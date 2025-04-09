@@ -1,0 +1,19 @@
+.cargo
+
+# develop resources
+/storage
+!/storage/.gitkeep
+*.sh
+
+# config files
+config.local.yaml
+diesel.toml
+.env
+
+# build
+/target
+
+# for ide
+.idea
+.vscode
+.aider*

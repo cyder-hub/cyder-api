@@ -1,0 +1,41 @@
+<div x-data="recordData">
+    <div class="table-header">
+        <span class="table-col">模型名称</span>
+        <span class="table-col">prompt tokens</span>
+        <span class="table-col">completion tokens</span>
+        <span class="table-col">是否流式</span>
+        <span class="table-col">首次响应</span>
+        <span class="table-col">总响应时间</span>
+        <span class="table-col">TPS</span>
+        <span class="table-col">请求时间</span>
+    </div>
+    <template x-for="record in result.list">
+        <div class="table-row">
+            <span class="table-col" x-text="record.model_name"></span>
+            <span class="table-col" x-text="record.prompt_tokens || '/'"></span>
+            <span class="table-col" x-text="record.completion_tokens || '/'"></span>
+            <span class="table-col" x-text="record.is_stream"></span>
+            <span class="table-col" x-text="record.first_token_time || '/'"></span>
+            <span class="table-col" x-text="record.response_time"></span>
+            <span class="table-col" x-text="record.completion_tokens ? (record.completion_tokens / (record.response_time - record.first_token_time || 0) * 1000).toFixed(2) : '/'"></span>
+            <span class="table-col" x-text="record.request_at"></span>
+        </div>
+    </template>
+    <div>
+        <span x-text="result.total"></span>
+    </div>
+    <div class="pagination">
+        <button @click="previousPage" :disabled="current_page === 1" class="pagination-button">Previous</button>
+
+        <template x-for="page in getVisiblePages()" :key="page">
+            <button
+                @click="goToPage(page)"
+                x-text="page"
+                :class="{ 'active': current_page === page, 'pagination-button': true }"
+            ></button>
+        </template>
+
+        <span>Page <span x-text="current_page"></span> of <span x-text="Math.ceil(result.total / page_size)"></span></span>
+        <button @click="nextPage" :disabled="current_page >= Math.ceil(result.total / page_size)" class="pagination-button">Next</button>
+    </div>
+</div>

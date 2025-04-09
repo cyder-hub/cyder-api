@@ -1,0 +1,94 @@
+<div x-data="{
+    showEditModel: false,
+    editingData: {
+        id: null,
+        api_key: '',
+        name: '',
+        description: ''
+    },
+    deleteApiKey(api_key) {},
+    editApiKey(api_key) {
+        this.editingData = api_key ? { ...api_key } : {
+            id: null,
+            api_key: '',
+            name: '',
+            description: ''
+        };
+        this.showEditModel = true;
+    },
+    stopEditing() {
+        this.editingData = {
+            id: null,
+            api_key: '',
+            name: '',
+            description: ''
+        };
+        this.showEditModel = false;
+    },
+    async onCommit() {
+        if (!this.editingData.id) {
+            await request('/ai/manager/api_key',
+                {
+                    method: 'POST' ,
+                    headers: { 'Content-Type' : 'application/json' },
+                    body: JSON.stringify({
+                        name: this.editingData.name,
+                        key: this.editingData.api_key,
+                        description: this.editingData.description
+                    })
+                }
+            );
+        } else {
+            await request(`/ai/manager/api_key/${this.editingData.id}`,
+                {
+                    method: 'PUT' ,
+                    headers: { 'Content-Type' : 'application/json' },
+                    body: JSON.stringify({
+                        name: this.editingData.name,
+                        api_key: this.editingData.api_key,
+                        description: this.editingData.description
+                    })
+                }
+            );
+        }
+        $store.data.reload_api_keys();
+        this.stopEditing();
+    }
+}">
+    <button class="btn btn-primary" @click="editApiKey()">新增</button>
+    <div class="table-header">
+        <span class="table-col">Name</span>
+        <span class="table-col">API Key</span>
+        <span class="table-col">Description</span>
+        <span class="table-col">Actions</span>
+    </div>
+    <template x-for="api_key in $store.data.api_keys">
+        <div class="table-row">
+            <span class="table-col" x-text="api_key.name"></span>
+            <span class="table-col" x-text="api_key.api_key"></span>
+            <span class="table-col" x-text="api_key.description"></span>
+            <div class="table-col">
+                <button class="btn btn-primary" @click="editApiKey(api_key)">Edit</button>
+                <button class="btn btn-danger" @click="deleteApiKey(api_key)">Delete</button>
+            </div>
+        </div>
+    </template>
+
+    <template x-if="showEditModel">
+        <div class="model-mask" @click.self="stopEditing">
+            <div class="model" :style="{ width: '400px', height: '300px' }">
+                <div x-text="editingData.id ? '编辑API Key' : '新增API Key'" class="model-title"></div>
+                <div class="form-item">
+                    <span class="form-label">名称</span><input x-model="editingData.name" class="form-input" />
+                </div>
+                <div class="form-item">
+                    <span class="form-label">Key</span><input x-model="editingData.api_key" class="form-input" />
+                </div>
+                <div class="form-item">
+                    <span class="form-label">描述</span><input x-model="editingData.description" class="form-input" />
+                </div>
+                <button @click="onCommit()" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+    </template>
+</div>

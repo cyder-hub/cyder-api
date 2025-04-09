@@ -1,0 +1,421 @@
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <script defer src="alpine-component@1.2.0.min.js"></script>
+    <script defer src="alpinejs.3.14.9.min.js"></script>
+    <link title="model" rel="stylesheet" href="assets/model.css">
+    <link title="utilities" rel="stylesheet" href="assets/utilities.css">
+
+    <style>
+        .header-list {
+            display: flex;
+            gap: 16px;
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .header-item {
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+            color: #333;
+        }
+
+        .header-item:hover {
+            background-color: #f0f0f0;
+        }
+
+        .header-item.active {
+            background-color: #007bff;
+            color: white;
+        }
+    </style>
+</head>
+
+<body x-data="global">
+    <header class="header-list">
+        <template x-for="tab in tabs">
+            <div x-text="tab.label" @click="activeTab = tab.key" class="header-item"
+                :class="{ 'active': activeTab === tab.key }"></div>
+        </template>
+    </header>
+    <content>
+        <template x-if="showLogin">
+            <div>
+                <input type="text" x-model="password"></input>
+                <button @click=onLogin>登录</button>
+            </div>
+        </template>
+        <template x-if="!showLogin">
+            <button @click="onLogout">注销</button>
+        </template>
+        <template x-if="activeTab === 'record'">
+            <x-component styles="utilities" url="./component/record.html"></x-component>
+        </template>
+        <template x-if="activeTab === 'provider'">
+            <x-component styles="utilities" url="./component/provider.html"></x-component>
+        </template>
+        <template x-if="activeTab === 'api_key'">
+            <x-component styles="utilities" url="./component/api_key.html"></x-component>
+        </template>
+         <template x-if="activeTab === 'model_transform'">
+            <x-component styles="utilities" url="./component/model_transform.html"></x-component>
+        </template>
+    </content>
+
+    <script>
+        let access_token = "";
+        async function request(url, _payload) {
+            const payload = _payload || {};
+            if (!payload.headers) {
+                payload.headers = {};
+            }
+            payload.headers.Authorization = `Bearer ${access_token}`;
+            return await fetch(url, payload);
+        }
+
+        async function try_refresh_token() {
+            const refresh_token = localStorage.getItem("auth_token");
+            if (refresh_token) {
+                access_token = (await (await fetch("/ai/manager/auth/refresh_token", {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${refresh_token}`
+                    }
+                })).json()).data;
+                return true;
+            } else {
+                return false;
+            }
+        }
+
+        document.addEventListener('alpine:init', () => {
+            Alpine.store("data", {
+                providers: [],
+                api_keys: [],
+                model_transforms: [],
+                async reload_providers() {
+                    const provider_res = await (await request("/ai/manager/provider/list")).json();
+                    this.providers = provider_res.data;
+                },
+                async reload_api_keys() {
+                    const api_key_res = await (await request("/ai/manager/api_key/list")).json();
+                    this.api_keys = api_key_res.data;
+                },
+                 async reload_model_transforms() {
+                    const model_transform_res = await (await request("/ai/manager/model_transform/list")).json();
+                    this.model_transforms = model_transform_res.data;
+                },
+                async init() {
+                    if (await try_refresh_token()) {
+                        await this.reload_providers();
+                        await this.reload_api_keys();
+                        await this.reload_model_transforms();
+                    }
+                }
+
+            })
+
+            Alpine.data('global', () => ({
+                showLogin: false,
+                activeTab: "",
+                tabs: [{
+                    key: "record",
+                    label: "请求"
+                }, {
+                    key: "provider",
+                    label: "渠道"
+                }, {
+                    key: "api_key",
+                    label: "API Key"
+                }, {
+                    key: "model_transform",
+                    label: "模型转换"
+                }],
+                password: "",
+                async onLogin() {
+                    const response = await fetch("/ai/manager/auth/login", {
+                        method: "POST", headers: {
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            key: this.password
+                        })
+                    });
+                    if (response.status === 200) {
+                        const refresh_token = (await response.json()).data;
+                        localStorage.setItem("auth_token", refresh_token);
+                        this.init();
+                    }
+                },
+                async onLogout() {
+                    localStorage.removeItem("auth_token");
+                    location.reload();
+                },
+                async init() {
+                    const refresh_token = localStorage.getItem("auth_token");
+                    if (refresh_token) {
+                        access_token = (await (await fetch("/ai/manager/auth/refresh_token", {
+                            method: "POST",
+                            headers: {
+                                Authorization: `Bearer ${refresh_token}`
+                            }
+                        })).json()).data;
+                        this.activeTab = "record";
+                        this.showLogin = false;
+                    } else {
+                        this.showLogin = true;
+                    }
+                }
+            }));
+
+            function getEmptyProvider() {
+                return {
+                    id: null,
+                    name: "",
+                    provider_key: "",
+                    endpoint: "",
+                    use_proxy: false
+                }
+            }
+
+            Alpine.data("recordData", () => ({
+                current_page: 1,
+                page_size: 10,
+                filter: {
+                    provider_id: null,
+                    model_name: null
+                },
+                result: {
+                    list: [],
+                    page_no: 0,
+                    page_size: 0,
+                    total: 0
+                },
+                async fetchRecords() {
+                    const result = (await (await request(`/ai/manager/record/list?page=${this.current_page}&page_size=${this.page_size}`)).json()).data;
+                    console.log(result);
+                    result.list.forEach(record => {
+                        record.request_at = new Date(record.request_at).toLocaleString();
+                    });
+                    this.result.list = result.list;
+                    this.result.page_no = result.page;
+                    this.result.page_size = result.page_size;
+                    this.result.total = result.total;
+                },
+                nextPage() {
+                    if (this.current_page < Math.ceil(this.result.total / this.page_size)) {
+                        this.current_page++;
+                        this.fetchRecords();
+                    }
+                },
+                previousPage() {
+                    if (this.current_page > 1) {
+                        this.current_page--;
+                        this.fetchRecords();
+                    }
+                },
+                goToPage(page) {
+                    if (page >= 1 && page <= Math.ceil(this.result.total / this.page_size)) {
+                        this.current_page = page;
+                        this.fetchRecords();
+                    }
+                },
+                getVisiblePages() {
+                    let totalPages = Math.ceil(this.result.total / this.page_size);
+                    let currentPage = this.current_page;
+                    let visiblePages = [];
+
+                    if (totalPages <= 7) {
+                        // If total pages is 7 or less, show all pages
+                        for (let i = 1; i <= totalPages; i++) {
+                            visiblePages.push(i);
+                        }
+                    } else {
+                        // Start with the current page
+                        visiblePages.push(currentPage);
+
+                        // Add pages to the left
+                        let left = currentPage - 1;
+                        while (visiblePages.length < 5 && left >= 1) {
+                            visiblePages.unshift(left);
+                            left--;
+                        }
+
+                        // Add pages to the right
+                        let right = currentPage + 1;
+                        while (visiblePages.length < 5 && right <= totalPages) {
+                            visiblePages.push(right);
+                            right++;
+                        }
+
+                        // Add "..." if needed
+                        if (visiblePages[0] > 1) {
+                            if (visiblePages[0] > 2) {
+                                visiblePages.unshift('...');
+                            }
+                            visiblePages.unshift(1);
+                        }
+
+                        if (visiblePages[visiblePages.length - 1] < totalPages) {
+                            if (visiblePages[visiblePages.length - 1] < totalPages - 1) {
+                                visiblePages.push('...');
+                            }
+                            visiblePages.push(totalPages);
+                        }
+                    }
+
+                    return visiblePages;
+                },
+                async init() {
+                    await this.fetchRecords();
+                }
+            }));
+
+            Alpine.data('providerData', () => ({
+                providers: [],
+                showEditModel: false,
+                editingProvider: getEmptyProvider(),
+                async deleteProvider(provider) {
+                    await request(`/ai/manager/provider/${provider.id}`, {
+                        method: "DELETE",
+                        headers: {
+                            "Content-Type": "application/json"
+                        }
+                    })
+                    this.init();
+                },
+                async startEditing(provider) {
+                    if (provider) {
+                        await this.getProviderDetail(provider.id);
+                    }
+                    this.editingProvider = provider ? { ...provider } : this.getEmptyProvider();
+                    this.showEditModel = true;
+                },
+                async getProviderDetail(provider_id) {
+                    const response = await request(`/ai/manager/provider/${provider_id}/details`, {
+                        method: 'GET', headers: { 'Content-Type': 'application/json' }
+                    });
+                },
+                async commitProvider() {
+                    if (this.editingProvider) {
+                        if (!this.editingProvider.id) {
+                            await request("/ai/manager/provider", {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type": "application/json"
+                                },
+                                body: JSON.stringify({
+                                    name: this.editingProvider.name,
+                                    key: this.editingProvider.provider_key,
+                                    endpoint: this.editingProvider.endpoint,
+                                    api_keys: ["test"],
+                                    limit_model: false,
+                                    use_proxy: this.editingProvider.use_proxy
+                                })
+                            })
+                            this.init();
+                        } else {
+                            await request(`/ai/manager/provider/${this.editingProvider.id}`, {
+                                method: "PUT",
+                                headers: {
+                                    "Content-Type": "application/json"
+                                },
+                                body: JSON.stringify({
+                                    name: this.editingProvider.name,
+                                    key: this.editingProvider.provider_key,
+                                    endpoint: this.editingProvider.endpoint,
+                                    api_keys: ["test"],
+                                    limit_model: false,
+                                    use_proxy: this.editingProvider.use_proxy
+                                })
+                            })
+                            this.init();
+                        }
+                    }
+                    this.stopEditing();
+                },
+                stopEditing() {
+                    this.editingProvider = getEmptyProvider();
+                    this.showEditModel = false;
+                },
+                async init() {
+                    const result = await (await request("/ai/manager/provider/list")).json();
+                    this.providers = result.data;
+                }
+            }))
+             Alpine.data('modelTransformData', () => ({
+                model_transforms: [],
+                showEditModel: false,
+                editingTransform: {
+                    id: null,
+                    model_name: '',
+                    map_model_name: '',
+                    is_enabled: true,
+                },
+                async deleteTransform(transform) {
+                    await request(`/ai/manager/model_transform/${transform.id}`, {
+                        method: 'DELETE', headers: { 'Content-Type' : 'application/json' } });
+                    this.init();
+                },
+                async startEditing(transform_id) {
+                    if (transform_id) {
+                        const response = await request(`/ai/manager/model_transform/${transform_id}`, {
+                            method: 'GET', headers: { 'Content-Type' : 'application/json' } });
+                        const result = await response.json();
+                        this.editingTransform = result.data;
+                    } else {
+                        this.editingTransform = {
+                            id: null,
+                            model_name: '',
+                            map_model_name: '',
+                            is_enabled: true,
+                        };
+                    }
+                    this.showEditModel = true;
+                },
+                async commitTransform() {
+                    let method = 'POST';
+                    let url = '/ai/manager/model_transform';
+                    if (this.editingTransform.id) {
+                        method = 'PUT';
+                        url = `/ai/manager/model_transform/${this.editingTransform.id}`;
+                    }
+                    await request(url,
+                        {
+                            method: method,
+                            headers: { 'Content-Type' : 'application/json' },
+                            body:   JSON.stringify({
+                                model_name: this.editingTransform.model_name,
+                                map_model_name: this.editingTransform.map_model_name,
+                                is_enabled: this.editingTransform.is_enabled,
+                            })
+                        }
+                    );
+                    this.init();
+                    this.stopEditing();
+                },
+                stopEditing() {
+                    this.editingTransform = {
+                        id: null,
+                        model_name: '',
+                        map_model_name: '',
+                        is_enabled: true,
+                    };
+                    this.showEditModel = false;
+                },
+                async init() {
+                    const response = await request('/ai/manager/model_transform/list', {
+                        method: 'GET', headers: { 'Content-Type' : 'application/json' } });
+                    const result = await response.json();
+                    this.model_transforms = result.data;
+                }
+            }))
+        })
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,44 @@
+<div x-data="modelTransformData" x-init="init">
+    <button class="btn btn-primary" @click="startEditing()">添加模型转换</button>
+    <div class="table-header">
+        <span class="table-col">模型名称</span>
+        <span class="table-col">映射模型名称</span>
+        <span class="table-col">是否启用</span>
+        <span class="table-col">操作</span>
+    </div>
+    <template x-for="transform in model_transforms" :key="transform.id">
+        <div class="table-row">
+            <span class="table-col" x-text="transform.model_name"></span>
+            <span class="table-col" x-text="transform.map_model_name"></span>
+            <span class="table-col" x-text="transform.is_enabled"></span>
+            <div class="table-col">
+                <button class="btn btn-primary" @click="startEditing(transform.id)">修改</button>
+                <button class="btn btn-danger" @click="deleteTransform(transform)">删除</button>
+            </div>
+        </div>
+    </template>
+
+    <template x-if="showEditModel">
+        <div class="model-mask" @click.self="stopEditing">
+            <div class="model" :style="{ width: '600px', height: '400px' }">
+                <div class="model-title" x-text="editingTransform.id ? '编辑模型转换' : '添加模型转换'"></div>
+                <div class="form-item">
+                    <span class="form-label">模型名称</span>
+                    <input x-model="editingTransform.model_name" class="form-input" />
+                </div>
+                <div class="form-item">
+                    <span class="form-label">映射模型名称</span>
+                    <input x-model="editingTransform.map_model_name" class="form-input" />
+                </div>
+                 <div class="form-item">
+                    <span class="form-label">是否启用</span>
+                    <input type="checkbox" x-model="editingTransform.is_enabled" class="form-checkbox" />
+                </div>
+                <div class="form-buttons">
+                    <button class="btn btn-primary" @click="commitTransform">保存</button>
+                    <button class="btn btn-default" @click="stopEditing">取消</button>
+                </div>
+            </div>
+        </div>
+    </template>
+</div>

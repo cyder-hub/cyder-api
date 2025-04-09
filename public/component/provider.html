@@ -1,0 +1,152 @@
+<div x-data="{
+        showEditModel: false,
+        getEmptyProvider() {
+            return {
+                id: null,
+                name: '',
+                provider_key: '',
+                provider_keys: [],
+                models: [],
+                endpoint: '',
+                use_proxy: false,
+                limit_model: false,
+            };
+        },
+        editingData: {
+            id: null,
+            name: '',
+            provider_key: '',
+            provider_keys: [],
+            models: [],
+            endpoint: '',
+            use_proxy: false,
+            limit_model: false,
+        },
+        async deleteProvider(provider) {
+            await request(`/ai/manager/provider/${provider.id}`, {
+                method: 'DELETE', headers: { 'Content-Type' : 'application/json' } });
+            $store.data.reload_providers();
+        },
+        async startEditing(provider_id) {
+            if (provider_id) {
+                const detail = await this.getProviderDetail(provider_id);
+                this.editingData.id = provider_id;
+                this.editingData.name = detail.provider.name;
+                this.editingData.provider_key = detail.provider.provider_key;
+                this.editingData.provider_keys = detail.provider_keys.map(key => ({ api_key: key.api_key, description: key.description }));
+                this.editingData.models = detail.models.map(model => ({ model_name: model.model_name, real_model_name: model.real_model_name }));
+                this.editingData.endpoint = detail.provider.endpoint;
+                this.editingData.use_proxy = detail.provider.use_proxy;
+                this.editingData.limit_model = detail.provider.limit_model;
+            } else {
+                this.editingData = this.getEmptyProvider();
+            }
+            this.showEditModel=true;
+        },
+        async getProviderDetail(provider_id) {
+            const response = await request(`/ai/manager/provider/${provider_id}/detail`, {
+                method: 'GET', headers: { 'Content-Type' : 'application/json' } });
+            return (await response.json()).data;
+        },
+        onAddModel() {
+            this.editingData.models.push({ model_name: '', real_model_name: ''});
+        },
+        onAddApiKey() {
+           this.editingData.provider_keys.push({ api_key: '', description: '' });
+        },
+        async commitProvider() {
+            if (this.editingData) {
+                await request('/ai/manager/provider/commit',
+                    {
+                        method: 'POST' ,
+                        headers: { 'Content-Type' : 'application/json' },
+                        body:   JSON.stringify({
+                            provider_key: this.editingData.provider_key,
+                            name: this.editingData.name,
+                            endpoint: this.editingData.endpoint,
+                            provider_keys: this.editingData.provider_keys,
+                            models: this.editingData.models,
+                            limit_model: false,
+                            use_proxy: this.editingData.use_proxy
+                        })
+                    }
+                );
+                $store.data.reload_providers();
+            };
+            this.stopEditing();
+        },
+        stopEditing() {
+            this.editingData = this.getEmptyProvider();
+            this.showEditModel=false;
+        }
+    }">
+    <button class="btn btn-primary" @click="startEditing()">添加</button>
+    <div class="table-header">
+        <span class="table-col">Key</span>
+        <span class="table-col">Name</span>
+        <span class="table-col">Use Proxy</span>
+        <span class="table-col">模型</span>
+        <span class="table-col">Api Key</span>
+        <span class="table-col">Actions</span>
+    </div>
+    <template x-for="provider in $store.data.providers">
+        <div class="table-row">
+            <span class="table-col" x-text="provider.provider_key"></span>
+            <span class="table-col" x-text="provider.name"></span>
+            <span class="table-col" x-text="provider.use_proxy"></span>
+            <div class="table-col"></div>
+            <div class="table-col">0</div>
+            <div class="table-col">
+                <button class="btn btn-primary" @click="startEditing(provider.id)">修改</button>
+                <button class="btn btn-danger" @click="deleteProvider(provider)">删除</button>
+            </div>
+        </div>
+    </template>
+
+    <template x-if="showEditModel">
+        <div class="model-mask" @click.self="stopEditing">
+            <div class="model" :style="{ width: '800px', height: '600px' }">
+                <div x-text="editingData ? '编辑渠道' : '新增渠道'" class="model-title"></div>
+                <div class="form-item">
+                    <span class="form-label">名称</span><input x-model="editingData.name" class="form-input" />
+                </div>
+                <div class="form-item">
+                    <span class="form-label">渠道标识</span><input x-model="editingData.provider_key" class="form-input" />
+                </div>
+                <div class="form-item">
+                    <span class="form-label">地址</span><input x-model="editingData.endpoint" class="form-input" />
+                </div>
+                <div class="form-item">
+                    <span class="form-label">使用代理</span><input type="checkbox" x-model="editingData.use_proxy"
+                        class="form-checkbox" />
+                </div>
+                <div>模型</div>
+                <div>
+                    <span>模型id</span>
+                    <span>映射模型id</span>
+                </div>
+                <template x-for="model in editingData.models">
+                    <div>
+                        <input type="text" x-model="model.model_name"></input>
+                        <input type="text" x-model="model.real_model_name"></input>
+                    </div>
+                </template>
+                <button class="btn btn-primary" @click="onAddModel">添加模型</button>
+
+                <div>api key</div>
+                <div>
+                    <span>API Key</span>
+                    <span>描述</span>
+                </div>
+                <template x-for="key in editingData.provider_keys">
+                    <div>
+                        <input type="text" x-model="key.api_key"></input>
+                        <input type="text" x-model="key.description"></input>
+                    </div>
+                </template>
+                <button class="btn btn-primary" @click="onAddApiKey">添加api key</button>
+                <button @click="commitProvider" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+    </template>
+</div>

@@ -1,5 +1,5 @@
 use crate::database::{
-    provider::{FullCommitData, Provider},
+    provider::{CustomField, FullCommitData, Provider},
     DbResult,
 };
 use axum::{
@@ -21,6 +21,7 @@ struct ProviderDetail {
     provider: Provider,
     models: Vec<Model>,
     provider_keys: Vec<ProviderApiKey>,
+    custom_fields: Vec<CustomField>,
 }
 
 async fn list() -> (StatusCode, HttpResult<Vec<Provider>>) {
@@ -88,19 +89,17 @@ async fn get_provider_detail(Path(id): Path<i64>) -> Result<HttpResult<ProviderD
     let provider = Provider::query_one(id)?;
     let models = Model::list_by_provider_id(id)?;
     let provider_keys = ProviderApiKey::list_by_provider_id(id)?;
+    let custom_fields = CustomField::list_by_provider_id(id)?;
 
     let detail = ProviderDetail {
         provider,
         models,
         provider_keys,
+        custom_fields,
     };
 
     Ok(HttpResult::new(detail))
 }
-
-async fn insert_key() {}
-async fn delete_key() {}
-async fn update_key() {}
 
 async fn full_commit(Json(data): Json<FullCommitData>) -> Result<HttpResult<String>, BaseError> {
     Provider::full_commit(data)?;
@@ -117,9 +116,6 @@ pub fn create_provider_router() -> Router {
             .route("/{id}", get(get_provider))
             .route("/{id}/detail", get(get_provider_detail))
             .route("/{id}", delete(delete_provider))
-            .route("/{id}", put(update_provider))
-            .route("/{id}/key", post(insert_key))
-            .route("/{id}/key/{key_id}", delete(delete_key))
-            .route("/{id}/key/{key_id}", put(update_key)),
+            .route("/{id}", put(update_provider)),
     )
 }

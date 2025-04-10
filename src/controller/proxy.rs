@@ -16,11 +16,13 @@ use chrono::Utc;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use reqwest::{
-    header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST},
+    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST},
     Method, Proxy, StatusCode, Url,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+
+use crate::database::provider::CustomField;
 
 use crate::{
     config::CONFIG,
@@ -56,7 +58,7 @@ fn build_new_headers(
 ) -> Result<HeaderMap, (StatusCode, String)> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in pre_headers.iter() {
-        if name != HOST && name != CONTENT_LENGTH {
+        if name != HOST && name != CONTENT_LENGTH && name != ACCEPT_ENCODING {
             headers.insert(name.clone(), value.clone());
         }
     }
@@ -317,6 +319,7 @@ async fn proxy_request(
         })
 }
 
+/// **Deprecated**
 async fn proxy_single_handler(
     Path(params): Path<(String, String)>,
     request: Request<Body>,
@@ -338,7 +341,7 @@ async fn proxy_single_handler(
     let model_name = data.get("model").unwrap().to_string();
     let model_name = &model_name[1..&model_name.len() - 1];
 
-    let (provider, provider_keys, model) =
+    let (provider, provider_keys, _, model) =
         Model::query_provider_model(&provider_key, model_name).unwrap();
 
     let model_id = match &model {
@@ -417,6 +420,59 @@ fn parse_provider_model(pm: &str) -> (&str, &str) {
     (provider, model_id)
 }
 
+fn handle_custom_fields(data: &mut Value, custom_fields: &Vec<CustomField>) {
+    for custom_field in custom_fields {
+        match custom_field.field_type.as_str() {
+            "unset" => {
+                data.as_object_mut().map(|obj| {
+                    obj.remove(&custom_field.field_name);
+                });
+            }
+            "text" => {
+                if let Some(text_value) = &custom_field.text_value {
+                    data.as_object_mut().map(|obj| {
+                        obj.insert(
+                            custom_field.field_name.clone(),
+                            Value::String(text_value.clone()),
+                        );
+                    });
+                }
+            }
+            "integer" => {
+                if let Some(int_value) = custom_field.integer_value {
+                    data.as_object_mut().map(|obj| {
+                        obj.insert(
+                            custom_field.field_name.clone(),
+                            Value::Number(int_value.into()),
+                        );
+                    });
+                }
+            }
+            "float" => {
+                if let Some(float_value) = custom_field.float_value {
+                    data.as_object_mut().map(|obj| {
+                        obj.insert(
+                            custom_field.field_name.clone(),
+                            serde_json::Number::from_f64(float_value as f64).map(Value::Number).unwrap_or(Value::Null),
+                        );
+                    });
+                }
+            }
+            "boolean" => {
+                if let Some(bool_value) = custom_field.boolean_value {
+                    data.as_object_mut().map(|obj| {
+                        obj.insert(
+                            custom_field.field_name.clone(),
+                            Value::Bool(bool_value),
+                        );
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn proxy_all_handler(
     Path(path): Path<String>,
     request: Request<Body>,
@@ -447,8 +503,10 @@ async fn proxy_all_handler(
 
     let (provider_key, model_name) = parse_provider_model(&model_name);
 
-    let (provider, provider_keys, model) =
+    let (provider, provider_keys, custom_fields, model) =
         Model::query_provider_model(provider_key, model_name).unwrap();
+
+    handle_custom_fields(&mut data, &custom_fields);
 
     let model_id = match &model {
         Some(model) => Some(model.id),

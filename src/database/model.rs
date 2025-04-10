@@ -7,7 +7,7 @@ use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
 use super::get_connection;
-use super::provider::ProviderApiKey;
+use super::provider::{CustomField, ProviderApiKey};
 use super::{provider::Provider, DbResult};
 
 db_object! {
@@ -50,10 +50,10 @@ impl Model {
     pub fn query_provider_model(
         provider_key: &str,
         model_name: &str,
-    ) -> DbResult<(Provider, Vec<ProviderApiKey>, Option<Model>)> {
+    ) -> DbResult<(Provider, Vec<ProviderApiKey>, Vec<CustomField>, Option<Model>)> {
         let conn = &mut get_connection();
         db_execute!(conn, {
-            let (provider, provider_api_keys) = Provider::query_key_by_key(provider_key)?;
+            let (provider, provider_api_keys, custom_fields) = Provider::query_key_by_key(provider_key)?;
             let model = model::table
                 .filter(
                     model::dsl::model_name
@@ -67,7 +67,7 @@ impl Model {
                 Ok(model) => Some(model.from_db()),
                 Err(_) => None,
             };
-            Ok((provider, provider_api_keys, model))
+            Ok((provider, provider_api_keys, custom_fields, model))
         })
     }
 

@@ -187,7 +187,9 @@
                 page_size: 10,
                 filter: {
                     provider_id: null,
-                    model_name: null
+                    model_id: null,
+                    model_name: null,
+                    api_key_id: null
                 },
                 result: {
                     list: [],
@@ -196,7 +198,20 @@
                     total: 0
                 },
                 async fetchRecords() {
-                    const result = (await (await request(`/ai/manager/record/list?page=${this.current_page}&page_size=${this.page_size}`)).json()).data;
+                    let queryParams = `page=${this.current_page}&page_size=${this.page_size}`;
+                    if (this.filter.provider_id) {
+                        queryParams += `&provider_id=${this.filter.provider_id}`;
+                    }
+                    if (this.filter.model_id) {
+                        queryParams += `&model_id=${this.filter.model_id}`;
+                    }
+                    if (this.filter.model_name) {
+                        queryParams += `&model_name=${this.filter.model_name}`;
+                    }
+                    if (this.filter.api_key_id) {
+                        queryParams += `&api_key_id=${this.filter.api_key_id}`;
+                    }
+                    const result = (await (await request(`/ai/manager/record/list?${queryParams}`)).json()).data;
                     console.log(result);
                     result.list.forEach(record => {
                         const date = new Date(record.request_at);
@@ -244,35 +259,50 @@
                             visiblePages.push(i);
                         }
                     } else {
-                        // Start with the current page
-                        visiblePages.push(currentPage);
+                        // Always show the first page
+                        visiblePages.push(1);
 
-                        // Add pages to the left
-                        let left = currentPage - 1;
-                        while (visiblePages.length < 5 && left >= 1) {
-                            visiblePages.unshift(left);
-                            left--;
-                        }
-
-                        // Add pages to the right
-                        let right = currentPage + 1;
-                        while (visiblePages.length < 5 && right <= totalPages) {
-                            visiblePages.push(right);
-                            right++;
-                        }
-
-                        // Add "..." if needed
-                        if (visiblePages[0] > 1) {
-                            if (visiblePages[0] > 2) {
-                                visiblePages.unshift('...');
+                        if (currentPage === 1) {
+                            //show 1 2 3 and last page
+                            visiblePages.push(2);
+                            if (totalPages > 2) {
+                                visiblePages.push(3);
                             }
-                            visiblePages.unshift(1);
-                        }
-
-                        if (visiblePages[visiblePages.length - 1] < totalPages) {
-                            if (visiblePages[visiblePages.length - 1] < totalPages - 1) {
+                            if (totalPages > 3) {
                                 visiblePages.push('...');
                             }
+                            visiblePages.push(totalPages);
+                        } else if (currentPage === totalPages) {
+                            visiblePages.push('...');
+                            visiblePages.push(currentPage - 2);
+                            visiblePages.push(currentPage - 1);
+                            visiblePages.push(currentPage);
+                        }
+                        else {
+                            // Add "..." after the first page if it's not adjacent to the visible pages
+                            if (currentPage - 2 > 2) {
+                                visiblePages.push('...');
+                            }
+
+                            // Add the two pages before the current page
+                            for (let i = Math.max(2, currentPage - 2); i < currentPage; i++) {
+                                visiblePages.push(i);
+                            }
+
+                            // Add the current page
+                            visiblePages.push(currentPage);
+
+                            // Add the two pages after the current page
+                            for (let i = currentPage + 1; i <= Math.min(totalPages - 1, currentPage + 2); i++) {
+                                visiblePages.push(i);
+                            }
+
+                            // Add "..." before the last page if it's not adjacent to the visible pages
+                            if (currentPage + 2 < totalPages - 1) {
+                                visiblePages.push('...');
+                            }
+
+                            // Always show the last page
                             visiblePages.push(totalPages);
                         }
                     }
@@ -289,6 +319,20 @@
                 getApiKeyName(api_key_id) {
                     const apiKey = Alpine.store("data").api_keys.find(k => k.id === api_key_id);
                     return apiKey ? apiKey.name : '/';
+                },
+                applyFilter() {
+                    this.current_page = 1;
+                    this.fetchRecords();
+                },
+                resetFilter() {
+                    this.filter = {
+                        provider_id: null,
+                        model_id: null,
+                        model_name: null,
+                        api_key_id: null
+                    };
+                    this.current_page = 1;
+                    this.fetchRecords();
                 }
             }));
 

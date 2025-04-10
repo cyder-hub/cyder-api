@@ -199,7 +199,16 @@
                     const result = (await (await request(`/ai/manager/record/list?page=${this.current_page}&page_size=${this.page_size}`)).json()).data;
                     console.log(result);
                     result.list.forEach(record => {
-                        record.request_at = new Date(record.request_at).toLocaleString();
+                        const date = new Date(record.request_at);
+                        const year = date.getFullYear();
+                        const month = String(date.getMonth() + 1).padStart(2, '0');
+                        const day = String(date.getDate()).padStart(2, '0');
+                        const hours = String(date.getHours()).padStart(2, '0');
+                        const minutes = String(date.getMinutes()).padStart(2, '0');
+                        const seconds = String(date.getSeconds()).padStart(2, '0');
+                        record.request_at = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+                        record.first_token_time = record.first_token_time ? (record.first_token_time / 1000).toFixed(3) : '/';
+                        record.response_time = record.response_time ? (record.response_time / 1000).toFixed(3) : '/';
                     });
                     this.result.list = result.list;
                     this.result.page_no = result.page;
@@ -272,6 +281,14 @@
                 },
                 async init() {
                     await this.fetchRecords();
+                },
+                getProviderName(provider_id) {
+                    const provider = Alpine.store("data").providers.find(p => p.id === provider_id);
+                    return provider ? provider.name : '/';
+                },
+                getApiKeyName(api_key_id) {
+                    const apiKey = Alpine.store("data").api_keys.find(k => k.id === api_key_id);
+                    return apiKey ? apiKey.name : '/';
                 }
             }));
 

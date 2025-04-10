@@ -25,9 +25,11 @@
             custom_fields: [],
         },
         async deleteProvider(provider) {
-            await request(`/ai/manager/provider/${provider.id}`, {
-                method: 'DELETE', headers: { 'Content-Type' : 'application/json' } });
-            $store.data.reload_providers();
+            if (confirm(`确定要删除渠道 ${provider.name} 吗?`)) {
+                await request(`/ai/manager/provider/${provider.id}`, {
+                    method: 'DELETE', headers: { 'Content-Type' : 'application/json' } });
+                $store.data.reload_providers();
+            }
         },
         async startEditing(provider_id) {
             if (provider_id) {
@@ -39,7 +41,7 @@
                 this.editingData.models = detail.models.map(model => ({ model_name: model.model_name, real_model_name: model.real_model_name }));
                 this.editingData.endpoint = detail.provider.endpoint;
                 this.editingData.use_proxy = detail.provider.use_proxy;
-                this.editingData.limit_model = detail.provider.limit_model;
+                this.editingData.limit_model = detail.limit_model;
                 this.editingData.custom_fields = detail.custom_fields.map(field => ({ field_name: field.field_name, field_type: field.field_type || 'unset', field_value: field.field_value, description: field.description }));
         } else {
                 this.editingData = this.getEmptyProvider();
@@ -135,14 +137,18 @@
         <tbody>
             <template x-for="provider in $store.data.providers">
                 <tr>
-                    <td x-text="provider.provider_key"></td>
-                    <td x-text="provider.name"></td>
-                    <td x-text="provider.use_proxy"></td>
-                    <td></td>
-                    <td>0</td>
+                    <td x-text="provider.provider.provider_key"></td>
+                    <td x-text="provider.provider.name"></td>
+                    <td x-text="provider.provider.use_proxy"></td>
                     <td>
-                        <button class="btn btn-primary" @click="startEditing(provider.id)">修改</button>
-                        <button class="btn btn-danger" @click="deleteProvider(provider)">删除</button>
+                        <template x-for="model in provider.models" :key="model.id">
+                            <span class="model-tag" x-text="model.model_name"></span>
+                        </template>
+                    </td>
+                    <td x-text="provider.provider_keys.length"></td>
+                    <td>
+                        <button class="btn btn-primary" @click="startEditing(provider.provider.id)">修改</button>
+                        <button class="btn btn-danger" @click="deleteProvider(provider.provider)">删除</button>
                     </td>
                 </tr>
             </template>
@@ -269,6 +275,14 @@
             content: "*";
             color: red;
             margin-left: 3px;
+        }
+
+        .model-tag {
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            padding: 2px 4px;
+            margin-right: 4px;
+            display: inline-block;
         }
     </style>
 </div>

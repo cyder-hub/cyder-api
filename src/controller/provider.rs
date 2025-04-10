@@ -106,6 +106,27 @@ async fn full_commit(Json(data): Json<FullCommitData>) -> Result<HttpResult<Stri
     Ok(HttpResult::new("ok".to_string()))
 }
 
+async fn list_provider_details() -> Result<(StatusCode, HttpResult<Vec<ProviderDetail>>), BaseError> {
+    let providers = Provider::list()?;
+    let mut provider_details: Vec<ProviderDetail> = Vec::new();
+
+    for provider in providers {
+        let models = Model::list_by_provider_id(provider.id)?;
+        let provider_keys = ProviderApiKey::list_by_provider_id(provider.id)?;
+        let custom_fields = CustomField::list_by_provider_id(provider.id)?;
+
+        let detail = ProviderDetail {
+            provider,
+            models,
+            provider_keys,
+            custom_fields,
+        };
+        provider_details.push(detail);
+    }
+
+    Ok((StatusCode::OK, HttpResult::new(provider_details)))
+}
+
 pub fn create_provider_router() -> Router {
     Router::new().nest(
         "/provider",
@@ -113,6 +134,7 @@ pub fn create_provider_router() -> Router {
             .route("/", post(insert))
             .route("/commit", post(full_commit))
             .route("/list", get(list))
+            .route("/detail/list", get(list_provider_details))
             .route("/{id}", get(get_provider))
             .route("/{id}/detail", get(get_provider_detail))
             .route("/{id}", delete(delete_provider))

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <script defer src="alpine-component@1.2.0.min.js"></script>
     <script defer src="alpinejs.3.14.9.min.js"></script>
+    <link rel="stylesheet" href="assets/utilities.css">
     <link title="model" rel="stylesheet" href="assets/model.css">
     <link title="utilities" rel="stylesheet" href="assets/utilities.css">
 
@@ -32,10 +33,43 @@
             background-color: #007bff;
             color: white;
         }
+
+        .logout-button {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+            color: #333;
+            background-color: #f0f0f0;
+            border: none;
+        }
+
+        .logout-button:hover {
+            background-color: #ddd;
+        }
+
+        .login-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 300px;
+            height: calc(100vh - 80px);
+            margin: auto;
+        }
+
+        .login-container>* {
+            margin: 8px;
+        }
     </style>
 </head>
 
 <body x-data="global">
+    <template x-if="!showLogin">
+      <button @click="onLogout" class="logout-button">注销</button>
+    </template>
     <header class="header-list">
         <template x-for="tab in tabs">
             <div x-text="tab.label" @click="activeTab = tab.key" class="header-item"
@@ -44,13 +78,10 @@
     </header>
     <content>
         <template x-if="showLogin">
-            <div>
-                <input type="text" x-model="password"></input>
-                <button @click=onLogin>登录</button>
+            <div class="login-container">
+                <input type="text" x-model="password" class="form-input"></input>
+                <button @click=onLogin class="btn btn-primary">登录</button>
             </div>
-        </template>
-        <template x-if="!showLogin">
-            <button @click="onLogout">注销</button>
         </template>
         <template x-if="activeTab === 'record'">
             <x-component styles="utilities" url="./component/record.html"></x-component>
@@ -61,7 +92,7 @@
         <template x-if="activeTab === 'api_key'">
             <x-component styles="utilities" url="./component/api_key.html"></x-component>
         </template>
-         <template x-if="activeTab === 'model_transform'">
+        <template x-if="activeTab === 'model_transform'">
             <x-component styles="utilities" url="./component/model_transform.html"></x-component>
         </template>
     </content>
@@ -98,14 +129,14 @@
                 api_keys: [],
                 model_transforms: [],
                 async reload_providers() {
-                    const provider_res = await (await request("/ai/manager/provider/list")).json();
+                    const provider_res = await (await request("/ai/manager/provider/detail/list")).json();
                     this.providers = provider_res.data;
                 },
                 async reload_api_keys() {
                     const api_key_res = await (await request("/ai/manager/api_key/list")).json();
                     this.api_keys = api_key_res.data;
                 },
-                 async reload_model_transforms() {
+                async reload_model_transforms() {
                     const model_transform_res = await (await request("/ai/manager/model_transform/list")).json();
                     this.model_transforms = model_transform_res.data;
                 },
@@ -184,7 +215,7 @@
 
             Alpine.data("recordData", () => ({
                 current_page: 1,
-                page_size: 10,
+                page_size: localStorage.getItem('page_size') || 10,
                 filter: {
                     provider_id: null,
                     model_id: null,
@@ -203,9 +234,6 @@
                         queryParams += `&provider_id=${this.filter.provider_id}`;
                     }
                     if (this.filter.model_id) {
-                        queryParams += `&model_id=${this.filter.model_id}`;
-                    }
-                    if (this.filter.model_name) {
                         queryParams += `&model_name=${this.filter.model_name}`;
                     }
                     if (this.filter.api_key_id) {
@@ -222,8 +250,6 @@
                         const minutes = String(date.getMinutes()).padStart(2, '0');
                         const seconds = String(date.getSeconds()).padStart(2, '0');
                         record.request_at = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-                        record.first_token_time = record.first_token_time ? (record.first_token_time / 1000).toFixed(3) : '/';
-                        record.response_time = record.response_time ? (record.response_time / 1000).toFixed(3) : '/';
                     });
                     this.result.list = result.list;
                     this.result.page_no = result.page;
@@ -310,11 +336,12 @@
                     return visiblePages;
                 },
                 async init() {
+                    this.page_size = localStorage.getItem('page_size') || 10;
                     await this.fetchRecords();
                 },
                 getProviderName(provider_id) {
-                    const provider = Alpine.store("data").providers.find(p => p.id === provider_id);
-                    return provider ? provider.name : '/';
+                    const provider = Alpine.store("data").providers.find(p => p.provider.id === provider_id);
+                    return provider ? provider.provider.name : '/';
                 },
                 getApiKeyName(api_key_id) {
                     const apiKey = Alpine.store("data").api_keys.find(k => k.id === api_key_id);
@@ -331,6 +358,11 @@
                         model_name: null,
                         api_key_id: null
                     };
+                    this.current_page = 1;
+                    this.fetchRecords();
+                },
+                updatePageSize() {
+                    localStorage.setItem('page_size', this.page_size);
                     this.current_page = 1;
                     this.fetchRecords();
                 }
@@ -404,11 +436,11 @@
                     this.showEditModel = false;
                 },
                 async init() {
-                    const result = await (await request("/ai/manager/provider/list")).json();
+                    const result = await (await request("/ai/manager/provider/detail/list")).json();
                     this.providers = result.data;
                 }
             }))
-             Alpine.data('modelTransformData', () => ({
+            Alpine.data('modelTransformData', () => ({
                 model_transforms: [],
                 showEditModel: false,
                 editingTransform: {
@@ -418,14 +450,18 @@
                     is_enabled: true,
                 },
                 async deleteTransform(transform) {
-                    await request(`/ai/manager/model_transform/${transform.id}`, {
-                        method: 'DELETE', headers: { 'Content-Type' : 'application/json' } });
-                    this.init();
+                    if (confirm(`确定要删除模型转换 ${transform.model_name} 吗?`)) {
+                        await request(`/ai/manager/model_transform/${transform.id}`, {
+                            method: 'DELETE', headers: { 'Content-Type': 'application/json' }
+                        });
+                        this.init();
+                    }
                 },
                 async startEditing(transform_id) {
                     if (transform_id) {
                         const response = await request(`/ai/manager/model_transform/${transform_id}`, {
-                            method: 'GET', headers: { 'Content-Type' : 'application/json' } });
+                            method: 'GET', headers: { 'Content-Type': 'application/json' }
+                        });
                         const result = await response.json();
                         this.editingTransform = result.data;
                     } else {
@@ -448,8 +484,8 @@
                     await request(url,
                         {
                             method: method,
-                            headers: { 'Content-Type' : 'application/json' },
-                            body:   JSON.stringify({
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
                                 model_name: this.editingTransform.model_name,
                                 map_model_name: this.editingTransform.map_model_name,
                                 is_enabled: this.editingTransform.is_enabled,
@@ -470,7 +506,9 @@
                 },
                 async init() {
                     const response = await request('/ai/manager/model_transform/list', {
-                        method: 'GET', headers: { 'Content-Type' : 'application/json' } });
+                        method: 'GET',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
                     const result = await response.json();
                     this.model_transforms = result.data;
                 }

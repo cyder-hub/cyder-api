@@ -7,6 +7,7 @@
                 provider_key: '',
                 provider_keys: [],
                 models: [],
+                custom_fields: [],
                 endpoint: '',
                 use_proxy: false,
                 limit_model: false,
@@ -21,6 +22,7 @@
             endpoint: '',
             use_proxy: false,
             limit_model: false,
+            custom_fields: [],
         },
         async deleteProvider(provider) {
             await request(`/ai/manager/provider/${provider.id}`, {
@@ -38,7 +40,8 @@
                 this.editingData.endpoint = detail.provider.endpoint;
                 this.editingData.use_proxy = detail.provider.use_proxy;
                 this.editingData.limit_model = detail.provider.limit_model;
-            } else {
+                this.editingData.custom_fields = detail.custom_fields.map(field => ({ field_name: field.field_name, field_type: field.field_type || 'unset', field_value: field.field_value, description: field.description }));
+        } else {
                 this.editingData = this.getEmptyProvider();
             }
             this.showEditModel=true;
@@ -54,6 +57,9 @@
         onAddApiKey() {
            this.editingData.provider_keys.push({ api_key: '', description: '' });
         },
+        onAddCustomField() {
+           this.editingData.custom_fields.push({ field_name: '', field_value: '', description: '', field_type: 'unset' });
+        },
         async commitProvider() {
             if (this.editingData) {
                 await request('/ai/manager/provider/commit',
@@ -67,8 +73,9 @@
                             provider_keys: this.editingData.provider_keys,
                             models: this.editingData.models,
                             limit_model: false,
-                            use_proxy: this.editingData.use_proxy
-                        })
+                            use_proxy: this.editingData.use_proxy,
+                            custom_fields: this.editingData.custom_fields
+                    })
                     }
                 );
                 $store.data.reload_providers();
@@ -145,6 +152,28 @@
                     </div>
                 </template>
                 <button class="btn btn-primary" @click="onAddApiKey">添加api key</button>
+                <div>Custom Fields</div>
+                <div>
+                    <span>Field Name</span>
+                    <span>Field Value</span>
+                    <span>Description</span>
+                    <span>Field Type</span>
+                </div>
+                <template x-for="field in editingData.custom_fields">
+                    <div>
+                        <input type="text" x-model="field.field_name"></input>
+                        <input type="text" x-model="field.field_value"></input>
+                        <input type="text" x-model="field.description"></input>
+                        <select x-model="field.field_type">
+                            <option value="unset">unset</option>
+                            <option value="text">text</option>
+                            <option value="integer">integer</option>
+                            <option value="float">float</option>
+                            <option value="boolean">boolean</option>
+                        </select>
+                    </div>
+                </template>
+                <button class="btn btn-primary" @click="onAddCustomField">Add Custom Field</button>
                 <button @click="commitProvider" class="btn btn-primary">保存</button>
             </div>
         </div>

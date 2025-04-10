@@ -14,6 +14,22 @@ diesel::table! {
 }
 
 diesel::table! {
+    custom_field (id) {
+        id -> Int8,
+        provider_id -> Int8,
+        field_name -> Text,
+        field_type -> Text,
+        text_value -> Nullable<Text>,
+        integer_value -> Nullable<Int4>,
+        float_value -> Nullable<Float>,
+        boolean_value -> Nullable<Bool>,
+        description -> Nullable<Text>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
     model (id) {
         id -> Int8,
         provider_id -> Int8,
@@ -106,6 +122,7 @@ diesel::table! {
 
 diesel::allow_tables_to_appear_in_same_query!(
     api_keys,
+    custom_field,
     model,
     model_transform,
     price,

@@ -27,6 +27,22 @@ diesel::table! {
 }
 
 diesel::table! {
+    custom_field (id) {
+        id -> Bigint,
+        provider_id -> Bigint,
+        field_name -> Text,
+        field_type -> Text,
+        text_value -> Nullable<Text>,
+        integer_value -> Nullable<Integer>,
+        float_value -> Nullable<Float>,
+        boolean_value -> Nullable<Bool>,
+        description -> Nullable<Text>,
+        created_at -> Bigint,
+        updated_at -> Bigint,
+    }
+}
+
+diesel::table! {
     model (id) {
         id -> Bigint,
         provider_id -> Bigint,
@@ -131,6 +147,7 @@ diesel::table! {
 diesel::allow_tables_to_appear_in_same_query!(
     api_key,
     api_keys,
+    custom_field,
     model,
     model_transform,
     price,

@@ -24,6 +24,14 @@ pub struct CommitProviderKey {
 }
 
 #[derive(Deserialize)]
+pub struct CommitCustomField {
+    pub field_name: String,
+    pub field_type: String, // e.g., 'unset', 'text', 'integer', 'float', 'boolean'
+    pub field_value: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct FullCommitData {
     pub provider_key: String,
     pub name: String,
@@ -32,6 +40,7 @@ pub struct FullCommitData {
     pub use_proxy: bool,
     pub models: Vec<CommitModel>,
     pub provider_keys: Vec<CommitProviderKey>,
+    pub custom_fields: Vec<CommitCustomField>,
 }
 
 db_object! {
@@ -62,6 +71,131 @@ db_object! {
         pub is_enabled: bool,
         pub created_at: i64,
         pub updated_at: i64,
+    }
+
+    #[derive(Queryable, Insertable, AsChangeset, Debug, Clone)]
+    #[diesel(table_name = custom_field)]
+    pub struct CustomField {
+        pub id: i64,
+        pub provider_id: i64,
+        pub field_name: String,
+        pub field_type: String,
+        pub text_value: Option<String>,
+        pub integer_value: Option<i32>,
+        pub float_value: Option<f32>,
+        pub boolean_value: Option<bool>,
+        pub description: Option<String>,
+        pub created_at: i64,
+        pub updated_at: i64,
+    }
+}
+
+impl CustomField {
+    fn new(provider_id: i64, field_name: &str, field_type: &str, field_value: Option<&str>, description: Option<&str>) -> Self {
+        let now = Utc::now().timestamp_millis();
+        let mut text_value = None;
+        let mut integer_value = None;
+        let mut float_value = None;
+        let mut boolean_value = None;
+        let actual_field_type = match field_type {
+            "text" => {
+                text_value = field_value.map(|s| s.to_string());
+                field_type
+            }
+            "integer" => {
+                integer_value = field_value.and_then(|s| s.parse::<i32>().ok());
+                field_type
+            }
+            "float" => {
+                float_value = field_value.and_then(|s| s.parse::<f32>().ok());
+                field_type
+            }
+            "boolean" => {
+                boolean_value = field_value.and_then(|s| s.parse::<bool>().ok());
+                field_type
+            }
+            _ => {
+                text_value = None;
+                integer_value = None;
+                float_value = None;
+                boolean_value = None;
+                "unset"
+            }
+        };
+
+        Self {
+            id: ID_GENERATOR.generate_id(),
+            provider_id,
+            field_name: field_name.to_string(),
+            field_type: actual_field_type.to_string(),
+            text_value,
+            integer_value,
+            float_value,
+            boolean_value,
+            description: description.map(|s| s.to_string()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn upsert_by_provider_and_name(
+        provider_id: i64,
+        field_name: &str,
+        field_type: &str,
+        field_value: Option<&str>,
+        description: Option<&str>,
+    ) -> DbResult<CustomField> {
+        let conn = &mut get_connection();
+        db_execute!(conn, {
+            let existing = custom_field::table
+                .filter(
+                    custom_field::dsl::provider_id
+                        .eq(provider_id)
+                        .and(custom_field::dsl::field_name.eq(field_name)),
+                )
+                .first::<CustomFieldDb>(conn);
+
+            let now = Utc::now().timestamp_millis();
+            let field = match existing {
+                Ok(db) => {
+                    let mut field = db.from_db();
+                    field.text_value = field_value.map(|s| s.to_string());
+                    field.description = description.map(|s| s.to_string());
+                    field.updated_at = now;
+                    diesel::update(
+                        custom_field::table.filter(custom_field::dsl::id.eq(field.id)),
+                    )
+                    .set(CustomFieldDb::to_db(&field))
+                    .execute(conn)?;
+                    field
+                }
+                Err(_) => {
+                    let field = CustomField::new(provider_id, field_name, field_type, field_value, description);
+                    diesel::insert_into(custom_field::table)
+                        .values(CustomFieldDb::to_db(&field))
+                        .execute(conn)
+                        .map_err(|_| BaseError::DatabaseFatal(None))?;
+                    field
+                }
+            };
+            Ok(field)
+        })
+    }
+
+    pub fn list_by_provider_id(provider_id: i64) -> DbResult<Vec<CustomField>> {
+        let conn = &mut get_connection();
+        let custom_fields = db_execute!(conn, {
+            custom_field::table
+                .filter(custom_field::dsl::provider_id.eq(provider_id))
+                .load::<CustomFieldDb>(conn)
+                .map_err(|_| BaseError::DatabaseFatal(None))
+                .unwrap()
+                .into_iter()
+                .map(|db| db.from_db())
+                .collect::<Vec<CustomField>>()
+        });
+
+        Ok(custom_fields)
     }
 }
 
@@ -270,6 +404,33 @@ impl Provider {
                     )?;
                 }
 
+                // Handle custom fields
+                let existing_custom_fields = CustomField::list_by_provider_id(provider.id)
+                    .map_err(|_e| BaseError::DatabaseFatal(None))?;
+
+                let new_custom_fields: Vec<CommitCustomField> = data.custom_fields;
+                let new_custom_field_names: HashSet<_> = new_custom_fields.iter().map(|f| &f.field_name).collect();
+
+                // Delete custom fields not in new data
+                for field in existing_custom_fields {
+                    if !new_custom_field_names.contains(&field.field_name) {
+                        diesel::delete(custom_field::table.filter(custom_field::dsl::id.eq(field.id)))
+                            .execute(conn)
+                            .map_err(|_| BaseError::DatabaseFatal(None))?;
+                    }
+                }
+
+                // Upsert custom fields from new data
+                for field in new_custom_fields {
+                    CustomField::upsert_by_provider_and_name(
+                        provider.id,
+                        &field.field_name,
+                        &field.field_type,
+                        field.field_value.as_deref(),
+                        field.description.as_deref(),
+                    )?;
+                }
+
                 Ok(())
             })
             .map_err(|_| BaseError::DatabaseFatal(None))
@@ -331,7 +492,7 @@ impl Provider {
         }))
     }
 
-    pub fn query_key_by_key(key: &str) -> DbResult<(Provider, Vec<ProviderApiKey>)> {
+    pub fn query_key_by_key(key: &str) -> DbResult<(Provider, Vec<ProviderApiKey>, Vec<CustomField>)> {
         let provider = Self::query_by_key(key)?;
         let conn = &mut get_connection();
 
@@ -346,7 +507,9 @@ impl Provider {
                 .collect::<Vec<ProviderApiKey>>()
         });
 
-        Ok((provider, provider_api_keys))
+        let custom_fields = CustomField::list_by_provider_id(provider.id)?;
+
+        Ok((provider, provider_api_keys, custom_fields))
     }
     pub fn list() -> DbResult<Vec<Self>> {
         let conn = &mut get_connection();

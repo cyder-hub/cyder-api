@@ -1,1 +1,1 @@
-DROP TABLE model_transform;
+DROP TABLE IF EXISTS model_transform;

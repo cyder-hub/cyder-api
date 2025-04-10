@@ -1,4 +1,23 @@
 <div x-data="recordData">
+    <div class="filters">
+        <select x-model="filter.api_key_id" class="form-select" @change="applyFilter">
+            <option value="">All API Keys</option>
+            <template x-for="apiKey in Alpine.store('data').api_keys" :key="apiKey.id">
+                <option :value="apiKey.id" x-text="apiKey.name"></option>
+            </template>
+        </select>
+        <select x-model="filter.provider_id" class="form-select" @change="applyFilter">
+            <option value="">All Providers</option>
+            <template x-for="provider in Alpine.store('data').providers" :key="provider.id">
+                <option :value="provider.id" x-text="provider.name"></option>
+            </template>
+        </select>
+        <input type="text" x-model="filter.model_name" placeholder="Model Name" class="form-input">
+        <button @click="applyFilter" class="btn btn-primary">Apply Filter</button>
+        <template x-if="filter.api_key_id || filter.provider_id || filter.model_name">
+            <button @click="resetFilter" class="btn btn-primary">Reset</button>
+        </template>
+    </div>
     <table class="data-table">
         <thead>
             <tr>
@@ -31,18 +50,27 @@
             </template>
         </tbody>
     </table>
-    <div class="pagination">
-        <button @click="previousPage" :disabled="current_page === 1" class="pagination-button">Previous</button>
+    <template x-if="Math.ceil(result.total / page_size) > 1">
+        <div class="pagination">
+            <button @click="previousPage" :disabled="current_page === 1" class="pagination-button">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-arrow-left" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M15 8a.5.5 0 0 0-.5-.5H2.707l3.147-3.146a.5.5 0 1 0-.708-.708l-4 4a.5.5 0 0 0 0 .708l4 4a.5.5 0 0 0 .708-.708L2.707 8.5H14.5A.5.5 0 0 0 15 8z"/>
+                </svg>
+            </button>
 
-        <template x-for="page in getVisiblePages()" :key="page">
-            <button
-                @click="goToPage(page)"
-                x-text="page"
-                :class="{ 'active': current_page === page, 'pagination-button': true }"
-            ></button>
-        </template>
+            <template x-for="(page, index) in getVisiblePages()" :key="index">
+                <button
+                    @click="goToPage(page)"
+                    x-text="page"
+                    :class="{ 'active': current_page === page, 'pagination-button': true }"
+                ></button>
+            </template>
 
-        <span>Page <span x-text="current_page"></span> of <span x-text="Math.ceil(result.total / page_size)"></span></span>
-        <button @click="nextPage" :disabled="current_page >= Math.ceil(result.total / page_size)" class="pagination-button">Next</button>
-    </div>
+            <button @click="nextPage" :disabled="current_page >= Math.ceil(result.total / page_size)" class="pagination-button">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-arrow-right" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M1 8a.5.5 0 0 1 .5-.5h11.793l-3.147-3.146a.5.5 0 0 1 .708-.708l4 4a.5.5 0 0 1 0 .708l-4 4a.5.5 0 0 1-.708-.708L13.293 8.5H1.5A.5.5 0 0 1 1 8z"/>
+                </svg>
+            </button>
+        </div>
+    </template>
 </div>

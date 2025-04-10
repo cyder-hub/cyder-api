@@ -5,7 +5,7 @@ use crate::{
 
 use super::{get_connection, DbResult, ListResult};
 use chrono::Utc;
-use diesel::prelude::{Insertable, Queryable};
+use diesel::prelude::{Insertable, Queryable, ExpressionMethods};
 use serde::{Deserialize, Serialize};
 use diesel::dsl::sql;
 use diesel::sql_types::BigInt;
@@ -98,7 +98,7 @@ impl Record {
             is_stream: is_stream,
             request_at: time_info.start_time,
             created_at: now,
-            updated_at: now
+            updated_at: now,
         }
     }
 
@@ -119,14 +119,59 @@ impl Record {
         let page_size = payload.page_size.unwrap_or(10);
         let page = payload.page.unwrap_or(1);
         let offset = (page - 1) * page_size;
+
         db_execute!(conn, {
-            let total = record::table
-                .select(diesel::dsl::count(record::id))
+            let provider_id_filter = payload.provider_id;
+            let model_id_filter = payload.model_id;
+            let model_name_filter = payload.model_name;
+            let api_key_id_filter = payload.api_key_id;
+
+            let mut query = record::table.into_boxed();
+
+            if let Some(provider_id_filter) = provider_id_filter {
+                query = query.filter(record::dsl::provider_id.eq(provider_id_filter));
+            }
+
+            if let Some(model_id_filter) = model_id_filter {
+                query = query.filter(record::dsl::model_id.eq(model_id_filter));
+            }
+
+            if let Some(model_name_filter) = model_name_filter.as_ref() {
+                let pattern = format!("%{}%", model_name_filter);
+                query = query.filter(record::dsl::model_name.like(pattern));
+            }
+
+            if let Some(api_key_id_filter) = api_key_id_filter {
+                query = query.filter(record::dsl::api_key_id.eq(api_key_id_filter));
+            }
+
+            // Build a separate query for counting
+            let mut count_query = record::table.into_boxed();
+
+            if let Some(provider_id_filter) = provider_id_filter {
+                count_query = count_query.filter(record::dsl::provider_id.eq(provider_id_filter));
+            }
+
+            if let Some(model_id_filter) = model_id_filter {
+                count_query = count_query.filter(record::dsl::model_id.eq(model_id_filter));
+            }
+
+            if let Some(model_name_filter) = model_name_filter.as_ref() {
+                let pattern = format!("%{}%", model_name_filter);
+                count_query = count_query.filter(record::dsl::model_name.like(pattern));
+            }
+
+            if let Some(api_key_id_filter) = api_key_id_filter {
+                count_query = count_query.filter(record::dsl::api_key_id.eq(api_key_id_filter));
+            }
+
+            let total = count_query
+                .select(diesel::dsl::count(record::dsl::id))
                 .first::<i64>(conn)
                 .map_err(|_| BaseError::DatabaseFatal(None))?;
 
-            let list = record::table
-                .order(record::request_at.desc())
+            let list = query
+                .order(record::dsl::request_at.desc())
                 .limit(page_size)
                 .offset(offset)
                 .load::<RecordDb>(conn)
@@ -140,7 +185,7 @@ impl Record {
                 total,
                 list,
                 page,
-                page_size
+                page_size,
             })
         })
     }
@@ -148,8 +193,10 @@ impl Record {
 
 #[derive(Debug, Deserialize)]
 pub struct RecordQueryPayload {
-    pub provider: Option<String>,
+    pub provider_id: Option<i64>,
+    pub model_id: Option<i64>,
     pub model_name: Option<String>,
+    pub api_key_id: Option<i64>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
 }

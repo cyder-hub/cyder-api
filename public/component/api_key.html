@@ -56,23 +56,29 @@
     }
 }">
     <button class="btn btn-primary" @click="editApiKey()">新增</button>
-    <div class="table-header">
-        <span class="table-col">Name</span>
-        <span class="table-col">API Key</span>
-        <span class="table-col">Description</span>
-        <span class="table-col">Actions</span>
-    </div>
-    <template x-for="api_key in $store.data.api_keys">
-        <div class="table-row">
-            <span class="table-col" x-text="api_key.name"></span>
-            <span class="table-col" x-text="api_key.api_key"></span>
-            <span class="table-col" x-text="api_key.description"></span>
-            <div class="table-col">
-                <button class="btn btn-primary" @click="editApiKey(api_key)">Edit</button>
-                <button class="btn btn-danger" @click="deleteApiKey(api_key)">Delete</button>
-            </div>
-        </div>
-    </template>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>API Key</th>
+                <th>Description</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            <template x-for="api_key in $store.data.api_keys" :key="api_key.id">
+                <tr>
+                    <td x-text="api_key.name"></td>
+                    <td x-text="api_key.api_key"></td>
+                    <td x-text="api_key.description"></td>
+                    <td>
+                        <button class="btn btn-primary" @click="editApiKey(api_key)">Edit</button>
+                        <button class="btn btn-danger" @click="deleteApiKey(api_key)">Delete</button>
+                    </td>
+                </tr>
+            </template>
+        </tbody>
+    </table>
 
     <template x-if="showEditModel">
         <div class="model-mask" @click.self="stopEditing">

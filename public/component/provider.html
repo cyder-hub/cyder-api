@@ -127,55 +127,109 @@
                     <span class="form-label">使用代理</span><input type="checkbox" x-model="editingData.use_proxy"
                         class="form-checkbox" />
                 </div>
-                <div>模型</div>
-                <div>
-                    <span>模型id</span>
-                    <span>映射模型id</span>
-                </div>
-                <template x-for="model in editingData.models">
-                    <div>
-                        <input type="text" x-model="model.model_name"></input>
-                        <input type="text" x-model="model.real_model_name"></input>
-                    </div>
-                </template>
-                <button class="btn btn-primary" @click="onAddModel">添加模型</button>
 
-                <div>api key</div>
-                <div>
-                    <span>API Key</span>
-                    <span>描述</span>
-                </div>
-                <template x-for="key in editingData.provider_keys">
-                    <div>
-                        <input type="text" x-model="key.api_key"></input>
-                        <input type="text" x-model="key.description"></input>
+                <div class="section">
+                    <div class="section-title">模型</div>
+                    <div class="section-header">
+                        <span class="col">模型id</span>
+                        <span class="col">映射模型id</span>
                     </div>
-                </template>
-                <button class="btn btn-primary" @click="onAddApiKey">添加api key</button>
-                <div>Custom Fields</div>
-                <div>
-                    <span>Field Name</span>
-                    <span>Field Value</span>
-                    <span>Description</span>
-                    <span>Field Type</span>
+                    <template x-for="model in editingData.models">
+                        <div class="section-row">
+                            <input type="text" x-model="model.model_name" class="col form-input"></input>
+                            <input type="text" x-model="model.real_model_name" class="col form-input"></input>
+                        </div>
+                    </template>
+                    <button class="btn btn-primary" @click="onAddModel">添加模型</button>
                 </div>
-                <template x-for="field in editingData.custom_fields">
-                    <div>
-                        <input type="text" x-model="field.field_name"></input>
-                        <input type="text" x-model="field.field_value"></input>
-                        <input type="text" x-model="field.description"></input>
-                        <select x-model="field.field_type">
-                            <option value="unset">unset</option>
-                            <option value="text">text</option>
-                            <option value="integer">integer</option>
-                            <option value="float">float</option>
-                            <option value="boolean">boolean</option>
-                        </select>
+
+                <div class="section">
+                    <div class="section-title">api key</div>
+                    <div class="section-header">
+                        <span class="col">API Key</span>
+                        <span class="col">描述</span>
                     </div>
-                </template>
-                <button class="btn btn-primary" @click="onAddCustomField">Add Custom Field</button>
+                    <template x-for="key in editingData.provider_keys">
+                        <div class="section-row">
+                            <input type="text" x-model="key.api_key" class="col form-input"></input>
+                            <input type="text" x-model="key.description" class="col form-input"></input>
+                        </div>
+                    </template>
+                    <button class="btn btn-primary" @click="onAddApiKey">添加api key</button>
+                </div>
+
+                <div class="section">
+                    <div class="section-title">自定义字段</div>
+                    <div class="section-header">
+                        <span class="col">字段名</span>
+                        <span class="col">字段值</span>
+                        <span class="col">描述</span>
+                        <span class="col">字段类型</span>
+                    </div>
+                    <template x-for="field in editingData.custom_fields">
+                        <div class="section-row">
+                            <input type="text" x-model="field.field_name" class="col form-input"></input>
+                            <input type="text" x-model="field.field_value" class="col form-input"></input>
+                            <input type="text" x-model="field.description" class="col form-input"></input>
+                            <select x-model="field.field_type" class="col form-select">
+                                <option value="unset">unset</option>
+                                <option value="text">text</option>
+                                <option value="integer">integer</option>
+                                <option value="float">float</option>
+                                <option value="boolean">boolean</option>
+                            </select>
+                        </div>
+                    </template>
+                    <button class="btn btn-primary" @click="onAddCustomField">添加自定义字段</button>
+                </div>
+
                 <button @click="commitProvider" class="btn btn-primary">保存</button>
             </div>
         </div>
     </template>
+    <style>
+        .section {
+            margin-bottom: 15px;
+            padding: 10px;
+        }
+
+        .section-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .section-header {
+            display: flex;
+            margin-bottom: 5px;
+        }
+
+        .section-header .col {
+            flex: 1;
+            font-weight: bold;
+        }
+
+        .section-row {
+            display: flex;
+            margin-bottom: 3px;
+        }
+
+        .section-row .col {
+            flex: 1;
+            margin-right: 5px;
+        }
+
+        .section-row .col:last-child {
+            margin-right: 0;
+        }
+
+        .form-select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 14px;
+        }
+    </style>
 </div>

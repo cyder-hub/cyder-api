@@ -23,7 +23,7 @@ db_object! {
 
 impl ApiKey {
     pub fn new(key: String, name: String, description: Option<String>) -> Self {
-        let now = Utc::now().timestamp();
+        let now = Utc::now().timestamp_millis();
         Self {
             id: ID_GENERATOR.generate_id(),
             api_key: key,

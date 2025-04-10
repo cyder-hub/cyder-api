@@ -22,7 +22,7 @@ db_object! {
 
 impl ModelTransform {
     pub fn new(model_name: String, map_model_name: String) -> Self {
-        let now = Utc::now().timestamp();
+        let now = Utc::now().timestamp_millis();
         Self {
             id: ID_GENERATOR.generate_id(),
             model_name,

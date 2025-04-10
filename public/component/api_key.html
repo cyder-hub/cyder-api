@@ -6,7 +6,15 @@
         name: '',
         description: ''
     },
-    deleteApiKey(api_key) {},
+    async deleteApiKey(api_key) {
+        if (confirm(`确定要删除 API Key ${api_key.name} 吗?`)) {
+            await request(`/ai/manager/api_key/${api_key.id}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            $store.data.reload_api_keys();
+        }
+    },
     editApiKey(api_key) {
         this.editingData = api_key ? { ...api_key } : {
             id: null,

@@ -91,7 +91,13 @@ db_object! {
 }
 
 impl CustomField {
-    fn new(provider_id: i64, field_name: &str, field_type: &str, field_value: Option<&str>, description: Option<&str>) -> Self {
+    fn new(
+        provider_id: i64,
+        field_name: &str,
+        field_type: &str,
+        field_value: Option<&str>,
+        description: Option<&str>,
+    ) -> Self {
         let now = Utc::now().timestamp_millis();
         let mut text_value = None;
         let mut integer_value = None;
@@ -162,15 +168,19 @@ impl CustomField {
                     field.text_value = field_value.map(|s| s.to_string());
                     field.description = description.map(|s| s.to_string());
                     field.updated_at = now;
-                    diesel::update(
-                        custom_field::table.filter(custom_field::dsl::id.eq(field.id)),
-                    )
-                    .set(CustomFieldDb::to_db(&field))
-                    .execute(conn)?;
+                    diesel::update(custom_field::table.filter(custom_field::dsl::id.eq(field.id)))
+                        .set(CustomFieldDb::to_db(&field))
+                        .execute(conn)?;
                     field
                 }
                 Err(_) => {
-                    let field = CustomField::new(provider_id, field_name, field_type, field_value, description);
+                    let field = CustomField::new(
+                        provider_id,
+                        field_name,
+                        field_type,
+                        field_value,
+                        description,
+                    );
                     diesel::insert_into(custom_field::table)
                         .values(CustomFieldDb::to_db(&field))
                         .execute(conn)
@@ -318,122 +328,119 @@ impl Provider {
     pub fn full_commit(data: FullCommitData) -> DbResult<()> {
         let conn = &mut get_connection();
         db_execute!(conn, {
-            conn.transaction::<(), BaseError, _>(|conn| {
-                // Check if provider exists
-                let existing_provider = provider::table
-                    .filter(provider::dsl::provider_key.eq(&data.provider_key))
-                    .first::<ProviderDb>(conn);
+            // Check if provider exists
+            let existing_provider = provider::table
+                .filter(provider::dsl::provider_key.eq(&data.provider_key))
+                .first::<ProviderDb>(conn);
 
-                let now = Utc::now().timestamp_millis();
-                let provider = match existing_provider {
-                    Ok(db) => {
-                        // Update existing provider
-                        let mut provider = db.from_db();
-                        provider.name = data.name;
-                        provider.endpoint = data.endpoint;
-                        provider.limit_model = data.limit_model;
-                        provider.use_proxy = data.use_proxy;
-                        provider.updated_at = now;
+            let now = Utc::now().timestamp_millis();
+            let provider = match existing_provider {
+                Ok(db) => {
+                    // Update existing provider
+                    let mut provider = db.from_db();
+                    provider.name = data.name;
+                    provider.endpoint = data.endpoint;
+                    provider.limit_model = data.limit_model;
+                    provider.use_proxy = data.use_proxy;
+                    provider.updated_at = now;
 
-                        diesel::update(provider::table)
-                            .filter(provider::dsl::id.eq(provider.id))
-                            .set(ProviderDb::to_db(&provider))
-                            .execute(conn)?;
-                        provider
-                    }
-                    Err(_) => {
-                        // Create new provider
-                        let provider = Provider::new(
-                            None,
-                            &data.provider_key,
-                            &data.name,
-                            &data.endpoint,
-                            None,
-                            data.limit_model,
-                            data.use_proxy,
-                        );
-                        diesel::insert_into(provider::table)
-                            .values(ProviderDb::to_db(&provider))
-                            .execute(conn);
-                        provider
-                    }
-                };
-
-                // Handle models
-                let existing_models = Model::list_by_provider_id(provider.id)?;
-                let new_model_names: HashSet<_> =
-                    data.models.iter().map(|m| &m.model_name).collect();
-
-                // Delete models not in new data
-                for model in existing_models {
-                    if !new_model_names.contains(&model.model_name) {
-                        Model::delete(model.id).map_err(|_e| BaseError::DatabaseFatal(None))?;
-                    }
+                    diesel::update(provider::table)
+                        .filter(provider::dsl::id.eq(provider.id))
+                        .set(ProviderDb::to_db(&provider))
+                        .execute(conn)?;
+                    provider
                 }
-
-                // Upsert models from new data
-                for model in data.models {
-                    Model::upsert_by_provider_and_name(
-                        provider.id,
-                        &model.model_name,
-                        model.real_model_name.as_deref(),
-                    )?;
+                Err(_) => {
+                    // Create new provider
+                    let provider = Provider::new(
+                        None,
+                        &data.provider_key,
+                        &data.name,
+                        &data.endpoint,
+                        None,
+                        data.limit_model,
+                        data.use_proxy,
+                    );
+                    diesel::insert_into(provider::table)
+                        .values(ProviderDb::to_db(&provider))
+                        .execute(conn);
+                    provider
                 }
+            };
 
-                // Handle provider keys
-                let existing_keys = ProviderApiKey::list_by_provider_id(provider.id)
-                    .map_err(|_e| BaseError::DatabaseFatal(None))?;
-                let new_key_values: HashSet<_> =
-                    data.provider_keys.iter().map(|k| &k.api_key).collect();
+            // Handle models
+            let existing_models = Model::list_by_provider_id(provider.id)?;
+            let new_model_names: HashSet<_> = data.models.iter().map(|m| &m.model_name).collect();
 
-                // Delete keys not in new data
-                for key in existing_keys {
-                    if !new_key_values.contains(&key.api_key) {
-                        ProviderApiKey::delete_by_provider_and_key(provider.id, &key.api_key)
-                            .map_err(|_e| BaseError::DatabaseFatal(None))
-                            .map_err(|_e| BaseError::DatabaseFatal(None))?;
-                    }
+            // Delete models not in new data
+            for model in existing_models {
+                if !new_model_names.contains(&model.model_name) {
+                    Model::delete(model.id).map_err(|_e| BaseError::DatabaseFatal(None))?;
                 }
+            }
 
-                // Upsert keys from new data
-                for key in data.provider_keys {
-                    ProviderApiKey::upsert_by_provider_and_key(
-                        provider.id,
-                        &key.api_key,
-                        key.description.as_deref(),
-                    )?;
+            // Upsert models from new data
+            for model in data.models {
+                Model::upsert_by_provider_and_name(
+                    provider.id,
+                    &model.model_name,
+                    model.real_model_name.as_deref(),
+                )?;
+            }
+
+            // Handle provider keys
+            let existing_keys = ProviderApiKey::list_by_provider_id(provider.id)
+                .map_err(|_e| BaseError::DatabaseFatal(None))?;
+            let new_key_values: HashSet<_> =
+                data.provider_keys.iter().map(|k| &k.api_key).collect();
+
+            // Delete keys not in new data
+            for key in existing_keys {
+                if !new_key_values.contains(&key.api_key) {
+                    ProviderApiKey::delete_by_provider_and_key(provider.id, &key.api_key)
+                        .map_err(|_e| BaseError::DatabaseFatal(None))
+                        .map_err(|_e| BaseError::DatabaseFatal(None))?;
                 }
+            }
 
-                // Handle custom fields
-                let existing_custom_fields = CustomField::list_by_provider_id(provider.id)
-                    .map_err(|_e| BaseError::DatabaseFatal(None))?;
+            // Upsert keys from new data
+            for key in data.provider_keys {
+                ProviderApiKey::upsert_by_provider_and_key(
+                    provider.id,
+                    &key.api_key,
+                    key.description.as_deref(),
+                )?;
+            }
 
-                let new_custom_fields: Vec<CommitCustomField> = data.custom_fields;
-                let new_custom_field_names: HashSet<_> = new_custom_fields.iter().map(|f| &f.field_name).collect();
+            // Handle custom fields
+            let existing_custom_fields = CustomField::list_by_provider_id(provider.id)
+                .map_err(|_e| BaseError::DatabaseFatal(None))?;
 
-                // Delete custom fields not in new data
-                for field in existing_custom_fields {
-                    if !new_custom_field_names.contains(&field.field_name) {
-                        diesel::delete(custom_field::table.filter(custom_field::dsl::id.eq(field.id)))
-                            .execute(conn)
-                            .map_err(|_| BaseError::DatabaseFatal(None))?;
-                    }
+            let new_custom_fields: Vec<CommitCustomField> = data.custom_fields;
+            let new_custom_field_names: HashSet<_> =
+                new_custom_fields.iter().map(|f| &f.field_name).collect();
+
+            // Delete custom fields not in new data
+            for field in existing_custom_fields {
+                if !new_custom_field_names.contains(&field.field_name) {
+                    diesel::delete(custom_field::table.filter(custom_field::dsl::id.eq(field.id)))
+                        .execute(conn)
+                        .map_err(|_| BaseError::DatabaseFatal(None))?;
                 }
+            }
 
-                // Upsert custom fields from new data
-                for field in new_custom_fields {
-                    CustomField::upsert_by_provider_and_name(
-                        provider.id,
-                        &field.field_name,
-                        &field.field_type,
-                        field.field_value.as_deref(),
-                        field.description.as_deref(),
-                    )?;
-                }
+            // Upsert custom fields from new data
+            for field in new_custom_fields {
+                CustomField::upsert_by_provider_and_name(
+                    provider.id,
+                    &field.field_name,
+                    &field.field_type,
+                    field.field_value.as_deref(),
+                    field.description.as_deref(),
+                )?;
+            }
 
-                Ok(())
-            })
-            .map_err(|_| BaseError::DatabaseFatal(None))
+            Ok(())
         })
     }
 
@@ -492,7 +499,9 @@ impl Provider {
         }))
     }
 
-    pub fn query_key_by_key(key: &str) -> DbResult<(Provider, Vec<ProviderApiKey>, Vec<CustomField>)> {
+    pub fn query_key_by_key(
+        key: &str,
+    ) -> DbResult<(Provider, Vec<ProviderApiKey>, Vec<CustomField>)> {
         let provider = Self::query_by_key(key)?;
         let conn = &mut get_connection();
 

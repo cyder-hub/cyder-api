@@ -43,7 +43,7 @@ pub fn get_connection() -> DbConnection {
 fn parse_db_type(db_url: &str) -> DbType {
     if db_url.starts_with("postgres") {
         DbType::Postgres
-    } else if db_url.starts_with("Mysql") {
+    } else if db_url.starts_with("mysql") {
         DbType::Mysql
     } else {
         DbType::Sqlite
@@ -64,11 +64,7 @@ impl DbPool {
                 DbPool::Sqlite(pool)
             }
             DbType::Mysql => {
-                let manager = ConnectionManager::<MysqlConnection>::new(db_url);
-                let pool = Pool::builder()
-                    .max_size(5)
-                    .build(manager)
-                    .expect("Failed to create pool.");
+                let pool = init_mysql_pool(db_url);
                 DbPool::Mysql(pool)
             }
         }
@@ -179,6 +175,10 @@ const POSTGRES_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/po
 const MYSQL_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/mysql");
 
 fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
+    let mut connection = SqliteConnection::establish(db_url).expect("failed to establish migration connection");
+
+    connection.run_pending_migrations(SQLITE_MIGRATIONS).expect("failed to run migrations");
+
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);
     Pool::builder()
         .test_on_check_out(true)
@@ -193,6 +193,18 @@ fn init_pg_pool(db_url: &str) -> Pool<ConnectionManager<PgConnection>> {
     connection.run_pending_migrations(POSTGRES_MIGRATIONS).expect("failed to run migrations");
 
     let manager = ConnectionManager::<PgConnection>::new(db_url);
+    Pool::builder()
+        .max_size(5)
+        .build(manager)
+        .expect("Failed to create pool.")
+}
+
+fn init_mysql_pool(db_url: &str) -> Pool<ConnectionManager<MysqlConnection>> {
+    let mut connection = MysqlConnection::establish(db_url).expect("failed to establish migration connection");
+
+    connection.run_pending_migrations(MYSQL_MIGRATIONS).expect("failed to run migrations");
+
+    let manager = ConnectionManager::<MysqlConnection>::new(db_url);
     Pool::builder()
         .max_size(5)
         .build(manager)

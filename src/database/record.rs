@@ -5,13 +5,14 @@ use crate::{
 
 use super::{get_connection, DbResult, ListResult};
 use chrono::Utc;
-use diesel::prelude::{Insertable, Queryable, ExpressionMethods};
+use super::model::{Model, Price}; // Import Model and Price
+use diesel::prelude::{ExpressionMethods, Insertable, Queryable};
 use serde::{Deserialize, Serialize};
 use diesel::dsl::sql;
 use diesel::sql_types::BigInt;
 
 db_object! {
-    #[derive(Debug, Serialize, Queryable, Insertable, Selectable)]
+    #[derive(Debug, Serialize, Queryable, Insertable, Selectable, Clone)] // Added Clone
     #[diesel(table_name = record)]
     pub struct Record {
         pub id: i64,
@@ -32,6 +33,15 @@ db_object! {
         pub created_at: i64,
         pub updated_at: i64,
     }
+}
+
+/// Represents a Record along with its calculated cost.
+#[derive(Debug, Serialize, Clone)]
+pub struct RecordWithCost {
+    #[serde(flatten)]
+    pub record: Record,
+    pub cost: Option<f64>, // Cost value
+    pub currency: Option<String>, // Currency symbol (e.g., "$", "¥")
 }
 
 pub struct TimeInfo {
@@ -184,6 +194,90 @@ impl Record {
             Ok(ListResult {
                 total,
                 list,
+                page,
+                page_size,
+            })
+        })
+    }
+
+    pub fn list_with_cost(payload: RecordQueryPayload) -> DbResult<ListResult<RecordWithCost>> {
+        let conn = &mut get_connection();
+        let page_size = payload.page_size.unwrap_or(10);
+        let page = payload.page.unwrap_or(1);
+        let offset = (page - 1) * page_size;
+
+        db_execute!(conn, {
+            let provider_id_filter = payload.provider_id;
+            let model_id_filter = payload.model_id;
+            let model_name_filter = payload.model_name;
+            let api_key_id_filter = payload.api_key_id;
+
+            let mut query = record::table.into_boxed();
+            let mut count_query = record::table.into_boxed();
+
+            // Apply filters to both query and count_query
+            if let Some(provider_id) = provider_id_filter {
+                query = query.filter(record::dsl::provider_id.eq(provider_id));
+                count_query = count_query.filter(record::dsl::provider_id.eq(provider_id));
+            }
+            if let Some(model_id) = model_id_filter {
+                query = query.filter(record::dsl::model_id.eq(model_id));
+                count_query = count_query.filter(record::dsl::model_id.eq(model_id));
+            }
+            if let Some(model_name) = model_name_filter.as_ref() {
+                let pattern = format!("%{}%", model_name);
+                query = query.filter(record::dsl::model_name.like(pattern.clone()));
+                count_query = count_query.filter(record::dsl::model_name.like(pattern));
+            }
+            if let Some(api_key_id) = api_key_id_filter {
+                query = query.filter(record::dsl::api_key_id.eq(api_key_id));
+                count_query = count_query.filter(record::dsl::api_key_id.eq(api_key_id));
+            }
+
+            let total = count_query
+                .select(diesel::dsl::count(record::dsl::id))
+                .first::<i64>(conn)
+                .map_err(|_| BaseError::DatabaseFatal(None))?;
+
+            let list_db = query
+                .order(record::dsl::request_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .load::<RecordDb>(conn)
+                .map_err(|_| BaseError::DatabaseFatal(None))?;
+
+            let mut list_with_cost = Vec::with_capacity(list_db.len());
+
+            for record_db in list_db {
+                let record = record_db.from_db();
+                let (cost, currency) = if let Some(model_id) = record.model_id {
+                    match Model::get_latest_by_model_id(model_id) {
+                        Ok(price) => {
+                            // Price is stored per 0.001 tokens. Divide by 10000000000.0 to get cost per token.
+                            let input_cost_per_token = price.input_price as f64 / 10000000000.0;
+                            let output_cost_per_token = price.output_price as f64 / 10000000000.0;
+                            // TODO: Consider cache prices if needed
+                            let total_cost = (record.prompt_tokens as f64 * input_cost_per_token)
+                                + (record.completion_tokens as f64 * output_cost_per_token);
+                            (Some(total_cost), Some(price.currency)) // Return cost and currency
+                        }
+                        Err(BaseError::NotFound(_)) => (None, None), // No price found for this model
+                        Err(e) => return Err(e), // Propagate other database errors
+                    }
+                } else {
+                    (None, None) // No model_id, cannot calculate cost or get currency
+                };
+
+                list_with_cost.push(RecordWithCost {
+                    record: record.clone(), // Clone the record
+                    cost,
+                    currency,
+                });
+            }
+
+            Ok(ListResult {
+                total,
+                list: list_with_cost,
                 page,
                 page_size,
             })

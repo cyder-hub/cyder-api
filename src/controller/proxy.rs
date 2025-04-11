@@ -28,7 +28,7 @@ use crate::{
     config::CONFIG,
     database::{
         api_key::ApiKey,
-        model::Model,
+        model::{Model, Price}, // Import Price
         model_transform::ModelTransform,
         record::{ModelInfo, Record, TimeInfo, UsageInfo},
     },
@@ -98,10 +98,11 @@ struct RequestInfo {
     model_id: Option<i64>,
     model_name: String,
     real_model_name: String,
+    price: Option<Price>, // Add price field
 }
 
 impl RequestInfo {
-    fn to_model_info(self: Self) -> ModelInfo {
+    fn to_model_info(self: &Self) -> ModelInfo {
         ModelInfo {
             provider_id: self.provider_id,
             model_id: self.model_id,
@@ -131,7 +132,7 @@ async fn proxy_request(
         }
     );
     let api_key_id = request_info.api_key_id;
-    let model_info = request_info.to_model_info();
+    let model_info: ModelInfo = request_info.to_model_info();
     // build http client with proxy
     let client = if use_proxy {
         let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
@@ -210,13 +211,23 @@ async fn proxy_request(
                                         let data: Value = serde_json::from_str(data).unwrap();
                                         let usage = data.get("usage");
                                         let usage = parse_usage_info(usage);
-                                        let usage_str = match &usage {
-                                            Some(u) => {
+                                        let price = request_info.price.as_ref(); // Get price from request_info
+
+                                        let usage_str = match (&usage, price) {
+                                            (Some(u), Some(p)) => {
+                                                // Calculate cost assuming price is USD per 1M tokens scaled by 10000
+                                                let cost = (u.prompt_tokens as f64 * p.input_price as f64 + u.completion_tokens as f64 * p.output_price as f64) / 10_000_000_000.0;
+                                                let tps = u.completion_tokens as f64 / (now - first_response) as f64 * 1000f64;
+                                                format!(" ({}, {}, {}, {tps:.3}t/s, {}{cost:.9})", u.prompt_tokens, u.completion_tokens, u.prompt_tokens + u.completion_tokens, p.currency) // Added currency
+                                            }
+                                            (Some(u), None) => {
+                                                // Price not available
                                                 let tps = u.completion_tokens as f64 / (now - first_response) as f64 * 1000f64;
                                                 format!(" ({}, {}, {}, {tps:.3}t/s)", u.prompt_tokens, u.completion_tokens, u.prompt_tokens + u.completion_tokens)
                                             }
-                                            None => "".to_string()
+                                            _ => "".to_string(), // No usage info
                                         };
+
                                         println!("{model_str}: {first_response} {now}{usage_str}");
                                         Record::insert_one(&Record::new(
                                             api_key_id,
@@ -262,13 +273,23 @@ async fn proxy_request(
                     let data: Value = serde_json::from_slice(&total_bytes).unwrap();
                     let usage = data.get("usage");
                     let usage = parse_usage_info(usage);
-                    let usage_str = match &usage {
-                        Some(u) => {
+                    let price = request_info.price.as_ref(); // Get price from request_info
+
+                    let usage_str = match (&usage, price) {
+                        (Some(u), Some(p)) => {
+                            // Calculate cost assuming price is USD per 1M tokens scaled by 10000
+                            let cost = (u.prompt_tokens as f64 * p.input_price as f64 + u.completion_tokens as f64 * p.output_price as f64) / 10_000_000_000.0;
+                            let tps = u.completion_tokens as f64 / now as f64 * 1000f64;
+                            format!(" ({}, {}, {}, {tps:.3}t/s, {}{cost:.9})", u.prompt_tokens, u.completion_tokens, u.prompt_tokens + u.completion_tokens, p.currency) // Added currency
+                        }
+                        (Some(u), None) => {
+                            // Price not available
                             let tps = u.completion_tokens as f64 / now as f64 * 1000f64;
                             format!(" ({}, {}, {}, {tps:.3}t/s)", u.prompt_tokens, u.completion_tokens, u.prompt_tokens + u.completion_tokens)
                         }
-                        None => "".to_string()
+                        _ => "".to_string(), // No usage info
                     };
+
                     println!("{model_str}: {now}{usage_str} ");
                     Record::insert_one(&Record::new(
                         api_key_id,
@@ -348,6 +369,11 @@ async fn proxy_single_handler(
         Some(model) => Some(model.id),
         None => None,
     };
+    // Fetch the latest price for the model_id if it exists
+    let price = match model_id {
+        Some(id) => Model::get_latest_by_model_id(id).ok(), // Use ok() to convert Result to Option
+        None => None,
+    };
 
     if provider.limit_model && model.is_none() {
         return Err((StatusCode::BAD_REQUEST, "model not found".to_string()));
@@ -393,6 +419,7 @@ async fn proxy_single_handler(
         model_id,
         model_name: model_name.to_string(),
         real_model_name: real_model_name.to_string(),
+        price, // Pass the fetched price
     };
 
     proxy_request(
@@ -513,6 +540,13 @@ async fn proxy_all_handler(
         None => None,
     };
 
+    // Fetch the latest price for the model_id if it exists
+    let price = match model_id {
+        Some(id) => Model::get_latest_by_model_id(id).ok(), // Use ok() to convert Result to Option
+        None => None,
+    };
+
+
     if provider.limit_model && model.is_none() {
         return Err((StatusCode::BAD_REQUEST, "model not found".to_string()));
     }
@@ -570,6 +604,7 @@ async fn proxy_all_handler(
         model_id: model_id,
         model_name: model_name.to_string(),
         real_model_name: real_model_name.to_string(),
+        price, // Pass the fetched price
     };
 
     proxy_request(

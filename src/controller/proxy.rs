@@ -1,3 +1,4 @@
+use cyder_tools::log::info;
 use std::{
     io::Read,
     sync::{Arc, Mutex},
@@ -228,7 +229,7 @@ async fn proxy_request(
                                             _ => "".to_string(), // No usage info
                                         };
 
-                                        println!("{model_str}: {first_response} {now}{usage_str}");
+                                        info!("{model_str}: {first_response} {now}{usage_str}");
                                         Record::insert_one(&Record::new(
                                             api_key_id,
                                             &model_info,
@@ -254,7 +255,7 @@ async fn proxy_request(
                     yield Ok::<_, std::io::Error>(chunk);
                 }
                 Err(e) => {
-                    println!("Stream error: {}", e);
+                    info!("Stream error: {}", e);
                     break;
                 }
             }
@@ -290,7 +291,7 @@ async fn proxy_request(
                         _ => "".to_string(), // No usage info
                     };
 
-                    println!("{model_str}: {now}{usage_str} ");
+                    info!("{model_str}: {now}{usage_str} ");
                     Record::insert_one(&Record::new(
                         api_key_id,
                         &model_info,
@@ -303,7 +304,7 @@ async fn proxy_request(
                         false
                     )).unwrap();
                 } else {
-                    println!("{model_str}: {now}");
+                    info!("{model_str}: {now}");
                     Record::insert_one(&Record::new(
                         api_key_id,
                         &model_info,
@@ -326,7 +327,7 @@ async fn proxy_request(
                 total_bytes.extend_from_slice(&Bytes::from(decompressed_data));
             }
             let data = String::from_utf8_lossy(&total_bytes).to_string();
-            println!("request failed ({}) {}", status_code, data);
+            info!("request failed ({}) {}", status_code, data);
         }
     };
 

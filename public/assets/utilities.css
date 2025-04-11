@@ -175,6 +175,17 @@
     /* margin-left: auto; */ /* Push reset button to the right */
 }
 
+.content-header {
+    display: flex;
+    justify-content: flex-end; /* Align button to the right */
+    margin-bottom: 16px; /* Space below the header */
+    padding: 0 10px; /* Optional padding if needed */
+}
+
+.content-body {
+    /* Styles for the main content area below the header, if needed */
+}
+
 
 .pagination {
     display: flex;

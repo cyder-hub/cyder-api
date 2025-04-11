@@ -253,9 +253,9 @@ impl Record {
                 let (cost, currency) = if let Some(model_id) = record.model_id {
                     match Model::get_latest_by_model_id(model_id) {
                         Ok(price) => {
-                            // Price is stored per 0.001 tokens. Divide by 10000000000.0 to get cost per token.
-                            let input_cost_per_token = price.input_price as f64 / 10000000000.0;
-                            let output_cost_per_token = price.output_price as f64 / 10000000000.0;
+                            // Price is stored per 0.001 tokens. Divide by 1000000000.0 to get cost per token.
+                            let input_cost_per_token = price.input_price as f64 / 1000000000.0;
+                            let output_cost_per_token = price.output_price as f64 / 1000000000.0;
                             // TODO: Consider cache prices if needed
                             let total_cost = (record.prompt_tokens as f64 * input_cost_per_token)
                                 + (record.completion_tokens as f64 * output_cost_per_token);

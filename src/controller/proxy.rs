@@ -216,7 +216,7 @@ async fn proxy_request(
                                         let usage_str = match (&usage, price) {
                                             (Some(u), Some(p)) => {
                                                 // Calculate cost assuming price is USD per 1M tokens scaled by 10000
-                                                let cost = (u.prompt_tokens as f64 * p.input_price as f64 + u.completion_tokens as f64 * p.output_price as f64) / 10_000_000_000.0;
+                                                let cost = (u.prompt_tokens as f64 * p.input_price as f64 + u.completion_tokens as f64 * p.output_price as f64) / 1_000_000_000.0;
                                                 let tps = u.completion_tokens as f64 / (now - first_response) as f64 * 1000f64;
                                                 format!(" ({}, {}, {}, {tps:.3}t/s, {}{cost:.9})", u.prompt_tokens, u.completion_tokens, u.prompt_tokens + u.completion_tokens, p.currency) // Added currency
                                             }
@@ -278,7 +278,7 @@ async fn proxy_request(
                     let usage_str = match (&usage, price) {
                         (Some(u), Some(p)) => {
                             // Calculate cost assuming price is USD per 1M tokens scaled by 10000
-                            let cost = (u.prompt_tokens as f64 * p.input_price as f64 + u.completion_tokens as f64 * p.output_price as f64) / 10_000_000_000.0;
+                            let cost = (u.prompt_tokens as f64 * p.input_price as f64 + u.completion_tokens as f64 * p.output_price as f64) / 1_000_000_000.0;
                             let tps = u.completion_tokens as f64 / now as f64 * 1000f64;
                             format!(" ({}, {}, {}, {tps:.3}t/s, {}{cost:.9})", u.prompt_tokens, u.completion_tokens, u.prompt_tokens + u.completion_tokens, p.currency) // Added currency
                         }

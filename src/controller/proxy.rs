@@ -363,8 +363,10 @@ async fn proxy_single_handler(
     let model_name = data.get("model").unwrap().to_string();
     let model_name = &model_name[1..&model_name.len() - 1];
 
-    let (provider, provider_keys, _, model) =
+    let (provider, provider_keys, custom_fields, model) =
         Model::query_provider_model(&provider_key_from_path, model_name).unwrap();
+
+    handle_custom_fields(&mut data, &custom_fields);
 
     let model_id = match &model {
         Some(model) => Some(model.id),

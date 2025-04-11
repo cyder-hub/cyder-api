@@ -138,21 +138,48 @@
 
 .data-table {
     width: 100%;
-    border-collapse: collapse;
+    /* border-collapse: collapse; Removed for individual cell borders */
     margin-bottom: 10px;
+    border-spacing: 0; /* Replaces border-collapse */
+    border: 1px solid #e0e0e0; /* Add outer border like header */
+    border-radius: 4px; /* Optional: slightly rounded corners for the table */
+    overflow: hidden; /* Ensures border-radius clips content */
 }
 
 .data-table th,
 .data-table td {
-    border: 1px solid #ddd;
-    padding: 8px;
+    /* border: 1px solid #ddd; */
+    border-bottom: 1px solid #e0e0e0; /* Use bottom border like header list */
+    padding: 10px 16px; /* Match header item padding more closely */
     text-align: left;
+    color: #495057; /* Match header text color */
+    background-color: #ffffff; /* Default white background */
 }
+
+/* Remove left/right borders for inner cells */
+.data-table th:not(:first-child),
+.data-table td:not(:first-child) {
+    border-left: 1px solid #e0e0e0;
+}
+
 
 .data-table th {
-    background-color: #f2f2f2;
+    background-color: #f8f9fa; /* Match header list background */
+    font-weight: 500; /* Match active header font weight */
+    color: #343a40; /* Slightly darker header text */
 }
 
-.data-table tbody tr:nth-child(even) {
+/* Remove alternating row background for consistency */
+/* .data-table tbody tr:nth-child(even) {
     background-color: #f9f9f9;
+} */
+
+.data-table tbody tr:hover td {
+    background-color: #e9ecef; /* Match header item hover */
+    color: #0056b3; /* Match header item hover text color */
+}
+
+/* Ensure last row doesn't have a bottom border */
+.data-table tbody tr:last-child td {
+    border-bottom: none;
 }

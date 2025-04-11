@@ -73,9 +73,57 @@
     padding: 20px;
     box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
     z-index: 1000;
-    border-radius: 10px;
+    border-radius: 8px; /* Slightly smaller radius */
+    /* overflow-y: auto; */ /* Let content define height */
+    min-width: 400px; /* Minimum width */
+    max-width: 90vw; /* Max width relative to viewport */
+}
+
+.model-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    border-bottom: 1px solid #e0e0e0;
+    background-color: #f8f9fa; /* Light header background */
+    border-radius: 8px 8px 0 0; /* Round top corners */
+}
+
+.model-title {
+    font-size: 1.1em;
+    font-weight: 500;
+    color: #343a40;
+}
+
+.close-button {
+    background: none;
+    border: none;
+    font-size: 1.5em;
+    color: #6c757d;
+    cursor: pointer;
+    padding: 0 5px;
+    line-height: 1;
+}
+.close-button:hover {
+    color: #343a40;
+}
+
+.model-body {
+    padding: 20px;
+    max-height: 70vh; /* Limit body height and allow scroll */
     overflow-y: auto;
 }
+
+.model-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 12px 20px;
+    border-top: 1px solid #e0e0e0;
+    background-color: #f8f9fa; /* Light footer background */
+    border-radius: 0 0 8px 8px; /* Round bottom corners */
+}
+
 
 .form-item {
     display: flex;

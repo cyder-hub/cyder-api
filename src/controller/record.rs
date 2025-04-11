@@ -1,7 +1,7 @@
 use axum::{extract::Query, routing::get, Router};
 
 use crate::{
-    database::{ListResult ,record::{Record, RecordQueryPayload}},
+    database::{ListResult ,record::{Record, RecordWithCost, RecordQueryPayload}},
     utils::HttpResult,
 };
 
@@ -9,8 +9,8 @@ use super::error::BaseError;
 
 async fn list_record(
     Query(payload): Query<RecordQueryPayload>,
-) -> Result<HttpResult<ListResult<Record>>, BaseError> {
-    match Record::list(payload) {
+) -> Result<HttpResult<ListResult<RecordWithCost>>, BaseError> {
+    match Record::list_with_cost(payload) {
         Ok(result) => Ok(HttpResult::new(result)),
         Err(_) => Err(BaseError::DatabaseFatal(None)),
     }

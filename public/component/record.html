@@ -31,6 +31,7 @@
                     <th>首次响应</th>
                     <th>总响应时间</th>
                     <th>TPS</th>
+                    <th>成本</th> <!-- Updated Cost Header -->
                     <th>请求时间</th>
                 </tr>
             </thead>
@@ -46,6 +47,7 @@
                         <td x-text="record.first_token_time ? (record.first_token_time / 1000).toFixed(3) : '/'"></td>
                         <td x-text="record.response_time ? (record.response_time / 1000).toFixed(3) : '/'"></td>
                         <td x-text="record.completion_tokens ? (record.completion_tokens / (record.response_time - record.first_token_time || 0) * 1000).toFixed(2) : '/'"></td>
+                        <td x-text="record.cost !== null && record.cost !== undefined ? (record.currency || '') + ' ' + record.cost.toFixed(8) : '/'"></td> <!-- Display currency and cost -->
                         <td x-text="record.request_at"></td>
                     </tr>
                 </template>

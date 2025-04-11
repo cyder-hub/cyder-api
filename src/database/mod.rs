@@ -9,7 +9,6 @@ use serde::Serialize;
 
 pub mod api_key;
 pub mod model;
-pub mod price;
 pub mod provider;
 pub mod record;
 pub mod model_transform;
@@ -92,7 +91,7 @@ macro_rules! db_object {
         )+
     ) => {
         $(
-            #[derive(Debug, serde::Serialize)]
+            #[derive(Debug, Clone, serde::Serialize)]
             pub struct $name { $( $vis $field : $typ, )+ }
         )+
 

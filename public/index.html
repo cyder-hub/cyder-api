@@ -9,62 +9,86 @@
     <link title="utilities" rel="stylesheet" href="assets/utilities.css">
 
     <style>
-        .header-list {
+        body {
+            margin: 0; /* Remove default body margin */
+            font-family: sans-serif; /* Optional: Set a base font */
+        }
+
+        .app-layout {
             display: flex;
-            gap: 8px; /* Reduced gap slightly */
-            list-style: none;
-            padding: 10px 16px; /* Added vertical padding */
-            margin: 0;
-            border-bottom: 1px solid #e0e0e0; /* Added a subtle bottom border */
-            background-color: #f8f9fa; /* Light background for the header area */
         }
 
-        .header-item {
-            padding: 10px 20px; /* Increased padding */
-            border-radius: 6px 6px 0 0; /* Rounded top corners */
+        .sidebar {
+            width: 220px; /* Width of the sidebar */
+            flex-shrink: 0; /* Prevent sidebar from shrinking */
+            background-color: #f8f9fa; /* Sidebar background */
+            border-right: 1px solid #e0e0e0; /* Separator line */
+            height: 100vh; /* Full viewport height */
+            position: sticky; /* Keep sidebar visible on scroll */
+            top: 0;
+            display: flex;
+            flex-direction: column; /* Stack items vertically */
+            padding-top: 20px; /* Space at the top */
+        }
+
+        .nav-item {
+            padding: 12px 20px; /* Padding for nav items */
             cursor: pointer;
-            transition: background-color 0.2s ease, color 0.2s ease, border-bottom-color 0.2s ease; /* Smoother transitions */
-            color: #495057; /* Softer text color */
-            border-bottom: 3px solid transparent; /* Placeholder for active border */
-            margin-bottom: -1px; /* Align with the header list border */
+            transition: background-color 0.2s ease, color 0.2s ease, border-left-color 0.2s ease; /* Smooth transitions */
+            color: #495057; /* Default text color */
+            border-left: 3px solid transparent; /* Placeholder for active indicator */
+            margin-bottom: 4px; /* Space between nav items */
+            display: block; /* Ensure items take full width */
+            text-decoration: none; /* Remove underline if using <a> */
         }
 
-        .header-item:hover {
-            background-color: #e9ecef; /* Slightly darker hover */
-            color: #0056b3; /* Change text color on hover */
+        .nav-item:hover {
+            background-color: #e9ecef; /* Hover background */
+            color: #0056b3; /* Hover text color */
         }
 
-        .header-item.active {
-            background-color: #ffffff; /* White background for active tab */
-            color: #007bff; /* Theme color for active text */
-            border-bottom: 3px solid #007bff; /* Highlight active tab with bottom border */
-            font-weight: 500; /* Slightly bolder text for active tab */
+        .nav-item.active {
+            background-color: #e9ecef; /* Active background */
+            color: #007bff; /* Active text color */
+            border-left-color: #007bff; /* Active indicator */
+            font-weight: 500; /* Slightly bolder active text */
         }
 
         .logout-button {
-            position: absolute;
-            top: 10px;
-            right: 10px;
+            /* position: absolute; */ /* Removed absolute positioning */
+            /* top: 10px; */
+            /* right: 10px; */
+            margin: auto 20px 20px 20px; /* Push to bottom with auto top margin */
             padding: 8px 16px;
             border-radius: 4px;
             cursor: pointer;
             transition: background-color 0.3s ease;
             color: #333;
-            background-color: #f0f0f0;
+            background-color: #e0e0e0; /* Adjusted background */
             border: none;
+            text-align: center; /* Center text */
         }
 
         .logout-button:hover {
-            background-color: #ddd;
+            background-color: #d0d0d0; /* Adjusted hover */
+        }
+
+        .main-content {
+            flex-grow: 1; /* Allow content to take remaining space */
+            padding: 20px; /* Padding around content */
+            height: 100vh; /* Full height */
+            overflow-y: auto; /* Allow content to scroll */
         }
 
         .login-container {
             display: flex;
+            flex-direction: column; /* Stack login elements vertically */
             align-items: center;
             justify-content: center;
-            width: 300px;
-            height: calc(100vh - 80px);
-            margin: auto;
+            /* width: 300px; */ /* Removed fixed width */
+            max-width: 350px; /* Limit login form width */
+            height: 100%; /* Fill the main content area vertically */
+            margin: auto; /* Center horizontally */
         }
 
         .login-container>* {
@@ -73,36 +97,42 @@
     </style>
 </head>
 
-<body x-data="global">
-    <template x-if="!showLogin">
-      <button @click="onLogout" class="logout-button">注销</button>
-    </template>
-    <header class="header-list">
+<body x-data="global" class="app-layout">
+    <!-- Sidebar Navigation -->
+    <nav class="sidebar" x-show="!showLogin">
+        <!-- Navigation Items -->
         <template x-for="tab in tabs">
-            <div x-text="tab.label" @click="activeTab = tab.key" class="header-item"
+            <div x-text="tab.label" @click="activeTab = tab.key" class="nav-item"
                 :class="{ 'active': activeTab === tab.key }"></div>
         </template>
-    </header>
-    <content>
+        <!-- Logout Button at the bottom -->
+        <button @click="onLogout" class="logout-button">注销</button>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
         <template x-if="showLogin">
             <div class="login-container">
-                <input type="text" x-model="password" class="form-input"></input>
-                <button @click=onLogin class="btn btn-primary">登录</button>
+                <input type="text" x-model="password" class="form-input" placeholder="输入密码"></input>
+                <button @click="onLogin" class="btn btn-primary" style="margin-top: 10px; width: 100%;">登录</button>
             </div>
         </template>
-        <template x-if="activeTab === 'record'">
-            <x-component styles="utilities" url="./component/record.html"></x-component>
-        </template>
-        <template x-if="activeTab === 'provider'">
-            <x-component styles="utilities" url="./component/provider.html"></x-component>
-        </template>
-        <template x-if="activeTab === 'api_key'">
-            <x-component styles="utilities" url="./component/api_key.html"></x-component>
-        </template>
-        <template x-if="activeTab === 'model_transform'">
-            <x-component styles="utilities" url="./component/model_transform.html"></x-component>
-        </template>
-    </content>
+        <!-- Dynamically load content based on activeTab -->
+        <div x-show="!showLogin">
+            <template x-if="activeTab === 'record'">
+                <x-component styles="utilities" url="./component/record.html"></x-component>
+            </template>
+            <template x-if="activeTab === 'provider'">
+                <x-component styles="utilities" url="./component/provider.html"></x-component>
+            </template>
+            <template x-if="activeTab === 'api_key'">
+                <x-component styles="utilities" url="./component/api_key.html"></x-component>
+            </template>
+            <template x-if="activeTab === 'model_transform'">
+                <x-component styles="utilities" url="./component/model_transform.html"></x-component>
+            </template>
+        </div>
+    </main>
 
     <script>
         let access_token = "";

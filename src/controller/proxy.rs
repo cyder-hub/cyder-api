@@ -354,17 +354,17 @@ async fn proxy_single_handler(
     let pre_headers: &axum::http::HeaderMap = &request.headers().clone();
     let api_key_id = check_header_auth(pre_headers)?;
 
-    let (provider_key, path) = params;
+    let (provider_key_from_path, path) = params;
 
     // parse body, and get provider and model info
     let axum_body = request.into_body();
-    let body = axum::body::to_bytes(axum_body, usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(axum_body, usize::MAX).await.map_err(|_| (StatusCode::BAD_REQUEST, "failed to read body".to_string()))?;
     let mut data: Value = serde_json::from_slice(&body).unwrap();
     let model_name = data.get("model").unwrap().to_string();
     let model_name = &model_name[1..&model_name.len() - 1];
 
     let (provider, provider_keys, _, model) =
-        Model::query_provider_model(&provider_key, model_name).unwrap();
+        Model::query_provider_model(&provider_key_from_path, model_name).unwrap();
 
     let model_id = match &model {
         Some(model) => Some(model.id),
@@ -416,7 +416,7 @@ async fn proxy_single_handler(
     let request_info = RequestInfo {
         api_key_id,
         provider_id: provider.id,
-        provider_key: provider.provider_key,
+        provider_key: provider.provider_key.to_string(),
         model_id,
         model_name: model_name.to_string(),
         real_model_name: real_model_name.to_string(),

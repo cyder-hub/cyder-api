@@ -11,27 +11,34 @@
     <style>
         .header-list {
             display: flex;
-            gap: 16px;
+            gap: 8px; /* Reduced gap slightly */
             list-style: none;
-            padding: 0;
+            padding: 10px 16px; /* Added vertical padding */
             margin: 0;
+            border-bottom: 1px solid #e0e0e0; /* Added a subtle bottom border */
+            background-color: #f8f9fa; /* Light background for the header area */
         }
 
         .header-item {
-            padding: 8px 16px;
-            border-radius: 4px;
+            padding: 10px 20px; /* Increased padding */
+            border-radius: 6px 6px 0 0; /* Rounded top corners */
             cursor: pointer;
-            transition: background-color 0.3s ease;
-            color: #333;
+            transition: background-color 0.2s ease, color 0.2s ease, border-bottom-color 0.2s ease; /* Smoother transitions */
+            color: #495057; /* Softer text color */
+            border-bottom: 3px solid transparent; /* Placeholder for active border */
+            margin-bottom: -1px; /* Align with the header list border */
         }
 
         .header-item:hover {
-            background-color: #f0f0f0;
+            background-color: #e9ecef; /* Slightly darker hover */
+            color: #0056b3; /* Change text color on hover */
         }
 
         .header-item.active {
-            background-color: #007bff;
-            color: white;
+            background-color: #ffffff; /* White background for active tab */
+            color: #007bff; /* Theme color for active text */
+            border-bottom: 3px solid #007bff; /* Highlight active tab with bottom border */
+            font-weight: 500; /* Slightly bolder text for active tab */
         }
 
         .logout-button {

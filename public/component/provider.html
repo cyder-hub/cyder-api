@@ -254,11 +254,14 @@
             return `${YYYY}-${MM}-${DD} ${hh}:${mm}:${ss}`;
         }
     }">
-    <button class="btn btn-primary" @click="startEditing()">添加</button>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Key</th>
+    <div class="content-header">
+        <button class="btn btn-primary" @click="startEditing()">添加</button>
+    </div>
+    <div class="content-body">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Key</th>
                 <th>Name</th>
                 <th>Use Proxy</th>
                 <th>模型</th>

@@ -46,7 +46,9 @@
             color: #495057; /* Default text color */
             border-left: 3px solid transparent; /* Placeholder for active indicator */
             margin-bottom: 4px; /* Space between nav items */
-            display: block; /* Ensure items take full width */
+            display: flex; /* Use flexbox for alignment */
+            align-items: center; /* Center items vertically */
+            gap: 8px; /* Space between icon and text */
             text-decoration: none; /* Remove underline if using <a> */
         }
 
@@ -197,18 +199,23 @@
             Alpine.data('global', () => ({
                 showLogin: false,
                 activeTab: "",
+                // Added 'icon' property to each tab
                 tabs: [{
                     key: "record",
-                    label: "请求"
+                    label: "请求",
+                    icon: "📄" // Placeholder icon
                 }, {
                     key: "provider",
-                    label: "渠道"
+                    label: "渠道",
+                    icon: "🔌" // Placeholder icon
                 }, {
                     key: "api_key",
-                    label: "API Key"
+                    label: "API Key",
+                    icon: "🔑" // Placeholder icon
                 }, {
                     key: "model_transform",
-                    label: "模型转换"
+                    label: "模型转换",
+                    icon: "🔄" // Placeholder icon
                 }],
                 password: "",
                 async onLogin() {

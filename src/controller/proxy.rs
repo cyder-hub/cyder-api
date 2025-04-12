@@ -1,4 +1,4 @@
-use cyder_tools::log::info;
+use cyder_tools::log::{info, debug};
 use std::{
     io::Read,
     sync::{Arc, Mutex},
@@ -355,6 +355,8 @@ async fn proxy_single_handler(
     let api_key_id = check_header_auth(pre_headers)?;
 
     let (provider_key_from_path, path) = params;
+
+    debug!("{provider_key_from_path}, {path}");
 
     // parse body, and get provider and model info
     let axum_body = request.into_body();

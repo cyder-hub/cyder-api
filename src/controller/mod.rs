@@ -1,23 +1,28 @@
+use crate::utils::auth::authorization_access_middleware;
 use api_key::create_api_key_router;
-use axum::{http, middleware, response::IntoResponse, Router};
+use auth::create_auth_router;
+use axum::{
+    http::{self, header::CACHE_CONTROL, HeaderValue},
+    middleware,
+    response::IntoResponse,
+    Router,
+};
 use model::create_model_router;
+use model_transform::create_model_transform_router;
 use provider::create_provider_router;
 use proxy::create_proxy_router;
 use record::create_record_router;
-use auth::create_auth_router;
-use crate::utils::auth::authorization_access_middleware;
-use model_transform::create_model_transform_router;
 
-use tower_http::services::ServeDir;
+use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 
 mod api_key;
+mod auth;
 mod error;
 mod model;
+mod model_transform;
 mod provider;
 mod proxy;
 mod record;
-mod auth;
-mod model_transform;
 
 pub use error::BaseError;
 
@@ -30,6 +35,15 @@ pub fn create_router() -> Router {
 
 fn create_manager_router() -> Router {
     let serve_dir = ServeDir::new("public");
+    let serve_vendor_dir = ServeDir::new("public/vendor");
+
+    let static_router = Router::new()
+        .nest_service("/settings", serve_dir)
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
+        .nest_service("/settings/vendor", serve_vendor_dir);
 
     Router::new().nest(
         "/manager",
@@ -41,7 +55,7 @@ fn create_manager_router() -> Router {
             .merge(create_model_transform_router())
             .layer(middleware::from_fn(authorization_access_middleware))
             .merge(create_auth_router())
-            .nest_service("/settings", serve_dir),
+            .merge(static_router),
     )
 }
 

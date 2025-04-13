@@ -1,17 +1,14 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::Path,
     response::Json,
     routing::{delete, get, post, put},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::{
-    config::Config,
     controller::BaseError,
-    database::model::{Model, Price}, // Import Price
-    db_execute,
+    database::model::{Model, Price},
     utils::HttpResult, // Import HttpResult
 };
 
@@ -120,7 +117,6 @@ async fn insert_model_price(
     Ok(HttpResult::new(price)) // Return the created price with generated ID/timestamps
 }
 
-
 async fn list_model_prices(Path(id): Path<i64>) -> Result<HttpResult<Vec<Price>>, BaseError> {
     let prices = Price::list_by_model_id(id)?;
     Ok(HttpResult::new(prices))
@@ -135,6 +131,6 @@ pub fn create_model_router() -> Router {
             .route("/{id}", delete(delete_model))
             .route("/{id}", put(update_model))
             .route("/{id}/prices", get(list_model_prices)) // List prices for a model
-            .route("/{id}/price", post(insert_model_price)) // Add a new price for a model
+            .route("/{id}/price", post(insert_model_price)), // Add a new price for a model
     )
 }

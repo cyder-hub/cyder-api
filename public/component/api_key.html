@@ -63,10 +63,13 @@
         this.stopEditing();
     }
 }">
-    <button class="btn btn-primary" @click="editApiKey()">新增</button>
-    <table class="data-table">
-        <thead>
-            <tr>
+    <div class="content-header">
+        <button class="btn btn-primary" @click="editApiKey()">新增</button>
+    </div>
+    <div class="content-body">
+        <table class="data-table">
+            <thead>
+                <tr>
                 <th>Name</th>
                 <th>API Key</th>
                 <th>Description</th>

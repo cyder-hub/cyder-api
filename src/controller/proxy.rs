@@ -1,3 +1,4 @@
+use cyder_tools::log::{info, debug};
 use std::{
     io::Read,
     sync::{Arc, Mutex},
@@ -228,7 +229,7 @@ async fn proxy_request(
                                             _ => "".to_string(), // No usage info
                                         };
 
-                                        println!("{model_str}: {first_response} {now}{usage_str}");
+                                        info!("{model_str}: {first_response} {now}{usage_str}");
                                         Record::insert_one(&Record::new(
                                             api_key_id,
                                             &model_info,
@@ -254,7 +255,7 @@ async fn proxy_request(
                     yield Ok::<_, std::io::Error>(chunk);
                 }
                 Err(e) => {
-                    println!("Stream error: {}", e);
+                    info!("Stream error: {}", e);
                     break;
                 }
             }
@@ -290,7 +291,7 @@ async fn proxy_request(
                         _ => "".to_string(), // No usage info
                     };
 
-                    println!("{model_str}: {now}{usage_str} ");
+                    info!("{model_str}: {now}{usage_str} ");
                     Record::insert_one(&Record::new(
                         api_key_id,
                         &model_info,
@@ -303,7 +304,7 @@ async fn proxy_request(
                         false
                     )).unwrap();
                 } else {
-                    println!("{model_str}: {now}");
+                    info!("{model_str}: {now}");
                     Record::insert_one(&Record::new(
                         api_key_id,
                         &model_info,
@@ -326,7 +327,7 @@ async fn proxy_request(
                 total_bytes.extend_from_slice(&Bytes::from(decompressed_data));
             }
             let data = String::from_utf8_lossy(&total_bytes).to_string();
-            println!("request failed ({}) {}", status_code, data);
+            info!("request failed ({}) {}", status_code, data);
         }
     };
 
@@ -353,17 +354,21 @@ async fn proxy_single_handler(
     let pre_headers: &axum::http::HeaderMap = &request.headers().clone();
     let api_key_id = check_header_auth(pre_headers)?;
 
-    let (provider_key, path) = params;
+    let (provider_key_from_path, path) = params;
+
+    debug!("{provider_key_from_path}, {path}");
 
     // parse body, and get provider and model info
     let axum_body = request.into_body();
-    let body = axum::body::to_bytes(axum_body, usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(axum_body, usize::MAX).await.map_err(|_| (StatusCode::BAD_REQUEST, "failed to read body".to_string()))?;
     let mut data: Value = serde_json::from_slice(&body).unwrap();
     let model_name = data.get("model").unwrap().to_string();
     let model_name = &model_name[1..&model_name.len() - 1];
 
-    let (provider, provider_keys, _, model) =
-        Model::query_provider_model(&provider_key, model_name).unwrap();
+    let (provider, provider_keys, custom_fields, model) =
+        Model::query_provider_model(&provider_key_from_path, model_name).unwrap();
+
+    handle_custom_fields(&mut data, &custom_fields);
 
     let model_id = match &model {
         Some(model) => Some(model.id),
@@ -415,7 +420,7 @@ async fn proxy_single_handler(
     let request_info = RequestInfo {
         api_key_id,
         provider_id: provider.id,
-        provider_key: provider.provider_key,
+        provider_key: provider.provider_key.to_string(),
         model_id,
         model_name: model_name.to_string(),
         real_model_name: real_model_name.to_string(),

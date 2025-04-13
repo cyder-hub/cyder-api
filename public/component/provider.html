@@ -254,11 +254,14 @@
             return `${YYYY}-${MM}-${DD} ${hh}:${mm}:${ss}`;
         }
     }">
-    <button class="btn btn-primary" @click="startEditing()">添加</button>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Key</th>
+    <div class="content-header">
+        <button class="btn btn-primary" @click="startEditing()">添加</button>
+    </div>
+    <div class="content-body">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Key</th>
                 <th>Name</th>
                 <th>Use Proxy</th>
                 <th>模型</th>
@@ -416,8 +419,8 @@
                              <div class="form-item">
                                  <span class="form-label">货币</span>
                                  <select x-model="newPrice.currency" class="form-select" style="width: auto;">
-                                     <option value="$">$ (USD)</option>
-                                     <option value="￥">￥ (CNY)</option>
+                                     <option value="USD">USD</option>
+                                     <option value="CNY">CNY</option>
                                  </select>
                              </div>
                              <div class="form-item">

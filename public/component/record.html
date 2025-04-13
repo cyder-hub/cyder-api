@@ -1,7 +1,7 @@
 <div x-data="recordData">
-    <div class="filters">
+    <div class="filter-controls"> <!-- Changed class name -->
         <select x-model="filter.api_key_id" class="form-select" @change="applyFilter">
-            <option value="">All API Keys</option>
+            <option value="">所有 API 密钥</option>
             <template x-for="apiKey in Alpine.store('data').api_keys" :key="apiKey.id">
                 <option :value="apiKey.id" x-text="apiKey.name"></option>
             </template>

@@ -2,6 +2,7 @@
 
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script defer src="vendor/alpine-component@1.2.0.min.js"></script>
     <script defer src="vendor/alpinejs.3.14.9.min.js"></script>
     <link rel="stylesheet" href="assets/utilities.css">
@@ -9,93 +10,197 @@
     <link title="utilities" rel="stylesheet" href="assets/utilities.css">
 
     <style>
-        .header-list {
+        body {
+           position: fixed;
+           top: 0;
+           right: 0;
+           bottom: 0;
+           left: 0;
+           margin: 0; /* Remove default body margin */
+           font-family: sans-serif; /* Optional: Set a base font */
+        }
+
+        .app-layout {
             display: flex;
-            gap: 16px;
-            list-style: none;
-            padding: 0;
-            margin: 0;
         }
 
-        .header-item {
-            padding: 8px 16px;
-            border-radius: 4px;
+        .sidebar {
+            width: 220px; /* Width of the sidebar */
+            flex-shrink: 0; /* Prevent sidebar from shrinking */
+            background-color: #f8f9fa; /* Sidebar background */
+            border-right: 1px solid #e0e0e0; /* Separator line */
+            height: 100vh; /* Full viewport height */
+            position: sticky; /* Keep sidebar visible on scroll */
+            top: 0;
+            display: flex;
+            flex-direction: column; /* Stack items vertically */
+            padding-top: 20px; /* Space at the top */
+        }
+
+        .nav-item {
+            padding: 12px 20px; /* Padding for nav items */
             cursor: pointer;
-            transition: background-color 0.3s ease;
-            color: #333;
+            transition: background-color 0.2s ease, color 0.2s ease, border-left-color 0.2s ease; /* Smooth transitions */
+            color: #495057; /* Default text color */
+            border-left: 3px solid transparent; /* Placeholder for active indicator */
+            margin-bottom: 4px; /* Space between nav items */
+            display: flex; /* Use flexbox for alignment */
+            align-items: center; /* Center items vertically */
+            gap: 8px; /* Space between icon and text */
+            text-decoration: none; /* Remove underline if using <a> */
         }
 
-        .header-item:hover {
-            background-color: #f0f0f0;
+        .nav-item:hover {
+            background-color: #e9ecef; /* Hover background */
+            color: #0056b3; /* Hover text color */
         }
 
-        .header-item.active {
-            background-color: #007bff;
-            color: white;
+        .nav-item.active {
+            background-color: #e9ecef; /* Active background */
+            color: #007bff; /* Active text color */
+            border-left-color: #007bff; /* Active indicator */
+            font-weight: 500; /* Slightly bolder active text */
         }
 
         .logout-button {
-            position: absolute;
-            top: 10px;
-            right: 10px;
+            /* position: absolute; */ /* Removed absolute positioning */
+            /* top: 10px; */
+            /* right: 10px; */
+            margin: auto 20px 20px 20px; /* Push to bottom with auto top margin */
             padding: 8px 16px;
             border-radius: 4px;
             cursor: pointer;
             transition: background-color 0.3s ease;
             color: #333;
-            background-color: #f0f0f0;
+            background-color: #e9ecef; /* Adjusted background */
             border: none;
+            text-align: center; /* Center text */
+            transition: all 0.3s ease; /* Add transition for smooth collapse */
         }
 
         .logout-button:hover {
-            background-color: #ddd;
+            background-color: #ced4da; /* Adjusted hover */
+        }
+
+        .main-content {
+            flex-grow: 1; /* Allow content to take remaining space */
+            padding: 20px; /* Padding around content */
+            height: 100vh; /* Full height */
+            overflow-y: auto; /* Allow content to scroll */
         }
 
         .login-container {
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 300px;
-            height: calc(100vh - 80px);
-            margin: auto;
+            /* width: 300px; */ /* Removed fixed width */
+            max-width: 350px; /* Limit login form width */
+            height: 100%; /* Fill the main content area vertically */
+            margin: auto; /* Center horizontally */
         }
 
         .login-container>* {
             margin: 8px;
         }
+
+        /* Sidebar specific styles */
+        .sidebar {
+            width: 220px; /* Default width */
+            transition: width 0.3s ease; /* Smooth transition for width change */
+            /* ... other existing sidebar styles ... */
+        }
+
+        .sidebar.collapsed {
+            width: 60px; /* Collapsed width */
+        }
+
+        .sidebar.collapsed .nav-item {
+            justify-content: center; /* Center icon when collapsed */
+            padding-left: 0; /* Adjust padding */
+            padding-right: 0;
+        }
+
+        .sidebar.collapsed .logout-button {
+             margin-left: 5px; /* Adjust margin */
+             margin-right: 5px;
+             padding: 8px; /* Adjust padding */
+        }
+
+        .collapse-button {
+            background: none;
+            border: none;
+            color: #6c757d;
+            padding: 10px;
+            margin-bottom: 10px; /* Space below button */
+            cursor: pointer;
+            text-align: right; /* Align text/icon to the right */
+            align-self: flex-end; /* Position button to the right */
+            margin-right: 10px; /* Space from the right edge */
+            font-size: 0.9em;
+            transition: color 0.2s ease;
+        }
+
+        .collapse-button:hover {
+            color: #007bff;
+        }
+
+        .sidebar.collapsed .collapse-button {
+            text-align: center; /* Center icon when collapsed */
+            align-self: center; /* Center button itself */
+            margin-right: 0;
+        }
+
     </style>
 </head>
 
-<body x-data="global">
-    <template x-if="!showLogin">
-      <button @click="onLogout" class="logout-button">注销</button>
-    </template>
-    <header class="header-list">
+<body x-data="global" class="app-layout">
+    <!-- Sidebar Navigation -->
+    <nav class="sidebar" x-show="!showLogin" :class="{ 'collapsed': isSidebarCollapsed }">
+        <!-- Collapse/Expand Button -->
+        <button @click="isSidebarCollapsed = !isSidebarCollapsed" class="collapse-button">
+            <span x-show="!isSidebarCollapsed">← Collapse</span>
+            <span x-show="isSidebarCollapsed">→</span>
+        </button>
+
+        <!-- Navigation Items -->
         <template x-for="tab in tabs">
-            <div x-text="tab.label" @click="activeTab = tab.key" class="header-item"
-                :class="{ 'active': activeTab === tab.key }"></div>
-        </template>
-    </header>
-    <content>
-        <template x-if="showLogin">
-            <div class="login-container">
-                <input type="text" x-model="password" class="form-input"></input>
-                <button @click=onLogin class="btn btn-primary">登录</button>
+            <div @click="activeTab = tab.key" class="nav-item"
+                :class="{ 'active': activeTab === tab.key }">
+                <span x-text="tab.icon"></span>
+                <span x-show="!isSidebarCollapsed" x-text="tab.label"></span>
             </div>
         </template>
-        <template x-if="activeTab === 'record'">
-            <x-component styles="utilities" url="./component/record.html"></x-component>
+        <!-- Logout Button at the bottom -->
+        <button @click="onLogout" class="logout-button">
+            <span x-show="!isSidebarCollapsed">注销</span>
+            <span x-show="isSidebarCollapsed">🚪</span> <!-- Example icon -->
+        </button>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+        <template x-if="showLogin">
+            <div class="login-container">
+                <input type="text" x-model="password" class="form-input" placeholder="输入密码" style="height: 32px;"></input>
+                <button @click="onLogin" class="btn btn-primary" style="margin-top: 10px; width: 100%;">登录</button>
+            </div>
         </template>
-        <template x-if="activeTab === 'provider'">
-            <x-component styles="utilities" url="./component/provider.html"></x-component>
-        </template>
-        <template x-if="activeTab === 'api_key'">
-            <x-component styles="utilities" url="./component/api_key.html"></x-component>
-        </template>
-        <template x-if="activeTab === 'model_transform'">
-            <x-component styles="utilities" url="./component/model_transform.html"></x-component>
-        </template>
-    </content>
+        <!-- Dynamically load content based on activeTab -->
+        <div x-show="!showLogin">
+            <template x-if="activeTab === 'record'">
+                <x-component styles="utilities" url="./component/record.html"></x-component>
+            </template>
+            <template x-if="activeTab === 'provider'">
+                <x-component styles="utilities" url="./component/provider.html"></x-component>
+            </template>
+            <template x-if="activeTab === 'api_key'">
+                <x-component styles="utilities" url="./component/api_key.html"></x-component>
+            </template>
+            <template x-if="activeTab === 'model_transform'">
+                <x-component styles="utilities" url="./component/model_transform.html"></x-component>
+            </template>
+        </div>
+    </main>
 
     <script>
         let access_token = "";
@@ -153,18 +258,24 @@
             Alpine.data('global', () => ({
                 showLogin: false,
                 activeTab: "",
+                isSidebarCollapsed: false,
+                // Added 'icon' property to each tab
                 tabs: [{
                     key: "record",
-                    label: "请求"
+                    label: "请求",
+                    icon: "📄" // Placeholder icon
                 }, {
                     key: "provider",
-                    label: "渠道"
+                    label: "渠道",
+                    icon: "🔌" // Placeholder icon
                 }, {
                     key: "api_key",
-                    label: "API Key"
+                    label: "API Key",
+                    icon: "🔑" // Placeholder icon
                 }, {
                     key: "model_transform",
-                    label: "模型转换"
+                    label: "模型转换",
+                    icon: "🔄" // Placeholder icon
                 }],
                 password: "",
                 async onLogin() {

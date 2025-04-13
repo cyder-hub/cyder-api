@@ -1,3 +1,4 @@
+use cyder_tools::log::info;
 use std::{
     collections::HashSet,
     fs, io,
@@ -22,7 +23,7 @@ pub fn init_migration(conn: &Connection) -> Result<()> {
 
     for migration in &migrations {
         if !applied_migrations.contains(&migration.version) {
-            println!("try to migrate to {}", migration.version);
+            info!("try to migrate to {}", migration.version);
             let up_file_path = migration.path.join(UP_FILE);
             if up_file_path.exists() {
                 conn.execute_batch(&fs::read_to_string(up_file_path).unwrap())?;
@@ -30,7 +31,7 @@ pub fn init_migration(conn: &Connection) -> Result<()> {
                     &format!("INSERT INTO {} (version) VALUES (?)", MIGRATIONS_TABLE),
                     params![migration.version],
                 )?;
-                println!("migration {} done", migration.version);
+            info!("migration {} done", migration.version);
             } else {
                 panic!("migration file {} do not exist", up_file_path.display());
             }

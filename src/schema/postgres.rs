@@ -10,6 +10,7 @@ diesel::table! {
         is_enabled -> Bool,
         created_at -> Int8,
         updated_at -> Int8,
+        limit_strategy_id -> Nullable<Int8>,
     }
 }
 
@@ -26,6 +27,30 @@ diesel::table! {
         description -> Nullable<Text>,
         created_at -> Int8,
         updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    limit_strategy (id) {
+        id -> Int8,
+        main_strategy -> Text,
+        name -> Text,
+        description -> Nullable<Text>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    limit_strategy_item (id) {
+        id -> Int8,
+        limit_strategy_id -> Int8,
+        limit_strategy_type -> Text,
+        resource_type -> Text,
+        resource_id -> Nullable<Int8>,
+        limit_type -> Text,
+        limit_value -> Nullable<Int4>,
+        duration -> Nullable<Text>,
     }
 }
 
@@ -123,6 +148,8 @@ diesel::table! {
 diesel::allow_tables_to_appear_in_same_query!(
     api_keys,
     custom_field,
+    limit_strategy,
+    limit_strategy_item,
     model,
     model_transform,
     price,

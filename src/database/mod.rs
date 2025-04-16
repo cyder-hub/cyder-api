@@ -12,6 +12,7 @@ pub mod model;
 pub mod provider;
 pub mod record;
 pub mod model_transform;
+pub mod limit_strategy;
 
 pub enum DbType {
     Postgres,

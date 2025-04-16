@@ -11,13 +11,15 @@
 
     <style>
         body {
-           position: fixed;
-           top: 0;
-           right: 0;
-           bottom: 0;
-           left: 0;
-           margin: 0; /* Remove default body margin */
-           font-family: sans-serif; /* Optional: Set a base font */
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            margin: 0;
+            /* Remove default body margin */
+            font-family: sans-serif;
+            /* Optional: Set a base font */
         }
 
         .app-layout {
@@ -25,78 +27,115 @@
         }
 
         .sidebar {
-            width: 220px; /* Width of the sidebar */
-            flex-shrink: 0; /* Prevent sidebar from shrinking */
-            background-color: #f8f9fa; /* Sidebar background */
-            border-right: 1px solid #e0e0e0; /* Separator line */
-            height: 100vh; /* Full viewport height */
-            position: sticky; /* Keep sidebar visible on scroll */
+            width: 220px;
+            /* Width of the sidebar */
+            flex-shrink: 0;
+            /* Prevent sidebar from shrinking */
+            background-color: #f8f9fa;
+            /* Sidebar background */
+            border-right: 1px solid #e0e0e0;
+            /* Separator line */
+            height: 100vh;
+            /* Full viewport height */
+            position: sticky;
+            /* Keep sidebar visible on scroll */
             top: 0;
             display: flex;
-            flex-direction: column; /* Stack items vertically */
-            padding-top: 20px; /* Space at the top */
+            flex-direction: column;
+            /* Stack items vertically */
+            padding-top: 20px;
+            /* Space at the top */
         }
 
         .nav-item {
-            padding: 12px 20px; /* Padding for nav items */
+            padding: 12px 20px;
+            /* Padding for nav items */
             cursor: pointer;
-            transition: background-color 0.2s ease, color 0.2s ease, border-left-color 0.2s ease; /* Smooth transitions */
-            color: #495057; /* Default text color */
-            border-left: 3px solid transparent; /* Placeholder for active indicator */
-            margin-bottom: 4px; /* Space between nav items */
-            display: flex; /* Use flexbox for alignment */
-            align-items: center; /* Center items vertically */
-            gap: 8px; /* Space between icon and text */
-            text-decoration: none; /* Remove underline if using <a> */
+            transition: background-color 0.2s ease, color 0.2s ease, border-left-color 0.2s ease;
+            /* Smooth transitions */
+            color: #495057;
+            /* Default text color */
+            border-left: 3px solid transparent;
+            /* Placeholder for active indicator */
+            margin-bottom: 4px;
+            /* Space between nav items */
+            display: flex;
+            /* Use flexbox for alignment */
+            align-items: center;
+            /* Center items vertically */
+            gap: 8px;
+            /* Space between icon and text */
+            text-decoration: none;
+            /* Remove underline if using <a> */
         }
 
         .nav-item:hover {
-            background-color: #e9ecef; /* Hover background */
-            color: #0056b3; /* Hover text color */
+            background-color: #e9ecef;
+            /* Hover background */
+            color: #0056b3;
+            /* Hover text color */
         }
 
         .nav-item.active {
-            background-color: #e9ecef; /* Active background */
-            color: #007bff; /* Active text color */
-            border-left-color: #007bff; /* Active indicator */
-            font-weight: 500; /* Slightly bolder active text */
+            background-color: #e9ecef;
+            /* Active background */
+            color: #007bff;
+            /* Active text color */
+            border-left-color: #007bff;
+            /* Active indicator */
+            font-weight: 500;
+            /* Slightly bolder active text */
         }
 
         .logout-button {
-            /* position: absolute; */ /* Removed absolute positioning */
+            /* position: absolute; */
+            /* Removed absolute positioning */
             /* top: 10px; */
             /* right: 10px; */
-            margin: auto 20px 20px 20px; /* Push to bottom with auto top margin */
+            margin: auto 20px 20px 20px;
+            /* Push to bottom with auto top margin */
             padding: 8px 16px;
             border-radius: 4px;
             cursor: pointer;
             transition: background-color 0.3s ease;
             color: #333;
-            background-color: #e9ecef; /* Adjusted background */
+            background-color: #e9ecef;
+            /* Adjusted background */
             border: none;
-            text-align: center; /* Center text */
-            transition: all 0.3s ease; /* Add transition for smooth collapse */
+            text-align: center;
+            /* Center text */
+            transition: all 0.3s ease;
+            /* Add transition for smooth collapse */
         }
 
         .logout-button:hover {
-            background-color: #ced4da; /* Adjusted hover */
+            background-color: #ced4da;
+            /* Adjusted hover */
         }
 
         .main-content {
-            flex-grow: 1; /* Allow content to take remaining space */
-            padding: 20px; /* Padding around content */
-            height: 100vh; /* Full height */
-            overflow-y: auto; /* Allow content to scroll */
+            flex-grow: 1;
+            /* Allow content to take remaining space */
+            padding: 20px;
+            /* Padding around content */
+            height: 100vh;
+            /* Full height */
+            overflow-y: auto;
+            /* Allow content to scroll */
         }
 
         .login-container {
             display: flex;
             align-items: center;
             justify-content: center;
-            /* width: 300px; */ /* Removed fixed width */
-            max-width: 350px; /* Limit login form width */
-            height: 100%; /* Fill the main content area vertically */
-            margin: auto; /* Center horizontally */
+            /* width: 300px; */
+            /* Removed fixed width */
+            max-width: 350px;
+            /* Limit login form width */
+            height: 100%;
+            /* Fill the main content area vertically */
+            margin: auto;
+            /* Center horizontally */
         }
 
         .login-container>* {
@@ -105,25 +144,32 @@
 
         /* Sidebar specific styles */
         .sidebar {
-            width: 220px; /* Default width */
-            transition: width 0.3s ease; /* Smooth transition for width change */
+            width: 220px;
+            /* Default width */
+            transition: width 0.3s ease;
+            /* Smooth transition for width change */
             /* ... other existing sidebar styles ... */
         }
 
         .sidebar.collapsed {
-            width: 60px; /* Collapsed width */
+            width: 60px;
+            /* Collapsed width */
         }
 
         .sidebar.collapsed .nav-item {
-            justify-content: center; /* Center icon when collapsed */
-            padding-left: 0; /* Adjust padding */
+            justify-content: center;
+            /* Center icon when collapsed */
+            padding-left: 0;
+            /* Adjust padding */
             padding-right: 0;
         }
 
         .sidebar.collapsed .logout-button {
-             margin-left: 5px; /* Adjust margin */
-             margin-right: 5px;
-             padding: 8px; /* Adjust padding */
+            margin-left: 5px;
+            /* Adjust margin */
+            margin-right: 5px;
+            padding: 8px;
+            /* Adjust padding */
         }
 
         .collapse-button {
@@ -131,11 +177,15 @@
             border: none;
             color: #6c757d;
             padding: 10px;
-            margin-bottom: 10px; /* Space below button */
+            margin-bottom: 10px;
+            /* Space below button */
             cursor: pointer;
-            text-align: right; /* Align text/icon to the right */
-            align-self: flex-end; /* Position button to the right */
-            margin-right: 10px; /* Space from the right edge */
+            text-align: right;
+            /* Align text/icon to the right */
+            align-self: flex-end;
+            /* Position button to the right */
+            margin-right: 10px;
+            /* Space from the right edge */
             font-size: 0.9em;
             transition: color 0.2s ease;
         }
@@ -145,11 +195,12 @@
         }
 
         .sidebar.collapsed .collapse-button {
-            text-align: center; /* Center icon when collapsed */
-            align-self: center; /* Center button itself */
+            text-align: center;
+            /* Center icon when collapsed */
+            align-self: center;
+            /* Center button itself */
             margin-right: 0;
         }
-
     </style>
 </head>
 
@@ -164,8 +215,7 @@
 
         <!-- Navigation Items -->
         <template x-for="tab in tabs">
-            <div @click="activeTab = tab.key" class="nav-item"
-                :class="{ 'active': activeTab === tab.key }">
+            <div @click="activeTab = tab.key" class="nav-item" :class="{ 'active': activeTab === tab.key }">
                 <span x-text="tab.icon"></span>
                 <span x-show="!isSidebarCollapsed" x-text="tab.label"></span>
             </div>
@@ -181,7 +231,8 @@
     <main class="main-content">
         <template x-if="showLogin">
             <div class="login-container">
-                <input type="text" x-model="password" class="form-input" placeholder="输入密码" style="height: 32px;"></input>
+                <input type="text" x-model="password" class="form-input" placeholder="输入密码"
+                    style="height: 32px;"></input>
                 <button @click="onLogin" class="btn btn-primary" style="margin-top: 10px; width: 100%;">登录</button>
             </div>
         </template>
@@ -198,6 +249,9 @@
             </template>
             <template x-if="activeTab === 'model_transform'">
                 <x-component styles="utilities" url="./component/model_transform.html"></x-component>
+            </template>
+            <template x-if="activeTab === 'limit_strategy'">
+                <x-component styles="utilities" url="./component/limit_strategy.html"></x-component>
             </template>
         </div>
     </main>
@@ -233,6 +287,7 @@
                 providers: [],
                 api_keys: [],
                 model_transforms: [],
+                limit_strategies: [],
                 async reload_providers() {
                     const provider_res = await (await request("/ai/manager/provider/detail/list")).json();
                     this.providers = provider_res.data;
@@ -245,11 +300,28 @@
                     const model_transform_res = await (await request("/ai/manager/model_transform/list")).json();
                     this.model_transforms = model_transform_res.data;
                 },
+                async reload_limit_strategies() {
+                    const response = await request('/ai/manager/limit_strategy/list', {
+                        method: 'GET',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    const result = await response.json();
+                    if (response.ok) {
+                        // Ensure items is always an array for each strategy
+                        this.limit_strategies = result.data.map(s => ({
+                            ...s,
+                            items: s.items || []
+                        }));
+                    } else {
+                        this.limit_strategies = []; // Clear strategies on error
+                    }
+                },
                 async init() {
                     if (await try_refresh_token()) {
                         await this.reload_providers();
                         await this.reload_api_keys();
                         await this.reload_model_transforms();
+                        await this.reload_limit_strategies();
                     }
                 }
 
@@ -276,6 +348,10 @@
                     key: "model_transform",
                     label: "模型转换",
                     icon: "🔄" // Placeholder icon
+                }, {
+                    key: "limit_strategy",
+                    label: "限制策略",
+                    icon: "🚦" // Placeholder icon
                 }],
                 password: "",
                 async onLogin() {
@@ -623,7 +699,29 @@
                     const result = await response.json();
                     this.model_transforms = result.data;
                 }
-            }))
+            }));
+
+            function getEmptyStrategy() {
+                return {
+                    id: null,
+                    main_strategy: 'default', // Set default value
+                    name: '',
+                    description: '',
+                    items: [] // Keep items array at the top level
+                };
+            }
+
+            function getEmptyStrategyItem() {
+                return {
+                    id: null, // Will be assigned by backend if new
+                    limit_strategy_id: null, // Will be set when saving
+                    resource_type: 'global', // Set default value
+                    resource_id: null,
+                    limit_type: 'request', // Set default value
+                    limit_value: null,
+                    duration: 'day' // Set default value
+                };
+            }
         })
     </script>
 </body>

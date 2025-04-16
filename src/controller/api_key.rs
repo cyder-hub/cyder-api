@@ -13,6 +13,7 @@ use crate::utils::HttpResult;
 struct InsertApiKey {
     key: String,
     name: String,
+    limit_strategy_id: Option<i64>,
     description: Option<String>,
 }
 
@@ -20,11 +21,17 @@ struct InsertApiKey {
 struct UpdateApiKey {
     api_key: Option<String>,
     name: Option<String>,
+    limit_strategy_id: Option<i64>,
     description: Option<String>,
 }
 
 async fn insert_one(Json(payload): Json<InsertApiKey>) -> DbResult<HttpResult<ApiKey>> {
-    let api_key = ApiKey::new(payload.key, payload.name, payload.description);
+    let api_key = ApiKey::new(
+        payload.key,
+        payload.name,
+        payload.limit_strategy_id,
+        payload.description,
+    );
     ApiKey::insert_one(&api_key)?;
     Ok(HttpResult::new(api_key))
 }
@@ -52,6 +59,7 @@ async fn update_one(
     if let Some(name) = payload.name {
         api_key.name = name;
     }
+    api_key.limit_strategy_id = payload.limit_strategy_id;
     api_key.description = payload.description;
     ApiKey::update_one(&api_key)?;
     Ok(HttpResult::new(api_key))

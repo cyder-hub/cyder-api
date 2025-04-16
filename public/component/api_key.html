@@ -4,7 +4,8 @@
         id: null,
         api_key: '',
         name: '',
-        description: ''
+        description: '',
+        limit_strategy_id: null // Added for strategy selection
     },
     async deleteApiKey(api_key) {
         if (confirm(`确定要删除 API Key ${api_key.name} 吗?`)) {
@@ -16,12 +17,22 @@
         }
     },
     editApiKey(api_key) {
-        this.editingData = api_key ? { ...api_key } : {
-            id: null,
-            api_key: '',
-            name: '',
-            description: ''
-        };
+        if (api_key) {
+            this.editingData.id = api_key.id;
+            this.editingData.api_key = api_key.api_key;
+            this.editingData.name = api_key.name;
+            this.editingData.description = api_key.description;
+            this.editingData.limit_strategy_id = api_key.limit_strategy_id; // Set the strategy ID from the API key
+        } else {
+            this.editingData = {
+                id: null,
+                api_key: '',
+                name: '',
+                description: '',
+                limit_strategy_id: null // Default for new key
+            };
+        }
+        console.log('test', this.editingData);
         this.showEditModel = true;
     },
     stopEditing() {
@@ -29,7 +40,8 @@
             id: null,
             api_key: '',
             name: '',
-            description: ''
+            description: '',
+            limit_strategy_id: null // Reset strategy ID
         };
         this.showEditModel = false;
     },
@@ -42,7 +54,8 @@
                     body: JSON.stringify({
                         name: this.editingData.name,
                         key: this.editingData.api_key,
-                        description: this.editingData.description
+                        description: this.editingData.description,
+                        limit_strategy_id: this.editingData.limit_strategy_id // Added
                     })
                 }
             );
@@ -54,7 +67,8 @@
                     body: JSON.stringify({
                         name: this.editingData.name,
                         api_key: this.editingData.api_key,
-                        description: this.editingData.description
+                        description: this.editingData.description,
+                        limit_strategy_id: this.editingData.limit_strategy_id // Added
                     })
                 }
             );
@@ -103,6 +117,17 @@
                 </div>
                 <div class="form-item">
                     <span class="form-label">描述</span><input x-model="editingData.description" class="form-input" />
+                </div>
+                <!-- Limit Strategy Select -->
+                <div class="form-item">
+                    <span class="form-label">限制策略</span>
+                    <select x-model.number="editingData.limit_strategy_id" class="form-input">
+                        <option :value="null">-- 无 --</option>
+                        <!-- Assuming $store.data.limit_strategies exists -->
+                        <template x-for="strategy in $store.data.limit_strategies" :key="strategy.id">
+                            <option :value="strategy.id" x-text="strategy.name"></option>
+                        </template>
+                    </select>
                 </div>
                 <button @click="onCommit()" class="btn btn-primary">保存</button>
             </div>

@@ -18,11 +18,17 @@ db_object! {
         pub is_enabled: bool,
         pub created_at: i64,
         pub updated_at: i64,
+        pub limit_strategy_id: Option<i64>,
     }
 }
 
 impl ApiKey {
-    pub fn new(key: String, name: String, description: Option<String>) -> Self {
+    pub fn new(
+        key: String,
+        name: String,
+        limit_strategy_id: Option<i64>,
+        description: Option<String>,
+    ) -> Self {
         let now = Utc::now().timestamp_millis();
         Self {
             id: ID_GENERATOR.generate_id(),
@@ -33,6 +39,7 @@ impl ApiKey {
             is_enabled: true,
             created_at: now,
             updated_at: now,
+            limit_strategy_id,
         }
     }
 

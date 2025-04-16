@@ -1,4 +1,4 @@
-use cyder_tools::log::{info, debug};
+use cyder_tools::log::{debug, info, log};
 use std::{
     io::Read,
     sync::{Arc, Mutex},
@@ -17,13 +17,18 @@ use chrono::Utc;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use reqwest::{
-    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST},
+    header::{
+        ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST,
+    },
     Method, Proxy, StatusCode, Url,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::database::provider::CustomField;
+use crate::{
+    database::{limit_strategy::LimitStrategy, provider::CustomField},
+    utils::limit::LIMITER,
+};
 
 use crate::{
     config::CONFIG,
@@ -33,10 +38,10 @@ use crate::{
         model_transform::ModelTransform,
         record::{ModelInfo, Record, TimeInfo, UsageInfo},
     },
-    utils::{process_stream_options, remove_data_field, split_chunks},
+    utils::{process_stream_options, split_chunks},
 };
 
-fn check_header_auth(headers: &HeaderMap) -> Result<i64, (StatusCode, String)> {
+fn check_header_auth(headers: &HeaderMap) -> Result<ApiKey, (StatusCode, String)> {
     let auth = match headers.get(AUTHORIZATION) {
         Some(value) => value,
         None => return Err((StatusCode::UNAUTHORIZED, "no api key".to_string())),
@@ -47,7 +52,7 @@ fn check_header_auth(headers: &HeaderMap) -> Result<i64, (StatusCode, String)> {
     if let Some(auth_str) = auth_str {
         let api_key = ApiKey::query_by_key(auth_str);
         if let Ok(api_key) = api_key {
-            return Ok(api_key.id);
+            return Ok(api_key);
         }
     }
     Err((StatusCode::UNAUTHORIZED, "api key is invalid".to_string()))
@@ -92,13 +97,15 @@ fn parse_usage_info(usage: Option<&Value>) -> Option<UsageInfo> {
     }
 }
 
-struct RequestInfo {
-    api_key_id: i64,
-    provider_id: i64,
-    provider_key: String,
-    model_id: Option<i64>,
-    model_name: String,
-    real_model_name: String,
+#[derive(Debug)]
+pub struct RequestInfo {
+    pub api_key_id: i64,
+    pub api_key_name: String,
+    pub provider_id: i64,
+    pub provider_key: String,
+    pub model_id: Option<i64>,
+    pub model_name: String,
+    pub real_model_name: String,
     price: Option<Price>, // Add price field
 }
 
@@ -352,7 +359,8 @@ async fn proxy_single_handler(
 
     // check and parse api_key_id
     let pre_headers: &axum::http::HeaderMap = &request.headers().clone();
-    let api_key_id = check_header_auth(pre_headers)?;
+    let api_key = check_header_auth(pre_headers)?;
+    let api_key_id = api_key.id;
 
     let (provider_key_from_path, path) = params;
 
@@ -360,7 +368,9 @@ async fn proxy_single_handler(
 
     // parse body, and get provider and model info
     let axum_body = request.into_body();
-    let body = axum::body::to_bytes(axum_body, usize::MAX).await.map_err(|_| (StatusCode::BAD_REQUEST, "failed to read body".to_string()))?;
+    let body = axum::body::to_bytes(axum_body, usize::MAX)
+        .await
+        .map_err(|_| (StatusCode::BAD_REQUEST, "failed to read body".to_string()))?;
     let mut data: Value = serde_json::from_slice(&body).unwrap();
     let model_name = data.get("model").unwrap().to_string();
     let model_name = &model_name[1..&model_name.len() - 1];
@@ -419,6 +429,7 @@ async fn proxy_single_handler(
 
     let request_info = RequestInfo {
         api_key_id,
+        api_key_name: api_key.name.to_string(),
         provider_id: provider.id,
         provider_key: provider.provider_key.to_string(),
         model_id,
@@ -485,7 +496,9 @@ fn handle_custom_fields(data: &mut Value, custom_fields: &Vec<CustomField>) {
                     data.as_object_mut().map(|obj| {
                         obj.insert(
                             custom_field.field_name.clone(),
-                            serde_json::Number::from_f64(float_value as f64).map(Value::Number).unwrap_or(Value::Null),
+                            serde_json::Number::from_f64(float_value as f64)
+                                .map(Value::Number)
+                                .unwrap_or(Value::Null),
                         );
                     });
                 }
@@ -493,10 +506,7 @@ fn handle_custom_fields(data: &mut Value, custom_fields: &Vec<CustomField>) {
             "boolean" => {
                 if let Some(bool_value) = custom_field.boolean_value {
                     data.as_object_mut().map(|obj| {
-                        obj.insert(
-                            custom_field.field_name.clone(),
-                            Value::Bool(bool_value),
-                        );
+                        obj.insert(custom_field.field_name.clone(), Value::Bool(bool_value));
                     });
                 }
             }
@@ -512,7 +522,9 @@ async fn proxy_all_handler(
     let start_time: i64 = Utc::now().timestamp_millis();
     // get auth header
     let pre_headers: &axum::http::HeaderMap = &request.headers().clone();
-    let api_key_id = check_header_auth(pre_headers)?;
+    let api_key = check_header_auth(pre_headers)?;
+    let api_key_id = api_key.id;
+    let limit_strategy_id = api_key.limit_strategy_id;
 
     let method = request.method().as_str().to_string();
 
@@ -551,7 +563,6 @@ async fn proxy_all_handler(
         None => None,
     };
 
-
     if provider.limit_model && model.is_none() {
         return Err((StatusCode::BAD_REQUEST, "model not found".to_string()));
     }
@@ -564,10 +575,6 @@ async fn proxy_all_handler(
             .unwrap_or(&model.model_name),
         None => model_name,
     };
-
-    // if let Some(omit_config) = request_info.0.omit_config.as_ref() {
-    //     remove_data_field(&mut data, Some(&omit_config.data));
-    // }
 
     if let Some(obj) = data.as_object_mut() {
         obj.insert("model".to_string(), json!(real_model_name));
@@ -604,6 +611,7 @@ async fn proxy_all_handler(
 
     let request_info = RequestInfo {
         api_key_id,
+        api_key_name: api_key.name.clone(),
         provider_id: provider.id,
         provider_key: provider.provider_key.to_string(),
         model_id: model_id,
@@ -611,6 +619,15 @@ async fn proxy_all_handler(
         real_model_name: real_model_name.to_string(),
         price, // Pass the fetched price
     };
+
+    if let Some(limit_strategy_id) = limit_strategy_id {
+        let limit_strategy = LimitStrategy::query_one_detail(limit_strategy_id).unwrap();
+        LIMITER
+            .check_limit_strategy(&limit_strategy, &request_info)
+            .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+    }
+
+    info!("info {:?}", request_info);
 
     proxy_request(
         url.as_str(),

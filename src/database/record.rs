@@ -5,11 +5,9 @@ use crate::{
 
 use super::{get_connection, DbResult, ListResult};
 use chrono::Utc;
-use super::model::{Model, Price}; // Import Model and Price
-use diesel::prelude::{ExpressionMethods, Insertable, Queryable};
+use super::model::Model;
+use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
-use diesel::dsl::sql;
-use diesel::sql_types::BigInt;
 
 db_object! {
     #[derive(Debug, Serialize, Queryable, Insertable, Selectable, Clone)] // Added Clone

@@ -1,6 +1,7 @@
 use crate::utils::auth::authorization_access_middleware;
 use api_key::create_api_key_router;
 use auth::create_auth_router;
+use limit_strategy::create_limit_strategy_router; // Add this import
 use axum::{
     http::{self, header::CACHE_CONTROL, HeaderValue},
     middleware,
@@ -18,10 +19,11 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
 mod api_key;
 mod auth;
 mod error;
+mod limit_strategy; // Add this module declaration
 mod model;
 mod model_transform;
 mod provider;
-mod proxy;
+pub mod proxy;
 mod record;
 
 pub use error::BaseError;
@@ -53,6 +55,7 @@ fn create_manager_router() -> Router {
             .merge(create_api_key_router())
             .merge(create_model_router())
             .merge(create_model_transform_router())
+            .merge(create_limit_strategy_router()) // Add this line
             .layer(middleware::from_fn(authorization_access_middleware))
             .merge(create_auth_router())
             .merge(static_router),

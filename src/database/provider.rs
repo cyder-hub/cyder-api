@@ -38,6 +38,7 @@ pub struct FullCommitData {
     pub endpoint: String,
     pub limit_model: bool,
     pub use_proxy: bool,
+    pub provider_type: Option<String>,
     pub models: Vec<CommitModel>,
     pub provider_keys: Vec<CommitProviderKey>,
     pub custom_fields: Vec<CommitCustomField>,
@@ -58,6 +59,7 @@ db_object! {
         pub is_deleted: bool,
         pub created_at: i64,
         pub updated_at: i64,
+        pub provider_type: String,
     }
 
     #[derive(Insertable, Queryable, Selectable, AsChangeset, Debug)]
@@ -305,6 +307,7 @@ impl Provider {
         config: Option<&str>,
         limit_model: bool,
         use_proxy: bool,
+        provider_type: &str,
     ) -> Self {
         let now = Utc::now().timestamp_millis();
         Self {
@@ -322,6 +325,7 @@ impl Provider {
             is_enabled: true,
             created_at: now,
             updated_at: now,
+            provider_type: provider_type.to_string(),
         }
     }
 
@@ -343,6 +347,7 @@ impl Provider {
                     provider.limit_model = data.limit_model;
                     provider.use_proxy = data.use_proxy;
                     provider.updated_at = now;
+                    provider.provider_type = data.provider_type.unwrap_or("openai".to_string());
 
                     diesel::update(provider::table)
                         .filter(provider::dsl::id.eq(provider.id))
@@ -360,6 +365,7 @@ impl Provider {
                         None,
                         data.limit_model,
                         data.use_proxy,
+                        data.provider_type.as_deref().unwrap_or("openai"),
                     );
                     diesel::insert_into(provider::table)
                         .values(ProviderDb::to_db(&provider))

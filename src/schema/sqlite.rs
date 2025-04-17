@@ -107,6 +107,7 @@ diesel::table! {
         is_deleted -> Bool,
         created_at -> BigInt,
         updated_at -> BigInt,
+        provider_type -> Text,
     }
 }
 

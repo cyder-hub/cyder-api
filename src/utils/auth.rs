@@ -10,7 +10,10 @@ use cyder_tools::auth::{
     decode_jwt, encode_password_argon2, issue_jwt, verify_password_argon2, DecodingKey,
     EncodingKey, JwtError, JwtValidation, SaltString,
 };
+use http::header::CONTENT_TYPE;
+use jsonwebtoken::{encode, Algorithm, Header};
 use once_cell::sync::Lazy;
+use reqwest::Proxy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -33,7 +36,8 @@ impl Keys {
     }
 }
 
-static KEYS: Lazy<Keys> = Lazy::new(|| Keys::new(&CONFIG.password_salt, CONFIG.jwt_secret.as_bytes()));
+static KEYS: Lazy<Keys> =
+    Lazy::new(|| Keys::new(&CONFIG.password_salt, CONFIG.jwt_secret.as_bytes()));
 
 const ISSUER: &str = "chneluoi";
 const REFRESH_TOKEN_SUBJECT: &str = "REFRESH_TOKEN";

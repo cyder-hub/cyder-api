@@ -1,4 +1,4 @@
-use cyder_tools::log::{debug, info, log};
+use cyder_tools::log::{debug, info};
 use std::{
     io::Read,
     sync::{Arc, Mutex},
@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     database::{limit_strategy::LimitStrategy, provider::CustomField},
-    utils::limit::LIMITER,
+    utils::{limit::LIMITER, vertex::get_vertex_token},
 };
 
 use crate::{
@@ -589,17 +589,17 @@ async fn proxy_all_handler(
         )
     })?;
 
-    let provider_key = &provider_keys[0];
+    let request_api_key = if provider.provider_type == "vertex" {
+        let provider_key = &provider_keys[0];
+        let service_account_str = &provider_key.api_key;
+        get_vertex_token(provider_key.id, service_account_str)
+            .await
+            .map_err(|err_msg| (StatusCode::BAD_REQUEST, err_msg))?
+    } else {
+        provider_keys[0].api_key.to_string()
+    };
 
-    // todo
-    let headers = build_new_headers(pre_headers, &provider_key.api_key)?;
-    // if let Some(omit_config) = request_info.0.omit_config {
-    //     if omit_config.header.len() > 0 {
-    //         for header_key in &omit_config.header {
-    //             headers.remove(header_key);
-    //         }
-    //     }
-    // }
+    let headers = build_new_headers(pre_headers, &request_api_key)?;
 
     let method: &str = &method;
     let method = reqwest::Method::try_from(method).map_err(|_| {
@@ -626,8 +626,6 @@ async fn proxy_all_handler(
             .check_limit_strategy(&limit_strategy, &request_info)
             .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
     }
-
-    info!("info {:?}", request_info);
 
     proxy_request(
         url.as_str(),

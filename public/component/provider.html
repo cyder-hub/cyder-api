@@ -16,12 +16,14 @@
                 endpoint: '',
                 use_proxy: false,
                 limit_model: false,
+                provider_type: 'openai', // Default provider type
             };
         },
         editingData: {
             id: null,
             name: '',
             provider_key: '',
+            provider_type: 'openai', // Initialize provider type
             provider_keys: [],
             models: [],
             endpoint: '',
@@ -47,6 +49,7 @@
                 this.editingData.endpoint = detail.provider.endpoint;
                 this.editingData.use_proxy = detail.provider.use_proxy;
                 this.editingData.limit_model = detail.limit_model;
+                this.editingData.provider_type = detail.provider.provider_type || 'openai'; // Set provider type from detail, default to openai
                 this.editingData.custom_fields = detail.custom_fields.map(field => ({ field_name: field.field_name, field_type: field.field_type || 'unset', field_value: field.field_value, description: field.description }));
         } else {
                 this.editingData = this.getEmptyProvider();
@@ -88,9 +91,28 @@
 
                 // Check required fields in api keys
                 for (let i = 0; i < this.editingData.provider_keys.length; i++) {
-                    if (!this.editingData.provider_keys[i].api_key) {
-                        alert('API Key 不能为空.');
+                    const keyEntry = this.editingData.provider_keys[i];
+                    if (!keyEntry.api_key) {
+                        alert(`API Key #${i + 1} 不能为空.`);
                         return;
+                    }
+
+                    // Additional validation for 'vertex' provider type
+                    if (this.editingData.provider_type === 'vertex') {
+                        try {
+                            const parsedKey = JSON.parse(keyEntry.api_key);
+                            const requiredFields = ['client_email', 'private_key', 'private_key_id', 'token_uri'];
+                            const missingFields = requiredFields.filter(field => !(field in parsedKey) || !parsedKey[field]);
+
+                            if (missingFields.length > 0) {
+                                alert(`Vertex API Key #${i + 1} (JSON) 缺少或为空的字段: ${missingFields.join(', ')}.`);
+                                return;
+                            }
+                        } catch (e) {
+                            alert(`Vertex API Key #${i + 1} 必须是有效的 JSON 格式.`);
+                            console.error('Vertex API Key JSON parse error:', e);
+                            return;
+                        }
                     }
                 }
 
@@ -114,6 +136,7 @@
                             models: this.editingData.models,
                             limit_model: false,
                             use_proxy: this.editingData.use_proxy,
+                            provider_type: this.editingData.provider_type, // Include provider_type
                             custom_fields: this.editingData.custom_fields
                     })
                     }
@@ -300,6 +323,14 @@
                 </div>
                 <div class="form-item">
                     <span class="form-label">渠道标识</span><input x-model="editingData.provider_key" class="form-input" />
+                </div>
+                 <div class="form-item">
+                    <span class="form-label">渠道类型</span>
+                    <select x-model="editingData.provider_type" class="form-select">
+                        <option value="openai">openai</option>
+                        <option value="vertex">vertex</option>
+                        <!-- Add more provider types as needed -->
+                    </select>
                 </div>
                 <div class="form-item">
                     <span class="form-label">地址</span><input x-model="editingData.endpoint" class="form-input" />

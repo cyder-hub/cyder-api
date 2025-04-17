@@ -120,6 +120,7 @@ diesel::table! {
         is_deleted -> Bool,
         created_at -> Bigint,
         updated_at -> Bigint,
+        provider_type -> Text,
     }
 }
 

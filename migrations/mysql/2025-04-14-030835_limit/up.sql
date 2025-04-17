@@ -18,4 +18,4 @@ CREATE TABLE IF NOT EXISTS limit_strategy_item (
     duration TEXT -- minute, hour, day
 );
 
-ALTER TABLE api_keys ADD COLUMN limit_strategy_id BIGINT NULL;
+ALTER TABLE api_keys ADD COLUMN limit_strategy_id BIGINT;

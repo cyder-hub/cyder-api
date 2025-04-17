@@ -38,6 +38,7 @@ struct InserPayload {
     pub limit_model: bool,
     pub use_proxy: bool,
     pub api_keys: Vec<String>,
+    pub provider_type: Option<String>,
 }
 
 async fn insert(Json(payload): Json<InserPayload>) -> DbResult<HttpResult<Provider>> {
@@ -49,6 +50,7 @@ async fn insert(Json(payload): Json<InserPayload>) -> DbResult<HttpResult<Provid
         payload.omit_config.as_deref(),
         payload.limit_model,
         payload.use_proxy,
+        payload.provider_type.as_deref().unwrap_or("openai"),
     );
     Provider::insert_one(&provider, payload.api_keys)?;
     Ok(HttpResult::new(provider))
@@ -73,6 +75,7 @@ async fn update_provider(
         payload.omit_config.as_deref(),
         payload.limit_model,
         payload.use_proxy,
+        payload.provider_type.as_deref().unwrap_or("openai"),
     );
     Provider::update_one(&provider)?;
     Ok(HttpResult::new(provider))
@@ -106,7 +109,8 @@ async fn full_commit(Json(data): Json<FullCommitData>) -> Result<HttpResult<Stri
     Ok(HttpResult::new("ok".to_string()))
 }
 
-async fn list_provider_details() -> Result<(StatusCode, HttpResult<Vec<ProviderDetail>>), BaseError> {
+async fn list_provider_details() -> Result<(StatusCode, HttpResult<Vec<ProviderDetail>>), BaseError>
+{
     let providers = Provider::list()?;
     let mut provider_details: Vec<ProviderDetail> = Vec::new();
 

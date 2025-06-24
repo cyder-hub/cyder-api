@@ -1,1 +1,0 @@
-ALTER TABLE provider DROP COLUMN provider_type;

@@ -1,0 +1,111 @@
+/* front/src/components/PageWrapper.module.css */
+.pageContainer {
+  display: flex;
+  min-height: 100vh; /* Ensure container takes full height */
+}
+
+.sidebar {
+  width: 220px;
+  background-color: #f8f9fa; /* Light grey background */
+  padding: 1rem;
+  transition: width 0.3s ease-in-out;
+  position: relative; /* For positioning the toggle button */
+  flex-shrink: 0; /* Prevent sidebar from shrinking */
+  overflow: hidden; /* Hide content that overflows when collapsed */
+  border-right: 1px solid #dee2e6; /* Subtle border */
+}
+
+.sidebarCollapsed {
+  width: 60px; /* Width when collapsed (adjust as needed for icons) */
+}
+
+.toggleButton {
+  position: absolute;
+  top: 10px;
+  right: 10px; /* Position top-right within the sidebar */
+  background: none;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  z-index: 10; /* Ensure it's above nav links if they overlap */
+}
+
+.toggleButton:hover {
+  background-color: #e9ecef;
+}
+
+.navList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  margin-top: 50px; /* Add space below the toggle button */
+}
+
+.navItem a {
+  display: flex; /* Use flex for icon + text alignment */
+  align-items: center;
+  padding: 0.75rem 0.5rem; /* Adjust padding */
+  text-decoration: none;
+  color: #495057;
+  border-radius: 4px;
+  white-space: nowrap; /* Prevent text wrapping */
+  overflow: hidden; /* Hide text overflow */
+}
+
+.navItem a:hover {
+  background-color: #e9ecef;
+  color: #212529;
+}
+
+.navItem a.active { /* Style for active link (optional) */
+    background-color: #0d6efd;
+    color: white;
+}
+
+.navIcon {
+  display: inline-block; /* Or flex item */
+  width: 24px; /* Fixed width for icon area */
+  margin-right: 10px;
+  text-align: center;
+  flex-shrink: 0; /* Prevent icon from shrinking */
+}
+
+.sidebarCollapsed .navIcon {
+  margin-right: 0; /* Remove margin when collapsed */
+}
+
+.navText {
+  transition: opacity 0.2s ease-in-out;
+  opacity: 1;
+}
+
+.sidebarCollapsed .navText {
+  opacity: 0; /* Hide text smoothly */
+  pointer-events: none; /* Prevent interaction with hidden text */
+  width: 0; /* Collapse width */
+}
+
+.mainContent {
+  flex-grow: 1; /* Allow main content to take remaining space */
+  padding: 1.5rem;
+  overflow-y: auto; /* Add scroll if content overflows */
+}
+
+/* Optional: Add header/footer styling if needed */
+.header {
+    padding: 1rem;
+    border-bottom: 1px solid #dee2e6;
+    background-color: #ffffff;
+}
+
+.footer {
+    padding: 1rem;
+    border-top: 1px solid #dee2e6;
+    background-color: #f8f9fa;
+    text-align: center;
+    font-size: 0.9rem;
+    color: #6c757d;
+    margin-top: auto; /* Push footer to bottom if content is short */
+}

@@ -3,3 +3,7 @@ config.yaml
 
 #.cargo
 /target
+
+#front
+front/node_modules
+front/dist

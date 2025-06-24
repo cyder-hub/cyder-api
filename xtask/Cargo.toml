@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false # This crate is not meant to be published
+
+[dependencies]
+pico-args = "0.5"
+anyhow = "1.0"

@@ -43,6 +43,7 @@ fn default_interval() -> Interval {
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum Interval {
+    Minute,
     Hour,
     Day,
     Month,
@@ -51,10 +52,11 @@ enum Interval {
 impl Interval {
     fn from_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
+            "minute" => Ok(Interval::Minute),
             "hour" => Ok(Interval::Hour),
             "day" => Ok(Interval::Day),
             "month" => Ok(Interval::Month),
-            _ => Err(format!("Invalid interval: {}. Supported intervals are 'hour', 'day', 'month'.", s)),
+            _ => Err(format!("Invalid interval: {}. Supported intervals are 'minute', 'hour', 'day', 'month'.", s)),
         }
     }
 }
@@ -71,7 +73,7 @@ pub struct UsageStatItem {
     reasoning_tokens: i64,
     total_tokens: i64,
     request_count: i64,
-    total_cost: i64,
+    total_cost: HashMap<String, i64>,
 }
 
 #[derive(Serialize, Debug)]
@@ -89,6 +91,7 @@ fn get_time_bucket(timestamp_ms: i64, interval: Interval, tz: Tz) -> i64 {
 
     // Perform bucketing in the target timezone
     let bucketed_dt_tz = match interval {
+        Interval::Minute => dt_tz.with_second(0).unwrap().with_nanosecond(0).unwrap(),
         Interval::Hour => dt_tz
             .with_minute(0)
             .unwrap()
@@ -136,6 +139,33 @@ async fn system_usage_stats(
 ) -> Result<HttpResult<Vec<UsageStatsPeriod>>, BaseError> {
     let interval = params.interval;
 
+    let time_range_ms = params.end_time - params.start_time;
+    match interval {
+        Interval::Minute => {
+            if time_range_ms > 180 * 60 * 1000 {
+                return Err(BaseError::ParamInvalid(Some(
+                    "For minute interval, the time range cannot exceed 180 minutes.".to_string(),
+                )));
+            }
+        }
+        Interval::Hour => {
+            if time_range_ms > 168 * 60 * 60 * 1000 {
+                return Err(BaseError::ParamInvalid(Some(
+                    "For hour interval, the time range cannot exceed 168 hours.".to_string(),
+                )));
+            }
+        }
+        Interval::Day => {
+            let one_eighty_days_in_ms: i64 = 180 * 24 * 60 * 60 * 1000;
+            if time_range_ms > one_eighty_days_in_ms {
+                return Err(BaseError::ParamInvalid(Some(
+                    "For day interval, the time range cannot exceed 180 days.".to_string(),
+                )));
+            }
+        }
+        Interval::Month => {}
+    }
+
     let tz: Tz = CONFIG
         .timezone
         .as_deref()
@@ -181,7 +211,11 @@ async fn system_usage_stats(
         stat_item.reasoning_tokens += log_entry.reasoning_tokens.unwrap_or(0) as i64;
         stat_item.total_tokens += log_entry.total_tokens.unwrap_or(0) as i64;
         stat_item.request_count += 1;
-        stat_item.total_cost += log_entry.calculated_cost.unwrap_or(0);
+        if let (Some(cost), Some(currency)) = (log_entry.calculated_cost, log_entry.cost_currency) {
+            if cost > 0 {
+                *stat_item.total_cost.entry(currency).or_insert(0) += cost;
+            }
+        }
     }
 
     let mut result: Vec<UsageStatsPeriod> = aggregated_data

@@ -38,10 +38,32 @@ const enDict = {
         usageStats: {
             title: "Usage Statistics",
             noData: "No data available for this period",
+            total: "Total",
+            summary: {
+                title: "Summary by Model",
+                model: "Model",
+            },
             intervals: {
                 hour: "Hourly",
                 day: "Daily",
                 month: "Monthly",
+            },
+            timeRanges: {
+                last_1_hour: "Last 1 hour",
+                last_3_hours: "Last 3 hours",
+                last_6_hours: "Last 6 hours",
+                last_24_hours: "Last 24 hours",
+                today: "Today",
+                yesterday: "Yesterday",
+                this_week: "This week",
+                last_7_days: "Last 7 days",
+                previous_week: "Previous week",
+                this_month: "This month",
+                last_30_days: "Last 30 days",
+                previous_month: "Previous month",
+                last_6_months: "Last 6 months",
+                this_year: "This year",
+                last_1_year: "Last year",
             },
             metrics: {
                 prompt_tokens: "Prompt Tokens",
@@ -50,6 +72,10 @@ const enDict = {
                 total_tokens: "Total Tokens",
                 request_count: "Request Count",
                 total_cost: "Total Cost",
+            },
+            chartTypes: {
+                line: "Line",
+                bar: "Bar",
             },
         },
         errorLoading: "Error loading stats: {{error}}",
@@ -138,6 +164,7 @@ const enDict = {
         save: "Save Changes",
         cancel: "Cancel",
         notAvailable: "N/A",
+        refresh: "Refresh",
     },
     apiKeyPage: {
         title: "API Key Management",
@@ -444,10 +471,32 @@ const zhDict = {
         usageStats: {
             title: "使用情况统计",
             noData: "此期间无可用数据",
+            total: "总计",
+            summary: {
+                title: "按模型汇总",
+                model: "模型",
+            },
             intervals: {
                 hour: "每小时",
                 day: "每天",
                 month: "每月",
+            },
+            timeRanges: {
+                last_1_hour: "过去1小时",
+                last_3_hours: "过去3小时",
+                last_6_hours: "过去6小时",
+                last_24_hours: "过去24小时",
+                today: "今天",
+                yesterday: "昨天",
+                this_week: "本周",
+                last_7_days: "过去7天",
+                previous_week: "上周",
+                this_month: "本月",
+                last_30_days: "过去30天",
+                previous_month: "上个月",
+                last_6_months: "过去6个月",
+                this_year: "今年",
+                last_1_year: "过去一年",
             },
             metrics: {
                 prompt_tokens: "输入 Tokens",
@@ -456,6 +505,10 @@ const zhDict = {
                 total_tokens: "总 Tokens",
                 request_count: "请求数",
                 total_cost: "总费用",
+            },
+            chartTypes: {
+                line: "折线图",
+                bar: "柱状图",
             },
         },
         errorLoading: "加载统计数据错误: {{error}}",
@@ -543,6 +596,7 @@ const zhDict = {
         save: "保存更改",
         cancel: "取消",
         notAvailable: "无",
+        refresh: "刷新",
     },
     apiKeyPage: {
         title: "API Key 管理",

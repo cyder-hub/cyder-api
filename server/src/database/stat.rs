@@ -27,6 +27,7 @@ pub struct RequestLogEntryForStats {
     pub reasoning_tokens: Option<i32>,
     pub total_tokens: Option<i32>,
     pub calculated_cost: Option<i64>,
+    pub cost_currency: Option<String>,
     // from joined tables
     pub provider_key: Option<String>,
     pub model_name: Option<String>,
@@ -118,6 +119,7 @@ pub fn get_request_logs_in_range(
                 request_log::dsl::reasoning_tokens,
                 request_log::dsl::total_tokens,
                 request_log::dsl::calculated_cost,
+                request_log::dsl::cost_currency.nullable(),
                 provider::dsl::provider_key.nullable(),
                 model::dsl::model_name.nullable(),
                 model::dsl::real_model_name.nullable(),

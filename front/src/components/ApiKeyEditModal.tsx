@@ -1,11 +1,13 @@
-import { createSignal, Show, onMount, Accessor, Setter, createEffect } from 'solid-js';
+import { createSignal, Show, onMount, Accessor, Setter, createEffect, For } from 'solid-js';
 import { useI18n } from '../i18n'; // Import the i18n hook
 import { Button } from '@kobalte/core/button';
 import { TextField } from '@kobalte/core/text-field';
 import { Checkbox } from '@kobalte/core/checkbox';
 import { Dialog } from '@kobalte/core/dialog';
+import { Select as KSelect } from '@kobalte/core/select';
 import { request } from '../services/api';
 import type { ApiKeyItem } from '../store/types';
+import type { AccessControlPolicyFromAPI } from '../pages/AccessControlPage';
 
 export interface EditingApiKeyData {
     id: number | null; // null for new
@@ -13,6 +15,7 @@ export interface EditingApiKeyData {
     api_key: string;
     description: string;
     is_enabled: boolean;
+    access_control_policy_id: number | null;
 }
 
 interface ApiKeyEditModalProps {
@@ -20,6 +23,7 @@ interface ApiKeyEditModalProps {
     onClose: () => void;
     initialData: Accessor<ApiKeyItem | null>; // Pass the full ApiKeyItem or null for new
     onSaveSuccess: () => void;
+    policies: AccessControlPolicyFromAPI[];
 }
 
 const getEmptyEditingData = (): EditingApiKeyData => ({
@@ -28,6 +32,7 @@ const getEmptyEditingData = (): EditingApiKeyData => ({
     api_key: '',
     description: '',
     is_enabled: true,
+    access_control_policy_id: null,
 });
 
 export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
@@ -48,6 +53,7 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
                     api_key: '', // API key is not pre-filled for editing for security
                     description: currentInitial.description,
                     is_enabled: currentInitial.is_enabled,
+                    access_control_policy_id: (currentInitial as any).access_control_policy_id ?? null,
                 });
             } else {
                 // Modal is open for creating a new item
@@ -83,6 +89,7 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
             name: currentFormState.name,
             description: currentFormState.description,
             is_enabled: currentFormState.is_enabled,
+            access_control_policy_id: currentFormState.access_control_policy_id,
         };
 
         if (currentFormState.api_key.trim()) {
@@ -90,7 +97,7 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
         }
 
         const method = currentFormState.id ? 'PUT' : 'POST';
-        const url = currentFormState.id ? `/ai/manager/system_api/api_key/${currentFormState.id}` : '/ai/manager/api/system_api_key';
+        const url = currentFormState.id ? `/ai/manager/api/system_api_key/${currentFormState.id}` : '/ai/manager/api/system_api_key';
 
         try {
             await request(url, {
@@ -147,6 +154,34 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
                                     <TextField.Label class="form-label">{t('apiKeyEditModal.labelDescription')}</TextField.Label>
                                     <TextField.Input class="form-input" />
                                 </TextField>
+
+                                <div class="form-item">
+                                    <KSelect<AccessControlPolicyFromAPI | null>
+                                        value={props.policies.find(p => p.id === editingData()?.access_control_policy_id) ?? null}
+                                        onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), access_control_policy_id: v ? v.id : null }))}
+                                        options={[null, ...props.policies]}
+                                        optionValue={(item) => item ? item.id : 0}
+                                        optionTextValue={(item) => item ? item.name : t('apiKeyEditModal.noPolicy')}
+                                        placeholder={t('apiKeyEditModal.placeholderAccessControlPolicy')}
+                                        itemComponent={props => (
+                                            <KSelect.Item item={props.item} class="kobalte-select-item">
+                                                <KSelect.ItemLabel>{props.item.rawValue ? props.item.rawValue.name : t('apiKeyEditModal.noPolicy')}</KSelect.ItemLabel>
+                                            </KSelect.Item>
+                                        )}
+                                    >
+                                        <KSelect.Label class="form-label">{t('apiKeyEditModal.labelAccessControlPolicy')}</KSelect.Label>
+                                        <KSelect.Trigger class="form-select w-full">
+                                            <KSelect.Value<AccessControlPolicyFromAPI | null>>
+                                                {state => state.selectedOption()?.name || t('apiKeyEditModal.noPolicy')}
+                                            </KSelect.Value>
+                                        </KSelect.Trigger>
+                                        <KSelect.Portal>
+                                            <KSelect.Content class="kobalte-select-content">
+                                                <KSelect.Listbox />
+                                            </KSelect.Content>
+                                        </KSelect.Portal>
+                                    </KSelect>
+                                </div>
 
                                 <Checkbox class="form-item items-center" checked={editingData()?.is_enabled ?? false} onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), is_enabled: v }))}>
                                     <Checkbox.Input class="form-checkbox" />

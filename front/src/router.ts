@@ -18,7 +18,7 @@ const ProviderEdit = lazy(() => import('./pages/ProviderEdit')); // Import for P
 const ModelEdit = lazy(() => import('./pages/ModelEdit'));
 const ApiKeyPage = lazy(() => import('./pages/ApiKey')); // Added import for ApiKeyPage
 const ModelAlias = lazy(() => import('./pages/ModelAlias'));
-const LimitStrategy = lazy(() => import('./pages/LimitStrategy'));
+const AccessControlPage = lazy(() => import('./pages/AccessControlPage'));
 const CustomFields = lazy(() => import('./pages/CustomFields'));
 const Price = lazy(() => import('./pages/Price'));
 
@@ -38,7 +38,7 @@ export const mainRoutes: RouteConfig[] = [
   { path: "/model/edit/:id", component: ModelEdit },
   { path: "/api_key", component: ApiKeyPage, icon: "🔑", text: "API Key", i18nKey: "sidebar.apiKey" }, // Added API Key route
   { path: "/model_transform", component: ModelAlias, icon: " T", text: "Model Transform", i18nKey: "sidebar.modelTransform" },
-  { path: "/limit_strategy", component: LimitStrategy, icon: " L", text: "Limit Strategy", i18nKey: "sidebar.limitStrategy" },
+  { path: "/access_control", component: AccessControlPage, icon: " L", text: "Access Control", i18nKey: "sidebar.accessControlPolicy" },
   { path: "/custom_fields", component: CustomFields, icon: " C", text: "Custom Fields", i18nKey: "sidebar.customFields" },
   { path: "/price", component: Price, icon: "💲", text: "Price", i18nKey: "sidebar.price" },
 ];

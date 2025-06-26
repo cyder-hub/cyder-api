@@ -288,7 +288,8 @@ fn log_final_update(
     let mut update_data = UpdateRequestLogData {
         llm_request_uri: Some(Some(request_url.to_string())),
         llm_request_body: if is_error {
-            Some(Some(request_body.to_string()))
+            let truncated_body: String = request_body.chars().take(2000).collect();
+            Some(Some(truncated_body))
         } else {
             None
         },

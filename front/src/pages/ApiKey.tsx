@@ -1,10 +1,11 @@
-import { createSignal, For, Show } from 'solid-js';
+import { createSignal, For, Show, createResource } from 'solid-js';
 import { Button } from '@kobalte/core/button';
 import { useI18n } from '../i18n'; // Import the i18n hook
 import { request } from '../services/api';
 import { apiKeys as globalApiKeys, refetchApiKeys as globalRefetchApiKeys } from '../store/apiKeyStore';
 import type { ApiKeyItem } from '../store/types';
 import ApiKeyEditModal from '../components/ApiKeyEditModal'; // Import the new modal component
+import { fetchPoliciesAPI, type AccessControlPolicyFromAPI } from './AccessControlPage';
 // EditingApiKeyData interface is now in ApiKeyEditModal.tsx
 
 const formatTimestamp = (ms: number | undefined | null): string => {
@@ -23,6 +24,7 @@ const formatTimestamp = (ms: number | undefined | null): string => {
 
 export default function ApiKeyPage() {
     const [t] = useI18n(); // Initialize the t function
+    const [policies] = createResource<AccessControlPolicyFromAPI[]>(fetchPoliciesAPI, { initialValue: [] });
     const [showEditModal, setShowEditModal] = createSignal(false);
     // This will hold the ApiKeyItem to edit, or null for a new one
     const [selectedApiKey, setSelectedApiKey] = createSignal<ApiKeyItem | null>(null);
@@ -43,6 +45,7 @@ export default function ApiKeyPage() {
                 api_key: updatedApiKey.api_key, // Send existing key, backend might ignore or re-validate
                 description: updatedApiKey.description,
                 is_enabled: updatedApiKey.is_enabled,
+                access_control_policy_id: (updatedApiKey as any).access_control_policy_id,
             };
             await request(`/ai/manager/api/system_api_key/${updatedApiKey.id}`, {
                 method: 'PUT',
@@ -145,6 +148,7 @@ export default function ApiKeyPage() {
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.apiKeyPartial')}</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.description')}</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.enabled')}</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.accessControlPolicy')}</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.createdAt')}</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.updatedAt')}</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.actions')}</th>
@@ -171,6 +175,7 @@ export default function ApiKeyPage() {
                                                 // id={`enable-apikey-${key.id}`} // Optional: for label association if a label were present
                                             />
                                         </td>
+                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{(key as any).access_control_policy_name || t('common.notAvailable')}</td>
                                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{key.created_at_formatted}</td>
                                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{key.updated_at_formatted}</td>
                                         <td class="px-4 py-3 whitespace-nowrap text-sm space-x-2">
@@ -186,12 +191,15 @@ export default function ApiKeyPage() {
             </Show>
 
             {/* Use the new ApiKeyEditModal component */}
-            <ApiKeyEditModal
-                isOpen={showEditModal}
-                onClose={handleCloseModal}
-                initialData={selectedApiKey}
-                onSaveSuccess={handleSaveSuccess}
-            />
+            <Show when={policies()}>
+                <ApiKeyEditModal
+                    isOpen={showEditModal}
+                    onClose={handleCloseModal}
+                    initialData={selectedApiKey}
+                    onSaveSuccess={handleSaveSuccess}
+                    policies={policies()!}
+                />
+            </Show>
             
             {/* Styles (can be moved to a global CSS file or CSS module) */}
             <style jsx global>{`

@@ -77,13 +77,29 @@ pub struct DbNewAccessControlRule {
 }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum AccessControlRuleScope {
+    Provider,
+    Model,
+}
+
+impl ToString for AccessControlRuleScope {
+    fn to_string(&self) -> String {
+        match self {
+            AccessControlRuleScope::Provider => "PROVIDER".to_string(),
+            AccessControlRuleScope::Model => "MODEL".to_string(),
+        }
+    }
+}
+
 // --- API-Facing Structs ---
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ApiAccessControlRule { // Renamed from ApiLimitStrategyItem
     pub id: Option<i64>, // Optional for creation, present for responses
     pub rule_type: String,
     pub priority: i32,
-    pub scope: String,
+    pub scope: AccessControlRuleScope,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
     pub description: Option<String>,
@@ -149,7 +165,7 @@ impl AccessControlPolicy { // Renamed from LimitStrategy
                     policy_id: policy_id_val,
                     rule_type: rule_payload.rule_type.clone(),
                     priority: rule_payload.priority,
-                    scope: rule_payload.scope.clone(),
+                    scope: rule_payload.scope.to_string(),
                     provider_id: rule_payload.provider_id,
                     model_id: rule_payload.model_id,
                     description: rule_payload.description.clone(),

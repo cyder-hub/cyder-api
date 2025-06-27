@@ -1,8 +1,23 @@
 import { createSignal, For, Show, createResource, createMemo } from 'solid-js';
 import { useI18n } from '../i18n'; // Import the i18n hook
-import { Button } from '@kobalte/core/button';
-import { TextField } from '@kobalte/core/text-field';
-import { Select } from '@kobalte/core/select'; // Removed KobalteItemProps import
+import { Button } from '../components/ui/Button';
+import { TextField } from '../components/ui/Input';
+import { Select } from '../components/ui/Select';
+import {
+    DialogRoot,
+    DialogContent,
+    DialogHeader,
+    DialogFooter,
+    DialogTitle,
+} from '../components/ui/Dialog';
+import {
+    TableRoot,
+    TableHeader,
+    TableBody,
+    TableRow,
+    TableColumnHeader,
+    TableCell,
+} from '../components/ui/Table';
 import { request } from '../services/api';
 import { providers as globalProviders } from '../store/providerStore'; // Import from store
 import type { ProviderListItem, ModelItem, ModelDetail } from '../store/types'; // Import ModelItem as well
@@ -143,6 +158,29 @@ export default function ModelAliasPage() {
     const [showEditModal, setShowEditModal] = createSignal(false);
     const [editingTransform, setEditingTransform] = createSignal<EditingModelAlias>(newModelAliasTemplate());
 
+    const providerOptions = createMemo(() => (providersData() || []).map(p => ({ value: p.provider.id, label: p.provider.name })));
+
+    const modelMap = createMemo(() => {
+        const map = new Map<number, { value: number; label: string; }[]>();
+        const providers = providersData();
+        if (!providers) return map;
+
+        for (const providerItem of providers) {
+            const models = (providerItem.models || []).map(m => ({ value: m.model.id, label: m.model.model_name }));
+            map.set(providerItem.provider.id, models);
+        }
+        return map;
+    });
+
+    const modelOptions = createMemo(() => {
+        const pid = editingTransform()?.provider_id;
+        if (!pid) return [];
+        return modelMap().get(pid) || [];
+    });
+
+    const selectedProvider = createMemo(() => providerOptions().find(p => p.value === editingTransform().provider_id));
+    const selectedModel = createMemo(() => modelOptions().find(m => m.value === editingTransform().target_model_id));
+
     // Ensure Provider type here matches ProviderListItem from the store if possible, or is compatible.
     const findProviderForModel = (modelId: number | null, currentProviders: Readonly<ProviderListItem[]> | undefined): number | null => {
         if (modelId === null || !currentProviders) return null;
@@ -240,7 +278,7 @@ export default function ModelAliasPage() {
         <div class="p-4">
             <div class="flex justify-between items-center mb-6">
                 <h1 class="text-2xl font-semibold text-gray-800">{t('modelAliasPage.title')}</h1>
-                <Button onClick={handleOpenAddModal} class="btn btn-primary">{t('modelAliasPage.addModelAlias')}</Button>
+                <Button onClick={handleOpenAddModal} variant="primary">{t('modelAliasPage.addModelAlias')}</Button>
             </div>
 
             {/* Data Table */}
@@ -255,165 +293,100 @@ export default function ModelAliasPage() {
             </Show>
             <Show when={!transforms.loading && !transforms.error && transforms() && transforms()!.length > 0}>
                 <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200">
-                    <table class="min-w-full divide-y divide-gray-200 data-table">
-                        <thead class="bg-gray-100">
-                            <tr>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('modelAliasPage.table.aliasName')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('modelAliasPage.table.targetModelName')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('modelAliasPage.table.enabled')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('actions')}</th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
+                    <TableRoot>
+                        <TableHeader>
+                            <TableRow>
+                                <TableColumnHeader>{t('modelAliasPage.table.aliasName')}</TableColumnHeader>
+                                <TableColumnHeader>{t('modelAliasPage.table.targetModelName')}</TableColumnHeader>
+                                <TableColumnHeader>{t('modelAliasPage.table.enabled')}</TableColumnHeader>
+                                <TableColumnHeader>{t('actions')}</TableColumnHeader>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
                             <For each={transforms()}>{(transform) =>
-                                <tr class="hover:bg-gray-50">
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-800">{transform.alias_name}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{transform.map_model_name}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                                <TableRow>
+                                    <TableCell>{transform.alias_name}</TableCell>
+                                    <TableCell>{transform.map_model_name}</TableCell>
+                                    <TableCell>
                                         <input
                                             type="checkbox"
-                                            class="form-checkbox" // Use existing checkbox style
+                                            class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                                             checked={transform.is_enabled}
                                             onChange={() => handleToggleEnable(transform)}
-                                        // Add a unique id for accessibility if needed, e.g., `id={`enable-transform-${transform.id}`}`
-                                        // For now, direct onChange is sufficient for functionality.
                                         />
-                                    </td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm space-x-2">
-                                        <Button onClick={() => handleOpenEditModal(transform.id)} class="btn btn-primary btn-sm">{t('edit')}</Button>
-                                        <Button onClick={() => handleDeleteTransform(transform.id, transform.alias_name)} class="btn btn-danger btn-sm">{t('delete')}</Button>
-                                    </td>
-                                </tr>
+                                    </TableCell>
+                                    <TableCell class="space-x-2">
+                                        <Button onClick={() => handleOpenEditModal(transform.id)} variant="primary" size="sm">{t('edit')}</Button>
+                                        <Button onClick={() => handleDeleteTransform(transform.id, transform.alias_name)} variant="destructive" size="sm">{t('delete')}</Button>
+                                    </TableCell>
+                                </TableRow>
                             }</For>
-                        </tbody>
-                    </table>
+                        </TableBody>
+                    </TableRoot>
                 </div>
             </Show>
 
             {/* Edit/Add Modal */}
-            <Show when={showEditModal()}>
-                <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity z-40 model-mask" onClick={handleCloseModal}></div>
-                <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-                    <div class="bg-white rounded-lg shadow-xl p-6 space-y-4 w-full max-w-lg model" style="height: auto;"> {/* Adjusted max-w and height */}
-                        <h2 class="text-xl font-semibold text-gray-800 model-title mb-6">
+            <DialogRoot open={showEditModal()} onOpenChange={setShowEditModal}>
+                <DialogContent class="max-w-lg">
+                    <DialogHeader>
+                        <DialogTitle>
                             {editingTransform()?.id ? t('modelAliasPage.modal.titleEdit') : t('modelAliasPage.modal.titleAdd')}
-                        </h2>
+                        </DialogTitle>
+                    </DialogHeader>
+                    <div class="space-y-4">
+                        <TextField
+                            label={t('modelAliasPage.modal.labelAliasName')}
+                            placeholder={t('modelAliasPage.modal.placeholderAliasName')}
+                            value={editingTransform()?.alias_name || ''}
+                            onChange={(v) => setEditingTransform(s => ({ ...s!, alias_name: v }))}
+                        />
 
-                        <TextField class="form-item" value={editingTransform()?.alias_name || ''} onChange={(v) => setEditingTransform(s => ({ ...s!, alias_name: v }))}>
-                            <TextField.Label class="form-label">{t('modelAliasPage.modal.labelAliasName')}</TextField.Label>
-                            <TextField.Input class="form-input" placeholder={t('modelAliasPage.modal.placeholderAliasName')} />
-                        </TextField>
+                        <Select
+                            label={t('modelAliasPage.modal.labelTargetProvider')}
+                            placeholder={t('modelAliasPage.modal.placeholderProvider')}
+                            value={selectedProvider()}
+                            options={providerOptions()}
+                            optionValue="value"
+                            optionTextValue="label"
+                            onChange={(v) => {
+                                setEditingTransform(s => ({ ...s!, provider_id: v ? v.value : null, target_model_id: null }));
+                            }}
+                        />
 
-                        {/* Provider Select */}
-                        <div class="form-item">
-                            <Select<ProviderListItem>
-                                value={providersData()?.find(pItem => pItem.provider.id === editingTransform().provider_id)}
-                                onChange={(selectedPItem: ProviderListItem | null) => {
-                                    setEditingTransform(s => ({ ...s!, provider_id: selectedPItem?.provider.id ?? null, target_model_id: null }));
+                        <Show when={editingTransform()?.provider_id !== null}>
+                            <Select
+                                label={t('modelAliasPage.modal.labelTargetModel')}
+                                placeholder={t('modelAliasPage.modal.placeholderModel')}
+                                value={selectedModel()}
+                                options={modelOptions()}
+                                optionValue="value"
+                                optionTextValue="label"
+                                onChange={(v) => {
+                                    setEditingTransform(s => ({ ...s!, target_model_id: v ? v.value : null }));
                                 }}
-                                options={providersData() || []}
-                                optionValue={item => item.provider.id} // Access nested id
-                                optionTextValue={item => item.provider.name} // Access nested name
-                                placeholder={t('modelAliasPage.modal.placeholderProvider')}
-                                itemComponent={props => ( // Removed explicit props typing
-                                    <Select.Item item={props.item} class="select__item p-2 hover:bg-gray-100 cursor-pointer">
-                                        {/* props.item.rawValue is ProviderListItem, so access props.item.rawValue.provider.name */}
-                                        {/* If props.item.rawValue is unknown, use: (props.item.rawValue as ProviderListItem).provider.name */}
-                                        <Select.ItemLabel>{(props.item.rawValue as ProviderListItem).provider.name}</Select.ItemLabel>
-                                    </Select.Item>
-                                )}
-                            >
-                                <Select.Label class="form-label">{t('modelAliasPage.modal.labelTargetProvider')}</Select.Label>
-                                <Select.Trigger class="form-input w-full flex justify-between items-center" aria-label="Provider">
-                                    <Select.Value<ProviderListItem>>
-                                        {(state) => {
-                                            const selected = state.selectedOption(); // selected is ProviderListItem | undefined
-                                            return selected ? selected.provider.name : <span class="text-gray-500">{t('modelAliasPage.modal.placeholderProvider')}</span>;
-                                        }}
-                                    </Select.Value>
-                                    <Select.Icon class="select__icon">▼</Select.Icon>
-                                </Select.Trigger>
-                                <Select.Portal>
-                                    <Select.Content class="select__content bg-white border border-gray-300 rounded-md shadow-lg mt-1 z-50">
-                                        <Select.Listbox class="select__listbox p-1 max-h-60 overflow-y-auto" />
-                                    </Select.Content>
-                                </Select.Portal>
-                            </Select>
-                        </div>
-
-                        {/* Model Select (dependent on selectedProviderId) */}
-                        <Show when={editingTransform()?.provider_id !== null && (providersData.loading === false || providersData() !== undefined)}>
-                            <div class="form-item">
-                                <Select
-                                    value={
-                                        createMemo(() => {
-                                            const pid = editingTransform()?.provider_id;
-                                            const tid = editingTransform()?.target_model_id;
-                                            if (!pid || !providersData() || tid === null) return undefined;
-                                            const providerItem = providersData()!.find(pItem => pItem.provider.id === pid);
-                                            return providerItem?.models?.find(m => m.model.id === tid);
-                                        })()
-                                    }
-                                    onChange={(selectedModel: ModelDetail | null) => {
-                                        setEditingTransform(s => ({ ...s!, target_model_id: selectedModel?.model.id ?? null }));
-                                    }}
-                                    options={
-                                        createMemo(() => {
-                                            const pid = editingTransform()?.provider_id;
-                                            if (!pid || !providersData()) return [];
-                                            const providerItem = providersData()!.find(pItem => pItem.provider.id === pid);
-                                            return providerItem && providerItem.models ? providerItem.models : [];
-                                        })()
-                                    }
-                                    optionValue={item => item.model.id} // ModelDetail has 'model' object
-                                    optionTextValue={item => item.model.model_name} // ModelDetail has 'model' object
-                                    placeholder={t('modelAliasPage.modal.placeholderModel')}
-                                    disabled={editingTransform()?.provider_id === null}
-                                    itemComponent={props => ( // Removed explicit props typing
-                                        <Select.Item item={props.item} class="select__item p-2 hover:bg-gray-100 cursor-pointer">
-                                            {/* props.item.rawValue is ModelDetail, access props.item.rawValue.model.model_name */}
-                                            <Select.ItemLabel>{(props.item.rawValue as ModelDetail).model.model_name}</Select.ItemLabel>
-                                        </Select.Item>
-                                    )}
-                                >
-                                    <Select.Label class="form-label">{t('modelAliasPage.modal.labelTargetModel')}</Select.Label>
-                                    <Select.Trigger class="form-input w-full flex justify-between items-center" aria-label="Model">
-                                        <Select.Value<ModelDetail>>
-                                            {(state) => {
-                                                const selected = state.selectedOption(); // selected is ModelDetail | undefined
-                                                return selected ? selected.model.model_name : <span class="text-gray-500">{t('modelAliasPage.modal.placeholderModel')}</span>;
-                                            }}
-                                        </Select.Value>
-                                        <Select.Icon class="select__icon">▼</Select.Icon>
-                                    </Select.Trigger>
-                                    <Select.Portal>
-                                        <Select.Content class="select__content bg-white border border-gray-300 rounded-md shadow-lg mt-1 z-50">
-                                            <Select.Listbox class="select__listbox p-1 max-h-60 overflow-y-auto" />
-                                        </Select.Content>
-                                    </Select.Portal>
-                                </Select>
-                            </div>
+                                disabled={editingTransform()?.provider_id === null}
+                            />
                         </Show>
 
 
-                        <div class="form-item"> {/* Retain form-item for flex layout, label has own margin */}
-                            <label for="is_enabled_checkbox" class="form-label">{t('modelAliasPage.modal.labelEnabled')}</label> {/* Changed to label and associated with checkbox */}
+                        <div class="flex items-center space-x-2 pt-2">
+                            <label for="is_enabled_checkbox" class="text-sm font-medium leading-none">{t('modelAliasPage.modal.labelEnabled')}</label>
                             <input
                                 type="checkbox"
                                 id="is_enabled_checkbox"
-                                class="form-checkbox" /* Style from utilities.css, will be adjusted */
+                                class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                                 checked={editingTransform()?.is_enabled || false}
                                 onChange={(e) => setEditingTransform(s => ({ ...s!, is_enabled: e.currentTarget.checked }))}
                             />
                         </div>
-
-                        <div class="form-buttons flex justify-end gap-3 pt-4"> {/* Ensured form-buttons class is present */}
-                            <Button onClick={handleCloseModal} class="btn btn-default">{t('common.cancel')}</Button>
-                            <Button onClick={handleSaveTransform} class="btn btn-primary">{t('common.save')}</Button>
-                        </div>
                     </div>
-                </div>
-            </Show>
+                    <DialogFooter class="pt-4">
+                        <Button onClick={handleCloseModal} variant="secondary">{t('common.cancel')}</Button>
+                        <Button onClick={handleSaveTransform} variant="primary">{t('common.save')}</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </DialogRoot>
         </div>
     );
 }

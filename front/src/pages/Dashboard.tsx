@@ -2,6 +2,7 @@ import { createResource, Show, For } from 'solid-js';
 import { useI18n } from '../i18n';
 import { request } from '../services/api'; // Use request from api service
 import UsageChart from '../components/UsageChart';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
 
 interface SystemOverviewStats {
     providers_count: number;
@@ -52,70 +53,78 @@ export default function Dashboard() {
 
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* System Overview Card */}
-                <div class="bg-white p-6 rounded-lg shadow-md">
-                    <h2 class="text-xl font-semibold text-gray-700 mb-4">{t('dashboard.systemOverview.title')}</h2>
-                    <Show when={!overviewStats.loading && overviewStats()} fallback={<p>{t('loading')}</p>}>
-                        <Show when={!overviewStats.error} fallback={<p class="text-red-500">{t('dashboard.errorLoading', { error: overviewStats.error?.message || t('unknownError') })}</p>}>
-                            <ul class="space-y-2">
-                                <li class="flex justify-between">
-                                    <span>{t('dashboard.systemOverview.providers')}:</span>
-                                    <span class="font-semibold">{overviewStats()?.providers_count}</span>
-                                </li>
-                                <li class="flex justify-between">
-                                    <span>{t('dashboard.systemOverview.models')}:</span>
-                                    <span class="font-semibold">{overviewStats()?.models_count}</span>
-                                </li>
-                                <li class="flex justify-between">
-                                    <span>{t('dashboard.systemOverview.providerKeys')}:</span>
-                                    <span class="font-semibold">{overviewStats()?.provider_keys_count}</span>
-                                </li>
-                            </ul>
+                <Card>
+                    <CardHeader>
+                        <CardTitle>{t('dashboard.systemOverview.title')}</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <Show when={!overviewStats.loading && overviewStats()} fallback={<p>{t('loading')}</p>}>
+                            <Show when={!overviewStats.error} fallback={<p class="text-red-500">{t('dashboard.errorLoading', { error: overviewStats.error?.message || t('unknownError') })}</p>}>
+                                <ul class="space-y-2">
+                                    <li class="flex justify-between">
+                                        <span>{t('dashboard.systemOverview.providers')}:</span>
+                                        <span class="font-semibold">{overviewStats()?.providers_count}</span>
+                                    </li>
+                                    <li class="flex justify-between">
+                                        <span>{t('dashboard.systemOverview.models')}:</span>
+                                        <span class="font-semibold">{overviewStats()?.models_count}</span>
+                                    </li>
+                                    <li class="flex justify-between">
+                                        <span>{t('dashboard.systemOverview.providerKeys')}:</span>
+                                        <span class="font-semibold">{overviewStats()?.provider_keys_count}</span>
+                                    </li>
+                                </ul>
+                            </Show>
                         </Show>
-                    </Show>
-                </div>
+                    </CardContent>
+                </Card>
 
                 {/* Today's Log Stats Card */}
-                <div class="bg-white p-6 rounded-lg shadow-md">
-                    <h2 class="text-xl font-semibold text-gray-700 mb-4">{t('dashboard.todayLogStats.title')}</h2>
-                    <Show when={!todayLogStats.loading && todayLogStats()} fallback={<p>{t('loading')}</p>}>
-                         <Show when={!todayLogStats.error} fallback={<p class="text-red-500">{t('dashboard.errorLoading', { error: todayLogStats.error?.message || t('unknownError') })}</p>}>
-                            <ul class="space-y-2">
-                                <li class="flex justify-between">
-                                    <span>{t('dashboard.todayLogStats.requests')}:</span>
-                                    <span class="font-semibold">{todayLogStats()?.requests_count}</span>
-                                </li>
-                                <li class="flex justify-between">
-                                    <span>{t('dashboard.todayLogStats.promptTokens')}:</span>
-                                    <span class="font-semibold">{todayLogStats()?.total_prompt_tokens?.toLocaleString()}</span>
-                                </li>
-                                <li class="flex justify-between">
-                                    <span>{t('dashboard.todayLogStats.completionTokens')}:</span>
-                                    <span class="font-semibold">{todayLogStats()?.total_completion_tokens?.toLocaleString()}</span>
-                                </li>
-                                <li class="flex justify-between">
-                                    <span>{t('dashboard.todayLogStats.reasoningTokens')}:</span>
-                                    <span class="font-semibold">{todayLogStats()?.total_reasoning_tokens?.toLocaleString()}</span>
-                                </li>
-                                <li class="flex justify-between">
-                                    <span>{t('dashboard.todayLogStats.totalTokens')}:</span>
-                                    <span class="font-semibold">{todayLogStats()?.total_tokens?.toLocaleString()}</span>
-                                </li>
-                                <li class="flex justify-between items-start">
-                                    <span>{t('dashboard.todayLogStats.totalCost')}:</span>
-                                    <div class="text-right">
-                                        <For each={Object.entries(todayLogStats()?.total_cost || {})}>
-                                            {([currency, cost]) => (
-                                                <div class="font-semibold">
-                                                    {(cost / 1_000_000_000)} {t(`currencies.${currency}`, {}, currency)}
-                                                </div>
-                                            )}
-                                        </For>
-                                    </div>
-                                </li>
-                            </ul>
+                <Card>
+                    <CardHeader>
+                        <CardTitle>{t('dashboard.todayLogStats.title')}</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <Show when={!todayLogStats.loading && todayLogStats()} fallback={<p>{t('loading')}</p>}>
+                            <Show when={!todayLogStats.error} fallback={<p class="text-red-500">{t('dashboard.errorLoading', { error: todayLogStats.error?.message || t('unknownError') })}</p>}>
+                                <ul class="space-y-2">
+                                    <li class="flex justify-between">
+                                        <span>{t('dashboard.todayLogStats.requests')}:</span>
+                                        <span class="font-semibold">{todayLogStats()?.requests_count}</span>
+                                    </li>
+                                    <li class="flex justify-between">
+                                        <span>{t('dashboard.todayLogStats.promptTokens')}:</span>
+                                        <span class="font-semibold">{todayLogStats()?.total_prompt_tokens?.toLocaleString()}</span>
+                                    </li>
+                                    <li class="flex justify-between">
+                                        <span>{t('dashboard.todayLogStats.completionTokens')}:</span>
+                                        <span class="font-semibold">{todayLogStats()?.total_completion_tokens?.toLocaleString()}</span>
+                                    </li>
+                                    <li class="flex justify-between">
+                                        <span>{t('dashboard.todayLogStats.reasoningTokens')}:</span>
+                                        <span class="font-semibold">{todayLogStats()?.total_reasoning_tokens?.toLocaleString()}</span>
+                                    </li>
+                                    <li class="flex justify-between">
+                                        <span>{t('dashboard.todayLogStats.totalTokens')}:</span>
+                                        <span class="font-semibold">{todayLogStats()?.total_tokens?.toLocaleString()}</span>
+                                    </li>
+                                    <li class="flex justify-between items-start">
+                                        <span>{t('dashboard.todayLogStats.totalCost')}:</span>
+                                        <div class="text-right">
+                                            <For each={Object.entries(todayLogStats()?.total_cost || {})}>
+                                                {([currency, cost]) => (
+                                                    <div class="font-semibold">
+                                                        {(cost / 1_000_000_000)} {t(`currencies.${currency}`, {}, currency)}
+                                                    </div>
+                                                )}
+                                            </For>
+                                        </div>
+                                    </li>
+                                </ul>
+                            </Show>
                         </Show>
-                    </Show>
-                </div>
+                    </CardContent>
+                </Card>
             </div>
 
             {/* Usage Stats Chart Card */}

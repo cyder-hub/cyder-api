@@ -1,7 +1,5 @@
 import { For, Show } from 'solid-js';
-import { Button } from '@kobalte/core/button';
-import { TextField } from '@kobalte/core/text-field';
-// import { Checkbox } from '@kobalte/core/checkbox'; // No longer used directly for provider edit form
+import { Button } from '../components/ui/Button';
 import { useNavigate } from '@solidjs/router'; // For navigation
 import { request } from '../services/api';
 import { providers, refetchProviders as globalRefetchProviders } from '../store/providerStore';
@@ -52,7 +50,7 @@ export default function Provider() {
             <h1 class="text-2xl font-semibold mb-4 text-gray-800">{t('providerPageTitle')}</h1>
 
             <div class="mb-4">
-                <Button class="btn btn-primary" onClick={() => navigate('/provider/new')}>{t('addProvider')}</Button>
+                <Button variant="primary" onClick={() => navigate('/provider/new')}>{t('addProvider')}</Button>
             </div>
 
             {/* Data Table */}
@@ -110,8 +108,8 @@ export default function Provider() {
                                     </div>
                                 </div>
                                 <div class="p-4 bg-gray-50 border-t border-gray-200 flex justify-end space-x-2">
-                                    <Button class="btn btn-primary btn-sm" onClick={() => navigate(`/provider/edit/${item.provider.id}`)}>{t('edit')}</Button>
-                                    <Button class="btn btn-danger btn-sm" onClick={() => handleDeleteProvider(item.provider)}>{t('delete')}</Button>
+                                    <Button variant="primary" size="sm" onClick={() => navigate(`/provider/edit/${item.provider.id}`)}>{t('edit')}</Button>
+                                    <Button variant="destructive" size="sm" onClick={() => handleDeleteProvider(item.provider)}>{t('delete')}</Button>
                                 </div>
                             </div>
                         )}
@@ -121,59 +119,6 @@ export default function Provider() {
 
             {/* Edit Provider Modal has been removed and is now a separate page */}
 
-            {/* Inline styles from provider.html, consider moving to a CSS file or module */}
-            <style jsx global>{`
-                .clickable {
-                    cursor: pointer;
-                    text-decoration: underline;
-                    color: #3b82f6; /* blue-500 */
-                }
-                .clickable:hover {
-                    color: #1d4ed8; /* blue-700 */
-                }
-                /* Styles for .section, .section-title, .required-field are moved to ProviderEdit.tsx or global css */
-                .model-tag {
-                    background-color: #f3f4f6; /* gray-100 */
-                    border-radius: 0.25rem; /* rounded-md */
-                    padding: 0.25rem 0.5rem; /* py-1 px-2 */
-                    margin-right: 0.5rem; /* 8px */
-                    margin-bottom: 0.5rem; /* Added for spacing if they wrap */
-                    display: inline-block;
-                    font-size: 0.875rem; /* text-sm */
-                }
-                /* Ensure Kobalte Dialog content has a max height and is scrollable */
-                .kb-dialog__content { /* Default Kobalte class, or use your own as in the example */
-                    max-height: 90vh;
-                    display: flex;
-                    flex-direction: column;
-                }
-                .kb-dialog__content > div:first-of-type { /* Assuming first div is the scrollable content area */
-                    overflow-y: auto;
-                }
-                /* General form item styling is moved to ProviderEdit.tsx or global css */
-                /* .form-item, .form-label, .form-input, .form-select, .form-checkbox are moved */
-                .btn {
-                    padding: 0.5rem 1rem;
-                    border-radius: 0.375rem;
-                    font-weight: 500;
-                    transition: background-color 0.15s ease-in-out;
-                    box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
-                }
-                .btn-sm { padding: 0.25rem 0.75rem; font-size: 0.875rem; }
-                .btn-primary { background-color: #2563eb; color: white; }
-                .btn-primary:hover { background-color: #1d4ed8; }
-                .btn-secondary { background-color: #6b7280; color: white; }
-                .btn-secondary:hover { background-color: #4b5563; }
-                .btn-danger { background-color: #dc2626; color: white; }
-                .btn-danger:hover { background-color: #b91c1c; }
-                .btn-success { background-color: #16a34a; color: white; }
-                .btn-success:hover { background-color: #15803d; }
-
-                /* For Kobalte Select Trigger to look like form-input */
-                .kb-select__trigger.form-select {
-                     /* padding already handled by .form-select */
-                }
-            `}</style>
         </div>
     );
 }

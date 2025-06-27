@@ -1,14 +1,26 @@
-import { createSignal, For, Show, createResource } from 'solid-js';
+import { createSignal, For, Show, createResource, createMemo } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { useI18n } from '../i18n';
 import { request } from '../services/api';
 import { toastController } from '../components/GlobalMessage';
-import { Button } from '@kobalte/core/button';
-import { Dialog } from '@kobalte/core/dialog';
-import { TextField } from '@kobalte/core/text-field';
-import { Checkbox } from '@kobalte/core/checkbox';
-import { Select } from '@kobalte/core/select';
-import { NumberField } from '@kobalte/core/number-field';
+import { Button } from '../components/ui/Button';
+import {
+    DialogRoot,
+    DialogContent,
+    DialogHeader,
+    DialogFooter,
+    DialogTitle,
+} from '../components/ui/Dialog';
+import { Select } from '../components/ui/Select';
+import { TextField, NumberField } from '../components/ui/Input';
+import {
+    TableRoot,
+    TableHeader,
+    TableBody,
+    TableRow,
+    TableColumnHeader,
+    TableCell,
+} from '../components/ui/Table';
 
 // Interfaces based on backend
 interface BillingPlan {
@@ -221,7 +233,9 @@ export default function PricePage() {
     };
 
     const USAGE_TYPES = ['PROMPT', 'COMPLETION', 'INVOCATION'];
-    const MEDIA_TYPES = ['', 'IMAGE', 'AUDIO', 'VIDEO', 'CACHE_TEXT', 'CACHE_AUDIO', 'CACHE_VIDEO'];
+    const MEDIA_TYPES = ['', 'IMAGE', 'AUDIO', 'VIDEO', 'CACHE_TEXT', 'CACHE_AUDIO', 'CACHE_VIDEO'].map(mt => ({ value: mt, label: mt || t('pricePage.rules.modal.mediaTypeDefault') }));
+
+    const selectedMediaType = createMemo(() => MEDIA_TYPES.find(o => o.value === (editingRule.media_type ?? '')));
 
     return (
         <div class="p-4 space-y-6 bg-white rounded-lg shadow-xl max-w-6xl mx-auto my-8">
@@ -231,38 +245,40 @@ export default function PricePage() {
             <div class="section">
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="section-title">{t('pricePage.plans.title')}</h2>
-                    <Button class="btn btn-primary" onClick={openNewPlanModal}>{t('pricePage.plans.add')}</Button>
+                    <Button variant="primary" onClick={openNewPlanModal}>{t('pricePage.plans.add')}</Button>
                 </div>
                 <Show when={!billingPlans.loading} fallback={<p>{t('pricePage.plans.loading')}</p>}>
-                    <table class="data-table min-w-full">
-                    <thead class="bg-gray-100">
-                        <tr>
-                            <th class="px-4 py-2 text-left">{t('pricePage.plans.table.name')}</th>
-                            <th class="px-4 py-2 text-left">{t('pricePage.plans.table.description')}</th>
-                            <th class="px-4 py-2 text-left">{t('pricePage.plans.modal.currency')}</th>
-                            <th class="px-4 py-2 text-left">{t('pricePage.plans.table.actions')}</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200">
-                        <For each={billingPlans()}>
-                            {(plan) => (
-                                <tr
-                                    class="cursor-pointer hover:bg-gray-100"
-                                    classList={{ 'bg-blue-100 font-semibold': selectedPlanId() === plan.id }}
-                                    onClick={() => handleSelectPlan(plan.id)}
-                                >
-                                    <td class="px-4 py-2">{plan.name}</td>
-                                    <td class="px-4 py-2">{plan.description}</td>
-                                    <td class="px-4 py-2">{plan.currency}</td>
-                                    <td class="px-4 py-2">
-                                        <Button class="btn btn-secondary btn-sm" onClick={(e) => { e.stopPropagation(); openEditPlanModal(plan); }}>{t('common.edit')}</Button>
-                                        <Button class="btn btn-danger btn-sm ml-2" onClick={(e) => { e.stopPropagation(); handleDeletePlan(plan.id, plan.name); }}>{t('common.delete')}</Button>
-                                    </td>
-                                </tr>
-                            )}
-                        </For>
-                    </tbody>
-                </table>
+                    <div class="shadow-md rounded-lg border border-gray-200 overflow-hidden">
+                        <TableRoot>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableColumnHeader>{t('pricePage.plans.table.name')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.plans.table.description')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.plans.modal.currency')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.plans.table.actions')}</TableColumnHeader>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                <For each={billingPlans()}>
+                                    {(plan) => (
+                                        <TableRow
+                                            class="cursor-pointer"
+                                            classList={{ 'bg-blue-100 font-semibold': selectedPlanId() === plan.id }}
+                                            onClick={() => handleSelectPlan(plan.id)}
+                                        >
+                                            <TableCell>{plan.name}</TableCell>
+                                            <TableCell>{plan.description}</TableCell>
+                                            <TableCell>{plan.currency}</TableCell>
+                                            <TableCell>
+                                                <Button variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); openEditPlanModal(plan); }}>{t('common.edit')}</Button>
+                                                <Button variant="destructive" size="sm" class="ml-2" onClick={(e) => { e.stopPropagation(); handleDeletePlan(plan.id, plan.name); }}>{t('common.delete')}</Button>
+                                            </TableCell>
+                                        </TableRow>
+                                    )}
+                                </For>
+                            </TableBody>
+                        </TableRoot>
+                    </div>
                 </Show>
             </div>
 
@@ -271,218 +287,141 @@ export default function PricePage() {
                 <div class="section">
                     <div class="flex justify-between items-center mb-4">
                         <h2 class="section-title">{t('pricePage.rules.title')}</h2>
-                        <Button class="btn btn-primary" onClick={openNewRuleModal}>{t('pricePage.rules.add')}</Button>
+                        <Button variant="primary" onClick={openNewRuleModal}>{t('pricePage.rules.add')}</Button>
                     </div>
                     <Show when={priceRules.loading}><p>{t('pricePage.rules.loading')}</p></Show>
-                    <table class="data-table min-w-full">
-                        <thead class="bg-gray-100">
-                            <tr>
-                                <th class="px-4 py-2 text-left">{t('pricePage.rules.table.description')}</th>
-                                <th class="px-4 py-2 text-left">{t('pricePage.rules.table.enabled')}</th>
-                                <th class="px-4 py-2 text-left">{t('pricePage.rules.table.usageType')}</th>
-                                <th class="px-4 py-2 text-left">{t('pricePage.rules.table.mediaType')}</th>
-                                <th class="px-4 py-2 text-left">{t('pricePage.rules.table.price')}</th>
-                                <th class="px-4 py-2 text-left">{t('pricePage.rules.table.effectiveFrom')}</th>
-                                <th class="px-4 py-2 text-left">{t('pricePage.rules.table.actions')}</th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-gray-200">
-                            <For each={priceRules()}>
-                                {(rule) => (
-                                    <tr>
-                                        <td class="px-4 py-2">{rule.description}</td>
-                                        <td class="px-4 py-2">{rule.is_enabled ? t('common.yes') : t('common.no')}</td>
-                                        <td class="px-4 py-2">{rule.usage_type}</td>
-                                        <td class="px-4 py-2">{rule.media_type}</td>
-                                        <td class="px-4 py-2 text-right">{rule.price_in_micro_units / 1000} {selectedPlan()?.currency}</td>
-                                        <td class="px-4 py-2">{formatTimestamp(rule.effective_from)}</td>
-                                        <td class="px-4 py-2">
-                                            <Button class="btn btn-secondary btn-sm" onClick={() => openEditRuleModal(rule)}>{t('common.edit')}</Button>
-                                            <Button class="btn btn-danger btn-sm ml-2" onClick={() => handleDeleteRule(rule.id)}>{t('common.delete')}</Button>
-                                        </td>
-                                    </tr>
-                                )}
-                            </For>
-                        </tbody>
-                    </table>
+                    <div class="shadow-md rounded-lg border border-gray-200 overflow-hidden">
+                        <TableRoot>
+                            <TableHeader>
+                                <TableRow>
+                                    <TableColumnHeader>{t('pricePage.rules.table.description')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.rules.table.enabled')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.rules.table.usageType')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.rules.table.mediaType')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.rules.table.price')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.rules.table.effectiveFrom')}</TableColumnHeader>
+                                    <TableColumnHeader>{t('pricePage.rules.table.actions')}</TableColumnHeader>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                                <For each={priceRules()}>
+                                    {(rule) => (
+                                        <TableRow>
+                                            <TableCell>{rule.description}</TableCell>
+                                            <TableCell>{rule.is_enabled ? t('common.yes') : t('common.no')}</TableCell>
+                                            <TableCell>{rule.usage_type}</TableCell>
+                                            <TableCell>{rule.media_type}</TableCell>
+                                            <TableCell class="text-right">{rule.price_in_micro_units / 1000} {selectedPlan()?.currency}</TableCell>
+                                            <TableCell>{formatTimestamp(rule.effective_from)}</TableCell>
+                                            <TableCell>
+                                                <Button variant="secondary" size="sm" onClick={() => openEditRuleModal(rule)}>{t('common.edit')}</Button>
+                                                <Button variant="destructive" size="sm" class="ml-2" onClick={() => handleDeleteRule(rule.id)}>{t('common.delete')}</Button>
+                                            </TableCell>
+                                        </TableRow>
+                                    )}
+                                </For>
+                            </TableBody>
+                        </TableRoot>
+                    </div>
                 </div>
             </Show>
 
             {/* Billing Plan Modal */}
-            <Dialog open={isPlanModalOpen()} onOpenChange={setPlanModalOpen}>
-                <Dialog.Portal>
-                    <Dialog.Overlay class="fixed inset-0 bg-black bg-opacity-50" />
-                    <div class="fixed inset-0 flex items-center justify-center p-4">
-                        <Dialog.Content class="bg-white p-6 rounded-lg shadow-lg w-full max-w-md">
-                            <Dialog.Title class="text-xl font-bold mb-4">{editingPlan.id ? t('pricePage.plans.modal.titleEdit') : t('pricePage.plans.modal.titleAdd')}</Dialog.Title>
-                            <div class="space-y-4">
-                                <TextField value={editingPlan.name ?? ''} onChange={(v) => setEditingPlan('name', v)}>
-                                    <TextField.Label class="form-label">{t('pricePage.plans.modal.name')}</TextField.Label>
-                                    <TextField.Input class="form-input" />
-                                </TextField>
-                                <TextField value={editingPlan.description ?? ''} onChange={(v) => setEditingPlan('description', v)}>
-                                    <TextField.Label class="form-label">{t('pricePage.plans.modal.description')}</TextField.Label>
-                                    <TextField.Input class="form-input" />
-                                </TextField>
-                                <Select
-                                    value={editingPlan.currency}
-                                    onChange={(v) => setEditingPlan('currency', v)}
-                                    options={['USD', 'CNY']}
-                                    itemComponent={props => (
-                                        <Select.Item item={props.item} class="flex justify-between items-center px-3 py-1.5 text-sm text-gray-700 ui-highlighted:bg-blue-100 ui-highlighted:text-blue-700 ui-selected:font-semibold outline-none cursor-default">
-                                            <Select.ItemLabel>{props.item.rawValue}</Select.ItemLabel>
-                                        </Select.Item>
-                                    )}
-                                >
-                                    <Select.Label class="form-label">{t('pricePage.plans.modal.currency')}</Select.Label>
-                                    <Select.Trigger class="form-select w-full">
-                                        <Select.Value>{state => state.selectedOption()}</Select.Value>
-                                    </Select.Trigger>
-                                    <Select.Portal>
-                                        <Select.Content class="bg-white border border-gray-300 rounded shadow-lg mt-1 z-50">
-                                            <Select.Listbox class="max-h-60 overflow-y-auto py-1" />
-                                        </Select.Content>
-                                    </Select.Portal>
-                                </Select>
-                            </div>
-                            <div class="mt-6 flex justify-end space-x-2">
-                                <Button class="btn btn-secondary" onClick={() => setPlanModalOpen(false)}>{t('common.cancel')}</Button>
-                                <Button class="btn btn-primary" onClick={handleSavePlan}>{t('common.save')}</Button>
-                            </div>
-                        </Dialog.Content>
+            <DialogRoot open={isPlanModalOpen()} onOpenChange={setPlanModalOpen}>
+                <DialogContent class="max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>{editingPlan.id ? t('pricePage.plans.modal.titleEdit') : t('pricePage.plans.modal.titleAdd')}</DialogTitle>
+                    </DialogHeader>
+                    <div class="space-y-4">
+                        <TextField
+                            label={t('pricePage.plans.modal.name')}
+                            value={editingPlan.name ?? ''}
+                            onChange={(v) => setEditingPlan('name', v)}
+                        />
+                        <TextField
+                            label={t('pricePage.plans.modal.description')}
+                            value={editingPlan.description ?? ''}
+                            onChange={(v) => setEditingPlan('description', v)}
+                        />
+                        <Select
+                            value={editingPlan.currency}
+                            onChange={(v) => setEditingPlan('currency', v)}
+                            options={['USD', 'CNY']}
+                            label={t('pricePage.plans.modal.currency')}
+                        />
                     </div>
-                </Dialog.Portal>
-            </Dialog>
+                    <DialogFooter class="mt-6">
+                        <Button variant="secondary" onClick={() => setPlanModalOpen(false)}>{t('common.cancel')}</Button>
+                        <Button variant="primary" onClick={handleSavePlan}>{t('common.save')}</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </DialogRoot>
 
             {/* Price Rule Modal */}
-            <Dialog open={isRuleModalOpen()} onOpenChange={setRuleModalOpen}>
-                <Dialog.Portal>
-                    <Dialog.Overlay class="fixed inset-0 bg-black bg-opacity-50 z-50" />
-                    <div class="fixed inset-0 flex items-center justify-center p-4 z-50">
-                        <Dialog.Content class="bg-white p-6 rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-                            <Dialog.Title class="text-xl font-bold mb-4">{editingRule.id ? t('pricePage.rules.modal.titleEdit') : t('pricePage.rules.modal.titleAdd')}</Dialog.Title>
-                            <div class="space-y-4">
-                                <TextField value={editingRule.description ?? ''} onChange={(v) => setEditingRule('description', v)}>
-                                    <TextField.Label class="form-label">{t('pricePage.rules.modal.description')}</TextField.Label>
-                                    <TextField.Input class="form-input" />
-                                </TextField>
-                                <Checkbox checked={editingRule.is_enabled ?? false} onChange={(v) => setEditingRule('is_enabled', v)}>
-                                    <Checkbox.Input class="form-checkbox" />
-                                    <Checkbox.Label class="form-label ml-2">{t('pricePage.rules.modal.enabled')}</Checkbox.Label>
-                                </Checkbox>
-                                <div class="grid grid-cols-2 gap-4">
-                                    <Select
-                                        value={editingRule.usage_type}
-                                        onChange={(v) => setEditingRule('usage_type', v)}
-                                        options={USAGE_TYPES}
-                                        itemComponent={props => (
-                                            <Select.Item item={props.item} class="flex justify-between items-center px-3 py-1.5 text-sm text-gray-700 ui-highlighted:bg-blue-100 ui-highlighted:text-blue-700 ui-selected:font-semibold outline-none cursor-default">
-                                                <Select.ItemLabel>{props.item.rawValue}</Select.ItemLabel>
-                                            </Select.Item>
-                                        )}
-                                    >
-                                        <Select.Label class="form-label">{t('pricePage.rules.modal.usageType')}</Select.Label>
-                                        <Select.Trigger class="form-select w-full">
-                                            <Select.Value>{state => state.selectedOption()}</Select.Value>
-                                        </Select.Trigger>
-                                        <Select.Portal>
-                                            <Select.Content class="bg-white border border-gray-300 rounded shadow-lg mt-1 z-50">
-                                                <Select.Listbox class="max-h-60 overflow-y-auto py-1" />
-                                            </Select.Content>
-                                        </Select.Portal>
-                                    </Select>
-                                    <Select
-                                        value={editingRule.media_type ?? ''}
-                                        onChange={(v) => setEditingRule('media_type', v)}
-                                        options={MEDIA_TYPES}
-                                        itemComponent={props => (
-                                            <Select.Item item={props.item} class="flex justify-between items-center px-3 py-1.5 text-sm text-gray-700 ui-highlighted:bg-blue-100 ui-highlighted:text-blue-700 ui-selected:font-semibold outline-none cursor-default">
-                                                <Select.ItemLabel>{props.item.rawValue || t('pricePage.rules.modal.mediaTypeDefault')}</Select.ItemLabel>
-                                            </Select.Item>
-                                        )}
-                                    >
-                                        <Select.Label class="form-label">{t('pricePage.rules.modal.mediaType')}</Select.Label>
-                                        <Select.Trigger class="form-select w-full">
-                                            <Select.Value>{state => state.selectedOption() || t('pricePage.rules.modal.mediaTypeDefault')}</Select.Value>
-                                        </Select.Trigger>
-                                        <Select.Portal>
-                                            <Select.Content class="bg-white border border-gray-300 rounded shadow-lg mt-1 z-50">
-                                                <Select.Listbox class="max-h-60 overflow-y-auto py-1" />
-                                            </Select.Content>
-                                        </Select.Portal>
-                                    </Select>
-                                </div>
-                                <NumberField value={editingRule.price_in_micro_units ?? 0} onChange={(v) => setEditingRule('price_in_micro_units', v)}>
-                                    <NumberField.Label class="form-label">{t('pricePage.rules.modal.price')}</NumberField.Label>
-                                    <NumberField.Input class="form-input" />
-                                </NumberField>
-                                <div class="grid grid-cols-2 gap-4">
-                                    <TextField
-                                        type="datetime-local"
-                                        value={toDateTimeLocal(editingRule.effective_from)}
-                                        onChange={(v) => setEditingRule('effective_from', fromDateTimeLocal(v))}
-                                    >
-                                        <TextField.Label class="form-label">{t('pricePage.rules.modal.effectiveFrom')}</TextField.Label>
-                                        <TextField.Input class="form-input" />
-                                    </TextField>
-                                    <TextField
-                                        type="datetime-local"
-                                        value={toDateTimeLocal(editingRule.effective_until)}
-                                        onChange={(v) => setEditingRule('effective_until', fromDateTimeLocal(v))}
-                                    >
-                                        <TextField.Label class="form-label">{t('pricePage.rules.modal.effectiveUntil')}</TextField.Label>
-                                        <TextField.Input class="form-input" />
-                                    </TextField>
-                                </div>
-                            </div>
-                            <div class="mt-6 flex justify-end space-x-2">
-                                <Button class="btn btn-secondary" onClick={() => setRuleModalOpen(false)}>{t('common.cancel')}</Button>
-                                <Button class="btn btn-primary" onClick={handleSaveRule}>{t('common.save')}</Button>
-                            </div>
-                        </Dialog.Content>
+            <DialogRoot open={isRuleModalOpen()} onOpenChange={setRuleModalOpen}>
+                <DialogContent class="max-w-2xl max-h-[90vh] overflow-y-auto">
+                    <DialogHeader>
+                        <DialogTitle>{editingRule.id ? t('pricePage.rules.modal.titleEdit') : t('pricePage.rules.modal.titleAdd')}</DialogTitle>
+                    </DialogHeader>
+                    <div class="space-y-4">
+                        <TextField
+                            label={t('pricePage.rules.modal.description')}
+                            value={editingRule.description ?? ''}
+                            onChange={(v) => setEditingRule('description', v)}
+                        />
+                        <div class="flex items-center space-x-2">
+                            <input
+                                type="checkbox"
+                                id="is_enabled_rule_checkbox"
+                                class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                checked={editingRule.is_enabled ?? false}
+                                onChange={(e) => setEditingRule('is_enabled', e.currentTarget.checked)}
+                            />
+                            <label for="is_enabled_rule_checkbox" class="text-sm font-medium leading-none">{t('pricePage.rules.modal.enabled')}</label>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <Select
+                                value={editingRule.usage_type}
+                                onChange={(v) => setEditingRule('usage_type', v)}
+                                options={USAGE_TYPES}
+                                label={t('pricePage.rules.modal.usageType')}
+                            />
+                            <Select
+                                value={selectedMediaType()}
+                                optionValue="value"
+                                optionTextValue="label"
+                                onChange={(v) => setEditingRule('media_type', v ? v.value : null)}
+                                options={MEDIA_TYPES}
+                                label={t('pricePage.rules.modal.mediaType')}
+                            />
+                        </div>
+                        <NumberField
+                            label={t('pricePage.rules.modal.price')}
+                            value={editingRule.price_in_micro_units ?? 0}
+                            onChange={(v) => setEditingRule('price_in_micro_units', v)}
+                        />
+                        <div class="grid grid-cols-2 gap-4">
+                            <TextField
+                                type="datetime-local"
+                                label={t('pricePage.rules.modal.effectiveFrom')}
+                                value={toDateTimeLocal(editingRule.effective_from)}
+                                onChange={(v) => setEditingRule('effective_from', fromDateTimeLocal(v))}
+                            />
+                            <TextField
+                                type="datetime-local"
+                                label={t('pricePage.rules.modal.effectiveUntil')}
+                                value={toDateTimeLocal(editingRule.effective_until)}
+                                onChange={(v) => setEditingRule('effective_until', fromDateTimeLocal(v))}
+                            />
+                        </div>
                     </div>
-                </Dialog.Portal>
-            </Dialog>
+                    <DialogFooter class="mt-6">
+                        <Button variant="secondary" onClick={() => setRuleModalOpen(false)}>{t('common.cancel')}</Button>
+                        <Button variant="primary" onClick={handleSaveRule}>{t('common.save')}</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </DialogRoot>
 
-            <style jsx global>{`
-                .section {
-                    margin-bottom: 1.25rem; /* 20px */
-                    padding: 1rem; /* 16px */
-                    border: 1px solid #e5e7eb; /* gray-200 */
-                    border-radius: 0.375rem; /* rounded-md */
-                }
-                .section-title {
-                    font-size: 1.25rem; /* text-xl */
-                    font-weight: 600; /* font-semibold */
-                }
-                .form-label { display: block; margin-bottom: 0.25rem; font-weight: 500; color: #374151; /* gray-700 */ }
-                .form-input, .form-select {
-                    width: 100%;
-                    padding: 0.5rem 0.75rem;
-                    border: 1px solid #d1d5db; /* gray-300 */
-                    border-radius: 0.375rem; /* rounded-md */
-                }
-                .form-checkbox {
-                    border-radius: 0.25rem;
-                    border-color: #d1d5db; /* gray-300 */
-                }
-                .btn {
-                    padding: 0.5rem 1rem;
-                    border-radius: 0.375rem;
-                    font-weight: 500;
-                }
-                .btn-sm { padding: 0.25rem 0.75rem; font-size: 0.875rem; }
-                .btn-primary { background-color: #2563eb; color: white; }
-                .btn-primary:hover { background-color: #1d4ed8; }
-                .btn-secondary { background-color: #6b7280; color: white; }
-                .btn-secondary:hover { background-color: #4b5563; }
-                .btn-danger { background-color: #dc2626; color: white; }
-                .btn-danger:hover { background-color: #b91c1c; }
-                .data-table th, .data-table td {
-                    padding: 0.75rem;
-                    vertical-align: middle;
-                }
-            `}</style>
         </div>
     );
 }

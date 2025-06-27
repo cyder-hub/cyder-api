@@ -1,5 +1,13 @@
 import { createSignal, For, Show, createResource } from 'solid-js';
-import { Button } from '@kobalte/core/button';
+import { Button } from '../components/ui/Button';
+import {
+    TableRoot,
+    TableHeader,
+    TableBody,
+    TableRow,
+    TableColumnHeader,
+    TableCell,
+} from '../components/ui/Table';
 import { useI18n } from '../i18n'; // Import the i18n hook
 import { request } from '../services/api';
 import { apiKeys as globalApiKeys, refetchApiKeys as globalRefetchApiKeys } from '../store/apiKeyStore';
@@ -123,7 +131,7 @@ export default function ApiKeyPage() {
             <h1 class="text-2xl font-semibold mb-4 text-gray-800">{t('apiKeyPage.title')}</h1>
 
             <div class="mb-4">
-                <Button class="btn btn-primary" onClick={() => handleStartEditing()}>{t('apiKeyPage.addApiKey')}</Button>
+                <Button variant="primary" onClick={() => handleStartEditing()}>{t('apiKeyPage.addApiKey')}</Button>
             </div>
 
             {/* Data Table */}
@@ -141,52 +149,51 @@ export default function ApiKeyPage() {
 
             <Show when={!globalApiKeys.loading && !globalApiKeys.error && globalApiKeys() && globalApiKeys()!.length > 0}>
                 <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200">
-                    <table class="min-w-full divide-y divide-gray-200 data-table">
-                        <thead class="bg-gray-100">
-                            <tr>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.name')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.apiKeyPartial')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.description')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.enabled')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.accessControlPolicy')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.createdAt')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.updatedAt')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('apiKeyPage.table.actions')}</th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
+                    <TableRoot>
+                        <TableHeader>
+                            <TableRow>
+                                <TableColumnHeader>{t('apiKeyPage.table.name')}</TableColumnHeader>
+                                <TableColumnHeader>{t('apiKeyPage.table.apiKeyPartial')}</TableColumnHeader>
+                                <TableColumnHeader>{t('apiKeyPage.table.description')}</TableColumnHeader>
+                                <TableColumnHeader>{t('apiKeyPage.table.enabled')}</TableColumnHeader>
+                                <TableColumnHeader>{t('apiKeyPage.table.accessControlPolicy')}</TableColumnHeader>
+                                <TableColumnHeader>{t('apiKeyPage.table.createdAt')}</TableColumnHeader>
+                                <TableColumnHeader>{t('apiKeyPage.table.updatedAt')}</TableColumnHeader>
+                                <TableColumnHeader>{t('apiKeyPage.table.actions')}</TableColumnHeader>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
                             <For each={globalApiKeys()}>
                                 {(key) => (
-                                    <tr class="hover:bg-gray-50">
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-800">{key.name}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-800 font-mono">
+                                    <TableRow>
+                                        <TableCell>{key.name}</TableCell>
+                                        <TableCell class="font-mono">
                                             {key.api_key ? `${key.api_key.substring(0, 3)}...${key.api_key.substring(key.api_key.length - 4)}` : 'N/A'}
-                                            <Button class="btn btn-xs btn-ghost ml-2" onClick={() => copyApiKeyToClipboard(key.api_key, key.id)} title={t('apiKeyPage.copy')}>
+                                            <Button variant="ghost" size="xs" class="ml-2" onClick={() => copyApiKeyToClipboard(key.api_key, key.id)} title={t('apiKeyPage.copy')}>
                                                 {copiedKeyId() === key.id ? t('apiKeyPage.copied') : t('apiKeyPage.copy')}
                                             </Button>
-                                        </td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 max-w-xs truncate" title={key.description}>{key.description || '/'}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                                        </TableCell>
+                                        <TableCell class="max-w-xs truncate" title={key.description}>{key.description || '/'}</TableCell>
+                                        <TableCell>
                                             <input
                                                 type="checkbox"
-                                                class="form-checkbox" // Use existing inline style for form-checkbox
+                                                class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                                                 checked={key.is_enabled}
                                                 onChange={() => handleToggleEnable(key)}
-                                                // id={`enable-apikey-${key.id}`} // Optional: for label association if a label were present
                                             />
-                                        </td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{(key as any).access_control_policy_name || t('common.notAvailable')}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{key.created_at_formatted}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{key.updated_at_formatted}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm space-x-2">
-                                            <Button class="btn btn-primary btn-sm" onClick={() => handleStartEditing(key)}>{t('edit')}</Button>
-                                            <Button class="btn btn-danger btn-sm" onClick={() => handleDeleteApiKey(key)}>{t('delete')}</Button>
-                                        </td>
-                                    </tr>
+                                        </TableCell>
+                                        <TableCell>{(key as any).access_control_policy_name || t('common.notAvailable')}</TableCell>
+                                        <TableCell>{key.created_at_formatted}</TableCell>
+                                        <TableCell>{key.updated_at_formatted}</TableCell>
+                                        <TableCell class="space-x-2">
+                                            <Button variant="primary" size="sm" onClick={() => handleStartEditing(key)}>{t('edit')}</Button>
+                                            <Button variant="destructive" size="sm" onClick={() => handleDeleteApiKey(key)}>{t('delete')}</Button>
+                                        </TableCell>
+                                    </TableRow>
                                 )}
                             </For>
-                        </tbody>
-                    </table>
+                        </TableBody>
+                    </TableRoot>
                 </div>
             </Show>
 
@@ -201,57 +208,6 @@ export default function ApiKeyPage() {
                 />
             </Show>
             
-            {/* Styles (can be moved to a global CSS file or CSS module) */}
-            <style jsx global>{`
-                /* Add any specific styles for ApiKeyPage here if needed, or use global styles */
-                .form-item { margin-bottom: 1rem; }
-                .form-label { display: block; margin-bottom: 0.25rem; font-weight: 500; color: #374151; }
-                .form-input, .form-select {
-                    width: 100%;
-                    padding: 0.5rem 0.75rem;
-                    border: 1px solid #d1d5db;
-                    border-radius: 0.375rem;
-                    box-shadow: inset 0 1px 2px 0 rgba(0,0,0,0.05);
-                }
-                .form-input:focus, .form-select:focus {
-                    border-color: #2563eb;
-                    outline: 2px solid transparent;
-                    outline-offset: 2px;
-                    box-shadow: 0 0 0 2px #bfdbfe;
-                }
-                .form-checkbox {
-                    border-radius: 0.25rem;
-                    border-color: #d1d5db;
-                }
-                .form-checkbox:focus {
-                     border-color: #2563eb;
-                     box-shadow: 0 0 0 2px #bfdbfe;
-                }
-                .btn {
-                    padding: 0.5rem 1rem;
-                    border-radius: 0.375rem;
-                    font-weight: 500;
-                    transition: background-color 0.15s ease-in-out;
-                    box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
-                }
-                .btn-sm { padding: 0.25rem 0.75rem; font-size: 0.875rem; }
-                .btn-xs { padding: 0.125rem 0.5rem; font-size: 0.75rem; }
-                .btn-primary { background-color: #2563eb; color: white; }
-                .btn-primary:hover { background-color: #1d4ed8; }
-                .btn-secondary { background-color: #6b7280; color: white; }
-                .btn-secondary:hover { background-color: #4b5563; }
-                .btn-danger { background-color: #dc2626; color: white; }
-                .btn-danger:hover { background-color: #b91c1c; }
-                .btn-ghost { background-color: transparent; border-color: transparent; color: #2563eb; }
-                .btn-ghost:hover { background-color: #eff6ff; }
-                .data-table { table-layout: fixed; } /* Helps with column widths and truncation */
-                .max-w-xs { max-width: 20rem; } /* Example for description column */
-                .truncate {
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                }
-            `}</style>
         </div>
     );
 }

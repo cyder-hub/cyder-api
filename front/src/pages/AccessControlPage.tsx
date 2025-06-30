@@ -1,8 +1,23 @@
-import { createSignal, For, Show, createResource, Accessor, Setter, onMount } from 'solid-js';
+import { createSignal, For, Show, createResource, Accessor, Setter, onMount, createMemo } from 'solid-js';
 import type { Resource } from 'solid-js';
-import { Button } from '@kobalte/core/button';
-import { Select as KSelect } from '@kobalte/core/select'; // Aliased to avoid conflict if HTMLSelectElement is used
-import { TextField } from '@kobalte/core/text-field';
+import { Button } from '../components/ui/Button';
+import {
+    DialogRoot,
+    DialogContent,
+    DialogHeader,
+    DialogFooter,
+    DialogTitle,
+} from '../components/ui/Dialog';
+import { Select } from '../components/ui/Select';
+import { TextField, NumberField } from '../components/ui/Input';
+import {
+    TableRoot,
+    TableHeader,
+    TableBody,
+    TableRow,
+    TableColumnHeader,
+    TableCell,
+} from '../components/ui/Table';
 import { request } from '../services/api';
 import { useI18n } from '../i18n';
 
@@ -174,24 +189,19 @@ function transformApiDetailToUiState(apiDetail: AccessControlPolicyFromAPI): Acc
 export default function AccessControlPage() {
     const [t] = useI18n();
 
-    // --- Tailwind CSS classes for form elements ---
-    const formLabelClass = "block mb-1 text-sm font-medium text-gray-700";
-    const formLabelSmClass = "text-xs";
-    const formControlBaseClass = "block w-full border border-gray-300 rounded-md transition";
-    const formControlFocusRingClass = "focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/[.25]";
-    const formControlFocusWithinRingClass = "focus-within:border-blue-600 focus-within:outline-none focus-within:ring-2 focus-within:ring-blue-600/[.25]";
-    const formInputClass = `${formControlBaseClass} py-2 px-3 text-base ${formControlFocusRingClass}`;
-    const formInputSmClass = `${formControlBaseClass} py-1 px-2 text-sm ${formControlFocusRingClass}`;
-    const formSelectTriggerClass = `w-full ${formControlBaseClass} py-2 px-3 text-base ${formControlFocusWithinRingClass}`;
-    const formSelectTriggerSmClass = `w-full ${formControlBaseClass} py-1 px-2 text-sm ${formControlFocusWithinRingClass}`;
-    const kSelectItemClass = "flex justify-between items-center py-[0.375rem] px-3 text-sm text-gray-700 cursor-default data-[highlighted]:bg-blue-100 data-[highlighted]:text-blue-700 data-[selected]:font-semibold";
-    const kSelectContentClass = "bg-white border border-gray-300 rounded-md shadow-lg mt-1 z-50 max-h-60 overflow-y-auto";
+    const ruleTypeOptions = createMemo(() => ['ALLOW', 'DENY'].map(o => ({ value: o, label: t(`accessControlPage.modal.option${o}`) })));
+    const scopeOptions = createMemo(() => ['PROVIDER', 'MODEL'].map(o => ({ value: o, label: t(`accessControlPage.rules.scope${o}`) })));
 
     const [policies, { refetch: refetchPolicies }] = createResource<AccessControlPolicyFromAPI[]>(fetchPoliciesAPI, { initialValue: [] });
     const [providers] = createResource<ProviderDetail[]>(fetchProvidersWithModelsAPI, { initialValue: [] });
 
     const [showEditModal, setShowEditModal] = createSignal(false);
     const [editingPolicy, setEditingPolicy] = createSignal<AccessControlPolicyUI>(newPolicyTemplate());
+
+    const defaultActionOptions = createMemo(() => ['ALLOW', 'DENY'].map(o => ({ value: o, label: t(`accessControlPage.modal.option${o}`) })));
+    const selectedDefaultAction = createMemo(() => defaultActionOptions().find(o => o.value === (editingPolicy()?.default_action || 'ALLOW')));
+
+    const providerOptions = createMemo(() => (providers() || []).map(p => ({ value: p.provider.id, label: p.provider.name })));
 
     const handleOpenAddModal = () => {
         setEditingPolicy(newPolicyTemplate());
@@ -321,7 +331,7 @@ export default function AccessControlPage() {
         <div class="p-4 space-y-6">
             <div class="flex justify-between items-center mb-4">
                 <h1 class="text-2xl font-semibold text-gray-800">{t('accessControlPage.title')}</h1>
-                <Button onClick={handleOpenAddModal} class="btn btn-primary">{t('accessControlPage.addPolicy')}</Button>
+                <Button onClick={handleOpenAddModal} variant="primary">{t('accessControlPage.addPolicy')}</Button>
             </div>
 
             {/* Data Table */}
@@ -336,70 +346,63 @@ export default function AccessControlPage() {
             </Show>
             <Show when={!policies.loading && !policies.error && policies() && policies()!.length > 0}>
                 <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200">
-                    <table class="min-w-full divide-y divide-gray-200 data-table">
-                        <thead class="bg-gray-100">
-                            <tr>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('accessControlPage.table.name')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('accessControlPage.table.defaultAction')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('accessControlPage.table.description')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('accessControlPage.table.rules')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('accessControlPage.table.actions')}</th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
+                    <TableRoot>
+                        <TableHeader>
+                            <TableRow>
+                                <TableColumnHeader>{t('accessControlPage.table.name')}</TableColumnHeader>
+                                <TableColumnHeader>{t('accessControlPage.table.defaultAction')}</TableColumnHeader>
+                                <TableColumnHeader>{t('accessControlPage.table.description')}</TableColumnHeader>
+                                <TableColumnHeader>{t('accessControlPage.table.rules')}</TableColumnHeader>
+                                <TableColumnHeader>{t('accessControlPage.table.actions')}</TableColumnHeader>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
                             <For each={policies()}>{(policy) =>
-                                <tr>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-800">{policy.name}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{t(`accessControlPage.modal.option${policy.default_action}`)}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{policy.description || '/'}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{t('accessControlPage.table.rulesCount', { count: policy.rules?.length || 0 })}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm space-x-2">
-                                        <Button onClick={() => handleOpenEditModal(policy.id)} class="btn btn-primary btn-sm">{t('common.edit')}</Button>
-                                        <Button onClick={() => handleDeletePolicy(policy.id, policy.name)} class="btn btn-danger btn-sm">{t('common.delete')}</Button>
-                                    </td>
-                                </tr>
+                                <TableRow>
+                                    <TableCell>{policy.name}</TableCell>
+                                    <TableCell>{t(`accessControlPage.modal.option${policy.default_action}`)}</TableCell>
+                                    <TableCell>{policy.description || '/'}</TableCell>
+                                    <TableCell>{t('accessControlPage.table.rulesCount', { count: policy.rules?.length || 0 })}</TableCell>
+                                    <TableCell class="space-x-2">
+                                        <Button onClick={() => handleOpenEditModal(policy.id)} variant="primary" size="sm">{t('common.edit')}</Button>
+                                        <Button onClick={() => handleDeletePolicy(policy.id, policy.name)} variant="destructive" size="sm">{t('common.delete')}</Button>
+                                    </TableCell>
+                                </TableRow>
                             }</For>
-                        </tbody>
-                    </table>
+                        </TableBody>
+                    </TableRoot>
                 </div>
             </Show>
 
             {/* Edit/Add Modal */}
-            <Show when={showEditModal()}>
-                <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity z-40" onClick={handleCloseModal}></div>
-                <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-                    <div class="bg-white rounded-lg shadow-xl p-6 space-y-4 w-full max-w-4xl max-h-[90vh] overflow-y-auto model"> {/* Increased max-w */}
-                        <h2 class="text-xl font-semibold text-gray-800 model-title">{editingPolicy()?.id ? t('accessControlPage.modal.titleEdit') : t('accessControlPage.modal.titleAdd')}</h2>
-
+            <DialogRoot open={showEditModal()} onOpenChange={setShowEditModal}>
+                <DialogContent class="max-w-4xl max-h-[90vh] flex flex-col">
+                    <DialogHeader>
+                        <DialogTitle>{editingPolicy()?.id ? t('accessControlPage.modal.titleEdit') : t('accessControlPage.modal.titleAdd')}</DialogTitle>
+                    </DialogHeader>
+                    <div class="space-y-4 overflow-y-auto">
                         {/* Policy Fields */}
-                        <TextField class="form-item" value={editingPolicy()?.name || ''} onChange={(v) => setEditingPolicy(p => ({ ...p!, name: v }))}>
-                            <TextField.Label class={formLabelClass}>{t('accessControlPage.modal.labelName')}</TextField.Label>
-                            <TextField.Input class={formInputClass} />
-                        </TextField>
-                        <div class="form-item">
-                            <KSelect<string>
-                                value={editingPolicy()?.default_action || 'ALLOW'}
-                                onChange={(v) => setEditingPolicy(p => ({ ...p!, default_action: v as 'ALLOW' | 'DENY' }))}
-                                options={['ALLOW', 'DENY']}
-                                placeholder={t('accessControlPage.modal.placeholderDefaultAction')}
-                                itemComponent={props => (
-                                    <KSelect.Item item={props.item} class={kSelectItemClass}>
-                                        <KSelect.ItemLabel>{t(`accessControlPage.modal.option${props.item.rawValue}`)}</KSelect.ItemLabel>
-                                        <KSelect.ItemIndicator>✓</KSelect.ItemIndicator>
-                                    </KSelect.Item>
-                                )}
-                            >
-                                <KSelect.Label class={formLabelClass}>{t('accessControlPage.modal.labelDefaultAction')}</KSelect.Label>
-                                <KSelect.Trigger class={formSelectTriggerClass}>
-                                    <KSelect.Value<string>>{state => t(`accessControlPage.modal.option${state.selectedOption()}`)}</KSelect.Value>
-                                </KSelect.Trigger>
-                                <KSelect.Portal><KSelect.Content class={kSelectContentClass}><KSelect.Listbox /></KSelect.Content></KSelect.Portal>
-                            </KSelect>
-                        </div>
-                        <TextField class="form-item" value={editingPolicy()?.description || ''} onChange={(v) => setEditingPolicy(p => ({ ...p!, description: v }))}>
-                            <TextField.Label class={formLabelClass}>{t('accessControlPage.modal.labelDescription')}</TextField.Label>
-                            <TextField.Input as="textarea" rows={2} class={formInputClass} />
-                        </TextField>
+                        <TextField
+                            label={t('accessControlPage.modal.labelName')}
+                            value={editingPolicy()?.name || ''}
+                            onChange={(v) => setEditingPolicy(p => ({ ...p!, name: v }))}
+                        />
+                        <Select
+                            label={t('accessControlPage.modal.labelDefaultAction')}
+                            value={selectedDefaultAction()}
+                            optionValue="value"
+                            optionTextValue="label"
+                            onChange={(v) => setEditingPolicy(p => ({ ...p!, default_action: v.value as 'ALLOW' | 'DENY' }))}
+                            options={defaultActionOptions()}
+                            placeholder={t('accessControlPage.modal.placeholderDefaultAction')}
+                        />
+                        <TextField
+                            label={t('accessControlPage.modal.labelDescription')}
+                            value={editingPolicy()?.description || ''}
+                            onChange={(v) => setEditingPolicy(p => ({ ...p!, description: v }))}
+                            textarea
+                            rows={2}
+                        />
 
                         <hr class="my-6" />
 
@@ -407,109 +410,93 @@ export default function AccessControlPage() {
                         <div class="space-y-3">
                             <div class="flex justify-between items-center">
                                 <h4 class="text-lg font-medium">{t('accessControlPage.rules.title')}</h4>
-                                <Button onClick={addRule} class="btn btn-secondary btn-sm">{t('accessControlPage.rules.addRule')}</Button>
+                                <Button onClick={addRule} variant="secondary" size="sm">{t('accessControlPage.rules.addRule')}</Button>
                             </div>
                             <div class="max-h-80 overflow-y-auto border rounded p-2 space-y-2">
                                 <Show when={editingPolicy()?.rules.length === 0}>
                                     <p class="text-sm text-gray-500 text-center py-2">{t('accessControlPage.rules.noRules')}</p>
                                 </Show>
-                                <For each={editingPolicy()?.rules}>{(rule, index) =>
-                                    <div class="p-3 border rounded bg-gray-50 space-y-2">
+                                <For each={editingPolicy()?.rules}>{(rule, index) => {
+                                    const modelOptions = createMemo(() => getModelsForProvider(rule.provider_id).map(m => ({ value: m.id, label: m.model_name })));
+                                    const selectedModel = createMemo(() => modelOptions().find(m => m.value === rule.model_id));
+
+                                    return (<div class="p-3 border rounded bg-gray-50 space-y-2">
                                         <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-2 items-end">
                                             {/* Rule Type */}
                                             <div>
-                                                <KSelect<AccessControlRuleUI['rule_type']>
-                                                    value={rule.rule_type}
-                                                    onChange={(v) => updateRuleField(index(), 'rule_type', v)}
-                                                    options={['ALLOW', 'DENY']}
-                                                    itemComponent={props => (<KSelect.Item item={props.item} class={kSelectItemClass}><KSelect.ItemLabel>{t(`accessControlPage.modal.option${props.item.rawValue}`)}</KSelect.ItemLabel></KSelect.Item>)}
-                                                >
-                                                    <KSelect.Label class={`${formLabelClass} ${formLabelSmClass}`}>{t('accessControlPage.rules.labelRuleType')}</KSelect.Label>
-                                                    <KSelect.Trigger class={formSelectTriggerSmClass}><KSelect.Value<string>>{state => t(`accessControlPage.modal.option${state.selectedOption()}`)}</KSelect.Value></KSelect.Trigger>
-                                                    <KSelect.Portal><KSelect.Content class={kSelectContentClass}><KSelect.Listbox /></KSelect.Content></KSelect.Portal>
-                                                </KSelect>
+                                                <Select
+                                                    value={ruleTypeOptions().find(o => o.value === rule.rule_type)}
+                                                    onChange={(v) => updateRuleField(index(), 'rule_type', v.value)}
+                                                    optionValue="value"
+                                                    optionTextValue="label"
+                                                    options={ruleTypeOptions()}
+                                                    label={t('accessControlPage.rules.labelRuleType')}
+                                                />
                                             </div>
                                             {/* Scope */}
                                             <div>
-                                                <KSelect<AccessControlRuleUI['scope']>
-                                                    value={rule.scope}
-                                                    onChange={(v) => updateRuleField(index(), 'scope', v)}
-                                                    options={['PROVIDER', 'MODEL']}
-                                                    itemComponent={props => (<KSelect.Item item={props.item} class={kSelectItemClass}><KSelect.ItemLabel>{t(`accessControlPage.rules.scope${props.item.rawValue}`)}</KSelect.ItemLabel></KSelect.Item>)}
-                                                >
-                                                    <KSelect.Label class={`${formLabelClass} ${formLabelSmClass}`}>{t('accessControlPage.rules.labelScope')}</KSelect.Label>
-                                                    <KSelect.Trigger class={formSelectTriggerSmClass}><KSelect.Value<string>>{state => t(`accessControlPage.rules.scope${state.selectedOption()}`)}</KSelect.Value></KSelect.Trigger>
-                                                    <KSelect.Portal><KSelect.Content class={kSelectContentClass}><KSelect.Listbox /></KSelect.Content></KSelect.Portal>
-                                                </KSelect>
+                                                <Select
+                                                    value={scopeOptions().find(o => o.value === rule.scope)}
+                                                    onChange={(v) => updateRuleField(index(), 'scope', v.value)}
+                                                    optionValue="value"
+                                                    optionTextValue="label"
+                                                    options={scopeOptions()}
+                                                    label={t('accessControlPage.rules.labelScope')}
+                                                />
                                             </div>
                                             {/* Provider */}
                                             <div classList={{ "lg:col-span-2": rule.scope === 'PROVIDER' }}>
-                                                <KSelect<ProviderDetail>
-                                                    value={providers()?.find(p => p.provider.id === rule.provider_id)}
-                                                    onChange={(v: ProviderDetail | null) => updateRuleField(index(), 'provider_id', v ? v.provider.id : null)}
-                                                    options={providers() || []}
-                                                    optionValue={item => item.provider.id}
-                                                    optionTextValue={item => item.provider.name}
+                                                <Select
+                                                    value={providerOptions().find(p => p.value === rule.provider_id)}
+                                                    optionValue="value"
+                                                    optionTextValue="label"
+                                                    onChange={(v) => updateRuleField(index(), 'provider_id', v ? v.value : null)}
+                                                    options={providerOptions()}
                                                     placeholder={t('accessControlPage.rules.placeholderProvider')}
-                                                    itemComponent={props => (
-                                                        <KSelect.Item item={props.item} class={kSelectItemClass}>
-                                                            <KSelect.ItemLabel>{(props.item.rawValue as ProviderDetail).provider.name}</KSelect.ItemLabel>
-                                                        </KSelect.Item>
-                                                    )}
-                                                >
-                                                    <KSelect.Label class={`${formLabelClass} ${formLabelSmClass}`}>{t('accessControlPage.rules.labelProvider')}</KSelect.Label>
-                                                    <KSelect.Trigger class={formSelectTriggerSmClass}>
-                                                        <KSelect.Value<ProviderDetail>>
-                                                            {state => state.selectedOption()?.provider.name || t('accessControlPage.rules.placeholderProvider')}
-                                                        </KSelect.Value>
-                                                    </KSelect.Trigger>
-                                                    <KSelect.Portal><KSelect.Content class={kSelectContentClass}><KSelect.Listbox /></KSelect.Content></KSelect.Portal>
-                                                </KSelect>
+                                                    label={t('accessControlPage.rules.labelProvider')}
+                                                />
                                             </div>
                                             {/* Model */}
                                             <Show when={rule.scope === 'MODEL'}>
                                                 <div>
-                                                    <KSelect<Model | null>
-                                                        value={getModelById(rule.provider_id, rule.model_id)}
-                                                        onChange={(v) => updateRuleField(index(), 'model_id', v ? v.id : null)}
-                                                        options={getModelsForProvider(rule.provider_id)}
-                                                        optionValue="id"
-                                                        optionTextValue={item => item.model_name}
+                                                    <Select
+                                                        value={selectedModel()}
+                                                        onChange={(v) => updateRuleField(index(), 'model_id', v ? v.value : null)}
+                                                        optionValue="value"
+                                                        optionTextValue="label"
+                                                        options={modelOptions()}
                                                         placeholder={t('accessControlPage.rules.placeholderModel')}
                                                         disabled={!rule.provider_id}
-                                                        itemComponent={props => (<KSelect.Item item={props.item} class={kSelectItemClass}><KSelect.ItemLabel>{props.item.rawValue.model_name}</KSelect.ItemLabel></KSelect.Item>)}
-                                                    >
-                                                        <KSelect.Label class={`${formLabelClass} ${formLabelSmClass}`}>{t('accessControlPage.rules.labelModel')}</KSelect.Label>
-                                                        <KSelect.Trigger class={formSelectTriggerSmClass}><KSelect.Value<Model>>{state => state.selectedOption()?.model_name || t('accessControlPage.rules.placeholderModel')}</KSelect.Value></KSelect.Trigger>
-                                                        <KSelect.Portal><KSelect.Content class={kSelectContentClass}><KSelect.Listbox /></KSelect.Content></KSelect.Portal>
-                                                    </KSelect>
+                                                        label={t('accessControlPage.rules.labelModel')}
+                                                    />
                                                 </div>
                                             </Show>
                                             {/* Priority */}
                                             <div>
-                                                <TextField value={rule.priority.toString()} onChange={v => updateRuleField(index(), 'priority', v === '' ? 0 : parseInt(v))} type="number">
-                                                    <TextField.Label class={`${formLabelClass} ${formLabelSmClass}`}>{t('accessControlPage.rules.labelPriority')}</TextField.Label>
-                                                    <TextField.Input class={formInputSmClass} />
-                                                </TextField>
+                                                <NumberField
+                                                    label={t('accessControlPage.rules.labelPriority')}
+                                                    value={rule.priority}
+                                                    onChange={v => updateRuleField(index(), 'priority', isNaN(v) ? 0 : v)}
+                                                    step={1}
+                                                    formatOptions={{ maximumFractionDigits: 0 }}
+                                                />
                                             </div>
                                             {/* Actions */}
                                             <div class="self-end">
-                                                <Button onClick={() => removeRule(index())} class="btn btn-danger btn-sm">{t('accessControlPage.rules.deleteRule')}</Button>
+                                                <Button onClick={() => removeRule(index())} variant="destructive" size="sm">{t('accessControlPage.rules.deleteRule')}</Button>
                                             </div>
                                         </div>
-                                    </div>
-                                }</For>
+                                    </div>)
+                                }}</For>
                             </div>
                         </div>
-
-                        {/* Modal Actions */}
-                        <div class="form-buttons flex justify-end gap-3 pt-6">
-                            <Button onClick={handleCloseModal} class="btn btn-default">{t('common.cancel')}</Button>
-                            <Button onClick={handleSavePolicy} class="btn btn-primary">{t('common.save')}</Button>
-                        </div>
                     </div>
-                </div>
-            </Show>
+                    <DialogFooter class="pt-6">
+                        <Button onClick={handleCloseModal} variant="secondary">{t('common.cancel')}</Button>
+                        <Button onClick={handleSavePolicy} variant="primary">{t('common.save')}</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </DialogRoot>
         </div>
     );
 }

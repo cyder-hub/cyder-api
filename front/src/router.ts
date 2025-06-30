@@ -10,6 +10,7 @@ export interface RouteConfig {
 }
 
 // Lazy load page components
+const RedirectToDashboard = lazy(() => import('./pages/RedirectToDashboard'));
 const Login = lazy(() => import('./pages/Login'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Record = lazy(() => import('./pages/Record'));
@@ -30,6 +31,7 @@ export const loginRoute: RouteConfig = {
 
 // Unified array for main application routes that are part of the PageWrapper layout
 export const mainRoutes: RouteConfig[] = [
+  { path: "/", component: RedirectToDashboard },
   { path: "/dashboard", component: Dashboard, icon: "📊", text: "Dashboard", i18nKey: "sidebar.dashboard" },
   { path: "/record", component: Record, icon: " M", text: "Record", i18nKey: "sidebar.record" },
   { path: "/provider", component: Provider, icon: " P", text: "Provider", i18nKey: "sidebar.provider" },
@@ -41,6 +43,7 @@ export const mainRoutes: RouteConfig[] = [
   { path: "/access_control", component: AccessControlPage, icon: " L", text: "Access Control", i18nKey: "sidebar.accessControlPolicy" },
   { path: "/custom_fields", component: CustomFields, icon: " C", text: "Custom Fields", i18nKey: "sidebar.customFields" },
   { path: "/price", component: Price, icon: "💲", text: "Price", i18nKey: "sidebar.price" },
+  { path: "*", component: RedirectToDashboard },
 ];
 
 // Helper function to get routes intended for the PageWrapper layout (those with nav items)

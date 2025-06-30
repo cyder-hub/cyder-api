@@ -1,10 +1,9 @@
-import { createSignal, Show, onMount, Accessor, Setter, createEffect, For } from 'solid-js';
+import { createSignal, Show, onMount, Accessor, Setter, createEffect, For, createMemo } from 'solid-js';
 import { useI18n } from '../i18n'; // Import the i18n hook
-import { Button } from '@kobalte/core/button';
-import { TextField } from '@kobalte/core/text-field';
-import { Checkbox } from '@kobalte/core/checkbox';
-import { Dialog } from '@kobalte/core/dialog';
-import { Select as KSelect } from '@kobalte/core/select';
+import { Button } from './ui/Button';
+import { TextField } from './ui/Input';
+import { Select } from './ui/Select';
+import { DialogRoot, DialogContent, DialogHeader, DialogFooter, DialogTitle } from './ui/Dialog';
 import { request } from '../services/api';
 import type { ApiKeyItem } from '../store/types';
 import type { AccessControlPolicyFromAPI } from '../pages/AccessControlPage';
@@ -39,6 +38,16 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
     const [ t ] = useI18n(); // Initialize the t function
     const [editingData, setEditingData] = createSignal<EditingApiKeyData>(getEmptyEditingData());
     const [showApiKeyInForm, setShowApiKeyInForm] = createSignal(false);
+
+    const policyOptions = createMemo(() => {
+        const noPolicy = { value: null, label: t('apiKeyEditModal.noPolicy') };
+        const policies = (props.policies || []).map(p => ({ value: p.id, label: p.name }));
+        return [noPolicy, ...policies];
+    });
+
+    const selectedPolicy = createMemo(() => {
+        return policyOptions().find(p => p.value === editingData()?.access_control_policy_id);
+    });
 
     // Effect to update form state when the modal is opened or initialData changes.
     // This runs when props.isOpen() or props.initialData() changes.
@@ -93,7 +102,7 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
         };
 
         if (currentFormState.api_key.trim()) {
-            payload.api_key = currentFormState.api_key;
+            payload.api_key_value = currentFormState.api_key;
         }
 
         const method = currentFormState.id ? 'PUT' : 'POST';
@@ -117,88 +126,70 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
     };
 
     return (
-        <Show when={props.isOpen()}>
-            <Dialog open={props.isOpen()} onOpenChange={(isOpen) => !isOpen && props.onClose()} modal>
-                <Dialog.Portal>
-                    <Dialog.Overlay class="fixed inset-0 bg-black bg-opacity-50" />
-                    <div class="fixed inset-0 flex items-center justify-center p-4">
-                        <Dialog.Content class="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col model">
-                            <Dialog.Title class="text-xl font-semibold mb-4 model-title">{editingData()?.id ? t('apiKeyEditModal.titleEdit') : t('apiKeyEditModal.titleAdd')}</Dialog.Title>
-                            <div class="overflow-y-auto space-y-4 pr-2">
-                                <TextField class="form-item" value={editingData()?.name ?? ''} onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), name: v }))}>
-                                    <TextField.Label class="form-label">{t('apiKeyEditModal.labelName')} <span class="text-red-500">*</span></TextField.Label>
-                                    <TextField.Input class="form-input" />
-                                </TextField>
+        <DialogRoot open={props.isOpen()} onOpenChange={(isOpen) => !isOpen && props.onClose()} modal>
+            <DialogContent class="max-h-[90vh] flex flex-col">
+                <DialogHeader>
+                    <DialogTitle>{editingData()?.id ? t('apiKeyEditModal.titleEdit') : t('apiKeyEditModal.titleAdd')}</DialogTitle>
+                </DialogHeader>
+                <div class="overflow-y-auto space-y-4 pr-2">
+                        <TextField
+                            label={<>{t('apiKeyEditModal.labelName')} <span class="text-red-500">*</span></>}
+                            value={editingData()?.name ?? ''}
+                            onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), name: v }))}
+                        />
 
-                                <TextField class="form-item">
-                                    <TextField.Label class="form-label">
-                                        {t('apiKeyEditModal.labelApiKey')}
-                                        <Show when={editingData()?.id === null}><span class="text-red-500">*</span></Show>
-                                        <Show when={editingData()?.id !== null}><span class="text-gray-500 text-xs ml-1">{t('apiKeyEditModal.apiKeyHelpText')}</span></Show>
-                                    </TextField.Label>
-                                    <div class="flex items-center space-x-2">
-                                        <TextField.Input
-                                            class="form-input flex-grow"
-                                            type={showApiKeyInForm() ? 'text' : 'password'}
-                                            value={editingData()?.api_key ?? ''}
-                                            onInput={(e) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), api_key: e.currentTarget.value }))}
-                                            placeholder={editingData()?.id ? t('apiKeyEditModal.apiKeyPlaceholderEdit') : t('apiKeyEditModal.apiKeyPlaceholderNew')}
-                                        />
-                                        <Button class="btn btn-secondary btn-sm" onClick={toggleApiKeyVisibility}>
-                                            {showApiKeyInForm() ? t('apiKeyEditModal.buttonHide') : t('apiKeyEditModal.buttonShow')}
-                                        </Button>
-                                    </div>
-                                </TextField>
-
-                                <TextField class="form-item" value={editingData()?.description ?? ''} onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), description: v }))}>
-                                    <TextField.Label class="form-label">{t('apiKeyEditModal.labelDescription')}</TextField.Label>
-                                    <TextField.Input class="form-input" />
-                                </TextField>
-
-                                <div class="form-item">
-                                    <KSelect<AccessControlPolicyFromAPI | null>
-                                        value={props.policies.find(p => p.id === editingData()?.access_control_policy_id) ?? null}
-                                        onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), access_control_policy_id: v ? v.id : null }))}
-                                        options={[null, ...props.policies]}
-                                        optionValue={(item) => item ? item.id : 0}
-                                        optionTextValue={(item) => item ? item.name : t('apiKeyEditModal.noPolicy')}
-                                        placeholder={t('apiKeyEditModal.placeholderAccessControlPolicy')}
-                                        itemComponent={props => (
-                                            <KSelect.Item item={props.item} class="kobalte-select-item">
-                                                <KSelect.ItemLabel>{props.item.rawValue ? props.item.rawValue.name : t('apiKeyEditModal.noPolicy')}</KSelect.ItemLabel>
-                                            </KSelect.Item>
-                                        )}
-                                    >
-                                        <KSelect.Label class="form-label">{t('apiKeyEditModal.labelAccessControlPolicy')}</KSelect.Label>
-                                        <KSelect.Trigger class="form-select w-full">
-                                            <KSelect.Value<AccessControlPolicyFromAPI | null>>
-                                                {state => state.selectedOption()?.name || t('apiKeyEditModal.noPolicy')}
-                                            </KSelect.Value>
-                                        </KSelect.Trigger>
-                                        <KSelect.Portal>
-                                            <KSelect.Content class="kobalte-select-content">
-                                                <KSelect.Listbox />
-                                            </KSelect.Content>
-                                        </KSelect.Portal>
-                                    </KSelect>
-                                </div>
-
-                                <Checkbox class="form-item items-center" checked={editingData()?.is_enabled ?? false} onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), is_enabled: v }))}>
-                                    <Checkbox.Input class="form-checkbox" />
-                                    <Checkbox.Label class="form-label ml-2">{t('apiKeyEditModal.labelEnabled')}</Checkbox.Label>
-                                </Checkbox>
+                        <div class="flex flex-col space-y-1.5">
+                            <label class="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                                {t('apiKeyEditModal.labelApiKey')}
+                                <Show when={editingData()?.id === null}><span class="text-red-500"> *</span></Show>
+                                <Show when={editingData()?.id !== null}><span class="text-gray-500 text-xs ml-1">{t('apiKeyEditModal.apiKeyHelpText')}</span></Show>
+                            </label>
+                            <div class="flex items-center space-x-2">
+                                <input
+                                    class="flex h-10 w-full rounded-md border border-gray-300 bg-transparent px-3 py-2 text-sm ring-offset-white placeholder:text-gray-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 flex-grow"
+                                    type={showApiKeyInForm() ? 'text' : 'password'}
+                                    value={editingData()?.api_key ?? ''}
+                                    onInput={(e) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), api_key: e.currentTarget.value }))}
+                                    placeholder={editingData()?.id ? t('apiKeyEditModal.apiKeyPlaceholderEdit') : t('apiKeyEditModal.apiKeyPlaceholderNew')}
+                                />
+                                <Button variant="secondary" size="sm" onClick={toggleApiKeyVisibility}>
+                                    {showApiKeyInForm() ? t('apiKeyEditModal.buttonHide') : t('apiKeyEditModal.buttonShow')}
+                                </Button>
                             </div>
-                            <Dialog.CloseButton class="absolute top-4 right-4 p-1 rounded-full hover:bg-gray-200 transition-colors" onClick={props.onClose}>
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
-                            </Dialog.CloseButton>
-                            <div class="mt-6 flex justify-end space-x-2 pt-4 border-t">
-                                <Button class="btn btn-secondary" onClick={props.onClose}>{t('common.cancel')}</Button>
-                                <Button class="btn btn-primary" onClick={handleCommit}>{t('common.save')}</Button>
-                            </div>
-                        </Dialog.Content>
+                        </div>
+
+                        <TextField
+                            label={t('apiKeyEditModal.labelDescription')}
+                            value={editingData()?.description ?? ''}
+                            onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), description: v }))}
+                        />
+
+                        <Select
+                            label={t('apiKeyEditModal.labelAccessControlPolicy')}
+                            value={selectedPolicy()}
+                            onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), access_control_policy_id: v ? v.value : null }))}
+                            options={policyOptions()}
+                            optionValue="value"
+                            optionTextValue="label"
+                            placeholder={t('apiKeyEditModal.placeholderAccessControlPolicy')}
+                        />
+
+                        <div class="flex items-center space-x-2">
+                            <input
+                                type="checkbox"
+                                id="is_enabled_modal_checkbox"
+                                class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                checked={editingData()?.is_enabled ?? false}
+                                onChange={(e) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), is_enabled: e.currentTarget.checked }))}
+                            />
+                            <label for="is_enabled_modal_checkbox" class="text-sm font-medium leading-none">{t('apiKeyEditModal.labelEnabled')}</label>
+                        </div>
                     </div>
-                </Dialog.Portal>
-            </Dialog>
-        </Show>
+                    <DialogFooter class="mt-6 pt-4 border-t">
+                        <Button variant="secondary" onClick={props.onClose}>{t('common.cancel')}</Button>
+                        <Button variant="primary" onClick={handleCommit}>{t('common.save')}</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </DialogRoot>
     );
 }

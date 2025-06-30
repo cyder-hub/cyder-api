@@ -1,10 +1,17 @@
 import { For, Show, onMount, createSignal, createResource } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { useI18n } from '../i18n';
-import { Button } from '@kobalte/core/button';
-import { TextField } from '@kobalte/core/text-field';
-import { Checkbox } from '@kobalte/core/checkbox';
-import { Select } from '@kobalte/core/select';
+import { Button } from '../components/ui/Button';
+import { TextField } from '../components/ui/Input';
+import { Select } from '../components/ui/Select';
+import {
+    TableRoot,
+    TableHeader,
+    TableBody,
+    TableRow,
+    TableColumnHeader,
+    TableCell,
+} from '../components/ui/Table';
 import { useNavigate, useParams } from '@solidjs/router';
 import { request } from '../services/api';
 import { toastController } from '../components/GlobalMessage';
@@ -302,18 +309,26 @@ export default function ModelEdit() {
             </Show>
             <Show when={!isLoading() && !error() && editingData}>
                 <div class="space-y-4">
-                    <TextField class="form-item" value={editingData!.model_name} onChange={(v) => updateEditingDataField('model_name', v)}>
-                        <TextField.Label class="form-label">{t('modelEditPage.labelModelName')} <span class="text-red-500">*</span></TextField.Label>
-                        <TextField.Input class="form-input" />
-                    </TextField>
-                    <TextField class="form-item" value={editingData!.real_model_name ?? ''} onChange={(v) => updateEditingDataField('real_model_name', v)}>
-                        <TextField.Label class="form-label">{t('modelEditPage.labelRealModelName')}</TextField.Label>
-                        <TextField.Input class="form-input" />
-                    </TextField>
-                    <Checkbox class="form-item items-center" checked={editingData!.is_enabled} onChange={(v) => updateEditingDataField('is_enabled', v)}>
-                        <Checkbox.Input class="form-checkbox" />
-                        <Checkbox.Label class="form-label ml-2">{t('modelEditPage.labelEnabled')}</Checkbox.Label>
-                    </Checkbox>
+                    <TextField
+                        label={<>{t('modelEditPage.labelModelName')} <span class="text-red-500">*</span></>}
+                        value={editingData!.model_name}
+                        onChange={(v) => updateEditingDataField('model_name', v)}
+                    />
+                    <TextField
+                        label={t('modelEditPage.labelRealModelName')}
+                        value={editingData!.real_model_name ?? ''}
+                        onChange={(v) => updateEditingDataField('real_model_name', v)}
+                    />
+                    <div class="flex items-center space-x-2">
+                        <input
+                            type="checkbox"
+                            id="is_enabled_model_checkbox"
+                            class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                            checked={editingData!.is_enabled}
+                            onChange={(e) => updateEditingDataField('is_enabled', e.currentTarget.checked)}
+                        />
+                        <label for="is_enabled_model_checkbox" class="text-sm font-medium leading-none">{t('modelEditPage.labelEnabled')}</label>
+                    </div>
 
                     {/* Custom Fields Section */}
                     <div class="section">
@@ -328,47 +343,24 @@ export default function ModelEdit() {
                         <For each={editingData!.custom_fields}>
                             {(field, index) => (
                                 <div class="section-row grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center mb-2">
-                                    <TextField value={field.field_name} disabled>
-                                        <TextField.Input class="form-input" />
-                                    </TextField>
-                                    <TextField value={field.field_value} disabled>
-                                        <TextField.Input class="form-input" />
-                                    </TextField>
-                                    <TextField value={field.description ?? ''} disabled>
-                                        <TextField.Input class="form-input" />
-                                    </TextField>
-                                    <TextField value={field.field_type} disabled>
-                                        <TextField.Input class="form-input" />
-                                    </TextField>
-                                    <Button class="btn btn-danger btn-sm" onClick={() => handleUnlinkCustomField(field.id, index())}>{t('common.delete')}</Button>
+                                    <TextField value={field.field_name} disabled />
+                                    <TextField value={field.field_value} disabled />
+                                    <TextField value={field.description ?? ''} disabled />
+                                    <TextField value={field.field_type} disabled />
+                                    <Button variant="destructive" size="sm" onClick={() => handleUnlinkCustomField(field.id, index())}>{t('common.delete')}</Button>
                                 </div>
                             )}
                         </For>
                         <div class="mt-4 flex items-center gap-2">
-                            <Select<CustomFieldItem>
-                                value={selectedCustomFieldId()}
-                                onChange={setSelectedCustomFieldId}
+                            <Select
+                                value={availableCustomFields().find(f => f.id === selectedCustomFieldId())}
+                                onChange={(v) => setSelectedCustomFieldId(v ? v.id : null)}
                                 options={availableCustomFields()}
                                 optionValue="id"
                                 optionTextValue="field_name"
                                 placeholder={t('modelEditPage.placeholderSelectCustomField')}
-                                itemComponent={props => (
-                                    <Select.Item item={props.item} class="flex justify-between items-center px-3 py-1.5 text-sm text-gray-700 ui-highlighted:bg-blue-100 ui-highlighted:text-blue-700 ui-selected:font-semibold outline-none cursor-default">
-                                        <Select.ItemLabel>{props.item.rawValue.field_name}</Select.ItemLabel>
-                                    </Select.Item>
-                                )}
-                            >
-                                <Select.Trigger class="form-select w-full" aria-label={t('modelEditPage.labelSelectCustomField')}>
-                                    <Select.Value<CustomFieldItem>>{state => state.selectedOption() ? state.selectedOption().field_name : ''}</Select.Value>
-                                    <Select.Icon class="ml-2 text-gray-500">▼</Select.Icon>
-                                </Select.Trigger>
-                                <Select.Portal>
-                                    <Select.Content class="bg-white border border-gray-300 rounded shadow-lg mt-1 z-50">
-                                        <Select.Listbox class="max-h-60 overflow-y-auto py-1" />
-                                    </Select.Content>
-                                </Select.Portal>
-                            </Select>
-                            <Button class="btn btn-primary btn-sm" onClick={handleLinkCustomField} disabled={!selectedCustomFieldId()}>
+                            />
+                            <Button variant="primary" size="sm" onClick={handleLinkCustomField} disabled={!selectedCustomFieldId()}>
                                 {t('modelEditPage.buttonAddCustomField')}
                             </Button>
                         </div>
@@ -377,7 +369,8 @@ export default function ModelEdit() {
                     {/* Price Management Section */}
                     <div class="section">
                         <h3 class="section-title">{t('modelEditPage.priceSection.title')}</h3>
-                        <Select<BillingPlan | { id: null, name: string }>
+                        <Select
+                            label={t('modelEditPage.priceSection.labelBillingPlan')}
                             value={
                                 [
                                     { id: null, name: t('modelEditPage.priceSection.noPlan') },
@@ -392,25 +385,7 @@ export default function ModelEdit() {
                             optionValue="id"
                             optionTextValue="name"
                             placeholder={t('modelEditPage.priceSection.placeholderBillingPlan')}
-                            itemComponent={props => (
-                                <Select.Item item={props.item} class="flex justify-between items-center px-3 py-1.5 text-sm text-gray-700 ui-highlighted:bg-blue-100 ui-highlighted:text-blue-700 ui-selected:font-semibold outline-none cursor-default">
-                                    <Select.ItemLabel>{props.item.rawValue.name}</Select.ItemLabel>
-                                </Select.Item>
-                            )}
-                        >
-                            <Select.Label class="form-label">{t('modelEditPage.priceSection.labelBillingPlan')}</Select.Label>
-                            <Select.Trigger class="form-select w-full" aria-label={t('modelEditPage.priceSection.labelBillingPlan')}>
-                                <Select.Value<BillingPlan | { id: null, name: string }>>
-                                    {state => state.selectedOption() ? state.selectedOption().name : t('modelEditPage.priceSection.noPlan')}
-                                </Select.Value>
-                                <Select.Icon class="ml-2 text-gray-500">▼</Select.Icon>
-                            </Select.Trigger>
-                            <Select.Portal>
-                                <Select.Content class="bg-white border border-gray-300 rounded shadow-lg mt-1 z-50">
-                                    <Select.Listbox class="max-h-60 overflow-y-auto py-1" />
-                                </Select.Content>
-                            </Select.Portal>
-                        </Select>
+                        />
 
                         <Show when={editingData!.billing_plan_id}>
                             <div class="mt-4">
@@ -419,106 +394,43 @@ export default function ModelEdit() {
                                 </Show>
                                 <Show when={!priceRules.loading && priceRules() && priceRules()!.length > 0}>
                                     <h4 class="text-md font-semibold mb-2">{t('modelEditPage.priceSection.rulesTitle')}</h4>
-                                    <table class="data-table min-w-full text-sm border-t">
-                                        <thead class="bg-gray-50">
-                                            <tr>
-                                                <th class="px-3 py-2 text-left font-medium text-gray-500">{t('pricePage.rules.table.description')}</th>
-                                                <th class="px-3 py-2 text-left font-medium text-gray-500">{t('pricePage.rules.table.enabled')}</th>
-                                                <th class="px-3 py-2 text-left font-medium text-gray-500">{t('pricePage.rules.table.usageType')}</th>
-                                                <th class="px-3 py-2 text-left font-medium text-gray-500">{t('pricePage.rules.table.mediaType')}</th>
-                                                <th class="px-3 py-2 text-left font-medium text-gray-500">{t('pricePage.rules.table.price')}</th>
-                                                <th class="px-3 py-2 text-left font-medium text-gray-500">{t('pricePage.rules.table.effectiveFrom')}</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody class="bg-white divide-y divide-gray-200">
+                                    <TableRoot>
+                                        <TableHeader>
+                                            <TableRow>
+                                                <TableColumnHeader>{t('pricePage.rules.table.description')}</TableColumnHeader>
+                                                <TableColumnHeader>{t('pricePage.rules.table.enabled')}</TableColumnHeader>
+                                                <TableColumnHeader>{t('pricePage.rules.table.usageType')}</TableColumnHeader>
+                                                <TableColumnHeader>{t('pricePage.rules.table.mediaType')}</TableColumnHeader>
+                                                <TableColumnHeader>{t('pricePage.rules.table.price')}</TableColumnHeader>
+                                                <TableColumnHeader>{t('pricePage.rules.table.effectiveFrom')}</TableColumnHeader>
+                                            </TableRow>
+                                        </TableHeader>
+                                        <TableBody>
                                             <For each={priceRules()}>
                                                 {(rule) => (
-                                                    <tr>
-                                                        <td class="px-3 py-2 whitespace-nowrap">{rule.description}</td>
-                                                        <td class="px-3 py-2">{rule.is_enabled ? t('common.yes') : t('common.no')}</td>
-                                                        <td class="px-3 py-2">{rule.usage_type}</td>
-                                                        <td class="px-3 py-2">{rule.media_type || '-'}</td>
-                                                        <td class="px-3 py-2 text-right">{rule.price_in_micro_units / 1000} {selectedPlan()?.currency}</td>
-                                                        <td class="px-3 py-2">{formatTimestamp(rule.effective_from)}</td>
-                                                    </tr>
+                                                    <TableRow>
+                                                        <TableCell>{rule.description}</TableCell>
+                                                        <TableCell>{rule.is_enabled ? t('common.yes') : t('common.no')}</TableCell>
+                                                        <TableCell>{rule.usage_type}</TableCell>
+                                                        <TableCell>{rule.media_type || '-'}</TableCell>
+                                                        <TableCell class="text-right">{rule.price_in_micro_units / 1000} {selectedPlan()?.currency}</TableCell>
+                                                        <TableCell>{formatTimestamp(rule.effective_from)}</TableCell>
+                                                    </TableRow>
                                                 )}
                                             </For>
-                                        </tbody>
-                                    </table>
+                                        </TableBody>
+                                    </TableRoot>
                                 </Show>
                             </div>
                         </Show>
                     </div>
 
                     <div class="mt-6 flex justify-end space-x-2 pt-4 border-t">
-                        <Button class="btn btn-secondary" onClick={handleNavigateBack}>{t('common.cancel')}</Button>
-                        <Button class="btn btn-primary" onClick={handleSaveModel}>{t('common.save')}</Button>
+                        <Button variant="secondary" onClick={handleNavigateBack}>{t('common.cancel')}</Button>
+                        <Button variant="primary" onClick={handleSaveModel}>{t('common.save')}</Button>
                     </div>
                 </div>
             </Show>
-            {/* Styles (copied from ProviderEdit.tsx) */}
-            <style jsx global>{`
-                .section {
-                    margin-bottom: 1.25rem; /* 20px */
-                    padding: 0.75rem; /* 12px */
-                    border: 1px solid #e5e7eb; /* gray-200 */
-                    border-radius: 0.375rem; /* rounded-md */
-                }
-                .section-title {
-                    font-size: 1.125rem; /* text-lg */
-                    font-weight: 600; /* font-semibold */
-                    margin-bottom: 0.5rem; /* 8px */
-                }
-                .required-field::after {
-                    content: "*";
-                    color: #ef4444; /* red-500 */
-                    margin-left: 0.25rem; /* 4px */
-                }
-                .form-item { margin-bottom: 1rem; }
-                .form-label { display: block; margin-bottom: 0.25rem; font-weight: 500; color: #374151; /* gray-700 */ }
-                .form-input, .form-select {
-                    width: 100%;
-                    padding: 0.5rem 0.75rem;
-                    border: 1px solid #d1d5db; /* gray-300 */
-                    border-radius: 0.375rem; /* rounded-md */
-                    box-shadow: inset 0 1px 2px 0 rgba(0,0,0,0.05);
-                }
-                .form-input:focus, .form-select:focus {
-                    border-color: #2563eb; /* blue-600 */
-                    outline: 2px solid transparent;
-                    outline-offset: 2px;
-                    box-shadow: 0 0 0 2px #bfdbfe; /* blue-200 */
-                }
-                .form-checkbox {
-                    border-radius: 0.25rem;
-                    border-color: #d1d5db; /* gray-300 */
-                }
-                .form-checkbox:focus {
-                     border-color: #2563eb; /* blue-600 */
-                     box-shadow: 0 0 0 2px #bfdbfe; /* blue-200 */
-                }
-                .btn {
-                    padding: 0.5rem 1rem;
-                    border-radius: 0.375rem;
-                    font-weight: 500;
-                    transition: background-color 0.15s ease-in-out;
-                    box-shadow: 0 1px 2px 0 rgba(0,0,0,0.05);
-                }
-                .btn-sm { padding: 0.25rem 0.75rem; font-size: 0.875rem; }
-                .btn-primary { background-color: #2563eb; color: white; }
-                .btn-primary:hover { background-color: #1d4ed8; }
-                .btn-secondary { background-color: #6b7280; color: white; }
-                .btn-secondary:hover { background-color: #4b5563; }
-                .btn-danger { background-color: #dc2626; color: white; }
-                .btn-danger:hover { background-color: #b91c1c; }
-                .btn-success { background-color: #16a34a; color: white; }
-                .btn-success:hover { background-color: #15803d; }
-                .btn-info { background-color: #3b82f6; color: white; } /* blue-500 */
-                .btn-info:hover { background-color: #2563eb; } /* blue-600 */
-                .kb-select__trigger.form-select {
-                     /* padding already handled by .form-select */
-                }
-            `}</style>
         </div>
     );
 }

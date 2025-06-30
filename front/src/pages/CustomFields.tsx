@@ -1,9 +1,24 @@
 import { createSignal, For, Show, createResource } from 'solid-js';
 import { useI18n } from '../i18n';
-import { Button } from '@kobalte/core/button';
-import { TextField } from '@kobalte/core/text-field';
-import { Select } from '@kobalte/core/select';
+import { Button } from '../components/ui/Button';
 import { request } from '../services/api';
+import {
+    DialogRoot,
+    DialogContent,
+    DialogHeader,
+    DialogFooter,
+    DialogTitle,
+} from '../components/ui/Dialog';
+import { TextField, NumberField } from '../components/ui/Input';
+import { Select } from '../components/ui/Select';
+import {
+    TableRoot,
+    TableHeader,
+    TableBody,
+    TableRow,
+    TableColumnHeader,
+    TableCell,
+} from '../components/ui/Table';
 
 // --- Type Definitions ---
 
@@ -192,7 +207,7 @@ export default function CustomFieldsPage() {
         <div class="p-4">
             <div class="flex justify-between items-center mb-6">
                 <h1 class="text-2xl font-semibold text-gray-800">{t('customFieldsPage.title')}</h1>
-                <Button onClick={handleOpenAddModal} class="btn btn-primary">{t('customFieldsPage.addCustomField')}</Button>
+                <Button onClick={handleOpenAddModal} variant="primary">{t('customFieldsPage.addCustomField')}</Button>
             </div>
 
             {/* Data Table */}
@@ -206,177 +221,154 @@ export default function CustomFieldsPage() {
                 <div class="text-center py-4 text-gray-500">{t('customFieldsPage.noData')}</div>
             </Show>
             <Show when={!customFields.loading && !customFields.error && customFields() && customFields()!.length > 0}>
-                <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200">
-                    <table class="min-w-full divide-y divide-gray-200 data-table">
-                        <thead class="bg-gray-100">
-                            <tr>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('customFieldsPage.table.name')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('customFieldsPage.table.fieldName')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('customFieldsPage.table.fieldType')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('customFieldsPage.table.placement')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('customFieldsPage.table.enabled')}</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('actions')}</th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
+                <div class="shadow-md rounded-lg border border-gray-200 overflow-hidden">
+                    <TableRoot>
+                        <TableHeader>
+                            <TableRow>
+                                <TableColumnHeader>{t('customFieldsPage.table.name')}</TableColumnHeader>
+                                <TableColumnHeader>{t('customFieldsPage.table.fieldName')}</TableColumnHeader>
+                                <TableColumnHeader>{t('customFieldsPage.table.fieldType')}</TableColumnHeader>
+                                <TableColumnHeader>{t('customFieldsPage.table.placement')}</TableColumnHeader>
+                                <TableColumnHeader>{t('customFieldsPage.table.enabled')}</TableColumnHeader>
+                                <TableColumnHeader>{t('actions')}</TableColumnHeader>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
                             <For each={customFields()}>{(field) =>
-                                <tr class="hover:bg-gray-50">
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-800">{field.name}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{field.field_name}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{field.field_type}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{field.field_placement}</td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                                <TableRow>
+                                    <TableCell>{field.name}</TableCell>
+                                    <TableCell>{field.field_name}</TableCell>
+                                    <TableCell>{field.field_type}</TableCell>
+                                    <TableCell>{field.field_placement}</TableCell>
+                                    <TableCell>
                                         <input
                                             type="checkbox"
                                             class="form-checkbox"
                                             checked={field.is_enabled}
                                             onChange={() => handleToggleEnable(field)}
                                         />
-                                    </td>
-                                    <td class="px-4 py-3 whitespace-nowrap text-sm space-x-2">
-                                        <Button onClick={() => handleOpenEditModal(field)} class="btn btn-primary btn-sm">{t('edit')}</Button>
-                                        <Button onClick={() => handleDelete(field.id, field.name || field.field_name)} class="btn btn-danger btn-sm">{t('delete')}</Button>
-                                    </td>
-                                </tr>
+                                    </TableCell>
+                                    <TableCell>
+                                        <Button onClick={() => handleOpenEditModal(field)} variant="secondary" size="sm">{t('edit')}</Button>
+                                        <Button onClick={() => handleDelete(field.id, field.name || field.field_name)} variant="destructive" size="sm">{t('delete')}</Button>
+                                    </TableCell>
+                                </TableRow>
                             }</For>
-                        </tbody>
-                    </table>
+                        </TableBody>
+                    </TableRoot>
                 </div>
             </Show>
 
             {/* Edit/Add Modal */}
-            <Show when={showEditModal()}>
-                <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity z-40 model-mask" onClick={handleCloseModal}></div>
-                <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-                    <div class="bg-white rounded-lg shadow-xl p-6 space-y-4 w-full max-w-lg model" style="height: auto;">
-                        <h2 class="text-xl font-semibold text-gray-800 model-title mb-6">
+            <DialogRoot open={showEditModal()} onOpenChange={setShowEditModal}>
+                <DialogContent class="space-y-4">
+                    <DialogHeader>
+                        <DialogTitle>
                             {editingField()?.id ? t('customFieldsPage.modal.titleEdit') : t('customFieldsPage.modal.titleAdd')}
-                        </h2>
+                        </DialogTitle>
+                    </DialogHeader>
 
-                        <TextField class="form-item" value={editingField()?.name || ''} onChange={(v) => setEditingField(s => ({ ...s!, name: v }))}>
-                            <TextField.Label class="form-label">{t('customFieldsPage.modal.labelName')}</TextField.Label>
-                            <TextField.Input class="form-input" placeholder={t('customFieldsPage.modal.placeholderName')} />
-                        </TextField>
+                    <TextField
+                        label={t('customFieldsPage.modal.labelName')}
+                        placeholder={t('customFieldsPage.modal.placeholderName')}
+                        value={editingField()?.name || ''}
+                        onChange={(v) => setEditingField(s => ({ ...s!, name: v }))}
+                    />
 
-                        <TextField class="form-item" value={editingField()?.description || ''} onChange={(v) => setEditingField(s => ({ ...s!, description: v }))}>
-                            <TextField.Label class="form-label">{t('customFieldsPage.modal.labelDescription')}</TextField.Label>
-                            <TextField.Input class="form-input" placeholder={t('customFieldsPage.modal.placeholderDescription')} />
-                        </TextField>
+                    <TextField
+                        label={t('customFieldsPage.modal.labelDescription')}
+                        placeholder={t('customFieldsPage.modal.placeholderDescription')}
+                        value={editingField()?.description || ''}
+                        onChange={(v) => setEditingField(s => ({ ...s!, description: v }))}
+                    />
 
-                        <TextField class="form-item" value={editingField()?.field_name || ''} onChange={(v) => setEditingField(s => ({ ...s!, field_name: v }))}>
-                            <TextField.Label class="form-label">{t('customFieldsPage.modal.labelFieldName')}</TextField.Label>
-                            <TextField.Input class="form-input" placeholder={t('customFieldsPage.modal.placeholderFieldName')} />
-                        </TextField>
+                    <TextField
+                        label={t('customFieldsPage.modal.labelFieldName')}
+                        placeholder={t('customFieldsPage.modal.placeholderFieldName')}
+                        value={editingField()?.field_name || ''}
+                        onChange={(v) => setEditingField(s => ({ ...s!, field_name: v }))}
+                    />
 
-                        <div class="form-item">
-                            <Select
-                                value={editingField()?.field_placement}
-                                onChange={(v) => setEditingField(s => ({ ...s!, field_placement: v || '' }))}
-                                options={fieldPlacements}
-                                placeholder={t('customFieldsPage.modal.placeholderPlacement')}
-                                itemComponent={props => (
-                                    <Select.Item item={props.item} class="select__item p-2 hover:bg-gray-100 cursor-pointer">
-                                        <Select.ItemLabel>{props.item.rawValue}</Select.ItemLabel>
-                                    </Select.Item>
-                                )}
-                            >
-                                <Select.Label class="form-label">{t('customFieldsPage.modal.labelPlacement')}</Select.Label>
-                                <Select.Trigger class="form-input w-full flex justify-between items-center" aria-label="Placement">
-                                    <Select.Value>
-                                        {(state) => state.selectedOption() || <span class="text-gray-500">{t('customFieldsPage.modal.placeholderPlacement')}</span>}
-                                    </Select.Value>
-                                    <Select.Icon class="select__icon">▼</Select.Icon>
-                                </Select.Trigger>
-                                <Select.Portal>
-                                    <Select.Content class="select__content bg-white border border-gray-300 rounded-md shadow-lg mt-1 z-50">
-                                        <Select.Listbox class="select__listbox p-1 max-h-60 overflow-y-auto" />
-                                    </Select.Content>
-                                </Select.Portal>
-                            </Select>
-                        </div>
+                    <Select
+                        value={editingField()?.field_placement}
+                        onChange={(v) => setEditingField(s => ({ ...s!, field_placement: v || '' }))}
+                        options={fieldPlacements}
+                        label={t('customFieldsPage.modal.labelPlacement')}
+                        placeholder={t('customFieldsPage.modal.placeholderPlacement')}
+                    />
 
-                        <div class="form-item">
-                            <Select<CustomFieldType>
-                                value={editingField()?.field_type}
-                                onChange={(v) => setEditingField(s => ({ ...s!, field_type: v || 'UNSET' }))}
-                                options={fieldTypes}
-                                placeholder={t('customFieldsPage.modal.placeholderFieldType')}
-                                itemComponent={props => (
-                                    <Select.Item item={props.item} class="select__item p-2 hover:bg-gray-100 cursor-pointer">
-                                        <Select.ItemLabel>{props.item.rawValue}</Select.ItemLabel>
-                                    </Select.Item>
-                                )}
-                            >
-                                <Select.Label class="form-label">{t('customFieldsPage.modal.labelFieldType')}</Select.Label>
-                                <Select.Trigger class="form-input w-full flex justify-between items-center" aria-label="Field Type">
-                                    <Select.Value<CustomFieldType>>
-                                        {(state) => state.selectedOption() || <span class="text-gray-500">{t('customFieldsPage.modal.placeholderFieldType')}</span>}
-                                    </Select.Value>
-                                    <Select.Icon class="select__icon">▼</Select.Icon>
-                                </Select.Trigger>
-                                <Select.Portal>
-                                    <Select.Content class="select__content bg-white border border-gray-300 rounded-md shadow-lg mt-1 z-50">
-                                        <Select.Listbox class="select__listbox p-1 max-h-60 overflow-y-auto" />
-                                    </Select.Content>
-                                </Select.Portal>
-                            </Select>
-                        </div>
+                    <Select<CustomFieldType>
+                        value={editingField()?.field_type}
+                        onChange={(v) => setEditingField(s => ({ ...s!, field_type: v || 'UNSET' }))}
+                        options={fieldTypes}
+                        label={t('customFieldsPage.modal.labelFieldType')}
+                        placeholder={t('customFieldsPage.modal.placeholderFieldType')}
+                    />
 
-                        <Show when={editingField()?.field_type === 'STRING'}>
-                            <TextField class="form-item" value={editingField()?.string_value || ''} onChange={(v) => setEditingField(s => ({ ...s!, string_value: v }))}>
-                                <TextField.Label class="form-label">{t('customFieldsPage.modal.labelValue')}</TextField.Label>
-                                <TextField.Input class="form-input" placeholder={t('customFieldsPage.modal.placeholderStringValue')} />
-                            </TextField>
-                        </Show>
-                        <Show when={editingField()?.field_type === 'JSON_STRING'}>
-                            <TextField class="form-item" value={editingField()?.string_value || ''} onChange={(v) => setEditingField(s => ({ ...s!, string_value: v }))}>
-                                <TextField.Label class="form-label">{t('customFieldsPage.modal.labelValue')}</TextField.Label>
-                                <TextField.Input class="form-input" placeholder={t('customFieldsPage.modal.placeholderJsonStringValue')} />
-                            </TextField>
-                        </Show>
-                        <Show when={editingField()?.field_type === 'INTEGER'}>
-                            <TextField class="form-item" value={editingField()?.integer_value?.toString() || ''} onChange={(v) => setEditingField(s => ({ ...s!, integer_value: parseInt(v, 10) || null }))}>
-                                <TextField.Label class="form-label">{t('customFieldsPage.modal.labelValue')}</TextField.Label>
-                                <TextField.Input type="number" class="form-input" placeholder={t('customFieldsPage.modal.placeholderIntegerValue')} />
-                            </TextField>
-                        </Show>
-                        <Show when={editingField()?.field_type === 'NUMBER'}>
-                            <TextField class="form-item" value={editingField()?.number_value?.toString() || ''} onChange={(v) => setEditingField(s => ({ ...s!, number_value: parseFloat(v) || null }))}>
-                                <TextField.Label class="form-label">{t('customFieldsPage.modal.labelValue')}</TextField.Label>
-                                <TextField.Input type="number" step="any" class="form-input" placeholder={t('customFieldsPage.modal.placeholderNumberValue')} />
-                            </TextField>
-                        </Show>
-                        <Show when={editingField()?.field_type === 'BOOLEAN'}>
-                            <div class="form-item flex items-center">
-                                <label for="boolean_value_checkbox" class="form-label mr-4">{t('customFieldsPage.modal.labelValue')}</label>
-                                <input
-                                    type="checkbox"
-                                    id="boolean_value_checkbox"
-                                    class="form-checkbox"
-                                    checked={editingField()?.boolean_value || false}
-                                    onChange={(e) => setEditingField(s => ({ ...s!, boolean_value: e.currentTarget.checked }))}
-                                />
-                            </div>
-                        </Show>
-
-                        <div class="form-item flex items-center">
-                            <label for="is_enabled_checkbox" class="form-label mr-4">{t('customFieldsPage.modal.labelEnabled')}</label>
+                    <Show when={editingField()?.field_type === 'STRING'}>
+                        <TextField
+                            label={t('customFieldsPage.modal.labelValue')}
+                            placeholder={t('customFieldsPage.modal.placeholderStringValue')}
+                            value={editingField()?.string_value || ''}
+                            onChange={(v) => setEditingField(s => ({ ...s!, string_value: v }))}
+                        />
+                    </Show>
+                    <Show when={editingField()?.field_type === 'JSON_STRING'}>
+                        <TextField
+                            label={t('customFieldsPage.modal.labelValue')}
+                            placeholder={t('customFieldsPage.modal.placeholderJsonStringValue')}
+                            value={editingField()?.string_value || ''}
+                            onChange={(v) => setEditingField(s => ({ ...s!, string_value: v }))}
+                        />
+                    </Show>
+                    <Show when={editingField()?.field_type === 'INTEGER'}>
+                        <NumberField
+                            label={t('customFieldsPage.modal.labelValue')}
+                            placeholder={t('customFieldsPage.modal.placeholderIntegerValue')}
+                            value={editingField()?.integer_value ?? undefined}
+                            onChange={(v) => setEditingField(s => ({ ...s!, integer_value: isNaN(v) ? null : v }))}
+                            step={1}
+                            formatOptions={{ maximumFractionDigits: 0 }}
+                        />
+                    </Show>
+                    <Show when={editingField()?.field_type === 'NUMBER'}>
+                        <NumberField
+                            label={t('customFieldsPage.modal.labelValue')}
+                            placeholder={t('customFieldsPage.modal.placeholderNumberValue')}
+                            value={editingField()?.number_value ?? undefined}
+                            onChange={(v) => setEditingField(s => ({ ...s!, number_value: isNaN(v) ? null : v }))}
+                        />
+                    </Show>
+                    <Show when={editingField()?.field_type === 'BOOLEAN'}>
+                        <div class="flex items-center space-x-2">
+                            <label for="boolean_value_checkbox" class="text-sm font-medium leading-none">{t('customFieldsPage.modal.labelValue')}</label>
                             <input
                                 type="checkbox"
-                                id="is_enabled_checkbox"
-                                class="form-checkbox"
-                                checked={editingField()?.is_enabled || false}
-                                onChange={(e) => setEditingField(s => ({ ...s!, is_enabled: e.currentTarget.checked }))}
+                                id="boolean_value_checkbox"
+                                class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                checked={editingField()?.boolean_value || false}
+                                onChange={(e) => setEditingField(s => ({ ...s!, boolean_value: e.currentTarget.checked }))}
                             />
                         </div>
+                    </Show>
 
-                        <div class="form-buttons flex justify-end gap-3 pt-4">
-                            <Button onClick={handleCloseModal} class="btn btn-default">{t('common.cancel')}</Button>
-                            <Button onClick={handleSave} class="btn btn-primary">{t('common.save')}</Button>
-                        </div>
+                    <div class="flex items-center space-x-2">
+                        <label for="is_enabled_checkbox" class="text-sm font-medium leading-none">{t('customFieldsPage.modal.labelEnabled')}</label>
+                        <input
+                            type="checkbox"
+                            id="is_enabled_checkbox"
+                            class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                            checked={editingField()?.is_enabled || false}
+                            onChange={(e) => setEditingField(s => ({ ...s!, is_enabled: e.currentTarget.checked }))}
+                        />
                     </div>
-                </div>
-            </Show>
+
+                    <DialogFooter>
+                        <Button onClick={handleCloseModal} variant="secondary">{t('common.cancel')}</Button>
+                        <Button onClick={handleSave} variant="primary">{t('common.save')}</Button>
+                    </DialogFooter>
+                </DialogContent>
+            </DialogRoot>
         </div>
     );
 }

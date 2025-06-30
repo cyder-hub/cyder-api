@@ -1,11 +1,19 @@
 import { createSignal, createEffect, For, Show, createResource, Accessor, Setter, createMemo } from 'solid-js';
 import type { Resource } from 'solid-js';
 import { useI18n } from '../i18n'; // Import the i18n hook
-import { Button } from '@kobalte/core/button';
-import { Popover } from '@kobalte/core/popover'; // Import Popover
-import { Pagination } from '@kobalte/core/pagination'; // Import Pagination
-import { Select } from '@kobalte/core/select';
-import { TextField } from '@kobalte/core/text-field';
+import { Button } from '../components/ui/Button';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/Popover';
+import { Pagination } from '../components/ui/Pagination';
+import { Select } from '../components/ui/Select';
+import { TextField } from '../components/ui/Input';
+import {
+    TableRoot,
+    TableHeader,
+    TableBody,
+    TableRow,
+    TableColumnHeader,
+    TableCell,
+} from '../components/ui/Table';
 import { request } from '../services/api'; // Import the centralized request function
 import styles from './Record.module.css';
 
@@ -164,31 +172,16 @@ export default function Record() {
         return map;
     };
 
-    const apiKeysForSelect = createMemo(() => {
-        const allKey: GlobalApiKeyItem = {
-            id: 0,
-            name: t('recordPage.filter.allApiKeys'),
-            api_key: '',
-            description: '',
-            enabled: false,
-            created_at: '',
-            updated_at: '',
-        };
-        return [allKey, ...(globalApiKeys() || [])];
+    const apiKeyOptions = createMemo(() => {
+        const allKey = { value: 0, label: t('recordPage.filter.allApiKeys') };
+        const keys = (globalApiKeys() || []).map(k => ({ value: k.id, label: k.name }));
+        return [allKey, ...keys];
     });
 
-    const providersForSelect = createMemo(() => {
-        const allProviderItem: ProviderListItem = {
-            provider: {
-                id: 0,
-                name: t('recordPage.filter.allProviders'),
-                provider_key: '',
-                endpoint: '',
-                use_proxy: false,
-                provider_type: '',
-            }
-        };
-        return [allProviderItem, ...(globalProviders() || [])];
+    const providerOptions = createMemo(() => {
+        const allProvider = { value: 0, label: t('recordPage.filter.allProviders') };
+        const providers = (globalProviders() || []).map(p => ({ value: p.provider.id, label: p.provider.name }));
+        return [allProvider, ...providers];
     });
 
     const fetchRecords = async ({ page, size, currentFilters }: FetchRecordsParams): Promise<FetchRecordsResult> => {
@@ -338,96 +331,41 @@ export default function Record() {
 
             {/* Filter Controls */}
             <div class="flex flex-wrap items-center gap-4 p-4 bg-gray-50 rounded-lg shadow-sm border border-gray-200">
-                {/* API Key Filter - Use Select instead of Select.Root */}
-                <Select<GlobalApiKeyItem> // Use GlobalApiKeyItem
-                    value={apiKeysForSelect().find(k => k.id === filters().api_key_id)}
-                    onChange={(selectedItem) => setFilters(f => ({ ...f, api_key_id: selectedItem!.id }))}
-                    options={apiKeysForSelect()}
-                    optionValue="id"
-                    optionTextValue="name"
-                    disallowEmptySelection
-                    itemComponent={props => (
-                        <Select.Item item={props.item} class="flex justify-between items-center px-3 py-1.5 text-sm text-gray-700 ui-highlighted:bg-blue-100 ui-highlighted:text-blue-700 ui-selected:font-semibold outline-none cursor-default">
-                            <Select.ItemLabel>{props.item.rawValue.name}</Select.ItemLabel>
-                            <Select.ItemIndicator class="text-blue-600">✓</Select.ItemIndicator>
-                        </Select.Item>
-                    )}
+                <Select
+                    value={apiKeyOptions().find(k => k.value === filters().api_key_id)}
+                    onChange={(selectedItem) => setFilters(f => ({ ...f, api_key_id: selectedItem!.value }))}
+                    optionValue="value"
+                    optionTextValue="label"
+                    options={apiKeyOptions()}
                     class="flex-grow md:flex-grow-0"
-                >
-                    <Select.Label class="sr-only">API Key</Select.Label>
-                    <Select.Trigger class="form-select flex justify-between items-center w-full px-3 py-2 text-base font-normal text-gray-700 bg-white bg-clip-padding bg-no-repeat border border-solid border-gray-300 rounded transition ease-in-out m-0 focus:text-gray-700 focus:bg-white focus:border-blue-600 focus:outline-none shadow-sm" aria-label="Filter by API Key">
-                        <Select.Value<GlobalApiKeyItem>>
-                            {state => state.selectedOption()!.name}
-                        </Select.Value>
-                        <Select.Icon class="ml-2 text-gray-500">▼</Select.Icon>
-                    </Select.Trigger>
-                    <Select.Portal>
-                        <Select.Content class="bg-white border border-gray-300 rounded shadow-lg mt-1 z-50">
-                            <Select.Listbox class="max-h-60 overflow-y-auto py-1">
-                            </Select.Listbox>
-                        </Select.Content>
-                    </Select.Portal>
-                </Select>
-
-                {/* Provider Filter - Use Select instead of Select.Root */}
-                <Select<ProviderListItem>
-                    value={providersForSelect().find(p => p.provider.id === filters().provider_id)}
-                    options={providersForSelect()}
-                    optionValue={item => item.provider.id} // Use accessor for complex object
-                    optionTextValue={item => item.provider.name} // Use accessor for complex object
-                    onChange={(selectedItem) => setFilters(f => ({ ...f, provider_id: selectedItem!.provider.id }))}
-                    disallowEmptySelection
-                    itemComponent={props => (
-                        <Select.Item item={props.item} class="flex justify-between items-center px-3 py-1.5 text-sm text-gray-700 ui-highlighted:bg-blue-100 ui-highlighted:text-blue-700 ui-selected:font-semibold outline-none cursor-default">
-                            {/* Access provider.name for display in the dropdown list */}
-                            <Select.ItemLabel>{props.item.rawValue.provider.name}</Select.ItemLabel>
-                            <Select.ItemIndicator class="text-blue-600">✓</Select.ItemIndicator>
-                        </Select.Item>
-                    )}
+                />
+                <Select
+                    value={providerOptions().find(p => p.value === filters().provider_id)}
+                    onChange={(selectedItem) => setFilters(f => ({ ...f, provider_id: selectedItem!.value }))}
+                    optionValue="value"
+                    optionTextValue="label"
+                    options={providerOptions()}
                     class="flex-grow md:flex-grow-0"
-                >
-                    <Select.Label class="sr-only">Provider</Select.Label>
-                    <Select.Trigger class="form-select flex justify-between items-center w-full px-3 py-2 text-base font-normal text-gray-700 bg-white bg-clip-padding bg-no-repeat border border-solid border-gray-300 rounded transition ease-in-out m-0 focus:text-gray-700 focus:bg-white focus:border-blue-600 focus:outline-none shadow-sm" aria-label="Filter by Provider">
-                        {/* Access provider.name for display in the trigger */}
-                        <Select.Value<ProviderListItem>>
-                            {state => state.selectedOption()!.provider.name}
-                        </Select.Value>
-                        <Select.Icon class="ml-2 text-gray-500">▼</Select.Icon>
-                    </Select.Trigger>
-                    <Select.Portal>
-                        <Select.Content class="bg-white border border-gray-300 rounded shadow-lg mt-1 z-50">
-                            <Select.Listbox class="max-h-60 overflow-y-auto py-1">
-                            </Select.Listbox>
-                        </Select.Content>
-                    </Select.Portal>
-                </Select>
-
-                {/* Model Name Filter */}
+                />
                 <TextField
-                    value={modelNameInput()} // Bind to the intermediate signal
-                    onChange={setModelNameInput} // Update the intermediate signal directly
+                    value={modelNameInput()}
+                    onChange={setModelNameInput}
+                    placeholder="Model Name"
                     class="flex-grow md:flex-grow-0"
-                >
-                    <TextField.Label class="sr-only">Model Name</TextField.Label>
-                    <TextField.Input
-                        placeholder="Model Name"
-                        class="form-input block w-full px-3 py-2 text-base font-normal text-gray-700 bg-white bg-clip-padding border border-solid border-gray-300 rounded transition ease-in-out m-0 focus:text-gray-700 focus:bg-white focus:border-blue-600 focus:outline-none shadow-sm"
-                        aria-label="Filter by Model Name"
-                    />
-                </TextField>
+                />
 
                 {/* Action Buttons */}
                 <div class="flex gap-2 flex-wrap">
                     <Button
                         onClick={applyFilter}
-                        class="btn bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded shadow-sm transition duration-150 ease-in-out"
+                        variant="primary"
                     >
                         {t('recordPage.filter.applyButton')}
                     </Button>
                     <Show when={filters().api_key_id || filters().provider_id || filters().model_name}>
                         <Button
                             onClick={resetFilter}
-                            class="btn bg-gray-500 hover:bg-gray-600 text-white font-medium py-2 px-4 rounded shadow-sm transition duration-150 ease-in-out"
+                            variant="secondary"
                         >
                             {t('recordPage.filter.resetButton')}
                         </Button>
@@ -446,42 +384,41 @@ export default function Record() {
             </Show>
             <Show when={!recordsResult.loading && !recordsResult.error}>
                 <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200">
-                    <table class="min-w-full divide-y divide-gray-200">
-                        <thead class="bg-gray-100">
-                            <tr>
-                                {/* Updated headers */}
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.modelName')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.provider')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.apiKey')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.status')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.promptTokens')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.completionTokens')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.reasoningTokens')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.totalTokens')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.stream')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.firstResp')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.totalResp')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.tps')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.cost')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.requestTime')}</th>
-                                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">{t('recordPage.table.details')}</th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
+                    <TableRoot>
+                        <TableHeader>
+                            <TableRow>
+                                <TableColumnHeader>{t('recordPage.table.modelName')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.provider')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.apiKey')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.status')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.promptTokens')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.completionTokens')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.reasoningTokens')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.totalTokens')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.stream')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.firstResp')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.totalResp')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.tps')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.cost')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.requestTime')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.details')}</TableColumnHeader>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
                             <For each={recordsResult()?.list} fallback={
-                                <tr>
-                                    <td colSpan={15} class="text-center py-6 text-gray-500"> {/* Updated colSpan */}
+                                <TableRow>
+                                    <TableCell colSpan={15} class="text-center py-6">
                                         <Show when={recordsResult()?.total === 0}>{t('recordPage.table.noRecordsMatch')}</Show>
                                         <Show when={!recordsResult()?.total}>{t('recordPage.table.noRecordsAvailable')}</Show>
-                                    </td>
-                                </tr>
+                                    </TableCell>
+                                </TableRow>
                             }>
                                 {(record: RecordItem) => (
-                                    <tr class="hover:bg-gray-50 transition duration-150 ease-in-out">
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-800">{record.model_name || '/'}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{record.providerName}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{record.apiKeyName}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm">
+                                    <TableRow>
+                                        <TableCell>{record.model_name || '/'}</TableCell>
+                                        <TableCell>{record.providerName}</TableCell>
+                                        <TableCell>{record.apiKeyName}</TableCell>
+                                        <TableCell>
                                             <span class={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${record.status === 'SUCCESS' ? 'bg-green-100 text-green-800' :
                                                     record.status === 'ERROR' ? 'bg-red-100 text-red-800' :
                                                         record.status === 'PENDING' ? 'bg-yellow-100 text-yellow-800' :
@@ -489,46 +426,44 @@ export default function Record() {
                                                 }`}>
                                                 {record.status || t('common.notAvailable')}
                                             </span>
-                                        </td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 text-right">{record.prompt_tokens ?? '/'}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 text-right">{record.completion_tokens ?? '/'}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 text-right">{record.reasoning_tokens ?? '/'}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 text-right">{record.total_tokens ?? '/'}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{record.isStreamDisplay}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 text-right">{record.firstRespTimeDisplay}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 text-right">{record.totalRespTimeDisplay}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 text-right">{record.tpsDisplay}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600 text-right">{record.costDisplay}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">{record.request_at_formatted}</td>
-                                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                                        </TableCell>
+                                        <TableCell class="text-right">{record.prompt_tokens ?? '/'}</TableCell>
+                                        <TableCell class="text-right">{record.completion_tokens ?? '/'}</TableCell>
+                                        <TableCell class="text-right">{record.reasoning_tokens ?? '/'}</TableCell>
+                                        <TableCell class="text-right">{record.total_tokens ?? '/'}</TableCell>
+                                        <TableCell>{record.isStreamDisplay}</TableCell>
+                                        <TableCell class="text-right">{record.firstRespTimeDisplay}</TableCell>
+                                        <TableCell class="text-right">{record.totalRespTimeDisplay}</TableCell>
+                                        <TableCell class="text-right">{record.tpsDisplay}</TableCell>
+                                        <TableCell class="text-right">{record.costDisplay}</TableCell>
+                                        <TableCell>{record.request_at_formatted}</TableCell>
+                                        <TableCell>
                                             <Popover
                                                 gutter={8}
                                                 onOpenChange={(isOpen) => isOpen ? setExpandedRecordId(record.id) : setExpandedRecordId(null)}
                                             >
-                                                <Popover.Trigger asChild>
+                                                <PopoverTrigger asChild>
                                                     <button class="text-blue-600 hover:text-blue-800 text-sm font-medium focus:outline-none">
                                                         {t('recordPage.table.viewDetails')}
                                                     </button>
-                                                </Popover.Trigger>
-                                                <Popover.Portal>
-                                                    <Popover.Content class="bg-white border border-gray-300 rounded-md shadow-lg p-4 z-50 max-w-lg max-h-96 overflow-auto">
-                                                        <Show
-                                                            when={!detailedRecordData.loading && detailedRecordData()}
-                                                            fallback={<p>{detailedRecordData.loading ? t('recordPage.loading') : t('recordPage.errorPrefix')}</p>}
-                                                        >
-                                                            <pre class="text-xs bg-gray-50 p-2 rounded-md whitespace-pre-wrap break-all">
-                                                                {JSON.stringify(detailedRecordData(), null, 2)}
-                                                            </pre>
-                                                        </Show>
-                                                    </Popover.Content>
-                                                </Popover.Portal>
+                                                </PopoverTrigger>
+                                                <PopoverContent class="p-4 max-w-lg max-h-96 overflow-auto">
+                                                    <Show
+                                                        when={!detailedRecordData.loading && detailedRecordData()}
+                                                        fallback={<p>{detailedRecordData.loading ? t('recordPage.loading') : t('recordPage.errorPrefix')}</p>}
+                                                    >
+                                                        <pre class="text-xs bg-gray-50 p-2 rounded-md whitespace-pre-wrap break-all">
+                                                            {JSON.stringify(detailedRecordData(), null, 2)}
+                                                        </pre>
+                                                    </Show>
+                                                </PopoverContent>
                                             </Popover>
-                                        </td>
-                                    </tr>
+                                        </TableCell>
+                                    </TableRow>
                                 )}
                             </For>
-                        </tbody>
-                    </table>
+                        </TableBody>
+                    </TableRoot>
                 </div>
             </Show>
 
@@ -541,28 +476,18 @@ export default function Record() {
                         page={currentPage()}
                         onPageChange={setCurrentPage}
                         itemComponent={props => (
-                            <Pagination.Item
-                                page={props.page}
-                                class={`px-3 py-1.5 rounded border text-sm font-medium transition-colors duration-150 ease-in-out ${props.page === currentPage()
-                                    ? 'bg-blue-600 text-white border-blue-600 z-10'
-                                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50 ui-disabled:opacity-50 ui-disabled:cursor-not-allowed'
-                                    }`}
-                            >
+                            <Pagination.Item page={props.page}>
                                 {props.page}
                             </Pagination.Item>
                         )}
                         ellipsisComponent={() => (
-                            <Pagination.Ellipsis class="px-3 py-1.5 text-gray-500">...</Pagination.Ellipsis>
+                            <Pagination.Ellipsis />
                         )}
                         class={styles.pagination}
                     >
-                        <Pagination.Previous class="px-3 py-1.5 rounded border border-gray-300 bg-white text-gray-600 hover:bg-gray-100 ui-disabled:opacity-50 ui-disabled:cursor-not-allowed transition duration-150 ease-in-out" aria-label={t('recordPage.pagination.previousPage')}>
-                            {'<'}
-                        </Pagination.Previous>
+                        <Pagination.Previous aria-label={t('recordPage.pagination.previousPage')} />
                         <Pagination.Items />
-                        <Pagination.Next class="px-3 py-1.5 rounded border border-gray-300 bg-white text-gray-600 hover:bg-gray-100 ui-disabled:opacity-50 ui-disabled:cursor-not-allowed transition duration-150 ease-in-out" aria-label={t('recordPage.pagination.nextPage')}>
-                            {'>'}
-                        </Pagination.Next>
+                        <Pagination.Next aria-label={t('recordPage.pagination.nextPage')} />
                     </Pagination>
 
                     {/* Page Info and Size Selector */}
@@ -572,7 +497,7 @@ export default function Record() {
                         </div>
                         <div class="flex items-center space-x-2">
                             <label for="page-size-select" class="text-sm text-gray-700 whitespace-nowrap">{t('recordPage.pagination.itemsPerPage')}</label>
-                            <Select<number>
+                            <Select
                                 value={pageSize()}
                                 options={[10, 25, 50, 100]}
                                 onChange={(value) => {
@@ -582,24 +507,8 @@ export default function Record() {
                                         setCurrentPage(1);
                                     }
                                 }}
-                                itemComponent={props => (
-                                    <Select.Item item={props.item} class="flex justify-between items-center px-3 py-1.5 text-sm text-gray-700 ui-highlighted:bg-blue-100 ui-highlighted:text-blue-700 ui-selected:font-semibold outline-none cursor-default">
-                                        <Select.ItemLabel>{props.item.rawValue}</Select.ItemLabel>
-                                        <Select.ItemIndicator class="text-blue-600">✓</Select.ItemIndicator>
-                                    </Select.Item>
-                                )}
-                            >
-                                <Select.Trigger class="form-select flex justify-between items-center w-auto px-3 py-1.5 text-base font-normal text-gray-700 bg-white bg-clip-padding bg-no-repeat border border-solid border-gray-300 rounded transition ease-in-out m-0 focus:text-gray-700 focus:bg-white focus:border-blue-600 focus:outline-none shadow-sm" aria-label="Select number of items per page">
-                                    <Select.Value<number>>{state => state.selectedOption()}</Select.Value>
-                                    <Select.Icon class="ml-2 text-gray-500">▼</Select.Icon>
-                                </Select.Trigger>
-                                <Select.Portal>
-                                    <Select.Content class="bg-white border border-gray-300 rounded shadow-lg mt-1 z-50">
-                                        <Select.Listbox class="py-1">
-                                        </Select.Listbox>
-                                    </Select.Content>
-                                </Select.Portal>
-                            </Select>
+                                class="w-auto"
+                            />
                         </div>
                     </div>
                 </div>

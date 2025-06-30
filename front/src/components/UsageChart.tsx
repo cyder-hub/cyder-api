@@ -14,6 +14,8 @@ import {
 } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import ECharts from './ECharts';
+import { Button } from './ui/Button';
+import { Select } from './ui/Select';
 
 echarts.use([
   TitleComponent,
@@ -168,6 +170,38 @@ export default function UsageChart() {
     const [selectedMetric, setSelectedMetric] = createSignal<UsageMetric>('total_tokens');
     const [chartType, setChartType] = createSignal<'line' | 'bar'>('line');
     const [usageStats, { refetch: refetchUsageStats }] = createResource(timeRange, fetchUsageStats, { storage: createSignal });
+
+    const chartTypeOptions = createMemo(() => [
+        { value: 'line' as const, label: t('dashboard.usageStats.chartTypes.line') },
+        { value: 'bar' as const, label: t('dashboard.usageStats.chartTypes.bar') }
+    ]);
+
+    const metricOptions = createMemo(() => ([
+        { value: 'total_tokens' as const, label: t('dashboard.usageStats.metrics.total_tokens') },
+        { value: 'prompt_tokens' as const, label: t('dashboard.usageStats.metrics.prompt_tokens') },
+        { value: 'completion_tokens' as const, label: t('dashboard.usageStats.metrics.completion_tokens') },
+        { value: 'reasoning_tokens' as const, label: t('dashboard.usageStats.metrics.reasoning_tokens') },
+        { value: 'request_count' as const, label: t('dashboard.usageStats.metrics.request_count') },
+        { value: 'total_cost' as const, label: t('dashboard.usageStats.metrics.total_cost') }
+    ]));
+
+    const timeRangeOptions = createMemo(() => ([
+        { value: 'last_1_hour' as const, label: t('dashboard.usageStats.timeRanges.last_1_hour') },
+        { value: 'last_3_hours' as const, label: t('dashboard.usageStats.timeRanges.last_3_hours') },
+        { value: 'last_6_hours' as const, label: t('dashboard.usageStats.timeRanges.last_6_hours') },
+        { value: 'last_24_hours' as const, label: t('dashboard.usageStats.timeRanges.last_24_hours') },
+        { value: 'today' as const, label: t('dashboard.usageStats.timeRanges.today') },
+        { value: 'yesterday' as const, label: t('dashboard.usageStats.timeRanges.yesterday') },
+        { value: 'this_week' as const, label: t('dashboard.usageStats.timeRanges.this_week') },
+        { value: 'last_7_days' as const, label: t('dashboard.usageStats.timeRanges.last_7_days') },
+        { value: 'previous_week' as const, label: t('dashboard.usageStats.timeRanges.previous_week') },
+        { value: 'this_month' as const, label: t('dashboard.usageStats.timeRanges.this_month') },
+        { value: 'last_30_days' as const, label: t('dashboard.usageStats.timeRanges.last_30_days') },
+        { value: 'previous_month' as const, label: t('dashboard.usageStats.timeRanges.previous_month') },
+        { value: 'last_6_months' as const, label: t('dashboard.usageStats.timeRanges.last_6_months') },
+        { value: 'this_year' as const, label: t('dashboard.usageStats.timeRanges.this_year') },
+        { value: 'last_1_year' as const, label: t('dashboard.usageStats.timeRanges.last_1_year') }
+    ]));
 
     const formatMetric = (value: number, metric: UsageMetric, currency?: string) => {
         if (metric === 'total_cost' && currency) {
@@ -533,55 +567,40 @@ export default function UsageChart() {
                         </span>
                     </Show>
                 </div>
-                <div class="flex items-center">
-                    <select
-                        value={chartType()}
-                        onChange={(e) => setChartType(e.currentTarget.value as 'line' | 'bar')}
-                        class="px-3 py-1 border border-gray-300 rounded-md mr-2"
-                    >
-                        <option value="line">{t('dashboard.usageStats.chartTypes.line')}</option>
-                        <option value="bar">{t('dashboard.usageStats.chartTypes.bar')}</option>
-                    </select>
-                    <select
-                        value={selectedMetric()}
-                        onChange={(e) => setSelectedMetric(e.currentTarget.value as UsageMetric)}
-                        class="px-3 py-1 border border-gray-300 rounded-md mr-2"
-                    >
-                        <option value="total_tokens">{t('dashboard.usageStats.metrics.total_tokens')}</option>
-                        <option value="prompt_tokens">{t('dashboard.usageStats.metrics.prompt_tokens')}</option>
-                        <option value="completion_tokens">{t('dashboard.usageStats.metrics.completion_tokens')}</option>
-                        <option value="reasoning_tokens">{t('dashboard.usageStats.metrics.reasoning_tokens')}</option>
-                        <option value="request_count">{t('dashboard.usageStats.metrics.request_count')}</option>
-                        <option value="total_cost">{t('dashboard.usageStats.metrics.total_cost')}</option>
-                    </select>
-                    <select
-                        value={timeRange()}
-                        onChange={(e) => setTimeRange(e.currentTarget.value as TimeRange)}
-                        class="px-3 py-1 border border-gray-300 rounded-md"
-                    >
-                        <option value="last_1_hour">{t('dashboard.usageStats.timeRanges.last_1_hour')}</option>
-                        <option value="last_3_hours">{t('dashboard.usageStats.timeRanges.last_3_hours')}</option>
-                        <option value="last_6_hours">{t('dashboard.usageStats.timeRanges.last_6_hours')}</option>
-                        <option value="last_24_hours">{t('dashboard.usageStats.timeRanges.last_24_hours')}</option>
-                        <option value="today">{t('dashboard.usageStats.timeRanges.today')}</option>
-                        <option value="yesterday">{t('dashboard.usageStats.timeRanges.yesterday')}</option>
-                        <option value="this_week">{t('dashboard.usageStats.timeRanges.this_week')}</option>
-                        <option value="last_7_days">{t('dashboard.usageStats.timeRanges.last_7_days')}</option>
-                        <option value="previous_week">{t('dashboard.usageStats.timeRanges.previous_week')}</option>
-                        <option value="this_month">{t('dashboard.usageStats.timeRanges.this_month')}</option>
-                        <option value="last_30_days">{t('dashboard.usageStats.timeRanges.last_30_days')}</option>
-                        <option value="previous_month">{t('dashboard.usageStats.timeRanges.previous_month')}</option>
-                        <option value="last_6_months">{t('dashboard.usageStats.timeRanges.last_6_months')}</option>
-                        <option value="this_year">{t('dashboard.usageStats.timeRanges.this_year')}</option>
-                        <option value="last_1_year">{t('dashboard.usageStats.timeRanges.last_1_year')}</option>
-                    </select>
-                    <button
+                <div class="flex items-center space-x-2">
+                    <Select
+                        value={chartTypeOptions().find(o => o.value === chartType())}
+                        onChange={(v) => setChartType(v.value)}
+                        options={chartTypeOptions()}
+                        optionValue="value"
+                        optionTextValue="label"
+                        class="w-32"
+                    />
+                    <Select
+                        value={metricOptions().find(o => o.value === selectedMetric())}
+                        onChange={(v) => setSelectedMetric(v.value)}
+                        options={metricOptions()}
+                        optionValue="value"
+                        optionTextValue="label"
+                        class="w-48"
+                    />
+                    <Select
+                        value={timeRangeOptions().find(o => o.value === timeRange())}
+                        onChange={(v) => setTimeRange(v.value)}
+                        options={timeRangeOptions()}
+                        optionValue="value"
+                        optionTextValue="label"
+                        class="w-48"
+                    />
+                    <Button
                         onClick={() => refetchUsageStats()}
-                        class="ml-2 px-3 py-1 border border-gray-300 rounded-md bg-white hover:bg-gray-50"
+                        variant="ghost"
+                        size="sm"
+                        class="border border-gray-300"
                         disabled={usageStats.loading}
                     >
                         {t('common.refresh')}
-                    </button>
+                    </Button>
                 </div>
             </div>
             <Show when={usageStats() || !usageStats.loading} fallback={<p>{t('loading')}</p>}>

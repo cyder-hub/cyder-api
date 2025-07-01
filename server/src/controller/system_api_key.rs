@@ -13,7 +13,6 @@ use cyder_tools::log::warn;
 
 #[derive(Deserialize)]
 struct InsertApiKeyRequest { // Renamed for clarity
-    api_key_value: String, // Renamed from key
     name: String,
     access_control_policy_id: Option<i64>,
     description: Option<String>,
@@ -35,7 +34,6 @@ async fn insert_one(
 ) -> DbResult<HttpResult<SystemApiKey>> {
     let created_api_key = SystemApiKey::create(
         &payload.name,
-        &payload.api_key_value,
         payload.description.as_deref(),
         payload.access_control_policy_id,
     )?;

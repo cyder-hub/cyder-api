@@ -38,7 +38,7 @@ use crate::{
         model::Model,
         custom_field::CustomFieldDefinition,
         provider::Provider,
-        price::{BillingPlan, PriceRule},
+        price::PriceRule,
         request_log::{NewRequestLog, RequestLog, RequestLogStatus, UpdateRequestLogData},
         system_api_key::SystemApiKey,
     },

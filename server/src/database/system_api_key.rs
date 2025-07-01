@@ -1,6 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
 use serde::Deserialize; // For potential deserialization into New/Update structs if needed from API
+use rand::{distr::Alphanumeric, Rng};
 
 use super::{get_connection, DbResult};
 use crate::service::app_state::Storable;
@@ -64,16 +65,22 @@ impl SystemApiKey {
     /// Creates a new system API key.
     pub fn create(
         name: &str,
-        api_key_value: &str,
         description: Option<&str>,
         access_control_policy_id: Option<i64>,
     ) -> DbResult<SystemApiKey> {
         let now = Utc::now().timestamp_millis();
         let new_key_id = ID_GENERATOR.generate_id();
 
+        let random_part: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(48)
+            .map(char::from)
+            .collect();
+        let api_key_value = format!("cyder-{}", random_part);
+
         let new_system_api_key_data = NewSystemApiKey {
             id: new_key_id,
-            api_key: api_key_value.to_string(),
+            api_key: api_key_value,
             name: name.to_string(),
             description: description.map(|s| s.to_string()),
             access_control_policy_id,

@@ -76,6 +76,7 @@ interface Filters {
     api_key_id: number;
     provider_id: number;
     model_name: string;
+    status: string;
 }
 
 // This interface now represents the actual values passed to fetchRecords
@@ -118,7 +119,8 @@ export default function Record() {
     const [filters, setFilters] = createSignal<Filters>({
         api_key_id: 0,
         provider_id: 0,
-        model_name: ''
+        model_name: '',
+        status: 'ALL'
     });
 
     // Fetch static data
@@ -184,6 +186,12 @@ export default function Record() {
         return [allProvider, ...providers];
     });
 
+    const statusOptions = createMemo(() => {
+        const allStatus = { value: 'ALL', label: t('recordPage.filter.allStatuses') };
+        const statuses = ['SUCCESS', 'PENDING', 'ERROR'].map(s => ({ value: s, label: t(`recordPage.filter.status.${s}`) }));
+        return [allStatus, ...statuses];
+    });
+
     const fetchRecords = async ({ page, size, currentFilters }: FetchRecordsParams): Promise<FetchRecordsResult> => {
         try {
             let queryParams = `page=${page}&page_size=${size}`;
@@ -193,6 +201,9 @@ export default function Record() {
             }
             if (currentFilters.model_name) {
                 queryParams += `&model_name=${encodeURIComponent(currentFilters.model_name)}`;
+            }
+            if (currentFilters.status && currentFilters.status !== 'ALL') {
+                queryParams += `&status=${encodeURIComponent(currentFilters.status)}`;
             }
             if (currentFilters.api_key_id) {
                 queryParams += `&system_api_key_id=${encodeURIComponent(currentFilters.api_key_id)}`;
@@ -298,7 +309,7 @@ export default function Record() {
 
     const resetFilter = () => {
         setModelNameInput(''); // Clear debounced input as well
-        setFilters({ api_key_id: 0, provider_id: 0, model_name: '' });
+        setFilters({ api_key_id: 0, provider_id: 0, model_name: '', status: 'ALL' });
         setCurrentPage(1);
     };
 
@@ -347,6 +358,14 @@ export default function Record() {
                     options={providerOptions()}
                     class="flex-grow md:flex-grow-0"
                 />
+                <Select
+                    value={statusOptions().find(s => s.value === filters().status)}
+                    onChange={(selectedItem) => setFilters(f => ({ ...f, status: selectedItem!.value }))}
+                    optionValue="value"
+                    optionTextValue="label"
+                    options={statusOptions()}
+                    class="flex-grow md:flex-grow-0"
+                />
                 <TextField
                     value={modelNameInput()}
                     onChange={setModelNameInput}
@@ -362,7 +381,7 @@ export default function Record() {
                     >
                         {t('recordPage.filter.applyButton')}
                     </Button>
-                    <Show when={filters().api_key_id || filters().provider_id || filters().model_name}>
+                    <Show when={filters().api_key_id || filters().provider_id || filters().model_name || filters().status}>
                         <Button
                             onClick={resetFilter}
                             variant="secondary"

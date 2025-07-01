@@ -1,12 +1,14 @@
 use crate::database::model_alias::{ModelAlias, ModelAliasDetails, UpdateModelAliasData}; // Updated import
 use crate::database::DbResult;
 use axum::{
-    extract::Path,
+    extract::{Path, State},
     routing::{delete, get, post, put},
-    Json, // Router will be replaced by StateRouter
+    Json,
 };
 use serde::Deserialize;
-use crate::service::app_state::{create_state_router, StateRouter};
+use std::sync::Arc;
+
+use crate::service::app_state::{create_state_router, AppState, StateRouter};
 use crate::utils::HttpResult;
 
 #[derive(Deserialize)]
@@ -27,19 +29,29 @@ struct UpdateAliasRequest {
     is_enabled: Option<bool>,
 }
 
-async fn create_alias(Json(payload): Json<CreateAliasRequest>) -> DbResult<HttpResult<ModelAlias>> {
-    let created_alias = ModelAlias::create(
+async fn create_alias(
+    State(app_state): State<Arc<AppState>>,
+    Json(payload): Json<CreateAliasRequest>,
+) -> DbResult<HttpResult<ModelAlias>> {
+    let created_alias_from_db = ModelAlias::create(
         &payload.alias_name,
         payload.target_model_id,
         payload.description.as_deref(),
         payload.priority,
         payload.is_enabled,
     )?;
-    Ok(HttpResult::new(created_alias))
+    let created_alias_in_store = app_state
+        .model_alias_store
+        .add(created_alias_from_db.clone())?;
+    Ok(HttpResult::new(created_alias_in_store))
 }
 
-async fn delete_alias(Path(id): Path<i64>) -> DbResult<HttpResult<()>> {
+async fn delete_alias(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> DbResult<HttpResult<()>> {
     ModelAlias::delete(id)?; // delete returns DbResult<usize>
+    app_state.model_alias_store.delete(id)?;
     Ok(HttpResult::new(()))
 }
 
@@ -49,6 +61,7 @@ async fn list_aliases() -> DbResult<HttpResult<Vec<ModelAliasDetails>>> {
 }
 
 async fn update_alias(
+    State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateAliasRequest>,
 ) -> DbResult<HttpResult<ModelAlias>> {
@@ -59,8 +72,11 @@ async fn update_alias(
         priority: payload.priority,
         is_enabled: payload.is_enabled,
     };
-    let updated_alias = ModelAlias::update(id, &update_data)?;
-    Ok(HttpResult::new(updated_alias))
+    let updated_alias_from_db = ModelAlias::update(id, &update_data)?;
+    let updated_alias_in_store = app_state
+        .model_alias_store
+        .update(updated_alias_from_db.clone())?;
+    Ok(HttpResult::new(updated_alias_in_store))
 }
 
 async fn get_alias(Path(id): Path<i64>) -> DbResult<HttpResult<ModelAlias>> {

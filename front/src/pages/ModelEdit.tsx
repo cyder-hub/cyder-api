@@ -330,42 +330,6 @@ export default function ModelEdit() {
                         <label for="is_enabled_model_checkbox" class="text-sm font-medium leading-none">{t('modelEditPage.labelEnabled')}</label>
                     </div>
 
-                    {/* Custom Fields Section */}
-                    <div class="section">
-                        <h3 class="section-title">{t('modelEditPage.sectionCustomFields')}</h3>
-                        <div class="section-header grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center">
-                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldName')}</span>
-                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldValue')}</span>
-                            <span class="font-semibold">{t('modelEditPage.tableHeaderDescription')}</span>
-                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldType')}</span>
-                            <span></span>
-                        </div>
-                        <For each={editingData!.custom_fields}>
-                            {(field, index) => (
-                                <div class="section-row grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center mb-2">
-                                    <TextField value={field.field_name} disabled />
-                                    <TextField value={field.field_value} disabled />
-                                    <TextField value={field.description ?? ''} disabled />
-                                    <TextField value={field.field_type} disabled />
-                                    <Button variant="destructive" size="sm" onClick={() => handleUnlinkCustomField(field.id, index())}>{t('common.delete')}</Button>
-                                </div>
-                            )}
-                        </For>
-                        <div class="mt-4 flex items-center gap-2">
-                            <Select
-                                value={availableCustomFields().find(f => f.id === selectedCustomFieldId())}
-                                onChange={(v) => setSelectedCustomFieldId(v ? v.id : null)}
-                                options={availableCustomFields()}
-                                optionValue="id"
-                                optionTextValue="field_name"
-                                placeholder={t('modelEditPage.placeholderSelectCustomField')}
-                            />
-                            <Button variant="primary" size="sm" onClick={handleLinkCustomField} disabled={!selectedCustomFieldId()}>
-                                {t('modelEditPage.buttonAddCustomField')}
-                            </Button>
-                        </div>
-                    </div>
-
                     {/* Price Management Section */}
                     <div class="section">
                         <h3 class="section-title">{t('modelEditPage.priceSection.title')}</h3>
@@ -423,6 +387,42 @@ export default function ModelEdit() {
                                 </Show>
                             </div>
                         </Show>
+                    </div>
+
+                    {/* Custom Fields Section */}
+                    <div class="section">
+                        <h3 class="section-title">{t('modelEditPage.sectionCustomFields')}</h3>
+                        <div class="section-header grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center">
+                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldName')}</span>
+                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldValue')}</span>
+                            <span class="font-semibold">{t('modelEditPage.tableHeaderDescription')}</span>
+                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldType')}</span>
+                            <span></span>
+                        </div>
+                        <For each={editingData!.custom_fields}>
+                            {(field, index) => (
+                                <div class="section-row grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center mb-2">
+                                    <TextField value={field.field_name} disabled />
+                                    <TextField value={field.field_value} disabled />
+                                    <TextField value={field.description ?? ''} disabled />
+                                    <TextField value={field.field_type} disabled />
+                                    <Button variant="destructive" size="sm" onClick={() => handleUnlinkCustomField(field.id, index())}>{t('common.delete')}</Button>
+                                </div>
+                            )}
+                        </For>
+                        <div class="mt-4 flex items-center gap-2">
+                            <Select
+                                value={availableCustomFields().find(f => f.id === selectedCustomFieldId())}
+                                onChange={(v) => setSelectedCustomFieldId(v ? v.id : null)}
+                                options={availableCustomFields()}
+                                optionValue="id"
+                                optionTextValue="field_name"
+                                placeholder={t('modelEditPage.placeholderSelectCustomField')}
+                            />
+                            <Button variant="primary" size="sm" onClick={handleLinkCustomField} disabled={!selectedCustomFieldId()}>
+                                {t('modelEditPage.buttonAddCustomField')}
+                            </Button>
+                        </div>
                     </div>
 
                     <div class="mt-6 flex justify-end space-x-2 pt-4 border-t">

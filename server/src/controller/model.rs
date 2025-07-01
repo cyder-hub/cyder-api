@@ -65,10 +65,10 @@ async fn delete_model(
 #[derive(Debug, Deserialize)]
 pub struct UpdateModelRequest {
     // pub provider_id: Option<i64>, // Removed: Provider ID is not updatable this way
-    pub model_name: Option<String>,
-    pub real_model_name: Option<Option<String>>, // Allow setting real_model_name to null
-    pub is_enabled: Option<bool>,
-    pub billing_plan_id: Option<Option<i64>>,
+    pub model_name: String,
+    pub real_model_name: Option<String>,
+    pub is_enabled: bool,
+    pub billing_plan_id: Option<i64>,
 }
 
 async fn update_model(
@@ -77,10 +77,10 @@ async fn update_model(
     Json(request): Json<UpdateModelRequest>,
 ) -> Result<HttpResult<Model>, BaseError> {
     let update_data = UpdateModelData {
-        model_name: request.model_name,
-        real_model_name: request.real_model_name,
-        is_enabled: request.is_enabled,
-        billing_plan_id: request.billing_plan_id,
+        model_name: Some(request.model_name),
+        real_model_name: Some(request.real_model_name),
+        is_enabled: Some(request.is_enabled),
+        billing_plan_id: Some(request.billing_plan_id),
     };
     let updated_model = Model::update(id, &update_data)?;
 

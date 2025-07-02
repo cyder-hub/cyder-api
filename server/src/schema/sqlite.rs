@@ -189,6 +189,8 @@ diesel::table! {
         completion_tokens -> Nullable<Integer>,
         reasoning_tokens -> Nullable<Integer>,
         total_tokens -> Nullable<Integer>,
+        channel -> Nullable<Text>,
+        external_id -> Nullable<Text>,
     }
 }
 
@@ -204,6 +206,8 @@ diesel::table! {
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
         updated_at -> BigInt,
+        #[sql_name = "ref"]
+        ref_ -> Nullable<Text>,
     }
 }
 

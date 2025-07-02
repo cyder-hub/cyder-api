@@ -13,6 +13,7 @@ import { request } from '../services/api';
 import { apiKeys as globalApiKeys, refetchApiKeys as globalRefetchApiKeys } from '../store/apiKeyStore';
 import type { ApiKeyItem } from '../store/types';
 import ApiKeyEditModal from '../components/ApiKeyEditModal'; // Import the new modal component
+import IssueTokenModal from '../components/IssueTokenModal';
 import { fetchPoliciesAPI, type AccessControlPolicyFromAPI } from './AccessControlPage';
 // EditingApiKeyData interface is now in ApiKeyEditModal.tsx
 
@@ -34,13 +35,20 @@ export default function ApiKeyPage() {
     const [t] = useI18n(); // Initialize the t function
     const [policies] = createResource<AccessControlPolicyFromAPI[]>(fetchPoliciesAPI, { initialValue: [] });
     const [showEditModal, setShowEditModal] = createSignal(false);
+    const [showIssueTokenModal, setShowIssueTokenModal] = createSignal(false);
     // This will hold the ApiKeyItem to edit, or null for a new one
     const [selectedApiKey, setSelectedApiKey] = createSignal<ApiKeyItem | null>(null);
+    const [apiKeyForToken, setApiKeyForToken] = createSignal<ApiKeyItem | null>(null);
     const [copiedKeyId, setCopiedKeyId] = createSignal<number | null>(null);
 
     const handleStartEditing = (apiKey?: ApiKeyItem) => {
         setSelectedApiKey(apiKey || null); // Set to null for new, or the item for editing
         setShowEditModal(true);
+    };
+
+    const handleStartIssuingToken = (apiKey: ApiKeyItem) => {
+        setApiKeyForToken(apiKey);
+        setShowIssueTokenModal(true);
     };
 
     const handleToggleEnable = async (apiKey: ApiKeyItem) => {
@@ -76,6 +84,11 @@ export default function ApiKeyPage() {
         setSelectedApiKey(null); // Clear selected data when modal closes
     };
 
+    const handleCloseIssueTokenModal = () => {
+        setShowIssueTokenModal(false);
+        setApiKeyForToken(null);
+    };
+
     const handleSaveSuccess = () => {
         globalRefetchApiKeys();
         // The modal will call its own onClose, but we ensure state is clean here too
@@ -90,6 +103,18 @@ export default function ApiKeyPage() {
             } catch (error) {
                 console.error("Failed to delete API key:", error);
                 alert(t('deleteFailed', { error: (error as Error).message || t('unknownError') }));
+            }
+        }
+    };
+
+    const handleRefreshRef = async (apiKey: ApiKeyItem) => {
+        if (confirm(t('apiKeyPage.confirmRefreshRef', { name: apiKey.name }))) {
+            try {
+                await request(`/ai/manager/api/system_api_key/${apiKey.id}/refresh_ref`, { method: 'POST' });
+                globalRefetchApiKeys();
+            } catch (error) {
+                console.error("Failed to refresh ref for API key:", error);
+                alert(t('apiKeyPage.refreshRefFailed', { error: (error as Error).message || t('unknownError') }));
             }
         }
     };
@@ -188,6 +213,8 @@ export default function ApiKeyPage() {
                                         <TableCell class="space-x-2">
                                             <Button variant="primary" size="sm" onClick={() => handleStartEditing(key)}>{t('edit')}</Button>
                                             <Button variant="destructive" size="sm" onClick={() => handleDeleteApiKey(key)}>{t('delete')}</Button>
+                                            <Button variant="secondary" size="sm" onClick={() => handleRefreshRef(key)}>{t('apiKeyPage.refreshRef')}</Button>
+                                            <Button size="sm" onClick={() => handleStartIssuingToken(key)}>{t('apiKeyPage.issueToken')}</Button>
                                         </TableCell>
                                     </TableRow>
                                 )}
@@ -207,7 +234,11 @@ export default function ApiKeyPage() {
                     policies={policies()!}
                 />
             </Show>
-            
+            <IssueTokenModal
+                isOpen={showIssueTokenModal}
+                onClose={handleCloseIssueTokenModal}
+                apiKey={apiKeyForToken()}
+            />
         </div>
     );
 }

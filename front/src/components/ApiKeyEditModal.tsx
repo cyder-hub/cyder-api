@@ -124,12 +124,6 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
                             onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), name: v }))}
                         />
 
-                        <Show when={!editingData()?.id}>
-                            <div class="text-sm p-3 rounded-md bg-gray-100 text-gray-600">
-                                {t('apiKeyEditModal.apiKeyGeneratedNotice')}
-                            </div>
-                        </Show>
-
                         <TextField
                             label={t('apiKeyEditModal.labelDescription')}
                             value={editingData()?.description ?? ''}

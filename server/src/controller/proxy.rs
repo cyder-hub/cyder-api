@@ -15,7 +15,7 @@ use axum::{
 };
 use axum::Json;
 use crate::service::{
-    app_state::{create_state_router, StateRouter, AppState, StateStore, AppStoreError, GroupItemSelectionStrategy}, // Added AppState, StateStore, AppStoreError
+    app_state::{create_state_router, StateRouter, AppState, StateStore, SystemApiKeyStore, AppStoreError, GroupItemSelectionStrategy}, // Added AppState, StateStore, AppStoreError
     vertex::get_vertex_token,
 };
 use bytes::BytesMut;
@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize}; // Added Serialize and Deserialize
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use crate::utils::auth::decode_api_key_jwt;
 use crate::{
     database::{
         access_control::ApiAccessControlPolicy, // Added ApiAccessControlPolicy
@@ -49,6 +50,12 @@ use crate::{
     config::CONFIG,
     utils::{process_stream_options, split_chunks},
 };
+
+struct ApiKeyCheckResult {
+    api_key: SystemApiKey,
+    channel: Option<String>,
+    external_id: Option<String>,
+}
 
 // Helper to serialize reqwest::header::HeaderMap to JSON String
 fn serialize_reqwest_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
@@ -316,23 +323,27 @@ fn log_final_update(
 async fn authenticate_and_authorize(
     headers: &HeaderMap,
     app_state: &Arc<AppState>,
-) -> Result<(SystemApiKey, Option<ApiAccessControlPolicy>), (StatusCode, String)> {
+) -> Result<(ApiKeyCheckResult, Option<ApiAccessControlPolicy>), (StatusCode, String)> {
     // 1. Get system_api_key from header and check it
     let system_api_key_str =
         parse_token_from_request(headers).map_err(|err| (StatusCode::UNAUTHORIZED, err))?;
-    let system_api_key = check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
-        .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))?;
+    let api_key_check_result =
+        check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
+            .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))?;
 
     // 2. Fetch Access Control Policy if ID is present on the SystemApiKey
-    if let Some(policy_id) = system_api_key.access_control_policy_id {
+    if let Some(policy_id) = api_key_check_result.api_key.access_control_policy_id {
         match app_state.access_control_store.get_by_id(policy_id) {
-            Ok(Some(policy)) => Ok((system_api_key, Some(policy))),
+            Ok(Some(policy)) => Ok((api_key_check_result, Some(policy))),
             Ok(None) => {
                 let err_msg = format!(
                     "Access control policy id {} configured but not found in application cache.",
                     policy_id
                 );
-                error!("{}, SystemApiKey ID: {}", err_msg, system_api_key.id);
+                error!(
+                    "{}, SystemApiKey ID: {}",
+                    err_msg, api_key_check_result.api_key.id
+                );
                 Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg))
             }
             Err(store_err) => {
@@ -340,12 +351,15 @@ async fn authenticate_and_authorize(
                     "Error accessing application cache for access control policy id {}: {}",
                     policy_id, store_err
                 );
-                error!("{}, SystemApiKey ID: {}", err_msg, system_api_key.id);
+                error!(
+                    "{}, SystemApiKey ID: {}",
+                    err_msg, api_key_check_result.api_key.id
+                );
                 Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg))
             }
         }
     } else {
-        Ok((system_api_key, None))
+        Ok((api_key_check_result, None))
     }
 }
 
@@ -903,18 +917,53 @@ fn parse_token_from_request(headers: &HeaderMap) -> Result<String, String> {
 }
 
 // Updated to query from the new StateStore<SystemApiKey> struct
-fn check_system_api_key(store: &StateStore<SystemApiKey>, key_str: &str) -> Result<SystemApiKey, String> {
-    match store.get_by_key(key_str) {
-        Ok(Some(api_key)) => Ok(api_key),
-        Ok(None) => Err("api key invalid or not found".to_string()),
-        Err(AppStoreError::LockError(e)) => {
-            error!("SystemApiKeyStore lock error: {}", e);
-            Err("Internal server error while checking API key".to_string())
+fn check_system_api_key(
+    store: &SystemApiKeyStore,
+    key_str: &str,
+) -> Result<ApiKeyCheckResult, String> {
+    if key_str.starts_with("cyder-") {
+        match store.get_by_key(key_str) {
+            Ok(Some(api_key)) => Ok(ApiKeyCheckResult {
+                api_key,
+                channel: None,
+                external_id: None,
+            }),
+            Ok(None) => Err("api key invalid or not found".to_string()),
+            Err(AppStoreError::LockError(e)) => {
+                error!("SystemApiKeyStore lock error: {}", e);
+                Err("Internal server error while checking API key".to_string())
+            }
+            Err(e) => {
+                // Catch other AppStoreError variants if any, though get_by_key primarily returns Option or LockError
+                error!("SystemApiKeyStore error: {:?}", e);
+                Err("Internal server error while checking API key".to_string())
+            }
         }
-        Err(e) => { // Catch other AppStoreError variants if any, though get_by_key primarily returns Option or LockError
-            error!("SystemApiKeyStore error: {:?}", e);
-            Err("Internal server error while checking API key".to_string())
+    } else if let Some(token) = key_str.strip_prefix("jwt-") {
+        let jwt_result =
+            decode_api_key_jwt(token).map_err(|e| format!("Invalid JWT token: {:?}", e))?;
+
+        match store.get_by_ref(&jwt_result.key_ref) {
+            Ok(Some(api_key)) => Ok(ApiKeyCheckResult {
+                api_key,
+                channel: Some(jwt_result.channel),
+                external_id: Some(jwt_result.sub),
+            }),
+            Ok(None) => Err(format!(
+                "api key for ref '{}' invalid or not found",
+                jwt_result.key_ref
+            )),
+            Err(AppStoreError::LockError(e)) => {
+                error!("SystemApiKeyStore lock error: {}", e);
+                Err("Internal server error while checking API key by ref".to_string())
+            }
+            Err(e) => {
+                error!("SystemApiKeyStore error: {:?}", e);
+                Err("Internal server error while checking API key by ref".to_string())
+            }
         }
+    } else {
+        Err("Invalid api key format. Must start with 'cyder-' or 'jwt-'".to_string())
     }
 }
 
@@ -1010,12 +1059,16 @@ async fn proxy_all_handler(
     let original_headers = request.headers().clone();
 
     // Step 1: Authenticate the request and retrieve API key and any associated access policy.
-    let (system_api_key, access_control_policy) =
+    let (api_key_check_result, access_control_policy) =
         authenticate_and_authorize(&original_headers, &app_state).await?;
+    let system_api_key = api_key_check_result.api_key;
+    let channel = api_key_check_result.channel;
+    let external_id = api_key_check_result.external_id;
 
     // Step 2: Parse the incoming request body.
     let mut data = parse_request_body(request).await?;
     debug!("[proxy] original request data: {:?}", data);
+
     process_stream_options(&mut data);
 
     // Step 3: Determine the provider and model from the 'model' field in the request.
@@ -1105,6 +1158,8 @@ async fn proxy_all_handler(
         llm_request_sent_at: Utc::now().timestamp_millis(),
         created_at: start_time,
         updated_at: start_time,
+        channel,
+        external_id,
     };
 
     if let Err(e) = RequestLog::create_initial_request(&initial_log_data) {
@@ -1175,8 +1230,10 @@ async fn list_available_models_handler(
     let original_headers_map = request.headers().clone();
     let system_api_key_str = parse_token_from_request(&original_headers_map)
         .map_err(|err| (StatusCode::UNAUTHORIZED, err))?;
-    let system_api_key = check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
-        .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))?;
+    let api_key_check_result =
+        check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
+            .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))?;
+    let system_api_key = api_key_check_result.api_key;
 
     // 2. Fetch Access Control Policy if ID is present
     let access_control_policy_opt: Option<ApiAccessControlPolicy> =

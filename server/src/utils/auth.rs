@@ -34,7 +34,15 @@ impl Keys {
 static KEYS: Lazy<Keys> =
     Lazy::new(|| Keys::new(CONFIG.jwt_secret.as_bytes()));
 
-const ISSUER: &str = "chneluoi";
+static API_KEY_JWT_KEYS: Lazy<Keys> = Lazy::new(|| {
+    let secret = CONFIG
+        .api_key_jwt_secret
+        .as_deref()
+        .unwrap_or(&CONFIG.jwt_secret);
+    Keys::new(secret.as_bytes())
+});
+
+const ISSUER: &str = "cyder-api";
 const REFRESH_TOKEN_SUBJECT: &str = "REFRESH_TOKEN";
 const REFRESH_TOKEN_ISSUE_SEC: u64 = 30 * 24 * 3600;
 const ACCESS_TOKEN_ISSUE_SEC: u64 = 3600;
@@ -146,6 +154,72 @@ fn decode_access_token(token: &str) -> Result<JwtResult, JwtError> {
     Ok(JwtResult {
         id: user_id,
         token: token.to_string(),
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ApiKeyJwtClaims {
+    exp: u64,
+    iat: u64,
+    iss: String,
+    sub: String,
+    channel: String,
+    key_ref: String,
+    scope: Option<String>,
+}
+
+impl ApiKeyJwtClaims {
+    fn new(
+        uid: String,
+        exp: u64,
+        channel: String,
+        key_ref: String,
+        scope: Option<String>,
+    ) -> Self {
+        let now = get_current_timestamp();
+        ApiKeyJwtClaims {
+            exp,
+            iat: now,
+            iss: ISSUER.to_string(),
+            sub: uid,
+            channel,
+            key_ref,
+            scope,
+        }
+    }
+}
+
+pub fn issue_api_key_jwt(
+    uid: String,
+    exp: u64,
+    channel: String,
+    key_ref: String,
+    scope: Option<String>,
+) -> String {
+    let claims = ApiKeyJwtClaims::new(uid, exp, channel, key_ref, scope);
+    issue_jwt(&API_KEY_JWT_KEYS.encoding, &claims)
+}
+
+#[derive(Clone)]
+pub struct ApiKeyJwtResult {
+    pub sub: String,
+    pub channel: String,
+    pub key_ref: String,
+    pub scope: Option<String>,
+}
+
+pub fn decode_api_key_jwt(token: &str) -> Result<ApiKeyJwtResult, JwtError> {
+    let validate = JwtValidation {
+        validate_aud: false,
+        issuer: ISSUER,
+        required_spec: &["sub", "iat", "exp", "channel", "key_ref"],
+    };
+    let result = decode_jwt::<ApiKeyJwtClaims>(&API_KEY_JWT_KEYS.decoding, &token, validate)?;
+    Ok(ApiKeyJwtResult {
+        sub: result.sub,
+        channel: result.channel,
+        key_ref: result.key_ref,
+        scope: result.scope,
     })
 }
 

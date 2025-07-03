@@ -10,10 +10,12 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use chrono::Utc;
+use crate::config::CONFIG;
 use crate::service::app_state::{create_state_router, StateRouter, AppState}; // Added AppState
-use reqwest::StatusCode;
+use reqwest::{Client, Proxy, StatusCode};
 use std::sync::Arc; // Added Arc
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use cyder_tools::log::{warn, info};
 
 use crate::utils::{HttpResult, ID_GENERATOR};
@@ -160,6 +162,55 @@ async fn get_provider_detail(Path(id): Path<i64>) -> Result<HttpResult<ProviderD
     };
 
     Ok(HttpResult::new(detail))
+}
+
+async fn get_remote_models(
+    Path(id): Path<i64>,
+) -> Result<HttpResult<Value>, BaseError> {
+    let provider = Provider::get_by_id(id)?;
+    let provider_keys = ProviderApiKey::list_by_provider_id(id)?;
+
+    let api_key = provider_keys.first().ok_or_else(|| {
+        BaseError::ParamInvalid(Some("No API key found for this provider.".to_string()))
+    })?;
+
+    let client = if provider.use_proxy {
+        let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
+        reqwest::Client::builder().proxy(proxy).build().unwrap()
+    } else {
+        Client::new()
+    };
+    let url = format!("{}/models", provider.endpoint.trim_end_matches('/'));
+
+    let response = client
+        .get(&url)
+        .bearer_auth(&api_key.api_key)
+        .send()
+        .await
+        .map_err(|e| {
+            BaseError::ParamInvalid(Some(format!("Failed to fetch remote models: {}", e)))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Could not retrieve error body".to_string());
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Provider API returned status {}: {}",
+            status, error_body
+        ))));
+    }
+
+    let models = response.json::<Value>().await.map_err(|e| {
+        BaseError::ParamInvalid(Some(format!(
+            "Failed to parse remote models response: {}",
+            e
+        )))
+    })?;
+
+    Ok(HttpResult::new(models))
 }
 
 // Removed full_commit function as Provider::full_commit is no longer available.
@@ -340,6 +391,7 @@ pub fn create_provider_router() -> StateRouter {
             .route("/detail/list", get(list_provider_details))
             .route("/{id}", get(get_provider))
             .route("/{id}/detail", get(get_provider_detail))
+            .route("/{id}/remote_models", get(get_remote_models))
             .route("/{id}", delete(delete_provider))
             .route("/{id}", put(update_provider))
             // Provider API Key routes

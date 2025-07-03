@@ -1,4 +1,4 @@
-import { For, Show, onMount, createSignal } from 'solid-js';
+import { For, Show, onMount, createSignal, createMemo } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
 import { useI18n } from '../i18n';
 import { Button } from '../components/ui/Button';
@@ -95,6 +95,11 @@ export default function ProviderEdit() {
     // setIsLoading and setError can remain createSignal as they are simple booleans/strings
     const [isLoading, setIsLoading] = createSignal<boolean>(true);
     const [error, setError] = createSignal<string | null>(null);
+
+    const hasUncommittedModels = createMemo(() => {
+        if (!editingData) return false;
+        return editingData.models?.some(m => m.id === null);
+    });
 
     const getEmptyProvider = (): EditingProviderData => ({
         id: null,
@@ -257,8 +262,7 @@ export default function ProviderEdit() {
                 description: savedKey.description ?? null,
                 isEditing: false, // Turn off editing mode after save
             });
-            // Optionally, provide user feedback e.g. alert or toast
-            toastController.success(t('API Key saved successfully.', { index: index + 1 })); // Example, add to i18n if needed
+            toastController.success(t('providerEditPage.alert.apiKeySaveSuccess'));
         } catch (error) {
             console.error("Failed to save API key:", error);
             toastController.error(t('providerEditPage.alert.saveApiKeyFailed', { error: (error as Error).message || t('unknownError') }));
@@ -326,7 +330,7 @@ export default function ProviderEdit() {
                 real_model_name: (savedModel as any).real_model_name ?? null, // Cast if BackendProviderApiKeyItem doesn't fit perfectly
                 isEditing: false,
             });
-            toastController.success(t('Model saved successfully.', { name: savedModel.model_name })); // Example, add to i18n
+            toastController.success(t('providerEditPage.alert.modelSaveSuccess'));
         } catch (error) {
             console.error("Failed to save model:", error);
             toastController.error(t('providerEditPage.alert.saveModelFailed', { error: (error as Error).message || t('unknownError') }));
@@ -355,7 +359,7 @@ export default function ProviderEdit() {
                         models.splice(index, 1);
                     })
                 );
-                toastController.success(t('Model deleted successfully.', { name: modelItem.model_name })); // Example, add to i18n
+                toastController.success(t('providerEditPage.alert.modelDeleteSuccess'));
             } catch (error) {
                 console.error("Failed to delete model:", error);
                 toastController.error(t('providerEditPage.alert.deleteModelFailed', { error: (error as Error).message || t('unknownError') }));
@@ -371,6 +375,85 @@ export default function ProviderEdit() {
         }
     };
 
+    const handleFetchRemoteModels = async () => {
+        const currentData = editingData;
+        if (!currentData || !currentData.id) {
+            toastController.warn(t('providerEditPage.alert.providerNotSavedForModel'));
+            return;
+        }
+
+        try {
+            const response = await request(`/ai/manager/api/provider/${currentData.id}/remote_models`);
+
+            let remoteModels: any[] = [];
+            if (response) {
+                if (Array.isArray(response.data)) { // OpenAI-like
+                    remoteModels = response.data;
+                } else if (Array.isArray(response.models)) { // Google Gemini-like
+                    remoteModels = response.models;
+                } else if (Array.isArray(response)) { // Direct array response
+                    remoteModels = response;
+                }
+            }
+
+            if (!remoteModels || remoteModels.length === 0) {
+                toastController.warn(t('providerEditPage.alert.noRemoteModels'));
+                return;
+            }
+
+            const existingModelNames = new Set<string>();
+            currentData.models.forEach(m => {
+                existingModelNames.add(m.model_name);
+                if (m.real_model_name) {
+                    existingModelNames.add(m.real_model_name);
+                }
+            });
+
+            const newModels: LocalEditableModelItem[] = [];
+            remoteModels.forEach(item => {
+                let model_name = item.id || item.name;
+                if (item.owned_by === 'google' && model_name && model_name.startsWith('models/')) {
+                    model_name = model_name.substring('models/'.length);
+                }
+
+                if (model_name && !existingModelNames.has(model_name)) {
+                    newModels.push({
+                        id: null,
+                        model_name: model_name,
+                        real_model_name: null,
+                        isEditing: false,
+                    });
+                    existingModelNames.add(model_name); // Add to set to avoid duplicates from remote list
+                }
+            });
+
+            if (newModels.length > 0) {
+                setEditingData('models', produce(models => {
+                    models.push(...newModels);
+                }));
+                toastController.success(t('providerEditPage.alert.newModelsAdded', { count: newModels.length }));
+            } else {
+                toastController.info(t('providerEditPage.alert.noNewModels'));
+            }
+
+        } catch (error) {
+            console.error("Failed to fetch remote models:", error);
+            toastController.error(t('providerEditPage.alert.fetchRemoteModelsFailed', { error: (error as Error).message || t('unknownError') }));
+        }
+    };
+
+    const handleClearUncommittedModels = () => {
+        if (!editingData) return;
+        const originalCount = editingData.models.length;
+        const committedModels = editingData.models.filter(m => m.id !== null);
+        if (originalCount > committedModels.length) {
+            setEditingData('models', committedModels);
+            toastController.info(t('providerEditPage.alert.uncommittedCleared'));
+        } else {
+            toastController.info(t('providerEditPage.alert.noUncommittedToClear'));
+        }
+    };
+
     const availableCustomFields = () => {
         if (!editingData) return [];
         const linkedIds = new Set(editingData.custom_fields.map(f => f.id));
@@ -382,11 +465,11 @@ export default function ProviderEdit() {
         const providerId = editingData?.id;
 
         if (!field) {
-            toastController.warn("Please select a custom field to link.");
+            toastController.warn(t('providerEditPage.alert.selectCustomField'));
             return;
         }
         if (!providerId) {
-            toastController.warn("Please save the provider before linking custom fields.");
+            toastController.warn(t('providerEditPage.alert.saveProviderBeforeLink'));
             return;
         }
 
@@ -410,17 +493,17 @@ export default function ProviderEdit() {
                 }));
             }
             setSelectedCustomFieldId(null);
-            toastController.success("Custom field linked successfully.");
+            toastController.success(t('providerEditPage.alert.linkCustomFieldSuccess'));
         } catch (error) {
             console.error("Failed to link custom field:", error);
-            toastController.error(`Failed to link custom field: ${(error as Error).message || 'Unknown error'}`);
+            toastController.error(t('providerEditPage.alert.linkCustomFieldFailed', { error: (error as Error).message || t('unknownError') }));
         }
     };
 
     const handleUnlinkCustomField = async (fieldId: number, index: number) => {
         const providerId = editingData?.id;
         if (!providerId) {
-            toastController.warn("Provider ID not found.");
+            toastController.warn(t('providerEditPage.alert.providerIdNotFound'));
             return;
         }
 
@@ -436,10 +519,10 @@ export default function ProviderEdit() {
             setEditingData('custom_fields', produce(fields => {
                 fields.splice(index, 1);
             }));
-            toastController.success("Custom field unlinked successfully.");
+            toastController.success(t('providerEditPage.alert.unlinkCustomFieldSuccess'));
         } catch (error) {
             console.error("Failed to unlink custom field:", error);
-            toastController.error(`Failed to unlink custom field: ${(error as Error).message || 'Unknown error'}`);
+            toastController.error(t('providerEditPage.alert.unlinkedCustomFieldFailed', { error: (error as Error).message || t('unknownError') }));
         }
     };
 
@@ -464,7 +547,7 @@ export default function ProviderEdit() {
                             keys.splice(index, 1);
                         })
                     );
-                    toastController.success(t('API Key deleted successfully.')); // Example, add to i18n
+                    toastController.success(t('providerEditPage.alert.apiKeyDeleteSuccess'));
                 } catch (error) {
                     console.error("Failed to delete API key:", error);
                     toastController.error(t('providerEditPage.alert.deleteApiKeyFailed', { error: (error as Error).message || t('unknownError') }));
@@ -590,7 +673,13 @@ export default function ProviderEdit() {
                                 </div>
                             )}
                         </For>
-                        <Button variant="secondary" size="sm" class="mt-2" onClick={() => addListItem<LocalEditableModelItem>('models', { model_name: '', real_model_name: null, isEditing: false })}>{t('providerEditPage.buttonAddModel')}</Button>
+                        <div class="flex items-center gap-2 mt-2">
+                            <Button variant="secondary" size="sm" onClick={() => addListItem<LocalEditableModelItem>('models', { model_name: '', real_model_name: null, isEditing: false })}>{t('providerEditPage.buttonAddModel')}</Button>
+                            <Button variant="secondary" size="sm" onClick={handleFetchRemoteModels} disabled={!editingData?.id}>{t('providerEditPage.buttonFetchRemote')}</Button>
+                            <Show when={hasUncommittedModels()}>
+                                <Button variant="destructive" size="sm" onClick={handleClearUncommittedModels}>{t('providerEditPage.buttonClearUncommitted')}</Button>
+                            </Show>
+                        </div>
                     </div>
 
                     {/* API Keys Section */}

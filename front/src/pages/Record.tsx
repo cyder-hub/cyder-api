@@ -51,6 +51,8 @@ interface RecordItem {
     llm_response_completed_at: number | null;
     calculated_cost: number | null;
     cost_currency: string | null;
+    channel: string | null;
+    external_id: string | null;
     request_at_formatted?: string;
     // Display-ready fields
     providerName: string;
@@ -75,8 +77,8 @@ interface RecordDetail extends RecordItem {
 interface Filters {
     api_key_id: number;
     provider_id: number;
-    model_name: string;
     status: string;
+    search: string;
 }
 
 // This interface now represents the actual values passed to fetchRecords
@@ -113,14 +115,14 @@ export default function Record() {
     // currentPage is already defined, will be used by Kobalte Pagination
     // totalPages is already defined, will be used by Kobalte Pagination
 
-    const [modelNameInput, setModelNameInput] = createSignal(''); // For debounced input
-    let debounceTimer: number;
+    const [searchInput, setSearchInput] = createSignal(''); // For debounced input
+    let searchDebounceTimer: number;
 
     const [filters, setFilters] = createSignal<Filters>({
         api_key_id: 0,
         provider_id: 0,
-        model_name: '',
-        status: 'ALL'
+        status: 'ALL',
+        search: '',
     });
 
     // Fetch static data
@@ -199,8 +201,8 @@ export default function Record() {
             if (currentFilters.provider_id) {
                 queryParams += `&provider_id=${encodeURIComponent(currentFilters.provider_id)}`;
             }
-            if (currentFilters.model_name) {
-                queryParams += `&model_name=${encodeURIComponent(currentFilters.model_name)}`;
+            if (currentFilters.search) {
+                queryParams += `&search=${encodeURIComponent(currentFilters.search)}`;
             }
             if (currentFilters.status && currentFilters.status !== 'ALL') {
                 queryParams += `&status=${encodeURIComponent(currentFilters.status)}`;
@@ -276,6 +278,8 @@ export default function Record() {
                     llm_response_completed_at: backendRecord.llm_response_completed_at ?? null,
                     calculated_cost: backendRecord.calculated_cost ?? null,
                     cost_currency: backendRecord.cost_currency || null,
+                    channel: backendRecord.channel || null,
+                    external_id: backendRecord.external_id || null,
                     request_at_formatted,
                     // Display fields
                     providerName,
@@ -308,8 +312,8 @@ export default function Record() {
     };
 
     const resetFilter = () => {
-        setModelNameInput(''); // Clear debounced input as well
-        setFilters({ api_key_id: 0, provider_id: 0, model_name: '', status: 'ALL' });
+        setSearchInput(''); // Clear debounced input as well
+        setFilters({ api_key_id: 0, provider_id: 0, status: 'ALL', search: '' });
         setCurrentPage(1);
     };
 
@@ -326,12 +330,12 @@ export default function Record() {
     // nextPage, previousPage, goToPage, and getVisiblePages are no longer needed
     // as Kobalte's Pagination component will handle this.
 
-    // Effect for debouncing model name filter
+    // Effect for debouncing search filter
     createEffect(() => {
-        const currentModelName = modelNameInput();
-        clearTimeout(debounceTimer);
-        debounceTimer = window.setTimeout(() => {
-            setFilters(f => ({ ...f, model_name: currentModelName }));
+        const currentSearch = searchInput();
+        clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = window.setTimeout(() => {
+            setFilters(f => ({ ...f, search: currentSearch }));
             // No need to call applyFilter() here as createResource will react to filters() changing
         }, 600); // 1 second delay
     });
@@ -367,9 +371,9 @@ export default function Record() {
                     class="flex-grow md:flex-grow-0"
                 />
                 <TextField
-                    value={modelNameInput()}
-                    onChange={setModelNameInput}
-                    placeholder="Model Name"
+                    value={searchInput()}
+                    onChange={setSearchInput}
+                    placeholder={t('recordPage.filter.searchPlaceholder')}
                     class="flex-grow md:flex-grow-0"
                 />
 
@@ -381,7 +385,7 @@ export default function Record() {
                     >
                         {t('recordPage.filter.applyButton')}
                     </Button>
-                    <Show when={filters().api_key_id || filters().provider_id || filters().model_name || filters().status}>
+                    <Show when={filters().api_key_id || filters().provider_id || filters().status !== 'ALL' || filters().search}>
                         <Button
                             onClick={resetFilter}
                             variant="secondary"
@@ -409,6 +413,8 @@ export default function Record() {
                                 <TableColumnHeader>{t('recordPage.table.modelName')}</TableColumnHeader>
                                 <TableColumnHeader>{t('recordPage.table.provider')}</TableColumnHeader>
                                 <TableColumnHeader>{t('recordPage.table.apiKey')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.channel')}</TableColumnHeader>
+                                <TableColumnHeader>{t('recordPage.table.externalId')}</TableColumnHeader>
                                 <TableColumnHeader>{t('recordPage.table.status')}</TableColumnHeader>
                                 <TableColumnHeader>{t('recordPage.table.promptTokens')}</TableColumnHeader>
                                 <TableColumnHeader>{t('recordPage.table.completionTokens')}</TableColumnHeader>
@@ -426,7 +432,7 @@ export default function Record() {
                         <TableBody>
                             <For each={recordsResult()?.list} fallback={
                                 <TableRow>
-                                    <TableCell colSpan={15} class="text-center py-6">
+                                    <TableCell colSpan={17} class="text-center py-6">
                                         <Show when={recordsResult()?.total === 0}>{t('recordPage.table.noRecordsMatch')}</Show>
                                         <Show when={!recordsResult()?.total}>{t('recordPage.table.noRecordsAvailable')}</Show>
                                     </TableCell>
@@ -437,6 +443,8 @@ export default function Record() {
                                         <TableCell>{record.model_name || '/'}</TableCell>
                                         <TableCell>{record.providerName}</TableCell>
                                         <TableCell>{record.apiKeyName}</TableCell>
+                                        <TableCell>{record.channel || '/'}</TableCell>
+                                        <TableCell>{record.external_id || '/'}</TableCell>
                                         <TableCell>
                                             <span class={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${record.status === 'SUCCESS' ? 'bg-green-100 text-green-800' :
                                                     record.status === 'ERROR' ? 'bg-red-100 text-red-800' :

@@ -37,7 +37,6 @@ const getEmptyEditingData = (): EditingApiKeyData => ({
 export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
     const [ t ] = useI18n(); // Initialize the t function
     const [editingData, setEditingData] = createSignal<EditingApiKeyData>(getEmptyEditingData());
-    const [showApiKeyInForm, setShowApiKeyInForm] = createSignal(false);
 
     const policyOptions = createMemo(() => {
         const noPolicy = { value: null, label: t('apiKeyEditModal.noPolicy') };
@@ -68,7 +67,6 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
                 // Modal is open for creating a new item
                 setEditingData(getEmptyEditingData());
             }
-            setShowApiKeyInForm(false); // Reset API key visibility each time the modal content is set
         }
         // No 'else' block is strictly necessary here to reset editingData when props.isOpen() is false,
         // because the form is not visible, and the parent component (ApiKeyPage)
@@ -89,10 +87,6 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
             alert(t('apiKeyEditModal.alert.nameRequired'));
             return;
         }
-        if (currentFormState.id === null && !currentFormState.api_key.trim()) {
-            alert(t('apiKeyEditModal.alert.apiKeyRequired'));
-            return;
-        }
 
         const payload: any = {
             name: currentFormState.name,
@@ -100,10 +94,6 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
             is_enabled: currentFormState.is_enabled,
             access_control_policy_id: currentFormState.access_control_policy_id,
         };
-
-        if (currentFormState.api_key.trim()) {
-            payload.api_key_value = currentFormState.api_key;
-        }
 
         const method = currentFormState.id ? 'PUT' : 'POST';
         const url = currentFormState.id ? `/ai/manager/api/system_api_key/${currentFormState.id}` : '/ai/manager/api/system_api_key';
@@ -121,10 +111,6 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
         }
     };
 
-    const toggleApiKeyVisibility = () => {
-        setShowApiKeyInForm(!showApiKeyInForm());
-    };
-
     return (
         <DialogRoot open={props.isOpen()} onOpenChange={(isOpen) => !isOpen && props.onClose()} modal>
             <DialogContent class="max-h-[90vh] flex flex-col">
@@ -137,26 +123,6 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
                             value={editingData()?.name ?? ''}
                             onChange={(v) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), name: v }))}
                         />
-
-                        <div class="flex flex-col space-y-1.5">
-                            <label class="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
-                                {t('apiKeyEditModal.labelApiKey')}
-                                <Show when={editingData()?.id === null}><span class="text-red-500"> *</span></Show>
-                                <Show when={editingData()?.id !== null}><span class="text-gray-500 text-xs ml-1">{t('apiKeyEditModal.apiKeyHelpText')}</span></Show>
-                            </label>
-                            <div class="flex items-center space-x-2">
-                                <input
-                                    class="flex h-10 w-full rounded-md border border-gray-300 bg-transparent px-3 py-2 text-sm ring-offset-white placeholder:text-gray-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 flex-grow"
-                                    type={showApiKeyInForm() ? 'text' : 'password'}
-                                    value={editingData()?.api_key ?? ''}
-                                    onInput={(e) => setEditingData(prev => ({ ...(prev ?? getEmptyEditingData()), api_key: e.currentTarget.value }))}
-                                    placeholder={editingData()?.id ? t('apiKeyEditModal.apiKeyPlaceholderEdit') : t('apiKeyEditModal.apiKeyPlaceholderNew')}
-                                />
-                                <Button variant="secondary" size="sm" onClick={toggleApiKeyVisibility}>
-                                    {showApiKeyInForm() ? t('apiKeyEditModal.buttonHide') : t('apiKeyEditModal.buttonShow')}
-                                </Button>
-                            </div>
-                        </div>
 
                         <TextField
                             label={t('apiKeyEditModal.labelDescription')}

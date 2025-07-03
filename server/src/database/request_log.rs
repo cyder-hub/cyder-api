@@ -55,6 +55,8 @@ db_object! {
         pub completion_tokens: Option<i32>,     // From schema (diesel type: Nullable<Int4>)
         pub reasoning_tokens: Option<i32>,      // From schema (diesel type: Nullable<Int4>)
         pub total_tokens: Option<i32>,          // From schema (diesel type: Nullable<Int4>)
+        pub channel: Option<String>,
+        pub external_id: Option<String>,
     }
 
     // Struct for inserting the initial part of a request log.
@@ -75,6 +77,8 @@ db_object! {
         pub status: String,
         pub created_at: i64,
         pub updated_at: i64,
+        pub channel: Option<String>,
+        pub external_id: Option<String>,
     }
 
     // Struct for updating a request log with completion details.
@@ -105,12 +109,12 @@ pub struct RequestLogQueryPayload {
     pub system_api_key_id: Option<i64>,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
-    pub model_name: Option<String>, // For LIKE query
     pub status: Option<String>,
     pub start_time: Option<i64>, // For request_received_at >= start_time
     pub end_time: Option<i64>,   // For request_received_at <= end_time
     pub page: Option<i64>,
     pub page_size: Option<i64>,
+    pub search: Option<String>,
 }
 
 impl RequestLog {
@@ -200,14 +204,20 @@ impl RequestLog {
                 query = query.filter(request_log::dsl::model_id.eq(val));
                 count_query = count_query.filter(request_log::dsl::model_id.eq(val));
             }
-            if let Some(name_filter) = payload.model_name.as_ref() {
-                let pattern = format!("%{}%", name_filter);
-                query = query.filter(request_log::dsl::model_name.like(pattern.clone()));
-                count_query = count_query.filter(request_log::dsl::model_name.like(pattern));
-            }
             if let Some(val) = payload.status  {
                 query = query.filter(request_log::dsl::status.eq(val.clone()));
                 count_query = count_query.filter(request_log::dsl::status.eq(val));
+            }
+            if let Some(search_term) = payload.search.as_ref() {
+                if !search_term.is_empty() {
+                    let pattern = format!("%{}%", search_term);
+                    let search_filter = request_log::dsl::model_name
+                        .like(pattern)
+                        .or(request_log::dsl::channel.eq(search_term))
+                        .or(request_log::dsl::external_id.eq(search_term));
+                    query = query.filter(search_filter.clone());
+                    count_query = count_query.filter(search_filter);
+                }
             }
             if let Some(st_time) = payload.start_time {
                 query = query.filter(request_log::dsl::request_received_at.ge(st_time));

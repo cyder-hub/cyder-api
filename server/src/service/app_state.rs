@@ -414,9 +414,120 @@ impl<S: Storable> StateStore<S> {
 }
 
 
+#[derive(Debug, Clone)]
+pub struct SystemApiKeyStore {
+    core_store: StateStore<SystemApiKey>,
+    id_by_ref: Arc<RwLock<HashMap<String, i64>>>,
+}
+
+impl SystemApiKeyStore {
+    pub fn new() -> Self {
+        SystemApiKeyStore {
+            core_store: StateStore::<SystemApiKey>::new("SystemApiKey", true, false),
+            id_by_ref: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    fn get_id_by_ref_read(&self) -> Result<RwLockReadGuard<'_, HashMap<String, i64>>, AppStoreError> {
+        self.id_by_ref.read().map_err(|e| AppStoreError::LockError(format!("Failed to acquire read lock on id_by_ref: {}", e)))
+    }
+
+    fn get_id_by_ref_write(&self) -> Result<RwLockWriteGuard<'_, HashMap<String, i64>>, AppStoreError> {
+        self.id_by_ref.write().map_err(|e| AppStoreError::LockError(format!("Failed to acquire write lock on id_by_ref: {}", e)))
+    }
+
+    pub fn get_by_key(&self, api_key: &str) -> Result<Option<SystemApiKey>, AppStoreError> {
+        self.core_store.get_by_key(api_key)
+    }
+
+    pub fn get_by_ref(&self, ref_key: &str) -> Result<Option<SystemApiKey>, AppStoreError> {
+        let id_map = self.get_id_by_ref_read()?;
+        if let Some(&id) = id_map.get(ref_key) {
+            self.core_store.get_by_id(id)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_by_id(&self, id: i64) -> Result<Option<SystemApiKey>, AppStoreError> {
+        self.core_store.get_by_id(id)
+    }
+
+    pub fn add(&self, item: SystemApiKey) -> Result<SystemApiKey, AppStoreError> {
+        let added_item = self.core_store.add(item.clone())?;
+        if let Some(ref_val) = &added_item.ref_ {
+            let mut id_map_w = self.get_id_by_ref_write()?;
+            id_map_w.insert(ref_val.clone(), added_item.id());
+        }
+        Ok(added_item)
+    }
+
+    pub fn update(&self, updated_item: SystemApiKey) -> Result<SystemApiKey, AppStoreError> {
+        let existing_item = self.core_store.get_by_id(updated_item.id())?
+            .ok_or_else(|| AppStoreError::NotFound(format!("SystemApiKey with ID {} not found for update", updated_item.id())))?;
+
+        let updated_in_core = self.core_store.update(updated_item.clone())?;
+
+        let old_ref = existing_item.ref_;
+        let new_ref = updated_in_core.ref_.clone();
+
+        if old_ref != new_ref {
+            let mut id_map_w = self.get_id_by_ref_write()?;
+            if let Some(old_ref_val) = old_ref {
+                id_map_w.remove(&old_ref_val);
+            }
+            if let Some(new_ref_val) = new_ref {
+                 if let Some(&conflicting_id) = id_map_w.get(&new_ref_val) {
+                    if conflicting_id != updated_in_core.id() {
+                        return Err(AppStoreError::AlreadyExists(format!(
+                            "Cannot update SystemApiKey ID {}: new ref '{}' is already in use by ID {}",
+                            updated_in_core.id(), new_ref_val, conflicting_id
+                        )));
+                    }
+                }
+                id_map_w.insert(new_ref_val, updated_in_core.id());
+            }
+        }
+        Ok(updated_in_core)
+    }
+
+    pub fn delete(&self, id: i64) -> Result<SystemApiKey, AppStoreError> {
+        let removed_item = self.core_store.delete(id)?;
+        if let Some(ref_val) = &removed_item.ref_ {
+            let mut id_map_w = self.get_id_by_ref_write()?;
+            id_map_w.remove(ref_val);
+        }
+        Ok(removed_item)
+    }
+
+    pub fn get_all(&self) -> Result<Vec<SystemApiKey>, AppStoreError> {
+        self.core_store.get_all()
+    }
+
+    pub fn refresh_data(&self, new_items: Vec<SystemApiKey>) -> Result<(), AppStoreError> {
+        let mut temp_id_by_ref = HashMap::with_capacity(new_items.len());
+        for item in &new_items {
+            if let Some(ref_val) = &item.ref_ {
+                if temp_id_by_ref.contains_key(ref_val) {
+                     return Err(AppStoreError::AlreadyExists(format!("Duplicate SystemApiKey ref '{}' in refresh dataset.", ref_val)));
+                }
+                temp_id_by_ref.insert(ref_val.clone(), item.id());
+            }
+        }
+
+        self.core_store.refresh_data(new_items)?;
+
+        let mut id_map_w = self.get_id_by_ref_write()?;
+        id_map_w.clear();
+        id_map_w.extend(temp_id_by_ref);
+        Ok(())
+    }
+}
+
+
 #[derive(Clone)]
 pub struct AppState {
-  pub system_api_key_store: StateStore<SystemApiKey>,
+  pub system_api_key_store: SystemApiKeyStore,
   pub provider_store: StateStore<Provider>,
   pub model_store: ModelStore,
   pub model_alias_store: StateStore<ModelAlias>,
@@ -895,24 +1006,22 @@ impl CustomFieldLinkStore {
 }
 
 
-// --- SystemApiKeyStore and ProviderStore are now replaced by StateStore<S> ---
-
-fn create_system_api_key_store() -> StateStore<SystemApiKey> {
-  let store = StateStore::<SystemApiKey>::new("SystemApiKey", true, false); // with_key_map: true, with_group_map: false
+fn create_system_api_key_store() -> SystemApiKeyStore {
+  let store = SystemApiKeyStore::new();
   match SystemApiKey::list_all() {
       Ok(all_keys) => {
           match store.refresh_data(all_keys) {
               Ok(_) => {
                   match store.get_all() {
-                      Ok(keys_vec) => info!("Successfully loaded {} {}s into Store.", keys_vec.len(), store.type_name),
-                      Err(e) => warn!("{} Store populated but failed to get count: {:?}", store.type_name, e),
+                      Ok(keys_vec) => info!("Successfully loaded {} SystemApiKeys into Store.", keys_vec.len()),
+                      Err(e) => warn!("SystemApiKey Store populated but failed to get count: {:?}", e),
                   }
               }
-              Err(e) => warn!("Failed to initially populate {} Store: {:?}", store.type_name, e),
+              Err(e) => warn!("Failed to initially populate SystemApiKey Store: {:?}", e),
           }
       }
       Err(e) => {
-          warn!("Failed to load {}s from DB, Store will be empty: {:?}", store.type_name, e);
+          warn!("Failed to load SystemApiKeys from DB, Store will be empty: {:?}", e);
       }
   }
   store

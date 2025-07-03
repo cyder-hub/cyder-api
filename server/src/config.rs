@@ -10,6 +10,7 @@ pub struct Config {
     pub base_path: String,
     pub secret_key: String,
     pub jwt_secret: String,
+    pub api_key_jwt_secret: Option<String>,
     pub db_url: String,
     pub proxy: ProxyConfig,
     pub log_level: String,

@@ -67,7 +67,7 @@ const newCustomFieldTemplate = (): EditingCustomField => ({
     is_enabled: true,
 });
 
-const fieldTypes: CustomFieldType[] = ['STRING', 'INTEGER', 'NUMBER', 'BOOLEAN', 'JSON_STRING'];
+const fieldTypes: CustomFieldType[] = ['STRING', 'INTEGER', 'NUMBER', 'BOOLEAN', 'JSON_STRING', 'UNSET'];
 
 // --- API Functions ---
 
@@ -162,7 +162,7 @@ export default function CustomFieldsPage() {
     const handleSave = async () => {
         const field = editingField();
         if (!field) return;
-        if (!field.field_name.trim() || field.field_type === 'UNSET') {
+        if (!field.field_name.trim()) {
             alert(t('customFieldsPage.alert.nameAndTypeRequired'));
             return;
         }

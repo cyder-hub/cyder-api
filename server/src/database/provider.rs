@@ -10,6 +10,7 @@ use crate::{db_execute, db_object};
 // BaseError is assumed to be accessible, e.g., from `crate::controller::BaseError`.
 use crate::controller::BaseError;
 use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
+use crate::schema::enum_def::ProviderType;
 
 // Define the main Provider struct and its DB representations using db_object!
 // The attributes like `#[derive(Queryable, ...)]` and `#[diesel(table_name = ...)]`
@@ -28,7 +29,7 @@ db_object! {
         pub deleted_at: Option<i64>,
         pub created_at: i64,
         pub updated_at: i64,
-        pub provider_type: String,
+        pub provider_type: ProviderType,
     }
 
 // Data structure for inserting a new provider.
@@ -45,7 +46,7 @@ pub struct NewProvider {
     pub is_enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
-    pub provider_type: String,
+    pub provider_type: ProviderType,
 }
 
 // Data structure for updating an existing provider.
@@ -57,8 +58,7 @@ pub struct UpdateProviderData {
     pub endpoint: Option<String>,
     pub use_proxy: Option<bool>,
     pub is_enabled: Option<bool>,
-    pub provider_type: Option<String>,
-
+    pub provider_type: Option<ProviderType>,
 }
 
 // Define ProviderApiKey struct and its DB representations

@@ -120,6 +120,9 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::ProviderTypeMapping;
+    use diesel::sql_types::{Int8, Text, Bool, Nullable};
+
     provider (id) {
         id -> Int8,
         provider_key -> Text,
@@ -130,7 +133,7 @@ diesel::table! {
         deleted_at -> Nullable<Int8>,
         created_at -> Int8,
         updated_at -> Int8,
-        provider_type -> Text,
+        provider_type -> ProviderTypeMapping,
         provider_api_key_mode -> Text,
     }
 }

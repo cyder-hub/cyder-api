@@ -79,7 +79,7 @@ const fetchAllCustomFields = async (): Promise<CustomFieldItem[]> => {
     }
 };
 
-const providerTypes = ['OPENAI', 'GEMINI', 'VERTEX', 'GEMINI_OPENAI', 'VERTEX_OPENAI', 'OLLAMA'];
+const providerTypes = ['OPENAI', 'GEMINI', 'VERTEX', 'VERTEX_OPENAI', 'OLLAMA'];
 const customFieldTypes: CustomFieldType[] = ['unset', 'text', 'integer', 'float', 'boolean'];
 
 export default function ProviderEdit() {
@@ -386,11 +386,13 @@ export default function ProviderEdit() {
             const response = await request(`/ai/manager/api/provider/${currentData.id}/remote_models`);
 
             let remoteModels: any[] = [];
+            let isGeminiLike = false;
             if (response) {
                 if (Array.isArray(response.data)) { // OpenAI-like
                     remoteModels = response.data;
                 } else if (Array.isArray(response.models)) { // Google Gemini-like
                     remoteModels = response.models;
+                    isGeminiLike = true;
                 } else if (Array.isArray(response)) { // Direct array response
                     remoteModels = response;
                 }
@@ -412,7 +414,11 @@ export default function ProviderEdit() {
             const newModels: LocalEditableModelItem[] = [];
             remoteModels.forEach(item => {
                 let model_name = item.id || item.name;
-                if (item.owned_by === 'google' && model_name && model_name.startsWith('models/')) {
+                const providerType = currentData.provider_type;
+                const isGoogleOwned = item.owned_by === 'google';
+                const isGeminiProvider = providerType === 'GEMINI' || providerType === 'VERTEX';
+
+                if ((isGeminiProvider || isGeminiLike || isGoogleOwned) && model_name && model_name.startsWith('models/')) {
                     model_name = model_name.substring('models/'.length);
                 }
 

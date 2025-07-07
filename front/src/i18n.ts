@@ -109,6 +109,8 @@ const enDict = {
     language: {
         english: "English",
         chinese: "Chinese",
+        englishShort: "En",
+        chineseShort: "Zh",
     },
     recordPage: {
         title: "Request Records",
@@ -650,6 +652,8 @@ const zhDict = {
     language: {
         english: "英文",
         chinese: "中文",
+        englishShort: "En",
+        chineseShort: "中",
     },
     recordPage: {
         title: "请求记录",

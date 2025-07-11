@@ -1,6 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
-use rand::{distr::Alphanumeric, thread_rng, Rng};
+use rand::{distr::Alphanumeric, rng, Rng};
 use serde::Deserialize; // For potential deserialization into New/Update structs if needed from API
 
 use super::{get_connection, DbResult};
@@ -73,7 +73,7 @@ impl SystemApiKey {
         let now = Utc::now().timestamp_millis();
         let new_key_id = ID_GENERATOR.generate_id();
 
-        let random_part: String = thread_rng()
+        let random_part: String = rng()
             .sample_iter(&Alphanumeric)
             .take(48)
             .map(char::from)
@@ -137,7 +137,7 @@ impl SystemApiKey {
         let conn = &mut get_connection();
         let current_time = Utc::now().timestamp_millis();
 
-        let random_ref: String = thread_rng()
+        let random_ref: String = rng()
             .sample_iter(&Alphanumeric)
             .take(48)
             .map(char::from)

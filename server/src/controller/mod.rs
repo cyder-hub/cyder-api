@@ -28,6 +28,7 @@ mod access_control;
 mod model;
 mod model_alias;
 mod provider;
+pub mod llm_types;
 pub mod proxy;
 mod request_log;
 mod stat; // Add this module declaration

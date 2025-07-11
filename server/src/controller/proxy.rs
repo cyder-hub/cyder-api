@@ -13,22 +13,28 @@ use axum::{
     response::Response,
     routing::{any, get},
 };
-use axum::Json;
+use crate::controller::llm_types::LlmApiType;
 use crate::service::{
-    app_state::{create_state_router, StateRouter, AppState, StateStore, SystemApiKeyStore, AppStoreError, GroupItemSelectionStrategy}, // Added AppState, StateStore, AppStoreError
+    app_state::{create_state_router, StateRouter, AppState, SystemApiKeyStore, AppStoreError, GroupItemSelectionStrategy}, // Added AppState, StateStore, AppStoreError
     vertex::get_vertex_token,
 };
-use bytes::BytesMut;
+use crate::utils::billing::{parse_usage_info, populate_token_cost_fields, UsageInfo};
+use crate::utils::transform::{
+    transform_request_data_gemini_to_openai, transform_request_data_openai_to_gemini,
+    transform_result_chunk_gemini_to_openai, transform_result_chunk_openai_to_gemini,
+    transform_result_gemini_to_openai, transform_result_openai_to_gemini,
+};
 use chrono::Utc;
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use reqwest::{
     header::{
         ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HOST,
+        TRANSFER_ENCODING,
     },
     Method, Proxy, StatusCode, Url,
 };
-use serde::{Deserialize, Serialize}; // Added Serialize and Deserialize
+use serde::{Serialize}; // Added Serialize and Deserialize
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -50,6 +56,7 @@ use crate::{
     config::CONFIG,
     utils::{process_stream_options, split_chunks},
 };
+use crate::schema::enum_def::ProviderType;
 
 struct ApiKeyCheckResult {
     api_key: SystemApiKey,
@@ -108,168 +115,6 @@ fn build_new_headers(
     Ok(headers)
 }
 
-#[derive(Debug)]
-struct UsageInfo {
-    prompt_tokens: i32,
-    completion_tokens: i32,
-    reasoning_tokens: i32,
-    total_tokens: i32,
-}
-
-fn parse_usage_info(usage_val: Option<&Value>) -> Option<UsageInfo> {
-    if let Some(usage) = usage_val {
-        if usage.is_null() {
-            return None;
-        }
-
-        let prompt_tokens = usage
-            .get("prompt_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0) as i32;
-        let completion_tokens = usage
-            .get("completion_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0) as i32;
-        let total_tokens = usage
-            .get("total_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0) as i32;
-
-        let reasoning_tokens = usage
-            .get("completion_tokens_details")
-            .and_then(|details| details.get("reasoning_tokens"))
-            .and_then(Value::as_i64)
-            .map(|rt| rt as i32)
-            .unwrap_or_else(|| {
-                let calculated_reasoning = total_tokens - prompt_tokens - completion_tokens;
-                if calculated_reasoning < 0 {
-                    0
-                } else {
-                    calculated_reasoning
-                }
-            });
-
-        Some(UsageInfo {
-            prompt_tokens,
-            completion_tokens,
-            reasoning_tokens,
-            total_tokens,
-        })
-    } else {
-        None
-    }
-}
-
-/// Calculates the total cost of a request based on token usage and a set of price rules.
-///
-/// It finds the best-matching active price rule for each usage type ('PROMPT', 'COMPLETION', 'INVOCATION')
-/// and calculates the cost. "Best" is the rule with the most recent `effective_from` date.
-///
-/// # Arguments
-///
-/// * `usage_info` - A reference to the `UsageInfo` struct containing token counts.
-/// * `price_rules` - A slice of `PriceRule`s applicable to the request.
-///
-/// # Returns
-///
-/// The total calculated cost in micro-units.
-fn calculate_cost(usage_info: &UsageInfo, price_rules: &[PriceRule]) -> i64 {
-    debug!("[calculate_cost] Calculating cost for usage: {:?}, with price rules: {:?}", usage_info, price_rules);
-    let now = Utc::now().timestamp_millis();
-    let mut total_cost: i64 = 0;
-
-    // Helper to find the best rule for a given usage type.
-    // "Best" is defined as the one that is currently active and has the latest `effective_from` date.
-    let find_best_rule = |usage_type: &str| -> Option<&PriceRule> {
-        price_rules
-            .iter()
-            .filter(|rule| {
-                rule.usage_type == usage_type
-                    && rule.is_enabled
-                    && rule.effective_from <= now
-                    && rule.effective_until.map_or(true, |until| now < until)
-            })
-            .max_by_key(|rule| rule.effective_from)
-    };
-
-    // Calculate cost for prompt tokens
-    if let Some(rule) = find_best_rule("PROMPT") {
-        if usage_info.prompt_tokens > 0 {
-            // Price is per 1000 tokens
-            let cost = usage_info.prompt_tokens as i64 * rule.price_in_micro_units;
-            total_cost += cost;
-            debug!("[calculate_cost] Applied PROMPT rule: {:?}. Cost added: {}. Current total cost: {}", rule, cost, total_cost);
-        }
-    }
-
-    // Calculate cost for completion tokens
-    if let Some(rule) = find_best_rule("COMPLETION") {
-        if usage_info.completion_tokens > 0 {
-            // Price is per 1000 tokens
-            let cost = usage_info.completion_tokens as i64 * rule.price_in_micro_units;
-            total_cost += cost;
-            debug!("[calculate_cost] Applied COMPLETION rule: {:?}. Cost added: {}. Current total cost: {}", rule, cost, total_cost);
-        }
-    }
-
-    // Calculate cost for invocation (flat fee)
-    if let Some(rule) = find_best_rule("INVOCATION") {
-        // Invocation is a flat fee, not token-based.
-        total_cost += rule.price_in_micro_units;
-        debug!("[calculate_cost] Applied INVOCATION rule: {:?}. Cost added: {}. Current total cost: {}", rule, rule.price_in_micro_units, total_cost);
-    }
-
-    debug!("[calculate_cost] Final calculated cost: {}", total_cost);
-    total_cost
-}
-
-
-// Helper function to decompress data if it's gzipped
-fn decompress_if_gzipped(bytes_mut: &BytesMut, is_gzip: bool, log_id_for_error: i64) -> Bytes {
-    if is_gzip {
-        if bytes_mut.is_empty() {
-            Bytes::new()
-        } else {
-            let mut gz = GzDecoder::new(&bytes_mut[..]);
-            let mut decompressed_data = Vec::new();
-            match gz.read_to_end(&mut decompressed_data) {
-                Ok(_) => Bytes::from(decompressed_data),
-                Err(e) => {
-                    error!("Gzip decoding failed for log_id {}: {}", log_id_for_error, e);
-                    bytes_mut.clone().freeze() // return original if decode fails
-                }
-            }
-        }
-    } else {
-        bytes_mut.clone().freeze()
-    }
-}
-
-// Helper function to populate token and cost fields in UpdateRequestLogData
-fn populate_token_cost_fields(
-    update_data: &mut UpdateRequestLogData,
-    usage_info: Option<&UsageInfo>,
-    price_rules: &[PriceRule],
-    currency: Option<&str>,
-) {
-    debug!("[populate_token_cost_fields] Populating with usage_info: {:?}, price_rules: {:?}", usage_info, price_rules);
-    if let Some(u) = usage_info {
-        update_data.prompt_tokens = Some(u.prompt_tokens);
-        update_data.completion_tokens = Some(u.completion_tokens);
-        update_data.reasoning_tokens = Some(u.reasoning_tokens);
-        update_data.total_tokens = Some(u.total_tokens);
-
-        if !price_rules.is_empty() {
-            let cost = calculate_cost(u, price_rules);
-            update_data.calculated_cost = Some(cost);
-            if cost > 0 {
-                update_data.cost_currency = currency.map(|c| Some(c.to_string()));
-            }
-        }
-    }
-    debug!("[populate_token_cost_fields] Resulting update_data: {:?}", update_data);
-}
-
 // Helper function to build and log the final update for a request
 fn log_final_update(
     log_id: i64,
@@ -319,48 +164,166 @@ fn log_final_update(
     }
 }
 
-// Authenticates the request and fetches the associated access control policy.
-async fn authenticate_and_authorize(
+// Authenticates an OpenAI-style request (Bearer token).
+async fn authenticate_openai_request(
     headers: &HeaderMap,
     app_state: &Arc<AppState>,
-) -> Result<(ApiKeyCheckResult, Option<ApiAccessControlPolicy>), (StatusCode, String)> {
-    // 1. Get system_api_key from header and check it
+) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
     let system_api_key_str =
         parse_token_from_request(headers).map_err(|err| (StatusCode::UNAUTHORIZED, err))?;
-    let api_key_check_result =
-        check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
-            .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))?;
+    check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
+        .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))
+}
 
-    // 2. Fetch Access Control Policy if ID is present on the SystemApiKey
-    if let Some(policy_id) = api_key_check_result.api_key.access_control_policy_id {
+// Authenticates a Gemini-style request (X-Goog-Api-Key header or 'key' query param).
+fn authenticate_gemini_request(
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    app_state: &Arc<AppState>,
+) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
+    let system_api_key_str = match headers.get("X-Goog-Api-Key") {
+        Some(header_value) => match header_value.to_str() {
+            Ok(key) => key.to_string(),
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Invalid characters in X-Goog-Api-Key header".to_string(),
+                ));
+            }
+        },
+        None => match params.get("key") {
+            Some(key) => key.clone(),
+            None => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Missing API key. Provide it in 'X-Goog-Api-Key' header or 'key' query parameter.".to_string()
+                ));
+            }
+        },
+    };
+    check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
+        .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))
+}
+
+// Checks if the request is allowed by the access control policy.
+fn check_access_control(
+    system_api_key: &SystemApiKey,
+    provider: &Provider,
+    model: &Model,
+    app_state: &Arc<AppState>,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(policy_id) = system_api_key.access_control_policy_id {
         match app_state.access_control_store.get_by_id(policy_id) {
-            Ok(Some(policy)) => Ok((api_key_check_result, Some(policy))),
+            Ok(Some(policy)) => {
+                if let Err(reason) = LIMITER.check_limit_strategy(&policy, provider.id, model.id) {
+                    info!(
+                        "Access denied by policy '{}' for SystemApiKey ID {}, Provider ID {}, Model ID {}. Reason: {}",
+                        policy.name, system_api_key.id, provider.id, model.id, reason
+                    );
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        format!("Access denied by access control policy: {}", reason),
+                    ));
+                }
+            }
             Ok(None) => {
                 let err_msg = format!(
                     "Access control policy id {} configured but not found in application cache.",
                     policy_id
                 );
-                error!(
-                    "{}, SystemApiKey ID: {}",
-                    err_msg, api_key_check_result.api_key.id
-                );
-                Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg))
+                error!("{}, SystemApiKey ID: {}", err_msg, system_api_key.id);
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
             }
             Err(store_err) => {
                 let err_msg = format!(
                     "Error accessing application cache for access control policy id {}: {}",
                     policy_id, store_err
                 );
-                error!(
-                    "{}, SystemApiKey ID: {}",
-                    err_msg, api_key_check_result.api_key.id
-                );
-                Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg))
+                error!("{}, SystemApiKey ID: {}", err_msg, system_api_key.id);
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
             }
         }
-    } else {
-        Ok((api_key_check_result, None))
     }
+    Ok(())
+}
+
+// Retrieves pricing rules and currency for a given model.
+fn get_pricing_info(model: &Model, app_state: &Arc<AppState>) -> (Vec<PriceRule>, Option<String>) {
+    if let Some(plan_id) = model.billing_plan_id {
+        let rules = app_state
+            .price_rule_store
+            .list_by_group_id(plan_id)
+            .unwrap_or_else(|e| {
+                error!(
+                    "Failed to get price rules for plan_id {}: {:?}. Cost will not be calculated.",
+                    plan_id, e
+                );
+                Vec::new()
+            });
+
+        let plan_currency = match app_state.billing_plan_store.get_by_id(plan_id) {
+            Ok(Some(plan)) => Some(plan.currency),
+            Ok(None) => {
+                error!("Billing plan with id {} not found in store.", plan_id);
+                None
+            }
+            Err(e) => {
+                error!("Failed to get billing plan for plan_id {}: {:?}", plan_id, e);
+                None
+            }
+        };
+
+        (rules, plan_currency)
+    } else {
+        (Vec::new(), None)
+    }
+}
+
+// Creates an initial request log entry in the database.
+fn create_request_log(
+    system_api_key: &SystemApiKey,
+    provider: &Provider,
+    model: &Model,
+    provider_api_key_id: i64,
+    start_time: i64,
+    client_ip_addr: &Option<String>,
+    request_uri_path: &str,
+    channel: &Option<String>,
+    external_id: &Option<String>,
+) -> i64 {
+    let log_id = ID_GENERATOR.generate_id();
+    let real_model_name = model
+        .real_model_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&model.model_name);
+
+    let initial_log_data = NewRequestLog {
+        id: log_id,
+        system_api_key_id: system_api_key.id,
+        provider_id: provider.id,
+        model_id: model.id,
+        provider_api_key_id,
+        model_name: model.model_name.clone(),
+        real_model_name: real_model_name.to_string(),
+        request_received_at: start_time,
+        client_ip: client_ip_addr.clone(),
+        external_request_uri: Some(request_uri_path.to_string()),
+        status: RequestLogStatus::PENDING.to_string(),
+        llm_request_sent_at: Utc::now().timestamp_millis(),
+        created_at: start_time,
+        updated_at: start_time,
+        channel: channel.clone(),
+        external_id: external_id.clone(),
+    };
+
+    if let Err(e) = RequestLog::create_initial_request(&initial_log_data) {
+        error!(
+            "Failed to create initial request log for log_id {}: {:?}",
+            log_id, e
+        );
+    }
+    log_id
 }
 
 // Parses the request body into a JSON Value.
@@ -404,7 +367,7 @@ async fn prepare_llm_request(
         })?;
 
     // 2. Get provider-specific token if needed (e.g., Vertex AI)
-    let request_api_key = if provider.provider_type == "VERTEX_OPENAI" {
+    let request_api_key = if provider.provider_type == ProviderType::VertexOpenai {
         get_vertex_token(
             selected_provider_api_key.id,
             &selected_provider_api_key.api_key,
@@ -471,6 +434,8 @@ async fn prepare_llm_request(
         obj.insert("model".to_string(), json!(real_model_name_str));
     }
 
+    process_stream_options(&mut data);
+
     // 6. Serialize final body and return all parts
     let final_body = serde_json::to_string(&data).map_err(|e| {
         (
@@ -487,7 +452,480 @@ async fn prepare_llm_request(
     ))
 }
 
-// Handles the response from the LLM, including streaming, logging, and error handling.
+// Prepares all elements for a downstream Gemini LLM request.
+async fn prepare_gemini_llm_request(
+    provider: &Provider,
+    model: &Model,
+    mut data: Value,
+    original_headers: &HeaderMap,
+    app_state: &Arc<AppState>,
+    is_stream: bool,
+    params: &HashMap<String, String>,
+) -> Result<(String, HeaderMap, String, i64), (StatusCode, String)> {
+    // 1. Get provider API key
+    let selected_provider_api_key = app_state
+        .provider_api_key_store
+        .get_one_by_group_id(provider.id, GroupItemSelectionStrategy::Queue)
+        .map_err(|e| {
+            error!(
+                "Failed to get provider API key from store for provider_id {}: {:?}",
+                provider.id, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to retrieve API key for provider '{}'", provider.name),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("No API keys configured for provider '{}'", provider.name),
+            )
+        })?;
+
+    // 2. Get provider-specific token if needed (e.g., Vertex AI)
+    let request_api_key = if provider.provider_type == ProviderType::Vertex {
+        get_vertex_token(
+            selected_provider_api_key.id,
+            &selected_provider_api_key.api_key,
+        )
+        .await
+        .map_err(|err_msg| (StatusCode::BAD_REQUEST, err_msg))?
+    } else {
+        selected_provider_api_key.api_key.clone()
+    };
+
+    // 3. Prepare URL, headers, and apply custom fields
+    let action = if is_stream {
+        "streamGenerateContent"
+    } else {
+        "generateContent"
+    };
+    let real_model_name = model
+        .real_model_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&model.model_name);
+    let target_url_str = format!("{}/{}:{}", provider.endpoint, real_model_name, action);
+    let mut url = Url::parse(&target_url_str)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "failed to parse target url".to_string()))?;
+
+    // Append original query params, except 'key'
+    for (k, v) in params {
+        if k != "key" {
+            url.query_pairs_mut().append_pair(k, v);
+        }
+    }
+
+    if is_stream {
+        url.query_pairs_mut().append_pair("alt", "sse");
+    }
+
+    let mut final_headers = reqwest::header::HeaderMap::new();
+    for (name, value) in original_headers.iter() {
+        if name != HOST
+            && name != CONTENT_LENGTH
+            && name != ACCEPT_ENCODING
+            && name != "x-api-key"
+            && name != "x-goog-api-key"
+            && name != AUTHORIZATION
+        {
+            final_headers.insert(name.clone(), value.clone());
+        }
+    }
+
+    if provider.provider_type == ProviderType::Vertex {
+        let bearer_token = format!("Bearer {}", request_api_key);
+        final_headers.insert(
+            AUTHORIZATION,
+            reqwest::header::HeaderValue::try_from(bearer_token).unwrap(),
+        );
+    } else {
+        // For Gemini, use X-Goog-Api-Key
+        final_headers.insert(
+            "X-Goog-Api-Key",
+            reqwest::header::HeaderValue::try_from(request_api_key).unwrap(),
+        );
+    }
+
+    // Fetch and combine custom fields for the provider and model
+    let provider_cfs = app_state
+        .custom_field_link_store
+        .get_definitions_by_entity_id(provider.id)
+        .map_err(|e| {
+            error!(
+                "Failed to get custom fields for provider_id {}: {:?}",
+                provider.id, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to retrieve custom fields for provider".to_string(),
+            )
+        })?;
+    let model_cfs = app_state
+        .custom_field_link_store
+        .get_definitions_by_entity_id(model.id)
+        .map_err(|e| {
+            error!(
+                "Failed to get custom fields for model_id {}: {:?}",
+                model.id, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to retrieve custom fields for model".to_string(),
+            )
+        })?;
+
+    let mut combined_cfs_map: HashMap<i64, CustomFieldDefinition> = HashMap::new();
+    for cf in provider_cfs {
+        combined_cfs_map.insert(cf.id, cf);
+    }
+    for cf in model_cfs {
+        combined_cfs_map.insert(cf.id, cf);
+    }
+    let custom_fields: Vec<CustomFieldDefinition> = combined_cfs_map.values().cloned().collect();
+
+    handle_custom_fields(&mut data, &mut url, &mut final_headers, &custom_fields);
+
+    let final_url = url.to_string();
+
+    // 4. Serialize final body
+    let final_body = serde_json::to_string(&data).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize final request body: {}", e),
+        )
+    })?;
+
+    Ok((
+        final_url,
+        final_headers,
+        final_body,
+        selected_provider_api_key.id,
+    ))
+}
+
+// Handles a non-streaming response from the LLM.
+async fn handle_non_streaming_response(
+    log_id: i64,
+    model_str: String,
+    response: reqwest::Response,
+    url: &str,
+    data: &str,
+    price_rules: Vec<PriceRule>,
+    currency: Option<String>,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    let status_code = response.status();
+    let response_headers = response.headers().clone();
+    debug!("[handle_non_streaming_response] response headers: {:?}", response_headers);
+    let is_gzip = response_headers
+        .get(CONTENT_ENCODING)
+        .map_or(false, |value| value.to_str().unwrap_or("").contains("gzip"));
+
+    debug!("is gzip {}", is_gzip);
+
+    let mut response_builder = Response::builder().status(status_code);
+    for (name, value) in response_headers.iter() {
+        // Do not forward content-length, content-encoding, or transfer-encoding.
+        // Axum will set the correct content-length.
+        // We handle decompression, so we don't want to forward the original encoding.
+        // We are not streaming chunk-by-chunk from the origin, so we don't forward transfer-encoding.
+        if name != CONTENT_LENGTH && name != CONTENT_ENCODING && name != TRANSFER_ENCODING {
+            response_builder = response_builder.header(name, value);
+        }
+    }
+
+    let body_bytes = match response.bytes().await {
+        Ok(b) => {
+            debug!("[handle_non_streaming_response] body bytes: {:?}", b);
+            b
+        }
+        Err(e) => {
+            let err_msg = format!("Failed to read LLM response body: {}", e);
+            error!("[handle_non_streaming_response] {}", err_msg);
+            let completed_at = Utc::now().timestamp_millis();
+            log_final_update(log_id, "LLM body read error", url, data, Some(status_code), Some(Some(err_msg.clone())), false, None, completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR));
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+        }
+    };
+
+    let decompressed_body = if is_gzip {
+        if body_bytes.is_empty() {
+            Bytes::new()
+        } else {
+            let mut gz = GzDecoder::new(&body_bytes[..]);
+            let mut decompressed_data = Vec::new();
+            match gz.read_to_end(&mut decompressed_data) {
+                Ok(_) => Bytes::from(decompressed_data),
+                Err(e) => {
+                    error!("Gzip decoding failed for log_id {}: {}", log_id, e);
+                    body_bytes // return original if decode fails
+                }
+            }
+        }
+    } else {
+        body_bytes
+    };
+    debug!("[handle_non_streaming_response] decompressed body: {}", String::from_utf8_lossy(&decompressed_body));
+    let llm_response_completed_at = Utc::now().timestamp_millis();
+
+    if status_code.is_success() {
+        let parsed_usage_info = serde_json::from_slice::<Value>(&decompressed_body)
+            .ok()
+            .and_then(|val| parse_usage_info(&val, target_api_type));
+
+        log_final_update(log_id, "Non-SSE success", url, data, Some(status_code), Some(None), false, None, llm_response_completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS));
+        info!("{}: Non-SSE request completed for log_id {}.", model_str, log_id);
+
+        let final_body = if api_type != target_api_type {
+            // Transformation is needed
+            let original_value: Value = match serde_json::from_slice(&decompressed_body) {
+                Ok(v) => v,
+                Err(e) => {
+                    // If we can't parse the body, we can't transform it. Return original.
+                    error!("Failed to parse LLM response for transformation: {}. Returning original body.", e);
+                    return Ok(response_builder.body(Body::from(decompressed_body)).unwrap());
+                }
+            };
+
+            let transformed_value = match (target_api_type, api_type) {
+                (LlmApiType::Gemini, LlmApiType::OpenAI) => transform_result_gemini_to_openai(original_value),
+                (LlmApiType::OpenAI, LlmApiType::Gemini) => transform_result_openai_to_gemini(original_value),
+                _ => original_value, // Should not happen if they are not equal
+            };
+
+            match serde_json::to_vec(&transformed_value) {
+                Ok(b) => Bytes::from(b),
+                Err(e) => {
+                    error!("Failed to serialize transformed response: {}. Returning original body.", e);
+                    decompressed_body
+                }
+            }
+        } else {
+            // No transformation needed
+            decompressed_body
+        };
+        
+        Ok(response_builder.body(Body::from(final_body)).unwrap())
+    } else {
+        let error_body_str = String::from_utf8_lossy(&decompressed_body).into_owned();
+        error!("LLM request failed with status {} for log_id {}: {}", status_code, log_id, &error_body_str);
+        log_final_update(log_id, "LLM error status", url, data, Some(status_code), Some(Some(error_body_str.clone())), false, None, llm_response_completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR));
+        
+        Ok(response_builder.body(Body::from(error_body_str)).unwrap())
+    }
+}
+
+// Handles a streaming (SSE) response from the LLM.
+async fn handle_streaming_response(
+    log_id: i64,
+    model_str: String,
+    response: reqwest::Response,
+    url: &str,
+    data: &str,
+    price_rules: Vec<PriceRule>,
+    currency: Option<String>,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    let status_code = response.status();
+    let response_headers = response.headers().clone();
+
+    let mut response_builder = Response::builder().status(status_code);
+    for (name, value) in response_headers.iter() {
+        // Do not forward content-length, content-encoding, or transfer-encoding.
+        // Axum will set the correct content-length for the stream.
+        // We are not forwarding the original encoding.
+        // We are re-streaming, so we don't forward transfer-encoding.
+        if name != CONTENT_LENGTH && name != CONTENT_ENCODING && name != TRANSFER_ENCODING {
+            response_builder = response_builder.header(name, value);
+        }
+    }
+
+    let mut first_chunk_received_at_proxy: i64 = 0;
+    let latest_chunk_arc: Arc<Mutex<Option<Bytes>>> = Arc::new(Mutex::new(None));
+    let logged_sse_success = Arc::new(Mutex::new(false));
+    let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
+
+    let url_owned = url.to_string();
+    let data_owned = data.to_string();
+    let logged_sse_success_clone = logged_sse_success.clone();
+
+    tokio::spawn(async move {
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            if tx.send(chunk_result).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let monitored_stream = async_stream::stream! {
+        let mut remainder = Bytes::new();
+        while let Some(chunk_result) = rx.recv().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    if first_chunk_received_at_proxy == 0 {
+                        first_chunk_received_at_proxy = Utc::now().timestamp_millis();
+                    }
+
+                    let current_chunk = if remainder.is_empty() {
+                        chunk
+                    } else {
+                        Bytes::from([remainder.as_ref(), chunk.as_ref()].concat())
+                    };
+                    let (lines, new_remainder) = split_chunks(current_chunk);
+                    remainder = new_remainder;
+
+                    if lines.is_empty() {
+                        continue;
+                    }
+
+                    for sub_chunk in &lines {
+                        let line_str = String::from_utf8_lossy(sub_chunk);
+                        if target_api_type == LlmApiType::OpenAI && line_str.trim() == "data: [DONE]" {
+                            if let Some(final_data_chunk) = latest_chunk_arc.lock().unwrap().take() {
+                                let final_line_str = String::from_utf8_lossy(&final_data_chunk);
+                                if let Some(data_json_str) = final_line_str.strip_prefix("data:").map(str::trim) {
+                                    if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
+                                        let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
+                                        let completed_at = Utc::now().timestamp_millis();
+                                        let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+                                        log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS));
+                                        *logged_sse_success_clone.lock().unwrap() = true;
+                                        info!("{}: SSE stream completed.", model_str);
+                                    }
+                                }
+                            }
+                        } else if line_str.starts_with("data:") {
+                            *latest_chunk_arc.lock().unwrap() = Some(sub_chunk.clone());
+                        }
+                    }
+                    
+                    let transformed_chunk = if api_type != target_api_type {
+                        let transformed_sub_chunks_as_strings: Vec<String> = lines
+                            .into_iter()
+                            .filter_map(|sub_chunk| {
+                                let transformed_bytes_opt = match (target_api_type, api_type) {
+                                    (LlmApiType::Gemini, LlmApiType::OpenAI) => transform_result_chunk_gemini_to_openai(sub_chunk),
+                                    (LlmApiType::OpenAI, LlmApiType::Gemini) => transform_result_chunk_openai_to_gemini(sub_chunk),
+                                    _ => unreachable!(), // This case is guarded by `api_type != target_api_type`
+                                };
+
+                                transformed_bytes_opt.map(|transformed_bytes| {
+                                    if transformed_bytes.is_empty() {
+                                        // An empty transformed chunk (e.g., from a keep-alive)
+                                        // will be concatenated as an empty string, preserving stream structure.
+                                        String::new()
+                                    } else {
+                                        // Each valid data chunk should be terminated by the SSE delimiter.
+                                        format!("{}\n\n", String::from_utf8_lossy(&transformed_bytes))
+                                    }
+                                })
+                            })
+                            .collect();
+
+                        Bytes::from(transformed_sub_chunks_as_strings.concat())
+                    } else {
+                        let mut new_chunk_vec: Vec<u8> = Vec::new();
+                        for line in lines {
+                            new_chunk_vec.extend_from_slice(&line);
+                            new_chunk_vec.push(b'\n');
+                        }
+                        Bytes::from(new_chunk_vec)
+                    };
+
+                    // Forward the transformed chunk to the client
+                    if !transformed_chunk.is_empty() {
+                        yield Ok::<_, std::io::Error>(transformed_chunk);
+                    }
+                }
+                Err(e) => {
+                    let stream_error_message = format!("LLM stream error: {}", e);
+                    error!("{}", stream_error_message);
+                    let completed_at = Utc::now().timestamp_millis();
+                    let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+
+                    log_final_update(
+                        log_id, "LLM stream error", &url_owned, &data_owned, Some(status_code),
+                        Some(None), true, first_chunk_ts, completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR),
+                    );
+                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, stream_error_message));
+                    break;
+                }
+            }
+        }
+
+        if status_code.is_success() && !remainder.is_empty() {
+            let line_str = String::from_utf8_lossy(&remainder);
+            if line_str.starts_with("data:") {
+                *latest_chunk_arc.lock().unwrap() = Some(remainder);
+            }
+        }
+
+        // After the upstream is closed, check if we need to send a [DONE] message.
+        if status_code.is_success() && api_type == LlmApiType::OpenAI && target_api_type == LlmApiType::Gemini {
+            // The client expects an OpenAI stream, which must end with [DONE].
+            // The Gemini stream we just consumed doesn't have this, so we add it.
+            debug!("[handle_streaming_response] Appending [DONE] chunk for OpenAI client.");
+            let done_chunk = Bytes::from("data: [DONE]\n\n");
+            yield Ok::<_, std::io::Error>(done_chunk);
+        }
+
+        let llm_response_completed_at = Utc::now().timestamp_millis();
+
+        if status_code.is_success() && !*logged_sse_success.lock().unwrap() {
+            if let Some(final_data_chunk) = latest_chunk_arc.lock().unwrap().take() {
+                let final_line_str = String::from_utf8_lossy(&final_data_chunk);
+                if let Some(data_json_str) = final_line_str.strip_prefix("data:").map(str::trim) {
+                    if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
+                        debug!("[proxy] final response from stream end {:?}", data_value);
+                        let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
+                        let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+
+                        log_final_update(
+                            log_id, "SSE stream end", &url_owned, &data_owned, Some(status_code),
+                            Some(None), true, first_chunk_ts, llm_response_completed_at,
+                            parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS),
+                        );
+                        info!("{}: SSE stream completed at stream end.", model_str);
+                    } else {
+                        error!("Failed to parse final SSE data JSON at stream end for log_id {}: {}", log_id, data_json_str);
+                    }
+                }
+            } else {
+                info!("{}: SSE stream completed without a final data chunk to parse.", model_str);
+                let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+                log_final_update(
+                    log_id, "SSE stream end (no final chunk)", &url_owned, &data_owned, Some(status_code),
+                    Some(None), true, first_chunk_ts, llm_response_completed_at,
+                    None, &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS),
+                );
+            }
+        } else if !status_code.is_success() {
+            let error_body_str = "Error during stream".to_string();
+            let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+            log_final_update(
+                log_id, "LLM error status", &url_owned, &data_owned, Some(status_code),
+                Some(Some(error_body_str)), true, first_chunk_ts,
+                llm_response_completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR),
+            );
+        }
+    };
+
+    match response_builder.body(Body::from_stream(monitored_stream)) {
+        Ok(final_response) => Ok(final_response),
+        Err(e) => {
+            let error_message = format!("Failed to build client response for log_id {}: {}", log_id, e);
+            error!("{}", error_message);
+            Err((StatusCode::INTERNAL_SERVER_ERROR, error_message))
+        }
+    }
+}
+
+// Dispatches to the correct response handler based on whether the response is a stream.
 async fn handle_llm_response(
     log_id: i64,
     model_str: String,
@@ -496,15 +934,15 @@ async fn handle_llm_response(
     data: &str,
     price_rules: Vec<PriceRule>,
     currency: Option<String>,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
 ) -> Result<Response<Body>, (StatusCode, String)> {
-    let response_headers = response.headers().clone();
-    let is_sse = response_headers
+    let is_sse = response.headers()
         .get(CONTENT_TYPE)
         .map_or(false, |value| {
             value.to_str().unwrap_or("").contains("text/event-stream")
         });
 
-    // Update the log with whether the response is a stream.
     if let Err(e) = RequestLog::update_request_with_completion_details(
         log_id,
         &UpdateRequestLogData {
@@ -512,154 +950,13 @@ async fn handle_llm_response(
             ..Default::default()
         },
     ) {
-        error!(
-            "Failed to update request log (is_stream) for log_id {}: {:?}",
-            log_id, e
-        );
+        error!("Failed to update request log (is_stream) for log_id {}: {:?}", log_id, e);
     }
 
-    let is_gzip = response_headers
-        .get(CONTENT_ENCODING)
-        .map_or(false, |value| value.to_str().unwrap_or("").contains("gzip"));
-    let status_code = response.status();
-
-    // Build the response to the client, forwarding headers from the LLM response.
-    let mut response_builder = Response::builder().status(status_code);
-    for (name, value) in response_headers.iter() {
-        if name != CONTENT_LENGTH {
-            response_builder = response_builder.header(name, value);
-        }
-    }
-
-    let mut first_chunk_received_at_proxy: i64 = 0;
-    let mut total_bytes_mut = BytesMut::new();
-    let latest_chunk_arc: Arc<Mutex<Option<Bytes>>> = Arc::new(Mutex::new(None));
-    let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
-
-    // Clone url and data to be moved into the async stream
-    let url_owned = url.to_string();
-    let data_owned = data.to_string();
-
-    // Spawn a task to pull chunks from the LLM response stream and send them to a channel.
-    // This decouples receiving from processing.
-    tokio::spawn(async move {
-        let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
-            if tx.send(chunk_result).await.is_err() {
-                // Receiver has been dropped, so we can stop.
-                break;
-            }
-        }
-    });
-
-    // Create a new stream that processes chunks as they are received from the channel.
-    let monitored_stream = async_stream::stream! {
-        while let Some(chunk_result) = rx.recv().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    if first_chunk_received_at_proxy == 0 {
-                        first_chunk_received_at_proxy = Utc::now().timestamp_millis();
-                    }
-
-                    if is_sse {
-                        let multi_chunks = split_chunks(chunk.slice(..));
-                        for current_sub_chunk in multi_chunks {
-                            let line_str = String::from_utf8_lossy(&current_sub_chunk);
-                            if line_str.trim() == "data: [DONE]" {
-                                if let Some(final_data_chunk) = latest_chunk_arc.lock().unwrap().take() {
-                                    let final_line_str = String::from_utf8_lossy(&final_data_chunk);
-                                    if let Some(data_json_str) = final_line_str.strip_prefix("data:").map(str::trim) {
-                                        if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
-                                            debug!("[proxy] final response {:?}", data_value);
-                                            let usage_json = data_value.get("usage");
-                                            let parsed_usage_info = parse_usage_info(usage_json);
-                                            let completed_at = Utc::now().timestamp_millis();
-                                            let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-
-                                            log_final_update(
-                                                log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code),
-                                                Some(None), true, first_chunk_ts, completed_at,
-                                                parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS),
-                                            );
-                                            info!("{}: SSE stream completed.", model_str);
-                                        } else {
-                                            error!("Failed to parse final SSE data JSON for log_id {}: {}", log_id, data_json_str);
-                                        }
-                                    }
-                                }
-                            } else {
-                                *latest_chunk_arc.lock().unwrap() = Some(current_sub_chunk);
-                            }
-                        }
-                    } else { // Not SSE
-                        total_bytes_mut.extend_from_slice(&chunk);
-                    }
-                    yield Ok::<_, std::io::Error>(chunk); // Forward the original chunk to the client
-                }
-                Err(e) => { // An error occurred while streaming from the LLM
-                    let stream_error_message = format!("LLM stream error: {}", e);
-                    error!("{}", stream_error_message);
-                    let completed_at = Utc::now().timestamp_millis();
-                    let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-
-                    log_final_update(
-                        log_id, "LLM stream error", &url_owned, &data_owned, Some(status_code),
-                        Some(None), is_sse, first_chunk_ts, completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR),
-                    );
-                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, stream_error_message));
-                    break;
-                }
-            }
-        }
-
-        // This block executes after the stream loop finishes.
-        let llm_response_completed_at = Utc::now().timestamp_millis();
-
-        if status_code.is_success() {
-            if !is_sse { // Non-SSE success, log here (SSE success is logged at "[DONE]")
-                let final_body_bytes = decompress_if_gzipped(&total_bytes_mut, is_gzip, log_id);
-                let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-                let parsed_usage_info = serde_json::from_slice::<Value>(&final_body_bytes)
-                    .ok()
-                    .and_then(|val| parse_usage_info(val.get("usage")));
-
-                log_final_update(
-                    log_id, "Non-SSE success", &url_owned, &data_owned, Some(status_code),
-                    Some(None), false, first_chunk_ts, llm_response_completed_at,
-                    parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS),
-                );
-                info!("{}: Non-SSE request completed for log_id {}.", model_str, log_id);
-            }
-        } else { // LLM returned a non-2xx status code
-            let final_body_bytes = decompress_if_gzipped(&total_bytes_mut, is_gzip, log_id);
-            let error_body_str = String::from_utf8_lossy(&final_body_bytes).into_owned();
-            let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-
-            error!("LLM request failed with status {} for log_id {}: {}", status_code, log_id, error_body_str);
-
-            log_final_update(
-                log_id, "LLM error status", &url_owned, &data_owned, Some(status_code),
-                Some(Some(error_body_str)), is_sse, first_chunk_ts,
-                llm_response_completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR),
-            );
-        }
-    };
-
-    // Build the final response to the client, streaming the body from our monitored stream.
-    match response_builder.body(Body::from_stream(monitored_stream)) {
-        Ok(final_response) => Ok(final_response),
-        Err(e) => {
-            let error_message = format!("Failed to build client response for log_id {}: {}", log_id, e);
-            error!("{}", error_message);
-            let completed_at = Utc::now().timestamp_millis();
-            let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-
-            log_final_update(
-                log_id, "Response build error", url, data, None, Some(None),
-                is_sse, first_chunk_ts, completed_at, None, &[], None, Some(RequestLogStatus::ERROR),
-            );
-            Err((StatusCode::INTERNAL_SERVER_ERROR, error_message))
-        }
+    if is_sse {
+        handle_streaming_response(log_id, model_str, response, url, data, price_rules, currency, api_type, target_api_type).await
+    } else {
+        handle_non_streaming_response(log_id, model_str, response, url, data, price_rules, currency, api_type, target_api_type).await
     }
 }
 
@@ -673,6 +970,8 @@ async fn proxy_request(
     use_proxy: bool,
     price_rules: Vec<PriceRule>,
     currency: Option<String>,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     // 1. Build HTTP client, with proxy if configured
     let client = if use_proxy {
@@ -686,7 +985,7 @@ async fn proxy_request(
         "[proxy] proxy request header: {:?}",
         serialize_reqwest_headers(&headers)
     );
-    debug!("[proxy] proxy request data: {:?}", &data);
+    debug!("[proxy] proxy request data: {}", &data);
 
     // 2. Send request to LLM
     let response = match client
@@ -721,7 +1020,7 @@ async fn proxy_request(
     };
 
     // 3. Process the response stream
-    handle_llm_response(log_id, model_str, response, &url, &data, price_rules, currency).await
+    handle_llm_response(log_id, model_str, response, &url, &data, price_rules, currency, api_type, target_api_type).await
 }
 
 fn parse_provider_model(pm: &str) -> (&str, &str) {
@@ -729,6 +1028,44 @@ fn parse_provider_model(pm: &str) -> (&str, &str) {
     let provider = parts.next().unwrap_or("");
     let model_id = parts.next().unwrap_or("");
     (provider, model_id)
+}
+
+// Sets or removes a value in a nested JSON object based on a dot-separated path.
+fn set_nested_value(data: &mut Value, path: &str, value_to_set: Option<Value>) {
+    if path.is_empty() {
+        return;
+    }
+    let mut parts: Vec<&str> = path.split('.').collect();
+    let key = match parts.pop() {
+        Some(k) => k,
+        None => return, // Should not happen if path is not empty
+    };
+
+    let mut current_level = data;
+    for part in parts {
+        if !current_level.is_object() {
+            *current_level = Value::Object(serde_json::Map::new());
+        }
+        let obj = current_level.as_object_mut().unwrap();
+        let next_level = obj
+            .entry(part.to_string())
+            .or_insert(Value::Object(serde_json::Map::new()));
+        if !next_level.is_object() {
+            *next_level = Value::Object(serde_json::Map::new());
+        }
+        current_level = next_level;
+    }
+
+    if let Some(obj) = current_level.as_object_mut() {
+        match value_to_set {
+            Some(v) => {
+                obj.insert(key.to_string(), v);
+            }
+            None => {
+                obj.remove(key);
+            }
+        }
+    }
 }
 
 fn handle_custom_fields(
@@ -740,68 +1077,40 @@ fn handle_custom_fields(
     for cf in custom_fields {
         match cf.field_placement.as_str() {
             "BODY" => {
-                match cf.field_type.as_str() {
+                let value_opt: Option<Value> = match cf.field_type.as_str() {
                     "UNSET" => {
-                        data.as_object_mut().map(|obj| {
-                            obj.remove(&cf.field_name);
-                        });
+                        set_nested_value(data, &cf.field_name, None);
+                        continue;
                     }
-                    "STRING" => {
-                        if let Some(string_value) = &cf.string_value {
-                            data.as_object_mut().map(|obj| {
-                                obj.insert(cf.field_name.clone(), Value::String(string_value.clone()));
-                            });
-                        }
-                    }
-                    "INTEGER" => {
-                        if let Some(int_value) = cf.integer_value {
-                            data.as_object_mut().map(|obj| {
-                                obj.insert(cf.field_name.clone(), Value::Number(int_value.into()));
-                            });
-                        }
-                    }
-                    "NUMBER" => {
-                        if let Some(number_value) = cf.number_value {
-                            data.as_object_mut().map(|obj| {
-                                obj.insert(
-                                    cf.field_name.clone(),
-                                    serde_json::Number::from_f64(number_value as f64) // Removed dereference *
-                                        .map(Value::Number)
-                                        .unwrap_or(Value::Null),
+                    "STRING" => cf.string_value.clone().map(Value::String),
+                    "INTEGER" => cf.integer_value.map(|v| Value::Number(v.into())),
+                    "NUMBER" => cf.number_value.map(|v| {
+                        serde_json::Number::from_f64(v as f64)
+                            .map(Value::Number)
+                            .unwrap_or(Value::Null)
+                    }),
+                    "BOOLEAN" => cf.boolean_value.map(Value::Bool),
+                    "JSON_STRING" => cf.string_value.as_ref().and_then(|s| {
+                        serde_json::from_str(s)
+                            .map_err(|e| {
+                                error!(
+                                    "Failed to parse JSON_STRING custom field '{}' for BODY: {}. Value: '{}'",
+                                    cf.field_name, e, s
                                 );
-                            });
-                        }
-                    }
-                    "BOOLEAN" => {
-                        if let Some(bool_value) = cf.boolean_value {
-                            data.as_object_mut().map(|obj| {
-                                obj.insert(cf.field_name.clone(), Value::Bool(bool_value)); // Removed dereference *
-                            });
-                        }
-                    }
-                    "JSON_STRING" => {
-                        if let Some(json_string_value) = &cf.string_value {
-                            match serde_json::from_str::<Value>(json_string_value) {
-                                Ok(parsed_json_value) => {
-                                    data.as_object_mut().map(|obj| {
-                                        obj.insert(cf.field_name.clone(), parsed_json_value);
-                                    });
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Failed to parse JSON_STRING custom field '{}' for BODY: {}. Value: '{}'",
-                                        cf.field_name, e, json_string_value
-                                    );
-                                }
-                            }
-                        }
-                    }
+                            })
+                            .ok()
+                    }),
                     _ => {
                         debug!(
                             "Unknown custom field type '{}' for field '{}' in BODY",
                             cf.field_type, cf.field_name
                         );
+                        None
                     }
+                };
+
+                if let Some(value) = value_opt {
+                    set_nested_value(data, &cf.field_name, Some(value));
                 }
             }
             "QUERY" => {
@@ -1048,130 +1357,163 @@ fn get_provider_and_model(app_state: &Arc<AppState>, pre_model_value: &str) -> R
     Ok((provider, model))
 }
 
-async fn proxy_all_handler(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    State(app_state): State<Arc<AppState>>,
+// The new unified handler for all proxy requests.
+async fn proxy_handler(
+    app_state: Arc<AppState>,
+    addr: SocketAddr,
+    path_segment: Option<String>,
+    query_params: Option<HashMap<String, String>>,
     request: Request<Body>,
+    api_type: LlmApiType,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     let client_ip_addr = Some(addr.ip().to_string());
     let start_time = Utc::now().timestamp_millis();
     let request_uri_path = request.uri().path().to_string();
     let original_headers = request.headers().clone();
 
-    // Step 1: Authenticate the request and retrieve API key and any associated access policy.
-    let (api_key_check_result, access_control_policy) =
-        authenticate_and_authorize(&original_headers, &app_state).await?;
+    // Step 1: Authenticate the request and retrieve API key.
+    let api_key_check_result = match api_type {
+        LlmApiType::OpenAI => authenticate_openai_request(&original_headers, &app_state).await?,
+        LlmApiType::Gemini => {
+            let empty_params = HashMap::new();
+            let params = query_params.as_ref().unwrap_or(&empty_params);
+            authenticate_gemini_request(&original_headers, params, &app_state)?
+        }
+    };
     let system_api_key = api_key_check_result.api_key;
     let channel = api_key_check_result.channel;
     let external_id = api_key_check_result.external_id;
 
     // Step 2: Parse the incoming request body.
     let mut data = parse_request_body(request).await?;
-    debug!("[proxy] original request data: {:?}", data);
+    debug!("[proxy] original request data: {}", serde_json::to_string(&data).unwrap_or_default());
 
-    process_stream_options(&mut data);
-
-    // Step 3: Determine the provider and model from the 'model' field in the request.
-    // This can be an alias or in 'provider/model' format.
-    let pre_model_str = data
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "'model' field must be a string".to_string(),
-            )
-        })?;
-    let (provider, model) =
-        get_provider_and_model(&app_state, pre_model_str).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-
-    let (price_rules, currency) = if let Some(plan_id) = model.billing_plan_id {
-        let rules = app_state
-            .price_rule_store
-            .list_by_group_id(plan_id)
-            .unwrap_or_else(|e| {
-                error!(
-                    "Failed to get price rules for plan_id {}: {:?}. Cost will not be calculated.",
-                    plan_id, e
+    // Step 3: Determine the provider and model.
+    let (provider, model, action) = match api_type {
+        LlmApiType::OpenAI => {
+            let pre_model_str = data
+                .get("model")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "'model' field must be a string".to_string(),
+                    )
+                })?;
+            let (provider, model) =
+                get_provider_and_model(&app_state, pre_model_str).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            (provider, model, None)
+        }
+        LlmApiType::Gemini => {
+            let model_action_segment = path_segment.as_ref().ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Missing model/action path segment".to_string(),
+                )
+            })?;
+            let parts: Vec<&str> = model_action_segment.rsplitn(2, ':').collect();
+            if parts.len() != 2 {
+                let err_msg = format!(
+                    "Invalid model_action_segment format: '{}'. Expected 'model_name:action'.",
+                    model_action_segment
                 );
-                Vec::new()
-            });
-
-        // Fetch the billing plan to get the currency.
-        // This assumes `billing_plan_store` is available on `app_state`.
-        let plan_currency = match app_state.billing_plan_store.get_by_id(plan_id) {
-            Ok(Some(plan)) => Some(plan.currency),
-            Ok(None) => {
-                error!("Billing plan with id {} not found in store.", plan_id);
-                None
+                error!("[gemini_models_handler] {}", err_msg);
+                return Err((StatusCode::BAD_REQUEST, err_msg));
             }
-            Err(e) => {
-                error!("Failed to get billing plan for plan_id {}: {:?}", plan_id, e);
-                None
-            }
-        };
+            let model_name = parts[1];
+            let action = parts[0];
 
-        (rules, plan_currency)
-    } else {
-        (Vec::new(), None)
+            if action != "generateContent" && action != "streamGenerateContent" {
+                let err_msg = format!(
+                    "Invalid action: '{}'. Must be 'generateContent' or 'streamGenerateContent'.",
+                    action
+                );
+                error!("[gemini_models_handler] {}", err_msg);
+                return Err((StatusCode::BAD_REQUEST, err_msg));
+            }
+
+            let (provider, model) =
+                get_provider_and_model(&app_state, model_name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+            (provider, model, Some(action.to_string()))
+        }
     };
 
-    // Step 4: If an access policy is present, check if the request is allowed.
-    if let Some(ref policy) = access_control_policy {
-        if let Err(reason) = LIMITER.check_limit_strategy(policy, provider.id, model.id) {
-            info!(
-                "Access denied by policy '{}' for SystemApiKey ID {}, Provider ID {}, Model ID {}. Reason: {}",
-                policy.name, system_api_key.id, provider.id, model.id, reason
-            );
-            return Err((
-                StatusCode::FORBIDDEN,
-                format!("Access denied by access control policy: {}", reason),
-            ));
-        }
+    let target_api_type = if provider.provider_type == ProviderType::Vertex
+        || provider.provider_type == ProviderType::Gemini
+    {
+        LlmApiType::Gemini
+    } else {
+        LlmApiType::OpenAI
+    };
+
+    let is_stream = match api_type {
+        LlmApiType::OpenAI => data.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        LlmApiType::Gemini => action.as_deref() == Some("streamGenerateContent"),
+    };
+
+    if api_type != target_api_type {
+        debug!(
+            "[proxy_handler] API type mismatch. Incoming: {:?}, Target: {:?}. Transforming request body.",
+            api_type, target_api_type
+        );
+        data = match (api_type, target_api_type) {
+            (LlmApiType::OpenAI, LlmApiType::Gemini) => {
+                transform_request_data_openai_to_gemini(data)
+            }
+            (LlmApiType::Gemini, LlmApiType::OpenAI) => {
+                transform_request_data_gemini_to_openai(data, is_stream)
+            }
+            _ => data, // Should not happen if they are not equal, but as a fallback.
+        };
     }
 
+    let (price_rules, currency) = get_pricing_info(&model, &app_state);
+
+    // Step 4: If an access policy is present, check if the request is allowed.
+    check_access_control(&system_api_key, &provider, &model, &app_state)?;
+
     // Step 5: Prepare the downstream request details (URL, headers, body).
-    // This includes selecting a provider API key, applying custom fields, and setting the final model name.
-    let (final_url, final_headers, final_body, provider_api_key_id) =
-        prepare_llm_request(&provider, &model, data, &original_headers, &app_state).await?;
+    let (final_url, final_headers, final_body, provider_api_key_id) = match target_api_type {
+        LlmApiType::OpenAI => {
+            prepare_llm_request(&provider, &model, data, &original_headers, &app_state).await?
+        }
+        LlmApiType::Gemini => {
+            let empty_params = HashMap::new();
+            let params = query_params.as_ref().unwrap_or(&empty_params);
+            prepare_gemini_llm_request(
+                &provider,
+                &model,
+                data,
+                &original_headers,
+                &app_state,
+                is_stream,
+                params,
+            )
+            .await?
+        }
+    };
 
     // Step 6: Create an initial log entry for the request.
-    let log_id = ID_GENERATOR.generate_id();
+    let log_id = create_request_log(
+        &system_api_key,
+        &provider,
+        &model,
+        provider_api_key_id,
+        start_time,
+        &client_ip_addr,
+        &request_uri_path,
+        &channel,
+        &external_id,
+    );
+
+    // Step 7: Execute the request against the downstream LLM service.
     let real_model_name = model
         .real_model_name
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or(&model.model_name);
-
-    let initial_log_data = NewRequestLog {
-        id: log_id,
-        system_api_key_id: system_api_key.id,
-        provider_id: provider.id,
-        model_id: model.id,
-        provider_api_key_id,
-        model_name: model.model_name.clone(),
-        real_model_name: real_model_name.to_string(),
-        request_received_at: start_time,
-        client_ip: client_ip_addr,
-        external_request_uri: Some(request_uri_path),
-        status: RequestLogStatus::PENDING.to_string(),
-        llm_request_sent_at: Utc::now().timestamp_millis(),
-        created_at: start_time,
-        updated_at: start_time,
-        channel,
-        external_id,
-    };
-
-    if let Err(e) = RequestLog::create_initial_request(&initial_log_data) {
-        error!(
-            "Failed to create initial request log for log_id {}: {:?}",
-            log_id, e
-        );
-        // Proceeding even if logging fails, but this could be changed to return an error.
-    }
-
-    // Step 7: Execute the request against the downstream LLM service.
-    let model_str = if model.model_name == *real_model_name {
+    let model_str = if model.model_name == real_model_name {
         format!("{}/{}", &provider.provider_key, &model.model_name)
     } else {
         format!(
@@ -1189,6 +1531,8 @@ async fn proxy_all_handler(
         provider.use_proxy,
         price_rules,
         currency,
+        api_type,
+        target_api_type,
     )
     .await
 }
@@ -1198,51 +1542,74 @@ pub fn create_proxy_router() -> StateRouter {
         .nest(
             "/openai",
             create_state_router()
-                .route("/chat/completions", any(proxy_all_handler))
-                .route("/models", get(list_available_models_handler)),
+                .route(
+                    "/chat/completions",
+                    any(
+                        |State(app_state), ConnectInfo(addr), request: Request<Body>| async move {
+                            proxy_handler(app_state, addr, None, None, request, LlmApiType::OpenAI)
+                                .await
+                        },
+                    ),
+                )
+                .route(
+                    "/models",
+                    get(
+                        |State(app_state), request: Request<Body>| async move {
+                            list_models_handler(app_state, HashMap::new(), request, LlmApiType::OpenAI).await
+                        },
+                    ),
+                ),
         )
         .route(
-            "/gemini/v1beta/models/{:model_action_segment}", // New Gemini route
-            any(gemini_models_handler), // Maps to the new handler for any method
+            "/gemini/v1beta/models", // Exact match for listing models
+            get(
+                |State(app_state),
+                 Query(params): Query<HashMap<String, String>>,
+                 request: Request<Body>| async move {
+                    list_models_handler(app_state, params, request, LlmApiType::Gemini).await
+                },
+            ),
+        )
+        .route(
+            "/gemini/v1beta/models/{*model_action_segment}", // Wildcard for model actions
+            any(
+                |Path(path_segment): Path<String>,
+                 Query(query_params): Query<HashMap<String, String>>,
+                 State(app_state),
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    proxy_handler(
+                        app_state,
+                        addr,
+                        Some(path_segment),
+                        Some(query_params),
+                        request,
+                        LlmApiType::Gemini,
+                    )
+                    .await
+                },
+            ),
         )
 }
 
-// --- Structs for /models endpoint response ---
-#[derive(Serialize, Debug)]
-struct ModelListResponse {
-    object: String,
-    data: Vec<ModelInfo>,
+#[derive(Debug)]
+struct AccessibleModel {
+    id: String,
+    owned_by: String,
+    provider_type: ProviderType,
 }
 
-#[derive(Serialize, Debug)]
-struct ModelInfo {
-    id: String, // model.model_name
-    object: String,
-    owned_by: String, // provider.provider_key
-}
-
-// --- Handler for /models endpoint ---
-async fn list_available_models_handler(
-    State(app_state): State<Arc<AppState>>, // Added AppState
-    request: Request<Body>,
-) -> Result<Json<ModelListResponse>, (StatusCode, String)> {
-    // 1. Authenticate and get SystemApiKey
-    let original_headers_map = request.headers().clone();
-    let system_api_key_str = parse_token_from_request(&original_headers_map)
-        .map_err(|err| (StatusCode::UNAUTHORIZED, err))?;
-    let api_key_check_result =
-        check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
-            .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))?;
-    let system_api_key = api_key_check_result.api_key;
-
-    // 2. Fetch Access Control Policy if ID is present
+async fn get_accessible_models(
+    app_state: &Arc<AppState>,
+    system_api_key: &SystemApiKey,
+) -> Result<Vec<AccessibleModel>, (StatusCode, String)> {
+    // 1. Fetch Access Control Policy if ID is present
     let access_control_policy_opt: Option<ApiAccessControlPolicy> =
         if let Some(policy_id) = system_api_key.access_control_policy_id {
             match app_state.access_control_store.get_by_id(policy_id) {
                 Ok(Some(policy)) => Some(policy),
                 Ok(None) => {
                     error!("Access control policy with id {} not found in store (configured on SystemApiKey {}).", policy_id, system_api_key.id);
-                    // If a policy_id is configured but not found, it's an internal issue.
                     return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         format!(
@@ -1263,9 +1630,9 @@ async fn list_available_models_handler(
             None
         };
 
-    let mut available_models: Vec<ModelInfo> = Vec::new();
+    let mut available_models: Vec<AccessibleModel> = Vec::new();
 
-    // 3. Get all active providers
+    // 2. Get all active providers
     let active_providers = Provider::list_all_active().map_err(|e| {
         error!("Failed to list active providers: {:?}", e);
         (
@@ -1275,7 +1642,7 @@ async fn list_available_models_handler(
     })?;
 
     for provider in active_providers {
-        // 4. Get all active models for this provider
+        // 3. Get all active models for this provider
         let active_models = Model::list_active_by_provider_id(provider.id).map_err(|e| {
             error!(
                 "Failed to list active models for provider {}: {:?}",
@@ -1293,14 +1660,10 @@ async fn list_available_models_handler(
         for model in active_models {
             let mut allowed = false;
             if let Some(ref policy) = access_control_policy_opt {
-                // 5a. Check against policy if one is loaded
+                // 4a. Check against policy if one is loaded
                 match LIMITER.check_limit_strategy(policy, provider.id, model.id) {
                     Ok(_) => {
                         allowed = true;
-                        debug!(
-                            "Model {}/{} allowed by policy '{}' for SystemApiKey ID {}",
-                            provider.provider_key, model.model_name, policy.name, system_api_key.id
-                        );
                     }
                     Err(reason) => {
                         debug!(
@@ -1311,29 +1674,24 @@ async fn list_available_models_handler(
                             system_api_key.id,
                             reason
                         );
-                        // Not allowed, do nothing
                     }
                 }
             } else {
-                // 5b. No policy loaded, model is allowed by default
+                // 4b. No policy loaded, model is allowed by default
                 allowed = true;
-                debug!(
-                    "Model {}/{} allowed (no policy attached) for SystemApiKey ID {}",
-                    provider.provider_key, model.model_name, system_api_key.id
-                );
             }
 
             if allowed {
-                available_models.push(ModelInfo {
-                    id: format!("{}/{}", provider.provider_key, model.model_name), // Changed id format
-                    object: "model".to_string(),
+                available_models.push(AccessibleModel {
+                    id: format!("{}/{}", provider.provider_key, model.model_name),
                     owned_by: provider.provider_key.clone(),
+                    provider_type: provider.provider_type.clone(),
                 });
             }
         }
     }
 
-    // 6. Get all model aliases and check their accessibility
+    // 5. Get all model aliases and check their accessibility
     let all_aliases = app_state.model_alias_store.get_all().map_err(|e| {
         error!("Failed to get model aliases from store: {:?}", e);
         (
@@ -1363,10 +1721,6 @@ async fn list_available_models_handler(
                     match LIMITER.check_limit_strategy(policy, provider.id, model.id) {
                         Ok(_) => {
                             allowed = true;
-                            debug!(
-                                "Model alias '{}' (target: {}/{}) allowed by policy '{}' for SystemApiKey ID {}",
-                                alias.alias_name, provider.provider_key, model.model_name, policy.name, system_api_key.id
-                            );
                         }
                         Err(reason) => {
                             debug!(
@@ -1378,100 +1732,110 @@ async fn list_available_models_handler(
                 } else {
                     // No policy, allowed by default
                     allowed = true;
-                    debug!(
-                        "Model alias '{}' (target: {}/{}) allowed (no policy attached) for SystemApiKey ID {}",
-                        alias.alias_name, provider.provider_key, model.model_name, system_api_key.id
-                    );
                 }
 
                 if allowed {
-                    available_models.push(ModelInfo {
+                    available_models.push(AccessibleModel {
                         id: alias.alias_name.clone(),
-                        object: "model".to_string(),
                         owned_by: "cyder-api".to_string(),
+                        provider_type: provider.provider_type.clone(),
                     });
                 }
             }
         }
     }
 
-    // Sort by owned_by, then by id for consistent output
-    available_models.sort_by(|a, b| {
-        a.owned_by.cmp(&b.owned_by)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    Ok(available_models)
+}
 
-    Ok(Json(ModelListResponse {
-        object: "list".to_string(),
-        data: available_models,
-    }))
+// --- Structs for /models endpoint response ---
+#[derive(Serialize, Debug)]
+struct ModelListResponse {
+    object: String,
+    data: Vec<ModelInfo>,
+}
+
+#[derive(Serialize, Debug)]
+struct ModelInfo {
+    id: String, // model.model_name
+    object: String,
+    owned_by: String, // provider.provider_key
+}
+
+
+// --- Structs for Gemini /models endpoint response ---
+#[derive(Serialize, Debug)]
+struct GeminiModelListResponse {
+    models: Vec<GeminiModelInfo>,
+}
+
+#[derive(Serialize, Debug)]
+struct GeminiModelInfo {
+    name: String,
+}
+
+// --- Unified Handler for listing models ---
+async fn list_models_handler(
+    app_state: Arc<AppState>,
+    params: HashMap<String, String>,
+    request: Request<Body>,
+    api_type: LlmApiType,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    // 1. Authenticate based on api_type
+    let original_headers = request.headers().clone();
+    let api_key_check_result = match api_type {
+        LlmApiType::OpenAI => authenticate_openai_request(&original_headers, &app_state).await?,
+        LlmApiType::Gemini => authenticate_gemini_request(&original_headers, &params, &app_state)?,
+    };
+    let system_api_key = api_key_check_result.api_key;
+
+    // 2. Get all accessible models
+    let all_accessible_models = get_accessible_models(&app_state, &system_api_key).await?;
+
+    // 3. Format response based on api_type
+    let response = match api_type {
+        LlmApiType::OpenAI => {
+            let mut available_models: Vec<ModelInfo> = all_accessible_models
+                .into_iter()
+                .map(|m| ModelInfo {
+                    id: m.id,
+                    object: "model".to_string(),
+                    owned_by: m.owned_by,
+                })
+                .collect();
+
+            available_models
+                .sort_by(|a, b| a.owned_by.cmp(&b.owned_by).then_with(|| a.id.cmp(&b.id)));
+
+            let response_data = ModelListResponse {
+                object: "list".to_string(),
+                data: available_models,
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&response_data).unwrap()))
+                .unwrap()
+        }
+        LlmApiType::Gemini => {
+            let mut available_models: Vec<GeminiModelInfo> = all_accessible_models
+                .into_iter()
+                .map(|m| GeminiModelInfo { name: m.id })
+                .collect();
+
+            available_models.sort_by(|a, b| a.name.cmp(&b.name));
+
+            let response_data = GeminiModelListResponse {
+                models: available_models,
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&response_data).unwrap()))
+                .unwrap()
+        }
+    };
+    Ok(response)
 }
 
 // --- Structs and Handler for Gemini endpoint ---
-#[derive(Deserialize, Debug)]
-struct GeminiHandlerQueryParams {
-    key: Option<String>,
-}
-
-async fn gemini_models_handler(
-    Path(model_action_segment): Path<String>,
-    Query(params): Query<GeminiHandlerQueryParams>,
-    // axum::extract::RequestParts might be useful if more request details are needed later
-) -> Result<Response<Body>, (StatusCode, String)> {
-    debug!(
-        "[gemini_models_handler] Received model_action_segment: {}",
-        model_action_segment
-    );
-    debug!("[gemini_models_handler] Received query params: {:?}", params);
-
-    let parts: Vec<&str> = model_action_segment.splitn(2, ':').collect();
-    if parts.len() != 2 {
-        let err_msg = format!(
-            "Invalid model_action_segment format: '{}'. Expected 'model_name:action'.",
-            model_action_segment
-        );
-        error!("[gemini_models_handler] {}", err_msg);
-        return Err((StatusCode::BAD_REQUEST, err_msg));
-    }
-    let model_name = parts[0];
-    let action = parts[1];
-
-    if action != "generateContent" && action != "streamGenerateContent" {
-        let err_msg = format!(
-            "Invalid action: '{}'. Must be 'generateContent' or 'streamGenerateContent'.",
-            action
-        );
-        error!("[gemini_models_handler] {}", err_msg);
-        return Err((StatusCode::BAD_REQUEST, err_msg));
-    }
-
-    let system_api_key = match params.key {
-        Some(k) => k,
-        None => {
-            let err_msg = "Missing 'key' query parameter for API authentication.".to_string();
-            error!("[gemini_models_handler] {}", err_msg);
-            return Err((StatusCode::UNAUTHORIZED, err_msg));
-        }
-    };
-
-    debug!(
-        "[gemini_models_handler] Model Name: '{}', Action: '{}', System API Key: '{}'",
-        model_name, action, system_api_key
-    );
-
-    // Placeholder response as requested
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .body(Body::from(format!(
-            "Debug Info: Model Name: '{}', Action: '{}', System API Key: '{}'",
-            model_name, action, system_api_key
-        )))
-        .unwrap_or_else(|e| {
-            error!("[gemini_models_handler] Failed to build response: {}", e);
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("Error building response"))
-                .unwrap()
-        }))
-}

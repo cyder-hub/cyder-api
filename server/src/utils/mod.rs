@@ -9,7 +9,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 pub mod auth;
+pub mod billing;
 pub mod limit;
+pub mod transform;
 
 #[derive(Debug, Serialize)]
 pub struct HttpResult<T> {
@@ -51,24 +53,23 @@ pub fn process_stream_options(data: &mut Value) {
     }
 }
 
-pub fn split_chunks(input: Bytes) -> Vec<Bytes> {
-    let mut result: Vec<Bytes> = Vec::new();
+pub fn split_chunks(input: Bytes) -> (Vec<Bytes>, Bytes) {
+    let mut lines = Vec::new();
     let mut start = 0;
 
     while let Some(pos) = input[start..].iter().position(|&b| b == b'\n') {
         let end = start + pos;
-        if start != end {
-            result.push(input.slice(start..end));
-        }
+        lines.push(input.slice(start..end));
         start = end + 1; // Move past the newline character
     }
 
-    // Add the last segment if there's any data left
-    if start < input.len() {
-        result.push(input.slice(start..));
-    }
+    let remainder = if start < input.len() {
+        input.slice(start..)
+    } else {
+        Bytes::new()
+    };
 
-    result
+    (lines, remainder)
 }
 
 pub static ID_GENERATOR: Lazy<Snowflake> = Lazy::new(|| Snowflake::new(1));

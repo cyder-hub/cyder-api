@@ -12,17 +12,19 @@ use axum::{
 use chrono::Utc;
 use crate::config::CONFIG;
 use crate::service::app_state::{create_state_router, StateRouter, AppState}; // Added AppState
-use reqwest::{Client, Proxy, StatusCode};
+use reqwest::{Client, Proxy, StatusCode, Url};
 use std::sync::Arc; // Added Arc
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use cyder_tools::log::{warn, info};
 
+use crate::service::vertex::get_vertex_token;
 use crate::utils::{HttpResult, ID_GENERATOR};
 
 use super::BaseError;
 use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
 use crate::database::model::Model;
+use crate::schema::enum_def::ProviderType;
 
 #[derive(Serialize)]
 struct ModelDetail {
@@ -49,7 +51,7 @@ struct InserPayload {
     pub key: String,
     pub endpoint: String,
     pub use_proxy: bool,
-    pub provider_type: Option<String>,
+    pub provider_type: Option<ProviderType>,
 }
 
 async fn insert(
@@ -66,12 +68,12 @@ async fn insert(
         is_enabled: true, // Default for new providers
         created_at: current_time,
         updated_at: current_time,
-        provider_type: payload.provider_type.unwrap_or_else(|| "OPENAI".to_string()),
+        provider_type: payload.provider_type.unwrap_or_else(|| ProviderType::Openai),
     };
     let created_provider = Provider::create(&new_provider_data)?;
 
     // Update the provider_store
-    app_state.provider_store.add(created_provider.clone());
+    let _ = app_state.provider_store.add(created_provider.clone());
 
     Ok(HttpResult::new(created_provider))
 }
@@ -100,7 +102,7 @@ async fn update_provider(
     let updated_provider = Provider::update(id, &update_data)?;
 
     // Update the provider_store
-    app_state.provider_store.update(updated_provider.clone());
+    let _ = app_state.provider_store.update(updated_provider.clone());
 
     Ok(HttpResult::new(updated_provider))
 }
@@ -170,7 +172,7 @@ async fn get_remote_models(
     let provider = Provider::get_by_id(id)?;
     let provider_keys = ProviderApiKey::list_by_provider_id(id)?;
 
-    let api_key = provider_keys.first().ok_or_else(|| {
+    let api_key_record = provider_keys.first().ok_or_else(|| {
         BaseError::ParamInvalid(Some("No API key found for this provider.".to_string()))
     })?;
 
@@ -180,16 +182,42 @@ async fn get_remote_models(
     } else {
         Client::new()
     };
-    let url = format!("{}/models", provider.endpoint.trim_end_matches('/'));
 
-    let response = client
-        .get(&url)
-        .bearer_auth(&api_key.api_key)
-        .send()
-        .await
-        .map_err(|e| {
-            BaseError::ParamInvalid(Some(format!("Failed to fetch remote models: {}", e)))
+    let response = if provider.provider_type == ProviderType::Gemini {
+        let mut url = Url::parse(&provider.endpoint).map_err(|e| {
+            BaseError::ParamInvalid(Some(format!("Failed to parse provider endpoint as URL: {}", e)))
         })?;
+        url.query_pairs_mut()
+            .append_pair("key", &api_key_record.api_key);
+
+        client.get(url).send().await.map_err(|e| {
+            BaseError::ParamInvalid(Some(format!("Failed to fetch remote models: {}", e)))
+        })?
+    } else if provider.provider_type == ProviderType::Vertex {
+        let token = get_vertex_token(api_key_record.id, &api_key_record.api_key)
+            .await
+            .map_err(|e| BaseError::ParamInvalid(Some(format!("Failed to get vertex token: {}", e))))?;
+
+        client
+            .get(&provider.endpoint)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| {
+                BaseError::ParamInvalid(Some(format!("Failed to fetch remote models: {}", e)))
+            })?
+    } else {
+        // For OpenAI-style providers (including VERTEX_OPENAI), append /models and use Bearer auth.
+        let url = format!("{}/models", provider.endpoint.trim_end_matches('/'));
+        client
+            .get(&url)
+            .bearer_auth(&api_key_record.api_key)
+            .send()
+            .await
+            .map_err(|e| {
+                BaseError::ParamInvalid(Some(format!("Failed to fetch remote models: {}", e)))
+            })?
+    };
 
     if !response.status().is_success() {
         let status = response.status();

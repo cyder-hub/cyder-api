@@ -5,6 +5,30 @@ use serde_json::{json, Value};
 
 use crate::utils::ID_GENERATOR;
 
+// Helper to recursively transform Gemini tool parameter types to lowercase for OpenAI.
+fn transform_gemini_tool_params_to_openai(params: &mut Value) {
+    if let Some(obj) = params.as_object_mut() {
+        // Transform "type" field
+        if let Some(type_val) = obj.get_mut("type") {
+            if let Some(type_str) = type_val.as_str() {
+                *type_val = json!(type_str.to_lowercase());
+            }
+        }
+        // Recurse into "properties"
+        if let Some(properties) = obj.get_mut("properties") {
+            if let Some(props_obj) = properties.as_object_mut() {
+                for (_, prop_val) in props_obj.iter_mut() {
+                    transform_gemini_tool_params_to_openai(prop_val);
+                }
+            }
+        }
+        // Recurse into "items" for arrays
+        if let Some(items) = obj.get_mut("items") {
+            transform_gemini_tool_params_to_openai(items);
+        }
+    }
+}
+
 // Transforms an OpenAI-compatible request body to a Gemini-compatible one.
 pub fn transform_request_data_openai_to_gemini(data: Value) -> Value {
     debug!("[transform] Starting OpenAI to Gemini transformation.");
@@ -41,47 +65,74 @@ pub fn transform_request_data_openai_to_gemini(data: Value) -> Value {
 
     // 2. Process messages into Gemini format
     for msg in messages {
-        // For now, we only handle simple string content.
-        // TODO: Handle complex content (e.g., image parts).
-        if let (Some(role), Some(content)) = (
-            msg.get("role").and_then(Value::as_str),
-            msg.get("content").and_then(Value::as_str),
-        ) {
-            if content.is_empty() {
-                continue;
+        let role = msg.get("role").and_then(Value::as_str);
+
+        if role == Some("system") {
+            if let Some(content) = msg.get("content").and_then(Value::as_str) {
+                if !content.is_empty() {
+                    system_instructions.push(content.to_string());
+                }
             }
-
-            if role == "system" {
-                system_instructions.push(content.to_string());
-            } else {
-                let gemini_role = if role == "assistant" { "model" } else { "user" };
-
-                // Gemini requires alternating user/model roles. Merge consecutive messages of the same role.
-                let should_merge = if let Some(last_content) = gemini_contents.last() {
-                    last_content.get("role").and_then(Value::as_str) == Some(gemini_role)
-                } else {
-                    false
-                };
-
-                if should_merge {
-                    if let Some(last_content) = gemini_contents.last_mut() {
-                        if let Some(parts) = last_content.get_mut("parts").and_then(Value::as_array_mut) {
-                            if let Some(first_part) = parts.get_mut(0) {
-                                if let Some(text_val) = first_part.get_mut("text") {
-                                    if let Some(text_str) = text_val.as_str() {
-                                        let new_text = format!("{}\n\n{}", text_str, content);
-                                        *text_val = Value::String(new_text);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
+        } else if role == Some("user") {
+            if let Some(content) = msg.get("content").and_then(Value::as_str) {
+                if !content.is_empty() {
                     gemini_contents.push(json!({
-                        "role": gemini_role,
+                        "role": "user",
                         "parts": [{ "text": content }]
                     }));
                 }
+            }
+        } else if role == Some("assistant") {
+            if let Some(tool_calls) = msg.get("tool_calls").and_then(Value::as_array) {
+                let parts: Vec<Value> = tool_calls
+                    .iter()
+                    .filter_map(|tc| {
+                        tc.get("function").map(|function| {
+                            let name = function.get("name").cloned();
+                            let arguments_str =
+                                function.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                            let args: Value =
+                                serde_json::from_str(arguments_str).unwrap_or(json!({}));
+                            json!({
+                                "functionCall": {
+                                    "name": name,
+                                    "args": args
+                                }
+                            })
+                        })
+                    })
+                    .collect();
+
+                if !parts.is_empty() {
+                    gemini_contents.push(json!({
+                        "role": "model",
+                        "parts": parts
+                    }));
+                }
+            } else if let Some(content) = msg.get("content").and_then(Value::as_str) {
+                if !content.is_empty() {
+                    gemini_contents.push(json!({
+                        "role": "model",
+                        "parts": [{ "text": content }]
+                    }));
+                }
+            }
+        } else if role == Some("tool") {
+            if let (Some(name), Some(content_str)) = (
+                msg.get("name").and_then(Value::as_str),
+                msg.get("content").and_then(Value::as_str),
+            ) {
+                gemini_contents.push(json!({
+                    "role": "user", // Gemini expects role 'user' for function responses
+                    "parts": [{
+                        "functionResponse": {
+                            "name": name,
+                            "response": {
+                                "result": content_str
+                            }
+                        }
+                    }]
+                }));
             }
         }
     }
@@ -93,12 +144,39 @@ pub fn transform_request_data_openai_to_gemini(data: Value) -> Value {
     // 4. Handle system instructions
     if !system_instructions.is_empty() {
         let combined_instructions = system_instructions.join("\n\n");
-        gemini_request.insert("system_instruction".to_string(), json!({
+        gemini_request.insert(
+            "system_instruction".to_string(),
+            json!({
             "parts": [{ "text": combined_instructions }]
-        }));
+        }),
+        );
     }
 
-    // 5. Map generation config from remaining OpenAI parameters
+    // 5. Handle tools (function calling)
+    if let Some(tools_val) = openai_request.remove("tools") {
+        if let Some(tools) = tools_val.as_array() {
+            let mut function_declarations = Vec::new();
+            for tool in tools {
+                if tool.get("type").and_then(Value::as_str) == Some("function") {
+                    if let Some(function_data) = tool.get("function") {
+                        // The structure of `function` in OpenAI is very similar to a function declaration in Gemini.
+                        // We can just clone it.
+                        function_declarations.push(function_data.clone());
+                    }
+                }
+            }
+            if !function_declarations.is_empty() {
+                gemini_request.insert(
+                    "tools".to_string(),
+                    json!([
+                        { "function_declarations": function_declarations }
+                    ]),
+                );
+            }
+        }
+    }
+
+    // 6. Map generation config from remaining OpenAI parameters
     let mut generation_config = serde_json::Map::new();
     if let Some(temp) = openai_request.remove("temperature") {
         generation_config.insert("temperature".to_string(), temp);
@@ -141,9 +219,11 @@ pub fn transform_request_data_gemini_to_openai(data: Value, is_stream: bool) -> 
     };
 
     let mut openai_messages = Vec::new();
+    let mut tool_call_ids: std::collections::HashMap<String, std::collections::VecDeque<String>> =
+        std::collections::HashMap::new();
 
     // 1. Handle system instruction first, if it exists.
-    if let Some(system_instruction) = gemini_request.remove("system_instruction") {
+    if let Some(system_instruction) = gemini_request.remove("systemInstruction") {
         if let Some(parts) = system_instruction.get("parts").and_then(Value::as_array) {
             let content = parts
                 .iter()
@@ -163,16 +243,94 @@ pub fn transform_request_data_gemini_to_openai(data: Value, is_stream: bool) -> 
     if let Some(contents_val) = gemini_request.remove("contents") {
         if let Some(contents) = contents_val.as_array() {
             for content_item in contents {
-                // The role is optional and defaults to "user" in the Gemini API.
-                let role = content_item
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("user");
+                let role = content_item.get("role").and_then(Value::as_str).unwrap_or("user");
+                let parts = match content_item.get("parts").and_then(Value::as_array) {
+                    Some(p) => p,
+                    None => continue,
+                };
 
-                if let Some(parts) = content_item.get("parts").and_then(Value::as_array) {
+                let mut has_function_call = false;
+                let mut has_function_response = false;
+                for part in parts {
+                    if part.get("functionCall").is_some() {
+                        has_function_call = true;
+                    }
+                    if part.get("functionResponse").is_some() {
+                        has_function_response = true;
+                    }
+                }
+
+                if role == "model" && has_function_call {
+                    let tool_calls: Vec<Value> = parts
+                        .iter()
+                        .filter_map(|part| {
+                            part.get("functionCall").map(|fc| {
+                                let name_val = fc.get("name").cloned();
+                                let name =
+                                    name_val.as_ref().and_then(Value::as_str).unwrap_or("").to_string();
+                                let args = fc.get("args").cloned().unwrap_or(json!({}));
+                                let arguments_str =
+                                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+
+                                let tool_id = format!("call_{}", ID_GENERATOR.generate_id());
+                                tool_call_ids
+                                    .entry(name.clone())
+                                    .or_default()
+                                    .push_back(tool_id.clone());
+
+                                json!({
+                                    "id": tool_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name_val,
+                                        "arguments": arguments_str
+                                    }
+                                })
+                            })
+                        })
+                        .collect();
+                    if !tool_calls.is_empty() {
+                        openai_messages.push(json!({
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": tool_calls
+                        }));
+                    }
+                } else if (role == "user" || role == "function") && has_function_response {
+                    for part in parts {
+                        if let Some(fr) = part.get("functionResponse") {
+                            let name_val = fr.get("name").cloned();
+                            let name =
+                                name_val.as_ref().and_then(Value::as_str).unwrap_or("").to_string();
+
+                            let tool_call_id = tool_call_ids
+                                .get_mut(&name)
+                                .and_then(|ids| ids.pop_front())
+                                .unwrap_or_else(|| format!("call_{}", ID_GENERATOR.generate_id()));
+
+                            let content_str = fr
+                                .get("response")
+                                .and_then(|r| r.get("result"))
+                                .and_then(Value::as_str)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| {
+                                    // Fallback for other structures
+                                    let response = fr.get("response").cloned().unwrap_or(json!({}));
+                                    serde_json::to_string(&response)
+                                        .unwrap_or_else(|_| "{}".to_string())
+                                });
+
+                            openai_messages.push(json!({
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "name": name_val,
+                                "content": content_str
+                            }));
+                        }
+                    }
+                } else {
+                    // Regular text message for user or model
                     let openai_role = if role == "model" { "assistant" } else { "user" };
-                    // For now, we just concatenate text parts.
-                    // TODO: Handle multi-modal content if needed.
                     let combined_text = parts
                         .iter()
                         .filter_map(|part| part.get("text").and_then(Value::as_str))
@@ -209,6 +367,33 @@ pub fn transform_request_data_gemini_to_openai(data: Value, is_stream: bool) -> 
             // OpenAI's `stop` can be a string or an array. Gemini's is an array.
             // We'll just pass it as-is, assuming the target can handle an array.
             openai_request.insert("stop".to_string(), stop.clone());
+        }
+    }
+
+    // 5. Handle tools (function calling)
+    if let Some(tools_val) = gemini_request.remove("tools") {
+        if let Some(tools) = tools_val.as_array() {
+            let mut openai_tools = Vec::new();
+            for tool_set in tools {
+                if let Some(declarations) =
+                    tool_set.get("functionDeclarations").and_then(Value::as_array)
+                {
+                    for func_dec in declarations {
+                        let mut cloned_func_dec = func_dec.clone();
+                        if let Some(params) = cloned_func_dec.get_mut("parameters") {
+                            transform_gemini_tool_params_to_openai(params);
+                        }
+
+                        openai_tools.push(json!({
+                            "type": "function",
+                            "function": cloned_func_dec
+                        }));
+                    }
+                }
+            }
+            if !openai_tools.is_empty() {
+                openai_request.insert("tools".to_string(), json!(openai_tools));
+            }
         }
     }
 
@@ -249,8 +434,25 @@ pub fn transform_result_openai_to_gemini(data: Value) -> Value {
                     let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
                     content.insert("role".to_string(), json!(if role == "assistant" { "model" } else { "user" }));
 
-                    // content string -> parts
-                    if let Some(content_str) = message.get("content").and_then(Value::as_str) {
+                    // Check for tool_calls first
+                    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+                        for tc in tool_calls {
+                            if let Some(function) = tc.get("function") {
+                                let name = function.get("name").cloned();
+                                let arguments_str =
+                                    function.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+                                let args: Value =
+                                    serde_json::from_str(arguments_str).unwrap_or(json!({}));
+                                parts.push(json!({
+                                    "functionCall": {
+                                        "name": name,
+                                        "args": args
+                                    }
+                                }));
+                            }
+                        }
+                    } else if let Some(content_str) = message.get("content").and_then(Value::as_str) {
+                        // content string -> parts
                         parts.push(json!({ "text": content_str }));
                     }
                 }
@@ -265,6 +467,7 @@ pub fn transform_result_openai_to_gemini(data: Value) -> Value {
                     Some("stop") => "STOP",
                     Some("length") => "MAX_TOKENS",
                     Some("content_filter") => "SAFETY",
+                    Some("tool_calls") => "STOP",
                     _ => "FINISH_REASON_UNSPECIFIED",
                 };
                 candidate.insert("finishReason".to_string(), json!(finish_reason));
@@ -337,6 +540,7 @@ pub fn transform_result_gemini_to_openai(data: Value) -> Value {
             candidates.iter().map(|candidate| {
                 let mut choice = serde_json::Map::new();
                 let mut message = serde_json::Map::new();
+                let mut has_function_call = false;
 
                 // Content -> message
                 if let Some(content) = candidate.get("content") {
@@ -344,13 +548,40 @@ pub fn transform_result_gemini_to_openai(data: Value) -> Value {
                     let role = content.get("role").and_then(Value::as_str).unwrap_or("user");
                     message.insert("role".to_string(), json!(if role == "model" { "assistant" } else { "user" }));
 
-                    // Parts -> content string
+                    // Parts -> content string or tool_calls
                     if let Some(parts) = content.get("parts").and_then(Value::as_array) {
-                        let content_str = parts.iter()
-                            .filter_map(|part| part.get("text").and_then(Value::as_str))
-                            .collect::<Vec<&str>>()
-                            .join("");
-                        message.insert("content".to_string(), json!(content_str));
+                        // Check for function calls first
+                        let function_calls: Vec<&Value> = parts.iter().filter(|p| p.get("functionCall").is_some()).collect();
+
+                        if !function_calls.is_empty() {
+                            has_function_call = true;
+                            let tool_calls: Vec<Value> = function_calls.iter()
+                                .filter_map(|part| {
+                                    part.get("functionCall").map(|fc| {
+                                        let name = fc.get("name").cloned();
+                                        let args = fc.get("args").cloned().unwrap_or(json!({}));
+                                        let arguments_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+                                        json!({
+                                            "id": format!("call_{}", ID_GENERATOR.generate_id()),
+                                            "type": "function",
+                                            "function": {
+                                                "name": name,
+                                                "arguments": arguments_str
+                                            }
+                                        })
+                                    })
+                                })
+                                .collect();
+                            message.insert("tool_calls".to_string(), json!(tool_calls));
+                            message.insert("content".to_string(), Value::Null);
+                        } else {
+                            // Handle as text content
+                            let content_str = parts.iter()
+                                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                                .collect::<Vec<&str>>()
+                                .join("");
+                            message.insert("content".to_string(), json!(content_str));
+                        }
                     } else {
                         message.insert("content".to_string(), Value::Null);
                     }
@@ -362,7 +593,8 @@ pub fn transform_result_gemini_to_openai(data: Value) -> Value {
 
                 // Finish reason
                 let finish_reason = match candidate.get("finishReason").and_then(Value::as_str) {
-                    Some("STOP") => "stop",
+                    Some("STOP") => if has_function_call { "tool_calls" } else { "stop" },
+                    Some("TOOL_USE") => "tool_calls",
                     Some("MAX_TOKENS") => "length",
                     Some("SAFETY") | Some("RECITATION") => "content_filter",
                     _ => "stop", // Default to stop
@@ -401,7 +633,7 @@ pub fn transform_result_gemini_to_openai(data: Value) -> Value {
 
 // Transforms an OpenAI-compatible streaming chunk to a Gemini-compatible one.
 pub fn transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Bytes> {
-    debug!("[transform_result_chunk] Starting OpenAI to Gemini transformation for chunk: {:?}", String::from_utf8_lossy(&chunk));
+    debug!("[transform_result_chunk] Starting OpenAI to Gemini transformation for chunk: {}", String::from_utf8_lossy(&chunk));
 
     let line_str = String::from_utf8_lossy(&chunk);
 
@@ -465,6 +697,30 @@ pub fn transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Bytes> {
                     parts.push(json!({ "text": content_str }));
                     has_content_data = true;
                 }
+
+                // Tool Calls
+                if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                    for tc in tool_calls {
+                        if let Some(function) = tc.get("function") {
+                            // This logic assumes the arguments are sent as a complete JSON string in a single chunk.
+                            // Partial/streaming arguments are not supported.
+                            if let Some(arguments_str) =
+                                function.get("arguments").and_then(Value::as_str)
+                            {
+                                if let Ok(args) = serde_json::from_str::<Value>(arguments_str) {
+                                    let name = function.get("name").cloned();
+                                    parts.push(json!({
+                                        "functionCall": {
+                                            "name": name,
+                                            "args": args
+                                        }
+                                    }));
+                                    has_content_data = true;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             if has_content_data {
@@ -482,6 +738,7 @@ pub fn transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Bytes> {
                         Some("stop") => "STOP",
                         Some("length") => "MAX_TOKENS",
                         Some("content_filter") => "SAFETY",
+                        Some("tool_calls") => "STOP",
                         _ => "FINISH_REASON_UNSPECIFIED",
                     };
                     candidate.insert("finishReason".to_string(), json!(finish_reason));
@@ -543,7 +800,7 @@ pub fn transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Bytes> {
 
 // Transforms a Gemini-compatible streaming chunk to an OpenAI-compatible one.
 pub fn transform_result_chunk_gemini_to_openai(chunk: Bytes) -> Option<Bytes> {
-    debug!("[transform_result_chunk] Starting Gemini to OpenAI transformation for chunk: {:?}", String::from_utf8_lossy(&chunk));
+    debug!("[transform_result_chunk] Starting Gemini to OpenAI transformation for chunk: {}", String::from_utf8_lossy(&chunk));
 
     let line_str = String::from_utf8_lossy(&chunk);
     if !line_str.starts_with("data:") {
@@ -591,7 +848,8 @@ pub fn transform_result_chunk_gemini_to_openai(chunk: Bytes) -> Option<Bytes> {
         for candidate in candidates {
             let mut choice = serde_json::Map::new();
             let mut delta = serde_json::Map::new();
-            let mut has_text_content = false;
+            let mut has_content = false;
+            let mut has_function_call = false;
 
             // Content -> delta
             if let Some(content) = candidate.get("content") {
@@ -616,7 +874,34 @@ pub fn transform_result_chunk_gemini_to_openai(chunk: Bytes) -> Option<Bytes> {
                             "content"
                         };
                         delta.insert(key.to_string(), json!(content_str));
-                        has_text_content = true;
+                        has_content = true;
+                    }
+
+                    let tool_calls: Vec<Value> = parts
+                        .iter()
+                        .filter_map(|part| {
+                            part.get("functionCall").map(|fc| {
+                                has_function_call = true;
+                                let name = fc.get("name").cloned();
+                                let args = fc.get("args").cloned().unwrap_or(json!({}));
+                                let arguments_str = serde_json::to_string(&args)
+                                    .unwrap_or_else(|_| "{}".to_string());
+                                json!({
+                                    "index": 0, // Assuming one tool call for now
+                                    "id": format!("call_{}", ID_GENERATOR.generate_id()),
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": arguments_str
+                                    }
+                                })
+                            })
+                        })
+                        .collect();
+
+                    if !tool_calls.is_empty() {
+                        delta.insert("tool_calls".to_string(), json!(tool_calls));
+                        has_content = true;
                     }
                 }
             }
@@ -627,14 +912,21 @@ pub fn transform_result_chunk_gemini_to_openai(chunk: Bytes) -> Option<Bytes> {
 
             // Finish reason
             let finish_reason = match candidate.get("finishReason").and_then(Value::as_str) {
-                Some("STOP") => Some("stop"),
+                Some("STOP") => {
+                    if has_function_call {
+                        Some("tool_calls")
+                    } else {
+                        Some("stop")
+                    }
+                }
+                Some("TOOL_USE") => Some("tool_calls"),
                 Some("MAX_TOKENS") => Some("length"),
                 Some("SAFETY") | Some("RECITATION") => Some("content_filter"),
                 _ => None,
             };
             choice.insert("finish_reason".to_string(), json!(finish_reason));
 
-            if has_text_content || finish_reason.is_some() {
+            if has_content || finish_reason.is_some() {
                 choices.push(Value::Object(choice));
             }
         }

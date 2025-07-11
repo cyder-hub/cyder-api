@@ -985,7 +985,7 @@ async fn proxy_request(
         "[proxy] proxy request header: {:?}",
         serialize_reqwest_headers(&headers)
     );
-    debug!("[proxy] proxy request data: {:?}", &data);
+    debug!("[proxy] proxy request data: {}", &data);
 
     // 2. Send request to LLM
     let response = match client
@@ -1386,7 +1386,7 @@ async fn proxy_handler(
 
     // Step 2: Parse the incoming request body.
     let mut data = parse_request_body(request).await?;
-    debug!("[proxy] original request data: {:?}", data);
+    debug!("[proxy] original request data: {}", serde_json::to_string(&data).unwrap_or_default());
 
     // Step 3: Determine the provider and model.
     let (provider, model, action) = match api_type {

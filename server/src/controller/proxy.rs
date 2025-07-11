@@ -20,9 +20,7 @@ use crate::service::{
 };
 use crate::utils::billing::{parse_usage_info, populate_token_cost_fields, UsageInfo};
 use crate::utils::transform::{
-    transform_request_data_gemini_to_openai, transform_request_data_openai_to_gemini,
-    transform_result_chunk_gemini_to_openai, transform_result_chunk_openai_to_gemini,
-    transform_result_gemini_to_openai, transform_result_openai_to_gemini,
+    transform_request_data, transform_result, transform_result_chunk,
 };
 use chrono::Utc;
 use flate2::read::GzDecoder;
@@ -690,11 +688,7 @@ async fn handle_non_streaming_response(
                 }
             };
 
-            let transformed_value = match (target_api_type, api_type) {
-                (LlmApiType::Gemini, LlmApiType::OpenAI) => transform_result_gemini_to_openai(original_value),
-                (LlmApiType::OpenAI, LlmApiType::Gemini) => transform_result_openai_to_gemini(original_value),
-                _ => original_value, // Should not happen if they are not equal
-            };
+            let transformed_value = transform_result(original_value, api_type, target_api_type);
 
             match serde_json::to_vec(&transformed_value) {
                 Ok(b) => Bytes::from(b),
@@ -804,38 +798,26 @@ async fn handle_streaming_response(
                         }
                     }
                     
-                    let transformed_chunk = if api_type != target_api_type {
-                        let transformed_sub_chunks_as_strings: Vec<String> = lines
-                            .into_iter()
-                            .filter_map(|sub_chunk| {
-                                let transformed_bytes_opt = match (target_api_type, api_type) {
-                                    (LlmApiType::Gemini, LlmApiType::OpenAI) => transform_result_chunk_gemini_to_openai(sub_chunk),
-                                    (LlmApiType::OpenAI, LlmApiType::Gemini) => transform_result_chunk_openai_to_gemini(sub_chunk),
-                                    _ => unreachable!(), // This case is guarded by `api_type != target_api_type`
-                                };
+                    let transformed_sub_chunks_as_strings: Vec<String> = lines
+                        .into_iter()
+                        .filter_map(|sub_chunk| {
+                            let transformed_bytes_opt =
+                                transform_result_chunk(sub_chunk, api_type, target_api_type);
 
-                                transformed_bytes_opt.map(|transformed_bytes| {
-                                    if transformed_bytes.is_empty() {
-                                        // An empty transformed chunk (e.g., from a keep-alive)
-                                        // will be concatenated as an empty string, preserving stream structure.
-                                        String::new()
-                                    } else {
-                                        // Each valid data chunk should be terminated by the SSE delimiter.
-                                        format!("{}\n\n", String::from_utf8_lossy(&transformed_bytes))
-                                    }
-                                })
+                            transformed_bytes_opt.map(|transformed_bytes| {
+                                if transformed_bytes.is_empty() {
+                                    // An empty transformed chunk (e.g., from a keep-alive)
+                                    // will be concatenated as an empty string, preserving stream structure.
+                                    String::new()
+                                } else {
+                                    // Each valid data chunk should be terminated by the SSE delimiter.
+                                    format!("{}\n\n", String::from_utf8_lossy(&transformed_bytes))
+                                }
                             })
-                            .collect();
+                        })
+                        .collect();
 
-                        Bytes::from(transformed_sub_chunks_as_strings.concat())
-                    } else {
-                        let mut new_chunk_vec: Vec<u8> = Vec::new();
-                        for line in lines {
-                            new_chunk_vec.extend_from_slice(&line);
-                            new_chunk_vec.push(b'\n');
-                        }
-                        Bytes::from(new_chunk_vec)
-                    };
+                    let transformed_chunk = Bytes::from(transformed_sub_chunks_as_strings.concat());
 
                     // Forward the transformed chunk to the client
                     if !transformed_chunk.is_empty() {
@@ -1452,21 +1434,7 @@ async fn proxy_handler(
         LlmApiType::Gemini => action.as_deref() == Some("streamGenerateContent"),
     };
 
-    if api_type != target_api_type {
-        debug!(
-            "[proxy_handler] API type mismatch. Incoming: {:?}, Target: {:?}. Transforming request body.",
-            api_type, target_api_type
-        );
-        data = match (api_type, target_api_type) {
-            (LlmApiType::OpenAI, LlmApiType::Gemini) => {
-                transform_request_data_openai_to_gemini(data)
-            }
-            (LlmApiType::Gemini, LlmApiType::OpenAI) => {
-                transform_request_data_gemini_to_openai(data, is_stream)
-            }
-            _ => data, // Should not happen if they are not equal, but as a fallback.
-        };
-    }
+    data = transform_request_data(data, api_type, target_api_type, is_stream);
 
     let (price_rules, currency) = get_pricing_info(&model, &app_state);
 

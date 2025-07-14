@@ -3,7 +3,70 @@ use chrono::Utc;
 use cyder_tools::log::{debug, error};
 use serde_json::{json, Value};
 
+use crate::controller::llm_types::LlmApiType;
 use crate::utils::ID_GENERATOR;
+
+pub fn transform_request_data(
+    data: Value,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+    is_stream: bool,
+) -> Value {
+    if api_type == target_api_type {
+        return data;
+    }
+
+    debug!(
+        "[transform] API type mismatch. Incoming: {:?}, Target: {:?}. Transforming request body.",
+        api_type, target_api_type
+    );
+
+    match (api_type, target_api_type) {
+        (LlmApiType::OpenAI, LlmApiType::Gemini) => {
+            internal_transform_request_data_openai_to_gemini(data)
+        }
+        (LlmApiType::Gemini, LlmApiType::OpenAI) => {
+            internal_transform_request_data_gemini_to_openai(data, is_stream)
+        }
+        _ => data, // Should not happen if they are not equal, but as a fallback.
+    }
+}
+
+pub fn transform_result(
+    data: Value,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+) -> Value {
+    if api_type == target_api_type {
+        return data;
+    }
+
+    match (target_api_type, api_type) {
+        (LlmApiType::Gemini, LlmApiType::OpenAI) => internal_transform_result_openai_to_gemini(data),
+        (LlmApiType::OpenAI, LlmApiType::Gemini) => internal_transform_result_gemini_to_openai(data),
+        _ => data,
+    }
+}
+
+pub fn transform_result_chunk(
+    chunk: Bytes,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+) -> Option<Bytes> {
+    if api_type == target_api_type {
+        return Some(chunk);
+    }
+
+    match (target_api_type, api_type) {
+        (LlmApiType::Gemini, LlmApiType::OpenAI) => {
+            internal_transform_result_chunk_openai_to_gemini(chunk)
+        }
+        (LlmApiType::OpenAI, LlmApiType::Gemini) => {
+            internal_transform_result_chunk_gemini_to_openai(chunk)
+        }
+        _ => Some(chunk),
+    }
+}
 
 // Helper to recursively transform Gemini tool parameter types to lowercase for OpenAI.
 fn transform_gemini_tool_params_to_openai(params: &mut Value) {
@@ -30,7 +93,7 @@ fn transform_gemini_tool_params_to_openai(params: &mut Value) {
 }
 
 // Transforms an OpenAI-compatible request body to a Gemini-compatible one.
-pub fn transform_request_data_openai_to_gemini(data: Value) -> Value {
+fn internal_transform_request_data_openai_to_gemini(data: Value) -> Value {
     debug!("[transform] Starting OpenAI to Gemini transformation.");
 
     let mut openai_request = match data {
@@ -207,7 +270,7 @@ pub fn transform_request_data_openai_to_gemini(data: Value) -> Value {
 }
 
 // Transforms a Gemini-compatible request body to an OpenAI-compatible one.
-pub fn transform_request_data_gemini_to_openai(data: Value, is_stream: bool) -> Value {
+fn internal_transform_request_data_gemini_to_openai(data: Value, is_stream: bool) -> Value {
     debug!("[transform] Starting Gemini to OpenAI transformation.");
 
     let mut gemini_request = match data {
@@ -407,7 +470,7 @@ pub fn transform_request_data_gemini_to_openai(data: Value, is_stream: bool) -> 
 }
 
 // Transforms an OpenAI-compatible non-streaming result to a Gemini-compatible one.
-pub fn transform_result_openai_to_gemini(data: Value) -> Value {
+fn internal_transform_result_openai_to_gemini(data: Value) -> Value {
     debug!("[transform_result] Starting OpenAI to Gemini transformation.");
 
     let mut openai_response = match data {
@@ -513,7 +576,7 @@ pub fn transform_result_openai_to_gemini(data: Value) -> Value {
 }
 
 // Transforms a Gemini-compatible non-streaming result to an OpenAI-compatible one.
-pub fn transform_result_gemini_to_openai(data: Value) -> Value {
+fn internal_transform_result_gemini_to_openai(data: Value) -> Value {
     debug!("[transform_result] Starting Gemini to OpenAI transformation.");
 
     let mut gemini_response = match data {
@@ -632,7 +695,7 @@ pub fn transform_result_gemini_to_openai(data: Value) -> Value {
 }
 
 // Transforms an OpenAI-compatible streaming chunk to a Gemini-compatible one.
-pub fn transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Bytes> {
+fn internal_transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Bytes> {
     debug!("[transform_result_chunk] Starting OpenAI to Gemini transformation for chunk: {}", String::from_utf8_lossy(&chunk));
 
     let line_str = String::from_utf8_lossy(&chunk);
@@ -799,7 +862,7 @@ pub fn transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Bytes> {
 }
 
 // Transforms a Gemini-compatible streaming chunk to an OpenAI-compatible one.
-pub fn transform_result_chunk_gemini_to_openai(chunk: Bytes) -> Option<Bytes> {
+fn internal_transform_result_chunk_gemini_to_openai(chunk: Bytes) -> Option<Bytes> {
     debug!("[transform_result_chunk] Starting Gemini to OpenAI transformation for chunk: {}", String::from_utf8_lossy(&chunk));
 
     let line_str = String::from_utf8_lossy(&chunk);

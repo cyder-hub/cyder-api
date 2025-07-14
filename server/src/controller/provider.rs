@@ -166,6 +166,108 @@ async fn get_provider_detail(Path(id): Path<i64>) -> Result<HttpResult<ProviderD
     Ok(HttpResult::new(detail))
 }
 
+#[derive(Deserialize)]
+struct CheckProviderPayload {
+    model_id: Option<i64>,
+    model_name: Option<String>,
+    provider_api_key_id: Option<i64>,
+    provider_api_key: Option<String>,
+}
+
+async fn check_provider(
+    Path(id): Path<i64>,
+    Json(payload): Json<CheckProviderPayload>,
+) -> Result<HttpResult<Value>, BaseError> {
+    let model_name = match (payload.model_id, payload.model_name) {
+        (Some(model_id), _) => {
+            let model = Model::get_by_id(model_id)?;
+            if model.provider_id != id {
+                return Err(BaseError::ParamInvalid(Some(format!(
+                    "Model {} does not belong to provider {}",
+                    model_id, id
+                ))));
+            }
+            model
+                .real_model_name
+                .filter(|s| !s.is_empty())
+                .unwrap_or(model.model_name)
+        }
+        (_, Some(model_name)) => model_name,
+        (None, None) => {
+            return Err(BaseError::ParamInvalid(Some(
+                "Either model_id or model_name must be provided.".to_string(),
+            )));
+        }
+    };
+
+    let api_key = match (payload.provider_api_key_id, payload.provider_api_key) {
+        (Some(key_id), _) => {
+            let provider_api_key = ProviderApiKey::get_by_id(key_id)?;
+            if provider_api_key.provider_id != id {
+                return Err(BaseError::ParamInvalid(Some(format!(
+                    "API key {} does not belong to provider {}",
+                    key_id, id
+                ))));
+            }
+            provider_api_key.api_key
+        }
+        (_, Some(api_key)) => api_key,
+        (None, None) => {
+            return Err(BaseError::ParamInvalid(Some(
+                "Either provider_api_key_id or provider_api_key must be provided.".to_string(),
+            )));
+        }
+    };
+
+    let provider = Provider::get_by_id(id)?;
+
+    let client = if provider.use_proxy {
+        let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
+        reqwest::Client::builder().proxy(proxy).build().unwrap()
+    } else {
+        Client::new()
+    };
+
+    let url = format!("{}/chat/completions", provider.endpoint.trim_end_matches('/'));
+
+    let request_body = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": "hi"
+            }
+        ]
+    });
+
+    let response = client
+        .post(&url)
+        .bearer_auth(&api_key)
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| {
+            BaseError::ParamInvalid(Some(format!("Failed to send check request: {}", e)))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Could not retrieve error body".to_string());
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Provider API returned status {}: {}",
+            status, error_body
+        ))));
+    }
+
+    // On success, we don't need to return the original response.
+    // Just consume the body to free up the connection and return a success indicator.
+    let _ = response.text().await;
+    Ok(HttpResult::new(serde_json::Value::Null))
+}
+
 async fn get_remote_models(
     Path(id): Path<i64>,
 ) -> Result<HttpResult<Value>, BaseError> {
@@ -420,6 +522,7 @@ pub fn create_provider_router() -> StateRouter {
             .route("/{id}", get(get_provider))
             .route("/{id}/detail", get(get_provider_detail))
             .route("/{id}/remote_models", get(get_remote_models))
+            .route("/{id}/check", post(check_provider))
             .route("/{id}", delete(delete_provider))
             .route("/{id}", put(update_provider))
             // Provider API Key routes

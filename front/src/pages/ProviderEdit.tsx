@@ -25,6 +25,8 @@ interface LocalProviderApiKeyItem {
     api_key: string;
     description: string | null;
     isEditing: boolean;
+    checkStatus: 'unchecked' | 'checking' | 'success' | 'error';
+    checkMessage?: string;
 }
 
 // Local interface for editable models within this component
@@ -33,6 +35,8 @@ interface LocalEditableModelItem {
     model_name: string;
     real_model_name: string | null; // Match backend Option<String>
     isEditing: boolean;
+    checkStatus: 'unchecked' | 'checking' | 'success' | 'error';
+    checkMessage?: string;
     // Add is_enabled if it needs to be managed directly, default to true for new
 }
 
@@ -82,6 +86,25 @@ const fetchAllCustomFields = async (): Promise<CustomFieldItem[]> => {
 const providerTypes = ['OPENAI', 'GEMINI', 'VERTEX', 'VERTEX_OPENAI', 'OLLAMA'];
 const customFieldTypes: CustomFieldType[] = ['unset', 'text', 'integer', 'float', 'boolean'];
 
+const StatusIndicator = (props: { status: 'unchecked' | 'checking' | 'success' | 'error', message?: string }) => {
+    const statusColor = {
+        unchecked: 'bg-gray-400',
+        checking: 'bg-blue-500 animate-pulse',
+        success: 'bg-green-500',
+        error: 'bg-red-500',
+    };
+    return (
+        <div class="relative group flex justify-center items-center h-full">
+            <div class={`w-3 h-3 rounded-full ${statusColor[props.status]}`}></div>
+            <Show when={props.status === 'error' && props.message}>
+                <div class="absolute bottom-full mb-2 w-max max-w-xs px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                    {props.message}
+                </div>
+            </Show>
+        </div>
+    );
+};
+
 export default function ProviderEdit() {
     const navigate = useNavigate();
     const params = useParams();
@@ -92,6 +115,15 @@ export default function ProviderEdit() {
     const [editingData, setEditingData] = createStore<EditingProviderData | null>(null);
     const [allCustomFields, setAllCustomFields] = createSignal<CustomFieldItem[]>([]);
     const [selectedCustomFieldId, setSelectedCustomFieldId] = createSignal<number | null>(null);
+    const [isModelSelectModalOpen, setIsModelSelectModalOpen] = createSignal(false);
+    const [apiKeyIndexToCheck, setApiKeyIndexToCheck] = createSignal<number | null>(null);
+    const [modelIndexToUse, setModelIndexToUse] = createSignal<number | null>(null);
+    const [isBatchCheckingApiKeys, setIsBatchCheckingApiKeys] = createSignal(false);
+
+    const [isApiKeySelectModalOpen, setIsApiKeySelectModalOpen] = createSignal(false);
+    const [modelIndexToCheck, setModelIndexToCheck] = createSignal<number | null>(null);
+    const [apiKeyIndexToUse, setApiKeyIndexToUse] = createSignal<number | null>(null);
+    const [isBatchCheckingModels, setIsBatchCheckingModels] = createSignal(false);
     // setIsLoading and setError can remain createSignal as they are simple booleans/strings
     const [isLoading, setIsLoading] = createSignal<boolean>(true);
     const [error, setError] = createSignal<string | null>(null);
@@ -99,6 +131,19 @@ export default function ProviderEdit() {
     const hasUncommittedModels = createMemo(() => {
         if (!editingData) return false;
         return editingData.models?.some(m => m.id === null);
+    });
+
+    const modelOptionsForSelect = createMemo(() => {
+        if (!editingData?.models) return [];
+        return editingData.models.map((m, i) => ({ value: i, label: m.model_name }));
+    });
+
+    const apiKeyOptionsForSelect = createMemo(() => {
+        if (!editingData?.provider_keys) return [];
+        return editingData.provider_keys.map((k, i) => ({
+            value: i,
+            label: k.description || t('providerEditPage.alert.apiKeyNameFallback', { lastKeyChars: k.api_key.slice(-4) })
+        }));
     });
 
     const getEmptyProvider = (): EditingProviderData => ({
@@ -135,12 +180,14 @@ export default function ProviderEdit() {
                         model_name: m.model.model_name,
                         real_model_name: m.model.real_model_name ?? null,
                         isEditing: false,
+                        checkStatus: 'unchecked',
                     })),
                     provider_keys: detail.provider_keys.map(k => ({
                         id: k.id,
                         api_key: k.api_key,
                         description: k.description ?? null,
                         isEditing: false, // Initialize isEditing state
+                        checkStatus: 'unchecked',
                     })),
                     custom_fields: (detail.custom_fields || []).map(f => ({
                         id: f.id,
@@ -269,15 +316,15 @@ export default function ProviderEdit() {
         }
     };
 
-    const addListItem = <T extends { id?: number | null; isEditing?: boolean }>(
+    const addListItem = <T extends { id?: number | null; isEditing?: boolean; checkStatus?: 'unchecked' | 'checking' | 'success' | 'error' }>(
         listField: 'models' | 'provider_keys',
-        newItemData: Omit<T, 'id' | 'isEditing'>
+        newItemData: Omit<T, 'id' | 'isEditing' | 'checkStatus'>
     ) => {
         let itemToAdd: T;
         if (listField === 'provider_keys') {
-            itemToAdd = { ...newItemData, id: null, isEditing: false } as T;
+            itemToAdd = { ...newItemData, id: null, isEditing: false, checkStatus: 'unchecked' } as T;
         } else if (listField === 'models') {
-            itemToAdd = { ...newItemData, id: null, isEditing: false } as T; // New models are not in edit mode by default
+            itemToAdd = { ...newItemData, id: null, isEditing: false, checkStatus: 'unchecked' } as T; // New models are not in edit mode by default
         } else {
             return;
         }
@@ -428,6 +475,7 @@ export default function ProviderEdit() {
                         model_name: model_name,
                         real_model_name: null,
                         isEditing: false,
+                        checkStatus: 'unchecked',
                     });
                     existingModelNames.add(model_name); // Add to set to avoid duplicates from remote list
                 }
@@ -532,6 +580,254 @@ export default function ProviderEdit() {
         }
     };
 
+    const performCheck = async (modelIndex: number, apiKeyIndex: number) => {
+        const currentData = editingData;
+        if (!currentData || !currentData.id) {
+            toastController.warn(t('providerEditPage.alert.providerNotSavedForCheck'));
+            return;
+        }
+
+        // Set both to checking
+        setEditingData('models', modelIndex, 'checkStatus', 'checking');
+        setEditingData('models', modelIndex, 'checkMessage', undefined);
+        setEditingData('provider_keys', apiKeyIndex, 'checkStatus', 'checking');
+        setEditingData('provider_keys', apiKeyIndex, 'checkMessage', undefined);
+
+        const modelItem = currentData.models[modelIndex];
+        const keyItem = currentData.provider_keys[apiKeyIndex];
+
+        const payload = {
+            ...(modelItem.id ? { model_id: modelItem.id } : { model_name: modelItem.real_model_name || modelItem.model_name }),
+            ...(keyItem.id ? { provider_api_key_id: keyItem.id } : { provider_api_key: keyItem.api_key }),
+        };
+
+        try {
+            await request(`/ai/manager/api/provider/${currentData.id}/check`, {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            // On success, update both
+            setEditingData('models', modelIndex, 'checkStatus', 'success');
+            setEditingData('provider_keys', apiKeyIndex, 'checkStatus', 'success');
+        } catch (error) {
+            const errorMessage = (error as Error).message || t('unknownError');
+            setEditingData('models', modelIndex, 'checkStatus', 'error');
+            setEditingData('models', modelIndex, 'checkMessage', errorMessage);
+            setEditingData('provider_keys', apiKeyIndex, 'checkStatus', 'error');
+            setEditingData('provider_keys', apiKeyIndex, 'checkMessage', errorMessage);
+        }
+    };
+
+    const performBatchModelCheck = async (apiKeyIndex: number) => {
+        const currentData = editingData;
+        if (!currentData || !currentData.id) {
+            toastController.warn(t('providerEditPage.alert.providerNotSavedForCheck'));
+            return;
+        }
+
+        const providerId = currentData.id;
+        const translatedType = t('providerEditPage.alert.checkTypeModels');
+        toastController.info(t('providerEditPage.alert.batchChecking', { type: translatedType }));
+
+        const modelsToCheck = currentData.models;
+        const key = currentData.provider_keys[apiKeyIndex];
+
+        modelsToCheck.forEach((_, index) => {
+            setEditingData('models', index, 'checkStatus', 'checking');
+            setEditingData('models', index, 'checkMessage', undefined);
+        });
+
+        let successCount = 0;
+        for (const [index, model] of modelsToCheck.entries()) {
+            const payload = {
+                ...(model.id ? { model_id: model.id } : { model_name: model.real_model_name || model.model_name }),
+                ...(key.id ? { provider_api_key_id: key.id } : { provider_api_key: key.api_key }),
+            };
+            try {
+                await request(`/ai/manager/api/provider/${providerId}/check`, {
+                    method: 'POST',
+                    body: JSON.stringify(payload),
+                });
+                successCount++;
+                setEditingData('models', index, 'checkStatus', 'success');
+            } catch (error) {
+                const errorMessage = (error as Error).message || t('unknownError');
+                setEditingData('models', index, 'checkStatus', 'error');
+                setEditingData('models', index, 'checkMessage', errorMessage);
+            }
+        }
+        toastController.info(t('providerEditPage.alert.batchCheckComplete', { success: successCount, total: modelsToCheck.length, type: translatedType }));
+    };
+
+    const performBatchApiKeyCheck = async (modelIndex: number) => {
+        const currentData = editingData;
+        if (!currentData || !currentData.id) {
+            toastController.warn(t('providerEditPage.alert.providerNotSavedForCheck'));
+            return;
+        }
+
+        const providerId = currentData.id;
+        const translatedType = t('providerEditPage.alert.checkTypeApiKeys');
+        toastController.info(t('providerEditPage.alert.batchChecking', { type: translatedType }));
+
+        const keysToCheck = currentData.provider_keys;
+        const model = currentData.models[modelIndex];
+
+        keysToCheck.forEach((_, index) => {
+            setEditingData('provider_keys', index, 'checkStatus', 'checking');
+            setEditingData('provider_keys', index, 'checkMessage', undefined);
+        });
+
+        let successCount = 0;
+        for (const [index, key] of keysToCheck.entries()) {
+            const payload = {
+                ...(model.id ? { model_id: model.id } : { model_name: model.real_model_name || model.model_name }),
+                ...(key.id ? { provider_api_key_id: key.id } : { provider_api_key: key.api_key }),
+            };
+            try {
+                await request(`/ai/manager/api/provider/${providerId}/check`, {
+                    method: 'POST',
+                    body: JSON.stringify(payload),
+                });
+                successCount++;
+                setEditingData('provider_keys', index, 'checkStatus', 'success');
+            } catch (error) {
+                const errorMessage = (error as Error).message || t('unknownError');
+                setEditingData('provider_keys', index, 'checkStatus', 'error');
+                setEditingData('provider_keys', index, 'checkMessage', errorMessage);
+            }
+        }
+        toastController.info(t('providerEditPage.alert.batchCheckComplete', { success: successCount, total: keysToCheck.length, type: translatedType }));
+    };
+
+    const handleConfirmModelSelection = () => {
+        const apiKeyIndex = apiKeyIndexToCheck();
+        const modelIndex = modelIndexToUse();
+
+        setIsModelSelectModalOpen(false);
+
+        if (modelIndex !== null) {
+            if (isBatchCheckingApiKeys()) {
+                performBatchApiKeyCheck(modelIndex);
+            } else if (apiKeyIndex !== null) {
+                performCheck(modelIndex, apiKeyIndex);
+            }
+        }
+
+        setApiKeyIndexToCheck(null);
+        setModelIndexToUse(null);
+        setIsBatchCheckingApiKeys(false);
+    };
+
+    const handleConfirmApiKeySelection = () => {
+        const modelIndex = modelIndexToCheck();
+        const apiKeyIndex = apiKeyIndexToUse();
+
+        setIsApiKeySelectModalOpen(false);
+
+        if (apiKeyIndex !== null) {
+            if (isBatchCheckingModels()) {
+                performBatchModelCheck(apiKeyIndex);
+            } else if (modelIndex !== null) {
+                performCheck(modelIndex, apiKeyIndex);
+            }
+        }
+
+        setModelIndexToCheck(null);
+        setApiKeyIndexToUse(null);
+        setIsBatchCheckingModels(false);
+    };
+
+    const handleBatchCheck = async (type: 'models' | 'api_keys') => {
+        const currentData = editingData;
+        if (!currentData || !currentData.id) {
+            toastController.warn(t('providerEditPage.alert.providerNotSavedForCheck'));
+            return;
+        }
+
+        if (type === 'models') {
+            const modelsToCheck = currentData.models;
+            if (modelsToCheck.length === 0) {
+                toastController.info(t('providerEditPage.alert.noModelsToCheck'));
+                return;
+            }
+            const apiKeys = currentData.provider_keys;
+            if (apiKeys.length === 0) {
+                toastController.warn(t('providerEditPage.alert.noApiKeyForCheck'));
+                return;
+            }
+
+            if (apiKeys.length === 1) {
+                await performBatchModelCheck(0);
+            } else {
+                setIsBatchCheckingModels(true);
+                setApiKeyIndexToUse(0); // Default to first key
+                setIsApiKeySelectModalOpen(true);
+            }
+        } else if (type === 'api_keys') {
+            const keysToCheck = currentData.provider_keys;
+            if (keysToCheck.length === 0) {
+                toastController.info(t('providerEditPage.alert.noApiKeysToCheck'));
+                return;
+            }
+            const models = currentData.models;
+            if (models.length === 0) {
+                toastController.warn(t('providerEditPage.alert.noModelForCheck'));
+                return;
+            }
+
+            if (models.length === 1) {
+                await performBatchApiKeyCheck(0);
+            } else {
+                setIsBatchCheckingApiKeys(true);
+                setModelIndexToUse(0); // Default to first model
+                setIsModelSelectModalOpen(true);
+            }
+        }
+    };
+
+    const handleCheck = async (type: 'model' | 'apiKey', index: number) => {
+        const currentData = editingData;
+        if (!currentData || !currentData.id) {
+            toastController.warn(t('providerEditPage.alert.providerNotSavedForCheck'));
+            return;
+        }
+
+        if (type === 'model') {
+            const apiKeys = currentData.provider_keys;
+            if (apiKeys.length === 0) {
+                toastController.warn(t('providerEditPage.alert.noApiKeyForCheck'));
+                setEditingData('models', index, 'checkStatus', 'error');
+                setEditingData('models', index, 'checkMessage', t('providerEditPage.alert.noApiKeyForCheck'));
+                return;
+            }
+
+            if (apiKeys.length === 1) {
+                await performCheck(index, 0);
+            } else {
+                setModelIndexToCheck(index);
+                setApiKeyIndexToUse(0); // Default to first key
+                setIsApiKeySelectModalOpen(true);
+            }
+        } else if (type === 'apiKey') {
+            const models = currentData.models;
+            if (models.length === 0) {
+                toastController.warn(t('providerEditPage.alert.noModelForCheck'));
+                setEditingData('provider_keys', index, 'checkStatus', 'error');
+                setEditingData('provider_keys', index, 'checkMessage', t('providerEditPage.alert.noModelForCheck'));
+                return;
+            }
+
+            if (models.length === 1) {
+                await performCheck(0, index);
+            } else {
+                setApiKeyIndexToCheck(index);
+                setModelIndexToUse(0); // Default to first model
+                setIsModelSelectModalOpen(true);
+            }
+        }
+    };
+
 
     const removeListItem = async (field: keyof EditingProviderData, index: number) => {
         const currentData = editingData; // Changed from editingData()
@@ -596,9 +892,10 @@ export default function ProviderEdit() {
                 </div>
             </Show>
             <Show when={!isLoading() && !error() && editingData}>
-                <div class="space-y-4">
-                    <TextField
-                        label={<>{t('providerEditPage.labelName')} <span class="text-red-500">*</span></>}
+                <>
+                    <div class="space-y-4">
+                        <TextField
+                            label={<>{t('providerEditPage.labelName')} <span class="text-red-500">*</span></>}
                         value={editingData!.name}
                         onChange={(v) => updateEditingDataField('name', v)}
                     />
@@ -640,15 +937,22 @@ export default function ProviderEdit() {
 
                     {/* Models Section */}
                     <div class="section">
-                        <h3 class="section-title">{t('providerEditPage.sectionModels')}</h3>
-                        <div class="section-header grid grid-cols-[1fr_1fr_auto] gap-2 items-center">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="section-title">{t('providerEditPage.sectionModels')}</h3>
+                            <Button variant="secondary" size="sm" onClick={() => handleBatchCheck('models')} disabled={!editingData?.id || editingData.models.length === 0}>
+                                {t('providerEditPage.alert.buttonCheckAll')}
+                            </Button>
+                        </div>
+                        <div class="section-header grid grid-cols-[auto_1fr_1fr_auto] gap-2 items-center">
+                            <span class="w-5"></span> {/* Status indicator column */}
                             <span class="font-semibold required-field">{t('providerEditPage.tableHeaderModelId')}</span>
                             <span class="font-semibold">{t('providerEditPage.tableHeaderMappedModelId')}</span>
                             <span></span> {/* Placeholder for button column */}
                         </div>
                         <For each={editingData!.models}>
                             {(model, index) => (
-                                <div class="section-row grid grid-cols-[1fr_1fr_auto] gap-2 items-center mb-2">
+                                <div class="section-row grid grid-cols-[auto_1fr_1fr_auto] gap-2 items-center mb-2">
+                                    <StatusIndicator status={model.checkStatus} message={model.checkMessage} />
                                     <TextField
                                         value={model.model_name}
                                         onChange={(v) => updateListItem('models', index(), 'model_name', v)}
@@ -667,9 +971,11 @@ export default function ProviderEdit() {
                                             <Button variant="primary" size="sm" onClick={() => handleSaveSingleModel(index())}>
                                                 {t('providerEditPage.buttonSaveModel')}
                                             </Button>
+                                            <Button variant="secondary" size="sm" onClick={() => handleCheck('model', index())}>{t('common.check')}</Button>
                                         </Show>
                                         {/* For existing models */}
                                         <Show when={model.id}>
+                                            <Button variant="secondary" size="sm" onClick={() => handleCheck('model', index())}>{t('common.check')}</Button>
                                             <Button variant="secondary" size="sm" onClick={() => navigate(`/model/edit/${model.id!}`)}>
                                                 {t('common.edit')}
                                             </Button>
@@ -690,16 +996,23 @@ export default function ProviderEdit() {
 
                     {/* API Keys Section */}
                     <div class="section">
-                        <h3 class="section-title">{t('providerEditPage.sectionApiKeys')}</h3>
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="section-title">{t('providerEditPage.sectionApiKeys')}</h3>
+                            <Button variant="secondary" size="sm" onClick={() => handleBatchCheck('api_keys')} disabled={!editingData?.id || editingData.provider_keys.length === 0}>
+                                {t('providerEditPage.alert.buttonCheckAll')}
+                            </Button>
+                        </div>
                         {/* Adjusted grid to make space for the new save button */}
-                        <div class="section-header grid grid-cols-[calc(50%-0.25rem)_calc(25%-0.25rem)_calc(25%-0.25rem)] md:grid-cols-[2fr_1fr_auto] gap-2 items-center">
+                        <div class="section-header grid grid-cols-[auto_2fr_1fr_auto] gap-2 items-center">
+                            <span class="w-5"></span> {/* Status indicator column */}
                             <span class="font-semibold required-field">{t('providerEditPage.tableHeaderApiKey')}</span>
                             <span class="font-semibold">{t('providerEditPage.tableHeaderDescription')}</span>
                             <span class="text-center">{t('providerEditPage.tableHeaderActions')}</span>
                         </div>
                         <For each={editingData!.provider_keys}>
                             {(keyItem, index) => (
-                                <div class="section-row grid grid-cols-[calc(50%-0.25rem)_calc(25%-0.25rem)_calc(25%-0.25rem)] md:grid-cols-[2fr_1fr_auto] gap-2 items-center mb-2">
+                                <div class="section-row grid grid-cols-[auto_2fr_1fr_auto] gap-2 items-center mb-2">
+                                    <StatusIndicator status={keyItem.checkStatus} message={keyItem.checkMessage} />
                                     <TextField
                                         value={keyItem.api_key}
                                         onChange={(v) => updateListItem<LocalProviderApiKeyItem>('provider_keys', index(), 'api_key', v)}
@@ -719,9 +1032,11 @@ export default function ProviderEdit() {
                                             <Button variant="primary" size="sm" onClick={() => handleSaveSingleApiKey(index())}>
                                                 {t('providerEditPage.buttonSaveThisKey')}
                                             </Button>
+                                            <Button variant="secondary" size="sm" onClick={() => handleCheck('apiKey', index())}>{t('common.check')}</Button>
                                         </Show>
                                         {/* For existing keys, not in edit mode */}
                                         <Show when={keyItem.id && !keyItem.isEditing}>
+                                            <Button variant="secondary" size="sm" onClick={() => handleCheck('apiKey', index())}>{t('common.check')}</Button>
                                             <Button variant="secondary" size="sm" onClick={() => handleEditApiKey(index())}>
                                                 {t('common.edit')}
                                             </Button>
@@ -785,6 +1100,47 @@ export default function ProviderEdit() {
                         <Button variant="secondary" onClick={handleNavigateBack}>{t('providerEditPage.buttonBackToList')}</Button>
                     </div>
                 </div>
+                <Show when={isModelSelectModalOpen()}>
+                    <div class="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
+                        <div class="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+                            <h2 class="text-lg font-bold mb-4">{t('providerEditPage.modalSelectModel.title')}</h2>
+                            <p class="mb-4">{t('providerEditPage.modalSelectModel.description')}</p>
+                            <Select
+                                value={modelOptionsForSelect().find(opt => opt.value === modelIndexToUse())}
+                                onChange={(v) => setModelIndexToUse(v ? v.value : null)}
+                                options={modelOptionsForSelect()}
+                                optionValue="value"
+                                optionTextValue="label"
+                                placeholder={t('providerEditPage.modalSelectModel.selectPlaceholder')}
+                            />
+                            <div class="mt-6 flex justify-end space-x-2">
+                                <Button variant="secondary" onClick={() => setIsModelSelectModalOpen(false)}>{t('common.cancel')}</Button>
+                                <Button variant="primary" onClick={handleConfirmModelSelection} disabled={modelIndexToUse() === null}>{t('common.check')}</Button>
+                            </div>
+                        </div>
+                    </div>
+                </Show>
+                <Show when={isApiKeySelectModalOpen()}>
+                    <div class="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
+                        <div class="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+                            <h2 class="text-lg font-bold mb-4">{t('providerEditPage.modalSelectApiKey.title')}</h2>
+                            <p class="mb-4">{t('providerEditPage.modalSelectApiKey.description')}</p>
+                            <Select
+                                value={apiKeyOptionsForSelect().find(opt => opt.value === apiKeyIndexToUse())}
+                                onChange={(v) => setApiKeyIndexToUse(v ? v.value : null)}
+                                options={apiKeyOptionsForSelect()}
+                                optionValue="value"
+                                optionTextValue="label"
+                                placeholder={t('providerEditPage.modalSelectApiKey.selectPlaceholder')}
+                            />
+                            <div class="mt-6 flex justify-end space-x-2">
+                                <Button variant="secondary" onClick={() => setIsApiKeySelectModalOpen(false)}>{t('common.cancel')}</Button>
+                                <Button variant="primary" onClick={handleConfirmApiKeySelection} disabled={apiKeyIndexToUse() === null}>{t('common.check')}</Button>
+                            </div>
+                        </div>
+                    </div>
+                </Show>
+                </>
             </Show>
         </div>
     );

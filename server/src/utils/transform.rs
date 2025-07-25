@@ -42,8 +42,8 @@ pub fn transform_result(
     }
 
     match (target_api_type, api_type) {
-        (LlmApiType::Gemini, LlmApiType::OpenAI) => internal_transform_result_openai_to_gemini(data),
-        (LlmApiType::OpenAI, LlmApiType::Gemini) => internal_transform_result_gemini_to_openai(data),
+        (LlmApiType::Gemini, LlmApiType::OpenAI) => internal_transform_result_gemini_to_openai(data),
+        (LlmApiType::OpenAI, LlmApiType::Gemini) => internal_transform_result_openai_to_gemini(data),
         _ => data,
     }
 }
@@ -59,10 +59,10 @@ pub fn transform_result_chunk(
 
     match (target_api_type, api_type) {
         (LlmApiType::Gemini, LlmApiType::OpenAI) => {
-            internal_transform_result_chunk_openai_to_gemini(chunk)
+            internal_transform_result_chunk_gemini_to_openai(chunk)
         }
         (LlmApiType::OpenAI, LlmApiType::Gemini) => {
-            internal_transform_result_chunk_gemini_to_openai(chunk)
+            internal_transform_result_chunk_openai_to_gemini(chunk)
         }
         _ => Some(chunk),
     }
@@ -94,6 +94,7 @@ fn transform_gemini_tool_params_to_openai(params: &mut Value) {
 
 // Transforms an OpenAI-compatible request body to a Gemini-compatible one.
 fn internal_transform_request_data_openai_to_gemini(data: Value) -> Value {
+    debug!("[transform] original data: {}", serde_json::to_string(&data).unwrap_or_default());
     debug!("[transform] Starting OpenAI to Gemini transformation.");
 
     let mut openai_request = match data {
@@ -271,6 +272,7 @@ fn internal_transform_request_data_openai_to_gemini(data: Value) -> Value {
 
 // Transforms a Gemini-compatible request body to an OpenAI-compatible one.
 fn internal_transform_request_data_gemini_to_openai(data: Value, is_stream: bool) -> Value {
+    debug!("[transform] original data: {}", serde_json::to_string(&data).unwrap_or_default());
     debug!("[transform] Starting Gemini to OpenAI transformation.");
 
     let mut gemini_request = match data {
@@ -471,6 +473,7 @@ fn internal_transform_request_data_gemini_to_openai(data: Value, is_stream: bool
 
 // Transforms an OpenAI-compatible non-streaming result to a Gemini-compatible one.
 fn internal_transform_result_openai_to_gemini(data: Value) -> Value {
+    debug!("[transform_result] original data: {}", serde_json::to_string(&data).unwrap_or_default());
     debug!("[transform_result] Starting OpenAI to Gemini transformation.");
 
     let mut openai_response = match data {
@@ -577,6 +580,7 @@ fn internal_transform_result_openai_to_gemini(data: Value) -> Value {
 
 // Transforms a Gemini-compatible non-streaming result to an OpenAI-compatible one.
 fn internal_transform_result_gemini_to_openai(data: Value) -> Value {
+    debug!("[transform_result] original data: {}", serde_json::to_string(&data).unwrap_or_default());
     debug!("[transform_result] Starting Gemini to OpenAI transformation.");
 
     let mut gemini_response = match data {
@@ -696,7 +700,8 @@ fn internal_transform_result_gemini_to_openai(data: Value) -> Value {
 
 // Transforms an OpenAI-compatible streaming chunk to a Gemini-compatible one.
 fn internal_transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Bytes> {
-    debug!("[transform_result_chunk] Starting OpenAI to Gemini transformation for chunk: {}", String::from_utf8_lossy(&chunk));
+    debug!("[transform_result_chunk] original chunk: {}", String::from_utf8_lossy(&chunk));
+    debug!("[transform_result_chunk] Starting OpenAI to Gemini transformation.");
 
     let line_str = String::from_utf8_lossy(&chunk);
 
@@ -858,12 +863,13 @@ fn internal_transform_result_chunk_openai_to_gemini(chunk: Bytes) -> Option<Byte
     }
 
     let gemini_json_str = serde_json::to_string(&gemini_response).unwrap();
-    Some(Bytes::from(format!("data: {}", gemini_json_str)))
+    Some(Bytes::from(format!("data: {}\n\n", gemini_json_str)))
 }
 
 // Transforms a Gemini-compatible streaming chunk to an OpenAI-compatible one.
 fn internal_transform_result_chunk_gemini_to_openai(chunk: Bytes) -> Option<Bytes> {
-    debug!("[transform_result_chunk] Starting Gemini to OpenAI transformation for chunk: {}", String::from_utf8_lossy(&chunk));
+    debug!("[transform_result_chunk] original chunk: {}", String::from_utf8_lossy(&chunk));
+    debug!("[transform_result_chunk] Starting Gemini to OpenAI transformation.");
 
     let line_str = String::from_utf8_lossy(&chunk);
     if !line_str.starts_with("data:") {
@@ -1024,5 +1030,5 @@ fn internal_transform_result_chunk_gemini_to_openai(chunk: Bytes) -> Option<Byte
     }
 
     let openai_json_str = serde_json::to_string(&openai_chunk).unwrap();
-    Some(Bytes::from(format!("data: {}", openai_json_str)))
+    Some(Bytes::from(format!("data: {}\n\n", openai_json_str)))
 }

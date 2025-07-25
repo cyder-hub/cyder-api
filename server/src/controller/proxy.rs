@@ -450,6 +450,100 @@ async fn prepare_llm_request(
     ))
 }
 
+// Prepares a simple Gemini request for utility endpoints, without custom fields or body transformation.
+async fn prepare_simple_gemini_request(
+    provider: &Provider,
+    model: &Model,
+    original_headers: &HeaderMap,
+    app_state: &Arc<AppState>,
+    action: &str,
+    params: &HashMap<String, String>,
+) -> Result<(String, HeaderMap, i64), (StatusCode, String)> {
+    // 1. Get provider API key
+    let selected_provider_api_key = app_state
+        .provider_api_key_store
+        .get_one_by_group_id(provider.id, GroupItemSelectionStrategy::Queue)
+        .map_err(|e| {
+            error!(
+                "Failed to get provider API key from store for provider_id {}: {:?}",
+                provider.id, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to retrieve API key for provider '{}'", provider.name),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("No API keys configured for provider '{}'", provider.name),
+            )
+        })?;
+
+    // 2. Get provider-specific token if needed (e.g., Vertex AI)
+    let request_api_key = if provider.provider_type == ProviderType::Vertex {
+        get_vertex_token(
+            selected_provider_api_key.id,
+            &selected_provider_api_key.api_key,
+        )
+        .await
+        .map_err(|err_msg| (StatusCode::BAD_REQUEST, err_msg))?
+    } else {
+        selected_provider_api_key.api_key.clone()
+    };
+
+    // 3. Prepare URL
+    let real_model_name = model
+        .real_model_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&model.model_name);
+    let target_url_str = format!("{}/{}:{}", provider.endpoint, real_model_name, action);
+    let mut url = Url::parse(&target_url_str)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "failed to parse target url".to_string()))?;
+
+    // Append original query params, except 'key'
+    for (k, v) in params {
+        if k != "key" {
+            url.query_pairs_mut().append_pair(k, v);
+        }
+    }
+
+    // 4. Prepare headers
+    let mut final_headers = reqwest::header::HeaderMap::new();
+    for (name, value) in original_headers.iter() {
+        if name != HOST
+            && name != CONTENT_LENGTH
+            && name != ACCEPT_ENCODING
+            && name != "x-api-key"
+            && name != "x-goog-api-key"
+            && name != AUTHORIZATION
+        {
+            final_headers.insert(name.clone(), value.clone());
+        }
+    }
+
+    if provider.provider_type == ProviderType::Vertex {
+        let bearer_token = format!("Bearer {}", request_api_key);
+        final_headers.insert(
+            AUTHORIZATION,
+            reqwest::header::HeaderValue::try_from(bearer_token).unwrap(),
+        );
+    } else {
+        // For Gemini, use X-Goog-Api-Key
+        final_headers.insert(
+            "X-Goog-Api-Key",
+            reqwest::header::HeaderValue::try_from(request_api_key).unwrap(),
+        );
+    }
+
+    Ok((
+        url.to_string(),
+        final_headers,
+        selected_provider_api_key.id,
+    ))
+}
+
 // Prepares all elements for a downstream Gemini LLM request.
 async fn prepare_gemini_llm_request(
     provider: &Provider,
@@ -810,8 +904,7 @@ async fn handle_streaming_response(
                                     // will be concatenated as an empty string, preserving stream structure.
                                     String::new()
                                 } else {
-                                    // Each valid data chunk should be terminated by the SSE delimiter.
-                                    format!("{}\n\n", String::from_utf8_lossy(&transformed_bytes))
+                                    String::from_utf8_lossy(&transformed_bytes).to_string()
                                 }
                             })
                         })
@@ -939,6 +1032,99 @@ async fn handle_llm_response(
         handle_streaming_response(log_id, model_str, response, url, data, price_rules, currency, api_type, target_api_type).await
     } else {
         handle_non_streaming_response(log_id, model_str, response, url, data, price_rules, currency, api_type, target_api_type).await
+    }
+}
+
+// A simple proxy that sends a request and returns the response, handling streaming and gzip.
+// It does not perform logging or response transformation.
+async fn simple_proxy_request(
+    url: String,
+    data: String,
+    headers: HeaderMap,
+    use_proxy: bool,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    let client = if use_proxy {
+        let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
+        reqwest::Client::builder().proxy(proxy).build().unwrap()
+    } else {
+        reqwest::Client::new()
+    };
+
+    debug!(
+        "[simple_proxy_request] request header: {:?}",
+        serialize_reqwest_headers(&headers)
+    );
+    debug!("[simple_proxy_request] request data: {}", &data);
+
+    let response = match client
+        .request(Method::POST, &url)
+        .headers(headers)
+        .body(data)
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            let error_message = format!("LLM request failed: {}", e);
+            error!("{}", error_message);
+            return Err((StatusCode::BAD_GATEWAY, error_message));
+        }
+    };
+
+    let status_code = response.status();
+    let response_headers = response.headers().clone();
+    let mut response_builder = Response::builder().status(status_code);
+    for (name, value) in response_headers.iter() {
+        if name != CONTENT_LENGTH && name != CONTENT_ENCODING && name != TRANSFER_ENCODING {
+            response_builder = response_builder.header(name, value);
+        }
+    }
+
+    let is_sse = response_headers
+        .get(CONTENT_TYPE)
+        .map_or(false, |value| {
+            value.to_str().unwrap_or("").contains("text/event-stream")
+        });
+
+    if is_sse {
+        let body = Body::from_stream(
+            response
+                .bytes_stream()
+                .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+        );
+        Ok(response_builder.body(body).unwrap())
+    } else {
+        let is_gzip = response_headers
+            .get(CONTENT_ENCODING)
+            .map_or(false, |value| value.to_str().unwrap_or("").contains("gzip"));
+
+        let body_bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                let err_msg = format!("Failed to read LLM response body: {}", e);
+                error!("[simple_proxy_request] {}", err_msg);
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+            }
+        };
+
+        let decompressed_body = if is_gzip {
+            if body_bytes.is_empty() {
+                Bytes::new()
+            } else {
+                let mut gz = GzDecoder::new(&body_bytes[..]);
+                let mut decompressed_data = Vec::new();
+                match gz.read_to_end(&mut decompressed_data) {
+                    Ok(_) => Bytes::from(decompressed_data),
+                    Err(e) => {
+                        error!("Gzip decoding failed in simple_proxy_request: {}", e);
+                        body_bytes // return original if decode fails
+                    }
+                }
+            }
+        } else {
+            body_bytes
+        };
+        Ok(response_builder.body(Body::from(decompressed_body)).unwrap())
     }
 }
 
@@ -1353,6 +1539,8 @@ async fn proxy_handler(
     let request_uri_path = request.uri().path().to_string();
     let original_headers = request.headers().clone();
 
+    debug!("{}", &request_uri_path);
+
     // Step 1: Authenticate the request and retrieve API key.
     let api_key_check_result = match api_type {
         LlmApiType::OpenAI => authenticate_openai_request(&original_headers, &app_state).await?,
@@ -1405,17 +1593,76 @@ async fn proxy_handler(
             let model_name = parts[1];
             let action = parts[0];
 
-            if action != "generateContent" && action != "streamGenerateContent" {
+            const GEMINI_GENERATION_ACTIONS: [&str; 2] =
+                ["generateContent", "streamGenerateContent"];
+            const GEMINI_UTILITY_ACTIONS: [&str; 3] =
+                ["countMessageTokens", "countTextTokens", "countTokens"];
+
+            if GEMINI_UTILITY_ACTIONS.contains(&action) {
+                // Handle utility actions: simple proxy, no logging
+                let (provider, model) = get_provider_and_model(&app_state, model_name)
+                    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+                let target_api_type = if provider.provider_type == ProviderType::Vertex
+                    || provider.provider_type == ProviderType::Gemini
+                {
+                    LlmApiType::Gemini
+                } else {
+                    LlmApiType::OpenAI
+                };
+
+                debug!("{:?}", provider.provider_type);
+
+                if target_api_type != LlmApiType::Gemini {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "Action '{}' is only supported for Gemini-compatible providers.",
+                            action
+                        ),
+                    ));
+                }
+
+                let empty_params = HashMap::new();
+                let params = query_params.as_ref().unwrap_or(&empty_params);
+
+                let (final_url, final_headers, _) = prepare_simple_gemini_request(
+                    &provider,
+                    &model,
+                    &original_headers,
+                    &app_state,
+                    action,
+                    params,
+                )
+                .await?;
+
+                let final_body = serde_json::to_string(&data).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to serialize final request body: {}", e),
+                    )
+                })?;
+
+                return simple_proxy_request(
+                    final_url,
+                    final_body,
+                    final_headers,
+                    provider.use_proxy,
+                )
+                .await;
+            }
+
+            if !GEMINI_GENERATION_ACTIONS.contains(&action) {
                 let err_msg = format!(
-                    "Invalid action: '{}'. Must be 'generateContent' or 'streamGenerateContent'.",
+                    "Invalid action: '{}'. Must be one of 'generateContent', 'streamGenerateContent', 'countMessageTokens', 'countTextTokens', or 'countTokens'.",
                     action
                 );
                 error!("[gemini_models_handler] {}", err_msg);
                 return Err((StatusCode::BAD_REQUEST, err_msg));
             }
 
-            let (provider, model) =
-                get_provider_and_model(&app_state, model_name).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            let (provider, model) = get_provider_and_model(&app_state, model_name)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
             (provider, model, Some(action.to_string()))
         }

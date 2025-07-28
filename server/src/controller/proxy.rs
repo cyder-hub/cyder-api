@@ -904,7 +904,11 @@ async fn handle_streaming_response(
                                     // will be concatenated as an empty string, preserving stream structure.
                                     String::new()
                                 } else {
-                                    String::from_utf8_lossy(&transformed_bytes).to_string()
+                                    if api_type == LlmApiType::OpenAI && target_api_type == LlmApiType::OpenAI {
+                                        format!("{}\n\n", String::from_utf8_lossy(&transformed_bytes))
+                                    } else {
+                                        String::from_utf8_lossy(&transformed_bytes).to_string()
+                                    }
                                 }
                             })
                         })

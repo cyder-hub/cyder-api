@@ -1,5 +1,3 @@
-.cargo
-
 # develop resources
 /storage
 !/storage/.gitkeep

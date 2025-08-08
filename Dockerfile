@@ -8,7 +8,7 @@ RUN npm ci
 RUN npm run build 
 
 # build
-FROM chenluo/cyder-api-base:1.85.1-alpine3.20 AS backend-builder
+FROM cyderhub/cyder-api-base:1.85.1-alpine3.20 AS backend-builder
 
 ADD . /work
 WORKDIR /work

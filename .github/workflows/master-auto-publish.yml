@@ -29,5 +29,5 @@ jobs:
         file: ./Dockerfile
         push: true
         tags: |
-          ghcr.io/${{ github.repository }}/cyder-api:latest
-          ghcr.io/${{ github.repository }}/cyder-api:${{ github.sha }}
+          ghcr.io/${{ github.repository }}:latest
+          ghcr.io/${{ github.repository }}:${{ github.sha }}

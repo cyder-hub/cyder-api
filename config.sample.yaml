@@ -1,5 +1,5 @@
 host: 0.0.0.0
-port: 29527
+port: 8000
 base_path: /ai
 secret_key: your_secret_key
 password_salt: jKnDj%pNoJerZGPA&AG7Rwuwo&8tC6QW
@@ -8,6 +8,5 @@ jwt_secret: uCK6g1EBERjj2U7FT8sGlMFFzL2M3ufW
 db_url: storage/database.db
 # db_url: postgres://user:pass@host:port/schema_name
 # db_url: mysql://user:pass@host:port/database_name
-proxy:
-  url: http://10.0.0.2:1081
+proxy: http://10.0.0.2:1081
 

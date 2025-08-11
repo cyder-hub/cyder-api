@@ -174,6 +174,20 @@ struct CheckProviderPayload {
     provider_api_key: Option<String>,
 }
 
+fn build_provider_client(use_proxy: bool) -> Result<Client, BaseError> {
+    let mut client_builder = Client::builder();
+    if use_proxy {
+        if let Some(proxy_url) = &CONFIG.proxy {
+            let proxy = Proxy::https(proxy_url)
+                .map_err(|e| BaseError::ParamInvalid(Some(format!("Invalid proxy URL: {}", e))))?;
+            client_builder = client_builder.proxy(proxy);
+        }
+    }
+    client_builder
+        .build()
+        .map_err(|e| BaseError::ParamInvalid(Some(format!("Failed to build HTTP client: {}", e))))
+}
+
 async fn check_provider(
     Path(id): Path<i64>,
     Json(payload): Json<CheckProviderPayload>,
@@ -221,12 +235,7 @@ async fn check_provider(
 
     let provider = Provider::get_by_id(id)?;
 
-    let client = if provider.use_proxy {
-        let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
-        reqwest::Client::builder().proxy(proxy).build().unwrap()
-    } else {
-        Client::new()
-    };
+    let client = build_provider_client(provider.use_proxy)?;
 
     let url = format!("{}/chat/completions", provider.endpoint.trim_end_matches('/'));
 
@@ -278,12 +287,7 @@ async fn get_remote_models(
         BaseError::ParamInvalid(Some("No API key found for this provider.".to_string()))
     })?;
 
-    let client = if provider.use_proxy {
-        let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
-        reqwest::Client::builder().proxy(proxy).build().unwrap()
-    } else {
-        Client::new()
-    };
+    let client = build_provider_client(provider.use_proxy)?;
 
     let response = if provider.provider_type == ProviderType::Gemini {
         let mut url = Url::parse(&provider.endpoint).map_err(|e| {

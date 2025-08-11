@@ -5,6 +5,7 @@
 
 # config files
 config.local.yaml
+config.default.yaml
 diesel.toml
 .env
 

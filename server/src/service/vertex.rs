@@ -114,8 +114,12 @@ pub async fn request_google_token(service_account_str: &str) -> Result<VertexTok
     let private_key =
         EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(|e| e.to_string())?;
 
-    let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
-    let client = reqwest::Client::builder().proxy(proxy).build().unwrap();
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(proxy_url) = &CONFIG.proxy {
+        let proxy = Proxy::https(proxy_url).map_err(|e| e.to_string())?;
+        client_builder = client_builder.proxy(proxy);
+    }
+    let client = client_builder.build().map_err(|e| e.to_string())?;
     let claims = Claims {
         iss: client_email,
         scope: scope,

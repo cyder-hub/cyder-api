@@ -4,8 +4,6 @@ use once_cell::sync::Lazy;
 use rand::{distr::Alphanumeric, rng, Rng};
 use serde::{Deserialize, Serialize};
 
-use cyder_tools::log::info;
-
 // Used for deserializing user-provided config files where all fields are optional.
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]

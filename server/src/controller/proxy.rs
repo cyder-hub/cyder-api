@@ -185,13 +185,14 @@ fn log_final_update(
     }
 }
 
-// Authenticates an OpenAI-style request (Bearer token).
+// Authenticates an OpenAI-style request (Bearer token or query param).
 async fn authenticate_openai_request(
     headers: &HeaderMap,
+    params: &HashMap<String, String>,
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
-    let system_api_key_str =
-        parse_token_from_request(headers).map_err(|err| (StatusCode::UNAUTHORIZED, err))?;
+    let system_api_key_str = parse_token_from_request(headers, params)
+        .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))?;
     check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
         .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))
 }
@@ -1395,19 +1396,25 @@ fn handle_custom_fields(
 }
 
 const BEARER_PREFIX: &str = "Bearer ";
-fn parse_token_from_request(headers: &HeaderMap) -> Result<String, String> {
-    let auth_header_value = headers
-        .get(AUTHORIZATION)
-        .ok_or_else(|| String::from("There is no authorization header"))?;
+fn parse_token_from_request(
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<String, String> {
+    if let Some(auth_header_value) = headers.get(AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header_value.to_str() {
+            if let Some(token) = auth_str.strip_prefix(BEARER_PREFIX) {
+                if !token.is_empty() && token != "raspberry" {
+                    return Ok(token.to_string());
+                }
+            }
+        }
+    }
 
-    let auth_str = auth_header_value
-        .to_str()
-        .map_err(|_| String::from("authorization invalid"))?;
-
-    auth_str
-        .strip_prefix(BEARER_PREFIX)
-        .map(|token_slice| token_slice.to_string())
-        .ok_or_else(|| String::from("authorization invalid"))
+    // Fallback to query parameter
+    params.get("key").cloned().ok_or_else(|| {
+        "Missing API key. Provide it in 'Authorization' header or 'key' query parameter."
+            .to_string()
+    })
 }
 
 // Updated to query from the new StateStore<SystemApiKey> struct
@@ -1567,6 +1574,7 @@ fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInfo> {
 async fn openai_utility_handler(
     app_state: Arc<AppState>,
     addr: SocketAddr,
+    params: HashMap<String, String>,
     request: Request<Body>,
     downstream_path: &str,
 ) -> Result<Response<Body>, (StatusCode, String)> {
@@ -1576,7 +1584,8 @@ async fn openai_utility_handler(
     let original_headers = request.headers().clone();
 
     // Step 1: Authenticate
-    let api_key_check_result = authenticate_openai_request(&original_headers, &app_state).await?;
+    let api_key_check_result =
+        authenticate_openai_request(&original_headers, &params, &app_state).await?;
     let system_api_key = api_key_check_result.api_key;
     let channel = api_key_check_result.channel;
     let external_id = api_key_check_result.external_id;
@@ -1759,11 +1768,15 @@ async fn proxy_handler(
     let request_uri_path = request.uri().path().to_string();
     let original_headers = request.headers().clone();
 
-    debug!("{}", &request_uri_path);
+    debug!("{} --- {:?}", &request_uri_path, query_params);
 
     // Step 1: Authenticate the request and retrieve API key.
     let api_key_check_result = match api_type {
-        LlmApiType::OpenAI => authenticate_openai_request(&original_headers, &app_state).await?,
+        LlmApiType::OpenAI => {
+            let empty_params = HashMap::new();
+            let params = query_params.as_ref().unwrap_or(&empty_params);
+            authenticate_openai_request(&original_headers, params, &app_state).await?
+        }
         LlmApiType::Gemini => {
             let empty_params = HashMap::new();
             let params = query_params.as_ref().unwrap_or(&empty_params);
@@ -1980,45 +1993,67 @@ async fn proxy_handler(
     .await
 }
 
-pub fn create_proxy_router() -> StateRouter {
+fn create_openai_router() -> StateRouter {
     create_state_router()
-        .nest(
-            "/openai",
-            create_state_router()
-                .route(
-                    "/chat/completions",
-                    any(
-                        |State(app_state), ConnectInfo(addr), request: Request<Body>| async move {
-                            proxy_handler(app_state, addr, None, None, request, LlmApiType::OpenAI)
-                                .await
-                        },
-                    ),
-                )
-                .route(
-                    "/embeddings",
-                    any(
-                        |State(app_state), ConnectInfo(addr), request: Request<Body>| async move {
-                            openai_utility_handler(app_state, addr, request, "embeddings").await
-                        },
-                    ),
-                )
-                .route(
-                    "/rerank",
-                    any(
-                        |State(app_state), ConnectInfo(addr), request: Request<Body>| async move {
-                            openai_utility_handler(app_state, addr, request, "rerank").await
-                        },
-                    ),
-                )
-                .route(
-                    "/models",
-                    get(
-                        |State(app_state), request: Request<Body>| async move {
-                            list_models_handler(app_state, HashMap::new(), request, LlmApiType::OpenAI).await
-                        },
-                    ),
-                ),
+        .route(
+            "/chat/completions",
+            any(
+                |State(app_state),
+                 Query(query_params): Query<HashMap<String, String>>,
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    proxy_handler(
+                        app_state,
+                        addr,
+                        None,
+                        Some(query_params),
+                        request,
+                        LlmApiType::OpenAI,
+                    )
+                    .await
+                },
+            ),
         )
+        .route(
+            "/embeddings",
+            any(
+                |State(app_state),
+                 Query(params): Query<HashMap<String, String>>,
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    openai_utility_handler(app_state, addr, params, request, "embeddings")
+                        .await
+                },
+            ),
+        )
+        .route(
+            "/rerank",
+            any(
+                |State(app_state),
+                 Query(params): Query<HashMap<String, String>>,
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    openai_utility_handler(app_state, addr, params, request, "rerank").await
+                },
+            ),
+        )
+        .route(
+            "/models",
+            get(
+                |State(app_state),
+                 Query(params): Query<HashMap<String, String>>,
+                 request: Request<Body>| async move {
+                    list_models_handler(app_state, params, request, LlmApiType::OpenAI).await
+                },
+            ),
+        )
+}
+
+pub fn create_proxy_router() -> StateRouter {
+    let openai_router = create_openai_router();
+    create_state_router()
+        .nest("/openai", openai_router.clone())
+        .nest("/openai/v1", openai_router)
         .route(
             "/gemini/v1beta/models", // Exact match for listing models
             get(
@@ -2243,7 +2278,7 @@ async fn list_models_handler(
     // 1. Authenticate based on api_type
     let original_headers = request.headers().clone();
     let api_key_check_result = match api_type {
-        LlmApiType::OpenAI => authenticate_openai_request(&original_headers, &app_state).await?,
+        LlmApiType::OpenAI => authenticate_openai_request(&original_headers, &params, &app_state).await?,
         LlmApiType::Gemini => authenticate_gemini_request(&original_headers, &params, &app_state)?,
     };
     let system_api_key = api_key_check_result.api_key;

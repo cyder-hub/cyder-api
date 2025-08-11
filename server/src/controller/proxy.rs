@@ -56,6 +56,29 @@ use crate::{
 };
 use crate::schema::enum_def::ProviderType;
 
+fn build_reqwest_client(use_proxy: bool) -> Result<reqwest::Client, (StatusCode, String)> {
+    let mut client_builder = reqwest::Client::builder();
+    if use_proxy {
+        if let Some(proxy_url) = &CONFIG.proxy {
+            let proxy = Proxy::https(proxy_url).map_err(|e| {
+                error!("Invalid proxy URL '{}': {}", proxy_url, e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Invalid proxy configuration".to_string(),
+                )
+            })?;
+            client_builder = client_builder.proxy(proxy);
+        }
+    }
+    client_builder.build().map_err(|e| {
+        error!("Failed to build reqwest client: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to build HTTP client".to_string(),
+        )
+    })
+}
+
 struct ApiKeyCheckResult {
     api_key: SystemApiKey,
     channel: Option<String>,
@@ -1047,12 +1070,7 @@ async fn simple_proxy_request(
     headers: HeaderMap,
     use_proxy: bool,
 ) -> Result<Response<Body>, (StatusCode, String)> {
-    let client = if use_proxy {
-        let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
-        reqwest::Client::builder().proxy(proxy).build().unwrap()
-    } else {
-        reqwest::Client::new()
-    };
+    let client = build_reqwest_client(use_proxy)?;
 
     debug!(
         "[simple_proxy_request] request header: {:?}",
@@ -1146,12 +1164,7 @@ async fn proxy_request(
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     // 1. Build HTTP client, with proxy if configured
-    let client = if use_proxy {
-        let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
-        reqwest::Client::builder().proxy(proxy).build().unwrap()
-    } else {
-        reqwest::Client::new()
-    };
+    let client = build_reqwest_client(use_proxy)?;
 
     debug!(
         "[proxy] proxy request header: {:?}",
@@ -1620,12 +1633,7 @@ async fn openai_utility_handler(
     .await?;
 
     // Step 8: Execute request against downstream
-    let client = if provider.use_proxy {
-        let proxy = Proxy::https(&CONFIG.proxy.url).unwrap();
-        reqwest::Client::builder().proxy(proxy).build().unwrap()
-    } else {
-        reqwest::Client::new()
-    };
+    let client = build_reqwest_client(provider.use_proxy)?;
 
     debug!(
         "[{}] proxy request header: {:?}",

@@ -35,11 +35,7 @@ static KEYS: Lazy<Keys> =
     Lazy::new(|| Keys::new(CONFIG.jwt_secret.as_bytes()));
 
 static API_KEY_JWT_KEYS: Lazy<Keys> = Lazy::new(|| {
-    let secret = CONFIG
-        .api_key_jwt_secret
-        .as_deref()
-        .unwrap_or(&CONFIG.jwt_secret);
-    Keys::new(secret.as_bytes())
+    Keys::new(CONFIG.api_key_jwt_secret.as_bytes())
 });
 
 const ISSUER: &str = "cyder-api";

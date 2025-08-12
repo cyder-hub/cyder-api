@@ -22,6 +22,24 @@ pub struct PartialConfig {
     pub redis_url: Option<String>,
 }
 
+impl PartialConfig {
+    /// Merges the fields of this partial config into a final config, overwriting existing values.
+    fn merge_into(self, final_config: &mut FinalConfig) {
+        if let Some(host) = self.host { final_config.host = host; }
+        if let Some(port) = self.port { final_config.port = port; }
+        if let Some(base_path) = self.base_path { final_config.base_path = base_path; }
+        if let Some(secret_key) = self.secret_key { final_config.secret_key = secret_key; }
+        if let Some(password_salt) = self.password_salt { final_config.password_salt = password_salt; }
+        if let Some(jwt_secret) = self.jwt_secret { final_config.jwt_secret = jwt_secret; }
+        if let Some(api_key_jwt_secret) = self.api_key_jwt_secret { final_config.api_key_jwt_secret = api_key_jwt_secret; }
+        if let Some(db_url) = self.db_url { final_config.db_url = db_url; }
+        if let Some(proxy) = self.proxy { final_config.proxy = Some(proxy); }
+        if let Some(log_level) = self.log_level { final_config.log_level = log_level; }
+        if let Some(timezone) = self.timezone { final_config.timezone = Some(timezone); }
+        if let Some(redis_url) = self.redis_url { final_config.redis_url = Some(redis_url); }
+    }
+}
+
 // The fully resolved configuration used by the application.
 // This is also the format for the default configuration file.
 #[derive(Debug, Deserialize, Serialize)]
@@ -46,6 +64,27 @@ fn generate_random_string(len: usize) -> String {
       .take(len)
       .map(char::from)
       .collect()
+}
+
+fn get_env_var<T: std::str::FromStr>(key: &str) -> Option<T> {
+    std::env::var(key).ok().and_then(|v| v.parse().ok())
+}
+
+fn get_config_from_env() -> PartialConfig {
+    PartialConfig {
+        host: get_env_var("HOST"),
+        port: get_env_var("PORT"),
+        base_path: get_env_var("BASE_PATH"),
+        secret_key: get_env_var("SECRET_KEY"),
+        password_salt: get_env_var("PASSWORD_SALT"),
+        jwt_secret: get_env_var("JWT_SECRET"),
+        api_key_jwt_secret: get_env_var("API_KEY_JWT_SECRET"),
+        db_url: get_env_var("DB_URL"),
+        proxy: get_env_var("PROXY"),
+        log_level: get_env_var("LOG_LEVEL"),
+        timezone: get_env_var("TIMEZONE"),
+        redis_url: get_env_var("REDIS_URL"),
+    }
 }
 
 pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
@@ -91,18 +130,7 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
             let file_defaults: PartialConfig = serde_yaml::from_str(&config_str)
                 .unwrap_or_else(|e| panic!("Failed to parse default configuration file at {:?}: {}", default_config_path, e));
 
-            if let Some(host) = file_defaults.host { effective_default_config.host = host; }
-            if let Some(port) = file_defaults.port { effective_default_config.port = port; }
-            if let Some(base_path) = file_defaults.base_path { effective_default_config.base_path = base_path; }
-            if let Some(secret_key) = file_defaults.secret_key { effective_default_config.secret_key = secret_key; }
-            if let Some(password_salt) = file_defaults.password_salt { effective_default_config.password_salt = password_salt; }
-            if let Some(jwt_secret) = file_defaults.jwt_secret { effective_default_config.jwt_secret = jwt_secret; }
-            if let Some(api_key_jwt_secret) = file_defaults.api_key_jwt_secret { effective_default_config.api_key_jwt_secret = api_key_jwt_secret; }
-            if let Some(db_url) = file_defaults.db_url { effective_default_config.db_url = db_url; }
-            if let Some(proxy) = file_defaults.proxy { effective_default_config.proxy = Some(proxy); }
-            if let Some(log_level) = file_defaults.log_level { effective_default_config.log_level = log_level; }
-            if let Some(timezone) = file_defaults.timezone { effective_default_config.timezone = Some(timezone); }
-            if let Some(redis_url) = file_defaults.redis_url { effective_default_config.redis_url = Some(redis_url); }
+            file_defaults.merge_into(&mut effective_default_config);
         }
     }
 
@@ -122,22 +150,12 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
                 .unwrap_or_else(|e| panic!("Failed to parse user configuration file at {:?}: {}", user_config_path, e));
 
             // Merge user overrides into the final config
-            if let Some(host) = user_config.host { final_config.host = host; }
-            if let Some(port) = user_config.port { final_config.port = port; }
-            if let Some(base_path) = user_config.base_path { final_config.base_path = base_path; }
-            if let Some(secret_key) = user_config.secret_key { final_config.secret_key = secret_key; }
-            if let Some(password_salt) = user_config.password_salt { final_config.password_salt = password_salt; }
-            if let Some(jwt_secret) = user_config.jwt_secret { final_config.jwt_secret = jwt_secret; }
-            if let Some(api_key_jwt_secret) = user_config.api_key_jwt_secret { final_config.api_key_jwt_secret = api_key_jwt_secret; }
-            if let Some(db_url) = user_config.db_url { final_config.db_url = db_url; }
-            if let Some(proxy) = user_config.proxy { final_config.proxy = Some(proxy); }
-            if let Some(log_level) = user_config.log_level { final_config.log_level = log_level; }
-            if let Some(timezone) = user_config.timezone { final_config.timezone = Some(timezone); }
-            if let Some(redis_url) = user_config.redis_url { final_config.redis_url = Some(redis_url); }
+            user_config.merge_into(&mut final_config);
         }
     }
 
-    println!("111{:?}", final_config);
+    // Load config from environment variables, which have the highest priority.
+    get_config_from_env().merge_into(&mut final_config);
 
     final_config
 });

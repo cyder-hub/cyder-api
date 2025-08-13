@@ -11,7 +11,6 @@ use serde_json::{json, Value};
 pub mod auth;
 pub mod billing;
 pub mod limit;
-pub mod transform;
 
 #[derive(Debug, Serialize)]
 pub struct HttpResult<T> {

@@ -2,4 +2,6 @@
 pub enum LlmApiType {
     OpenAI,
     Gemini,
+    Ollama,
+    Anthropic,
 }

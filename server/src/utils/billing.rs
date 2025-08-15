@@ -87,6 +87,7 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 None
             }
         }
+        _ => return None
     }
 }
 

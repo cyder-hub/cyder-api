@@ -19,8 +19,8 @@ use crate::service::{
     vertex::get_vertex_token,
 };
 use crate::utils::billing::{parse_usage_info, populate_token_cost_fields, UsageInfo};
-use crate::utils::transform::{
-    transform_request_data, transform_result, transform_result_chunk,
+use crate::service::transform::{
+    transform_request_data, transform_result, StreamTransformer,
 };
 use chrono::Utc;
 use flate2::read::GzDecoder;
@@ -222,6 +222,32 @@ fn authenticate_gemini_request(
                 ));
             }
         },
+    };
+    check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
+        .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))
+}
+
+// Authenticates an Anthropic-style request (x-api-key header).
+fn authenticate_anthropic_request(
+    headers: &HeaderMap,
+    app_state: &Arc<AppState>,
+) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
+    let system_api_key_str = match headers.get("x-api-key") {
+        Some(header_value) => match header_value.to_str() {
+            Ok(key) => key.to_string(),
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Invalid characters in x-api-key header".to_string(),
+                ));
+            }
+        },
+        None => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Missing API key. Provide it in 'x-api-key' header.".to_string(),
+            ));
+        }
     };
     check_system_api_key(&app_state.system_api_key_store, &system_api_key_str)
         .map_err(|err_msg| (StatusCode::UNAUTHORIZED, err_msg))
@@ -806,7 +832,7 @@ async fn handle_non_streaming_response(
                 }
             };
 
-            let transformed_value = transform_result(original_value, api_type, target_api_type);
+            let transformed_value = transform_result(original_value, target_api_type, api_type);
 
             match serde_json::to_vec(&transformed_value) {
                 Ok(b) => Bytes::from(b),
@@ -874,6 +900,8 @@ async fn handle_streaming_response(
         }
     });
 
+    let mut transformer = StreamTransformer::new(target_api_type, api_type);
+
     let monitored_stream = async_stream::stream! {
         let mut remainder = Bytes::new();
         while let Some(chunk_result) = rx.recv().await {
@@ -895,48 +923,45 @@ async fn handle_streaming_response(
                         continue;
                     }
 
+                    let mut transformed_sub_chunks_as_strings: Vec<String> = Vec::new();
                     for sub_chunk in &lines {
-                        let line_str = String::from_utf8_lossy(sub_chunk);
-                        if target_api_type == LlmApiType::OpenAI && line_str.trim() == "data: [DONE]" {
-                            if let Some(final_data_chunk) = latest_chunk_arc.lock().unwrap().take() {
-                                let final_line_str = String::from_utf8_lossy(&final_data_chunk);
-                                if let Some(data_json_str) = final_line_str.strip_prefix("data:").map(str::trim) {
-                                    if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
-                                        let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
-                                        let completed_at = Utc::now().timestamp_millis();
-                                        let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-                                        log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS));
-                                        *logged_sse_success_clone.lock().unwrap() = true;
-                                        info!("{}: SSE stream completed.", model_str);
+                        // This part is for logging usage from the final chunk of an OpenAI stream.
+                        if target_api_type == LlmApiType::OpenAI {
+                            let line_str = String::from_utf8_lossy(sub_chunk);
+                            if line_str.trim() == "data: [DONE]" {
+                                if let Some(final_data_chunk) = latest_chunk_arc.lock().unwrap().take() {
+                                    let final_line_str = String::from_utf8_lossy(&final_data_chunk);
+                                    if let Some(data_json_str) = final_line_str.strip_prefix("data:").map(str::trim) {
+                                        if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
+                                            let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
+                                            let completed_at = Utc::now().timestamp_millis();
+                                            let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+                                            log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS));
+                                            *logged_sse_success_clone.lock().unwrap() = true;
+                                            info!("{}: SSE stream completed.", model_str);
+                                        }
                                     }
                                 }
+                            } else if line_str.starts_with("data:") {
+                                *latest_chunk_arc.lock().unwrap() = Some(sub_chunk.clone());
                             }
-                        } else if line_str.starts_with("data:") {
-                            *latest_chunk_arc.lock().unwrap() = Some(sub_chunk.clone());
+                        }
+
+                        let transformed_bytes_opt = transformer.transform_chunk(sub_chunk.clone());
+
+                        if let Some(transformed_bytes) = transformed_bytes_opt {
+                            let s = if transformed_bytes.is_empty() {
+                                String::new()
+                            } else {
+                                if api_type == LlmApiType::OpenAI && target_api_type == LlmApiType::OpenAI {
+                                    format!("{}\n\n", String::from_utf8_lossy(&transformed_bytes))
+                                } else {
+                                    String::from_utf8_lossy(&transformed_bytes).to_string()
+                                }
+                            };
+                            transformed_sub_chunks_as_strings.push(s);
                         }
                     }
-                    
-                    let transformed_sub_chunks_as_strings: Vec<String> = lines
-                        .into_iter()
-                        .filter_map(|sub_chunk| {
-                            let transformed_bytes_opt =
-                                transform_result_chunk(sub_chunk, api_type, target_api_type);
-
-                            transformed_bytes_opt.map(|transformed_bytes| {
-                                if transformed_bytes.is_empty() {
-                                    // An empty transformed chunk (e.g., from a keep-alive)
-                                    // will be concatenated as an empty string, preserving stream structure.
-                                    String::new()
-                                } else {
-                                    if api_type == LlmApiType::OpenAI && target_api_type == LlmApiType::OpenAI {
-                                        format!("{}\n\n", String::from_utf8_lossy(&transformed_bytes))
-                                    } else {
-                                        String::from_utf8_lossy(&transformed_bytes).to_string()
-                                    }
-                                }
-                            })
-                        })
-                        .collect();
 
                     let transformed_chunk = Bytes::from(transformed_sub_chunks_as_strings.concat());
 
@@ -1782,6 +1807,8 @@ async fn proxy_handler(
             let params = query_params.as_ref().unwrap_or(&empty_params);
             authenticate_gemini_request(&original_headers, params, &app_state)?
         }
+        LlmApiType::Anthropic => authenticate_anthropic_request(&original_headers, &app_state)?,
+        _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "unsupported api type".to_string()))
     };
     let system_api_key = api_key_check_result.api_key;
     let channel = api_key_check_result.channel;
@@ -1899,6 +1926,21 @@ async fn proxy_handler(
 
             (provider, model, Some(action.to_string()))
         }
+        LlmApiType::Anthropic => {
+            let pre_model_str = data
+                .get("model")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "'model' field must be a string".to_string(),
+                    )
+                })?;
+            let (provider, model) =
+                get_provider_and_model(&app_state, pre_model_str).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            (provider, model, None)
+        }
+        _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "unsupported api type".to_string()))
     };
 
     let target_api_type = if provider.provider_type == ProviderType::Vertex
@@ -1912,6 +1954,8 @@ async fn proxy_handler(
     let is_stream = match api_type {
         LlmApiType::OpenAI => data.get("stream").and_then(Value::as_bool).unwrap_or(false),
         LlmApiType::Gemini => action.as_deref() == Some("streamGenerateContent"),
+        LlmApiType::Anthropic => data.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "unsupported api type".to_string()))
     };
 
     data = transform_request_data(data, api_type, target_api_type, is_stream);
@@ -1948,6 +1992,7 @@ async fn proxy_handler(
             )
             .await?
         }
+        _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "unsupported api type".to_string()))
     };
 
     // Step 6: Create an initial log entry for the request.
@@ -2049,11 +2094,44 @@ fn create_openai_router() -> StateRouter {
         )
 }
 
+fn create_anthropic_router() -> StateRouter {
+    create_state_router()
+        .route(
+            "/messages",
+            any(
+                |State(app_state), ConnectInfo(addr), request: Request<Body>| async move {
+                    proxy_handler(
+                        app_state,
+                        addr,
+                        None,
+                        None,
+                        request,
+                        LlmApiType::Anthropic,
+                    )
+                    .await
+                },
+            ),
+        )
+        .route(
+            "/models",
+            get(
+                |State(app_state),
+                 Query(params): Query<HashMap<String, String>>,
+                 request: Request<Body>| async move {
+                    list_models_handler(app_state, params, request, LlmApiType::Anthropic).await
+                },
+            ),
+        )
+}
+
 pub fn create_proxy_router() -> StateRouter {
     let openai_router = create_openai_router();
+    let anthropic_router = create_anthropic_router();
     create_state_router()
         .nest("/openai", openai_router.clone())
         .nest("/openai/v1", openai_router)
+        .nest("/anthropic", anthropic_router.clone())
+        .nest("/anthropic/v1", anthropic_router)
         .route(
             "/gemini/v1beta/models", // Exact match for listing models
             get(
@@ -2280,6 +2358,8 @@ async fn list_models_handler(
     let api_key_check_result = match api_type {
         LlmApiType::OpenAI => authenticate_openai_request(&original_headers, &params, &app_state).await?,
         LlmApiType::Gemini => authenticate_gemini_request(&original_headers, &params, &app_state)?,
+        LlmApiType::Anthropic => authenticate_anthropic_request(&original_headers, &app_state)?,
+        _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "unsupported api type".to_string()))
     };
     let system_api_key = api_key_check_result.api_key;
 
@@ -2288,7 +2368,7 @@ async fn list_models_handler(
 
     // 3. Format response based on api_type
     let response = match api_type {
-        LlmApiType::OpenAI => {
+        LlmApiType::OpenAI | LlmApiType::Anthropic => {
             let mut available_models: Vec<ModelInfo> = all_accessible_models
                 .into_iter()
                 .map(|m| ModelInfo {
@@ -2328,6 +2408,7 @@ async fn list_models_handler(
                 .body(Body::from(serde_json::to_string(&response_data).unwrap()))
                 .unwrap()
         }
+        _ => return Err((StatusCode::INTERNAL_SERVER_ERROR, "unsupported api type".to_string()))
     };
     Ok(response)
 }

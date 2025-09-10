@@ -15,14 +15,6 @@ fn main() -> Result<()> {
 
     let subcommand = args.subcommand()?.unwrap_or_else(|| "default".into());
 
-    // Ensure all remaining arguments are processed or fail if unexpected ones are found
-    let remaining = args.finish();
-    if !remaining.is_empty() {
-        eprintln!("Error: Unexpected arguments: {:?}", remaining);
-        print_help();
-        std::process::exit(1); // Use exit code 1 for errors
-    }
-
     // Set working directory to project root before running commands that need it
     let root = project_root();
     println!("Running xtask in: {}", root.display());
@@ -38,6 +30,10 @@ fn main() -> Result<()> {
         "dev-front" => cmd_dev_front()?,
         "build-front" => cmd_build_front()?,
         "install-front-deps" => cmd_install_front_deps()?, // Add this line
+        "test" => {
+            cmd_test(args)?;
+            return Ok(());
+        }
         "default" => {
             // Optional: Define a default behavior, e.g., print help or run combined dev
             println!("Default task: Running combined dev server (backend + frontend).");
@@ -48,6 +44,14 @@ fn main() -> Result<()> {
             print_help();
             std::process::exit(1); // Use exit code 1 for errors
         }
+    }
+
+    // Ensure all remaining arguments are processed or fail if unexpected ones are found
+    let remaining = args.finish();
+    if !remaining.is_empty() {
+        eprintln!("Error: Unexpected arguments: {:?}", remaining);
+        print_help();
+        std::process::exit(1); // Use exit code 1 for errors
     }
 
     Ok(())
@@ -66,6 +70,7 @@ Commands:
   dev-front            Installs deps and runs the frontend development server using 'npm run dev' in './front'.
   build-front          Installs deps and builds the frontend project using 'npm run build' in './front'.
   install-front-deps   Installs frontend dependencies using 'npm install' in './front'.
+  test                 Runs backend tests, with optional test name and arguments.
   default              Runs the 'dev' command.
 "#
     );
@@ -145,6 +150,22 @@ fn cmd_build_backend() -> Result<()> {
     // Run 'cargo build --release' within the server directory
     run_cargo("build", &["--release"], &server_dir)?; // Remove -p flag, update directory
     println!("✅ Backend build complete.");
+    Ok(())
+}
+
+fn cmd_test(args: pico_args::Arguments) -> Result<()> {
+    println!("🧪 Running backend tests...");
+    let server_dir = project_root().join("server");
+
+    let mut cargo_args: Vec<String> = vec!["--package".to_string(), "cyder-api".to_string()];
+
+    // All remaining arguments are for cargo test.
+    let test_args: Vec<std::ffi::OsString> = args.finish();
+    cargo_args.extend(test_args.into_iter().map(|s| s.to_string_lossy().into_owned()));
+
+    let cargo_args_str: Vec<&str> = cargo_args.iter().map(|s| s.as_str()).collect();
+    run_cargo("test", &cargo_args_str, &server_dir)?;
+    println!("✅ Backend tests complete.");
     Ok(())
 }
 

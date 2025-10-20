@@ -1,4 +1,4 @@
-use cyder_tools::log::{debug, error, info}; // Removed info as it's re-imported if needed by other macros
+use cyder_tools::log::{debug, error, info, warn}; // Removed info as it's re-imported if needed by other macros
 use std::{
     collections::HashMap,
     io::Read,
@@ -44,7 +44,7 @@ use crate::{
         custom_field::CustomFieldDefinition,
         provider::Provider,
         price::PriceRule,
-        request_log::{NewRequestLog, RequestLog, RequestLogStatus, UpdateRequestLogData},
+        request_log::{NewRequestLog, RequestLog, UpdateRequestLogData},
         system_api_key::SystemApiKey,
     },
     utils::{limit::LIMITER, ID_GENERATOR}, // Added LIMITER
@@ -54,7 +54,48 @@ use crate::{
     config::CONFIG,
     utils::{process_stream_options, split_chunks},
 };
-use crate::schema::enum_def::ProviderType;
+use crate::schema::enum_def::{FieldPlacement, FieldType, ProviderType, RequestStatus};
+
+// A guard to log a warning if the request is cancelled before completion.
+struct CancellationGuard {
+    log_id: i64,
+    is_armed: bool,
+}
+
+impl CancellationGuard {
+    fn new(log_id: i64) -> Self {
+        Self {
+            log_id,
+            is_armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.is_armed = false;
+    }
+}
+
+impl Drop for CancellationGuard {
+    fn drop(&mut self) {
+        if self.is_armed {
+            warn!(
+                "Request for log_id {} was cancelled by the client.",
+                self.log_id
+            );
+            let update_data = UpdateRequestLogData {
+                status: Some(RequestStatus::Cancelled),
+                response_sent_to_client_at: Some(Utc::now().timestamp_millis()),
+                ..Default::default()
+            };
+            if let Err(e) = RequestLog::update_request_with_completion_details(self.log_id, &update_data) {
+                error!(
+                    "Failed to update request log status to CANCELLED for log_id {}: {:?}",
+                    self.log_id, e
+                );
+            }
+        }
+    }
+}
 
 fn build_reqwest_client(use_proxy: bool) -> Result<reqwest::Client, (StatusCode, String)> {
     let mut client_builder = reqwest::Client::builder();
@@ -154,9 +195,9 @@ fn log_final_update(
     usage_opt: Option<&UsageInfo>,
     price_rules: &[PriceRule],
     currency: Option<&str>,
-    overall_status: Option<RequestLogStatus>,
+    overall_status: Option<RequestStatus>,
 ) {
-    let is_error = overall_status == Some(RequestLogStatus::ERROR);
+    let is_error = overall_status == Some(RequestStatus::Error);
 
     let mut update_data = UpdateRequestLogData {
         llm_request_uri: Some(Some(request_url.to_string())),
@@ -172,7 +213,7 @@ fn log_final_update(
         llm_response_first_chunk_at: first_chunk_ts,
         llm_response_completed_at: Some(completion_ts),
         response_sent_to_client_at: Some(completion_ts),
-        status: overall_status.map(|s| s.to_string()),
+        status: overall_status.map(|s| s.clone()),
         ..Default::default()
     };
     populate_token_cost_fields(&mut update_data, usage_opt, price_rules, currency);
@@ -357,7 +398,7 @@ fn create_request_log(
         request_received_at: start_time,
         client_ip: client_ip_addr.clone(),
         external_request_uri: Some(request_uri_path.to_string()),
-        status: RequestLogStatus::PENDING.to_string(),
+        status: RequestStatus::Pending,
         llm_request_sent_at: Utc::now().timestamp_millis(),
         created_at: start_time,
         updated_at: start_time,
@@ -788,7 +829,7 @@ async fn handle_non_streaming_response(
             let err_msg = format!("Failed to read LLM response body: {}", e);
             error!("[handle_non_streaming_response] {}", err_msg);
             let completed_at = Utc::now().timestamp_millis();
-            log_final_update(log_id, "LLM body read error", url, data, Some(status_code), Some(Some(err_msg.clone())), false, None, completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR));
+            log_final_update(log_id, "LLM body read error", url, data, Some(status_code), Some(Some(err_msg.clone())), false, None, completed_at, None, &price_rules, currency.as_deref(), Some(RequestStatus::Error));
             return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
         }
     };
@@ -818,7 +859,7 @@ async fn handle_non_streaming_response(
             .ok()
             .and_then(|val| parse_usage_info(&val, target_api_type));
 
-        log_final_update(log_id, "Non-SSE success", url, data, Some(status_code), Some(None), false, None, llm_response_completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS));
+        log_final_update(log_id, "Non-SSE success", url, data, Some(status_code), Some(None), false, None, llm_response_completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success));
         info!("{}: Non-SSE request completed for log_id {}.", model_str, log_id);
 
         let final_body = if api_type != target_api_type {
@@ -850,7 +891,7 @@ async fn handle_non_streaming_response(
     } else {
         let error_body_str = String::from_utf8_lossy(&decompressed_body).into_owned();
         error!("LLM request failed with status {} for log_id {}: {}", status_code, log_id, &error_body_str);
-        log_final_update(log_id, "LLM error status", url, data, Some(status_code), Some(Some(error_body_str.clone())), false, None, llm_response_completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR));
+        log_final_update(log_id, "LLM error status", url, data, Some(status_code), Some(Some(error_body_str.clone())), false, None, llm_response_completed_at, None, &price_rules, currency.as_deref(), Some(RequestStatus::Error));
         
         Ok(response_builder.body(Body::from(error_body_str)).unwrap())
     }
@@ -936,7 +977,7 @@ async fn handle_streaming_response(
                                             let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
                                             let completed_at = Utc::now().timestamp_millis();
                                             let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-                                            log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS));
+                                            log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success));
                                             *logged_sse_success_clone.lock().unwrap() = true;
                                             info!("{}: SSE stream completed.", model_str);
                                         }
@@ -978,7 +1019,7 @@ async fn handle_streaming_response(
 
                     log_final_update(
                         log_id, "LLM stream error", &url_owned, &data_owned, Some(status_code),
-                        Some(None), true, first_chunk_ts, completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR),
+                        Some(None), true, first_chunk_ts, completed_at, None, &price_rules, currency.as_deref(), Some(RequestStatus::Error),
                     );
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, stream_error_message));
                     break;
@@ -1016,7 +1057,7 @@ async fn handle_streaming_response(
                         log_final_update(
                             log_id, "SSE stream end", &url_owned, &data_owned, Some(status_code),
                             Some(None), true, first_chunk_ts, llm_response_completed_at,
-                            parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS),
+                            parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success),
                         );
                         info!("{}: SSE stream completed at stream end.", model_str);
                     } else {
@@ -1029,7 +1070,7 @@ async fn handle_streaming_response(
                 log_final_update(
                     log_id, "SSE stream end (no final chunk)", &url_owned, &data_owned, Some(status_code),
                     Some(None), true, first_chunk_ts, llm_response_completed_at,
-                    None, &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS),
+                    None, &price_rules, currency.as_deref(), Some(RequestStatus::Success),
                 );
             }
         } else if !status_code.is_success() {
@@ -1038,7 +1079,7 @@ async fn handle_streaming_response(
             log_final_update(
                 log_id, "LLM error status", &url_owned, &data_owned, Some(status_code),
                 Some(Some(error_body_str)), true, first_chunk_ts,
-                llm_response_completed_at, None, &price_rules, currency.as_deref(), Some(RequestLogStatus::ERROR),
+                llm_response_completed_at, None, &price_rules, currency.as_deref(), Some(RequestStatus::Error),
             );
         }
     };
@@ -1192,6 +1233,8 @@ async fn proxy_request(
     // 1. Build HTTP client, with proxy if configured
     let client = build_reqwest_client(use_proxy)?;
 
+    let mut cancellation_guard = CancellationGuard::new(log_id);
+
     debug!(
         "[proxy] proxy request header: {:?}",
         serialize_reqwest_headers(&headers)
@@ -1208,6 +1251,7 @@ async fn proxy_request(
     {
         Ok(resp) => resp,
         Err(e) => {
+            cancellation_guard.disarm();
             let error_message = format!("LLM request failed: {}", e);
             error!("{}", error_message);
             let completed_at = Utc::now().timestamp_millis();
@@ -1224,14 +1268,27 @@ async fn proxy_request(
                 None,
                 &price_rules,
                 currency.as_deref(),
-                Some(RequestLogStatus::ERROR),
+                Some(RequestStatus::Error),
             );
             return Err((StatusCode::BAD_GATEWAY, error_message));
         }
     };
 
     // 3. Process the response stream
-    handle_llm_response(log_id, model_str, response, &url, &data, price_rules, currency, api_type, target_api_type).await
+    let result = handle_llm_response(
+        log_id,
+        model_str,
+        response,
+        &url,
+        &data,
+        price_rules,
+        currency,
+        api_type,
+        target_api_type,
+    )
+    .await;
+    cancellation_guard.disarm();
+    result
 }
 
 fn parse_provider_model(pm: &str) -> (&str, &str) {
@@ -1286,22 +1343,22 @@ fn handle_custom_fields(
     custom_fields: &Vec<CustomFieldDefinition>,
 ) {
     for cf in custom_fields {
-        match cf.field_placement.as_str() {
-            "BODY" => {
-                let value_opt: Option<Value> = match cf.field_type.as_str() {
-                    "UNSET" => {
+        match cf.field_placement {
+            FieldPlacement::Body => {
+                let value_opt: Option<Value> = match cf.field_type {
+                    FieldType::Unset => {
                         set_nested_value(data, &cf.field_name, None);
                         continue;
                     }
-                    "STRING" => cf.string_value.clone().map(Value::String),
-                    "INTEGER" => cf.integer_value.map(|v| Value::Number(v.into())),
-                    "NUMBER" => cf.number_value.map(|v| {
+                    FieldType::String => cf.string_value.clone().map(Value::String),
+                    FieldType::Integer => cf.integer_value.map(|v| Value::Number(v.into())),
+                    FieldType::Number => cf.number_value.map(|v| {
                         serde_json::Number::from_f64(v as f64)
                             .map(Value::Number)
                             .unwrap_or(Value::Null)
                     }),
-                    "BOOLEAN" => cf.boolean_value.map(Value::Bool),
-                    "JSON_STRING" => cf.string_value.as_ref().and_then(|s| {
+                    FieldType::Boolean => cf.boolean_value.map(Value::Bool),
+                    FieldType::JsonString => cf.string_value.as_ref().and_then(|s| {
                         serde_json::from_str(s)
                             .map_err(|e| {
                                 error!(
@@ -1311,36 +1368,23 @@ fn handle_custom_fields(
                             })
                             .ok()
                     }),
-                    _ => {
-                        debug!(
-                            "Unknown custom field type '{}' for field '{}' in BODY",
-                            cf.field_type, cf.field_name
-                        );
-                        None
-                    }
                 };
 
                 if let Some(value) = value_opt {
                     set_nested_value(data, &cf.field_name, Some(value));
                 }
             }
-            "QUERY" => {
+            FieldPlacement::Query => {
                 let field_name_key = cf.field_name.clone();
                 let mut new_value_opt: Option<String> = None;
 
-                match cf.field_type.as_str() {
-                    "UNSET" => { /* new_value_opt remains None, effectively removing */ }
-                    "STRING" => { new_value_opt = cf.string_value.clone(); }
-                    "INTEGER" => { new_value_opt = cf.integer_value.map(|v| v.to_string()); }
-                    "NUMBER" => { new_value_opt = cf.number_value.map(|v| v.to_string()); }
-                    "BOOLEAN" => { new_value_opt = cf.boolean_value.map(|v| v.to_string()); }
-                    "JSON_STRING" => { new_value_opt = cf.string_value.clone(); } // JSON as string for query
-                    _ => {
-                        debug!(
-                            "Unknown custom field type '{}' for field '{}' in QUERY",
-                            cf.field_type, cf.field_name
-                        );
-                    }
+                match cf.field_type {
+                    FieldType::Unset => { /* new_value_opt remains None, effectively removing */ }
+                    FieldType::String => { new_value_opt = cf.string_value.clone(); }
+                    FieldType::Integer => { new_value_opt = cf.integer_value.map(|v| v.to_string()); }
+                    FieldType::Number => { new_value_opt = cf.number_value.map(|v| v.to_string()); }
+                    FieldType::Boolean => { new_value_opt = cf.boolean_value.map(|v| v.to_string()); }
+                    FieldType::JsonString => { new_value_opt = cf.string_value.clone(); } // JSON as string for query
                 }
 
                 // Rebuild query parameters to ensure replacement
@@ -1363,21 +1407,21 @@ fn handle_custom_fields(
                 }
                 // UrlQueryMut updates the URL when it's dropped (goes out of scope)
             }
-            "HEADER" => {
-                match cf.field_type.as_str() {
-                    "UNSET" => {
+            FieldPlacement::Header => {
+                match cf.field_type {
+                    FieldType::Unset => {
                         headers.remove(&cf.field_name);
                     }
                     _ => { // For all other types, convert to string and set header
-                        let value_str_opt: Option<String> = match cf.field_type.as_str() {
-                            "STRING" => cf.string_value.clone(),
-                            "INTEGER" => cf.integer_value.map(|v| v.to_string()),
-                            "NUMBER" => cf.number_value.map(|v| v.to_string()),
-                            "BOOLEAN" => cf.boolean_value.map(|v| v.to_string()),
-                            "JSON_STRING" => cf.string_value.clone(), // JSON as string for header
+                        let value_str_opt: Option<String> = match cf.field_type {
+                            FieldType::String => cf.string_value.clone(),
+                            FieldType::Integer => cf.integer_value.map(|v| v.to_string()),
+                            FieldType::Number => cf.number_value.map(|v| v.to_string()),
+                            FieldType::Boolean => cf.boolean_value.map(|v| v.to_string()),
+                            FieldType::JsonString => cf.string_value.clone(), // JSON as string for header
                             _ => {
                                 debug!(
-                                    "Unknown custom field type '{}' for field '{}' in HEADER",
+                                    "Unknown custom field type '{:?}' for field '{}' in HEADER",
                                     cf.field_type, cf.field_name
                                 );
                                 None
@@ -1409,12 +1453,6 @@ fn handle_custom_fields(
                         }
                     }
                 }
-            }
-            _ => {
-                error!(
-                    "Unknown custom field placement '{}' for field '{}'",
-                    cf.field_placement, cf.field_name
-                );
             }
         }
     }
@@ -1763,7 +1801,7 @@ async fn openai_utility_handler(
             .ok()
             .and_then(|val| parse_utility_usage_info(&val));
 
-        log_final_update(log_id, "Non-SSE success", &final_url, &final_body, Some(status_code), Some(None), false, None, llm_response_completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestLogStatus::SUCCESS));
+        log_final_update(log_id, "Non-SSE success", &final_url, &final_body, Some(status_code), Some(None), false, None, llm_response_completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success));
         info!("{}: Non-SSE request completed for log_id {}.", model_str, log_id);
     } else {
         let error_body_str = String::from_utf8_lossy(&body_bytes).into_owned();

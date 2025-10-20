@@ -8,6 +8,7 @@ use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 use crate::service::app_state::Storable; // Import Storable
+use crate::schema::enum_def::{FieldPlacement, FieldType};
 
 // --- Core Database Object Struct (managed by db_object!) ---
 db_object! {
@@ -18,8 +19,8 @@ db_object! {
         pub definition_name: Option<String>,
         pub definition_description: Option<String>,
         pub field_name: String,
-        pub field_placement: String,
-        pub field_type: String,
+        pub field_placement: FieldPlacement,
+        pub field_type: FieldType,
         pub string_value: Option<String>,
         pub integer_value: Option<i64>,
         pub number_value: Option<f32>,
@@ -38,8 +39,8 @@ pub struct DbNewCustomFieldDefinition {
     pub definition_name: Option<String>,
     pub definition_description: Option<String>,
     pub field_name: String,
-    pub field_placement: String,
-    pub field_type: String,
+    pub field_placement: FieldPlacement,
+    pub field_type: FieldType,
     pub string_value: Option<String>,
     pub integer_value: Option<i64>,
     pub number_value: Option<f32>,
@@ -55,8 +56,8 @@ pub struct DbUpdateCustomFieldDefinition {
     pub definition_name: Option<Option<String>>,
     pub definition_description: Option<Option<String>>,
     pub field_name: Option<String>,
-    pub field_placement: Option<String>,
-    pub field_type: Option<String>,
+    pub field_placement: Option<FieldPlacement>,
+    pub field_type: Option<FieldType>,
     pub string_value: Option<Option<String>>,
     pub integer_value: Option<Option<i64>>,
     pub number_value: Option<Option<f32>>,
@@ -132,8 +133,8 @@ pub struct ApiCustomFieldDefinition {
     pub name: Option<String>,        // Mapped from definition_name
     pub description: Option<String>, // Mapped from definition_description
     pub field_name: String,
-    pub field_placement: String,
-    pub field_type: String,
+    pub field_placement: FieldPlacement,
+    pub field_type: FieldType,
     pub string_value: Option<String>,
     pub integer_value: Option<i64>,
     pub number_value: Option<f32>,
@@ -148,8 +149,8 @@ pub struct ApiCreateCustomFieldDefinitionPayload {
     pub name: Option<String>,
     pub description: Option<String>,
     pub field_name: String,
-    pub field_placement: String,
-    pub field_type: String,
+    pub field_placement: FieldPlacement,
+    pub field_type: FieldType,
     pub string_value: Option<String>,
     pub integer_value: Option<i64>,
     pub number_value: Option<f32>,
@@ -162,8 +163,8 @@ pub struct ApiUpdateCustomFieldDefinitionPayload {
     pub name: Option<Option<String>>,
     pub description: Option<Option<String>>,
     pub field_name: Option<String>,
-    pub field_placement: Option<String>,
-    pub field_type: Option<String>,
+    pub field_placement: Option<FieldPlacement>,
+    pub field_type: Option<FieldType>,
     pub string_value: Option<Option<String>>,
     pub integer_value: Option<Option<i64>>,
     pub number_value: Option<Option<f32>>,

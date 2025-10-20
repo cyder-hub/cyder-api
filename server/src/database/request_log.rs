@@ -5,23 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{get_connection, DbResult, ListResult};
 use crate::controller::BaseError;
 use crate::{db_execute, db_object};
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub enum RequestLogStatus {
-    PENDING,
-    SUCCESS,
-    ERROR,
-}
-
-impl ToString for RequestLogStatus {
-    fn to_string(&self) -> String {
-        match self {
-            RequestLogStatus::PENDING => "PENDING".to_string(),
-            RequestLogStatus::SUCCESS => "SUCCESS".to_string(),
-            RequestLogStatus::ERROR => "ERROR".to_string(),
-        }
-    }
-}
+use crate::schema::enum_def::RequestStatus;
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Serialize, Debug, Clone)]
@@ -45,7 +29,7 @@ db_object! {
         pub llm_response_status: Option<i32>,   // From schema (diesel type: Nullable<Int4>)
         pub llm_request_body: Option<String>,   // From schema (diesel type: Nullable<Text>)
         pub llm_response_body: Option<String>,  // From schema (diesel type: Nullable<Text>)
-        pub status: Option<String>,             // From schema (diesel type: Nullable<Text>)
+        pub status: Option<RequestStatus>,             // From schema (diesel type: Nullable<Text>)
         pub is_stream: bool,                    // From schema (diesel type: Bool)
         pub calculated_cost: Option<i64>,       // From schema (diesel type: Nullable<Int8>)
         pub cost_currency: Option<String>,      // From schema (diesel type: Nullable<Text>)
@@ -74,7 +58,7 @@ db_object! {
         pub llm_request_sent_at: i64,
         pub client_ip: Option<String>,
         pub external_request_uri: Option<String>,
-        pub status: String,
+        pub status: RequestStatus,
         pub created_at: i64,
         pub updated_at: i64,
         pub channel: Option<String>,
@@ -92,7 +76,7 @@ db_object! {
         pub llm_response_first_chunk_at: Option<i64>,
         pub llm_response_completed_at: Option<i64>,
         pub response_sent_to_client_at: Option<i64>,
-        pub status: Option<String>,          // From schema: Nullable<Text>
+        pub status: Option<RequestStatus>,          // From schema: Nullable<Text>
         pub calculated_cost: Option<i64>,    // From schema: Nullable<Int8>
         pub cost_currency: Option<Option<String>>,   // From schema: Nullable<Text>
         pub is_stream: Option<bool>,                 // From schema: Bool
@@ -109,7 +93,7 @@ pub struct RequestLogQueryPayload {
     pub system_api_key_id: Option<i64>,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
-    pub status: Option<String>,
+    pub status: Option<RequestStatus>,
     pub start_time: Option<i64>, // For request_received_at >= start_time
     pub end_time: Option<i64>,   // For request_received_at <= end_time
     pub page: Option<i64>,

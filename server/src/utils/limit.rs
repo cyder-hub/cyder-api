@@ -1,8 +1,9 @@
-use cyder_tools::log::{debug, error}; // Removed info, not used in this file
+use cyder_tools::log::debug; // Removed info, not used in this file
 use once_cell::sync::Lazy;
 
 // Removed: use crate::controller::proxy::RequestInfo;
 use crate::database::access_control::ApiAccessControlPolicy;
+use crate::schema::enum_def::{Action, RuleScope};
 
 pub trait Limiter: Sync + Send {
     fn check_limit_strategy(
@@ -39,8 +40,8 @@ impl MemoryLimiter {
             }
 
             let mut rule_matches = false;
-            match rule.scope.as_str() {
-                "MODEL" => {
+            match rule.scope {
+                RuleScope::Model => {
                     if let Some(rule_model_id) = rule.model_id {
                         if rule_model_id == request_model_id {
                             rule_matches = true;
@@ -52,7 +53,7 @@ impl MemoryLimiter {
                         );
                     }
                 }
-                "PROVIDER" => {
+                RuleScope::Provider => {
                     if let Some(rule_provider_id) = rule.provider_id {
                         if rule_provider_id == request_provider_id {
                             rule_matches = true;
@@ -64,38 +65,25 @@ impl MemoryLimiter {
                         );
                     }
                 }
-                unknown_scope => {
-                    debug!("Unknown rule scope: '{}' for rule ID {}. Rule will not match.", unknown_scope, rule.id);
-                }
             }
 
             if rule_matches {
-                match rule.rule_type.as_str() {
-                    "ALLOW" => {
+                match rule.rule_type {
+                    Action::Allow => {
                         debug!(
-                            "Request allowed by rule ID {} (Priority {}, Scope: {}) for policy '{}'",
+                            "Request allowed by rule ID {} (Priority {}, Scope: {:?}) for policy '{:?}'",
                             rule.id, rule.priority, rule.scope, policy.name
                         );
                         return Ok(());
                     }
-                    "DENY" => {
+                    Action::Deny => {
                         debug!(
-                            "Request denied by rule ID {} (Priority {}, Scope: {}) for policy '{}'",
+                            "Request denied by rule ID {} (Priority {}, Scope: {:?}) for policy '{:?}'",
                             rule.id, rule.priority, rule.scope, policy.name
                         );
                         return Err(format!(
-                            "request denied by rule (ID: {}, Policy: '{}', Scope: {}, Type: {})",
+                            "request denied by rule (ID: {}, Policy: '{}', Scope: {:?}, Type: {:?})",
                             rule.id, policy.name, rule.scope, rule.rule_type
-                        ));
-                    }
-                    unknown_type => {
-                        error!(
-                            "Misconfigured rule: unknown rule type '{}' for rule ID {} in policy '{}'. Denying request.",
-                            unknown_type, rule.id, policy.name
-                        );
-                        return Err(format!(
-                            "misconfigured rule: unknown rule type '{}' (ID: {}, Policy: '{}')",
-                            unknown_type, rule.id, policy.name
                         ));
                     }
                 }
@@ -103,26 +91,16 @@ impl MemoryLimiter {
         }
 
         // If no rules matched, apply default_action
-        match policy.default_action.as_str() {
-            "ALLOW" => {
+        match policy.default_action {
+            Action::Allow => {
                 debug!("Request allowed by default action of policy '{}'", policy.name);
                 Ok(())
             }
-            "DENY" => {
+            Action::Deny => {
                 debug!("Request denied by default action of policy '{}'", policy.name);
                 Err(format!(
                     "request denied by default policy action from '{}'",
                     policy.name
-                ))
-            }
-            unknown_action => {
-                error!(
-                    "Unknown default_action '{}' in policy '{}'. Denying request for safety.",
-                    unknown_action, policy.name
-                );
-                Err(format!(
-                    "unknown default_action '{}' in policy '{}'",
-                    unknown_action, policy.name
                 ))
             }
         }

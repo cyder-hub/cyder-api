@@ -7,6 +7,7 @@ use super::{get_connection, DbConnection, DbResult};
 use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
+use crate::schema::enum_def::{Action, RuleScope};
 
 // --- Core Database Object Structs (managed by db_object!) ---
 db_object! {
@@ -16,7 +17,7 @@ db_object! {
         pub id: i64,
         pub name: String,
         pub description: Option<String>,
-        pub default_action: String, // New field
+        pub default_action: Action, // New field
         pub created_at: i64,
         pub updated_at: i64,
         pub deleted_at: Option<i64>,
@@ -27,9 +28,9 @@ db_object! {
     pub struct AccessControlRule {
         pub id: i64,
         pub policy_id: i64,         // Renamed from limit_strategy_id
-        pub rule_type: String,      // New field (replaces item_type logic)
+        pub rule_type: Action,      // New field (replaces item_type logic)
         pub priority: i32,          // New field
-        pub scope: String,          // Renamed from resource_scope
+        pub scope: RuleScope,          // Renamed from resource_scope
         pub provider_id: Option<i64>, // New field (replaces part of resource_identifier)
         pub model_id: Option<i64>,    // New field (replaces part of resource_identifier)
         pub is_enabled: bool,
@@ -46,7 +47,7 @@ pub struct DbNewAccessControlPolicy {
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
-    pub default_action: String,
+    pub default_action: Action,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -56,7 +57,7 @@ pub struct DbNewAccessControlPolicy {
 pub struct DbUpdateAccessControlPolicy {
     pub name: Option<String>,
     pub description: Option<Option<String>>,
-    pub default_action: Option<String>,
+    pub default_action: Option<Action>,
     // updated_at is set manually
 }
 
@@ -65,9 +66,9 @@ pub struct DbUpdateAccessControlPolicy {
 pub struct DbNewAccessControlRule {
     pub id: i64,
     pub policy_id: i64,
-    pub rule_type: String,
+    pub rule_type: Action,
     pub priority: i32,
-    pub scope: String,
+    pub scope: RuleScope,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
     pub is_enabled: bool,
@@ -77,29 +78,13 @@ pub struct DbNewAccessControlRule {
 }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum AccessControlRuleScope {
-    Provider,
-    Model,
-}
-
-impl ToString for AccessControlRuleScope {
-    fn to_string(&self) -> String {
-        match self {
-            AccessControlRuleScope::Provider => "PROVIDER".to_string(),
-            AccessControlRuleScope::Model => "MODEL".to_string(),
-        }
-    }
-}
-
 // --- API-Facing Structs ---
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ApiAccessControlRule { // Renamed from ApiLimitStrategyItem
     pub id: Option<i64>, // Optional for creation, present for responses
-    pub rule_type: String,
+    pub rule_type: Action,
     pub priority: i32,
-    pub scope: AccessControlRuleScope,
+    pub scope: RuleScope,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
     pub description: Option<String>,
@@ -110,7 +95,7 @@ pub struct ApiAccessControlRule { // Renamed from ApiLimitStrategyItem
 pub struct ApiCreateAccessControlPolicyPayload { // Renamed
     pub name: String,
     pub description: Option<String>,
-    pub default_action: String, // Added
+    pub default_action: Action, // Added
     // pub is_enabled: Option<bool>, // Removed, default_action serves a related purpose
     pub rules: Option<Vec<ApiAccessControlRule>>, // Consolidated from white/black/quota lists
 }
@@ -119,7 +104,7 @@ pub struct ApiCreateAccessControlPolicyPayload { // Renamed
 pub struct ApiUpdateAccessControlPolicyPayload { // Renamed
     pub name: Option<String>,
     pub description: Option<Option<String>>,
-    pub default_action: Option<String>, // Added
+    pub default_action: Option<Action>, // Added
     // pub is_enabled: Option<bool>, // Removed
     // To update rules, the full list must be provided.
     // If rules is None, rules are not touched. If Some (even empty Vec), rules are replaced.
@@ -131,7 +116,7 @@ pub struct ApiAccessControlPolicy { // Renamed
     pub id: i64,
     pub name: String,
     pub description: Option<String>,
-    pub default_action: String, // Added
+    pub default_action: Action, // Added
     // pub is_enabled: bool, // Removed
     pub created_at: i64,
     pub updated_at: i64,
@@ -165,7 +150,7 @@ impl AccessControlPolicy { // Renamed from LimitStrategy
                     policy_id: policy_id_val,
                     rule_type: rule_payload.rule_type.clone(),
                     priority: rule_payload.priority,
-                    scope: rule_payload.scope.to_string(),
+                    scope: rule_payload.scope.clone(),
                     provider_id: rule_payload.provider_id,
                     model_id: rule_payload.model_id,
                     description: rule_payload.description.clone(),

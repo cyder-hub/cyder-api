@@ -1,11 +1,14 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    use crate::schema::enum_def::ActionMapping;
+    use diesel::sql_types::{Int8, Text, Nullable};
+
     access_control_policy (id) {
         id -> Int8,
         name -> Text,
         description -> Nullable<Text>,
-        default_action -> Text,
+        default_action -> ActionMapping,
         created_at -> Int8,
         updated_at -> Int8,
         deleted_at -> Nullable<Int8>,
@@ -13,12 +16,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::ActionMapping;
+    use crate::schema::enum_def::RuleScopeMapping;
+    use diesel::sql_types::{Int4, Int8, Bool, Text, Nullable};
+
     access_control_rule (id) {
         id -> Int8,
         policy_id -> Int8,
-        rule_type -> Text,
+        rule_type -> ActionMapping,
         priority -> Int4,
-        scope -> Text,
+        scope -> RuleScopeMapping,
         provider_id -> Nullable<Int8>,
         model_id -> Nullable<Int8>,
         is_enabled -> Bool,
@@ -42,13 +49,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::FieldPlacementMapping;
+    use crate::schema::enum_def::FieldTypeMapping;
+    use diesel::sql_types::{Int8, Float4, Text, Bool, Nullable};
+
     custom_field_definition (id) {
         id -> Int8,
         definition_name -> Nullable<Text>,
         definition_description -> Nullable<Text>,
         field_name -> Text,
-        field_placement -> Text,
-        field_type -> Text,
+        field_placement -> FieldPlacementMapping,
+        field_type -> FieldTypeMapping,
         string_value -> Nullable<Text>,
         integer_value -> Nullable<Int8>,
         number_value -> Nullable<Float4>,
@@ -121,6 +132,7 @@ diesel::table! {
 
 diesel::table! {
     use crate::schema::enum_def::ProviderTypeMapping;
+    use crate::schema::enum_def::ProviderApiKeyModeMapping;
     use diesel::sql_types::{Int8, Text, Bool, Nullable};
 
     provider (id) {
@@ -134,7 +146,7 @@ diesel::table! {
         created_at -> Int8,
         updated_at -> Int8,
         provider_type -> ProviderTypeMapping,
-        provider_api_key_mode -> Text,
+        provider_api_key_mode -> ProviderApiKeyModeMapping,
     }
 }
 
@@ -162,6 +174,9 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::RequestStatusMapping;
+    use diesel::sql_types::{Bool, Int4, Int8, Text, Nullable};
+
     request_log (id) {
         id -> Int8,
         system_api_key_id -> Nullable<Int8>,
@@ -181,7 +196,7 @@ diesel::table! {
         llm_response_status -> Nullable<Int4>,
         llm_request_body -> Nullable<Text>,
         llm_response_body -> Nullable<Text>,
-        status -> Nullable<Text>,
+        status -> Nullable<RequestStatusMapping>,
         is_stream -> Bool,
         calculated_cost -> Nullable<Int8>,
         cost_currency -> Nullable<Text>,

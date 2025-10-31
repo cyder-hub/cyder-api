@@ -1,0 +1,86 @@
+name: Promote Final Release
+
+on:
+  release:
+    # Triggers when a release is published or edited from pre-release to stable.
+    types: [released]
+
+jobs:
+  promote:
+    # This condition ensures the job only runs for official releases, not pre-releases.
+    if: github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Required for context if a build step were present.
+      packages: write
+
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up version and image names
+        id: setup
+        run: |
+          # Extract the version number from the git tag (e.g., 'v1.2.3' -> '1.2.3').
+          VERSION=$(echo ${{ github.event.release.tag_name }} | sed 's/^v//')
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "IMAGE_GHCR=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
+          echo "IMAGE_DOCKERHUB=${{ secrets.DOCKERHUB_USERNAME }}/cyder-api" >> $GITHUB_ENV
+
+      - name: Try to pull existing pre-release image from GHCR
+        id: pull_image
+        # If the pull command fails, the workflow continues instead of stopping.
+        # This allows us to check the outcome in the next steps.
+        continue-on-error: true
+        run: |
+          docker pull ${{ env.IMAGE_GHCR }}:${{ env.VERSION }}
+
+      - name: Promote existing image if found
+        # This step runs only if the 'pull_image' step succeeded.
+        if: steps.pull_image.outcome == 'success'
+        run: |
+          echo "Pre-release image found. Promoting to final release..."
+          # Extract major.minor version (e.g., '1.2.3' -> '1.2').
+          MAJOR_MINOR=$(echo "${{ env.VERSION }}" | cut -d. -f1,2)
+
+          # --- Retag and push to GHCR ---
+          docker tag ${{ env.IMAGE_GHCR }}:${{ env.VERSION }} ${{ env.IMAGE_GHCR }}:$MAJOR_MINOR
+          docker push ${{ env.IMAGE_GHCR }}:$MAJOR_MINOR
+          # Add the 'latest' tag only if this is the "latest" release on GitHub.
+          if ('${{ github.event.release.latest }}' == 'true'); then
+            docker tag ${{ env.IMAGE_GHCR }}:${{ env.VERSION }} ${{ env.IMAGE_GHCR }}:latest
+            docker push ${{ env.IMAGE_GHCR }}:latest
+          fi
+
+          # --- Retag and push to Docker Hub ---
+          # First, pull the corresponding Docker Hub image to work with it locally.
+          docker pull ${{ env.IMAGE_DOCKERHUB }}:${{ env.VERSION }}
+          docker tag ${{ env.IMAGE_DOCKERHUB }}:${{ env.VERSION }} ${{ env.IMAGE_DOCKERHUB }}:$MAJOR_MINOR
+          docker push ${{ env.IMAGE_DOCKERHUB }}:$MAJOR_MINOR
+          if ('${{ github.event.release.latest }}' == 'true'); then
+            docker tag ${{ env.IMAGE_DOCKERHUB }}:${{ env.VERSION }} ${{ env.IMAGE_DOCKERHUB }}:latest
+            docker push ${{ env.IMAGE_DOCKERHUB }}:latest
+          fi
+
+      - name: Fail workflow if pre-release image is not found
+        # This step runs only if the 'pull_image' step failed.
+        if: steps.pull_image.outcome == 'failure'
+        run: |
+          # '::error::' is a workflow command that prints an error message in the logs.
+          # This makes the error highly visible in the GitHub Actions UI.
+          echo "::error title=Incorrect Release Process::Required pre-release Docker image for version ${{ env.VERSION }} was not found."
+          echo "::error::Please follow the correct process: "
+          echo "::error::1. Create a 'pre-release' first to trigger the build."
+          echo "::error::2. Once the build is successful, edit the release and uncheck 'This is a pre-release' to promote it."
+          # 'exit 1' causes the step to fail, which in turn fails the entire job.
+          exit 1

@@ -1,15 +1,15 @@
-import { createSignal, For, Show, createResource, Accessor, Setter, onMount, createMemo } from 'solid-js';
-import type { Resource } from 'solid-js';
-import { Button } from '../components/ui/Button';
+import { createSignal, For, Show, Accessor, Setter, onMount, createMemo } from 'solid-js';
+import { createFileRoute, useRouter } from '@tanstack/solid-router';
+import { Button } from '@/components/ui/Button';
 import {
     DialogRoot,
     DialogContent,
     DialogHeader,
     DialogFooter,
     DialogTitle,
-} from '../components/ui/Dialog';
-import { Select } from '../components/ui/Select';
-import { TextField, NumberField } from '../components/ui/Input';
+} from '@/components/ui/Dialog';
+import { Select } from '@/components/ui/Select';
+import { TextField, NumberField } from '@/components/ui/Input';
 import {
     TableRoot,
     TableHeader,
@@ -17,9 +17,10 @@ import {
     TableRow,
     TableColumnHeader,
     TableCell,
-} from '../components/ui/Table';
-import { request } from '../services/api';
-import { useI18n } from '../i18n';
+} from '@/components/ui/Table';
+import { request } from '@/services/api';
+import { useI18n } from '@/i18n';
+import { policies as globalPolicies, loadPolicies, type AccessControlPolicyFromAPI } from '@/store/accessControlStore';
 
 // --- Type Definitions ---
 
@@ -50,37 +51,13 @@ interface AccessControlRuleUI {
     is_enabled: boolean;
 }
 
-interface AccessControlPolicyBase {
+// Represents a full policy in the UI for editing
+interface AccessControlPolicyUI {
+    id: number | null; // null for new policy
     name: string;
     default_action: 'ALLOW' | 'DENY';
     description: string | null;
-}
-
-// Represents a full policy in the UI for editing
-interface AccessControlPolicyUI extends AccessControlPolicyBase {
-    id: number | null; // null for new policy
     rules: AccessControlRuleUI[];
-}
-
-// API response for a single policy (summary or detail)
-export interface AccessControlPolicyFromAPI extends AccessControlPolicyBase {
-    id: number;
-    created_at: number;
-    updated_at: number;
-    rules: Array<{
-        id: number;
-        policy_id: number;
-        rule_type: string;
-        priority: number;
-        scope: string;
-        provider_id: number | null;
-        model_id: number | null;
-        is_enabled: boolean;
-        description: string | null;
-        created_at: number;
-        updated_at: number;
-        deleted_at: number | null;
-    }>;
 }
 
 const newPolicyTemplate = (): AccessControlPolicyUI => ({
@@ -104,16 +81,6 @@ const newRuleTemplate = (): AccessControlRuleUI => ({
 
 // --- API Functions ---
 
-export const fetchPoliciesAPI = async (): Promise<AccessControlPolicyFromAPI[]> => {
-    try {
-        const response = await request("/ai/manager/api/access_control/list");
-        return response || [];
-    } catch (error) {
-        console.error("Failed to fetch policies:", error);
-        return [];
-    }
-};
-
 const fetchProvidersWithModelsAPI = async (): Promise<ProviderDetail[]> => {
     try {
         const response = await request("/ai/manager/api/provider/detail/list");
@@ -123,6 +90,10 @@ const fetchProvidersWithModelsAPI = async (): Promise<ProviderDetail[]> => {
         return [];
     }
 };
+
+export const Route = createFileRoute('/_layout/access_control')({
+    component: AccessControlPage,
+});
 
 const fetchPolicyDetailAPI = async (id: number): Promise<AccessControlPolicyFromAPI | null> => {
     try {
@@ -188,12 +159,21 @@ function transformApiDetailToUiState(apiDetail: AccessControlPolicyFromAPI): Acc
 
 export default function AccessControlPage() {
     const [t] = useI18n();
+    const router = useRouter();
+    const [providers, setProviders] = createSignal<ProviderDetail[]>([]);
+    const [providersLoading, setProvidersLoading] = createSignal(true);
+
+    onMount(async () => {
+        loadPolicies(); // This has its own loading state in the store
+        const providersData = await fetchProvidersWithModelsAPI();
+        setProviders(providersData || []);
+        setProvidersLoading(false);
+    });
 
     const ruleTypeOptions = createMemo(() => ['ALLOW', 'DENY'].map(o => ({ value: o, label: t(`accessControlPage.modal.option${o}`) })));
     const scopeOptions = createMemo(() => ['PROVIDER', 'MODEL'].map(o => ({ value: o, label: t(`accessControlPage.rules.scope${o}`) })));
 
-    const [policies, { refetch: refetchPolicies }] = createResource<AccessControlPolicyFromAPI[]>(fetchPoliciesAPI, { initialValue: [] });
-    const [providers] = createResource<ProviderDetail[]>(fetchProvidersWithModelsAPI, { initialValue: [] });
+    const policies = globalPolicies;
 
     const [showEditModal, setShowEditModal] = createSignal(false);
     const [editingPolicy, setEditingPolicy] = createSignal<AccessControlPolicyUI>(newPolicyTemplate());
@@ -233,7 +213,7 @@ export default function AccessControlPage() {
         try {
             await savePolicyAPI(policy);
             setShowEditModal(false);
-            refetchPolicies();
+            router.invalidate();
         } catch (error) {
             console.error("Failed to save policy:", error);
             alert(t('accessControlPage.alert.saveFailed', { error: error instanceof Error ? error.message : t('unknownError') }));
@@ -244,7 +224,7 @@ export default function AccessControlPage() {
         if (confirm(t('accessControlPage.confirmDelete', { name }))) {
             try {
                 await deletePolicyAPI(id);
-                refetchPolicies();
+                router.invalidate();
             } catch (error) {
                 console.error("Failed to delete policy:", error);
                 alert(t('accessControlPage.alert.deleteFailed', { error: error instanceof Error ? error.message : t('unknownError') }));
@@ -331,7 +311,7 @@ export default function AccessControlPage() {
         <div class="p-4 space-y-6">
             <div class="flex justify-between items-center mb-4">
                 <h1 class="text-2xl font-semibold text-gray-800">{t('accessControlPage.title')}</h1>
-                <Button onClick={handleOpenAddModal} variant="primary">{t('accessControlPage.addPolicy')}</Button>
+                <Button onClick={handleOpenAddModal} variant="primary" disabled={providersLoading() || policies.loading}>{t('accessControlPage.addPolicy')}</Button>
             </div>
 
             {/* Data Table */}
@@ -364,8 +344,8 @@ export default function AccessControlPage() {
                                     <TableCell>{policy.description || '/'}</TableCell>
                                     <TableCell>{t('accessControlPage.table.rulesCount', { count: policy.rules?.length || 0 })}</TableCell>
                                     <TableCell class="space-x-2">
-                                        <Button onClick={() => handleOpenEditModal(policy.id)} variant="primary" size="sm">{t('common.edit')}</Button>
-                                        <Button onClick={() => handleDeletePolicy(policy.id, policy.name)} variant="destructive" size="sm">{t('common.delete')}</Button>
+                                        <Button type="text" onClick={() => handleOpenEditModal(policy.id)} variant="primary" size="sm" disabled={providersLoading() || policies.loading}>{t('common.edit')}</Button>
+                                        <Button type="text" onClick={() => handleDeletePolicy(policy.id, policy.name)} variant="destructive" size="sm">{t('common.delete')}</Button>
                                     </TableCell>
                                 </TableRow>
                             }</For>
@@ -483,7 +463,7 @@ export default function AccessControlPage() {
                                             </div>
                                             {/* Actions */}
                                             <div class="self-end">
-                                                <Button onClick={() => removeRule(index())} variant="destructive" size="sm">{t('accessControlPage.rules.deleteRule')}</Button>
+                                                <Button type="text" onClick={() => removeRule(index())} variant="destructive" size="sm">{t('accessControlPage.rules.deleteRule')}</Button>
                                             </div>
                                         </div>
                                     </div>)

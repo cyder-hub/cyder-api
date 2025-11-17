@@ -1,9 +1,9 @@
-import { For, Show, onMount, createSignal, createResource } from 'solid-js';
+import { For, Show, createSignal, createResource, createEffect } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
-import { useI18n } from '../i18n';
-import { Button } from '../components/ui/Button';
-import { TextField } from '../components/ui/Input';
-import { Select } from '../components/ui/Select';
+import { useI18n } from '@/i18n';
+import { Button } from '@/components/ui/Button';
+import { TextField } from '@/components/ui/Input';
+import { Select } from '@/components/ui/Select';
 import {
     TableRoot,
     TableHeader,
@@ -11,12 +11,12 @@ import {
     TableRow,
     TableColumnHeader,
     TableCell,
-} from '../components/ui/Table';
-import { useNavigate, useParams } from '@solidjs/router';
-import { request } from '../services/api';
-import { toastController } from '../components/GlobalMessage';
-import type { CustomFieldType } from '../store/types';
-import { refetchProviders as globalRefetchProviders } from '../store/providerStore';
+} from '@/components/ui/Table';
+import { createFileRoute, useRouter } from '@tanstack/solid-router';
+import { request } from '@/services/api';
+import { toastController } from '@/components/GlobalMessage';
+import type { CustomFieldType } from '@/store/types';
+import { refetchProviders as globalRefetchProviders } from '@/store/providerStore';
 
 interface BillingPlan {
     id: number;
@@ -39,6 +39,7 @@ interface PriceRule {
 // Local interface for custom fields, must include id for linking/unlinking
 interface CustomFieldItem {
     id: number;
+    name: string | null;
     field_name: string;
     field_value: string;
     description: string | null;
@@ -103,12 +104,13 @@ const fetchModelDetail = async (modelId: number): Promise<ModelDetailFromApi | n
     }
 };
 
-const fetchAllCustomFields = async (t: (key: string) => string): Promise<CustomFieldItem[]> => {
+const fetchAllCustomFields = async (): Promise<CustomFieldItem[]> => {
     try {
         const response = await request('/ai/manager/api/custom_field_definition/list');
         if (response && response.list) {
             return response.list.map((f: any) => ({
                 id: f.id,
+                name: f.name,
                 field_name: f.field_name,
                 field_value: (f.string_value ?? f.integer_value?.toString() ?? f.number_value?.toString() ?? f.boolean_value?.toString()) || '',
                 description: f.description,
@@ -118,8 +120,7 @@ const fetchAllCustomFields = async (t: (key: string) => string): Promise<CustomF
         return [];
     } catch (error) {
         console.error('Failed to fetch all custom fields', error);
-        toastController.error(t('modelEditPage.alert.fetchCustomFieldsFailed'));
-        return [];
+        throw error;
     }
 };
 
@@ -129,37 +130,47 @@ const formatTimestamp = (ms: number | undefined | null): string => {
     return date.toLocaleString();
 };
 
-export default function ModelEdit() {
-    const navigate = useNavigate();
-    const params = useParams();
-    const modelId = params.id ? parseInt(params.id) : null;
+const fetchData = async (modelId: number) => {
+    if (isNaN(modelId)) {
+        toastController.error("Invalid model ID");
+        return { modelDetail: null, allCustomFields: [], billingPlans: [] };
+    }
+
+    try {
+        const [modelDetail, allCustomFields, billingPlans] = await Promise.all([
+            fetchModelDetail(modelId),
+            fetchAllCustomFields(),
+            fetchBillingPlans()
+        ]);
+        return { modelDetail, allCustomFields, billingPlans };
+    } catch (error) {
+        toastController.error(`Failed to load model data: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        return { modelDetail: null, allCustomFields: [], billingPlans: [] };
+    }
+};
+
+export const Route = createFileRoute('/_layout/model/edit/$id')({
+    component: ModelEditPage,
+});
+
+export default function ModelEditPage() {
+    const router = useRouter();
+    const params = Route.useParams()();
+    const modelId = parseInt(params.id);
     const [t] = useI18n();
+    const [loaderData, { refetch }] = createResource(() => modelId, fetchData);
+    const isPending = () => loaderData.loading;
 
     const [editingData, setEditingData] = createStore<EditingModelData | null>(null);
-    const [allCustomFields, setAllCustomFields] = createSignal<CustomFieldItem[]>([]);
+
     const [selectedCustomFieldId, setSelectedCustomFieldId] = createSignal<number | null>(null);
-    const [isLoading, setIsLoading] = createSignal<boolean>(true);
-    const [error, setError] = createSignal<string | null>(null);
 
-    const [billingPlans] = createResource(fetchBillingPlans);
-    const [priceRules] = createResource(() => editingData?.billing_plan_id, fetchPriceRules);
+    const allCustomFields = () => loaderData()?.allCustomFields || [];
+    const billingPlans = () => loaderData()?.billingPlans || [];
+    const modelDetail = () => loaderData()?.modelDetail;
 
-    const selectedPlan = () => billingPlans()?.find(p => p.id === editingData?.billing_plan_id);
-
-    const reloadData = async () => {
-        if (!modelId) {
-            setError(t('modelEditPage.alert.missingId'));
-            setIsLoading(false);
-            return;
-        }
-
-        setIsLoading(true);
-        setError(null);
-
-        const fields = await fetchAllCustomFields(t);
-        setAllCustomFields(fields);
-
-        const detail = await fetchModelDetail(modelId);
+    createEffect(() => {
+        const detail = modelDetail();
         if (detail) {
             setEditingData({
                 id: detail.model.id,
@@ -170,6 +181,7 @@ export default function ModelEdit() {
                 is_enabled: detail.model.is_enabled,
                 custom_fields: (detail.custom_fields || []).map(f => ({
                     id: f.id,
+                    name: f.name,
                     field_name: f.field_name,
                     field_value: (f.string_value ?? f.integer_value?.toString() ?? f.number_value?.toString() ?? f.boolean_value?.toString()) || '',
                     description: f.description,
@@ -177,15 +189,16 @@ export default function ModelEdit() {
                 })),
             });
         } else {
-            setError(t('modelEditPage.alert.loadDataFailed', { modelId: modelId }));
+            setEditingData(null);
         }
-        setIsLoading(false);
-    };
+    });
 
-    onMount(reloadData);
+    const [priceRules] = createResource(() => editingData?.billing_plan_id, fetchPriceRules);
+
+    const selectedPlan = () => billingPlans()?.find(p => p.id === editingData?.billing_plan_id);
 
     const handleNavigateBack = () => {
-        navigate('/provider'); // Navigate back to provider list
+        router.navigate({ to: '/provider' }); // Navigate back to provider list
     };
 
     const handleSaveModel = async () => {
@@ -211,7 +224,7 @@ export default function ModelEdit() {
             });
             toastController.success(t('modelEditPage.alert.updateSuccess'));
             globalRefetchProviders(); // To update provider list which shows models
-            await reloadData();
+            refetch();
         } catch (error) {
             console.error("Failed to save model:", error);
             toastController.error(t('modelEditPage.alert.saveFailed', { error: (error as Error).message || t('unknownError') }));
@@ -225,9 +238,11 @@ export default function ModelEdit() {
     };
 
     const availableCustomFields = () => {
-        if (!editingData) return [];
+        if (!editingData || !editingData.custom_fields) return [];
         const linkedIds = new Set(editingData.custom_fields.map(f => f.id));
-        return allCustomFields().filter(f => f.id && !linkedIds.has(f.id));
+        return allCustomFields()
+            .filter(f => f.id && !linkedIds.has(f.id))
+            .map(f => ({ ...f, displayName: f.name || f.field_name }));
     };
 
     const handleLinkCustomField = async () => {
@@ -255,14 +270,9 @@ export default function ModelEdit() {
                 }),
             });
 
-            const fieldToAdd = allCustomFields().find(f => f.id === fieldId);
-            if (fieldToAdd) {
-                setEditingData('custom_fields', produce(fields => {
-                    fields.push(fieldToAdd);
-                }));
-            }
             setSelectedCustomFieldId(null);
             toastController.success(t('modelEditPage.alert.linkSuccess'));
+            refetch();
         } catch (error) {
             console.error("Failed to link custom field:", error);
             toastController.error(t('modelEditPage.alert.linkFailed', { error: (error as Error).message || t('unknownError') }));
@@ -270,7 +280,7 @@ export default function ModelEdit() {
     };
 
 
-    const handleUnlinkCustomField = async (fieldId: number, index: number) => {
+    const handleUnlinkCustomField = async (fieldId: number) => {
         const modelId = editingData?.id;
         if (!modelId) {
             toastController.warn(t('modelEditPage.alert.modelIdNotFound'));
@@ -286,10 +296,8 @@ export default function ModelEdit() {
                 }),
             });
 
-            setEditingData('custom_fields', produce(fields => {
-                fields.splice(index, 1);
-            }));
             toastController.success(t('modelEditPage.alert.unlinkSuccess'));
+            refetch();
         } catch (error) {
             console.error("Failed to unlink custom field:", error);
             toastController.error(t('modelEditPage.alert.unlinkFailed', { error: (error as Error).message || t('unknownError') }));
@@ -299,19 +307,19 @@ export default function ModelEdit() {
     return (
         <div class="p-4 space-y-6 bg-white rounded-lg shadow-xl max-w-3xl mx-auto my-8">
             <h1 class="text-2xl font-semibold mb-4 text-gray-800">{t('modelEditPage.title')}</h1>
-            <Show when={isLoading()}>
+            <Show when={isPending()}>
                 <div class="text-center py-4 text-gray-500">{t('modelEditPage.loading')}</div>
             </Show>
-            <Show when={error()}>
+            <Show when={!isPending() && !modelDetail()}>
                 <div class="text-center py-4 text-red-600 bg-red-100 border border-red-400 rounded p-4">
-                    {error()}
+                    {t('modelEditPage.alert.loadDataFailed', { modelId: modelId })}
                 </div>
             </Show>
-            <Show when={!isLoading() && !error() && editingData}>
+            <Show when={!isPending() && editingData}>
                 <div class="space-y-4">
                     <TextField
                         label={<>{t('modelEditPage.labelModelName')} <span class="text-red-500">*</span></>}
-                        value={editingData!.model_name}
+                        value={editingData!.model_name ?? ''}
                         onChange={(v) => updateEditingDataField('model_name', v)}
                     />
                     <TextField
@@ -392,31 +400,42 @@ export default function ModelEdit() {
                     {/* Custom Fields Section */}
                     <div class="section">
                         <h3 class="section-title">{t('modelEditPage.sectionCustomFields')}</h3>
-                        <div class="section-header grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center">
-                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldName')}</span>
-                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldValue')}</span>
-                            <span class="font-semibold">{t('modelEditPage.tableHeaderDescription')}</span>
-                            <span class="font-semibold">{t('modelEditPage.tableHeaderFieldType')}</span>
-                            <span></span>
-                        </div>
-                        <For each={editingData!.custom_fields}>
-                            {(field, index) => (
-                                <div class="section-row grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center mb-2">
-                                    <TextField value={field.field_name} disabled />
-                                    <TextField value={field.field_value} disabled />
-                                    <TextField value={field.description ?? ''} disabled />
-                                    <TextField value={field.field_type} disabled />
-                                    <Button variant="destructive" size="sm" onClick={() => handleUnlinkCustomField(field.id, index())}>{t('common.delete')}</Button>
-                                </div>
-                            )}
-                        </For>
+                        <Show when={editingData!.custom_fields && editingData!.custom_fields.length > 0}>
+                            <TableRoot class="mt-2">
+                                <TableHeader>
+                                    <TableRow>
+                                        <TableColumnHeader>{t('modelEditPage.tableHeaderFieldName')}</TableColumnHeader>
+                                        <TableColumnHeader>{t('modelEditPage.tableHeaderFieldValue')}</TableColumnHeader>
+                                        <TableColumnHeader>{t('modelEditPage.tableHeaderDescription')}</TableColumnHeader>
+                                        <TableColumnHeader>{t('modelEditPage.tableHeaderFieldType')}</TableColumnHeader>
+                                        <TableColumnHeader></TableColumnHeader>
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    <For each={editingData!.custom_fields}>
+                                        {(field) => (
+                                            <TableRow>
+                                                <TableCell>{field.field_name}</TableCell>
+                                                <TableCell>{field.field_value}</TableCell>
+                                                <TableCell>{field.description ?? ''}</TableCell>
+                                                <TableCell>{field.field_type}</TableCell>
+                                                <TableCell class="text-right">
+                                                    <Button variant="destructive" size="sm" onClick={() => handleUnlinkCustomField(field.id)}>{t('common.delete')}</Button>
+                                                </TableCell>
+                                            </TableRow>
+                                        )}
+                                    </For>
+                                </TableBody>
+                            </TableRoot>
+                        </Show>
                         <div class="mt-4 flex items-center gap-2">
                             <Select
+                                class="w-80"
                                 value={availableCustomFields().find(f => f.id === selectedCustomFieldId())}
                                 onChange={(v) => setSelectedCustomFieldId(v ? v.id : null)}
                                 options={availableCustomFields()}
                                 optionValue="id"
-                                optionTextValue="field_name"
+                                optionTextValue="displayName"
                                 placeholder={t('modelEditPage.placeholderSelectCustomField')}
                             />
                             <Button variant="primary" size="sm" onClick={handleLinkCustomField} disabled={!selectedCustomFieldId()}>

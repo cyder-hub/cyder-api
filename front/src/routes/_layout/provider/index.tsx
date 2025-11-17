@@ -1,31 +1,16 @@
 import { For, Show } from 'solid-js';
-import { Button } from '../components/ui/Button';
-import { useNavigate } from '@solidjs/router'; // For navigation
-import { request } from '../services/api';
-import { providers, refetchProviders as globalRefetchProviders } from '../store/providerStore';
-import type { ProviderListItem, ProviderBase, ModelItem, CustomFieldType } from '../store/types'; // Removed types used only in the old modal
-import { useI18n } from '../i18n'; // Import useI18n
+import { Button } from '@/components/ui/Button';
+import { createFileRoute, useNavigate } from '@tanstack/solid-router';
+import { request } from '@/services/api';
+import { providers, loadProviders, refetchProviders as globalRefetchProviders } from '@/store/providerStore';
+import type { ProviderBase } from '@/store/types';
+import { useI18n } from '@/i18n';
 
-// --- Type Definitions (specific to this page or not yet moved) ---
-// EditingProviderData is moved to ProviderEdit.tsx
-// EditableModelItem, ProviderApiKeyItem, CustomFieldItem are moved or not needed here anymore
+function ProviderPage() {
+    loadProviders();
 
-// ModelItem, ProviderBase, ProviderListItem are now imported from ../store/types
-
-// fetchProviders is now in providerStore.ts
-// fetchProviderDetail is moved to ProviderEdit.tsx
-
-
-export default function Provider() {
-    const [t] = useI18n(); // Initialize i18n
-    const navigate = useNavigate();
-    // Use global providers resource
-    // const [providers, { refetch: refetchProviders }] = createResource<ProviderListItem[]>(fetchProviders, { initialValue: [] });
-    // showEditModal and editingData are removed as the modal is now a separate page
-
-    // getEmptyProvider is moved to ProviderEdit.tsx
-
-    // handleStartEditing and handleStopEditing are removed
+    const [t] = useI18n();
+    const navigate = useNavigate({ from: Route.fullPath });
 
     const handleDeleteProvider = async (provider: ProviderBase) => {
         if (confirm(t('confirmDeleteProvider', { name: provider.name }))) {
@@ -50,7 +35,7 @@ export default function Provider() {
             <h1 class="text-2xl font-semibold mb-4 text-gray-800">{t('providerPageTitle')}</h1>
 
             <div class="mb-4">
-                <Button variant="primary" onClick={() => navigate('/provider/new')}>{t('addProvider')}</Button>
+                <Button variant="primary" onClick={() => navigate({ to: '/provider/new' })}>{t('addProvider')}</Button>
             </div>
 
             {/* Data Table */}
@@ -98,7 +83,7 @@ export default function Provider() {
                                                     <span
                                                         class="model-tag clickable"
                                                         title={t('providerPage.editModel', { model_name: model.model.model_name })}
-                                                        onClick={() => navigate(`/model/edit/${model.model.id}`)}
+                                                        onClick={() => navigate({ to: `/model/edit/${model.model.id}` })}
                                                     >
                                                         {model.model.model_name}
                                                     </span>
@@ -108,7 +93,7 @@ export default function Provider() {
                                     </div>
                                 </div>
                                 <div class="p-4 bg-gray-50 border-t border-gray-200 flex justify-end space-x-2">
-                                    <Button variant="primary" size="sm" onClick={() => navigate(`/provider/edit/${item.provider.id}`)}>{t('edit')}</Button>
+                                    <Button variant="primary" size="sm" onClick={() => navigate({ to: `/provider/edit/${item.provider.id}` })}>{t('edit')}</Button>
                                     <Button variant="destructive" size="sm" onClick={() => handleDeleteProvider(item.provider)}>{t('delete')}</Button>
                                 </div>
                             </div>
@@ -122,3 +107,7 @@ export default function Provider() {
         </div>
     );
 }
+
+export const Route = createFileRoute('/_layout/provider/')({
+    component: ProviderPage,
+});

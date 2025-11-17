@@ -1,11 +1,12 @@
-import { createSignal, createEffect, For, Show, createResource, Accessor, Setter, createMemo } from 'solid-js';
+import { createSignal, createEffect, For, Show, createResource, createMemo, Suspense } from 'solid-js';
 import type { Resource } from 'solid-js';
-import { useI18n } from '../i18n'; // Import the i18n hook
-import { Button } from '../components/ui/Button';
-import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/Popover';
-import { Pagination } from '../components/ui/Pagination';
-import { Select } from '../components/ui/Select';
-import { TextField } from '../components/ui/Input';
+import { createFileRoute } from '@tanstack/solid-router';
+import { useI18n } from '@/i18n'; // Import the i18n hook
+import { Button } from '@/components/ui/Button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover';
+import { Pagination } from '@/components/ui/Pagination';
+import { Select } from '@/components/ui/Select';
+import { TextField } from '@/components/ui/Input';
 import {
     TableRoot,
     TableHeader,
@@ -13,13 +14,13 @@ import {
     TableRow,
     TableColumnHeader,
     TableCell,
-} from '../components/ui/Table';
-import { request } from '../services/api'; // Import the centralized request function
-import styles from './Record.module.css';
+} from '@/components/ui/Table';
+import { request } from '@/services/api'; // Import the centralized request function
+import styles from './record.module.css';
 
-import { providers as globalProviders } from '../store/providerStore'; // Import global providers
-import { apiKeys as globalApiKeys } from '../store/apiKeyStore'; // Import global API keys
-import type { ProviderListItem, ProviderBase, ApiKeyItem as GlobalApiKeyItem } from '../store/types'; // Import shared types, rename ApiKeyItem to avoid conflict
+import { providers as globalProviders, loadProviders } from '@/store/providerStore'; // Import global providers
+import { apiKeys as globalApiKeys, loadApiKeys } from '@/store/apiKeyStore'; // Import global API keys
+import type { ProviderListItem, ProviderBase, ApiKeyItem as GlobalApiKeyItem } from '@/store/types'; // Import shared types, rename ApiKeyItem to avoid conflict
 
 // --- Type Definitions ---
 // ApiKey interface can be removed or replaced by GlobalApiKeyItem if suitable
@@ -99,9 +100,18 @@ interface FetchRecordsResult {
 
 // fetchProviders is removed, will use globalProviders from providerStore
 
+export const Route = createFileRoute('/_layout/record')({
+    component: RecordPage,
+});
+
 // --- Component ---
-export default function Record() {
+function RecordPage() {
     const [t] = useI18n(); // Initialize the t function
+
+    // Load initial data for filters
+    loadApiKeys();
+    loadProviders();
+
     const [currentPage, setCurrentPage] = createSignal(1);
     const [expandedRecordId, setExpandedRecordId] = createSignal<number | null>(null);
 
@@ -335,9 +345,14 @@ export default function Record() {
         const currentSearch = searchInput();
         clearTimeout(searchDebounceTimer);
         searchDebounceTimer = window.setTimeout(() => {
-            setFilters(f => ({ ...f, search: currentSearch }));
+            setFilters(f => {
+                if (f.search === currentSearch) {
+                    return f;
+                }
+                return { ...f, search: currentSearch };
+            });
             // No need to call applyFilter() here as createResource will react to filters() changing
-        }, 600); // 1 second delay
+        }, 600); // 600ms delay
     });
 
     return (
@@ -396,150 +411,153 @@ export default function Record() {
                 </div>
             </div>
 
-            {/* Data Table */}
-            <Show when={recordsResult.loading}>
-                <div class="text-center py-4 text-gray-500">{t('recordPage.loading')}</div>
-            </Show>
-            <Show when={!recordsResult.loading && recordsResult.error}>
-                <div class="text-center py-4 text-red-600 bg-red-100 border border-red-400 rounded p-4">
-                    {t('recordPage.errorPrefix')} {recordsResult.error instanceof Error ? recordsResult.error.message : t('recordPage.unknownError')}
-                </div>
-            </Show>
-            <Show when={!recordsResult.loading && !recordsResult.error}>
-                <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200">
-                    <TableRoot>
-                        <TableHeader>
-                            <TableRow>
-                                <TableColumnHeader>{t('recordPage.table.modelName')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.provider')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.apiKey')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.channel')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.externalId')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.status')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.promptTokens')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.completionTokens')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.reasoningTokens')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.totalTokens')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.stream')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.firstResp')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.totalResp')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.tps')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.cost')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.requestTime')}</TableColumnHeader>
-                                <TableColumnHeader>{t('recordPage.table.details')}</TableColumnHeader>
-                            </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                            <For each={recordsResult()?.list} fallback={
-                                <TableRow>
-                                    <TableCell colSpan={17} class="text-center py-6">
-                                        <Show when={recordsResult()?.total === 0}>{t('recordPage.table.noRecordsMatch')}</Show>
-                                        <Show when={!recordsResult()?.total}>{t('recordPage.table.noRecordsAvailable')}</Show>
-                                    </TableCell>
-                                </TableRow>
-                            }>
-                                {(record: RecordItem) => (
-                                    <TableRow>
-                                        <TableCell>{record.model_name || '/'}</TableCell>
-                                        <TableCell>{record.providerName}</TableCell>
-                                        <TableCell>{record.apiKeyName}</TableCell>
-                                        <TableCell>{record.channel || '/'}</TableCell>
-                                        <TableCell>{record.external_id || '/'}</TableCell>
-                                        <TableCell>
-                                            <span class={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${record.status === 'SUCCESS' ? 'bg-green-100 text-green-800' :
-                                                    record.status === 'ERROR' ? 'bg-red-100 text-red-800' :
-                                                        record.status === 'PENDING' ? 'bg-yellow-100 text-yellow-800' :
-                                                            'bg-gray-100 text-gray-800'
-                                                }`}>
-                                                {record.status || t('common.notAvailable')}
-                                            </span>
-                                        </TableCell>
-                                        <TableCell class="text-right">{record.prompt_tokens ?? '/'}</TableCell>
-                                        <TableCell class="text-right">{record.completion_tokens ?? '/'}</TableCell>
-                                        <TableCell class="text-right">{record.reasoning_tokens ?? '/'}</TableCell>
-                                        <TableCell class="text-right">{record.total_tokens ?? '/'}</TableCell>
-                                        <TableCell>{record.isStreamDisplay}</TableCell>
-                                        <TableCell class="text-right">{record.firstRespTimeDisplay}</TableCell>
-                                        <TableCell class="text-right">{record.totalRespTimeDisplay}</TableCell>
-                                        <TableCell class="text-right">{record.tpsDisplay}</TableCell>
-                                        <TableCell class="text-right">{record.costDisplay}</TableCell>
-                                        <TableCell>{record.request_at_formatted}</TableCell>
-                                        <TableCell>
-                                            <Popover
-                                                gutter={8}
-                                                onOpenChange={(isOpen) => isOpen ? setExpandedRecordId(record.id) : setExpandedRecordId(null)}
-                                            >
-                                                <PopoverTrigger asChild>
-                                                    <button class="text-blue-600 hover:text-blue-800 text-sm font-medium focus:outline-none">
-                                                        {t('recordPage.table.viewDetails')}
-                                                    </button>
-                                                </PopoverTrigger>
-                                                <PopoverContent class="p-4 max-w-lg max-h-96 overflow-auto">
-                                                    <Show
-                                                        when={!detailedRecordData.loading && detailedRecordData()}
-                                                        fallback={<p>{detailedRecordData.loading ? t('recordPage.loading') : t('recordPage.errorPrefix')}</p>}
-                                                    >
-                                                        <pre class="text-xs bg-gray-50 p-2 rounded-md whitespace-pre-wrap break-all">
-                                                            {JSON.stringify(detailedRecordData(), null, 2)}
-                                                        </pre>
-                                                    </Show>
-                                                </PopoverContent>
-                                            </Popover>
-                                        </TableCell>
-                                    </TableRow>
-                                )}
-                            </For>
-                        </TableBody>
-                    </TableRoot>
-                </div>
-            </Show>
+            {/* Data Table and Pagination */}
+            <Suspense fallback={<div class="text-center py-4 text-gray-500">{t('recordPage.loading')}</div>}>
+                <Show
+                    when={recordsResult.error}
+                    fallback={
+                        <div classList={{ 'opacity-50 pointer-events-none': recordsResult.state === 'refreshing' }}>
+                            <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200">
+                                <TableRoot size="small">
+                                    <TableHeader>
+                                        <TableRow>
+                                            <TableColumnHeader>{t('recordPage.table.modelName')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.provider')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.apiKey')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.channel')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.externalId')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.status')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.promptTokens')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.completionTokens')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.reasoningTokens')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.totalTokens')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.stream')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.firstResp')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.totalResp')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.tps')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.cost')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.requestTime')}</TableColumnHeader>
+                                            <TableColumnHeader>{t('recordPage.table.details')}</TableColumnHeader>
+                                        </TableRow>
+                                    </TableHeader>
+                                    <TableBody>
+                                        <For each={recordsResult()?.list} fallback={
+                                            <TableRow>
+                                                <TableCell colSpan={17} class="text-center py-6">
+                                                    <Show when={recordsResult()?.total === 0}>{t('recordPage.table.noRecordsMatch')}</Show>
+                                                    <Show when={!recordsResult()?.total}>{t('recordPage.table.noRecordsAvailable')}</Show>
+                                                </TableCell>
+                                            </TableRow>
+                                        }>
+                                            {(record: RecordItem) => (
+                                                <TableRow>
+                                                    <TableCell>{record.model_name || '/'}</TableCell>
+                                                    <TableCell>{record.providerName}</TableCell>
+                                                    <TableCell>{record.apiKeyName}</TableCell>
+                                                    <TableCell>{record.channel || '/'}</TableCell>
+                                                    <TableCell>{record.external_id || '/'}</TableCell>
+                                                    <TableCell>
+                                                        <span class={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${record.status === 'SUCCESS' ? 'bg-green-100 text-green-800' :
+                                                                record.status === 'ERROR' ? 'bg-red-100 text-red-800' :
+                                                                    record.status === 'PENDING' ? 'bg-yellow-100 text-yellow-800' :
+                                                                        'bg-gray-100 text-gray-800'
+                                                            }`}>
+                                                            {record.status || t('common.notAvailable')}
+                                                        </span>
+                                                    </TableCell>
+                                                    <TableCell class="text-right">{record.prompt_tokens ?? '/'}</TableCell>
+                                                    <TableCell class="text-right">{record.completion_tokens ?? '/'}</TableCell>
+                                                    <TableCell class="text-right">{record.reasoning_tokens ?? '/'}</TableCell>
+                                                    <TableCell class="text-right">{record.total_tokens ?? '/'}</TableCell>
+                                                    <TableCell>{record.isStreamDisplay}</TableCell>
+                                                    <TableCell class="text-right">{record.firstRespTimeDisplay}</TableCell>
+                                                    <TableCell class="text-right">{record.totalRespTimeDisplay}</TableCell>
+                                                    <TableCell class="text-right">{record.tpsDisplay}</TableCell>
+                                                    <TableCell class="text-right">{record.costDisplay}</TableCell>
+                                                    <TableCell>{record.request_at_formatted}</TableCell>
+                                                    <TableCell>
+                                                        <Popover
+                                                            gutter={8}
+                                                            onOpenChange={(isOpen) => isOpen ? setExpandedRecordId(record.id) : setExpandedRecordId(null)}
+                                                        >
+                                                            <PopoverTrigger asChild>
+                                                                <button class="text-blue-600 hover:text-blue-800 text-sm font-medium focus:outline-none">
+                                                                    {t('recordPage.table.viewDetails')}
+                                                                </button>
+                                                            </PopoverTrigger>
+                                                            <PopoverContent class="p-4 max-w-lg max-h-96 overflow-auto">
+                                                                <Show
+                                                                    when={!detailedRecordData.loading && detailedRecordData()}
+                                                                    fallback={<p>{detailedRecordData.loading ? t('recordPage.loading') : t('recordPage.errorPrefix')}</p>}
+                                                                >
+                                                                    <pre class="text-xs bg-gray-50 p-2 rounded-md whitespace-pre-wrap break-all">
+                                                                        {JSON.stringify(detailedRecordData(), null, 2)}
+                                                                    </pre>
+                                                                </Show>
+                                                            </PopoverContent>
+                                                        </Popover>
+                                                    </TableCell>
+                                                </TableRow>
+                                            )}
+                                        </For>
+                                    </TableBody>
+                                </TableRoot>
+                            </div>
 
-            {/* Pagination Controls */}
-            <Show when={totalPages() > 0}>
-                <div class="flex items-center justify-between mt-4 flex-wrap gap-4 px-4 py-3 bg-white border border-gray-200 rounded-lg shadow-sm">
-                    {/* Kobalte Pagination */}
-                    <Pagination
-                        count={totalPages()}
-                        page={currentPage()}
-                        onPageChange={setCurrentPage}
-                        itemComponent={props => (
-                            <Pagination.Item page={props.page}>
-                                {props.page}
-                            </Pagination.Item>
-                        )}
-                        ellipsisComponent={() => (
-                            <Pagination.Ellipsis />
-                        )}
-                        class={styles.pagination}
-                    >
-                        <Pagination.Previous aria-label={t('recordPage.pagination.previousPage')} />
-                        <Pagination.Items />
-                        <Pagination.Next aria-label={t('recordPage.pagination.nextPage')} />
-                    </Pagination>
+                            {/* Pagination Controls */}
+                            <Show when={totalPages() > 0}>
+                                <div class="flex items-center justify-between mt-4 flex-wrap gap-4 px-4 py-3 bg-white border border-gray-200 rounded-lg shadow-sm">
+                                    {/* Kobalte Pagination */}
+                                    <Pagination
+                                        count={totalPages()}
+                                        page={currentPage()}
+                                        onPageChange={setCurrentPage}
+                                        itemComponent={props => (
+                                            <Pagination.Item page={props.page}>
+                                                {props.page}
+                                            </Pagination.Item>
+                                        )}
+                                        ellipsisComponent={() => (
+                                            <Pagination.Ellipsis />
+                                        )}
+                                        class={styles.pagination}
+                                    >
+                                        <Pagination.Previous aria-label={t('recordPage.pagination.previousPage')} />
+                                        <Pagination.Items />
+                                        <Pagination.Next aria-label={t('recordPage.pagination.nextPage')} />
+                                    </Pagination>
 
-                    {/* Page Info and Size Selector */}
-                    <div class="flex items-center gap-4 flex-wrap">
-                        <div class="text-sm text-gray-700">
-                            {t('recordPage.pagination.page')} <span class="font-medium">{currentPage()}</span> {t('recordPage.pagination.of')} <span class="font-medium">{totalPages()}</span> (<span class="font-medium">{recordsResult()?.total ?? 0}</span> {t('recordPage.pagination.items')})
+                                    {/* Page Info and Size Selector */}
+                                    <div class="flex items-center gap-4 flex-wrap">
+                                        <div class="text-sm text-gray-700">
+                                            {t('recordPage.pagination.page')} <span class="font-medium">{currentPage()}</span> {t('recordPage.pagination.of')} <span class="font-medium">{totalPages()}</span> (<span class="font-medium">{recordsResult()?.total ?? 0}</span> {t('recordPage.pagination.items')})
+                                        </div>
+                                        <div class="flex items-center space-x-2">
+                                            <label for="page-size-select" class="text-sm text-gray-700 whitespace-nowrap">{t('recordPage.pagination.itemsPerPage')}</label>
+                                            <Select
+                                                value={pageSize()}
+                                                options={[10, 25, 50, 100]}
+                                                onChange={(value) => {
+                                                    if (value) {
+                                                        localStorage.setItem('pageSize', String(value));
+                                                        setPageSize(value);
+                                                        setCurrentPage(1);
+                                                    }
+                                                }}
+                                                class="w-auto"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            </Show>
                         </div>
-                        <div class="flex items-center space-x-2">
-                            <label for="page-size-select" class="text-sm text-gray-700 whitespace-nowrap">{t('recordPage.pagination.itemsPerPage')}</label>
-                            <Select
-                                value={pageSize()}
-                                options={[10, 25, 50, 100]}
-                                onChange={(value) => {
-                                    if (value) {
-                                        localStorage.setItem('pageSize', String(value));
-                                        setPageSize(value);
-                                        setCurrentPage(1);
-                                    }
-                                }}
-                                class="w-auto"
-                            />
-                        </div>
+                    }
+                >
+                    <div class="text-center py-4 text-red-600 bg-red-100 border border-red-400 rounded p-4">
+                        {t('recordPage.errorPrefix')} {recordsResult.error instanceof Error ? recordsResult.error.message : t('recordPage.unknownError')}
                     </div>
-                </div>
-            </Show>
+                </Show>
+            </Suspense>
         </div>
     );
 }

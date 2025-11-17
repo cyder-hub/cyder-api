@@ -1,4 +1,5 @@
-import { createResource, Show, createSignal, createMemo, For } from 'solid-js';
+import { Show, createSignal, createMemo, For } from 'solid-js';
+import { useQuery } from '@tanstack/solid-query';
 import { useI18n } from '../i18n';
 import { request } from '../services/api';
 import * as echarts from 'echarts/core';
@@ -169,7 +170,10 @@ export default function UsageChart() {
     const [timeRange, setTimeRange] = createSignal<TimeRange>('last_24_hours');
     const [selectedMetric, setSelectedMetric] = createSignal<UsageMetric>('total_tokens');
     const [chartType, setChartType] = createSignal<'line' | 'bar'>('line');
-    const [usageStats, { refetch: refetchUsageStats }] = createResource(timeRange, fetchUsageStats, { storage: createSignal });
+    const usageStatsQuery = useQuery(() => ({
+        queryKey: ['usageStats', timeRange()],
+        queryFn: () => fetchUsageStats(timeRange()),
+    }));
 
     const chartTypeOptions = createMemo(() => [
         { value: 'line' as const, label: t('dashboard.usageStats.chartTypes.line') },
@@ -223,7 +227,7 @@ export default function UsageChart() {
     };
 
     const totalMetricSumText = createMemo(() => {
-        const data = usageStats();
+        const data = usageStatsQuery.data;
         const metric = selectedMetric();
         if (!data || !data.stats) {
             return '';
@@ -254,7 +258,7 @@ export default function UsageChart() {
     });
 
     const perModelMetricSum = createMemo(() => {
-        const data = usageStats();
+        const data = usageStatsQuery.data;
         const metric = selectedMetric();
         if (!data || !data.stats) {
             return new Map();
@@ -317,7 +321,7 @@ export default function UsageChart() {
     });
 
     const chartOptions = (): EChartsOption => {
-        const data = usageStats();
+        const data = usageStatsQuery.data;
         const metric = selectedMetric();
         const type = chartType();
 
@@ -593,18 +597,18 @@ export default function UsageChart() {
                         class="w-48"
                     />
                     <Button
-                        onClick={() => refetchUsageStats()}
+                        onClick={() => usageStatsQuery.refetch()}
                         variant="ghost"
                         size="sm"
                         class="border border-gray-300"
-                        disabled={usageStats.loading}
+                        disabled={usageStatsQuery.isFetching}
                     >
                         {t('common.refresh')}
                     </Button>
                 </div>
             </div>
-            <Show when={usageStats() || !usageStats.loading} fallback={<p>{t('loading')}</p>}>
-                <Show when={!usageStats.error} fallback={<p class="text-red-500">{t('dashboard.errorLoading', { error: usageStats.error?.message || t('unknownError') })}</p>}>
+            <Show when={usageStatsQuery.data || !usageStatsQuery.isFetching} fallback={<p>{t('loading')}</p>}>
+                <Show when={!usageStatsQuery.error} fallback={<p class="text-red-500">{t('dashboard.errorLoading', { error: usageStatsQuery.error?.message || t('unknownError') })}</p>}>
                     <ECharts options={chartOptions} style={{ height: '400px' }} />
                     <Show when={sortedModelSum().length > 0}>
                         <div class="mt-4">

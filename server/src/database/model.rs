@@ -3,8 +3,8 @@ use diesel::prelude::*;
 use serde::Deserialize;
 
 use super::{get_connection, DbResult};
-use crate::service::app_state::Storable;
 use crate::controller::BaseError;
+use crate::service::app_state::Storable;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
@@ -228,6 +228,8 @@ impl Model {
         let conn = &mut get_connection();
         db_execute!(conn, {
             let db_models = model::table
+                .left_join(provider::table.on(provider::dsl::id.eq(model::dsl::provider_id)))
+                .filter(provider::dsl::deleted_at.is_null())
                 .filter(model::dsl::deleted_at.is_null())
                 .order(model::dsl::created_at.desc())
                 .select(ModelDb::as_select())
@@ -283,7 +285,10 @@ impl Model {
                 .first::<ModelDb>(conn)
                 .optional() // Makes it return Option<ModelDb>
                 .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Error checking for existing model: {}", e)))
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Error checking for existing model: {}",
+                        e
+                    )))
                 })?;
 
             let now = Utc::now().timestamp_millis();
@@ -296,10 +301,10 @@ impl Model {
                     let update_data = UpdateModelData {
                         real_model_name: Some(real_model_name_val.map(|s| s.to_string())),
                         is_enabled: Some(true), // Ensure it's enabled
-                        model_name: None, // Not changing model_name itself here
-                        billing_plan_id: None, // Do not update billing_plan_id during upsert
+                        model_name: None,       // Not changing model_name itself here
+                        billing_plan_id: None,  // Do not update billing_plan_id during upsert
                     };
-                    
+
                     // Also ensure it's not deleted
                     let updated_db_model = diesel::update(model::table.find(model_item.id))
                         .set((
@@ -310,7 +315,10 @@ impl Model {
                         .returning(ModelDb::as_returning())
                         .get_result::<ModelDb>(conn)
                         .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!("Failed to update existing model during upsert: {}",e)))
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to update existing model during upsert: {}",
+                                e
+                            )))
                         })?;
                     Ok(updated_db_model.from_db())
                 }
@@ -331,7 +339,10 @@ impl Model {
                         .returning(ModelDb::as_returning())
                         .get_result::<ModelDb>(conn)
                         .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!("Failed to insert new model during upsert: {}",e)))
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to insert new model during upsert: {}",
+                                e
+                            )))
                         })?;
                     Ok(inserted_db_model.from_db())
                 }
@@ -349,4 +360,3 @@ impl Storable for Model {
         self.id.to_string()
     }
 }
-

@@ -1,5 +1,6 @@
-import { createSignal, For, Show, createResource } from 'solid-js';
-import { Button } from '../components/ui/Button';
+import { createSignal, For, Show, onMount } from 'solid-js';
+import { createFileRoute, useRouter } from '@tanstack/solid-router';
+import { Button } from '@/components/ui/Button';
 import {
     TableRoot,
     TableHeader,
@@ -7,33 +8,30 @@ import {
     TableRow,
     TableColumnHeader,
     TableCell,
-} from '../components/ui/Table';
-import { useI18n } from '../i18n'; // Import the i18n hook
-import { request } from '../services/api';
-import { apiKeys as globalApiKeys, refetchApiKeys as globalRefetchApiKeys } from '../store/apiKeyStore';
-import type { ApiKeyItem } from '../store/types';
-import ApiKeyEditModal from '../components/ApiKeyEditModal'; // Import the new modal component
-import IssueTokenModal from '../components/IssueTokenModal';
-import { fetchPoliciesAPI, type AccessControlPolicyFromAPI } from './AccessControlPage';
+} from '@/components/ui/Table';
+import { useI18n } from '@/i18n'; // Import the i18n hook
+import { request } from '@/services/api';
+import type { ApiKeyItem } from '@/store/types';
+import ApiKeyEditModal from '@/components/ApiKeyEditModal'; // Import the new modal component
+import IssueTokenModal from '@/components/IssueTokenModal';
+import { policies, loadPolicies } from '@/store/accessControlStore.ts';
+import { apiKeys, refetchApiKeys, loadApiKeys } from '@/store/apiKeyStore.ts';
 // EditingApiKeyData interface is now in ApiKeyEditModal.tsx
 
-const formatTimestamp = (ms: number | undefined | null): string => {
-    if (!ms) return '';
-    const date = new Date(ms);
-    const YYYY = date.getFullYear();
-    const MM = String(date.getMonth() + 1).padStart(2, '0');
-    const DD = String(date.getDate()).padStart(2, '0');
-    const hh = String(date.getHours()).padStart(2, '0');
-    const mm = String(date.getMinutes()).padStart(2, '0');
-    const ss = String(date.getSeconds()).padStart(2, '0');
-    return `${YYYY}-${MM}-${DD} ${hh}:${mm}:${ss}`;
-};
-
-// fetchApiKeys is now in apiKeyStore.ts
+export const Route = createFileRoute('/_layout/api_key')({
+    component: ApiKeyPage,
+});
 
 export default function ApiKeyPage() {
+    onMount(async () => {
+        await Promise.all([
+            loadApiKeys(),
+            loadPolicies()
+        ]);
+    });
+
     const [t] = useI18n(); // Initialize the t function
-    const [policies] = createResource<AccessControlPolicyFromAPI[]>(fetchPoliciesAPI, { initialValue: [] });
+    const router = useRouter();
     const [showEditModal, setShowEditModal] = createSignal(false);
     const [showIssueTokenModal, setShowIssueTokenModal] = createSignal(false);
     // This will hold the ApiKeyItem to edit, or null for a new one
@@ -68,14 +66,14 @@ export default function ApiKeyPage() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
             });
-            globalRefetchApiKeys();
+            router.invalidate();
         } catch (error) {
             console.error("Failed to toggle API key status:", error);
             alert(t('apiKeyPage.toggleStatusFailed', { error: error instanceof Error ? error.message : t('unknownError') }));
             // Optionally, refetch to revert optimistic UI changes if any were made,
             // or revert the checkbox state manually if it was optimistically updated.
             // For now, a refetch will correct the UI.
-            globalRefetchApiKeys();
+            router.invalidate();
         }
     };
 
@@ -90,7 +88,7 @@ export default function ApiKeyPage() {
     };
 
     const handleSaveSuccess = () => {
-        globalRefetchApiKeys();
+        router.invalidate();
         // The modal will call its own onClose, but we ensure state is clean here too
         handleCloseModal();
     };
@@ -99,7 +97,7 @@ export default function ApiKeyPage() {
         if (confirm(t('apiKeyPage.confirmDelete', { name: apiKey.name }))) {
             try {
                 await request(`/ai/manager/api/system_api_key/${apiKey.id}`, { method: 'DELETE' });
-                globalRefetchApiKeys();
+                router.invalidate();
             } catch (error) {
                 console.error("Failed to delete API key:", error);
                 alert(t('deleteFailed', { error: (error as Error).message || t('unknownError') }));
@@ -111,7 +109,7 @@ export default function ApiKeyPage() {
         if (confirm(t('apiKeyPage.confirmRefreshRef', { name: apiKey.name }))) {
             try {
                 await request(`/ai/manager/api/system_api_key/${apiKey.id}/refresh_ref`, { method: 'POST' });
-                globalRefetchApiKeys();
+                router.invalidate();
             } catch (error) {
                 console.error("Failed to refresh ref for API key:", error);
                 alert(t('apiKeyPage.refreshRefFailed', { error: (error as Error).message || t('unknownError') }));
@@ -160,19 +158,19 @@ export default function ApiKeyPage() {
             </div>
 
             {/* Data Table */}
-            <Show when={globalApiKeys.loading}>
+            <Show when={apiKeys.loading}>
                 <div class="text-center py-4 text-gray-500">{t('apiKeyPage.loading')}</div>
             </Show>
-            <Show when={!globalApiKeys.loading && globalApiKeys.error}>
+            <Show when={!apiKeys.loading && apiKeys.error}>
                 <div class="text-center py-4 text-red-600 bg-red-100 border border-red-400 rounded p-4">
-                    {t('apiKeyPage.errorPrefix')} {globalApiKeys.error instanceof Error ? globalApiKeys.error.message : t('unknownError')}
+                    {t('apiKeyPage.errorPrefix')} {apiKeys.error instanceof Error ? apiKeys.error.message : t('unknownError')}
                 </div>
             </Show>
-            <Show when={!globalApiKeys.loading && !globalApiKeys.error && globalApiKeys()?.length === 0}>
+            <Show when={!apiKeys.loading && !apiKeys.error && apiKeys()?.length === 0}>
                  <div class="text-center py-4 text-gray-500">{t('apiKeyPage.noData')}</div>
             </Show>
 
-            <Show when={!globalApiKeys.loading && !globalApiKeys.error && globalApiKeys() && globalApiKeys()!.length > 0}>
+            <Show when={!apiKeys.loading && !apiKeys.error && apiKeys() && apiKeys()!.length > 0}>
                 <div class="overflow-x-auto shadow-md rounded-lg border border-gray-200">
                     <TableRoot>
                         <TableHeader>
@@ -188,13 +186,13 @@ export default function ApiKeyPage() {
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            <For each={globalApiKeys()}>
+                            <For each={apiKeys()}>
                                 {(key) => (
                                     <TableRow>
                                         <TableCell>{key.name}</TableCell>
                                         <TableCell class="font-mono">
                                             {key.api_key ? `${key.api_key.substring(0, 3)}...${key.api_key.substring(key.api_key.length - 4)}` : 'N/A'}
-                                            <Button variant="ghost" size="xs" class="ml-2" onClick={() => copyApiKeyToClipboard(key.api_key, key.id)} title={t('apiKeyPage.copy')}>
+                                            <Button type="text" variant="ghost" size="xs" class="ml-2" onClick={() => copyApiKeyToClipboard(key.api_key, key.id)} title={t('apiKeyPage.copy')}>
                                                 {copiedKeyId() === key.id ? t('apiKeyPage.copied') : t('apiKeyPage.copy')}
                                             </Button>
                                         </TableCell>
@@ -211,10 +209,10 @@ export default function ApiKeyPage() {
                                         <TableCell>{key.created_at_formatted}</TableCell>
                                         <TableCell>{key.updated_at_formatted}</TableCell>
                                         <TableCell class="space-x-2">
-                                            <Button variant="primary" size="sm" onClick={() => handleStartEditing(key)}>{t('edit')}</Button>
-                                            <Button variant="destructive" size="sm" onClick={() => handleDeleteApiKey(key)}>{t('delete')}</Button>
-                                            <Button variant="secondary" size="sm" onClick={() => handleRefreshRef(key)}>{t('apiKeyPage.refreshRef')}</Button>
-                                            <Button size="sm" onClick={() => handleStartIssuingToken(key)}>{t('apiKeyPage.issueToken')}</Button>
+                                            <Button type="text" variant="primary" size="sm" onClick={() => handleStartEditing(key)}>{t('edit')}</Button>
+                                            <Button type="text" variant="destructive" size="sm" onClick={() => handleDeleteApiKey(key)}>{t('delete')}</Button>
+                                            <Button type="text" variant="secondary" size="sm" onClick={() => handleRefreshRef(key)}>{t('apiKeyPage.refreshRef')}</Button>
+                                            <Button type="text" size="sm" onClick={() => handleStartIssuingToken(key)}>{t('apiKeyPage.issueToken')}</Button>
                                         </TableCell>
                                     </TableRow>
                                 )}
@@ -225,15 +223,12 @@ export default function ApiKeyPage() {
             </Show>
 
             {/* Use the new ApiKeyEditModal component */}
-            <Show when={policies()}>
-                <ApiKeyEditModal
-                    isOpen={showEditModal}
-                    onClose={handleCloseModal}
-                    initialData={selectedApiKey}
-                    onSaveSuccess={handleSaveSuccess}
-                    policies={policies()!}
-                />
-            </Show>
+            <ApiKeyEditModal
+                isOpen={showEditModal}
+                onClose={handleCloseModal}
+                initialData={selectedApiKey}
+                onSaveSuccess={handleSaveSuccess}
+            />
             <IssueTokenModal
                 isOpen={showIssueTokenModal}
                 onClose={handleCloseIssueTokenModal}

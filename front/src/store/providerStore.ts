@@ -1,8 +1,8 @@
-import { createResource } from 'solid-js';
+import { createResource, createSignal, createRoot } from 'solid-js';
 import { request } from '../services/api';
 import type { ProviderListItem } from './types';
 
-const fetchProviders = async (): Promise<ProviderListItem[]> => {
+const fetchProvidersAPI = async (): Promise<ProviderListItem[]> => {
     try {
         const response = await request("/ai/manager/api/provider/detail/list");
         return response || []; // Assuming `request` returns the data array or null/undefined
@@ -12,6 +12,17 @@ const fetchProviders = async (): Promise<ProviderListItem[]> => {
     }
 };
 
-const [providers, { refetch: refetchProviders }] = createResource<ProviderListItem[]>(fetchProviders, { initialValue: [] });
+function createProviderStore() {
+    const [shouldFetch, setShouldFetch] = createSignal(false);
 
-export { providers, refetchProviders };
+    const [providers, { refetch: refetchProviders }] = createResource<ProviderListItem[]>(shouldFetch, fetchProvidersAPI, { initialValue: [] });
+
+    function loadProviders() {
+        setShouldFetch(true);
+    }
+    return { providers, refetchProviders, loadProviders };
+}
+
+const { providers, refetchProviders, loadProviders } = createRoot(createProviderStore);
+
+export { providers, refetchProviders, loadProviders };

@@ -1,6 +1,6 @@
-import { createResource } from 'solid-js';
+import { createResource, createSignal, createRoot } from 'solid-js';
 import { request } from '../services/api';
-import type { ApiKeyItem } from './types'; // Import the shared type
+import type { ApiKeyItem } from './types';
 
 const formatTimestamp = (ms: number | undefined | null): string => {
     if (!ms) return '';
@@ -14,21 +14,32 @@ const formatTimestamp = (ms: number | undefined | null): string => {
     return `${YYYY}-${MM}-${DD} ${hh}:${mm}:${ss}`;
 };
 
-const fetchApiKeysGlobal = async (): Promise<ApiKeyItem[]> => {
+export const fetchApiKeysAPI = async (): Promise<ApiKeyItem[]> => {
     try {
-        const responseData = await request("/ai/manager/api/system_api_key/list");
-        const keys: ApiKeyItem[] = Array.isArray(responseData) ? responseData : [];
-        return keys.map(key => ({
+        const data = await request<ApiKeyItem[]>("/ai/manager/api/system_api_key/list");
+        return (data || []).map(key => ({
             ...key,
             created_at_formatted: formatTimestamp(key.created_at),
             updated_at_formatted: formatTimestamp(key.updated_at),
         }));
     } catch (error) {
-        console.error("Failed to fetch global API keys:", error);
+        console.error("Failed to fetch API keys:", error);
         return [];
     }
 };
 
-const [apiKeys, { refetch: refetchApiKeys }] = createResource<ApiKeyItem[]>(fetchApiKeysGlobal, { initialValue: [] });
+function createApiKeyStore() {
+    const [shouldFetch, setShouldFetch] = createSignal(false);
 
-export { apiKeys, refetchApiKeys };
+    // Eagerly fetch API keys on app startup
+    const [apiKeys, { refetch: refetchApiKeys }] = createResource<ApiKeyItem[]>(shouldFetch, fetchApiKeysAPI, { initialValue: [] });
+
+    function loadApiKeys() {
+        setShouldFetch(true);
+    }
+    return { apiKeys, refetchApiKeys, loadApiKeys };
+}
+
+const { apiKeys, refetchApiKeys, loadApiKeys } = createRoot(createApiKeyStore);
+
+export { apiKeys, refetchApiKeys, loadApiKeys };

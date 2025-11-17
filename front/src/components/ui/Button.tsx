@@ -15,7 +15,11 @@ const buttonVariants = cva(
         secondary: 'bg-gray-200 text-gray-800 hover:bg-gray-300',
         destructive: 'bg-red-600 text-white hover:bg-red-700',
         ghost: 'hover:bg-gray-100',
-        link: 'text-blue-600 underline-offset-4 hover:underline',
+      },
+      // Variant type: "type"
+      type: {
+        button: '',
+        text: 'bg-transparent hover:bg-transparent underline-offset-4 hover:underline',
       },
       // Variant type: "size"
       size: {
@@ -24,10 +28,37 @@ const buttonVariants = cva(
         lg: 'h-11 px-8',
       },
     },
+    compoundVariants: [
+      {
+        type: 'text',
+        class: 'h-auto p-0',
+      },
+      {
+        type: 'text',
+        variant: 'primary',
+        class: 'text-blue-600 hover:text-blue-700',
+      },
+      {
+        type: 'text',
+        variant: 'destructive',
+        class: 'text-red-600 hover:text-red-700',
+      },
+      {
+        type: 'text',
+        variant: 'secondary',
+        class: 'text-gray-700 hover:text-gray-900',
+      },
+      {
+        type: 'text',
+        variant: 'ghost',
+        class: 'text-blue-600 hover:text-blue-700',
+      },
+    ],
     // Default variants
     defaultVariants: {
       variant: 'primary',
       size: 'md',
+      type: 'button',
     },
   }
 );
@@ -43,13 +74,19 @@ export interface ButtonProps
 export const Button: Component<ButtonProps> = (props) => {
   // 使用 splitProps 将变体 props 和其他 props 分开
   // 这是 SolidJS 的最佳实践，确保响应性
-  const [local, rest] = splitProps(props, ['variant', 'size', 'class']);
+  // 使用 splitProps 将变体 props 和其他 props 分开
+  // 这是 SolidJS 的最佳实践，确保响应性
+  const [local, rest] = splitProps(props, ['variant', 'size', 'class', 'type']);
 
   return (
     <ButtonPrimitive
       // 使用 twMerge 和 cva 来智能地合并 class
       class={twMerge(
-        buttonVariants({ variant: local.variant, size: local.size }),
+        buttonVariants({
+          variant: local.variant,
+          size: local.size,
+          type: local.type,
+        }),
         local.class
       )}
       {...rest} // 将剩余的所有 props (如 onClick, disabled 等) 传递给 Kobalte 按钮

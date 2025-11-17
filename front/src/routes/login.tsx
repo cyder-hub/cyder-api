@@ -1,14 +1,18 @@
-import { Button } from "../components/ui/Button";
-import { TextField } from "../components/ui/Input";
+import { Button } from "@/components/ui/Button";
+import { TextField } from "@/components/ui/Input";
 import { createSignal } from "solid-js";
-import { useNavigate } from "@solidjs/router"; // Import useNavigate
-import { login } from "../services/auth"; // Import the login function
+import { createFileRoute, useRouter } from "@tanstack/solid-router";
+import { login } from "@/services/auth"; // Import the login function
 
-export default function Login() {
+export const Route = createFileRoute('/login')({
+  component: LoginPage,
+});
+
+export default function LoginPage() {
   const [password, setPassword] = createSignal("");
   const [isLoading, setIsLoading] = createSignal(false); // Add loading state
   const [error, setError] = createSignal<string | null>(null); // Add error state
-  const navigate = useNavigate(); // Initialize navigate
+  const router = useRouter();
 
   const handleLogin = async (e: Event) => {
     e.preventDefault(); // Prevent default form submission
@@ -22,7 +26,7 @@ export default function Login() {
       console.log("Login successful, navigating to dashboard...");
       // Navigate to the dashboard or a default route upon successful login
       // Ensure the path matches your router configuration and base path
-      navigate("/dashboard", { replace: true });
+      router.navigate({ to: "/dashboard", replace: true });
     } else {
       console.error("Login failed.");
       setError("Login failed. Please check your password."); // Set error message

@@ -6,7 +6,7 @@ import { Select } from './ui/Select';
 import { DialogRoot, DialogContent, DialogHeader, DialogFooter, DialogTitle } from './ui/Dialog';
 import { request } from '../services/api';
 import type { ApiKeyItem } from '../store/types';
-import type { AccessControlPolicyFromAPI } from '../pages/AccessControlPage';
+import { policies, type AccessControlPolicyFromAPI } from '../store/accessControlStore';
 
 export interface EditingApiKeyData {
     id: number | null; // null for new
@@ -22,7 +22,6 @@ interface ApiKeyEditModalProps {
     onClose: () => void;
     initialData: Accessor<ApiKeyItem | null>; // Pass the full ApiKeyItem or null for new
     onSaveSuccess: () => void;
-    policies: AccessControlPolicyFromAPI[];
 }
 
 const getEmptyEditingData = (): EditingApiKeyData => ({
@@ -40,8 +39,8 @@ export default function ApiKeyEditModal(props: ApiKeyEditModalProps) {
 
     const policyOptions = createMemo(() => {
         const noPolicy = { value: null, label: t('apiKeyEditModal.noPolicy') };
-        const policies = (props.policies || []).map(p => ({ value: p.id, label: p.name }));
-        return [noPolicy, ...policies];
+        const policiesList = (policies() || []).map(p => ({ value: p.id, label: p.name }));
+        return [noPolicy, ...policiesList];
     });
 
     const selectedPolicy = createMemo(() => {

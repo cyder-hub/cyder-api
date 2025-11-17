@@ -32,6 +32,41 @@ This repository is an AI proxy service. It provides a robust and scalable backen
 * `server/src/service`: Business logic services, including an in-memory cache (`app_state`), request/response transformation for different AI services, and a Vertex AI token issuer.
 
 
+## Frontend Style Guide
+
+### Visual Design
+
+*   **Aesthetic**: The project follows a modern, clean, and professional design aesthetic, typical of a dashboard or admin interface. The focus is on clarity, usability, and information density.
+*   **Layout**: A standard two-column layout is used, featuring a collapsible sidebar for navigation and a main content area. This provides a consistent and predictable user experience across different pages.
+*   **Color Palette**:
+    *   **Primary/Accent**: `blue-600` is the primary interactive color, with `blue-700` for hover states. `indigo-500` is used for focus rings.
+    *   **Neutral**: `gray-100` is used for page backgrounds. `gray-200` and `gray-300` are used for secondary buttons and borders. Text colors range from `gray-500` for descriptions to `gray-800` for primary text. `white` is used for text on dark backgrounds and for card backgrounds.
+    *   **Feedback**: `red-600` is used for destructive actions, with `red-700` for hover states.
+*   **Typography**:
+    *   The base font size is `text-sm`.
+    *   Page titles (`h1`) are `text-3xl` and `font-bold`.
+    *   Card titles (`h2`) are `text-xl` and `font-semibold`.
+*   **Interactivity & State**:
+    *   Interactive elements have clear `hover` and `focus` states, usually indicated by a subtle change in background color.
+    *   Active or "current" items (e.g., the current page in pagination or navigation) are highlighted with a solid `blue` or `indigo` background and `white` text.
+    *   Disabled elements are de-emphasized with reduced opacity (`opacity-50`) and a `not-allowed` cursor.
+*   **Border & Spacing**:
+    *   Elements like buttons, inputs, and cards feature rounded corners (`rounded-md`), contributing to a modern and soft appearance.
+    *   Consistent padding and margins create a well-organized and uncluttered layout.
+    *   Subtle gray borders are used to define component boundaries without creating harsh visual divisions.
+
+### Component Implementation
+
+The frontend is built with **SolidJS** and styled using **Tailwind CSS**, with **Kobalte** providing accessible UI primitives.
+
+*   **UI Primitives**: Reusable, low-level UI components are located in `front/src/components/ui`. These are built on top of Kobalte's headless primitives. When creating new UI elements, prefer extending these or following the same pattern.
+*   **Styling**:
+    *   All styling is done with **Tailwind CSS** utility classes. Avoid writing custom CSS files.
+    *   Use `twMerge` to intelligently merge Tailwind classes, which is especially useful for creating customizable components.
+*   **State-driven Styles**: Leverage Kobalte's `ui-*` data attributes (e.g., `ui-current`, `ui-disabled`) for styling different component states directly in your JSX.
+*   **Component Variants**: The project uses `class-variance-authority` (CVA) to manage component variants in a structured and maintainable way. This is particularly evident in the `Button` component, which has variants for `variant`, `type`, and `size`. When creating new components with multiple styles, this approach is preferred.
+
+
 ## Use Cargo to Manage the Project
 This project uses `cargo xtask` for project management.
 

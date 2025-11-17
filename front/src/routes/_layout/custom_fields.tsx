@@ -1,16 +1,17 @@
-import { createSignal, For, Show, createResource } from 'solid-js';
-import { useI18n } from '../i18n';
-import { Button } from '../components/ui/Button';
-import { request } from '../services/api';
+import { createSignal, For, Show, onMount } from 'solid-js';
+import { createFileRoute, useRouter } from '@tanstack/solid-router';
+import { useI18n } from '@/i18n';
+import { Button } from '@/components/ui/Button';
+import { request } from '@/services/api';
 import {
     DialogRoot,
     DialogContent,
     DialogHeader,
     DialogFooter,
     DialogTitle,
-} from '../components/ui/Dialog';
-import { TextField, NumberField } from '../components/ui/Input';
-import { Select } from '../components/ui/Select';
+} from '@/components/ui/Dialog';
+import { TextField, NumberField } from '@/components/ui/Input';
+import { Select } from '@/components/ui/Select';
 import {
     TableRoot,
     TableHeader,
@@ -18,26 +19,13 @@ import {
     TableRow,
     TableColumnHeader,
     TableCell,
-} from '../components/ui/Table';
+} from '@/components/ui/Table';
+import { customFields, loadCustomFields, refetchCustomFields, type CustomFieldDefinition } from '@/store/customFieldStore';
 
 // --- Type Definitions ---
 
 type CustomFieldType = 'STRING' | 'INTEGER' | 'NUMBER' | 'BOOLEAN' | 'JSON_STRING' | 'UNSET';
 const fieldPlacements = ['HEADER', 'QUERY', 'BODY'];
-
-interface CustomFieldDefinition {
-    id: number;
-    name: string | null;
-    description: string | null;
-    field_name: string;
-    field_placement: string;
-    field_type: string;
-    string_value: string | null;
-    integer_value: number | null;
-    number_value: number | null;
-    boolean_value: boolean | null;
-    is_enabled: boolean;
-}
 
 interface EditingCustomField {
     id: number | null;
@@ -70,16 +58,6 @@ const newCustomFieldTemplate = (): EditingCustomField => ({
 const fieldTypes: CustomFieldType[] = ['STRING', 'INTEGER', 'NUMBER', 'BOOLEAN', 'JSON_STRING', 'UNSET'];
 
 // --- API Functions ---
-
-const fetchCustomFieldsAPI = async (): Promise<CustomFieldDefinition[]> => {
-    try {
-        const response = await request("/ai/manager/api/custom_field_definition/list?page_size=1000");
-        return response.list || [];
-    } catch (error) {
-        console.error("Failed to fetch custom fields:", error);
-        return [];
-    }
-};
 
 const fetchCustomFieldDetailAPI = async (id: number): Promise<CustomFieldDefinition | null> => {
     try {
@@ -121,12 +99,20 @@ const deleteCustomFieldAPI = async (id: number): Promise<any> => {
     return request(`/ai/manager/api/custom_field_definition/${id}`, { method: 'DELETE' });
 };
 
+export const Route = createFileRoute('/_layout/custom_fields')({
+    component: CustomFieldsPage,
+});
+
 // --- Component ---
 export default function CustomFieldsPage() {
     const [t] = useI18n();
-    const [customFields, { refetch: refetchCustomFields }] = createResource<CustomFieldDefinition[]>(fetchCustomFieldsAPI, { initialValue: [] });
+    const router = useRouter();
     const [showEditModal, setShowEditModal] = createSignal(false);
     const [editingField, setEditingField] = createSignal<EditingCustomField>(newCustomFieldTemplate());
+
+    onMount(() => {
+        loadCustomFields();
+    });
 
     const handleOpenAddModal = () => {
         setEditingField(newCustomFieldTemplate());
@@ -207,7 +193,7 @@ export default function CustomFieldsPage() {
         <div class="p-4">
             <div class="flex justify-between items-center mb-6">
                 <h1 class="text-2xl font-semibold text-gray-800">{t('customFieldsPage.title')}</h1>
-                <Button onClick={handleOpenAddModal} variant="primary">{t('customFieldsPage.addCustomField')}</Button>
+                <Button onClick={handleOpenAddModal} variant="primary" disabled={customFields.loading}>{t('customFieldsPage.addCustomField')}</Button>
             </div>
 
             {/* Data Table */}
@@ -248,9 +234,9 @@ export default function CustomFieldsPage() {
                                             onChange={() => handleToggleEnable(field)}
                                         />
                                     </TableCell>
-                                    <TableCell>
-                                        <Button onClick={() => handleOpenEditModal(field)} variant="secondary" size="sm">{t('edit')}</Button>
-                                        <Button onClick={() => handleDelete(field.id, field.name || field.field_name)} variant="destructive" size="sm">{t('delete')}</Button>
+                                    <TableCell class="space-x-2">
+                                        <Button type="text" onClick={() => handleOpenEditModal(field)} variant="secondary" size="sm">{t('edit')}</Button>
+                                        <Button type="text" onClick={() => handleDelete(field.id, field.name || field.field_name)} variant="destructive" size="sm">{t('delete')}</Button>
                                     </TableCell>
                                 </TableRow>
                             }</For>

@@ -1,18 +1,19 @@
-import { createSignal, For, Show, createResource, createMemo } from 'solid-js';
+import { createSignal, For, Show, createMemo, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
-import { useI18n } from '../i18n';
-import { request } from '../services/api';
-import { toastController } from '../components/GlobalMessage';
-import { Button } from '../components/ui/Button';
+import { createFileRoute, useRouter } from '@tanstack/solid-router';
+import { useI18n } from '@/i18n';
+import { request } from '@/services/api';
+import { toastController } from '@/components/GlobalMessage';
+import { Button } from '@/components/ui/Button';
 import {
     DialogRoot,
     DialogContent,
     DialogHeader,
     DialogFooter,
     DialogTitle,
-} from '../components/ui/Dialog';
-import { Select } from '../components/ui/Select';
-import { TextField, NumberField } from '../components/ui/Input';
+} from '@/components/ui/Dialog';
+import { Select } from '@/components/ui/Select';
+import { TextField, NumberField } from '@/components/ui/Input';
 import {
     TableRoot,
     TableHeader,
@@ -20,56 +21,22 @@ import {
     TableRow,
     TableColumnHeader,
     TableCell,
-} from '../components/ui/Table';
-
-// Interfaces based on backend
-interface BillingPlan {
-    id: number;
-    name: string;
-    description: string | null;
-    currency: string;
-    created_at: number;
-    updated_at: number;
-}
-
-interface PriceRule {
-    id: number;
-    plan_id: number;
-    description: string | null;
-    is_enabled: boolean;
-    effective_from: number;
-    effective_until: number | null;
-    usage_type: string;
-    media_type: string | null;
-    price_in_micro_units: number;
-}
+} from '@/components/ui/Table';
+import {
+    billingPlans,
+    priceRules,
+    selectedPlanId,
+    setSelectedPlanId,
+    refetchPriceRules,
+    loadBillingPlans,
+    refetchBillingPlans,
+    type BillingPlan,
+    type PriceRule,
+} from '@/store/priceStore';
 
 // Editing types
 type EditingBillingPlan = Omit<BillingPlan, 'created_at' | 'updated_at'>;
 type EditingPriceRule = Omit<PriceRule, 'created_at' | 'updated_at'>;
-
-const fetchBillingPlans = async (): Promise<BillingPlan[]> => {
-    try {
-        const response = await request('/ai/manager/api/price/plan/list');
-        return response || [];
-    } catch (error) {
-        console.error("Failed to fetch billing plans", error);
-        toastController.error("Failed to fetch billing plans");
-        return [];
-    }
-};
-
-const fetchPriceRules = async (planId: number): Promise<PriceRule[]> => {
-    if (!planId) return [];
-    try {
-        const response = await request(`/ai/manager/api/price/rule/list_by_plan?plan_id=${planId}`);
-        return response || [];
-    } catch (error) {
-        console.error(`Failed to fetch price rules for plan ${planId}`, error);
-        toastController.error(`Failed to fetch price rules for plan ${planId}`);
-        return [];
-    }
-};
 
 const formatTimestamp = (ms: number | undefined | null): string => {
     if (!ms) return '';
@@ -89,12 +56,17 @@ const fromDateTimeLocal = (str: string) => {
     return str ? new Date(str).getTime() : null;
 };
 
+export const Route = createFileRoute('/_layout/price')({
+    component: PricePage,
+});
+
 export default function PricePage() {
     const [t] = useI18n();
+    const router = useRouter();
 
-    const [billingPlans, { refetch: refetchBillingPlans }] = createResource(fetchBillingPlans);
-    const [selectedPlanId, setSelectedPlanId] = createSignal<number | null>(null);
-    const [priceRules, { refetch: refetchPriceRules }] = createResource(selectedPlanId, fetchPriceRules);
+    onMount(() => {
+        loadBillingPlans();
+    });
 
     const selectedPlan = () => billingPlans()?.find(p => p.id === selectedPlanId());
 
@@ -245,7 +217,7 @@ export default function PricePage() {
             <div class="section">
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="section-title">{t('pricePage.plans.title')}</h2>
-                    <Button variant="primary" onClick={openNewPlanModal}>{t('pricePage.plans.add')}</Button>
+                    <Button variant="primary" onClick={openNewPlanModal} disabled={billingPlans.loading}>{t('pricePage.plans.add')}</Button>
                 </div>
                 <Show when={!billingPlans.loading} fallback={<p>{t('pricePage.plans.loading')}</p>}>
                     <div class="shadow-md rounded-lg border border-gray-200 overflow-hidden">
@@ -269,9 +241,9 @@ export default function PricePage() {
                                             <TableCell>{plan.name}</TableCell>
                                             <TableCell>{plan.description}</TableCell>
                                             <TableCell>{plan.currency}</TableCell>
-                                            <TableCell>
-                                                <Button variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); openEditPlanModal(plan); }}>{t('common.edit')}</Button>
-                                                <Button variant="destructive" size="sm" class="ml-2" onClick={(e) => { e.stopPropagation(); handleDeletePlan(plan.id, plan.name); }}>{t('common.delete')}</Button>
+                                            <TableCell class="space-x-2">
+                                                <Button type="text" variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); openEditPlanModal(plan); }}>{t('common.edit')}</Button>
+                                                <Button type="text" variant="destructive" size="sm" onClick={(e) => { e.stopPropagation(); handleDeletePlan(plan.id, plan.name); }}>{t('common.delete')}</Button>
                                             </TableCell>
                                         </TableRow>
                                     )}
@@ -287,7 +259,7 @@ export default function PricePage() {
                 <div class="section">
                     <div class="flex justify-between items-center mb-4">
                         <h2 class="section-title">{t('pricePage.rules.title')}</h2>
-                        <Button variant="primary" onClick={openNewRuleModal}>{t('pricePage.rules.add')}</Button>
+                        <Button variant="primary" onClick={openNewRuleModal} disabled={priceRules.loading}>{t('pricePage.rules.add')}</Button>
                     </div>
                     <Show when={priceRules.loading}><p>{t('pricePage.rules.loading')}</p></Show>
                     <div class="shadow-md rounded-lg border border-gray-200 overflow-hidden">
@@ -313,9 +285,9 @@ export default function PricePage() {
                                             <TableCell>{rule.media_type}</TableCell>
                                             <TableCell class="text-right">{rule.price_in_micro_units / 1000} {selectedPlan()?.currency}</TableCell>
                                             <TableCell>{formatTimestamp(rule.effective_from)}</TableCell>
-                                            <TableCell>
-                                                <Button variant="secondary" size="sm" onClick={() => openEditRuleModal(rule)}>{t('common.edit')}</Button>
-                                                <Button variant="destructive" size="sm" class="ml-2" onClick={() => handleDeleteRule(rule.id)}>{t('common.delete')}</Button>
+                                            <TableCell class="space-x-2">
+                                                <Button type="text" variant="secondary" size="sm" onClick={() => openEditRuleModal(rule)}>{t('common.edit')}</Button>
+                                                <Button type="text" variant="destructive" size="sm" onClick={() => handleDeleteRule(rule.id)}>{t('common.delete')}</Button>
                                             </TableCell>
                                         </TableRow>
                                     )}

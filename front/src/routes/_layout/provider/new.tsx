@@ -1,14 +1,14 @@
 import { For, Show, onMount, createSignal, createMemo } from 'solid-js';
 import { createStore, produce } from 'solid-js/store';
-import { useI18n } from '../i18n';
-import { Button } from '../components/ui/Button';
-import { TextField } from '../components/ui/Input';
-import { Select } from '../components/ui/Select';
-import { useNavigate, useParams } from '@solidjs/router';
-import { request } from '../services/api';
-import { refetchProviders as globalRefetchProviders } from '../store/providerStore';
-import { toastController } from '../components/GlobalMessage';
-import type { ProviderListItem, CustomFieldType, ProviderApiKeyItem as BackendProviderApiKeyItem } from '../store/types';
+import { useI18n } from '@/i18n';
+import { Button } from '@/components/ui/Button';
+import { TextField } from '@/components/ui/Input';
+import { Select } from '@/components/ui/Select';
+import { createFileRoute, useNavigate } from '@tanstack/solid-router';
+import { request } from '@/services/api';
+import { refetchProviders as globalRefetchProviders } from '@/store/providerStore';
+import { toastController } from '@/components/GlobalMessage';
+import type { ProviderListItem, CustomFieldType, ProviderApiKeyItem as BackendProviderApiKeyItem, ModelItem } from '@/store/types';
 
 // Local interface for custom fields, must include id for linking/unlinking
 interface CustomFieldItem {
@@ -53,15 +53,7 @@ interface EditingProviderData {
     custom_fields: CustomFieldItem[];
 }
 
-const fetchProviderDetail = async (providerId: number): Promise<ProviderListItem | null> => {
-    try {
-        const response = await request(`/ai/manager/api/provider/${providerId}/detail`);
-        return response || null;
-    } catch (error) {
-        console.error(t('providerEditPage.alert.fetchDetailFailed', { providerId: providerId }), error);
-        return null;
-    }
-};
+// fetchProviderDetail is moved into the ProviderEdit component to get access to the 't' function from i18n.
 
 const fetchAllCustomFields = async (): Promise<CustomFieldItem[]> => {
     try {
@@ -105,11 +97,21 @@ const StatusIndicator = (props: { status: 'unchecked' | 'checking' | 'success' |
     );
 };
 
-export default function ProviderEdit() {
-    const navigate = useNavigate();
-    const params = useParams();
-    const providerId = params.id ? parseInt(params.id) : null;
+function ProviderEdit(props: { providerId: number | null }) {
+    const navigate = useNavigate({ from: Route.fullPath });
+    const providerId = props.providerId;
     const [t] = useI18n();
+
+    const fetchProviderDetail = async (providerId: number): Promise<ProviderListItem | null> => {
+        try {
+            const response = await request(`/ai/manager/api/provider/${providerId}/detail`);
+            return response || null;
+        } catch (error) {
+            console.error(t('providerEditPage.alert.fetchDetailFailed', { providerId: providerId }), error);
+            toastController.error(t('providerEditPage.alert.fetchDetailFailed', { providerId: providerId }));
+            return null;
+        }
+    };
 
     // Use createStore instead of createSignal for editingData
     const [editingData, setEditingData] = createStore<EditingProviderData | null>(null);
@@ -208,7 +210,7 @@ export default function ProviderEdit() {
 
     // This function is kept for the "Cancel" button that navigates away from the page.
     const handleNavigateBack = () => {
-        navigate('/provider');
+        navigate({ to: '/provider' });
     };
 
     // Removed handleCommitProvider function
@@ -976,7 +978,7 @@ export default function ProviderEdit() {
                                         {/* For existing models */}
                                         <Show when={model.id}>
                                             <Button variant="secondary" size="sm" onClick={() => handleCheck('model', index())}>{t('common.check')}</Button>
-                                            <Button variant="secondary" size="sm" onClick={() => navigate(`/model/edit/${model.id!}`)}>
+                                            <Button variant="secondary" size="sm" onClick={() => navigate({ to: `/model/edit/${model.id!}` })}>
                                                 {t('common.edit')}
                                             </Button>
                                         </Show>
@@ -1144,4 +1146,13 @@ export default function ProviderEdit() {
             </Show>
         </div>
     );
+}
+
+export const Route = createFileRoute('/_layout/provider/new')({
+    component: ProviderEditPage,
+});
+
+function ProviderEditPage() {
+    const { id } = Route.useParams();
+    return <ProviderEdit providerId={parseInt(id)} />;
 }

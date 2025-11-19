@@ -857,7 +857,6 @@ impl ModelStore {
         let mut composite_key_map_w = self.get_id_by_composite_key_write()?;
         composite_key_map_w.clear();
         composite_key_map_w.extend(temp_id_by_composite_key);
-        debug!("init model stroe {:?}", composite_key_map_w);
         
         Ok(())
     }

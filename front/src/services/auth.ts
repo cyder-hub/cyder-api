@@ -4,6 +4,7 @@ const [accessTokenSignal, setAccessTokenSignal] = createSignal<string | null>(nu
 export const getAccessToken = accessTokenSignal;
 
 export async function tryRefreshToken(): Promise<boolean> {
+  console.debug("Attempting to refresh token...");
   const refreshToken = localStorage.getItem("auth_token");
 
   if (!refreshToken) {
@@ -38,6 +39,7 @@ export async function tryRefreshToken(): Promise<boolean> {
 
 // Placeholder for login function if needed later
 export async function login(password: string): Promise<boolean> {
+    console.debug("Attempting login...");
     try {
         const response = await fetch("/ai/manager/api/auth/login", {
             method: "POST",

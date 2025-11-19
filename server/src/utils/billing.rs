@@ -129,7 +129,6 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[PriceRule]) -> i64 
             // Price is per 1000 tokens
             let cost = usage_info.prompt_tokens as i64 * rule.price_in_micro_units;
             total_cost += cost;
-            debug!("[calculate_cost] Applied PROMPT rule: {:?}. Cost added: {}. Current total cost: {}", rule, cost, total_cost);
         }
     }
 
@@ -139,7 +138,6 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[PriceRule]) -> i64 
             // Price is per 1000 tokens
             let cost = usage_info.completion_tokens as i64 * rule.price_in_micro_units;
             total_cost += cost;
-            debug!("[calculate_cost] Applied COMPLETION rule: {:?}. Cost added: {}. Current total cost: {}", rule, cost, total_cost);
         }
     }
 
@@ -147,7 +145,6 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[PriceRule]) -> i64 
     if let Some(rule) = find_best_rule("INVOCATION") {
         // Invocation is a flat fee, not token-based.
         total_cost += rule.price_in_micro_units;
-        debug!("[calculate_cost] Applied INVOCATION rule: {:?}. Cost added: {}. Current total cost: {}", rule, rule.price_in_micro_units, total_cost);
     }
 
     debug!("[calculate_cost] Final calculated cost: {}", total_cost);

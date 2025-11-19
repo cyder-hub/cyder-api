@@ -31,6 +31,18 @@ This repository is an AI proxy service. It provides a robust and scalable backen
 * `server/src/utils`: Utility modules for features like authentication, billing calculation, and access limit checks.
 * `server/src/service`: Business logic services, including an in-memory cache (`app_state`), request/response transformation for different AI services, and a Vertex AI token issuer.
 
+## Backend Logging Guide
+
+We use `cyder_tools::log` for logging in the backend. Import the macros as follows:
+`use cyder_tools::log::{debug, info, warn, error};`
+
+### Log Levels
+
+*   **debug**: Show only during development or when debugging in production.
+*   **info**: Show common running information in production.
+*   **warn**: Show when errors occur but do not affect the system running.
+*   **error**: Show when a fatal error occurs and cannot be recovered (e.g., database error, core features failing).
+
 
 ## Frontend Style Guide
 

@@ -15,7 +15,6 @@ use axum::{
 use model::create_model_router;
 use model_alias::create_model_alias_router;
 use provider::create_provider_router;
-use proxy::create_proxy_router;
 use request_log::create_record_router;
 
 use tower_http::{services::{ServeDir, ServeFile}, set_header::SetResponseHeaderLayer};
@@ -29,7 +28,6 @@ mod model;
 mod model_alias;
 mod provider;
 pub mod llm_types;
-pub mod proxy;
 mod request_log;
 mod stat; // Add this module declaration
 mod system_api_key;
@@ -37,14 +35,7 @@ mod price;
 
 pub use error::BaseError;
 
-pub fn create_router() -> StateRouter {
-    create_state_router()
-        .merge(create_manager_router())
-        .merge(create_proxy_router())
-        .fallback(handle_404)
-}
-
-fn create_manager_router() -> StateRouter {
+pub fn create_manager_router() -> StateRouter {
     let serve_dir = ServeDir::new("public").fallback(ServeFile::new("public/index.html"));
     let serve_vendor_dir = ServeDir::new("public/assets");
 
@@ -75,6 +66,6 @@ fn create_manager_router() -> StateRouter {
     create_state_router().nest("/manager", create_state_router().merge(api_router).merge(ui_router))
 }
 
-async fn handle_404() -> impl IntoResponse {
+pub async fn handle_404() -> impl IntoResponse {
     (http::StatusCode::NOT_FOUND, "not found")
 }

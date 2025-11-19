@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 
 use config::CONFIG;
-use controller::create_router;
+use controller::{create_manager_router, handle_404};
+use crate::proxy::create_proxy_router;
 use crate::service::app_state::{create_app_state, create_state_router}; // Import create_app_state
 
 use cyder_tools::log::{info, LocalLogger};
@@ -9,9 +10,10 @@ use cyder_tools::log::{info, LocalLogger};
 mod config;
 mod controller;
 mod database;
+mod proxy;
 mod schema;
-mod utils;
 mod service;
+mod utils;
 
 #[tokio::main]
 async fn main() {
@@ -23,7 +25,12 @@ async fn main() {
     axum::serve(
         listener,
         create_state_router()
-            .nest(&CONFIG.base_path, create_router())
+            .nest(&CONFIG.base_path,
+                create_state_router()
+                    .merge(create_manager_router())
+                    .merge(create_proxy_router())
+                    .fallback(handle_404)
+            )
             .with_state(app_state) // Call with_state before into_make_service
             .into_make_service_with_connect_info::<SocketAddr>(),
     )

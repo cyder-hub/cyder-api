@@ -14,6 +14,10 @@ pub struct OllamaRequestPayload {
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<OllamaOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,11 +61,10 @@ impl From<OllamaRequestPayload> for UnifiedRequest {
                 };
                 // NOTE: Ollama's `images` field is ignored for now.
                 // UnifiedRequest would need to be updated to handle multimodal content.
-                let content = UnifiedMessageContent::Text(msg.content);
+                let content = vec![UnifiedContentPart::Text { text: msg.content }];
                 UnifiedMessage {
                     role,
                     content,
-                    thinking_content: None,
                 }
             })
             .collect();
@@ -84,7 +87,8 @@ impl From<OllamaRequestPayload> for UnifiedRequest {
         UnifiedRequest {
             model: Some(ollama_req.model),
             messages,
-            tools: None, // Ollama doesn't support tools in the same way
+            // Ollama doesn't support tools/function calling - always set to None
+            tools: None,
             stream: ollama_req.stream.unwrap_or(false),
             temperature,
             max_tokens,
@@ -93,7 +97,11 @@ impl From<OllamaRequestPayload> for UnifiedRequest {
             seed,
             presence_penalty,
             frequency_penalty,
+            format: ollama_req.format,
+            keep_alive: ollama_req.keep_alive,
+            ..Default::default()
         }
+        .filter_empty() // Filter out empty content and messages
     }
 }
 
@@ -107,33 +115,26 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                     UnifiedRole::System => "system",
                     UnifiedRole::User => "user",
                     UnifiedRole::Assistant => "assistant",
-                    // Ollama doesn't have a 'tool' role. We drop tool messages.
+                    // Ollama doesn't support tool role or function calling - drop tool messages
+                    // Warning: This means tool results will be lost when targeting Ollama
                     UnifiedRole::Tool => return None,
                 }
                 .to_string();
 
                 let mut final_content = String::new();
-                if let Some(thinking) = msg.thinking_content {
-                    if !thinking.is_empty() {
-                        final_content.push_str(&thinking);
-                        final_content.push('\n');
+                
+                for part in msg.content {
+                    match part {
+                        UnifiedContentPart::Text { text } => {
+                             final_content.push_str(&text);
+                        }
+                        _ => {}
                     }
                 }
 
-                match &msg.content {
-                    UnifiedMessageContent::Text(text) => {
-                        final_content.push_str(text);
-                    }
-                    // Drop tool calls from assistant messages as Ollama doesn't support them.
-                    UnifiedMessageContent::ToolCalls(_) => return None,
-                    UnifiedMessageContent::ToolResult(_) => return None,
-                };
-
                 if final_content.is_empty() {
-                    // Don't send empty messages, unless it was an empty text message originally.
-                    if !matches!(&msg.content, UnifiedMessageContent::Text(s) if s.is_empty()) {
-                        return None;
-                    }
+                    // Don't send empty messages? Or send empty string.
+                    // Assuming we send what we have.
                 }
 
                 Some(OllamaMessage {
@@ -170,6 +171,8 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
             messages,
             stream: Some(unified_req.stream),
             options,
+            format: None,
+            keep_alive: None,
         }
     }
 }
@@ -182,30 +185,51 @@ pub struct OllamaResponse {
     pub created_at: String,
     pub message: OllamaMessage,
     pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_reason: Option<String>,
     #[serde(rename = "prompt_eval_count")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
     #[serde(rename = "eval_count")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_duration: Option<u64>,
 }
 
 impl From<OllamaResponse> for UnifiedResponse {
     fn from(ollama_res: OllamaResponse) -> Self {
         let message = UnifiedMessage {
             role: UnifiedRole::Assistant, // Ollama response is always assistant
-            content: UnifiedMessageContent::Text(ollama_res.message.content),
-            thinking_content: None,
+            content: vec![UnifiedContentPart::Text { text: ollama_res.message.content }],
         };
+
+        let finish_reason = if ollama_res.done {
+            ollama_res.done_reason.or_else(|| Some("stop".to_string()))
+        } else {
+            None
+        };
+        
+        // Map Ollama's done_reason to unified finish_reason
+        let finish_reason = finish_reason.map(|reason| {
+            match reason.as_str() {
+                "stop" => "stop".to_string(),
+                "length" => "length".to_string(),
+                _ => "stop".to_string(), // Default to stop for other reasons
+            }
+        });
 
         let choice = UnifiedChoice {
             index: 0,
             message,
-            finish_reason: if ollama_res.done {
-                Some("stop".to_string())
-            } else {
-                None
-            },
+            finish_reason,
+            logprobs: None,
         };
 
         let usage = if let (Some(prompt_tokens), Some(completion_tokens)) =
@@ -227,6 +251,7 @@ impl From<OllamaResponse> for UnifiedResponse {
             usage,
             created: Some(Utc::now().timestamp()),
             object: Some("chat.completion".to_string()),
+            system_fingerprint: None,
         }
     }
 }
@@ -238,24 +263,19 @@ impl From<UnifiedResponse> for OllamaResponse {
                 index: 0,
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
-                    content: UnifiedMessageContent::Text("".to_string()),
-                    thinking_content: None,
+                    content: vec![],
                 },
                 finish_reason: None,
+                logprobs: None,
             }
         });
 
         let mut content = String::new();
-        if let Some(thinking) = choice.message.thinking_content {
-            if !thinking.is_empty() {
-                content.push_str(&thinking);
-                content.push('\n');
+        for part in choice.message.content {
+            if let UnifiedContentPart::Text { text } = part {
+                content.push_str(&text);
             }
         }
-        match choice.message.content {
-            UnifiedMessageContent::Text(text) => content.push_str(&text),
-            _ => {} // Ollama only supports text content in responses
-        };
 
         let message = OllamaMessage {
             role: "assistant".to_string(),
@@ -269,13 +289,26 @@ impl From<UnifiedResponse> for OllamaResponse {
             (None, None)
         };
 
+        let done_reason = choice.finish_reason.as_ref().map(|reason| {
+            match reason.as_str() {
+                "stop" => "stop".to_string(),
+                "length" => "length".to_string(),
+                _ => "stop".to_string(),
+            }
+        });
+
         OllamaResponse {
             model: unified_res.model,
             created_at: Utc::now().to_rfc3339(),
             message,
             done: choice.finish_reason.is_some(),
+            done_reason,
             prompt_tokens,
             completion_tokens,
+            total_duration: None,
+            load_duration: None,
+            prompt_eval_duration: None,
+            eval_duration: None,
         }
     }
 }
@@ -291,13 +324,11 @@ mod tests {
             messages: vec![
                 UnifiedMessage {
                     role: UnifiedRole::System,
-                    content: UnifiedMessageContent::Text("You are a bot.".to_string()),
-                    thinking_content: None,
+                    content: vec![UnifiedContentPart::Text { text: "You are a bot.".to_string() }],
                 },
                 UnifiedMessage {
                     role: UnifiedRole::User,
-                    content: UnifiedMessageContent::Text("Hello".to_string()),
-                    thinking_content: None,
+                    content: vec![UnifiedContentPart::Text { text: "Hello".to_string() }],
                 },
             ],
             stream: true,
@@ -309,6 +340,7 @@ mod tests {
             presence_penalty: Some(0.5),
             frequency_penalty: Some(0.6),
             tools: None,
+            ..Default::default()
         };
 
         let ollama_req: OllamaRequestPayload = unified_req.into();
@@ -356,6 +388,8 @@ mod tests {
                 presence_penalty: Some(0.5),
                 frequency_penalty: Some(0.6),
             }),
+            format: None,
+            keep_alive: None,
         };
 
         let unified_req: UnifiedRequest = ollama_req.into();
@@ -365,15 +399,13 @@ mod tests {
         assert_eq!(unified_req.messages[0].role, UnifiedRole::System);
         assert_eq!(
             unified_req.messages[0].content,
-            UnifiedMessageContent::Text("You are a bot.".to_string())
+            vec![UnifiedContentPart::Text { text: "You are a bot.".to_string() }]
         );
-        assert!(unified_req.messages[0].thinking_content.is_none());
         assert_eq!(unified_req.messages[1].role, UnifiedRole::User);
         assert_eq!(
             unified_req.messages[1].content,
-            UnifiedMessageContent::Text("Hello".to_string())
+            vec![UnifiedContentPart::Text { text: "Hello".to_string() }]
         );
-        assert!(unified_req.messages[1].thinking_content.is_none());
         assert_eq!(unified_req.stream, true);
         assert_eq!(unified_req.temperature, Some(0.8));
         assert_eq!(unified_req.max_tokens, Some(100));
@@ -395,8 +427,13 @@ mod tests {
                 images: None,
             },
             done: true,
+            done_reason: Some("stop".to_string()),
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
+            total_duration: None,
+            load_duration: None,
+            prompt_eval_duration: None,
+            eval_duration: None,
         };
 
         let unified_res: UnifiedResponse = ollama_res.into();
@@ -408,9 +445,8 @@ mod tests {
         assert_eq!(choice.message.role, UnifiedRole::Assistant);
         assert_eq!(
             choice.message.content,
-            UnifiedMessageContent::Text("Hello there!".to_string())
+            vec![UnifiedContentPart::Text { text: "Hello there!".to_string() }]
         );
-        assert!(choice.message.thinking_content.is_none());
         assert_eq!(choice.finish_reason, Some("stop".to_string()));
         let usage = unified_res.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);
@@ -427,10 +463,10 @@ mod tests {
                 index: 0,
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
-                    content: UnifiedMessageContent::Text("Hello there!".to_string()),
-                    thinking_content: None,
+                    content: vec![UnifiedContentPart::Text { text: "Hello there!".to_string() }],
                 },
                 finish_reason: Some("stop".to_string()),
+                logprobs: None,
             }],
             usage: Some(UnifiedUsage {
                 prompt_tokens: 10,
@@ -438,7 +474,8 @@ mod tests {
                 total_tokens: 15,
             }),
             created: Some(12345),
-            object: Some("chat.completion".to_string()),
+            object: Some("chat.completion.chunk".to_string()),
+            system_fingerprint: None,
         };
 
         let ollama_res: OllamaResponse = unified_res.into();
@@ -463,8 +500,13 @@ mod tests {
                 images: None,
             }),
             done: false,
+            done_reason: None,
             prompt_tokens: None,
             completion_tokens: None,
+            total_duration: None,
+            load_duration: None,
+            prompt_eval_duration: None,
+            eval_duration: None,
         };
 
         let unified_chunk: UnifiedChunkResponse = ollama_chunk.into();
@@ -474,9 +516,7 @@ mod tests {
         let choice = &unified_chunk.choices[0];
         assert_eq!(choice.index, 0);
         assert_eq!(choice.delta.role, Some(UnifiedRole::Assistant));
-        assert_eq!(choice.delta.content, Some("Hello".to_string()));
-        assert!(choice.delta.tool_calls.is_none());
-        assert!(choice.delta.thinking_content.is_none());
+        assert_eq!(choice.delta.content, vec![UnifiedContentPartDelta::TextDelta { index: 0, text: "Hello".to_string() }]);
         assert!(choice.finish_reason.is_none());
         assert!(unified_chunk.usage.is_none());
 
@@ -486,8 +526,13 @@ mod tests {
             created_at: "2023-12-12T18:34:13.014Z".to_string(),
             message: None,
             done: true,
+            done_reason: Some("stop".to_string()),
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
+            total_duration: None,
+            load_duration: None,
+            prompt_eval_duration: None,
+            eval_duration: None,
         };
 
         let unified_final_chunk: UnifiedChunkResponse = ollama_final_chunk.into();
@@ -495,7 +540,7 @@ mod tests {
         assert_eq!(unified_final_chunk.choices.len(), 1);
         let final_choice = &unified_final_chunk.choices[0];
         assert!(final_choice.delta.role.is_none());
-        assert!(final_choice.delta.content.is_none());
+        assert!(final_choice.delta.content.is_empty());
         assert_eq!(final_choice.finish_reason, Some("stop".to_string()));
         let usage = unified_final_chunk.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);
@@ -513,9 +558,7 @@ mod tests {
                 index: 0,
                 delta: UnifiedMessageDelta {
                     role: Some(UnifiedRole::Assistant),
-                    content: Some(" World".to_string()),
-                    tool_calls: None,
-                    thinking_content: None,
+                    content: vec![UnifiedContentPartDelta::TextDelta { index: 0, text: " World".to_string() }],
                 },
                 finish_reason: None,
             }],
@@ -560,75 +603,6 @@ mod tests {
         assert_eq!(ollama_final_chunk.prompt_tokens, Some(10));
         assert_eq!(ollama_final_chunk.completion_tokens, Some(5));
     }
-
-    #[test]
-    fn test_unified_request_with_thinking_to_ollama() {
-        let unified_req = UnifiedRequest {
-            model: Some("test-model".to_string()),
-            messages: vec![UnifiedMessage {
-                role: UnifiedRole::Assistant,
-                content: UnifiedMessageContent::Text("I am a bot.".to_string()),
-                thinking_content: Some("Thinking...".to_string()),
-            }],
-            ..Default::default()
-        };
-
-        let ollama_req: OllamaRequestPayload = unified_req.into();
-
-        assert_eq!(ollama_req.messages.len(), 1);
-        assert_eq!(ollama_req.messages[0].role, "assistant");
-        assert_eq!(
-            ollama_req.messages[0].content,
-            "Thinking...\nI am a bot."
-        );
-    }
-
-    #[test]
-    fn test_unified_response_with_thinking_to_ollama() {
-        let unified_res = UnifiedResponse {
-            id: "cmpl-123".to_string(),
-            model: "test-model".to_string(),
-            choices: vec![UnifiedChoice {
-                index: 0,
-                message: UnifiedMessage {
-                    role: UnifiedRole::Assistant,
-                    content: UnifiedMessageContent::Text("Hello there!".to_string()),
-                    thinking_content: Some("I think...".to_string()),
-                },
-                finish_reason: Some("stop".to_string()),
-            }],
-            usage: None,
-            created: None,
-            object: None,
-        };
-
-        let ollama_res: OllamaResponse = unified_res.into();
-
-        assert_eq!(ollama_res.message.content, "I think...\nHello there!");
-    }
-
-    #[test]
-    fn test_unified_chunk_with_thinking_to_ollama() {
-        let unified_chunk = UnifiedChunkResponse {
-            id: "cmpl-123".to_string(),
-            model: "test-model".to_string(),
-            choices: vec![UnifiedChunkChoice {
-                index: 0,
-                delta: UnifiedMessageDelta {
-                    role: Some(UnifiedRole::Assistant),
-                    content: Some(" World".to_string()),
-                    tool_calls: None,
-                    thinking_content: Some("Thinking...".to_string()),
-                },
-                finish_reason: None,
-            }],
-            ..Default::default()
-        };
-
-        let ollama_chunk: OllamaChunkResponse = unified_chunk.into();
-        let message = ollama_chunk.message.unwrap();
-        assert_eq!(message.content, "Thinking... World");
-    }
 }
 
 // --- Ollama Chunk Response ---
@@ -640,6 +614,8 @@ pub struct OllamaChunkResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<OllamaMessage>,
     pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done_reason: Option<String>,
     // Usage stats are only in the final chunk
     #[serde(rename = "prompt_eval_count")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -647,6 +623,14 @@ pub struct OllamaChunkResponse {
     #[serde(rename = "eval_count")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_eval_duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eval_duration: Option<u64>,
 }
 
 impl From<OllamaChunkResponse> for UnifiedChunkResponse {
@@ -654,22 +638,31 @@ impl From<OllamaChunkResponse> for UnifiedChunkResponse {
         let delta = if let Some(message) = ollama_chunk.message {
             UnifiedMessageDelta {
                 role: Some(UnifiedRole::Assistant),
-                content: Some(message.content),
-                tool_calls: None,
-                thinking_content: None,
+                content: vec![UnifiedContentPartDelta::TextDelta { index: 0, text: message.content }],
             }
         } else {
             UnifiedMessageDelta::default()
         };
 
+        let finish_reason = if ollama_chunk.done {
+            ollama_chunk.done_reason.or_else(|| Some("stop".to_string()))
+        } else {
+            None
+        };
+        
+        // Map Ollama's done_reason to unified finish_reason
+        let finish_reason = finish_reason.map(|reason| {
+            match reason.as_str() {
+                "stop" => "stop".to_string(),
+                "length" => "length".to_string(),
+                _ => "stop".to_string(), // Default to stop for other reasons
+            }
+        });
+
         let choice = UnifiedChunkChoice {
             index: 0,
             delta,
-            finish_reason: if ollama_chunk.done {
-                Some("stop".to_string())
-            } else {
-                None
-            },
+            finish_reason,
         };
 
         let usage = if let (Some(prompt_tokens), Some(completion_tokens)) =
@@ -708,11 +701,10 @@ impl From<UnifiedChunkResponse> for OllamaChunkResponse {
             });
 
         let mut final_content = String::new();
-        if let Some(thinking) = choice.delta.thinking_content {
-            final_content.push_str(&thinking);
-        }
-        if let Some(content) = choice.delta.content {
-            final_content.push_str(&content);
+        for part in choice.delta.content {
+             if let UnifiedContentPartDelta::TextDelta { text, .. } = part {
+                final_content.push_str(&text);
+            }
         }
 
         let message = if !final_content.is_empty() {
@@ -731,15 +723,26 @@ impl From<UnifiedChunkResponse> for OllamaChunkResponse {
             (None, None)
         };
 
+        let done_reason = choice.finish_reason.as_ref().map(|reason| {
+            match reason.as_str() {
+                "stop" => "stop".to_string(),
+                "length" => "length".to_string(),
+                _ => "stop".to_string(),
+            }
+        });
+
         OllamaChunkResponse {
             model: unified_chunk.model,
             created_at: Utc::now().to_rfc3339(),
             message,
             done: choice.finish_reason.is_some(),
+            done_reason,
             prompt_tokens,
             completion_tokens,
+            total_duration: None,
+            load_duration: None,
+            prompt_eval_duration: None,
+            eval_duration: None,
         }
     }
 }
-
-

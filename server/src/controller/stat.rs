@@ -50,6 +50,7 @@ enum Interval {
 }
 
 impl Interval {
+    #[warn(dead_code)]
     fn from_str(s: &str) -> Result<Self, String> {
         match s.to_lowercase().as_str() {
             "minute" => Ok(Interval::Minute),

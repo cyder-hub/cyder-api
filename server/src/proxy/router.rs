@@ -14,6 +14,7 @@ use crate::{
 use super::anthropic::handle_anthropic_request;
 use super::gemini::handle_gemini_request;
 use super::handlers::{list_models_handler, openai_utility_handler};
+use super::ollama::handle_ollama_request;
 use super::openai::handle_openai_request;
 
 fn create_openai_router() -> StateRouter {
@@ -86,14 +87,63 @@ fn create_anthropic_router() -> StateRouter {
         )
 }
 
+fn create_ollama_router() -> StateRouter {
+    create_state_router()
+        .route(
+            "/api/chat",
+            any(
+                |State(app_state),
+                 Query(query_params): Query<HashMap<String, String>>,
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    handle_ollama_request(app_state, addr, query_params, request).await
+                },
+            ),
+        )
+        .route(
+            "/api/generate",
+            any(
+                |State(app_state),
+                 Query(query_params): Query<HashMap<String, String>>,
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    handle_ollama_request(app_state, addr, query_params, request).await
+                },
+            ),
+        )
+        .route(
+            "/api/embeddings",
+            any(
+                |State(app_state),
+                 Query(query_params): Query<HashMap<String, String>>,
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    handle_ollama_request(app_state, addr, query_params, request).await
+                },
+            ),
+        )
+        .route(
+            "/api/tags",
+            get(
+                |State(app_state),
+                 Query(params): Query<HashMap<String, String>>,
+                 request: Request<Body>| async move {
+                    list_models_handler(app_state, params, request, LlmApiType::Ollama).await
+                },
+            ),
+        )
+}
+
 pub fn create_proxy_router() -> StateRouter {
     let openai_router = create_openai_router();
     let anthropic_router = create_anthropic_router();
+    let ollama_router = create_ollama_router();
     create_state_router()
         .nest("/openai", openai_router.clone())
         .nest("/openai/v1", openai_router)
         .nest("/anthropic", anthropic_router.clone())
         .nest("/anthropic/v1", anthropic_router)
+        .nest("/ollama", ollama_router)
         .route(
             "/gemini/v1beta/models", // Exact match for listing models
             get(

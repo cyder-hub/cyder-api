@@ -84,6 +84,18 @@ pub async fn handle_anthropic_request(
             )
             .await?
         }
+        LlmApiType::Gemini => {
+            prepare_gemini_llm_request(
+                &provider,
+                &model,
+                data,
+                &original_headers,
+                &app_state,
+                is_stream,
+                &std::collections::HashMap::new(),
+            )
+            .await?
+        }
         _ => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,

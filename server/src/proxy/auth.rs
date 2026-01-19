@@ -119,6 +119,25 @@ pub fn authenticate_anthropic_request(
     })
 }
 
+// Authenticates an Ollama-style request (Bearer token or query param, same as OpenAI).
+pub async fn authenticate_ollama_request(
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    app_state: &Arc<AppState>,
+) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
+    debug!("Authenticating Ollama request");
+    let (system_api_key_str, position) = parse_token_from_request(headers, params)
+        .map_err(|err_msg| {
+            warn!("Ollama auth failed: {}", err_msg);
+            (StatusCode::UNAUTHORIZED, err_msg)
+        })?;
+    check_system_api_key(&app_state.system_api_key_store, &system_api_key_str, position)
+        .map_err(|err_msg| {
+            warn!("Ollama system key check failed: {}", err_msg);
+            (StatusCode::UNAUTHORIZED, err_msg)
+        })
+}
+
 // Checks if the request is allowed by the access control policy.
 pub fn check_access_control(
     system_api_key: &SystemApiKey,

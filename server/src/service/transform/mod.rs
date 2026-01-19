@@ -1,8 +1,8 @@
-use axum::body::Bytes;
 use cyder_tools::log::{debug, error};
 use serde_json::Value;
 
 use crate::controller::llm_types::LlmApiType;
+use crate::utils::sse::SseEvent;
 
 pub mod openai;
 pub mod gemini;
@@ -26,71 +26,62 @@ pub fn transform_request_data(
         api_type, target_api_type
     );
 
+    macro_rules! deserialize {
+        ($type:ty, $name:expr) => {
+            match serde_json::from_value::<$type>(data.clone()) {
+                Ok(payload) => payload.into(),
+                Err(e) => {
+                    error!(
+                        "[transform] Failed to deserialize {} request: {}. Returning original data.",
+                        $name, e
+                    );
+                    return data;
+                }
+            }
+        };
+    }
+
     // Step 1: Deserialize to UnifiedRequest
     let mut unified_request: UnifiedRequest = match api_type {
-        LlmApiType::OpenAI => match serde_json::from_value::<openai::OpenAiRequestPayload>(data.clone()) {
-            Ok(payload) => payload.into(),
-            Err(e) => {
-                error!(
-                    "[transform] Failed to deserialize OpenAI request: {}. Returning original data.",
-                    e
-                );
-                return data;
-            }
-        },
-        LlmApiType::Gemini => match serde_json::from_value::<gemini::GeminiRequestPayload>(data.clone()) {
-            Ok(payload) => payload.into(),
-            Err(e) => {
-                error!(
-                    "[transform] Failed to deserialize Gemini request: {}. Returning original data.",
-                    e
-                );
-                return data;
-            }
-        },
-        LlmApiType::Ollama => match serde_json::from_value::<ollama::OllamaRequestPayload>(data.clone()) {
-            Ok(payload) => payload.into(),
-            Err(e) => {
-                error!(
-                    "[transform] Failed to deserialize Ollama request: {}. Returning original data.",
-                    e
-                );
-                return data;
-            }
-        },
-        LlmApiType::Anthropic => match serde_json::from_value::<anthropic::AnthropicRequestPayload>(data.clone()) {
-            Ok(payload) => payload.into(),
-            Err(e) => {
-                error!(
-                    "[transform] Failed to deserialize Anthropic request: {}. Returning original data.",
-                    e
-                );
-                return data;
-            }
-        },
+        LlmApiType::OpenAI => deserialize!(openai::OpenAiRequestPayload, "OpenAI"),
+        LlmApiType::Gemini => deserialize!(gemini::GeminiRequestPayload, "Gemini"),
+        LlmApiType::Ollama => deserialize!(ollama::OllamaRequestPayload, "Ollama"),
+        LlmApiType::Anthropic => deserialize!(anthropic::AnthropicRequestPayload, "Anthropic"),
     };
 
     // The `is_stream` from the request URL is the source of truth.
     unified_request.stream = is_stream;
+    
+    // Warn if top_k is used with non-Anthropic targets
+    if unified_request.top_k.is_some() && target_api_type != LlmApiType::Anthropic {
+        debug!(
+            "[transform] Warning: top_k parameter is set but target API ({:?}) may not support it. This is primarily an Anthropic feature.",
+            target_api_type
+        );
+    }
+    
+    // Warn if tools are used with Ollama
+    if unified_request.tools.is_some() && target_api_type == LlmApiType::Ollama {
+        debug!(
+            "[transform] Warning: tools/function calling is not supported by Ollama. Tool definitions will be dropped."
+        );
+    }
+
+    debug!("[transform] unified request: {:?}", unified_request);
+
+    macro_rules! serialize {
+        ($type:ty) => {{
+            let payload: $type = unified_request.into();
+            serde_json::to_value(payload)
+        }};
+    }
 
     // Step 2: Serialize from UnifiedRequest to target format
     let target_payload_result = match target_api_type {
-        LlmApiType::OpenAI => {
-            let openai_payload: openai::OpenAiRequestPayload = unified_request.into();
-            serde_json::to_value(openai_payload)
-        }
-        LlmApiType::Gemini => {
-            let gemini_payload: gemini::GeminiRequestPayload = unified_request.into();
-            serde_json::to_value(gemini_payload)
-        }
-        LlmApiType::Ollama => {
-            let ollama_payload: ollama::OllamaRequestPayload = unified_request.into();
-            serde_json::to_value(ollama_payload)
-        }
-        LlmApiType::Anthropic => {
-            let anthropic_payload: anthropic::AnthropicRequestPayload = unified_request.into();
-            serde_json::to_value(anthropic_payload)
-        }
+        LlmApiType::OpenAI => serialize!(openai::OpenAiRequestPayload),
+        LlmApiType::Gemini => serialize!(gemini::GeminiRequestPayload),
+        LlmApiType::Ollama => serialize!(ollama::OllamaRequestPayload),
+        LlmApiType::Anthropic => serialize!(anthropic::AnthropicRequestPayload),
     };
 
     match target_payload_result {
@@ -114,7 +105,6 @@ pub fn transform_request_data(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Bytes;
     use serde_json::{json, Value};
 
     #[test]
@@ -469,14 +459,18 @@ mod tests {
         let mut transformer = StreamTransformer::new(LlmApiType::OpenAI, LlmApiType::Gemini);
 
         // Test case 1: Content chunk
-        let openai_chunk_content = Bytes::from("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}");
-        let transformed_bytes = transformer.transform_chunk(openai_chunk_content).unwrap();
-        let transformed_str = String::from_utf8(transformed_bytes.to_vec()).unwrap();
-        let transformed_json: Value =
-            serde_json::from_str(transformed_str.strip_prefix("data:").unwrap().trim()).unwrap();
+        let openai_data_content = "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}";
+        let event = SseEvent {
+            data: openai_data_content.to_string(),
+            ..Default::default()
+        };
+        let transformed_events = transformer.transform_event(event).unwrap();
+        assert_eq!(transformed_events.len(), 1);
+        let transformed_json: Value = serde_json::from_str(&transformed_events[0].data).unwrap();
 
         let expected_json = json!({
             "candidates": [{
+                "index": 0,
                 "content": {
                     "parts": [{"text": "Hello"}],
                     "role": "model"
@@ -486,12 +480,15 @@ mod tests {
         assert_eq!(transformed_json, expected_json);
 
         // Test case 2: Finish reason chunk
-        let openai_chunk_finish = Bytes::from("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}");
-        let transformed_bytes_finish = transformer.transform_chunk(openai_chunk_finish).unwrap();
-        let transformed_str_finish = String::from_utf8(transformed_bytes_finish.to_vec()).unwrap();
+        let openai_data_finish = "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}";
+        let event_finish = SseEvent {
+            data: openai_data_finish.to_string(),
+            ..Default::default()
+        };
+        let transformed_events_finish = transformer.transform_event(event_finish).unwrap();
+        assert_eq!(transformed_events_finish.len(), 1);
         let transformed_json_finish: Value =
-            serde_json::from_str(transformed_str_finish.strip_prefix("data:").unwrap().trim())
-                .unwrap();
+            serde_json::from_str(&transformed_events_finish[0].data).unwrap();
 
         assert_eq!(
             transformed_json_finish["candidates"][0]["finishReason"],
@@ -500,19 +497,28 @@ mod tests {
         assert!(transformed_json_finish["candidates"][0]["safetyRatings"].is_array());
 
         // Test case 3: DONE chunk
-        let openai_chunk_done = Bytes::from("data: [DONE]");
-        let transformed_done = transformer.transform_chunk(openai_chunk_done);
+        let openai_data_done = "[DONE]";
+        let event_done = SseEvent {
+            data: openai_data_done.to_string(),
+            ..Default::default()
+        };
+        let transformed_done = transformer.transform_event(event_done);
         assert!(transformed_done.is_none());
 
         // Test case 4: Tool call chunk
-        let openai_chunk_tool = Bytes::from("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"location\\\": \\\"Boston\\\"}\"}}]}}]}");
-        let transformed_bytes_tool = transformer.transform_chunk(openai_chunk_tool).unwrap();
-        let transformed_str_tool = String::from_utf8(transformed_bytes_tool.to_vec()).unwrap();
+        let openai_data_tool = "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"location\\\": \\\"Boston\\\"}\"}}]}}]}";
+        let event_tool = SseEvent {
+            data: openai_data_tool.to_string(),
+            ..Default::default()
+        };
+        let transformed_events_tool = transformer.transform_event(event_tool).unwrap();
+        assert_eq!(transformed_events_tool.len(), 1);
         let transformed_json_tool: Value =
-            serde_json::from_str(transformed_str_tool.strip_prefix("data:").unwrap().trim()).unwrap();
+            serde_json::from_str(&transformed_events_tool[0].data).unwrap();
 
         let expected_tool_json = json!({
             "candidates": [{
+                "index": 0,
                 "content": {
                     "role": "model",
                     "parts": [{
@@ -529,8 +535,12 @@ mod tests {
         assert_eq!(transformed_json_tool, expected_tool_json);
 
         // Test case 5: Empty content chunk should be filtered out
-        let openai_chunk_empty_content = Bytes::from("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"}}]}");
-        let transformed_empty_content = transformer.transform_chunk(openai_chunk_empty_content);
+        let openai_data_empty_content = "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"}}]}";
+        let event_empty = SseEvent {
+            data: openai_data_empty_content.to_string(),
+            ..Default::default()
+        };
+        let transformed_empty_content = transformer.transform_event(event_empty);
         assert!(transformed_empty_content.is_none());
     }
 
@@ -539,13 +549,14 @@ mod tests {
         let mut transformer = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::OpenAI);
 
         // Test case 1: Content chunk
-        let gemini_chunk_content = Bytes::from(
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" World\"}],\"role\":\"model\"},\"index\":0}]}",
-        );
-        let transformed_bytes = transformer.transform_chunk(gemini_chunk_content).unwrap();
-        let transformed_str = String::from_utf8(transformed_bytes.to_vec()).unwrap();
-        let transformed_json: Value =
-            serde_json::from_str(transformed_str.strip_prefix("data:").unwrap().trim()).unwrap();
+        let gemini_data_content = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" World\"}],\"role\":\"model\"},\"index\":0}]}";
+        let event = SseEvent {
+            data: gemini_data_content.to_string(),
+            ..Default::default()
+        };
+        let transformed_events = transformer.transform_event(event).unwrap();
+        assert_eq!(transformed_events.len(), 1);
+        let transformed_json: Value = serde_json::from_str(&transformed_events[0].data).unwrap();
 
         assert_eq!(
             transformed_json["choices"][0]["delta"]["content"],
@@ -555,13 +566,15 @@ mod tests {
         assert_eq!(transformed_json["object"], "chat.completion.chunk");
 
         // Test case 2: Finish reason chunk
-        let gemini_chunk_finish =
-            Bytes::from("data: {\"candidates\":[{\"finishReason\":\"STOP\",\"index\":0}]}");
-        let transformed_bytes_finish = transformer.transform_chunk(gemini_chunk_finish).unwrap();
-        let transformed_str_finish = String::from_utf8(transformed_bytes_finish.to_vec()).unwrap();
+        let gemini_data_finish = "{\"candidates\":[{\"finishReason\":\"STOP\",\"index\":0}]}";
+        let event_finish = SseEvent {
+            data: gemini_data_finish.to_string(),
+            ..Default::default()
+        };
+        let transformed_events_finish = transformer.transform_event(event_finish).unwrap();
+        assert_eq!(transformed_events_finish.len(), 1);
         let transformed_json_finish: Value =
-            serde_json::from_str(transformed_str_finish.strip_prefix("data:").unwrap().trim())
-                .unwrap();
+            serde_json::from_str(&transformed_events_finish[0].data).unwrap();
 
         assert_eq!(
             transformed_json_finish["choices"][0]["finish_reason"],
@@ -573,13 +586,15 @@ mod tests {
             .is_empty());
 
         // Test case 3: Function call chunk
-        let gemini_chunk_tool = Bytes::from(
-            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"location\":\"Boston\"}}}]},\"index\":0}]}",
-        );
-        let transformed_bytes_tool = transformer.transform_chunk(gemini_chunk_tool).unwrap();
-        let transformed_str_tool = String::from_utf8(transformed_bytes_tool.to_vec()).unwrap();
+        let gemini_data_tool = "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"location\":\"Boston\"}}}]},\"index\":0}]}";
+        let event_tool = SseEvent {
+            data: gemini_data_tool.to_string(),
+            ..Default::default()
+        };
+        let transformed_events_tool = transformer.transform_event(event_tool).unwrap();
+        assert_eq!(transformed_events_tool.len(), 1);
         let mut transformed_json_tool: Value =
-            serde_json::from_str(transformed_str_tool.strip_prefix("data:").unwrap().trim()).unwrap();
+            serde_json::from_str(&transformed_events_tool[0].data).unwrap();
 
         // The ID is generated, so we need to extract it and then compare
         let tool_call = transformed_json_tool["choices"][0]["delta"]["tool_calls"][0]
@@ -652,6 +667,7 @@ mod tests {
         let expected_gemini_result = json!({
           "candidates": [
             {
+              "index": 0,
               "content": {
                 "parts": [
                   {
@@ -684,6 +700,7 @@ mod tests {
         let gemini_result = json!({
           "candidates": [
             {
+              "index": 0,
               "content": {
                 "parts": [
                   {
@@ -781,6 +798,7 @@ mod tests {
         let expected_gemini_result = json!({
           "candidates": [
             {
+              "index": 0,
               "content": {
                 "parts": [
                   {
@@ -1003,10 +1021,10 @@ pub fn transform_result(
 
     // Step 1: Deserialize to UnifiedResponse
     let unified_response_result: Result<UnifiedResponse, serde_json::Error> = match api_type {
-        LlmApiType::OpenAI => serde_json::from_value::<openai::OpenAiResponse>(data.clone()).map(|p| p.into()),
-        LlmApiType::Gemini => serde_json::from_value::<gemini::GeminiResponse>(data.clone()).map(|p| p.into()),
-        LlmApiType::Ollama => serde_json::from_value::<ollama::OllamaResponse>(data.clone()).map(|p| p.into()),
-        LlmApiType::Anthropic => serde_json::from_value::<anthropic::AnthropicResponse>(data.clone()).map(|p| p.into()),
+        LlmApiType::OpenAI => serde_json::from_value::<openai::OpenAiResponse>(data.clone()).map(Into::into),
+        LlmApiType::Gemini => serde_json::from_value::<gemini::GeminiResponse>(data.clone()).map(Into::into),
+        LlmApiType::Ollama => serde_json::from_value::<ollama::OllamaResponse>(data.clone()).map(Into::into),
+        LlmApiType::Anthropic => serde_json::from_value::<anthropic::AnthropicResponse>(data.clone()).map(Into::into),
     };
 
     let unified_response = match unified_response_result {
@@ -1052,8 +1070,8 @@ pub struct StreamTransformer {
     pub is_first_chunk: bool,
     // Anthropic-specific state
     pub is_first_content_chunk: bool,
-    pub is_first_thinking_content: bool,
-    pub has_thinking_content: bool,
+    // Cached stream ID for consistency across chunks
+    stream_id: Option<String>,
 }
 
 impl StreamTransformer {
@@ -1063,121 +1081,113 @@ impl StreamTransformer {
             target_api_type,
             is_first_chunk: true,
             is_first_content_chunk: true,
-            is_first_thinking_content: true,
-            has_thinking_content: false,
+            stream_id: None,
+        }
+    }
+    
+    fn get_or_generate_stream_id(&mut self) -> String {
+        if let Some(ref id) = self.stream_id {
+            id.clone()
+        } else {
+            use crate::utils::ID_GENERATOR;
+            let new_id = format!("chatcmpl-{}", ID_GENERATOR.generate_id());
+            self.stream_id = Some(new_id.clone());
+            new_id
         }
     }
 
-    pub fn transform_chunk(&mut self, chunk: Bytes) -> Option<Bytes> {
+    pub fn transform_event(&mut self, event: SseEvent) -> Option<Vec<SseEvent>> {
         if self.api_type == self.target_api_type {
-            return Some(chunk);
+            return Some(vec![event]);
         }
 
         // Handle OpenAI's stream termination marker
-        if self.api_type == LlmApiType::OpenAI && chunk.as_ref() == b"data: [DONE]" {
+        if self.api_type == LlmApiType::OpenAI && event.data == "[DONE]" {
             // Gemini, Ollama, and Anthropic streams just end, so we return None to not send anything.
-            return if self.target_api_type == LlmApiType::Gemini || self.target_api_type == LlmApiType::Ollama || self.target_api_type == LlmApiType::Anthropic {
+            return if self.target_api_type == LlmApiType::Gemini
+                || self.target_api_type == LlmApiType::Ollama
+                || self.target_api_type == LlmApiType::Anthropic
+            {
                 None
             } else {
                 // Pass through for other potential targets
-                Some(chunk)
+                Some(vec![event])
             };
         }
 
-        let line_str = String::from_utf8_lossy(&chunk);
-
-        let json_str = if self.api_type == LlmApiType::Ollama {
-            line_str.trim()
-        } else if self.api_type == LlmApiType::Anthropic {
-            // Anthropic uses event: and data: lines. We only care about the data line.
-            line_str
-                .lines()
-                .find_map(|line| line.strip_prefix("data:"))
-                .map(|s| s.trim())
-                .unwrap_or("")
-        } else if line_str.starts_with("data:") {
-            line_str.strip_prefix("data:").unwrap().trim()
-        } else {
-            // Not a data line (e.g., empty keep-alive), pass it through.
-            return Some(chunk);
-        };
-        if json_str.is_empty() {
-            return Some(chunk); // empty data line
+        if event.data.is_empty() {
+            return None;
         }
 
         // Step 1: Deserialize to UnifiedChunkResponse
         let unified_chunk_result: Result<UnifiedChunkResponse, _> = match self.api_type {
-            LlmApiType::OpenAI => serde_json::from_str::<openai::OpenAiChunkResponse>(json_str).map(|p| p.into()),
-            LlmApiType::Gemini => serde_json::from_str::<gemini::GeminiChunkResponse>(json_str).map(|p| p.into()),
-            LlmApiType::Ollama => serde_json::from_str::<ollama::OllamaChunkResponse>(json_str).map(|p| p.into()),
+            LlmApiType::OpenAI => serde_json::from_str::<openai::OpenAiChunkResponse>(&event.data)
+                .map(|p| p.into()),
+            LlmApiType::Gemini => serde_json::from_str::<gemini::GeminiChunkResponse>(&event.data)
+                .map(|p| p.into()),
+            LlmApiType::Ollama => serde_json::from_str::<ollama::OllamaChunkResponse>(&event.data)
+                .map(|p| p.into()),
             LlmApiType::Anthropic => {
-                let event_result: Result<anthropic::AnthropicEvent, _> = serde_json::from_str(json_str);
+                let event_result: Result<anthropic::AnthropicEvent, _> =
+                    serde_json::from_str(&event.data);
                 event_result.map(|event| event.into())
             }
         };
 
-        let unified_chunk = match unified_chunk_result {
+        let mut unified_chunk = match unified_chunk_result {
             Ok(uc) => uc,
             Err(e) => {
                 error!(
-                    "[StreamTransformer::transform_chunk] Failed to deserialize chunk from {:?}: {}. Chunk: '{}'",
-                    self.api_type, e, json_str
+                    "[StreamTransformer::transform_event] Failed to deserialize chunk from {:?}: {}. Data: '{}'",
+                    self.api_type, e, event.data
                 );
                 // Return an empty data chunk to avoid breaking client-side parsers.
-                return Some(Bytes::from("data: {}\n\n"));
+                return Some(vec![SseEvent {
+                    data: "{}".to_string(),
+                    ..Default::default()
+                }]);
             }
         };
+
+        // Ensure consistent stream ID across all chunks
+        let consistent_id = self.get_or_generate_stream_id();
+        unified_chunk.id = consistent_id;
 
         // Step 2: Serialize from UnifiedChunkResponse to target format
-        let target_payload_result = match self.target_api_type {
+        match self.target_api_type {
             LlmApiType::OpenAI => {
-                let openai_payload: openai::OpenAiChunkResponse = unified_chunk.into();
-                serde_json::to_value(openai_payload)
+                let value =
+                    serde_json::to_value(openai::OpenAiChunkResponse::from(unified_chunk)).ok()?;
+                Some(vec![SseEvent {
+                    data: serde_json::to_string(&value).unwrap_or_default(),
+                    ..Default::default()
+                }])
             }
             LlmApiType::Gemini => {
-                let gemini_payload: gemini::GeminiChunkResponse = unified_chunk.into();
-                serde_json::to_value(gemini_payload)
-            }
-            LlmApiType::Ollama => {
-                let ollama_payload: ollama::OllamaChunkResponse = unified_chunk.into();
-                serde_json::to_value(ollama_payload)
-            }
-            LlmApiType::Anthropic => {
-                return anthropic::transform_unified_chunk_to_anthropic_bytes(unified_chunk, self);
-            }
-        };
-
-        match target_payload_result {
-            Ok(value) => {
-                // Gemini can produce empty candidates list for some chunks (e.g. role only).
-                // We should filter these out to avoid sending empty data chunks.
-                if self.target_api_type == LlmApiType::Gemini {
-                    if let Some(candidates) = value.get("candidates").and_then(|c| c.as_array()) {
-                        if candidates.is_empty() {
-                            return None;
-                        }
+                let value =
+                    serde_json::to_value(gemini::GeminiChunkResponse::from(unified_chunk)).ok()?;
+                if let Some(candidates) = value.get("candidates").and_then(|c| c.as_array()) {
+                    if candidates.is_empty() {
+                        return None;
                     }
                 }
-                // Ollama stream chunks are newline-delimited JSON. Others are SSE.
-                let new_chunk_str = if self.target_api_type == LlmApiType::Ollama {
-                    format!("{}\n", serde_json::to_string(&value).unwrap())
-                } else {
-                    format!("data: {}\n\n", serde_json::to_string(&value).unwrap())
-                };
-                Some(Bytes::from(new_chunk_str))
+                Some(vec![SseEvent {
+                    data: serde_json::to_string(&value).unwrap_or_default(),
+                    ..Default::default()
+                }])
             }
-            Err(e) => {
-                error!(
-                    "[StreamTransformer::transform_chunk] Failed to serialize to target chunk format {:?}: {}",
-                    self.target_api_type, e
-                );
-                Some(Bytes::from("data: {}\n\n"))
+            LlmApiType::Ollama => {
+                let value =
+                    serde_json::to_value(ollama::OllamaChunkResponse::from(unified_chunk)).ok()?;
+                Some(vec![SseEvent {
+                    data: serde_json::to_string(&value).unwrap_or_default(),
+                    ..Default::default()
+                }])
+            }
+            LlmApiType::Anthropic => {
+                anthropic::transform_unified_chunk_to_anthropic_events(unified_chunk, self)
             }
         }
     }
+
 }
-
-
-
-
-

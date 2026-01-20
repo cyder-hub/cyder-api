@@ -8,7 +8,7 @@ use crate::database::request_log::{RequestLog, UpdateRequestLogData};
 use crate::schema::enum_def::RequestStatus;
 use crate::service::transform::{transform_result, StreamTransformer};
 use crate::utils::billing::parse_usage_info;
-use crate::utils::split_chunks;
+use crate::utils::sse::SseParser;
 
 use axum::{
     body::{Body, Bytes},
@@ -453,7 +453,6 @@ async fn handle_streaming_response(
     }
 
     let mut first_chunk_received_at_proxy: i64 = 0;
-    let latest_chunk_arc: Arc<Mutex<Option<Bytes>>> = Arc::new(Mutex::new(None));
     let logged_sse_success = Arc::new(Mutex::new(false));
     let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
 
@@ -471,9 +470,10 @@ async fn handle_streaming_response(
     });
 
     let mut transformer = StreamTransformer::new(target_api_type, api_type);
+    let mut parser = SseParser::new();
 
     let monitored_stream = async_stream::stream! {
-        let mut remainder = Bytes::new();
+        let mut latest_event_data: Option<String> = None;
         while let Some(chunk_result) = rx.recv().await {
             match chunk_result {
                 Ok(chunk) => {
@@ -481,55 +481,42 @@ async fn handle_streaming_response(
                         first_chunk_received_at_proxy = Utc::now().timestamp_millis();
                     }
 
-                    let current_chunk = if remainder.is_empty() {
-                        chunk
-                    } else {
-                        Bytes::from([remainder.as_ref(), chunk.as_ref()].concat())
-                    };
-                    let (lines, new_remainder) = split_chunks(current_chunk);
-                    remainder = new_remainder;
+                    let events = parser.process(&chunk);
 
-                    if lines.is_empty() {
+                    if events.is_empty() {
                         continue;
                     }
 
                     let mut transformed_sub_chunks_as_strings: Vec<String> = Vec::new();
-                    for sub_chunk in &lines {
-                        // This part is for logging usage from the final chunk of an OpenAI stream.
+                    for event in events {
+                        // Handle [DONE] and logging logic directly on the event data
                         if target_api_type == LlmApiType::OpenAI {
-                            let line_str = String::from_utf8_lossy(sub_chunk);
-                            if line_str.trim() == "data: [DONE]" {
-                                if let Some(final_data_chunk) = latest_chunk_arc.lock().unwrap().take() {
-                                    let final_line_str = String::from_utf8_lossy(&final_data_chunk);
-                                    if let Some(data_json_str) = final_line_str.strip_prefix("data:").map(str::trim) {
-                                        if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
-                                            let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
-                                            let completed_at = Utc::now().timestamp_millis();
-                                            let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-                                            log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success));
-                                            *logged_sse_success_clone.lock().unwrap() = true;
-                                            info!("{}: SSE stream completed.", model_str);
-                                        }
+                            if event.data.trim() == "[DONE]" {
+                                if let Some(data_json_str) = &latest_event_data {
+                                    if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
+                                        let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
+                                        let completed_at = Utc::now().timestamp_millis();
+                                        let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+                                        log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success));
+                                        *logged_sse_success_clone.lock().unwrap() = true;
+                                        info!("{}: SSE stream completed.", model_str);
                                     }
                                 }
-                            } else if line_str.starts_with("data:") {
-                                *latest_chunk_arc.lock().unwrap() = Some(sub_chunk.clone());
+                            } else if !event.data.is_empty() {
+                                latest_event_data = Some(event.data.clone());
                             }
                         }
 
-                        let transformed_bytes_opt = transformer.transform_chunk(sub_chunk.clone());
-
-                        if let Some(transformed_bytes) = transformed_bytes_opt {
-                            let s = if transformed_bytes.is_empty() {
-                                String::new()
-                            } else {
-                                if api_type == LlmApiType::OpenAI && target_api_type == LlmApiType::OpenAI {
-                                    format!("{}\n\n", String::from_utf8_lossy(&transformed_bytes))
+                        if let Some(transformed_events) = transformer.transform_event(event) {
+                            for transformed_event in transformed_events {
+                                if target_api_type == LlmApiType::Ollama {
+                                    transformed_sub_chunks_as_strings
+                                        .push(format!("{}\n", transformed_event.data));
                                 } else {
-                                    String::from_utf8_lossy(&transformed_bytes).to_string()
+                                    transformed_sub_chunks_as_strings
+                                        .push(transformed_event.to_string());
                                 }
-                            };
-                            transformed_sub_chunks_as_strings.push(s);
+                            }
                         }
                     }
 
@@ -556,13 +543,6 @@ async fn handle_streaming_response(
             }
         }
 
-        if status_code.is_success() && !remainder.is_empty() {
-            let line_str = String::from_utf8_lossy(&remainder);
-            if line_str.starts_with("data:") {
-                *latest_chunk_arc.lock().unwrap() = Some(remainder);
-            }
-        }
-
         // After the upstream is closed, check if we need to send a [DONE] message.
         if status_code.is_success() && api_type == LlmApiType::OpenAI && target_api_type == LlmApiType::Gemini {
             // The client expects an OpenAI stream, which must end with [DONE].
@@ -575,23 +555,20 @@ async fn handle_streaming_response(
         let llm_response_completed_at = Utc::now().timestamp_millis();
 
         if status_code.is_success() && !*logged_sse_success.lock().unwrap() {
-            if let Some(final_data_chunk) = latest_chunk_arc.lock().unwrap().take() {
-                let final_line_str = String::from_utf8_lossy(&final_data_chunk);
-                if let Some(data_json_str) = final_line_str.strip_prefix("data:").map(str::trim) {
-                    if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
-                        debug!("[proxy] final response from stream end {:?}", data_value);
-                        let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
-                        let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+            if let Some(data_json_str) = latest_event_data {
+                if let Ok(data_value) = serde_json::from_str::<Value>(&data_json_str) {
+                    debug!("[proxy] final response from stream end {:?}", data_value);
+                    let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
+                    let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
 
-                        log_final_update(
-                            log_id, "SSE stream end", &url_owned, &data_owned, Some(status_code),
-                            Some(None), true, first_chunk_ts, llm_response_completed_at,
-                            parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success),
-                        );
-                        info!("{}: SSE stream completed at stream end.", model_str);
-                    } else {
-                        error!("Failed to parse final SSE data JSON at stream end for log_id {}: {}", log_id, data_json_str);
-                    }
+                    log_final_update(
+                        log_id, "SSE stream end", &url_owned, &data_owned, Some(status_code),
+                        Some(None), true, first_chunk_ts, llm_response_completed_at,
+                        parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success),
+                    );
+                    info!("{}: SSE stream completed at stream end.", model_str);
+                } else {
+                    error!("Failed to parse final SSE data JSON at stream end for log_id {}: {}", log_id, data_json_str);
                 }
             } else {
                 info!("{}: SSE stream completed without a final data chunk to parse.", model_str);

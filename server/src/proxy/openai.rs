@@ -5,7 +5,6 @@ use super::prepare::*;
 use super::util::*;
 
 use crate::controller::llm_types::LlmApiType;
-use crate::schema::enum_def::ProviderType;
 use crate::service::app_state::AppState;
 use crate::service::transform::transform_request_data;
 use axum::{body::Body, extract::Request, response::Response};
@@ -60,26 +59,18 @@ pub async fn handle_openai_request(
         (StatusCode::BAD_REQUEST, e)
     })?;
 
-    let target_api_type = if provider.provider_type == ProviderType::Vertex
-        || provider.provider_type == ProviderType::Gemini
-    {
-        LlmApiType::Gemini
-    } else {
-        LlmApiType::OpenAI
-    };
-
+    let target_api_type = determine_target_api_type(&provider);
     let is_stream = data.get("stream").and_then(Value::as_bool).unwrap_or(false);
-
-    let api_type = LlmApiType::OpenAI;
-    data = transform_request_data(data, api_type, target_api_type, is_stream);
+    data = transform_request_data(data, LlmApiType::OpenAI, target_api_type, is_stream);
 
     let (price_rules, currency) = get_pricing_info(&model, &app_state);
 
     // Step 4: If an access policy is present, check if the request is allowed.
-    if let Err(e) = check_access_control(&system_api_key, &provider, &model, &app_state) {
-        warn!("Access control check failed: {:?}", e);
-        return Err(e);
-    }
+    check_access_control(&system_api_key, &provider, &model, &app_state)
+        .map_err(|e| {
+            warn!("Access control check failed: {:?}", e);
+            e
+        })?;
 
     // Step 5: Prepare the downstream request details (URL, headers, body).
     let (final_url, final_headers, final_body, provider_api_key_id) = match target_api_type {
@@ -137,19 +128,7 @@ pub async fn handle_openai_request(
     );
 
     // Step 7: Execute the request against the downstream LLM service.
-    let real_model_name = model
-        .real_model_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&model.model_name);
-    let model_str = if model.model_name == real_model_name {
-        format!("{}/{}", &provider.provider_key, &model.model_name)
-    } else {
-        format!(
-            "{}/{}({})",
-            &provider.provider_key, &model.model_name, real_model_name
-        )
-    };
+    let model_str = format_model_str(&provider, &model);
 
     proxy_request(
         log_id,
@@ -160,7 +139,7 @@ pub async fn handle_openai_request(
         provider.use_proxy,
         price_rules,
         currency,
-        api_type,
+        LlmApiType::OpenAI,
         target_api_type,
     )
     .await

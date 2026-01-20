@@ -1,24 +1,20 @@
-/*use super::auth::*;
+use super::auth::*;
 use super::core::proxy_request;
 use super::logging::create_request_log;
 use super::prepare::*;
 use super::util::*;
 
 use crate::controller::llm_types::LlmApiType;
-use crate::database::model::Model;
 use crate::schema::enum_def::ProviderType;
 use crate::service::app_state::AppState;
 use crate::service::transform::transform_request_data;
 use axum::{body::Body, extract::Request, response::Response};
 use chrono::Utc;
-use cyder_tools::log::debug;
+use cyder_tools::log::{debug, error, info, warn};
 use reqwest::StatusCode;
 use serde_json::Value;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-// NOTE: This handler is not currently used in any route.
-// It's a template for future Ollama integration.
-#[allow(dead_code)]
 pub async fn handle_ollama_request(
     app_state: Arc<AppState>,
     addr: SocketAddr,
@@ -30,10 +26,9 @@ pub async fn handle_ollama_request(
     let request_uri_path = request.uri().path().to_string();
     let original_headers = request.headers().clone();
 
-    debug!("{} --- {:?}", &request_uri_path, &query_params);
+    debug!("{} --- {:?}", &request_uri_path, query_params);
 
     // Step 1: Authenticate the request and retrieve API key.
-    // NOTE: Ollama doesn't have a standard auth method. This is a placeholder.
     let api_key_check_result =
         authenticate_ollama_request(&original_headers, &query_params, &app_state).await?;
     let system_api_key = api_key_check_result.api_key;
@@ -57,8 +52,13 @@ pub async fn handle_ollama_request(
                 "'model' field must be a string".to_string(),
             )
         })?;
-    let (provider, model) =
-        get_provider_and_model(&app_state, pre_model_str).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    info!("Processing Ollama request for model: {}", pre_model_str);
+
+    let (provider, model) = get_provider_and_model(&app_state, pre_model_str).map_err(|e| {
+        warn!("Failed to resolve model '{}': {}", pre_model_str, e);
+        (StatusCode::BAD_REQUEST, e)
+    })?;
 
     let target_api_type = if provider.provider_type == ProviderType::Ollama {
         LlmApiType::Ollama
@@ -74,12 +74,14 @@ pub async fn handle_ollama_request(
     let (price_rules, currency) = get_pricing_info(&model, &app_state);
 
     // Step 4: If an access policy is present, check if the request is allowed.
-    check_access_control(&system_api_key, &provider, &model, &app_state)?;
+    if let Err(e) = check_access_control(&system_api_key, &provider, &model, &app_state) {
+        warn!("Access control check failed: {:?}", e);
+        return Err(e);
+    }
 
     // Step 5: Prepare the downstream request details (URL, headers, body).
     let (final_url, final_headers, final_body, provider_api_key_id) = match target_api_type {
         LlmApiType::Ollama => {
-            // Assuming prepare_llm_request can handle ollama with a different path
             prepare_llm_request(
                 &provider,
                 &model,
@@ -88,7 +90,11 @@ pub async fn handle_ollama_request(
                 &app_state,
                 "api/chat",
             )
-            .await?
+            .await
+            .map_err(|e| {
+                error!("Failed to prepare Ollama LLM request: {:?}", e);
+                e
+            })?
         }
         LlmApiType::OpenAI => {
             prepare_llm_request(
@@ -99,13 +105,18 @@ pub async fn handle_ollama_request(
                 &app_state,
                 "chat/completions",
             )
-            .await?
+            .await
+            .map_err(|e| {
+                error!("Failed to prepare OpenAI LLM request: {:?}", e);
+                e
+            })?
         }
         _ => {
+            error!("Unsupported target API type: {:?}", target_api_type);
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "unsupported api type".to_string(),
-            ))
+            ));
         }
     };
 
@@ -150,4 +161,4 @@ pub async fn handle_ollama_request(
         target_api_type,
     )
     .await
-}*/
+}

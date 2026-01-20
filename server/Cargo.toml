@@ -10,6 +10,7 @@ bytes = "1.10.1"
 chrono = "0.4.42"
 chrono-tz = "0.10.4"
 cyder-tools = { version = "0.1.2", features = ["auth"] }
+dashmap = "6.1.0"
 diesel = { version = "2.2.12", features = ["64-column-tables", "postgres", "r2d2", "returning_clauses_for_sqlite_3_35", "sqlite"] }
 diesel-derive-enum = { version = "3.0.0-beta.1", features = ["postgres", "sqlite"] }
 diesel_migrations = "2.2.0"
@@ -28,6 +29,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
 serde_urlencoded = "0.7.1"
 serde_yaml = "0.9.34"
+struct-patch = "0.10.4"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["full"] }
 tower-http = { version = "0.6.6", features = ["fs", "set-header"] }

@@ -5,6 +5,10 @@ use axum::Router;
 use cyder_tools::log::{debug, info, warn};
 use rand::prelude::*;
 use thiserror::Error;
+use struct_patch::Patch;
+use dashmap::DashMap;
+
+use crate::schema::enum_def::{Action, ProviderType, RuleScope};
 
 use crate::database::system_api_key::SystemApiKey;
 use crate::database::provider::{Provider, ProviderApiKey};
@@ -14,6 +18,274 @@ use crate::database::price::{BillingPlan, PriceRule};
 use crate::database::access_control::{AccessControlPolicy as DbAccessControlPolicy, ApiAccessControlPolicy};
 use crate::database::custom_field::{CustomFieldDefinition, ModelCustomFieldAssignment, ProviderCustomFieldAssignment};
 
+#[derive(Default, Debug, PartialEq, Clone, Patch)]
+#[patch(attribute(derive(Debug, Default)))]
+pub struct CacheProvider {
+    #[patch(skip)]
+    provider_key: String,
+    endpoint: String,
+    use_proxy: bool,
+    provider_type: ProviderType,
+    is_enabled: bool,
+    custom_field_definition_ids: Vec<i64>,
+}
+
+#[derive(Default, Debug, PartialEq, Clone, Patch)]
+#[patch(attribute(derive(Debug, Default)))]
+pub struct CacheModel {
+    #[patch(skip)]
+    model_name: String,
+    #[patch(skip)]
+    provider_id: i64,
+    billing_plan_id: Option<i64>,
+    real_model_name: Option<String>,
+    is_enabled: bool,
+    custom_field_definition_ids: Vec<i64>,
+}
+
+#[derive(Default, Debug, PartialEq, Clone, Patch)]
+#[patch(attribute(derive(Debug, Default)))]
+pub struct CacheSystemApiKey {
+    api_key: String,
+    access_control_policy_id: Option<i64>,
+}
+
+#[derive(Default, Debug, PartialEq, Clone)]
+pub struct CacheAccessControlRule {
+    is_enabled: bool,
+    model_id: Option<i64>,
+    priority: i64,
+    provider_id: i64,
+    rule_type: Action,
+    scope: RuleScope,
+}
+
+#[derive(Default, Debug, PartialEq, Clone, Patch)]
+pub struct CacheAccessControl {
+    default_action: Action,
+    rules: Vec<CacheAccessControlRule>,
+}
+
+pub trait SystemApiKeyCacheStore {
+    fn update_system_api_key(&self, id: i64, item: CacheSystemApiKeyPatch);
+    fn add_system_api_key(&self, id: i64, item: CacheSystemApiKey);
+    fn get_system_api_key_by_key(&self, key: &str) -> Option<CacheSystemApiKey>;
+}
+
+pub trait ProviderCacheStore {
+    fn update_provider(&self, id: i64, item: CacheProviderPatch);
+    fn add_provider(&self, id: i64, item: CacheProvider);
+    fn delete_provider(&self, id: i64) -> Option<()>;
+
+    fn get_provider_by_id(&self, id: i64) -> Option<CacheProvider>;
+    fn get_provider_id_by_key(&self, key: &str) -> Option<i64>;
+}
+
+pub trait ModelCacheStore {
+    fn add_model(&self, id: i64, item: CacheModel);
+    fn update_model(&self, id: i64, item: CacheModelPatch);
+    fn delete_model(&self, id: i64) -> Option<()>;
+
+    fn get_model_by_id(&self, id: i64) -> Option<CacheModel>;
+    fn get_model_id_by_key(&self, key: &str) -> Option<i64>;
+    fn get_model_id_by_alias_name(&self, name: &str) -> Option<i64>;
+}
+
+pub trait AccessControlCacheStore {
+    fn add_access_control_policy(&self, id: i64, item: CacheAccessControl);
+    fn update_acecss_control_policy(&self, id: i64, item: CacheAccessControlPatch);
+    fn delete_access_control_policy(&self, id: i64) -> Option<()>;
+
+    fn get_access_control_policy(&self, id: i64) -> Option<CacheAccessControl>;
+}
+
+pub trait CacheStore: SystemApiKeyCacheStore + ProviderCacheStore + ModelCacheStore + AccessControlCacheStore {
+    fn new(providers: Vec<Provider>, models: Vec<Model>, system_api_keys: Vec<SystemApiKey>) -> Self;
+
+    fn get_provider_model(&self, model_name: &str) -> Option<(CacheProvider, CacheModel)> {
+        let model_id = self.get_model_id_by_alias_name(model_name)
+            .or_else(|| self.get_model_id_by_key(model_name))?;
+        let model = self.get_model_by_id(model_id)?;
+        let provider = self.get_provider_by_id(model.provider_id)?;
+        Some((provider, model))
+    }
+}
+
+pub struct MemoryCacheStore {
+    system_api_key_map: DashMap<i64, CacheSystemApiKey>,
+    system_api_key_key_id_map: DashMap<String, i64>,
+
+    provider_map: DashMap<i64, CacheProvider>,
+    provider_key_id_map: DashMap<String, i64>,
+    
+    model_map: DashMap<i64, CacheModel>,
+    model_key_id_map: DashMap<String, i64>,
+    model_alias_id_map: DashMap<String, i64>,
+
+    access_control_policy_map: DashMap<i64, CacheAccessControl>,
+}
+
+impl CacheStore for MemoryCacheStore {
+  fn new(providers: Vec<Provider>, models: Vec<Model>, system_api_keys: Vec<SystemApiKey>) -> Self {
+    let store = MemoryCacheStore {
+        system_api_key_map: DashMap::new(),
+        system_api_key_key_id_map: DashMap::new(),
+        provider_map: DashMap::new(),
+        provider_key_id_map: DashMap::new(),
+        model_map: DashMap::new(),
+        model_key_id_map: DashMap::new(),
+        model_alias_id_map: DashMap::new(),
+        access_control_policy_map: DashMap::new(),
+    };
+    for provider in providers {
+       store.add_provider(provider.id, CacheProvider {
+           provider_key: provider.provider_key.clone(),
+           endpoint: provider.endpoint.clone(),
+           use_proxy: provider.use_proxy,
+           provider_type: provider.provider_type.clone(),
+           is_enabled: provider.is_enabled,
+           custom_field_definition_ids: Vec::new(),
+         })
+    }
+
+    for model in models {
+        store.add_model(model.id, CacheModel {
+            model_name: model.model_name.clone(),
+            provider_id: model.provider_id,
+            billing_plan_id: model.billing_plan_id,
+            real_model_name: model.real_model_name.clone(),
+            is_enabled: model.is_enabled,
+            custom_field_definition_ids: Vec::new(),
+        });
+    }
+
+    for key in system_api_keys {
+        store.add_system_api_key(key.id, CacheSystemApiKey {
+            api_key: key.api_key.clone(),
+            access_control_policy_id: key.access_control_policy_id,
+        });
+    }
+
+    store
+  }
+}
+
+impl SystemApiKeyCacheStore for MemoryCacheStore {
+  fn update_system_api_key(&self, id: i64, item: CacheSystemApiKeyPatch) {
+    if let Some(mut existing_item) = self.system_api_key_map.get_mut(&id) {
+      if let Some(new_key) = &item.api_key {
+        self.system_api_key_key_id_map.remove(&existing_item.api_key);
+        self.system_api_key_key_id_map.insert(new_key.clone(), id);
+      }
+      existing_item.apply(item);
+    }
+  }
+
+  fn add_system_api_key(&self, id: i64, item: CacheSystemApiKey) {
+    if self.system_api_key_map.contains_key(&id) {
+      warn!("system api key already exists");
+    } else {
+      self.system_api_key_key_id_map.insert(item.api_key.clone(), id);
+      self.system_api_key_map.insert(id, item);
+    }
+  }
+
+  fn get_system_api_key_by_key(&self, key: &str) -> Option<CacheSystemApiKey> {
+    let id = self.system_api_key_key_id_map.get(key)?;
+    self.system_api_key_map.get(&*id).map(|v| v.clone())
+  }
+}
+
+impl ProviderCacheStore for MemoryCacheStore {
+  fn update_provider(&self, id: i64, item: CacheProviderPatch) {
+    if let Some(mut existing_item) = self.provider_map.get_mut(&id) {
+      existing_item.apply(item);
+    }
+  }
+
+  fn add_provider(&self, id: i64, item: CacheProvider) {
+    if self.provider_map.contains_key(&id) {
+      warn!("provider already");
+    } else {
+      self.provider_key_id_map.insert(item.provider_key.clone(), id);
+      self.provider_map.insert(id, item);
+    }
+  }
+
+  fn delete_provider(&self, id: i64) -> Option<()> {
+      let (_, provider) = self.provider_map.remove(&id)?;
+      self.provider_key_id_map.remove(&provider.provider_key);
+      Some(())
+  }
+
+  fn get_provider_by_id(&self, id: i64) -> Option<CacheProvider> {
+     self.provider_map.get(&id).map(|v| v.clone())
+  }
+
+  fn get_provider_id_by_key(&self, key: &str) -> Option<i64> {
+      self.provider_key_id_map.get(key).map(|v| *v)
+  }
+}
+
+impl ModelCacheStore for MemoryCacheStore {
+  fn add_model(&self, id: i64, item: CacheModel) {
+      if self.model_map.contains_key(&id) {
+          warn!("model already exists");
+      } else {
+          if let Some(provider) = self.get_provider_by_id(item.provider_id) {
+              self.model_key_id_map.insert(format!("{}/{}", provider.provider_key, item.model_name), id);
+              self.model_map.insert(id, item);
+          }
+      }
+  }
+
+  fn update_model(&self, id: i64, item: CacheModelPatch) {
+      if let Some(mut model) = self.model_map.get_mut(&id) {
+          model.apply(item);
+      }
+  }
+
+  fn delete_model(&self, id: i64) -> Option<()> {
+      let (_, model) = self.model_map.remove(&id)?;
+
+      let provider = self.provider_map.get(&model.provider_id)?;
+      self.model_key_id_map.remove(&format!("{}/{}", &provider.provider_key, &model.model_name))?;
+      Some(())
+      // todo delete alias
+  }
+
+  fn get_model_by_id(&self, id: i64) -> Option<CacheModel> {
+      self.model_map.get(&id).map(|v| v.clone())
+  }
+
+  fn get_model_id_by_key(&self, key: &str) -> Option<i64> {
+      self.model_key_id_map.get(key).map(|v| *v)
+  }
+
+  fn get_model_id_by_alias_name(&self, name: &str) -> Option<i64> {
+      self.model_alias_id_map.get(name).map(|v| *v)
+  }
+}
+
+impl AccessControlCacheStore for MemoryCacheStore {
+  fn add_access_control_policy(&self, id: i64, item: CacheAccessControl) {
+      self.access_control_policy_map.insert(id, item);
+  }
+
+  fn update_acecss_control_policy(&self, id: i64, item: CacheAccessControlPatch) {
+      if let Some(mut policy) = self.access_control_policy_map.get_mut(&id) {
+          policy.apply(item);
+      }
+  }
+
+  fn delete_access_control_policy(&self, id: i64) -> Option<()> {
+      self.access_control_policy_map.remove(&id).map(|_| ())
+  }
+
+  fn get_access_control_policy(&self, id: i64) -> Option<CacheAccessControl> {
+      self.access_control_policy_map.get(&id).map(|v| v.clone())
+  }
+}
 
 pub enum GroupItemSelectionStrategy {
     Random,
@@ -536,6 +808,7 @@ pub struct AppState {
   pub billing_plan_store: StateStore<BillingPlan>,
   pub price_rule_store: StateStore<PriceRule>,
   pub custom_field_link_store: CustomFieldLinkStore,
+  pub cache_store: Arc<MemoryCacheStore>,
 }
 
 impl AppState {
@@ -733,7 +1006,6 @@ impl ModelStore {
     pub fn get_by_composite_key(&self, provider_key: &str, model_name: &str) -> Result<Option<Model>, AppStoreError> {
         let composite_key = (provider_key.to_string(), model_name.to_string());
         let id_map = self.get_id_by_composite_key_read()?;
-        debug!("down {:?}", id_map);
         if let Some(&id) = id_map.get(&composite_key) {
             // Fetch from core_store using the ID found from composite key
             self.core_store.get_by_id(id)
@@ -1240,6 +1512,12 @@ pub fn create_app_state() -> Arc<AppState> {
     let billing_plan_store = create_billing_plan_store();
     let price_rule_store = create_price_rule_store();
     let custom_field_link_store = create_custom_field_link_store();
+
+    let providers = Provider::list_all().unwrap_or_default();
+    let models = Model::list_all().unwrap_or_default();
+    let system_api_keys = SystemApiKey::list_all().unwrap_or_default();
+    let cache_store = Arc::new(MemoryCacheStore::new(providers, models, system_api_keys));
+
     Arc::new(AppState {
         system_api_key_store,
         provider_store,
@@ -1250,6 +1528,7 @@ pub fn create_app_state() -> Arc<AppState> {
         billing_plan_store,
         price_rule_store,
         custom_field_link_store,
+        cache_store,
     })
 }
 

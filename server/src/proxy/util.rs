@@ -5,7 +5,9 @@ use cyder_tools::log::{debug, error};
 use serde_json::Value;
 
 use crate::{
-    database::{model::Model, price::PriceRule},
+    controller::llm_types::LlmApiType,
+    database::{model::Model, provider::Provider, price::PriceRule},
+    schema::enum_def::ProviderType,
     service::app_state::AppState,
     utils::billing::UsageInfo,
 };
@@ -110,4 +112,34 @@ pub(super) fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInf
         total_tokens: t as i32,
         reasoning_tokens: 0,
     })
+}
+
+// Determines the target API type based on the provider type.
+pub(super) fn determine_target_api_type(provider: &Provider) -> LlmApiType {
+    if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
+        LlmApiType::Gemini
+    } else if provider.provider_type == ProviderType::Ollama {
+        LlmApiType::Ollama
+    } else {
+        LlmApiType::OpenAI
+    }
+}
+
+// Formats a model string for logging purposes.
+// Returns "provider/model" if model_name == real_model_name, otherwise "provider/model(real_model_name)".
+pub(super) fn format_model_str(provider: &Provider, model: &Model) -> String {
+    let real_model_name = model
+        .real_model_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&model.model_name);
+    
+    if model.model_name == real_model_name {
+        format!("{}/{}", &provider.provider_key, &model.model_name)
+    } else {
+        format!(
+            "{}/{}({})",
+            &provider.provider_key, &model.model_name, real_model_name
+        )
+    }
 }

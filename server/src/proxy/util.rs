@@ -1,15 +1,15 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::{body::Body, extract::Request, http::StatusCode};
-use cyder_tools::log::{debug, error};
+use cyder_tools::log::debug;
 use serde_json::Value;
 
 use crate::{
     controller::llm_types::LlmApiType,
-    database::{model::Model, provider::Provider, price::PriceRule},
     schema::enum_def::ProviderType,
     service::app_state::AppState,
     utils::billing::UsageInfo,
+    service::cache::types::{CacheBillingPlan, CacheProvider, CacheModel},
 };
 
 
@@ -46,39 +46,20 @@ pub(super) fn _serialize_axum_headers(headers: &axum::http::HeaderMap) -> Option
 
 
 // Retrieves pricing rules and currency for a given model.
-pub(super) fn get_pricing_info(model: &Model, app_state: &Arc<AppState>) -> (Vec<PriceRule>, Option<String>) {
+pub(super) async fn get_pricing_info(model: &CacheModel, app_state: &Arc<AppState>) -> Option<CacheBillingPlan> {
     debug!(
         "Fetching pricing info for model: {}, plan_id: {:?}",
         model.model_name, model.billing_plan_id
     );
-    if let Some(plan_id) = model.billing_plan_id {
-        let rules = app_state
-            .price_rule_store
-            .list_by_group_id(plan_id)
-            .unwrap_or_else(|e| {
-                error!(
-                    "Failed to get price rules for plan_id {}: {:?}. Cost will not be calculated.",
-                    plan_id, e
-                );
-                Vec::new()
-            });
-
-        let plan_currency = match app_state.billing_plan_store.get_by_id(plan_id) {
-            Ok(Some(plan)) => Some(plan.currency),
-            Ok(None) => {
-                error!("Billing plan with id {} not found in store.", plan_id);
-                None
-            }
-            Err(e) => {
-                error!("Failed to get billing plan for plan_id {}: {:?}", plan_id, e);
-                None
-            }
-        };
-
-        debug!("Found {} price rules for plan {}", rules.len(), plan_id);
-        (rules, plan_currency)
+    if let Some(billing_plan_id) = model.billing_plan_id {
+        app_state
+            .get_billing_plan_by_id(billing_plan_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|bp| (*bp).clone())
     } else {
-        (Vec::new(), None)
+        None
     }
 }
 
@@ -115,7 +96,7 @@ pub(super) fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInf
 }
 
 // Determines the target API type based on the provider type.
-pub(super) fn determine_target_api_type(provider: &Provider) -> LlmApiType {
+pub(super) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType {
     if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
         LlmApiType::Gemini
     } else if provider.provider_type == ProviderType::Ollama {
@@ -127,7 +108,7 @@ pub(super) fn determine_target_api_type(provider: &Provider) -> LlmApiType {
 
 // Formats a model string for logging purposes.
 // Returns "provider/model" if model_name == real_model_name, otherwise "provider/model(real_model_name)".
-pub(super) fn format_model_str(provider: &Provider, model: &Model) -> String {
+pub(super) fn format_model_str(provider: &CacheProvider, model: &CacheModel) -> String {
     let real_model_name = model
         .real_model_name
         .as_deref()

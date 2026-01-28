@@ -3,10 +3,10 @@ use super::util::serialize_reqwest_headers;
 
 use crate::config::CONFIG;
 use crate::controller::llm_types::LlmApiType;
-use crate::database::price::PriceRule;
 use crate::database::request_log::{RequestLog, UpdateRequestLogData};
 use crate::schema::enum_def::RequestStatus;
 use crate::service::transform::{transform_result, StreamTransformer};
+use crate::service::cache::types::CacheBillingPlan;
 use crate::utils::billing::parse_usage_info;
 use crate::utils::sse::SseParser;
 
@@ -191,8 +191,7 @@ pub(super) async fn proxy_request(
     headers: reqwest::header::HeaderMap,
     model_str: String,
     use_proxy: bool,
-    price_rules: Vec<PriceRule>,
-    currency: Option<String>,
+    billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, (StatusCode, String)> {
@@ -237,8 +236,7 @@ pub(super) async fn proxy_request(
                 None,
                 completed_at,
                 None,
-                &price_rules,
-                currency.as_deref(),
+                billing_plan.as_ref(),
                 Some(RequestStatus::Error),
             );
             return Err((StatusCode::BAD_GATEWAY, error_message));
@@ -252,8 +250,7 @@ pub(super) async fn proxy_request(
         response,
         &url,
         &data,
-        price_rules,
-        currency,
+        billing_plan,
         api_type,
         target_api_type,
     )
@@ -269,8 +266,7 @@ async fn handle_non_streaming_response(
     response: reqwest::Response,
     url: &str,
     data: &str,
-    price_rules: Vec<PriceRule>,
-    currency: Option<String>,
+    billing_plan: Option<&CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, (StatusCode, String)> {
@@ -312,8 +308,7 @@ async fn handle_non_streaming_response(
                 None,
                 completed_at,
                 None,
-                &price_rules,
-                currency.as_deref(),
+                billing_plan,
                 Some(RequestStatus::Error),
             );
             return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
@@ -359,8 +354,7 @@ async fn handle_non_streaming_response(
             None,
             llm_response_completed_at,
             parsed_usage_info.as_ref(),
-            &price_rules,
-            currency.as_deref(),
+            billing_plan,
             Some(RequestStatus::Success),
         );
         info!(
@@ -417,8 +411,7 @@ async fn handle_non_streaming_response(
             None,
             llm_response_completed_at,
             None,
-            &price_rules,
-            currency.as_deref(),
+            billing_plan,
             Some(RequestStatus::Error),
         );
 
@@ -433,8 +426,7 @@ async fn handle_streaming_response(
     response: reqwest::Response,
     url: &str,
     data: &str,
-    price_rules: Vec<PriceRule>,
-    currency: Option<String>,
+    billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, (StatusCode, String)> {
@@ -459,6 +451,7 @@ async fn handle_streaming_response(
     let url_owned = url.to_string();
     let data_owned = data.to_string();
     let logged_sse_success_clone = logged_sse_success.clone();
+    let billing_plan_clone = billing_plan.clone();
 
     tokio::spawn(async move {
         let mut stream = response.bytes_stream();
@@ -497,7 +490,7 @@ async fn handle_streaming_response(
                                         let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
                                         let completed_at = Utc::now().timestamp_millis();
                                         let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-                                        log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success));
+                                        log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), billing_plan_clone.as_ref(), Some(RequestStatus::Success));
                                         *logged_sse_success_clone.lock().unwrap() = true;
                                         info!("{}: SSE stream completed.", model_str);
                                     }
@@ -535,7 +528,7 @@ async fn handle_streaming_response(
 
                     log_final_update(
                         log_id, "LLM stream error", &url_owned, &data_owned, Some(status_code),
-                        Some(None), true, first_chunk_ts, completed_at, None, &price_rules, currency.as_deref(), Some(RequestStatus::Error),
+                        Some(None), true, first_chunk_ts, completed_at, None, billing_plan_clone.as_ref(), Some(RequestStatus::Error),
                     );
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, stream_error_message));
                     break;
@@ -564,7 +557,7 @@ async fn handle_streaming_response(
                     log_final_update(
                         log_id, "SSE stream end", &url_owned, &data_owned, Some(status_code),
                         Some(None), true, first_chunk_ts, llm_response_completed_at,
-                        parsed_usage_info.as_ref(), &price_rules, currency.as_deref(), Some(RequestStatus::Success),
+                        parsed_usage_info.as_ref(), billing_plan_clone.as_ref(), Some(RequestStatus::Success),
                     );
                     info!("{}: SSE stream completed at stream end.", model_str);
                 } else {
@@ -576,7 +569,7 @@ async fn handle_streaming_response(
                 log_final_update(
                     log_id, "SSE stream end (no final chunk)", &url_owned, &data_owned, Some(status_code),
                     Some(None), true, first_chunk_ts, llm_response_completed_at,
-                    None, &price_rules, currency.as_deref(), Some(RequestStatus::Success),
+                    None, billing_plan_clone.as_ref(), Some(RequestStatus::Success),
                 );
             }
         } else if !status_code.is_success() {
@@ -585,7 +578,7 @@ async fn handle_streaming_response(
             log_final_update(
                 log_id, "LLM error status", &url_owned, &data_owned, Some(status_code),
                 Some(Some(error_body_str)), true, first_chunk_ts,
-                llm_response_completed_at, None, &price_rules, currency.as_deref(), Some(RequestStatus::Error),
+                llm_response_completed_at, None, billing_plan_clone.as_ref(), Some(RequestStatus::Error),
             );
         }
     };
@@ -608,8 +601,7 @@ pub(super) async fn handle_llm_response(
     response: reqwest::Response,
     url: &str,
     data: &str,
-    price_rules: Vec<PriceRule>,
-    currency: Option<String>,
+    billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, (StatusCode, String)> {
@@ -640,8 +632,7 @@ pub(super) async fn handle_llm_response(
             response,
             url,
             data,
-            price_rules,
-            currency,
+            billing_plan,
             api_type,
             target_api_type,
         )
@@ -653,8 +644,7 @@ pub(super) async fn handle_llm_response(
             response,
             url,
             data,
-            price_rules,
-            currency,
+            billing_plan.as_ref(),
             api_type,
             target_api_type,
         )

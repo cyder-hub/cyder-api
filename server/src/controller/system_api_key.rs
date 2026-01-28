@@ -40,7 +40,6 @@ struct IssueTokenRequest {
 }
 
 async fn insert_one(
-    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<InsertApiKeyRequest>
 ) -> DbResult<HttpResult<SystemApiKey>> {
     let created_api_key = SystemApiKey::create(
@@ -49,21 +48,25 @@ async fn insert_one(
         payload.access_control_policy_id,
     )?;
 
-    if let Err(e) = app_state.system_api_key_store.add(created_api_key.clone()) {
-        warn!("Failed to add SystemApiKey id {} to store: {:?}", created_api_key.id, e);
-    }
-
     Ok(HttpResult::new(created_api_key))
 }
 
 async fn delete_one(
     State(app_state): State<Arc<AppState>>,
-    Path(id): Path<i64>
+    Path(id): Path<i64>,
 ) -> DbResult<HttpResult<()>> {
+    let key_to_delete = SystemApiKey::get_by_id(id)?;
     SystemApiKey::delete(id)?; // delete returns DbResult<usize>
 
-    if let Err(e) = app_state.system_api_key_store.delete(id) {
-        warn!("Failed to delete SystemApiKey id {} from store: {:?}", id, e);
+    // Update cache
+    if let Err(e) = app_state
+        .invalidate_system_api_key(&key_to_delete.api_key)
+        .await
+    {
+        warn!(
+            "Failed to invalidate SystemApiKey id {} from cache: {:?}",
+            id, e
+        );
     }
 
     Ok(HttpResult::new(()))
@@ -87,8 +90,14 @@ async fn update_one(
     };
     let updated_api_key = SystemApiKey::update(id, &update_data)?;
 
-    if let Err(e) = app_state.system_api_key_store.update(updated_api_key.clone()) {
-        warn!("Failed to update SystemApiKey id {} in store: {:?}", updated_api_key.id, e);
+    if let Err(e) = app_state
+        .invalidate_system_api_key(&updated_api_key.api_key)
+        .await
+    {
+        warn!(
+            "Failed to invalidate SystemApiKey id {} from cache: {:?}",
+            id, e
+        );
     }
 
     Ok(HttpResult::new(updated_api_key))
@@ -98,10 +107,14 @@ async fn refresh_ref(
     State(app_state): State<Arc<AppState>>,
     Path(api_key_id): Path<i64>,
 ) -> DbResult<HttpResult<SystemApiKey>> {
+    // Get the key before refreshing to find the old ref_ for invalidation.
+    let old_key = SystemApiKey::get_by_id(api_key_id)?;
+
     let updated_api_key = SystemApiKey::refresh_ref(api_key_id)?;
 
-    if let Err(e) = app_state.system_api_key_store.update(updated_api_key.clone()) {
-        warn!("Failed to update SystemApiKey id {} in store after refreshing ref: {:?}", updated_api_key.id, e);
+    // Invalidate the key from cache.
+    if let Err(e) = app_state.invalidate_system_api_key(&old_key.api_key).await {
+         warn!("Failed to invalidate SystemApiKey id {} from cache after refreshing ref: {:?}", api_key_id, e);
     }
 
     Ok(HttpResult::new(updated_api_key))
@@ -125,8 +138,12 @@ async fn issue_token(
         Some(ref_str) => ref_str,
         None => {
             let updated_api_key = SystemApiKey::refresh_ref(api_key_id)?;
-            if let Err(e) = app_state.system_api_key_store.update(updated_api_key.clone()) {
-                warn!("Failed to update SystemApiKey id {} in store after auto-refreshing ref: {:?}", updated_api_key.id, e);
+            // Invalidate from cache
+            if let Err(e) = app_state
+                .invalidate_system_api_key(&updated_api_key.api_key)
+                .await
+            {
+                warn!("Failed to invalidate SystemApiKey id {} in cache after auto-refreshing ref: {:?}", updated_api_key.id, e);
             }
             // refresh_ref should always return a key with a ref.
             updated_api_key.ref_.ok_or_else(|| BaseError::DatabaseFatal(Some("Failed to generate and retrieve ref_".to_string())))?

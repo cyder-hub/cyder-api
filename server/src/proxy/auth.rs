@@ -4,11 +4,8 @@ use axum::http::HeaderMap;
 use reqwest::{header::AUTHORIZATION, StatusCode};
 
 use crate::{
-    database::{
-        model::Model, provider::Provider,
-        system_api_key::SystemApiKey,
-    },
-    service::app_state::{AppStoreError, AppState, SystemApiKeyStore},
+    service::app_state::{AppStoreError, AppState},
+    service::cache::types::{CacheSystemApiKey, CacheProvider, CacheModel},
     utils::{auth::decode_api_key_jwt, limit::LIMITER},
 };
 use cyder_tools::log::{debug, error, info, warn};
@@ -22,7 +19,7 @@ pub enum ApiKeyPosition {
 }
 
 pub struct ApiKeyCheckResult {
-    pub api_key: SystemApiKey,
+    pub api_key: Arc<CacheSystemApiKey>,
     pub channel: Option<String>,
     pub external_id: Option<String>,
     pub position: ApiKeyPosition,
@@ -40,7 +37,8 @@ pub async fn authenticate_openai_request(
             warn!("OpenAI auth failed: {}", err_msg);
             (StatusCode::UNAUTHORIZED, err_msg)
         })?;
-    check_system_api_key(&app_state.system_api_key_store, &system_api_key_str, position)
+    check_system_api_key(app_state, &system_api_key_str, position)
+        .await
         .map_err(|err_msg| {
             warn!("OpenAI system key check failed: {}", err_msg);
             (StatusCode::UNAUTHORIZED, err_msg)
@@ -48,7 +46,7 @@ pub async fn authenticate_openai_request(
 }
 
 // Authenticates a Gemini-style request (X-Goog-Api-Key header or 'key' query param).
-pub fn authenticate_gemini_request(
+pub async fn authenticate_gemini_request(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
     app_state: &Arc<AppState>,
@@ -76,7 +74,8 @@ pub fn authenticate_gemini_request(
             }
         },
     };
-    check_system_api_key(&app_state.system_api_key_store, &system_api_key_str, position)
+    check_system_api_key(app_state, &system_api_key_str, position)
+        .await
         .map_err(|err_msg| {
             warn!("Gemini system key check failed: {}", err_msg);
             (StatusCode::UNAUTHORIZED, err_msg)
@@ -84,7 +83,7 @@ pub fn authenticate_gemini_request(
 }
 
 // Authenticates an Anthropic-style request (x-api-key header).
-pub fn authenticate_anthropic_request(
+pub async fn authenticate_anthropic_request(
     headers: &HeaderMap,
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
@@ -109,10 +108,11 @@ pub fn authenticate_anthropic_request(
         }
     };
     check_system_api_key(
-        &app_state.system_api_key_store,
+        app_state,
         &system_api_key_str,
         ApiKeyPosition::XApiKeyHeader,
     )
+    .await
     .map_err(|err_msg| {
         warn!("Anthropic system key check failed: {}", err_msg);
         (StatusCode::UNAUTHORIZED, err_msg)
@@ -131,7 +131,8 @@ pub async fn authenticate_ollama_request(
             warn!("Ollama auth failed: {}", err_msg);
             (StatusCode::UNAUTHORIZED, err_msg)
         })?;
-    check_system_api_key(&app_state.system_api_key_store, &system_api_key_str, position)
+    check_system_api_key(app_state, &system_api_key_str, position)
+        .await
         .map_err(|err_msg| {
             warn!("Ollama system key check failed: {}", err_msg);
             (StatusCode::UNAUTHORIZED, err_msg)
@@ -139,14 +140,14 @@ pub async fn authenticate_ollama_request(
 }
 
 // Checks if the request is allowed by the access control policy.
-pub fn check_access_control(
-    system_api_key: &SystemApiKey,
-    provider: &Provider,
-    model: &Model,
+pub async fn check_access_control(
+    system_api_key: &CacheSystemApiKey,
+    provider: &CacheProvider,
+    model: &CacheModel,
     app_state: &Arc<AppState>,
 ) -> Result<(), (StatusCode, String)> {
     if let Some(policy_id) = system_api_key.access_control_policy_id {
-        match app_state.access_control_store.get_by_id(policy_id) {
+        match app_state.get_access_control_policy(policy_id).await {
             Ok(Some(policy)) => {
                 if let Err(reason) = LIMITER.check_limit_strategy(&policy, provider.id, model.id) {
                     info!(
@@ -206,14 +207,14 @@ pub fn parse_token_from_request(
         })
 }
 
-// Updated to query from the new StateStore<SystemApiKey> struct
-pub fn check_system_api_key(
-    store: &SystemApiKeyStore,
+// Checks system API key from AppState cache
+pub async fn check_system_api_key(
+    app_state: &AppState,
     key_str: &str,
     position: ApiKeyPosition,
 ) -> Result<ApiKeyCheckResult, String> {
     if key_str.starts_with("cyder-") {
-        match store.get_by_key(key_str) {
+        match app_state.get_system_api_key(key_str).await {
             Ok(Some(api_key)) => Ok(ApiKeyCheckResult {
                 api_key,
                 channel: None,
@@ -222,12 +223,11 @@ pub fn check_system_api_key(
             }),
             Ok(None) => Err("api key invalid or not found".to_string()),
             Err(AppStoreError::LockError(e)) => {
-                error!("SystemApiKeyStore lock error: {}", e);
+                error!("AppState lock error: {}", e);
                 Err("Internal server error while checking API key".to_string())
             }
             Err(e) => {
-                // Catch other AppStoreError variants if any, though get_by_key primarily returns Option or LockError
-                error!("SystemApiKeyStore error: {:?}", e);
+                error!("AppState error: {:?}", e);
                 Err("Internal server error while checking API key".to_string())
             }
         }
@@ -235,7 +235,7 @@ pub fn check_system_api_key(
         let jwt_result =
             decode_api_key_jwt(token).map_err(|e| format!("Invalid JWT token: {:?}", e))?;
 
-        match store.get_by_ref(&jwt_result.key_ref) {
+        match app_state.get_system_api_key(&jwt_result.key_ref).await {
             Ok(Some(api_key)) => Ok(ApiKeyCheckResult {
                 api_key,
                 channel: Some(jwt_result.channel),
@@ -247,11 +247,11 @@ pub fn check_system_api_key(
                 jwt_result.key_ref
             )),
             Err(AppStoreError::LockError(e)) => {
-                error!("SystemApiKeyStore lock error: {}", e);
+                error!("AppState lock error: {}", e);
                 Err("Internal server error while checking API key by ref".to_string())
             }
             Err(e) => {
-                error!("SystemApiKeyStore error: {:?}", e);
+                error!("AppState error: {:?}", e);
                 Err("Internal server error while checking API key by ref".to_string())
             }
         }

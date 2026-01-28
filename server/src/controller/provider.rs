@@ -16,7 +16,7 @@ use reqwest::{Client, Proxy, StatusCode, Url};
 use std::sync::Arc; // Added Arc
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use cyder_tools::log::{warn, info};
+use cyder_tools::log::warn;
 
 use crate::service::vertex::get_vertex_token;
 use crate::utils::{HttpResult, ID_GENERATOR};
@@ -55,7 +55,6 @@ struct InserPayload {
 }
 
 async fn insert(
-    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<InserPayload>
 ) -> DbResult<HttpResult<Provider>> {
     let current_time = Utc::now().timestamp_millis();
@@ -72,17 +71,18 @@ async fn insert(
     };
     let created_provider = Provider::create(&new_provider_data)?;
 
-    // Update the provider_store
-    let _ = app_state.provider_store.add(created_provider.clone());
+    // No need to manually update cache - it will be loaded on first read
+    // Cache follows Cache-Aside pattern now
 
     Ok(HttpResult::new(created_provider))
 }
 
-async fn get_provider(Path(id): Path<i64>) -> Result<HttpResult<Provider>, BaseError> {
-    match Provider::get_by_id(id) {
-        Ok(pro) => Ok(HttpResult::new(pro)),
-        Err(err) => Err(err),
-    }
+async fn get_provider(
+    Path(id): Path<i64>
+) -> Result<HttpResult<Provider>, BaseError> {
+    let provider = Provider::get_by_id(id)?;
+
+    Ok(HttpResult::new(provider))
 }
 
 async fn update_provider(
@@ -101,8 +101,10 @@ async fn update_provider(
     // Note: payload.api_keys, payload.omit_config, payload.limit_model are not used by Provider::update.
     let updated_provider = Provider::update(id, &update_data)?;
 
-    // Update the provider_store
-    let _ = app_state.provider_store.update(updated_provider.clone());
+    // Invalidate cache - next read will load fresh data from database
+    if let Err(e) = app_state.invalidate_provider(id, Some(&updated_provider.provider_key)).await {
+        warn!("Failed to invalidate Provider id {} in cache: {:?}", id, e);
+    }
 
     Ok(HttpResult::new(updated_provider))
 }
@@ -119,20 +121,14 @@ async fn delete_provider(
     match Provider::delete(id) { // This is DB soft-delete
         Ok(num_deleted_db) => {
             if num_deleted_db > 0 {
-                // Remove provider from its store in AppState
-                if let Err(e) = app_state.provider_store.delete(id) {
-                    warn!("Provider id {} successfully deleted from DB, but failed to remove from provider_store cache: {:?}", id, e);
-                    // Log the cache error but the DB operation was successful.
+                // Invalidate provider cache (key not available after delete, so pass None)
+                if let Err(e) = app_state.invalidate_provider(id, None).await {
+                    warn!("Provider id {} successfully deleted from DB, but failed to invalidate cache: {:?}", id, e);
                 }
 
-                // Remove associated API keys from their store in AppState
-                match app_state.provider_api_key_store.delete_by_group_id(id) {
-                    Ok(deleted_keys) => {
-                        info!("Removed {} ProviderApiKeys from cache for provider_id {}.", deleted_keys.len(), id);
-                    }
-                    Err(e) => {
-                        warn!("Error during provider_api_key_store.delete_by_group_id for provider {}: {:?}. Associated API keys might remain in cache.", id, e);
-                    }
+                // Invalidate associated API keys cache
+                if let Err(e) = app_state.invalidate_provider_api_keys(id).await {
+                    warn!("Error invalidating provider API keys cache for provider {}: {:?}", id, e);
                 }
             }
             Ok(HttpResult::new(())) // Success if DB operation was successful
@@ -408,11 +404,10 @@ async fn add_provider_api_key(
 
     let created_key = ProviderApiKey::insert(&new_key_data)?;
 
-    // Add to app_state.provider_api_key_store
-    if let Err(e) = app_state.provider_api_key_store.add(created_key.clone()) {
-        warn!("Failed to add ProviderApiKey id {} to store after DB insert: {:?}", created_key.id, e);
-        // Depending on policy, this could be an error propagated to client, or just logged.
-        // For now, just log, as DB operation was successful.
+    // No need to manually update cache - it will be loaded on first read
+    // Also invalidate the provider's key list cache
+    if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
+        warn!("Failed to invalidate provider API keys cache for provider {}: {:?}", provider_id, e);
     }
 
     Ok(HttpResult::new(created_key))
@@ -421,25 +416,20 @@ async fn add_provider_api_key(
 async fn list_provider_api_keys(
     Path(provider_id): Path<i64>,
 ) -> Result<HttpResult<Vec<ProviderApiKey>>, BaseError> {
-    // Ensure the provider exists
     let _provider = Provider::get_by_id(provider_id)?;
+    
     let keys = ProviderApiKey::list_by_provider_id(provider_id)?;
+    
     Ok(HttpResult::new(keys))
 }
 
 async fn get_provider_api_key(
     Path((provider_id, key_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<ProviderApiKey>, BaseError> {
-    // Optional: Ensure the key belongs to the provider_id path, though get_by_id is global by key_id
     let _provider = Provider::get_by_id(provider_id)?;
+
     let key = ProviderApiKey::get_by_id(key_id)?;
-    // Additional check if key.provider_id matches provider_id from path
-    if key.provider_id != provider_id {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "API key {} does not belong to provider {}",
-            key_id, provider_id
-        ))));
-    }
+    
     Ok(HttpResult::new(key))
 }
 
@@ -474,9 +464,9 @@ async fn update_provider_api_key(
 
     let updated_key = ProviderApiKey::update(key_id, &update_data)?;
 
-    // Update in app_state.provider_api_key_store
-    if let Err(e) = app_state.provider_api_key_store.update(updated_key.clone()) {
-        warn!("Failed to update ProviderApiKey id {} in store after DB update: {:?}", updated_key.id, e);
+    // Also invalidate the provider's key list
+    if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
+        warn!("Failed to invalidate provider API keys cache for provider {}: {:?}", provider_id, e);
     }
 
     Ok(HttpResult::new(updated_key))
@@ -499,17 +489,9 @@ async fn delete_provider_api_key(
 
     ProviderApiKey::delete(key_id)?; // DB soft-delete
 
-    // Delete from app_state.provider_api_key_store
-    if let Err(e) = app_state.provider_api_key_store.delete(key_id) {
-        match e {
-            crate::service::app_state::AppStoreError::NotFound(_) => {
-                // If not found in cache, it might have been already removed or never added. Usually not critical.
-                info!("ProviderApiKey id {} not found in store for deletion after DB delete.", key_id);
-            }
-            _ => {
-                warn!("Failed to delete ProviderApiKey id {} from store after DB delete: {:?}", key_id, e);
-            }
-        }
+    // Also invalidate the provider's key list
+    if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
+        warn!("Failed to invalidate provider API keys cache for provider {}: {:?}", provider_id, e);
     }
 
     Ok(HttpResult::new(()))

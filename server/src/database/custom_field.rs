@@ -7,7 +7,6 @@ use super::{get_connection, DbResult, ListResult};
 use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
-use crate::service::app_state::Storable; // Import Storable
 use crate::schema::enum_def::{FieldPlacement, FieldType};
 
 // --- Core Database Object Struct (managed by db_object!) ---
@@ -172,14 +171,6 @@ pub struct ApiUpdateCustomFieldDefinitionPayload {
     pub is_enabled: Option<bool>,
 }
 
-#[derive(Serialize, Debug)]
-pub struct ApiCustomFieldDefinitionList {
-    pub items: Vec<ApiCustomFieldDefinition>,
-    pub total: i64,
-    pub page: i64,
-    pub page_size: i64,
-}
-
 // --- API Payloads for Linking/Unlinking ---
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ApiLinkCustomFieldPayload {
@@ -235,22 +226,6 @@ impl From<ApiCustomFieldDefinition> for CustomFieldDefinition {
             updated_at: api_cfd.updated_at,
         }
     }
-}
-
-impl Storable for CustomFieldDefinition {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        // Since the StateStore for CustomFieldDefinition will be created with with_key_map: false,
-        // this key might not be strictly used for map lookups within that store.
-        // Using id.to_string() as a unique key.
-        self.id.to_string()
-    }
-
-    // group_id is not applicable for CustomFieldDefinition in this context,
-    // so we use the default implementation which returns None.
 }
 
 impl CustomFieldDefinition {
@@ -512,6 +487,19 @@ impl CustomFieldDefinition {
         })
     }
 
+    pub fn list_enabled_model_assignments_by_model_id(model_id_val: i64) -> DbResult<Vec<ModelCustomFieldAssignment>> {
+        let conn = &mut get_connection();
+        db_execute!(conn, {
+            model_custom_field_assignment::table
+                .filter(model_custom_field_assignment::dsl::is_enabled.eq(true))
+                .filter(model_custom_field_assignment::dsl::model_id.eq(model_id_val))
+                .select(ModelCustomFieldAssignmentDb::as_select())
+                .load::<ModelCustomFieldAssignmentDb>(conn)
+                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list enabled model custom field assignments by model id: {}", e))))
+                .map(|vec_db| vec_db.into_iter().map(|db_item| db_item.from_db()).collect())
+        })
+    }
+
     // --- Provider Custom Field Assignment ---
     pub fn link_provider(
         custom_field_definition_id_val: i64,
@@ -580,6 +568,19 @@ impl CustomFieldDefinition {
                 .select(ProviderCustomFieldAssignmentDb::as_select())
                 .load::<ProviderCustomFieldAssignmentDb>(conn)
                 .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list all enabled provider custom field assignments: {}", e))))
+                .map(|vec_db| vec_db.into_iter().map(|db_item| db_item.from_db()).collect())
+        })
+    }
+
+    pub fn list_enabled_provider_assignments_by_provider_id(provider_id_val: i64) -> DbResult<Vec<ProviderCustomFieldAssignment>> {
+        let conn = &mut get_connection();
+        db_execute!(conn, {
+            provider_custom_field_assignment::table
+                .filter(provider_custom_field_assignment::dsl::is_enabled.eq(true))
+                .filter(provider_custom_field_assignment::dsl::provider_id.eq(provider_id_val))
+                .select(ProviderCustomFieldAssignmentDb::as_select())
+                .load::<ProviderCustomFieldAssignmentDb>(conn)
+                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list enabled provider custom field assignments by provider id: {}", e))))
                 .map(|vec_db| vec_db.into_iter().map(|db_item| db_item.from_db()).collect())
         })
     }

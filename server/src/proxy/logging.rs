@@ -1,17 +1,12 @@
 use crate::{
-    database::{
-        model::Model,
-        price::PriceRule,
-        provider::Provider,
-        request_log::{NewRequestLog, RequestLog, UpdateRequestLogData},
-        system_api_key::SystemApiKey,
-    },
+    database::request_log::{NewRequestLog, RequestLog, UpdateRequestLogData},
     schema::enum_def::RequestStatus,
     utils::{
         billing::{populate_token_cost_fields, UsageInfo},
         ID_GENERATOR,
     },
 };
+use crate::service::cache::types::{CacheSystemApiKey, CacheProvider, CacheModel, CacheBillingPlan};
 use chrono::Utc;
 use cyder_tools::log::{debug, error};
 use reqwest::StatusCode;
@@ -32,8 +27,7 @@ pub(super) fn log_final_update(
     first_chunk_ts: Option<i64>,
     completion_ts: i64,
     usage_opt: Option<&UsageInfo>,
-    price_rules: &[PriceRule],
-    currency: Option<&str>,
+    billing_plan: Option<&CacheBillingPlan>,
     overall_status: Option<RequestStatus>,
 ) {
     let is_error = overall_status == Some(RequestStatus::Error);
@@ -55,7 +49,7 @@ pub(super) fn log_final_update(
         status: overall_status.clone(),
         ..Default::default()
     };
-    populate_token_cost_fields(&mut update_data, usage_opt, price_rules, currency);
+    populate_token_cost_fields(&mut update_data, usage_opt, billing_plan);
 
     debug!(
         "Updating request log {} (context: {}) with status {:?}",
@@ -72,9 +66,9 @@ pub(super) fn log_final_update(
 
 // Creates an initial request log entry in the database.
 pub(super) fn create_request_log(
-    system_api_key: &SystemApiKey,
-    provider: &Provider,
-    model: &Model,
+    system_api_key: &CacheSystemApiKey,
+    provider: &CacheProvider,
+    model: &CacheModel,
     provider_api_key_id: i64,
     start_time: i64,
     client_ip_addr: &Option<String>,

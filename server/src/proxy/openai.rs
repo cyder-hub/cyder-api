@@ -6,6 +6,7 @@ use super::util::*;
 
 use crate::controller::llm_types::LlmApiType;
 use crate::service::app_state::AppState;
+use crate::service::cache::types::{CacheProvider, CacheModel};
 use crate::service::transform::transform_request_data;
 use axum::{body::Body, extract::Request, response::Response};
 use chrono::Utc;
@@ -54,7 +55,7 @@ pub async fn handle_openai_request(
 
     info!("Processing OpenAI request for model: {}", pre_model_str);
 
-    let (provider, model) = get_provider_and_model(&app_state, pre_model_str).map_err(|e| {
+    let (provider, model): (Arc<CacheProvider>, Arc<CacheModel>) = get_provider_and_model(&app_state, pre_model_str).await.map_err(|e: String| {
         warn!("Failed to resolve model '{}': {}", pre_model_str, e);
         (StatusCode::BAD_REQUEST, e)
     })?;
@@ -63,10 +64,10 @@ pub async fn handle_openai_request(
     let is_stream = data.get("stream").and_then(Value::as_bool).unwrap_or(false);
     data = transform_request_data(data, LlmApiType::OpenAI, target_api_type, is_stream);
 
-    let (price_rules, currency) = get_pricing_info(&model, &app_state);
+    let billing_plan = get_pricing_info(&model, &app_state).await;
 
     // Step 4: If an access policy is present, check if the request is allowed.
-    check_access_control(&system_api_key, &provider, &model, &app_state)
+    check_access_control(&system_api_key, &provider, &model, &app_state).await
         .map_err(|e| {
             warn!("Access control check failed: {:?}", e);
             e
@@ -137,8 +138,7 @@ pub async fn handle_openai_request(
         final_headers,
         model_str,
         provider.use_proxy,
-        price_rules,
-        currency,
+        billing_plan,
         LlmApiType::OpenAI,
         target_api_type,
     )

@@ -28,7 +28,7 @@ pub async fn handle_anthropic_request(
     debug!("{} ---", &request_uri_path);
 
     // Step 1: Authenticate the request and retrieve API key.
-    let api_key_check_result = authenticate_anthropic_request(&original_headers, &app_state)?;
+    let api_key_check_result = authenticate_anthropic_request(&original_headers, &app_state).await?;
     let system_api_key = api_key_check_result.api_key;
     let channel = api_key_check_result.channel;
     let external_id = api_key_check_result.external_id;
@@ -51,7 +51,7 @@ pub async fn handle_anthropic_request(
             )
         })?;
     let (provider, model) =
-        get_provider_and_model(&app_state, pre_model_str).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        get_provider_and_model(&app_state, pre_model_str).await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let target_api_type = if provider.provider_type == ProviderType::Vertex
         || provider.provider_type == ProviderType::Gemini
@@ -66,10 +66,10 @@ pub async fn handle_anthropic_request(
 
     data = transform_request_data(data, api_type, target_api_type, is_stream);
 
-    let (price_rules, currency) = get_pricing_info(&model, &app_state);
+    let billing_plan = get_pricing_info(&model, &app_state).await;
 
     // Step 4: If an access policy is present, check if the request is allowed.
-    check_access_control(&system_api_key, &provider, &model, &app_state)?;
+    check_access_control(&system_api_key, &provider, &model, &app_state).await?;
 
     // Step 5: Prepare the downstream request details (URL, headers, body).
     let (final_url, final_headers, final_body, provider_api_key_id) = match target_api_type {
@@ -139,8 +139,7 @@ pub async fn handle_anthropic_request(
         final_headers,
         model_str,
         provider.use_proxy,
-        price_rules,
-        currency,
+        billing_plan,
         api_type,
         target_api_type,
     )

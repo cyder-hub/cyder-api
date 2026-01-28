@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     controller::llm_types::LlmApiType,
-    database::{price::PriceRule, request_log::UpdateRequestLogData},
+    database::request_log::UpdateRequestLogData, service::cache::types::{CacheBillingPlan, CachePriceRule},
 };
 
 #[derive(Debug)]
@@ -104,30 +104,30 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
 /// # Returns
 ///
 /// The total calculated cost in micro-units.
-pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[PriceRule]) -> i64 {
+pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[CachePriceRule]) -> i64 {
     debug!("[calculate_cost] Calculating cost for usage: {:?}, with price rules: {:?}", usage_info, price_rules);
     let now = Utc::now().timestamp_millis();
     let mut total_cost: i64 = 0;
 
     // Helper to find the best rule for a given usage type.
     // "Best" is defined as the one that is currently active and has the latest `effective_from` date.
-    let find_best_rule = |usage_type: &str| -> Option<&PriceRule> {
+    let find_best_rule = |usage_type: &str| -> Option<&CachePriceRule> {
         price_rules
             .iter()
             .filter(|rule| {
                 rule.usage_type == usage_type
-                    && rule.is_enabled
                     && rule.effective_from <= now
                     && rule.effective_until.map_or(true, |until| now < until)
             })
             .max_by_key(|rule| rule.effective_from)
+            .map(|v| v)
     };
 
     // Calculate cost for prompt tokens
     if let Some(rule) = find_best_rule("PROMPT") {
         if usage_info.prompt_tokens > 0 {
             // Price is per 1000 tokens
-            let cost = usage_info.prompt_tokens as i64 * rule.price_in_micro_units;
+            let cost = usage_info.prompt_tokens as i64 * rule.price_in_micro_units.unwrap_or(0);
             total_cost += cost;
         }
     }
@@ -136,7 +136,7 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[PriceRule]) -> i64 
     if let Some(rule) = find_best_rule("COMPLETION") {
         if usage_info.completion_tokens > 0 {
             // Price is per 1000 tokens
-            let cost = usage_info.completion_tokens as i64 * rule.price_in_micro_units;
+            let cost = usage_info.completion_tokens as i64 * rule.price_in_micro_units.unwrap_or(0);
             total_cost += cost;
         }
     }
@@ -144,7 +144,7 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[PriceRule]) -> i64 
     // Calculate cost for invocation (flat fee)
     if let Some(rule) = find_best_rule("INVOCATION") {
         // Invocation is a flat fee, not token-based.
-        total_cost += rule.price_in_micro_units;
+        total_cost += rule.price_in_micro_units.unwrap_or(0);
     }
 
     debug!("[calculate_cost] Final calculated cost: {}", total_cost);
@@ -155,21 +155,20 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[PriceRule]) -> i64 
 pub fn populate_token_cost_fields(
     update_data: &mut UpdateRequestLogData,
     usage_info: Option<&UsageInfo>,
-    price_rules: &[PriceRule],
-    currency: Option<&str>,
+    billing_plan: Option<&CacheBillingPlan>,
 ) {
-    debug!("[populate_token_cost_fields] Populating with usage_info: {:?}, price_rules: {:?}", usage_info, price_rules);
+    debug!("[populate_token_cost_fields] Populating with usage_info: {:?}, billing_plan: {:?}", usage_info, billing_plan);
     if let Some(u) = usage_info {
         update_data.prompt_tokens = Some(u.prompt_tokens);
         update_data.completion_tokens = Some(u.completion_tokens);
         update_data.reasoning_tokens = Some(u.reasoning_tokens);
         update_data.total_tokens = Some(u.total_tokens);
 
-        if !price_rules.is_empty() {
-            let cost = calculate_cost(u, price_rules);
+        if let Some(bp) = billing_plan {
+            let cost = calculate_cost(u, bp.price_rules.as_slice());
             update_data.calculated_cost = Some(cost);
             if cost > 0 {
-                update_data.cost_currency = currency.map(|c| Some(c.to_string()));
+                update_data.cost_currency = Some(Some(bp.currency.clone()));
             }
         }
     }

@@ -21,7 +21,7 @@ async fn main() {
     let addr = format!("{}:{}", &CONFIG.host, CONFIG.port);
     info!("server start at {}", &addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    let app_state = create_app_state();
+    let app_state = create_app_state().await;
     axum::serve(
         listener,
         create_state_router()

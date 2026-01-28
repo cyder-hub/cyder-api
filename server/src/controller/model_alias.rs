@@ -5,6 +5,7 @@ use axum::{
     routing::{delete, get, post, put},
     Json,
 };
+use cyder_tools::log::warn;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -30,7 +31,6 @@ struct UpdateAliasRequest {
 }
 
 async fn create_alias(
-    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<CreateAliasRequest>,
 ) -> DbResult<HttpResult<ModelAlias>> {
     let created_alias_from_db = ModelAlias::create(
@@ -40,18 +40,21 @@ async fn create_alias(
         payload.priority,
         payload.is_enabled,
     )?;
-    let created_alias_in_store = app_state
-        .model_alias_store
-        .add(created_alias_from_db.clone())?;
-    Ok(HttpResult::new(created_alias_in_store))
+    
+    Ok(HttpResult::new(created_alias_from_db))
 }
 
 async fn delete_alias(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> DbResult<HttpResult<()>> {
+    let alias_to_delete = ModelAlias::get_by_id(id)?;
     ModelAlias::delete(id)?; // delete returns DbResult<usize>
-    app_state.model_alias_store.delete(id)?;
+    
+    if let Err(e) = app_state.invalidate_model_alias(&alias_to_delete.alias_name).await {
+        warn!("Failed to delete ModelAlias id {} from cache: {:?}", id, e);
+    }
+    
     Ok(HttpResult::new(()))
 }
 
@@ -65,6 +68,7 @@ async fn update_alias(
     Path(id): Path<i64>,
     Json(payload): Json<UpdateAliasRequest>,
 ) -> DbResult<HttpResult<ModelAlias>> {
+    let original_alias = ModelAlias::get_by_id(id)?;
     let update_data = UpdateModelAliasData {
         alias_name: payload.alias_name,
         target_model_id: payload.target_model_id,
@@ -73,10 +77,16 @@ async fn update_alias(
         is_enabled: payload.is_enabled,
     };
     let updated_alias_from_db = ModelAlias::update(id, &update_data)?;
-    let updated_alias_in_store = app_state
-        .model_alias_store
-        .update(updated_alias_from_db.clone())?;
-    Ok(HttpResult::new(updated_alias_in_store))
+
+    // Invalidate cache for the original alias name. This handles name changes correctly.
+    if let Err(e) = app_state.invalidate_model_alias(&original_alias.alias_name).await {
+        warn!(
+            "Failed to invalidate ModelAlias id {} ('{}') in cache: {:?}",
+            id, original_alias.alias_name, e
+        );
+    }
+
+    Ok(HttpResult::new(updated_alias_from_db))
 }
 
 async fn get_alias(Path(id): Path<i64>) -> DbResult<HttpResult<ModelAlias>> {

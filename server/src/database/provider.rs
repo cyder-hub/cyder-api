@@ -4,7 +4,6 @@ use serde::Serialize;
 use chrono::Utc;
 
 use crate::database::{DbResult, get_connection};
-use crate::service::app_state::Storable;
 use crate::{db_execute, db_object};
 // db_object! is exported at the crate root by `#[macro_export]` in `database/mod.rs`.
 // BaseError is assumed to be accessible, e.g., from `crate::controller::BaseError`.
@@ -249,34 +248,6 @@ impl Provider {
             api_keys,
             custom_fields,
         })
-    }
-}
-
-impl Storable for Provider {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        self.provider_key.clone()
-    }
-    // group_id() defaults to None for Provider
-}
-
-impl Storable for ProviderApiKey {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        // Using id as string for the key, as api_key content might not be unique or suitable for a direct key.
-        // The ProviderApiKeyStore will be initialized with with_key_map: false,
-        // so this key won't be used for map lookups but is required by the Storable trait.
-        self.id.to_string()
-    }
-
-    fn group_id(&self) -> Option<i64> {
-        Some(self.provider_id)
     }
 }
 

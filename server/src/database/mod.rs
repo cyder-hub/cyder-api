@@ -86,7 +86,7 @@ macro_rules! db_object {
         )+
     ) => {
         $(
-            #[derive(Debug, Clone, Default, serde::Serialize)]
+            #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
             pub struct $name { $( $vis $field : $typ, )+ }
         )+
 

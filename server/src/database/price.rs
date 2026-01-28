@@ -4,7 +4,6 @@ use serde::Deserialize;
 
 use super::{get_connection, DbResult};
 use crate::controller::BaseError;
-use crate::service::app_state::Storable;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
@@ -103,16 +102,6 @@ db_object! {
     }
 }
 
-impl Storable for BillingPlan {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        self.name.clone()
-    }
-}
-
 #[derive(Deserialize, Debug)]
 pub struct NewBillingPlanPayload {
     pub name: String,
@@ -144,6 +133,23 @@ impl BillingPlan {
                     BaseError::DatabaseFatal(Some(format!("Failed to create billing plan: {}", e)))
                 })?;
             Ok(inserted_db_plan.from_db())
+        })
+    }
+
+    pub fn get_by_id(id_value: i64) -> DbResult<BillingPlan> {
+        let conn = &mut get_connection();
+        db_execute!(conn, {
+            let db_plan = billing_plans::table
+                .find(id_value)
+                .select(BillingPlanDb::as_select())
+                .first::<BillingPlanDb>(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to get billing plan by id {}: {}",
+                        id_value, e
+                    )))
+                })?;
+            Ok(db_plan.from_db())
         })
     }
 
@@ -201,20 +207,6 @@ impl BillingPlan {
                 .map(|db_plan| db_plan.from_db())
                 .collect())
         })
-    }
-}
-
-impl Storable for PriceRule {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        self.id.to_string()
-    }
-
-    fn group_id(&self) -> Option<i64> {
-        Some(self.plan_id)
     }
 }
 

@@ -67,16 +67,6 @@ db_object! {
     }
 }
 
-impl crate::service::app_state::Storable for ModelAlias {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        self.alias_name.clone()
-    }
-}
-
 impl ModelAlias {
     /// Creates a new model alias.
     pub fn create(

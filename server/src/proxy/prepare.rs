@@ -8,15 +8,11 @@ use reqwest::{
 use serde_json::{json, Value};
 
 use crate::{
-    database::{
-        custom_field::CustomFieldDefinition,
-        model::Model,
-        provider::Provider,
-    },
     schema::enum_def::{FieldPlacement, FieldType, ProviderType},
     service::{
-        app_state::{AppStoreError, AppState, GroupItemSelectionStrategy},
+        app_state::{AppState, GroupItemSelectionStrategy},
         vertex::get_vertex_token,
+        cache::types::{CacheProvider, CacheModel, CacheCustomField},
     },
     utils::process_stream_options,
 };
@@ -44,8 +40,8 @@ pub fn build_new_headers(
 
 // Prepares all elements for the downstream LLM request including URL, headers, and body.
 pub async fn prepare_llm_request(
-    provider: &Provider,
-    model: &Model,
+    provider: &CacheProvider,
+    model: &CacheModel,
     mut data: Value, // Takes ownership of data
     original_headers: &HeaderMap,
     app_state: &Arc<AppState>,
@@ -59,11 +55,11 @@ pub async fn prepare_llm_request(
     // 1. Get provider API key
     // TODO: Make selection strategy configurable on the provider. Using Queue for now.
     let selected_provider_api_key = app_state
-        .provider_api_key_store
-        .get_one_by_group_id(provider.id, GroupItemSelectionStrategy::Queue)
+        .get_one_provider_api_key_by_provider(provider.id, GroupItemSelectionStrategy::Queue)
+        .await
         .map_err(|e| {
             error!(
-                "Failed to get provider API key from store for provider_id {}: {:?}",
+                "Failed to get provider API key from cache for provider_id {}: {:?}",
                 provider.id, e
             );
             (
@@ -92,8 +88,8 @@ pub async fn prepare_llm_request(
 
     // 3. Fetch and combine custom fields for the provider and model
     let provider_cfs = app_state
-        .custom_field_link_store
-        .get_definitions_by_entity_id(provider.id)
+        .get_custom_fields_by_provider_id(provider.id)
+        .await
         .map_err(|e| {
             error!(
                 "Failed to get custom fields for provider_id {}: {:?}",
@@ -105,8 +101,9 @@ pub async fn prepare_llm_request(
             )
         })?;
     let model_cfs = app_state
-        .custom_field_link_store
-        .get_definitions_by_entity_id(model.id)
+        
+        .get_custom_fields_by_model_id(model.id)
+        .await
         .map_err(|e| {
             error!(
                 "Failed to get custom fields for model_id {}: {:?}",
@@ -118,14 +115,14 @@ pub async fn prepare_llm_request(
             )
         })?;
 
-    let mut combined_cfs_map: HashMap<i64, CustomFieldDefinition> = HashMap::new();
+    let mut combined_cfs_map: HashMap<i64, Arc<CacheCustomField>> = HashMap::new();
     for cf in provider_cfs {
         combined_cfs_map.insert(cf.id, cf);
     }
     for cf in model_cfs {
         combined_cfs_map.insert(cf.id, cf);
     }
-    let custom_fields: Vec<CustomFieldDefinition> = combined_cfs_map.values().cloned().collect();
+    let custom_fields: Vec<Arc<CacheCustomField>> = combined_cfs_map.values().cloned().collect();
     debug!(
         "Fetched {} custom fields for provider and model",
         custom_fields.len()
@@ -169,8 +166,8 @@ pub async fn prepare_llm_request(
 
 // Prepares a simple Gemini request for utility endpoints, without custom fields or body transformation.
 pub async fn prepare_simple_gemini_request(
-    provider: &Provider,
-    model: &Model,
+    provider: &CacheProvider,
+    model: &CacheModel,
     original_headers: &HeaderMap,
     app_state: &Arc<AppState>,
     action: &str,
@@ -183,11 +180,12 @@ pub async fn prepare_simple_gemini_request(
 
     // 1. Get provider API key
     let selected_provider_api_key = app_state
-        .provider_api_key_store
-        .get_one_by_group_id(provider.id, GroupItemSelectionStrategy::Queue)
+        
+        .get_one_provider_api_key_by_provider(provider.id, GroupItemSelectionStrategy::Queue)
+        .await
         .map_err(|e| {
             error!(
-                "Failed to get provider API key from store for provider_id {}: {:?}",
+                "Failed to get provider API key from cache for provider_id {}: {:?}",
                 provider.id, e
             );
             (
@@ -268,8 +266,8 @@ pub async fn prepare_simple_gemini_request(
 
 // Prepares all elements for a downstream Gemini LLM request.
 pub async fn prepare_gemini_llm_request(
-    provider: &Provider,
-    model: &Model,
+    provider: &CacheProvider,
+    model: &CacheModel,
     mut data: Value,
     original_headers: &HeaderMap,
     app_state: &Arc<AppState>,
@@ -283,11 +281,12 @@ pub async fn prepare_gemini_llm_request(
 
     // 1. Get provider API key
     let selected_provider_api_key = app_state
-        .provider_api_key_store
-        .get_one_by_group_id(provider.id, GroupItemSelectionStrategy::Queue)
+        
+        .get_one_provider_api_key_by_provider(provider.id, GroupItemSelectionStrategy::Queue)
+        .await
         .map_err(|e| {
             error!(
-                "Failed to get provider API key from store for provider_id {}: {:?}",
+                "Failed to get provider API key from cache for provider_id {}: {:?}",
                 provider.id, e
             );
             (
@@ -369,8 +368,9 @@ pub async fn prepare_gemini_llm_request(
 
     // Fetch and combine custom fields for the provider and model
     let provider_cfs = app_state
-        .custom_field_link_store
-        .get_definitions_by_entity_id(provider.id)
+        
+        .get_custom_fields_by_provider_id(provider.id)
+        .await
         .map_err(|e| {
             error!(
                 "Failed to get custom fields for provider_id {}: {:?}",
@@ -382,8 +382,9 @@ pub async fn prepare_gemini_llm_request(
             )
         })?;
     let model_cfs = app_state
-        .custom_field_link_store
-        .get_definitions_by_entity_id(model.id)
+        
+        .get_custom_fields_by_model_id(model.id)
+        .await
         .map_err(|e| {
             error!(
                 "Failed to get custom fields for model_id {}: {:?}",
@@ -395,14 +396,14 @@ pub async fn prepare_gemini_llm_request(
             )
         })?;
 
-    let mut combined_cfs_map: HashMap<i64, CustomFieldDefinition> = HashMap::new();
+    let mut combined_cfs_map: HashMap<i64, Arc<CacheCustomField>> = HashMap::new();
     for cf in provider_cfs {
         combined_cfs_map.insert(cf.id, cf);
     }
     for cf in model_cfs {
         combined_cfs_map.insert(cf.id, cf);
     }
-    let custom_fields: Vec<CustomFieldDefinition> = combined_cfs_map.values().cloned().collect();
+    let custom_fields: Vec<Arc<CacheCustomField>> = combined_cfs_map.values().cloned().collect();
     debug!(
         "Fetched {} custom fields for provider and model",
         custom_fields.len()
@@ -477,7 +478,7 @@ pub fn handle_custom_fields(
     data: &mut Value,    // For "BODY"
     url: &mut Url,       // For "QUERY"
     headers: &mut HeaderMap, // For "HEADER" (reqwest::header::HeaderMap)
-    custom_fields: &Vec<CustomFieldDefinition>,
+    custom_fields: &Vec<Arc<CacheCustomField>>,
 ) {
     for cf in custom_fields {
         debug!(
@@ -600,51 +601,53 @@ pub fn handle_custom_fields(
 }
 
 
-// Updated to use ProviderStore, ModelStore, and ModelAliasStore from AppState
-pub fn get_provider_and_model(app_state: &Arc<AppState>, pre_model_value: &str) -> Result<(Provider, Model), String> {
+// Fetches provider and model from AppState cache, resolving aliases first.
+pub async fn get_provider_and_model(
+    app_state: &Arc<AppState>,
+    pre_model_value: &str,
+) -> Result<(Arc<CacheProvider>, Arc<CacheModel>), String> {
     // Attempt to resolve as a model alias first
-    match app_state.model_alias_store.get_by_key(pre_model_value) {
-        Ok(Some(model_alias)) => {
-            if !model_alias.is_enabled {
-                debug!("Model alias '{}' found but is not enabled. Falling back to provider/model parsing.", pre_model_value);
-                // Fall through to provider/model parsing logic below
-            } else {
-                // Alias found and enabled, try to get model and provider from stores
-                let model = app_state.model_store.get_by_id(model_alias.target_model_id)
-                    .map_err(|e| format!("Error accessing model store for alias target ID {}: {:?}", model_alias.target_model_id, e))?
-                    .ok_or_else(|| format!("Target model ID {} for alias '{}' not found in model store.", model_alias.target_model_id, pre_model_value))?;
+    match app_state.get_model_by_alias(pre_model_value).await {
+        Ok(Some(model)) => {
+                let provider = app_state
+                    .get_provider_by_id(model.provider_id)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "Error accessing cache for provider ID {}: {:?}",
+                            model.provider_id, e
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        format!(
+                            "Provider ID {} for model '{}' (from alias '{}') not found in cache.",
+                            model.provider_id, model.model_name, pre_model_value
+                        )
+                    })?;
 
-                if !model.is_enabled {
-                     return Err(format!("Target model '{}' for alias '{}' is not enabled.", model.model_name, pre_model_value));
-                }
-
-                let provider = app_state.provider_store.get_by_id(model.provider_id)
-                    .map_err(|e| format!("Error accessing provider store for model's provider ID {}: {:?}", model.provider_id, e))?
-                    .ok_or_else(|| format!("Provider ID {} for model '{}' (alias '{}') not found in provider store.", model.provider_id, model.model_name, pre_model_value))?;
-
-                if !provider.is_enabled {
-                    return Err(format!("Provider '{}' for model '{}' (alias '{}') is not enabled.", provider.name, model.model_name, pre_model_value));
-                }
+                debug!(
+                    "Resolved '{}' as an alias to model '{}' from provider '{}'",
+                    pre_model_value, model.model_name, provider.name
+                );
                 return Ok((provider, model));
-            }
         }
         Ok(None) => {
-            // Alias not found by key, fall through to provider/model parsing logic
-            debug!("Model alias '{}' not found in store. Attempting provider/model parsing.", pre_model_value);
+            debug!(
+                "'{}' is not a model alias. Attempting provider/model parsing.",
+                pre_model_value
+            );
         }
-        Err(AppStoreError::LockError(e)) => {
-            error!("ModelAliasStore lock error when getting alias '{}': {}", pre_model_value, e);
-            return Err(format!("Internal server error while checking model alias '{}'.", pre_model_value));
-        }
-        Err(e) => { // Other AppStoreError variants
-            error!("ModelAliasStore error when getting alias '{}': {:?}", pre_model_value, e);
-            return Err(format!("Internal server error while checking model alias '{}'.", pre_model_value));
+        Err(e) => {
+            error!("Error checking model alias '{}': {:?}", pre_model_value, e);
+            return Err(format!(
+                "Internal server error while checking model alias '{}'.",
+                pre_model_value
+            ));
         }
     }
 
     // Fallback: try parsing as provider/model
     let (provider_key_str, model_name_str) = parse_provider_model(pre_model_value);
-
     if provider_key_str.is_empty() || model_name_str.is_empty() {
         return Err(format!(
             "Invalid model format: '{}'. Expected 'provider/model' or a valid alias.",
@@ -652,31 +655,38 @@ pub fn get_provider_and_model(app_state: &Arc<AppState>, pre_model_value: &str) 
         ));
     }
 
-    let provider = app_state.provider_store.get_by_key(provider_key_str)
-        .map_err(|e| format!("Error accessing provider store for key '{}': {:?}", provider_key_str, e))?
-        .ok_or_else(|| format!("Provider '{}' not found in store (after alias check failed/skipped).", provider_key_str))?;
-
-    if !provider.is_enabled {
-        return Err(format!("Provider '{}' found but is not enabled.", provider.name));
-    }
-
-    let model = app_state.model_store.get_by_composite_key(&provider.provider_key, model_name_str)
+    let provider = app_state
+        .get_provider_by_key(provider_key_str)
+        .await
         .map_err(|e| {
             format!(
-                "Error accessing model store for provider '{}' model '{}': {:?}",
-                provider.provider_key, model_name_str, e
+                "Error accessing cache for provider key '{}': {:?}",
+                provider_key_str, e
             )
         })?
-        .ok_or_else(|| {
-            format!(
-                "Model '{}' not found for provider '{}' in store (after alias check failed/skipped). No given provider/model combination was valid.",
-                model_name_str, provider.provider_key
-            )
-        })?;
+        .ok_or_else(|| format!("Provider '{}' not found.", provider_key_str))?;
 
-    if !model.is_enabled {
-        return Err(format!("Model '{}' for provider '{}' found but is not enabled.", model.model_name, provider.name));
+    let model = app_state
+        .get_model_by_name(provider_key_str, model_name_str)
+        .await
+        .map_err(|e| {
+            format!(
+                "Error accessing cache for model name '{}': {:?}",
+                pre_model_value, e
+            )
+        })?
+        .ok_or_else(|| format!("Model '{}' not found.", pre_model_value))?;
+
+    if model.provider_id != provider.id {
+        return Err(format!(
+            "Model '{}' does not belong to provider '{}'.",
+            model.model_name, provider.name
+        ));
     }
 
+    debug!(
+        "Resolved '{}' as provider '{}' and model '{}'",
+        pre_model_value, provider.name, model.model_name
+    );
     Ok((provider, model))
 }

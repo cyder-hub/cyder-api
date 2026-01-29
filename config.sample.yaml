@@ -8,5 +8,14 @@ jwt_secret: uCK6g1EBERjj2U7FT8sGlMFFzL2M3ufW
 db_url: storage/database.db
 # db_url: postgres://user:pass@host:port/schema_name
 # db_url: mysql://user:pass@host:port/database_name
+redis:
+  url: "redis://127.0.0.1:6379/"
+  pool_size: 10
+  key_prefix: "cyder:"
 proxy: http://10.0.0.2:1081
-
+# cache:
+#   backend: memory # memory or redis
+#   ttl: 3600 # 1 hour
+#   negative_ttl: 60 # 1 minute
+#   redis:
+#     key_prefix: "cache:"

@@ -4,7 +4,6 @@ use serde::Deserialize;
 
 use super::{get_connection, DbResult};
 use crate::controller::BaseError;
-use crate::service::app_state::Storable;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
@@ -351,12 +350,3 @@ impl Model {
     }
 }
 
-impl Storable for Model {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        self.id.to_string()
-    }
-}

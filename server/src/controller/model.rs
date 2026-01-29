@@ -26,7 +26,6 @@ pub struct InsertModelRequest {
 }
 
 async fn insert_model(
-    State(app_state): State<Arc<AppState>>,
     Json(request): Json<InsertModelRequest>,
 ) -> Result<HttpResult<Model>, BaseError> {
     let created_model = Model::create(
@@ -35,13 +34,6 @@ async fn insert_model(
         request.real_model_name.as_deref(),
         request.is_enabled,
     )?;
-
-    // Add to ModelStore
-    if let Err(store_err) = app_state.model_store.add(created_model.clone(), &app_state.provider_store) {
-        // Log the error, but the DB operation was successful, so we might not want to fail the request.
-        // Depending on desired consistency, this could return an error or just log.
-        eprintln!("Failed to add model to store after DB insert: {:?}", store_err);
-    }
 
     Ok(HttpResult::new(created_model))
 }
@@ -53,10 +45,9 @@ async fn delete_model(
     let num_deleted = Model::delete(id)?;
 
     if num_deleted > 0 {
-        // Remove from ModelStore
-        if let Err(store_err) = app_state.model_store.delete(id, &app_state.provider_store) {
-            eprintln!("Failed to delete model from store after DB delete: {:?}", store_err);
-            // Potentially return an error or handle inconsistency
+        // Invalidate from cache
+        if let Err(store_err) = app_state.invalidate_model(id, None).await {
+            eprintln!("Failed to invalidate model from cache after DB delete: {:?}", store_err);
         }
     }
     Ok(HttpResult::new(()))
@@ -84,10 +75,9 @@ async fn update_model(
     };
     let updated_model = Model::update(id, &update_data)?;
 
-    // Update in ModelStore
-    if let Err(store_err) = app_state.model_store.update(updated_model.clone(), &app_state.provider_store) {
-        eprintln!("Failed to update model in store after DB update: {:?}", store_err);
-        // Potentially return an error or handle inconsistency
+    // Invalidate from cache
+    if let Err(store_err) = app_state.invalidate_model(id, None).await {
+        eprintln!("Failed to invalidate model in cache after DB update: {:?}", store_err);
     }
 
     Ok(HttpResult::new(updated_model))

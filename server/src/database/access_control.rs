@@ -2,7 +2,6 @@ use chrono::Utc;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::service::app_state::Storable; // Import Storable
 use super::{get_connection, DbConnection, DbResult};
 use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
@@ -111,7 +110,7 @@ pub struct ApiUpdateAccessControlPolicyPayload { // Renamed
     pub rules: Option<Vec<ApiAccessControlRule>>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ApiAccessControlPolicy { // Renamed
     pub id: i64,
     pub name: String,
@@ -121,19 +120,6 @@ pub struct ApiAccessControlPolicy { // Renamed
     pub created_at: i64,
     pub updated_at: i64,
     pub rules: Vec<AccessControlRule>, // Consolidated, using the full DB struct for items in response
-}
-
-impl Storable for ApiAccessControlPolicy {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        // Even if not indexed by key in this specific store,
-        // the Storable trait requires a key method.
-        // Name is a reasonable candidate.
-        self.name.clone()
-    }
 }
 
 impl AccessControlPolicy { // Renamed from LimitStrategy

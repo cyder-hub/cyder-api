@@ -2,13 +2,13 @@ use cyder_tools::log::debug; // Removed info, not used in this file
 use once_cell::sync::Lazy;
 
 // Removed: use crate::controller::proxy::RequestInfo;
-use crate::database::access_control::ApiAccessControlPolicy;
+use crate::service::cache::types::CacheAccessControl;
 use crate::schema::enum_def::{Action, RuleScope};
 
 pub trait Limiter: Sync + Send {
     fn check_limit_strategy(
         &self,
-        policy: &ApiAccessControlPolicy,
+        policy: &CacheAccessControl,
         provider_id: i64,
         model_id: i64,
     ) -> Result<(), String>;
@@ -25,7 +25,7 @@ impl MemoryLimiter {
 impl MemoryLimiter {
     fn inner_check(
         &self,
-        policy: &ApiAccessControlPolicy,
+        policy: &CacheAccessControl,
         provider_id: i64, // Changed parameter
         model_id: i64,    // Changed parameter
     ) -> Result<(), String> {
@@ -35,10 +35,6 @@ impl MemoryLimiter {
 
         // Rules in ApiAccessControlPolicy are assumed to be pre-sorted by priority.
         for rule in &policy.rules {
-            if !rule.is_enabled {
-                continue;
-            }
-
             let mut rule_matches = false;
             match rule.scope {
                 RuleScope::Model => {
@@ -110,7 +106,7 @@ impl MemoryLimiter {
 impl Limiter for MemoryLimiter {
     fn check_limit_strategy(
         &self,
-        policy: &ApiAccessControlPolicy,
+        policy: &CacheAccessControl,
         provider_id: i64, // Changed parameter
         model_id: i64,    // Changed parameter
     ) -> Result<(), String> {

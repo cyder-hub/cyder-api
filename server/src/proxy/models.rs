@@ -5,11 +5,10 @@ use serde::Serialize;
 
 use crate::{
     database::{
-        access_control::ApiAccessControlPolicy, model::Model, provider::Provider,
-        system_api_key::SystemApiKey,
+        model::Model, model_alias::ModelAlias, provider::Provider
     },
     schema::enum_def::ProviderType,
-    service::app_state::AppState,
+    service::{app_state::AppState, cache::types::{CacheAccessControl, CacheSystemApiKey}},
     utils::limit::LIMITER,
 };
 use cyder_tools::log::{debug, error};
@@ -23,7 +22,7 @@ pub(super) struct AccessibleModel {
 
 pub(super) async fn get_accessible_models(
     app_state: &Arc<AppState>,
-    system_api_key: &SystemApiKey,
+    system_api_key: &CacheSystemApiKey,
 ) -> Result<Vec<AccessibleModel>, (StatusCode, String)> {
     debug!(
         "Fetching accessible models for SystemApiKey ID: {}",
@@ -31,9 +30,9 @@ pub(super) async fn get_accessible_models(
     );
 
     // 1. Fetch Access Control Policy if ID is present
-    let access_control_policy_opt: Option<ApiAccessControlPolicy> =
+    let access_control_policy_opt: Option<Arc<CacheAccessControl>> =
         if let Some(policy_id) = system_api_key.access_control_policy_id {
-            match app_state.access_control_store.get_by_id(policy_id) {
+            match app_state.get_access_control_policy(policy_id).await {
                 Ok(Some(policy)) => Some(policy),
                 Ok(None) => {
                     error!("Access control policy with id {} not found in store (configured on SystemApiKey {}).", policy_id, system_api_key.id);
@@ -126,7 +125,7 @@ pub(super) async fn get_accessible_models(
     );
 
     // 5. Get all model aliases and check their accessibility
-    let all_aliases = app_state.model_alias_store.get_all().map_err(|e| {
+    let all_aliases = ModelAlias::list_all().map_err(|e| {
         error!("Failed to get model aliases from store: {:?}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -140,15 +139,8 @@ pub(super) async fn get_accessible_models(
         }
 
         // Find target model and provider
-        if let Ok(Some(model)) = app_state.model_store.get_by_id(alias.target_model_id) {
-            if !model.is_enabled {
-                continue;
-            }
-            if let Ok(Some(provider)) = app_state.provider_store.get_by_id(model.provider_id) {
-                if !provider.is_enabled {
-                    continue;
-                }
-
+        if let Ok(Some(model)) = app_state.get_model_by_id(alias.target_model_id).await {
+            if let Ok(Some(provider)) = app_state.get_provider_by_id(model.provider_id).await {
                 let mut allowed = false;
                 if let Some(ref policy) = access_control_policy_opt {
                     // Check policy against the target model

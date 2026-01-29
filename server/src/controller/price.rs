@@ -44,10 +44,10 @@ async fn insert_rule(
 ) -> DbResult<HttpResult<PriceRule>> {
     let created_rule = PriceRule::create(&payload)?;
 
-    if let Err(e) = app_state.price_rule_store.add(created_rule.clone()) {
+    if let Err(e) = app_state.invalidate_billing_plan(payload.plan_id).await {
         warn!(
-            "Failed to add PriceRule id {} to store: {:?}",
-            created_rule.id, e
+            "Failed to update PriceRule id {} in cache: {:?}",
+            payload.plan_id, e
         );
     }
 
@@ -58,10 +58,14 @@ async fn delete_rule(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> DbResult<HttpResult<()>> {
+    let rule = PriceRule::get_by_id(id)?;
     PriceRule::delete(id)?;
 
-    if let Err(e) = app_state.price_rule_store.delete(id) {
-        warn!("Failed to delete PriceRule id {} from store: {:?}", id, e);
+    if let Err(e) = app_state.invalidate_billing_plan(rule.plan_id).await {
+        warn!(
+            "Failed to invalidate BillingPlan after deleting PriceRule: {:?}",
+            e
+        );
     }
 
     Ok(HttpResult::new(()))
@@ -84,6 +88,8 @@ async fn update_rule(
     Path(id): Path<i64>,
     Json(payload): Json<UpdatePriceRuleRequest>,
 ) -> DbResult<HttpResult<PriceRule>> {
+    let original_rule = PriceRule::get_by_id(id)?;
+
     let update_data = UpdatePriceRuleData {
         plan_id: payload.plan_id,
         description: payload.description,
@@ -101,11 +107,27 @@ async fn update_rule(
     };
     let updated_rule = PriceRule::update(id, &update_data)?;
 
-    if let Err(e) = app_state.price_rule_store.update(updated_rule.clone()) {
+    // Invalidate the original plan
+    if let Err(e) = app_state
+        .invalidate_billing_plan(original_rule.plan_id)
+        .await
+    {
         warn!(
-            "Failed to update PriceRule id {} in store: {:?}",
-            updated_rule.id, e
+            "Failed to invalidate original BillingPlan after updating PriceRule: {:?}",
+            e
         );
+    }
+
+    // If the plan_id was changed, invalidate the new plan as well
+    if let Some(new_plan_id) = payload.plan_id {
+        if new_plan_id != original_rule.plan_id {
+            if let Err(e) = app_state.invalidate_billing_plan(new_plan_id).await {
+                warn!(
+                    "Failed to invalidate new BillingPlan after updating PriceRule: {:?}",
+                    e
+                );
+            }
+        }
     }
 
     Ok(HttpResult::new(updated_rule))
@@ -121,18 +143,9 @@ struct UpdateBillingPlanRequest {
 }
 
 async fn insert_plan(
-    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<NewBillingPlanPayload>,
 ) -> DbResult<HttpResult<BillingPlan>> {
     let created_plan = BillingPlan::create(&payload)?;
-
-    if let Err(e) = app_state.billing_plan_store.add(created_plan.clone()) {
-        warn!(
-            "Failed to add BillingPlan id {} to store: {:?}",
-            created_plan.id, e
-        );
-    }
-
     Ok(HttpResult::new(created_plan))
 }
 
@@ -142,8 +155,8 @@ async fn delete_plan(
 ) -> DbResult<HttpResult<()>> {
     BillingPlan::delete(id)?;
 
-    if let Err(e) = app_state.billing_plan_store.delete(id) {
-        warn!("Failed to delete BillingPlan id {} from store: {:?}", id, e);
+    if let Err(e) = app_state.invalidate_billing_plan(id).await {
+        warn!("Failed to delete BillingPlan id {} from cache: {:?}", id, e);
     }
 
     Ok(HttpResult::new(()))
@@ -166,9 +179,9 @@ async fn update_plan(
     };
     let updated_plan = BillingPlan::update(id, &update_data)?;
 
-    if let Err(e) = app_state.billing_plan_store.update(updated_plan.clone()) {
+    if let Err(e) = app_state.invalidate_billing_plan(id).await {
         warn!(
-            "Failed to update BillingPlan id {} in store: {:?}",
+            "Failed to update BillingPlan id {} in cache: {:?}",
             updated_plan.id, e
         );
     }

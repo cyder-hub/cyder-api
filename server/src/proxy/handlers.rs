@@ -10,6 +10,7 @@ use super::util::*;
 use crate::controller::llm_types::LlmApiType;
 use crate::schema::enum_def::{ProviderType, RequestStatus};
 use crate::service::app_state::AppState;
+use crate::service::cache::types::{CacheProvider, CacheModel};
 use axum::{
     body::{Body, Bytes},
     extract::Request,
@@ -66,7 +67,7 @@ pub async fn openai_utility_handler(
         downstream_path, pre_model_str
     );
 
-    let (provider, model) = get_provider_and_model(&app_state, pre_model_str).map_err(|e| {
+    let (provider, model): (Arc<CacheProvider>, Arc<CacheModel>) = get_provider_and_model(&app_state, pre_model_str).await.map_err(|e: String| {
         warn!("Failed to resolve model '{}': {}", pre_model_str, e);
         (StatusCode::BAD_REQUEST, e)
     })?;
@@ -91,10 +92,10 @@ pub async fn openai_utility_handler(
     }
 
     // Step 5: Pricing info
-    let (price_rules, currency) = get_pricing_info(&model, &app_state);
+    let billing_plan = get_pricing_info(&model, &app_state).await;
 
     // Step 6: Access control
-    if let Err(e) = check_access_control(&system_api_key, &provider, &model, &app_state) {
+    if let Err(e) = check_access_control(&system_api_key, &provider, &model, &app_state).await {
         warn!("Access control check failed: {:?}", e);
         return Err(e);
     }
@@ -225,8 +226,7 @@ pub async fn openai_utility_handler(
             None,
             llm_response_completed_at,
             parsed_usage_info.as_ref(),
-            &price_rules,
-            currency.as_deref(),
+            billing_plan.as_ref(),
             Some(RequestStatus::Success),
         );
         info!(
@@ -265,8 +265,8 @@ pub async fn list_models_handler(
         LlmApiType::OpenAI => {
             authenticate_openai_request(&original_headers, &params, &app_state).await?
         }
-        LlmApiType::Gemini => authenticate_gemini_request(&original_headers, &params, &app_state)?,
-        LlmApiType::Anthropic => authenticate_anthropic_request(&original_headers, &app_state)?,
+        LlmApiType::Gemini => authenticate_gemini_request(&original_headers, &params, &app_state).await?,
+        LlmApiType::Anthropic => authenticate_anthropic_request(&original_headers, &app_state).await?,
         _ => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,

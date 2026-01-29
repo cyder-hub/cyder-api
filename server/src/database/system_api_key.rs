@@ -4,7 +4,6 @@ use rand::{distr::Alphanumeric, rng, Rng};
 use serde::Deserialize; // For potential deserialization into New/Update structs if needed from API
 
 use super::{get_connection, DbResult};
-use crate::service::app_state::Storable;
 use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
@@ -289,12 +288,3 @@ impl SystemApiKey {
     }
 }
 
-impl Storable for SystemApiKey {
-    fn id(&self) -> i64 {
-        self.id
-    }
-
-    fn key(&self) -> String {
-        self.api_key.clone()
-    }
-}

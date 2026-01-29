@@ -29,16 +29,12 @@ async fn list() -> Result<(StatusCode, HttpResult<Vec<ApiAccessControlPolicy>>),
 
 // Handler to insert a new policy
 async fn insert(
-    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<ApiCreateAccessControlPolicyPayload>, 
 ) -> DbResult<HttpResult<ApiAccessControlPolicy>> { 
     // The logic for creating policy and rules is now within AccessControlPolicy::create
     let created_policy_from_db = AccessControlPolicy::create(payload)?;
     
-    // Add to store
-    let created_policy_in_store = app_state.access_control_store.add(created_policy_from_db.clone())?;
-    
-    Ok(HttpResult::new(created_policy_in_store))
+    Ok(HttpResult::new(created_policy_from_db))
 }
 
 // Handler to get a single policy by ID, including its rules
@@ -59,10 +55,13 @@ async fn update_one(
     // The logic for updating policy and rules is now within AccessControlPolicy::update
     let updated_policy_from_db = AccessControlPolicy::update(id, payload)?;
     
-    // Update in store
-    let updated_policy_in_store = app_state.access_control_store.update(updated_policy_from_db.clone())?;
+    // Invalidate from cache
+    if let Err(e) = app_state.invalidate_access_control_policy(id).await {
+        use cyder_tools::log::warn;
+        warn!("Failed to invalidate AccessControlPolicy id {} from cache: {:?}", id, e);
+    }
 
-    Ok(HttpResult::new(updated_policy_in_store))
+    Ok(HttpResult::new(updated_policy_from_db))
 }
 
 // Handler to delete a policy and its associated rules
@@ -73,8 +72,11 @@ async fn delete_one(
     // AccessControlPolicy::delete now handles soft-deleting policy and rules
     AccessControlPolicy::delete(id)?; // Ensure DB operation is successful
     
-    // Delete from store
-    app_state.access_control_store.delete(id)?;
+    // Invalidate from cache
+    if let Err(e) = app_state.invalidate_access_control_policy(id).await {
+        use cyder_tools::log::warn;
+        warn!("Failed to invalidate AccessControlPolicy id {} from cache: {:?}", id, e);
+    }
 
     Ok(HttpResult::new(()))
 }

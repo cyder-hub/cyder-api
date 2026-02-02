@@ -2,6 +2,7 @@ use cyder_tools::log::{debug, error};
 use serde_json::Value;
 
 use crate::controller::llm_types::LlmApiType;
+use crate::utils::billing::{self, UsageInfo};
 use crate::utils::sse::SseEvent;
 
 pub mod openai;
@@ -1072,6 +1073,8 @@ pub struct StreamTransformer {
     pub is_first_content_chunk: bool,
     // Cached stream ID for consistency across chunks
     stream_id: Option<String>,
+    pub original_events: Vec<SseEvent>,
+    pub transformed_events: Vec<SseEvent>,
 }
 
 impl StreamTransformer {
@@ -1082,9 +1085,81 @@ impl StreamTransformer {
             is_first_chunk: true,
             is_first_content_chunk: true,
             stream_id: None,
+            original_events: Vec::new(),
+            transformed_events: Vec::new(),
         }
     }
+
+    pub fn transform_events(&mut self, events: Vec<SseEvent>) -> Vec<SseEvent> {
+        self.original_events.extend(events.iter().cloned());
+
+        let transformed_events: Vec<SseEvent> = events
+            .into_iter()
+            .flat_map(|event| self.transform_event(event).unwrap_or_default())
+            .collect();
+
+        self.transformed_events
+            .extend(transformed_events.iter().cloned());
+
+        transformed_events
+    }
     
+    pub fn parse_usage_info(&self) -> Option<UsageInfo> {
+        if self.original_events.is_empty() {
+            return None;
+        }
+
+        match self.api_type {
+            LlmApiType::OpenAI => {
+                // For OpenAI, the last event is "[DONE]", usage is in the second to last.
+                if self.original_events.len() < 2 {
+                    return None;
+                }
+                let event = self
+                    .original_events
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .find(|e| e.data != "[DONE]" && !e.data.is_empty());
+                event.and_then(|e| {
+                    serde_json::from_str::<Value>(&e.data)
+                        .ok()
+                        .and_then(|v| billing::parse_usage_info(&v, self.api_type))
+                })
+            }
+            LlmApiType::Gemini | LlmApiType::Ollama => {
+                // For Gemini and Ollama, it's usually in the last chunk.
+                self.original_events
+                    .iter()
+                    .rev()
+                    .find(|e| !e.data.is_empty())
+                    .and_then(|e| {
+                        serde_json::from_str::<Value>(&e.data)
+                            .ok()
+                            .and_then(|v| billing::parse_usage_info(&v, self.api_type))
+                    })
+            }
+            LlmApiType::Anthropic => {
+                // For Anthropic, usage info is in the 'message_stop' event.
+                self.original_events
+                    .iter()
+                    .rev()
+                    .find(|e| {
+                        if let Ok(value) = serde_json::from_str::<Value>(&e.data) {
+                            value.get("type").and_then(|t| t.as_str()) == Some("message_stop")
+                        } else {
+                            false
+                        }
+                    })
+                    .and_then(|e| {
+                        serde_json::from_str::<Value>(&e.data)
+                            .ok()
+                            .and_then(|v| billing::parse_usage_info(&v, self.api_type))
+                    })
+            }
+        }
+    }
+
     fn get_or_generate_stream_id(&mut self) -> String {
         if let Some(ref id) = self.stream_id {
             id.clone()
@@ -1191,3 +1266,4 @@ impl StreamTransformer {
     }
 
 }
+

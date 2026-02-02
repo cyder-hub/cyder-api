@@ -46,7 +46,7 @@ pub async fn prepare_llm_request(
     original_headers: &HeaderMap,
     app_state: &Arc<AppState>,
     path: &str,
-) -> Result<(String, HeaderMap, String, i64), (StatusCode, String)> {
+) -> Result<(String, HeaderMap, Value, i64), (StatusCode, String)> {
     debug!(
         "Preparing LLM request for provider: {}, model: {}",
         provider.name, model.model_name
@@ -149,17 +149,10 @@ pub async fn prepare_llm_request(
     process_stream_options(&mut data);
 
     // 6. Serialize final body and return all parts
-    let final_body = serde_json::to_string(&data).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize final request body: {}", e),
-        )
-    })?;
-
     Ok((
         url.to_string(),
         headers,
-        final_body,
+        data,
         selected_provider_api_key.id,
     ))
 }
@@ -273,7 +266,7 @@ pub async fn prepare_gemini_llm_request(
     app_state: &Arc<AppState>,
     is_stream: bool,
     params: &HashMap<String, String>,
-) -> Result<(String, HeaderMap, String, i64), (StatusCode, String)> {
+) -> Result<(String, HeaderMap, Value, i64), (StatusCode, String)> {
     debug!(
         "Preparing Gemini LLM request for provider: {}, model: {}",
         provider.name, model.model_name
@@ -413,18 +406,10 @@ pub async fn prepare_gemini_llm_request(
 
     let final_url = url.to_string();
 
-    // 4. Serialize final body
-    let final_body = serde_json::to_string(&data).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize final request body: {}", e),
-        )
-    })?;
-
     Ok((
         final_url,
         final_headers,
-        final_body,
+        data,
         selected_provider_api_key.id,
     ))
 }

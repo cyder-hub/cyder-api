@@ -12,6 +12,7 @@ pub mod auth;
 pub mod billing;
 pub mod limit;
 pub mod sse;
+pub mod storage;
 
 #[derive(Debug, Serialize)]
 pub struct HttpResult<T> {

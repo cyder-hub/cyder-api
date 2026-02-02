@@ -195,8 +195,8 @@ pub type DbResult<T> = Result<T, BaseError>;
 
 #[derive(Serialize)]
 pub struct ListResult<T> {
-    total: i64,
-    page: i64,
-    page_size: i64,
-    list: Vec<T>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub list: Vec<T>,
 }

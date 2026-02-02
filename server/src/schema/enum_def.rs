@@ -80,3 +80,14 @@ pub enum RequestStatus {
     Error,
     Cancelled,
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, strum_macros::Display)]
+#[db_enum(pg_type = "storage_type_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum StorageType {
+    #[default]
+    FileSystem,
+    S3,
+}

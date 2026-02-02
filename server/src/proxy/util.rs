@@ -70,6 +70,10 @@ pub(super) async fn parse_request_body(request: Request<Body>) -> Result<Value, 
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e)))?;
 
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+
     serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to parse JSON body: {}", e)))
 }

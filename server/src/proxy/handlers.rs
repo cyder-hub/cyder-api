@@ -1,6 +1,6 @@
 use super::auth::*;
 use super::core::build_reqwest_client;
-use super::logging::{create_request_log, log_final_update};
+use super::logging::{get_log_manager, RequestLogContext};
 use super::models::{
     get_accessible_models, GeminiModelInfo, GeminiModelListResponse, ModelInfo, ModelListResponse,
 };
@@ -10,7 +10,7 @@ use super::util::*;
 use crate::controller::llm_types::LlmApiType;
 use crate::schema::enum_def::{ProviderType, RequestStatus};
 use crate::service::app_state::AppState;
-use crate::service::cache::types::{CacheProvider, CacheModel};
+use crate::service::cache::types::{CacheModel, CacheProvider};
 use axum::{
     body::{Body, Bytes},
     extract::Request,
@@ -48,6 +48,7 @@ pub async fn openai_utility_handler(
 
     // Step 2: Parse body
     let data = parse_request_body(request).await?;
+    let original_request_body_str = serde_json::to_string(&data).unwrap_or_default();
     debug!(
         "[{}] original request data: {}",
         downstream_path,
@@ -67,19 +68,21 @@ pub async fn openai_utility_handler(
         downstream_path, pre_model_str
     );
 
-    let (provider, model): (Arc<CacheProvider>, Arc<CacheModel>) = get_provider_and_model(&app_state, pre_model_str).await.map_err(|e: String| {
-        warn!("Failed to resolve model '{}': {}", pre_model_str, e);
-        (StatusCode::BAD_REQUEST, e)
-    })?;
+    let (provider, model): (Arc<CacheProvider>, Arc<CacheModel>) =
+        get_provider_and_model(&app_state, pre_model_str)
+            .await
+            .map_err(|e: String| {
+                warn!("Failed to resolve model '{}': {}", pre_model_str, e);
+                (StatusCode::BAD_REQUEST, e)
+            })?;
 
     // Step 4: Check if provider is OpenAI compatible
-    let target_api_type = if provider.provider_type == ProviderType::Vertex
-        || provider.provider_type == ProviderType::Gemini
-    {
-        LlmApiType::Gemini
-    } else {
-        LlmApiType::OpenAI
-    };
+    let target_api_type =
+        if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
+            LlmApiType::Gemini
+        } else {
+            LlmApiType::OpenAI
+        };
 
     if target_api_type != LlmApiType::OpenAI {
         return Err((
@@ -101,19 +104,39 @@ pub async fn openai_utility_handler(
     }
 
     // Step 7: Prepare downstream request
-    let (final_url, final_headers, final_body, provider_api_key_id) = prepare_llm_request(
+    let (final_url, final_headers, final_body_value, provider_api_key_id) =
+        prepare_llm_request(
+            &provider,
+            &model,
+            data,
+            &original_headers,
+            &app_state,
+            downstream_path,
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to prepare LLM request: {:?}", e);
+            e
+        })?;
+
+    let final_body = serde_json::to_string(&final_body_value).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize final request body: {}", e),
+        )
+    })?;
+
+    let mut log_context = RequestLogContext::new(
+        &system_api_key,
         &provider,
         &model,
-        data,
-        &original_headers,
-        &app_state,
-        downstream_path,
-    )
-    .await
-    .map_err(|e| {
-        error!("Failed to prepare LLM request: {:?}", e);
-        e
-    })?;
+        provider_api_key_id,
+        start_time,
+        &client_ip_addr,
+        &request_uri_path,
+        &channel,
+        &external_id,
+    );
 
     // Step 8: Execute request against downstream
     let client = build_reqwest_client(provider.use_proxy)?;
@@ -125,6 +148,7 @@ pub async fn openai_utility_handler(
     );
     debug!("[{}] proxy request data: {}", downstream_path, &final_body);
 
+    log_context.llm_request_sent_at = Some(Utc::now().timestamp_millis());
     let response = match client
         .request(Method::POST, &final_url)
         .headers(final_headers)
@@ -134,9 +158,10 @@ pub async fn openai_utility_handler(
     {
         Ok(resp) => resp,
         Err(e) => {
-            // Per user request, don't log if request fails to send.
             let error_message = format!("LLM request failed: {}", e);
             error!("[{}] {}", downstream_path, error_message);
+            log_context.overall_status = RequestStatus::Error;
+            get_log_manager().log(log_context).await;
             return Err((StatusCode::BAD_GATEWAY, error_message));
         }
     };
@@ -166,7 +191,8 @@ pub async fn openai_utility_handler(
         Err(e) => {
             let err_msg = format!("Failed to read LLM response body: {}", e);
             error!("[{}] {}", downstream_path, err_msg);
-            // No logging on body read error, just return error
+            log_context.overall_status = RequestStatus::Error;
+            get_log_manager().log(log_context).await;
             return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
         }
     };
@@ -199,39 +225,27 @@ pub async fn openai_utility_handler(
         };
 
         let llm_response_completed_at = Utc::now().timestamp_millis();
-
-        let log_id = create_request_log(
-            &system_api_key,
-            &provider,
-            &model,
-            provider_api_key_id,
-            start_time,
-            &client_ip_addr,
-            &request_uri_path,
-            &channel,
-            &external_id,
-        );
         let parsed_usage_info = serde_json::from_slice::<Value>(&body_for_parsing)
             .ok()
             .and_then(|val| parse_utility_usage_info(&val));
+        let llm_response_body_str = String::from_utf8_lossy(&body_for_parsing).to_string();
+        let user_response_body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
-        log_final_update(
-            log_id,
-            "Non-SSE success",
-            &final_url,
-            &final_body,
-            Some(status_code),
-            Some(None),
-            false,
-            None,
-            llm_response_completed_at,
-            parsed_usage_info.as_ref(),
-            billing_plan.as_ref(),
-            Some(RequestStatus::Success),
-        );
+        log_context.request_url = Some(final_url);
+        log_context.llm_status = Some(status_code);
+        log_context.completion_ts = Some(llm_response_completed_at);
+        log_context.usage = parsed_usage_info;
+        log_context.billing_plan = billing_plan;
+        log_context.overall_status = RequestStatus::Success;
+        log_context.user_request_body = Some(Bytes::from(original_request_body_str));
+        log_context.llm_request_body = Some(Bytes::from(final_body));
+        log_context.llm_response_body = Some(Bytes::from(llm_response_body_str));
+        log_context.user_response_body = Some(Bytes::from(user_response_body_str));
+
+        get_log_manager().log(log_context.clone()).await;
         info!(
             "{}: Non-SSE request completed for log_id {}.",
-            model_str, log_id
+            model_str, log_context.id
         );
     } else {
         let error_body_str = String::from_utf8_lossy(&body_bytes).into_owned();
@@ -265,8 +279,12 @@ pub async fn list_models_handler(
         LlmApiType::OpenAI => {
             authenticate_openai_request(&original_headers, &params, &app_state).await?
         }
-        LlmApiType::Gemini => authenticate_gemini_request(&original_headers, &params, &app_state).await?,
-        LlmApiType::Anthropic => authenticate_anthropic_request(&original_headers, &app_state).await?,
+        LlmApiType::Gemini => {
+            authenticate_gemini_request(&original_headers, &params, &app_state).await?
+        }
+        LlmApiType::Anthropic => {
+            authenticate_anthropic_request(&original_headers, &app_state).await?
+        }
         _ => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,

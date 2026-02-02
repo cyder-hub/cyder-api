@@ -175,7 +175,8 @@ diesel::table! {
 
 diesel::table! {
     use crate::schema::enum_def::RequestStatusMapping;
-    use diesel::sql_types::{Bool, Int4, Int8, Text, Nullable};
+    use crate::schema::enum_def::StorageTypeMapping;
+    use diesel::sql_types::{Bool, Int4, Int8, Text, Nullable, Jsonb};
 
     request_log (id) {
         id -> Int8,
@@ -194,8 +195,6 @@ diesel::table! {
         external_request_uri -> Nullable<Text>,
         llm_request_uri -> Nullable<Text>,
         llm_response_status -> Nullable<Int4>,
-        llm_request_body -> Nullable<Text>,
-        llm_response_body -> Nullable<Text>,
         status -> Nullable<RequestStatusMapping>,
         is_stream -> Bool,
         calculated_cost -> Nullable<Int8>,
@@ -208,6 +207,12 @@ diesel::table! {
         total_tokens -> Nullable<Int4>,
         channel -> Nullable<Text>,
         external_id -> Nullable<Text>,
+        metadata -> Nullable<Jsonb>,
+        storage_type -> Nullable<StorageTypeMapping>,
+        user_request_body -> Nullable<Text>,
+        llm_request_body -> Nullable<Text>,
+        llm_response_body -> Nullable<Text>,
+        user_response_body -> Nullable<Text>,
     }
 }
 

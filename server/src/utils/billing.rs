@@ -7,7 +7,7 @@ use crate::{
     database::request_log::UpdateRequestLogData, service::cache::types::{CacheBillingPlan, CachePriceRule},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UsageInfo {
     pub prompt_tokens: i32,
     pub completion_tokens: i32,
@@ -87,7 +87,29 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 None
             }
         }
-        _ => return None
+        LlmApiType::Anthropic => {
+            let usage_val = response_body.get("usage");
+            if let Some(usage) = usage_val {
+                if usage.is_null() {
+                    return None;
+                }
+                let prompt_tokens =
+                    usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let completion_tokens =
+                    usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let total_tokens = prompt_tokens + completion_tokens;
+
+                Some(UsageInfo {
+                    prompt_tokens,
+                    completion_tokens,
+                    reasoning_tokens: 0,
+                    total_tokens,
+                })
+            } else {
+                None
+            }
+        }
+        _ => return None,
     }
 }
 

@@ -6,25 +6,35 @@ export async function request(url: string, options: RequestInit = {}, isRetry: b
   // const navigate = useNavigate(); // If using router for redirects
   const token = getAccessToken(); // Get token from global signal
 
-  const headers = {
-    ...(options.headers || {}),
-    'Content-Type': 'application/json',
-    // Add Authorization header only if token exists
-    ...(token && { Authorization: `Bearer ${token}` }),
-  };
+  const headers = new Headers(options.headers);
+
+  // Set a default Content-Type if one isn't provided by the caller.
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  // Add Authorization header only if token exists, potentially overwriting.
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
 
   try {
     const response = await fetch(url, { ...options, headers });
 
     if (response.ok) {
-      const data = await response.json();
-      // Assuming API response structure is { data: [...] } or { data: {...} }
-      // Or sometimes { code: ..., message: ..., data: ... }
-      if (data && typeof data.data !== 'undefined') {
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        const data = await response.json();
+        // Assuming API response structure is { data: [...] } or { data: {...} }
+        // Or sometimes { code: ..., message: ..., data: ... }
+        if (data && typeof data.data !== 'undefined') {
           return data.data;
+        }
+        // Handle cases where response might be just the data directly or different structure
+        return data; // Adjust as needed based on your API conventions
+      } else {
+        return response.text(); // Return as plain text if not JSON
       }
-      // Handle cases where response might be just the data directly or different structure
-      return data; // Adjust as needed based on your API conventions
     }
 
     // --- Token Refresh Logic ---

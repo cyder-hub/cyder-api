@@ -1,6 +1,7 @@
+use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SseEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -12,41 +13,37 @@ pub struct SseEvent {
 }
 
 impl SseEvent {
-    pub fn to_string(&self) -> String {
-        let mut buffer = String::new();
+    pub fn to_bytes(&self) -> BytesMut {
+        let mut buffer = BytesMut::new();
 
         if let Some(id) = &self.id {
-            buffer.push_str("id: ");
-            buffer.push_str(id);
-            buffer.push('\n');
+            buffer.put_slice(b"id: ");
+            buffer.put_slice(id.as_bytes());
+            buffer.put_u8(b'\n');
         }
 
         if let Some(event) = &self.event {
-            buffer.push_str("event: ");
-            buffer.push_str(event);
-            buffer.push('\n');
+            buffer.put_slice(b"event: ");
+            buffer.put_slice(event.as_bytes());
+            buffer.put_u8(b'\n');
         }
 
         if let Some(retry) = self.retry {
-            buffer.push_str("retry: ");
-            buffer.push_str(&retry.to_string());
-            buffer.push('\n');
+            buffer.put_slice(b"retry: ");
+            buffer.put_slice(retry.to_string().as_bytes());
+            buffer.put_u8(b'\n');
         }
 
         if !self.data.is_empty() {
             for line in self.data.split('\n') {
-                buffer.push_str("data: ");
-                buffer.push_str(line);
-                buffer.push('\n');
+                buffer.put_slice(b"data: ");
+                buffer.put_slice(line.as_bytes());
+                buffer.put_u8(b'\n');
             }
         }
 
-        buffer.push('\n');
+        buffer.put_u8(b'\n');
         buffer
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.to_string().into_bytes()
     }
 }
 
@@ -367,5 +364,18 @@ mod tests {
         // "EF A" -> field name "ïA" (latin1) or replacement. Value empty.
         // Event is empty.
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_event_to_bytes() {
+        let event = SseEvent {
+            id: Some("1".to_string()),
+            event: Some("message".to_string()),
+            data: "hello\nworld".to_string(),
+            retry: Some(123),
+        };
+
+        let expected = "id: 1\nevent: message\nretry: 123\ndata: hello\ndata: world\n\n";
+        assert_eq!(event.to_bytes(), expected.as_bytes());
     }
 }

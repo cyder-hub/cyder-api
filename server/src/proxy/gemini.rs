@@ -1,6 +1,6 @@
 use super::auth::*;
 use super::core::{proxy_request, simple_proxy_request};
-use super::logging::create_request_log;
+use super::logging::RequestLogContext;
 use super::prepare::*;
 use super::util::*;
 
@@ -9,6 +9,7 @@ use crate::schema::enum_def::ProviderType;
 use crate::service::app_state::AppState;
 use crate::service::transform::transform_request_data;
 use axum::{body::Body, extract::Request, response::Response};
+use bytes::Bytes;
 use chrono::Utc;
 use cyder_tools::log::{debug, error};
 use reqwest::StatusCode;
@@ -36,7 +37,21 @@ pub async fn handle_gemini_request(
     let external_id = api_key_check_result.external_id;
 
     // Step 2: Parse the incoming request body.
-    let mut data = parse_request_body(request).await?;
+    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to read request body: {}", e),
+            )
+        })?;
+    let mut data: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse request body: {}", e),
+        )
+    })?;
+    let original_request_body = body_bytes;
     debug!(
         "[proxy] original request data: {}",
         serde_json::to_string(&data).unwrap_or_default()
@@ -62,16 +77,16 @@ pub async fn handle_gemini_request(
 
     if GEMINI_UTILITY_ACTIONS.contains(&action) {
         // Handle utility actions: simple proxy, no logging
-        let (provider, model) =
-            get_provider_and_model(&app_state, model_name).await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let (provider, model) = get_provider_and_model(&app_state, model_name)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-        let target_api_type = if provider.provider_type == ProviderType::Vertex
-            || provider.provider_type == ProviderType::Gemini
-        {
-            LlmApiType::Gemini
-        } else {
-            LlmApiType::OpenAI
-        };
+        let target_api_type =
+            if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
+                LlmApiType::Gemini
+            } else {
+                LlmApiType::OpenAI
+            };
 
         debug!("{:?}", provider.provider_type);
 
@@ -102,7 +117,8 @@ pub async fn handle_gemini_request(
             )
         })?;
 
-        return simple_proxy_request(final_url, final_body, final_headers, provider.use_proxy).await;
+        return simple_proxy_request(final_url, final_body, final_headers, provider.use_proxy)
+            .await;
     }
 
     if !GEMINI_GENERATION_ACTIONS.contains(&action) {
@@ -114,16 +130,16 @@ pub async fn handle_gemini_request(
         return Err((StatusCode::BAD_REQUEST, err_msg));
     }
 
-    let (provider, model) =
-        get_provider_and_model(&app_state, model_name).await.map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let (provider, model) = get_provider_and_model(&app_state, model_name)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    let target_api_type = if provider.provider_type == ProviderType::Vertex
-        || provider.provider_type == ProviderType::Gemini
-    {
-        LlmApiType::Gemini
-    } else {
-        LlmApiType::OpenAI
-    };
+    let target_api_type =
+        if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
+            LlmApiType::Gemini
+        } else {
+            LlmApiType::OpenAI
+        };
 
     let api_type = LlmApiType::Gemini;
     let is_stream = action == "streamGenerateContent";
@@ -135,8 +151,7 @@ pub async fn handle_gemini_request(
     // Step 4: If an access policy is present, check if the request is allowed.
     check_access_control(&system_api_key, &provider, &model, &app_state).await?;
 
-    // Step 5: Prepare the downstream request details (URL, headers, body).
-    let (final_url, final_headers, final_body, provider_api_key_id) = match target_api_type {
+    let (final_url, final_headers, final_body_value, provider_api_key_id) = match target_api_type {
         LlmApiType::OpenAI => {
             prepare_llm_request(
                 &provider,
@@ -168,8 +183,15 @@ pub async fn handle_gemini_request(
         }
     };
 
+    let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize final request body: {}", e),
+        )
+    })?);
+
     // Step 6: Create an initial log entry for the request.
-    let log_id = create_request_log(
+    let log_context = RequestLogContext::new(
         &system_api_key,
         &provider,
         &model,
@@ -197,7 +219,7 @@ pub async fn handle_gemini_request(
     };
 
     proxy_request(
-        log_id,
+        log_context,
         final_url,
         final_body,
         final_headers,
@@ -206,6 +228,7 @@ pub async fn handle_gemini_request(
         billing_plan,
         api_type,
         target_api_type,
+        original_request_body,
     )
     .await
 }

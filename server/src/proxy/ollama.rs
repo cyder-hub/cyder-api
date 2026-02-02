@@ -1,15 +1,16 @@
 use super::auth::*;
 use super::core::proxy_request;
-use super::logging::create_request_log;
+use super::logging::RequestLogContext;
 use super::prepare::*;
 use super::util::*;
 
 use crate::controller::llm_types::LlmApiType;
 use crate::schema::enum_def::ProviderType;
 use crate::service::app_state::AppState;
-use crate::service::cache::types::{CacheProvider, CacheModel};
+use crate::service::cache::types::{CacheModel, CacheProvider};
 use crate::service::transform::transform_request_data;
 use axum::{body::Body, extract::Request, response::Response};
+use bytes::Bytes;
 use chrono::Utc;
 use cyder_tools::log::{debug, error, info, warn};
 use reqwest::StatusCode;
@@ -37,7 +38,21 @@ pub async fn handle_ollama_request(
     let external_id = api_key_check_result.external_id;
 
     // Step 2: Parse the incoming request body.
-    let mut data = parse_request_body(request).await?;
+    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to read request body: {}", e),
+            )
+        })?;
+    let mut data: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse request body: {}", e),
+        )
+    })?;
+    let original_request_body = body_bytes;
     debug!(
         "[proxy] original request data: {}",
         serde_json::to_string(&data).unwrap_or_default()
@@ -56,10 +71,13 @@ pub async fn handle_ollama_request(
 
     info!("Processing Ollama request for model: {}", pre_model_str);
 
-    let (provider, model): (Arc<CacheProvider>, Arc<CacheModel>) = get_provider_and_model(&app_state, pre_model_str).await.map_err(|e: String| {
-        warn!("Failed to resolve model '{}': {}", pre_model_str, e);
-        (StatusCode::BAD_REQUEST, e)
-    })?;
+    let (provider, model): (Arc<CacheProvider>, Arc<CacheModel>) =
+        get_provider_and_model(&app_state, pre_model_str)
+            .await
+            .map_err(|e: String| {
+                warn!("Failed to resolve model '{}': {}", pre_model_str, e);
+                (StatusCode::BAD_REQUEST, e)
+            })?;
 
     let target_api_type = if provider.provider_type == ProviderType::Ollama {
         LlmApiType::Ollama
@@ -81,7 +99,7 @@ pub async fn handle_ollama_request(
     }
 
     // Step 5: Prepare the downstream request details (URL, headers, body).
-    let (final_url, final_headers, final_body, provider_api_key_id) = match target_api_type {
+    let (final_url, final_headers, final_body_value, provider_api_key_id) = match target_api_type {
         LlmApiType::Ollama => {
             prepare_llm_request(
                 &provider,
@@ -121,8 +139,15 @@ pub async fn handle_ollama_request(
         }
     };
 
+    let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize final request body: {}", e),
+        )
+    })?);
+
     // Step 6: Create an initial log entry for the request.
-    let log_id = create_request_log(
+    let log_context = RequestLogContext::new(
         &system_api_key,
         &provider,
         &model,
@@ -150,7 +175,7 @@ pub async fn handle_ollama_request(
     };
 
     proxy_request(
-        log_id,
+        log_context,
         final_url,
         final_body,
         final_headers,
@@ -159,6 +184,7 @@ pub async fn handle_ollama_request(
         billing_plan,
         api_type,
         target_api_type,
+        original_request_body,
     )
     .await
 }

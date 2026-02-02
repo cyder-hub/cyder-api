@@ -151,6 +151,160 @@ impl PartialCacheConfig {
     }
 }
 
+// --- START STORAGE CONFIG ---
+
+/// S3 Access Mode
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum S3AccessMode {
+    Proxy,
+    Redirect,
+}
+
+impl Default for S3AccessMode {
+    fn default() -> Self {
+        S3AccessMode::Proxy
+    }
+}
+
+
+/// Storage driver type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageDriver {
+    Local,
+    S3,
+}
+
+impl Default for StorageDriver {
+    fn default() -> Self {
+        StorageDriver::Local
+    }
+}
+
+/// Local storage specific configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalStorageConfig {
+    #[serde(default = "default_local_storage_root")]
+    pub root: String,
+}
+
+impl Default for LocalStorageConfig {
+    fn default() -> Self {
+        Self {
+            root: default_local_storage_root(),
+        }
+    }
+}
+
+/// S3 storage specific configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3StorageConfig {
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+    pub bucket: String,
+    #[serde(default)]
+    pub access_mode: S3AccessMode,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    #[serde(default)]
+    pub force_path_style: bool,
+    pub public_url: Option<String>,
+}
+
+/// Overall storage configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    #[serde(default)]
+    pub driver: StorageDriver,
+    #[serde(default)]
+    pub local: LocalStorageConfig,
+    pub s3: Option<S3StorageConfig>,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            driver: StorageDriver::default(),
+            local: LocalStorageConfig::default(),
+            s3: None,
+        }
+    }
+}
+
+
+// --- PARTIAL STORAGE CONFIG for merging ---
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PartialLocalStorageConfig {
+    pub root: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PartialS3StorageConfig {
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+    pub bucket: Option<String>,
+    pub access_mode: Option<S3AccessMode>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub force_path_style: Option<bool>,
+    pub public_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PartialStorageConfig {
+    pub driver: Option<StorageDriver>,
+    pub local: Option<PartialLocalStorageConfig>,
+    pub s3: Option<PartialS3StorageConfig>,
+}
+
+impl PartialStorageConfig {
+    fn merge_into(self, final_config: &mut StorageConfig) {
+        if let Some(driver) = self.driver {
+            final_config.driver = driver;
+        }
+
+        if let Some(local_partial) = self.local {
+            if let Some(root) = local_partial.root {
+                final_config.local.root = root;
+            }
+        }
+
+        if let Some(s3_partial) = self.s3 {
+            match &mut final_config.s3 {
+                Some(s3_final) => { // s3 config already exists, merge into it
+                    if let Some(endpoint) = s3_partial.endpoint { s3_final.endpoint = Some(endpoint); }
+                    if let Some(region) = s3_partial.region { s3_final.region = Some(region); }
+                    if let Some(bucket) = s3_partial.bucket { s3_final.bucket = bucket; }
+                    if let Some(access_mode) = s3_partial.access_mode { s3_final.access_mode = access_mode; }
+                    if let Some(access_key) = s3_partial.access_key { s3_final.access_key = Some(access_key); }
+                    if let Some(secret_key) = s3_partial.secret_key { s3_final.secret_key = Some(secret_key); }
+                    if let Some(force_path_style) = s3_partial.force_path_style { s3_final.force_path_style = force_path_style; }
+                    if let Some(public_url) = s3_partial.public_url { s3_final.public_url = Some(public_url); }
+                }
+                None => { // no s3 config, try to create from partial
+                    if let Some(bucket) = s3_partial.bucket {
+                        final_config.s3 = Some(S3StorageConfig {
+                            bucket,
+                            endpoint: s3_partial.endpoint,
+                            region: s3_partial.region,
+                            access_mode: s3_partial.access_mode.unwrap_or_default(),
+                            access_key: s3_partial.access_key,
+                            secret_key: s3_partial.secret_key,
+                            force_path_style: s3_partial.force_path_style.unwrap_or(false),
+                            public_url: s3_partial.public_url,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Default values for cache
 fn default_ttl_seconds() -> u64 {
     3600 // 1 hour
@@ -176,6 +330,10 @@ fn default_redis_url() -> String {
     "redis://127.0.0.1:6379/".to_string()
 }
 
+fn default_local_storage_root() -> String {
+    "storage/storage".to_string()
+}
+
 
 // Used for deserializing user-provided config files where all fields are optional.
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -194,6 +352,7 @@ pub struct PartialConfig {
     pub timezone: Option<String>,
     pub redis: Option<PartialRedisConfig>,
     pub cache: Option<PartialCacheConfig>,
+    pub storage: Option<PartialStorageConfig>,
 }
 
 impl PartialConfig {
@@ -216,6 +375,9 @@ impl PartialConfig {
         if let Some(cache) = self.cache {
             cache.merge_into(&mut final_config.cache)
         }
+        if let Some(storage) = self.storage {
+            storage.merge_into(&mut final_config.storage)
+        }
     }
 }
 
@@ -236,6 +398,7 @@ pub struct FinalConfig {
     pub timezone: Option<String>,
     pub redis: Option<RedisConfig>,
     pub cache: CacheConfig,
+    pub storage: StorageConfig,
 }
 
 fn generate_random_string(len: usize) -> String {
@@ -265,6 +428,7 @@ fn get_config_from_env() -> PartialConfig {
         timezone: get_env_var("TIMEZONE"),
         redis: None,
         cache: None,
+        storage: None,
     }
 }
 
@@ -304,6 +468,7 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
         timezone: None,
         redis: None,
         cache: CacheConfig::default(),
+        storage: StorageConfig::default(),
     };
 
     // If a default config file exists, load it as partial and merge it over the programmatic defaults.
@@ -341,6 +506,10 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
 
     if final_config.redis.is_none() && final_config.cache.backend == CacheBackendType::Redis {
         final_config.cache.backend = CacheBackendType::Memory;
+    }
+
+    if final_config.storage.driver == StorageDriver::S3 && final_config.storage.s3.is_none() {
+        final_config.storage.driver = StorageDriver::Local;
     }
 
     final_config

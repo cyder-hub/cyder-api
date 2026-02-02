@@ -1,11 +1,12 @@
 use chrono::Utc;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{get_connection, DbResult, ListResult};
 use crate::controller::BaseError;
+use crate::schema::enum_def::{RequestStatus, StorageType};
 use crate::{db_execute, db_object};
-use crate::schema::enum_def::RequestStatus;
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Serialize, Debug, Clone)]
@@ -24,23 +25,27 @@ db_object! {
         pub llm_response_completed_at: Option<i64>,
         pub response_sent_to_client_at: Option<i64>,
         pub client_ip: Option<String>,
-        pub external_request_uri: Option<String>, // From schema
-        pub llm_request_uri: Option<String>,    // From schema
-        pub llm_response_status: Option<i32>,   // From schema (diesel type: Nullable<Int4>)
-        pub llm_request_body: Option<String>,   // From schema (diesel type: Nullable<Text>)
-        pub llm_response_body: Option<String>,  // From schema (diesel type: Nullable<Text>)
-        pub status: Option<RequestStatus>,             // From schema (diesel type: Nullable<Text>)
-        pub is_stream: bool,                    // From schema (diesel type: Bool)
-        pub calculated_cost: Option<i64>,       // From schema (diesel type: Nullable<Int8>)
-        pub cost_currency: Option<String>,      // From schema (diesel type: Nullable<Text>)
-        pub created_at: i64,                    // From schema (diesel type: Int8)
-        pub updated_at: i64,                    // From schema (diesel type: Int8)
-        pub prompt_tokens: Option<i32>,         // From schema (diesel type: Nullable<Int4>)
-        pub completion_tokens: Option<i32>,     // From schema (diesel type: Nullable<Int4>)
-        pub reasoning_tokens: Option<i32>,      // From schema (diesel type: Nullable<Int4>)
-        pub total_tokens: Option<i32>,          // From schema (diesel type: Nullable<Int4>)
+        pub external_request_uri: Option<String>,
+        pub llm_request_uri: Option<String>,
+        pub llm_response_status: Option<i32>,
+        pub status: Option<RequestStatus>,
+        pub is_stream: bool,
+        pub calculated_cost: Option<i64>,
+        pub cost_currency: Option<String>,
+        pub created_at: i64,
+        pub updated_at: i64,
+        pub prompt_tokens: Option<i32>,
+        pub completion_tokens: Option<i32>,
+        pub reasoning_tokens: Option<i32>,
+        pub total_tokens: Option<i32>,
         pub channel: Option<String>,
         pub external_id: Option<String>,
+        pub metadata: Option<Value>,
+        pub storage_type: Option<StorageType>,
+        pub user_request_body: Option<String>,
+        pub llm_request_body: Option<String>,
+        pub llm_response_body: Option<String>,
+        pub user_response_body: Option<String>,
     }
 
     // Struct for inserting the initial part of a request log.
@@ -76,14 +81,18 @@ db_object! {
         pub llm_response_first_chunk_at: Option<i64>,
         pub llm_response_completed_at: Option<i64>,
         pub response_sent_to_client_at: Option<i64>,
-        pub status: Option<RequestStatus>,          // From schema: Nullable<Text>
-        pub calculated_cost: Option<i64>,    // From schema: Nullable<Int8>
-        pub cost_currency: Option<Option<String>>,   // From schema: Nullable<Text>
-        pub is_stream: Option<bool>,                 // From schema: Bool
-        pub llm_request_uri: Option<Option<String>>, // From schema: Nullable<Text>
-        pub llm_request_body: Option<Option<String>>,// From schema: Nullable<Text>
-        pub llm_response_body: Option<Option<String>>,// From schema: Nullable<Text>
-        pub llm_response_status: Option<Option<i32>>,// From schema: Nullable<Int4>
+        pub status: Option<RequestStatus>,
+        pub calculated_cost: Option<i64>,
+        pub cost_currency: Option<Option<String>>,
+        pub is_stream: Option<bool>,
+        pub llm_request_uri: Option<Option<String>>,
+        pub llm_response_status: Option<Option<i32>>,
+        pub metadata: Option<Option<Value>>,
+        pub storage_type: Option<Option<StorageType>>,
+        pub user_request_body: Option<Option<String>>,
+        pub llm_request_body: Option<Option<String>>,
+        pub llm_response_body: Option<Option<String>>,
+        pub user_response_body: Option<Option<String>>,
         // updated_at is handled manually
     }
 }
@@ -165,6 +174,34 @@ impl RequestLog {
         })
     }
 
+    pub fn find_by_hash(storage_type: StorageType, hash: &str) -> DbResult<RequestLog> {
+        let conn = &mut get_connection();
+        db_execute!(conn, {
+            let log_db = request_log::table
+                .filter(request_log::dsl::storage_type.eq(storage_type))
+                .filter(
+                    request_log::dsl::user_request_body
+                        .eq(hash)
+                        .or(request_log::dsl::llm_request_body.eq(hash))
+                        .or(request_log::dsl::llm_response_body.eq(hash))
+                        .or(request_log::dsl::user_response_body.eq(hash)),
+                )
+                .select(RequestLogDb::as_select())
+                .first::<RequestLogDb>(conn)
+                .map_err(|e| match e {
+                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                        "Request log with hash {} not found",
+                        hash
+                    ))),
+                    _ => BaseError::DatabaseFatal(Some(format!(
+                        "Error fetching request log with hash {}: {}",
+                        hash, e
+                    ))),
+                })?;
+            Ok(log_db.from_db())
+        })
+    }
+
     /// Lists request logs with filtering and pagination.
     pub fn list(payload: RequestLogQueryPayload) -> DbResult<ListResult<RequestLog>> {
         let conn = &mut get_connection();
@@ -188,7 +225,7 @@ impl RequestLog {
                 query = query.filter(request_log::dsl::model_id.eq(val));
                 count_query = count_query.filter(request_log::dsl::model_id.eq(val));
             }
-            if let Some(val) = payload.status  {
+            if let Some(val) = payload.status {
                 query = query.filter(request_log::dsl::status.eq(val.clone()));
                 count_query = count_query.filter(request_log::dsl::status.eq(val));
             }
@@ -215,7 +252,9 @@ impl RequestLog {
             let total = count_query
                 .select(diesel::dsl::count_star())
                 .first::<i64>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to count request logs: {}", e))))?;
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!("Failed to count request logs: {}", e)))
+                })?;
 
             let results_db = query
                 .order(request_log::dsl::request_received_at.desc())
@@ -223,7 +262,9 @@ impl RequestLog {
                 .offset(offset)
                 .select(RequestLogDb::as_select())
                 .load::<RequestLogDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list request logs: {}", e))))?;
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!("Failed to list request logs: {}", e)))
+                })?;
 
             let list = results_db.into_iter().map(|db_log| db_log.from_db()).collect();
 

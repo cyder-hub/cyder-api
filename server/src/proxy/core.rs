@@ -1,13 +1,12 @@
-use super::logging::log_final_update;
+use super::logging::{get_log_manager, RequestLogContext};
 use super::util::serialize_reqwest_headers;
 
 use crate::config::CONFIG;
 use crate::controller::llm_types::LlmApiType;
-use crate::database::request_log::{RequestLog, UpdateRequestLogData};
 use crate::schema::enum_def::RequestStatus;
-use crate::service::transform::{transform_result, StreamTransformer};
 use crate::service::cache::types::CacheBillingPlan;
-use crate::utils::billing::parse_usage_info;
+use crate::service::transform::{transform_result, StreamTransformer};
+use crate::utils::billing::{parse_usage_info, UsageInfo};
 use crate::utils::sse::SseParser;
 
 use axum::{
@@ -19,53 +18,46 @@ use cyder_tools::log::{debug, error, info, warn};
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use reqwest::{
-    header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
+    header::{HeaderMap, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
     Method, Proxy, StatusCode,
 };
 use serde_json::Value;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 
-// A guard to log a warning if the request is cancelled before completion.
-pub(super) struct CancellationGuard {
-    log_id: i64,
+struct RequestLogContextGuard {
+    context: Arc<TokioMutex<RequestLogContext>>,
     is_armed: bool,
 }
 
-impl CancellationGuard {
-    pub(super) fn new(log_id: i64) -> Self {
+impl RequestLogContextGuard {
+    fn new(context: Arc<TokioMutex<RequestLogContext>>) -> Self {
         Self {
-            log_id,
+            context,
             is_armed: true,
         }
     }
 
-    pub(super) fn disarm(&mut self) {
+    fn disarm(&mut self) {
         self.is_armed = false;
     }
 }
 
-impl Drop for CancellationGuard {
+impl Drop for RequestLogContextGuard {
     fn drop(&mut self) {
         if self.is_armed {
-            warn!(
-                "Request for log_id {} was cancelled by the client.",
-                self.log_id
-            );
-            let update_data = UpdateRequestLogData {
-                status: Some(RequestStatus::Cancelled),
-                response_sent_to_client_at: Some(Utc::now().timestamp_millis()),
-                ..Default::default()
-            };
-            if let Err(e) =
-                RequestLog::update_request_with_completion_details(self.log_id, &update_data)
-            {
-                error!(
-                    "Failed to update request log status to CANCELLED for log_id {}: {:?}",
-                    self.log_id, e
+            let context_clone = Arc::clone(&self.context);
+            tokio::spawn(async move {
+                let mut context = context_clone.lock().await;
+                warn!(
+                    "Request for log_id {} was cancelled by the client.",
+                    context.id
                 );
-            }
+                context.overall_status = RequestStatus::Cancelled;
+                context.completion_ts = Some(Utc::now().timestamp_millis());
+                get_log_manager().log(context.clone()).await;
+            });
         }
     }
 }
@@ -135,11 +127,9 @@ pub(super) async fn simple_proxy_request(
         }
     }
 
-    let is_sse = response_headers
-        .get(CONTENT_TYPE)
-        .map_or(false, |value| {
-            value.to_str().unwrap_or("").contains("text/event-stream")
-        });
+    let is_sse = response_headers.get(CONTENT_TYPE).map_or(false, |value| {
+        value.to_str().unwrap_or("").contains("text/event-stream")
+    });
 
     if is_sse {
         let body = Body::from_stream(
@@ -179,39 +169,37 @@ pub(super) async fn simple_proxy_request(
         } else {
             body_bytes
         };
-        Ok(response_builder.body(Body::from(decompressed_body)).unwrap())
+        Ok(response_builder
+            .body(Body::from(decompressed_body))
+            .unwrap())
     }
 }
 
 // Builds the HTTP client, sends the request to the LLM, and passes the response to be handled.
 pub(super) async fn proxy_request(
-    log_id: i64,
+    log_context: RequestLogContext,
     url: String,
-    data: String,
-    headers: reqwest::header::HeaderMap,
+    data: Bytes,
+    headers: HeaderMap,
     model_str: String,
     use_proxy: bool,
     billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
+    original_request_body: Bytes,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     info!(
         "Starting proxy request for log_id {}, model {}",
-        log_id, model_str
+        log_context.id, model_str
     );
-
+    let log_context = Arc::new(TokioMutex::new(log_context));
     // 1. Build HTTP client, with proxy if configured
     let client = build_reqwest_client(use_proxy)?;
 
-    let mut cancellation_guard = CancellationGuard::new(log_id);
-
-    debug!(
-        "[proxy] proxy request header: {:?}",
-        serialize_reqwest_headers(&headers)
-    );
-    debug!("[proxy] proxy request data: {}", &data);
+    let mut cancellation_guard = RequestLogContextGuard::new(log_context.clone());
 
     // 2. Send request to LLM
+    log_context.lock().await.llm_request_sent_at = Some(Utc::now().timestamp_millis());
     let response = match client
         .request(Method::POST, &url)
         .headers(headers)
@@ -225,50 +213,74 @@ pub(super) async fn proxy_request(
             let error_message = format!("LLM request failed: {}", e);
             error!("{}", error_message);
             let completed_at = Utc::now().timestamp_millis();
-            log_final_update(
-                log_id,
-                "LLM send error",
-                &url,
-                &data,
-                None,
-                Some(None),
-                false,
-                None,
-                completed_at,
-                None,
-                billing_plan.as_ref(),
-                Some(RequestStatus::Error),
-            );
+
+            let mut context = log_context.lock().await;
+            context.request_url = Some(url.clone());
+            context.completion_ts = Some(completed_at);
+            context.billing_plan = billing_plan.clone();
+            context.overall_status = RequestStatus::Error;
+            context.llm_request_body = Some(data);
+            get_log_manager().log(context.clone()).await;
+
             return Err((StatusCode::BAD_GATEWAY, error_message));
         }
     };
 
     // 3. Process the response stream
-    let result = handle_llm_response(
-        log_id,
-        model_str,
-        response,
-        &url,
-        &data,
-        billing_plan,
-        api_type,
-        target_api_type,
-    )
-    .await;
+    let is_sse = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .map_or(false, |value| {
+            value.to_str().unwrap_or("").contains("text/event-stream")
+        });
+
+    {
+        let mut context = log_context.lock().await;
+        context.is_stream = is_sse;
+    }
+
+    let result = if is_sse {
+        handle_streaming_response(
+            log_context,
+            model_str,
+            response,
+            &url,
+            &data,
+            billing_plan,
+            api_type,
+            target_api_type,
+            original_request_body,
+        )
+        .await
+    } else {
+        handle_non_streaming_response(
+            log_context,
+            model_str,
+            response,
+            &url,
+            &data,
+            billing_plan.as_ref(),
+            api_type,
+            target_api_type,
+            original_request_body,
+        )
+        .await
+    };
     cancellation_guard.disarm();
     result
 }
 
 // Handles a non-streaming response from the LLM.
 async fn handle_non_streaming_response(
-    log_id: i64,
+    log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
-    data: &str,
+    data: &Bytes,
     billing_plan: Option<&CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
+    original_request_body: Bytes,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -282,10 +294,6 @@ async fn handle_non_streaming_response(
 
     let mut response_builder = Response::builder().status(status_code);
     for (name, value) in response_headers.iter() {
-        // Do not forward content-length, content-encoding, or transfer-encoding.
-        // Axum will set the correct content-length.
-        // We handle decompression, so we don't want to forward the original encoding.
-        // We are not streaming chunk-by-chunk from the origin, so we don't forward transfer-encoding.
         if name != CONTENT_LENGTH && name != CONTENT_ENCODING && name != TRANSFER_ENCODING {
             response_builder = response_builder.header(name, value);
         }
@@ -297,20 +305,17 @@ async fn handle_non_streaming_response(
             let err_msg = format!("Failed to read LLM response body: {}", e);
             error!("[handle_non_streaming_response] {}", err_msg);
             let completed_at = Utc::now().timestamp_millis();
-            log_final_update(
-                log_id,
-                "LLM body read error",
-                url,
-                data,
-                Some(status_code),
-                Some(Some(err_msg.clone())),
-                false,
-                None,
-                completed_at,
-                None,
-                billing_plan,
-                Some(RequestStatus::Error),
-            );
+
+            let mut context = log_context.lock().await;
+            context.request_url = Some(url.to_string());
+            context.llm_status = Some(status_code);
+            context.completion_ts = Some(completed_at);
+            context.billing_plan = billing_plan.cloned();
+            context.overall_status = RequestStatus::Error;
+            context.llm_request_body = Some(data.clone());
+            context.llm_response_body = Some(Bytes::from(err_msg.clone()));
+            get_log_manager().log(context.clone()).await;
+
             return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
         }
     };
@@ -324,6 +329,7 @@ async fn handle_non_streaming_response(
             match gz.read_to_end(&mut decompressed_data) {
                 Ok(_) => Bytes::from(decompressed_data),
                 Err(e) => {
+                    let log_id = log_context.lock().await.id;
                     error!("Gzip decoding failed for log_id {}: {}", log_id, e);
                     body_bytes // return original if decode fails
                 }
@@ -332,10 +338,6 @@ async fn handle_non_streaming_response(
     } else {
         body_bytes
     };
-    debug!(
-        "[handle_non_streaming_response] decompressed body: {}",
-        String::from_utf8_lossy(&decompressed_body)
-    );
     let llm_response_completed_at = Utc::now().timestamp_millis();
 
     if status_code.is_success() {
@@ -343,36 +345,17 @@ async fn handle_non_streaming_response(
             .ok()
             .and_then(|val| parse_usage_info(&val, target_api_type));
 
-        log_final_update(
-            log_id,
-            "Non-SSE success",
-            url,
-            data,
-            Some(status_code),
-            Some(None),
-            false,
-            None,
-            llm_response_completed_at,
-            parsed_usage_info.as_ref(),
-            billing_plan,
-            Some(RequestStatus::Success),
-        );
-        info!(
-            "{}: Non-SSE request completed for log_id {}.",
-            model_str, log_id
-        );
-
         let final_body = if api_type != target_api_type {
-            // Transformation is needed
             let original_value: Value = match serde_json::from_slice(&decompressed_body) {
                 Ok(v) => v,
                 Err(e) => {
-                    // If we can't parse the body, we can't transform it. Return original.
                     error!(
                         "Failed to parse LLM response for transformation: {}. Returning original body.",
                         e
                     );
-                    return Ok(response_builder.body(Body::from(decompressed_body)).unwrap());
+                    return Ok(response_builder
+                        .body(Body::from(decompressed_body))
+                        .unwrap());
                 }
             };
 
@@ -385,72 +368,83 @@ async fn handle_non_streaming_response(
                         "Failed to serialize transformed response: {}. Returning original body.",
                         e
                     );
-                    decompressed_body
+                    decompressed_body.clone()
                 }
             }
         } else {
-            // No transformation needed
-            decompressed_body
+            decompressed_body.clone()
         };
+
+        let mut context = log_context.lock().await;
+        context.request_url = Some(url.to_string());
+        context.llm_status = Some(status_code);
+        context.completion_ts = Some(llm_response_completed_at);
+        context.usage = parsed_usage_info;
+        context.billing_plan = billing_plan.cloned();
+        context.overall_status = RequestStatus::Success;
+        context.user_request_body = Some(original_request_body);
+        context.llm_request_body = Some(data.clone());
+        context.llm_response_body = Some(decompressed_body.clone());
+        context.user_response_body = Some(final_body.clone());
+        get_log_manager().log(context.clone()).await;
+
+        info!(
+            "{}: Non-SSE request completed for log_id {}.",
+            model_str, context.id
+        );
 
         Ok(response_builder.body(Body::from(final_body)).unwrap())
     } else {
         let error_body_str = String::from_utf8_lossy(&decompressed_body).into_owned();
+        let mut context = log_context.lock().await;
         error!(
             "LLM request failed with status {} for log_id {}: {}",
-            status_code, log_id, &error_body_str
-        );
-        log_final_update(
-            log_id,
-            "LLM error status",
-            url,
-            data,
-            Some(status_code),
-            Some(Some(error_body_str.clone())),
-            false,
-            None,
-            llm_response_completed_at,
-            None,
-            billing_plan,
-            Some(RequestStatus::Error),
+            status_code, context.id, &error_body_str
         );
 
-        Ok(response_builder.body(Body::from(error_body_str)).unwrap())
+        context.request_url = Some(url.to_string());
+        context.llm_status = Some(status_code);
+        context.completion_ts = Some(llm_response_completed_at);
+        context.billing_plan = billing_plan.cloned();
+        context.overall_status = RequestStatus::Error;
+        context.user_request_body = Some(original_request_body);
+        context.llm_request_body = Some(data.clone());
+        context.llm_response_body = Some(decompressed_body.clone());
+        context.user_response_body = Some(decompressed_body.clone());
+        get_log_manager().log(context.clone()).await;
+
+        Ok(response_builder
+            .body(Body::from(decompressed_body))
+            .unwrap())
     }
 }
 
 // Handles a streaming (SSE) response from the LLM.
 async fn handle_streaming_response(
-    log_id: i64,
+    log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
-    data: &str,
+    data: &Bytes,
     billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
+    original_request_body: Bytes,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
 
     let mut response_builder = Response::builder().status(status_code);
     for (name, value) in response_headers.iter() {
-        // Do not forward content-length, content-encoding, or transfer-encoding.
-        // Axum will set the correct content-length for the stream.
-        // We are not forwarding the original encoding.
-        // We are re-streaming, so we don't forward transfer-encoding.
         if name != CONTENT_LENGTH && name != CONTENT_ENCODING && name != TRANSFER_ENCODING {
             response_builder = response_builder.header(name, value);
         }
     }
 
-    let mut first_chunk_received_at_proxy: i64 = 0;
-    let logged_sse_success = Arc::new(Mutex::new(false));
     let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
 
     let url_owned = url.to_string();
-    let data_owned = data.to_string();
-    let logged_sse_success_clone = logged_sse_success.clone();
+    let data_owned = data.clone();
     let billing_plan_clone = billing_plan.clone();
 
     tokio::spawn(async move {
@@ -464,58 +458,45 @@ async fn handle_streaming_response(
 
     let mut transformer = StreamTransformer::new(target_api_type, api_type);
     let mut parser = SseParser::new();
+    let log_context_clone = log_context.clone();
 
     let monitored_stream = async_stream::stream! {
-        let mut latest_event_data: Option<String> = None;
+        let mut first_chunk_received_at_proxy: i64 = 0;
+        let mut llm_body_aggregator: Vec<u8> = Vec::new();
+        let mut user_body_aggregator: Vec<u8> = Vec::new();
+
         while let Some(chunk_result) = rx.recv().await {
             match chunk_result {
                 Ok(chunk) => {
+                    llm_body_aggregator.extend_from_slice(&chunk);
+
                     if first_chunk_received_at_proxy == 0 {
                         first_chunk_received_at_proxy = Utc::now().timestamp_millis();
+                        let mut context = log_context_clone.lock().await;
+                        context.first_chunk_ts = Some(first_chunk_received_at_proxy);
                     }
 
                     let events = parser.process(&chunk);
-
                     if events.is_empty() {
                         continue;
                     }
 
-                    let mut transformed_sub_chunks_as_strings: Vec<String> = Vec::new();
-                    for event in events {
-                        // Handle [DONE] and logging logic directly on the event data
-                        if target_api_type == LlmApiType::OpenAI {
-                            if event.data.trim() == "[DONE]" {
-                                if let Some(data_json_str) = &latest_event_data {
-                                    if let Ok(data_value) = serde_json::from_str::<Value>(data_json_str) {
-                                        let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
-                                        let completed_at = Utc::now().timestamp_millis();
-                                        let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-                                        log_final_update(log_id, "SSE DONE", &url_owned, &data_owned, Some(status_code), Some(None), true, first_chunk_ts, completed_at, parsed_usage_info.as_ref(), billing_plan_clone.as_ref(), Some(RequestStatus::Success));
-                                        *logged_sse_success_clone.lock().unwrap() = true;
-                                        info!("{}: SSE stream completed.", model_str);
-                                    }
-                                }
-                            } else if !event.data.is_empty() {
-                                latest_event_data = Some(event.data.clone());
-                            }
-                        }
+                    let transformed_events = transformer.transform_events(events);
+                    let mut transformed_chunk_bytes: Vec<u8> = Vec::new();
 
-                        if let Some(transformed_events) = transformer.transform_event(event) {
-                            for transformed_event in transformed_events {
-                                if target_api_type == LlmApiType::Ollama {
-                                    transformed_sub_chunks_as_strings
-                                        .push(format!("{}\n", transformed_event.data));
-                                } else {
-                                    transformed_sub_chunks_as_strings
-                                        .push(transformed_event.to_string());
-                                }
-                            }
+                    for transformed_event in transformed_events {
+                        if target_api_type == LlmApiType::Ollama {
+                            transformed_chunk_bytes
+                                .extend_from_slice(transformed_event.data.as_bytes());
+                            transformed_chunk_bytes.push(b'\n');
+                        } else {
+                            transformed_chunk_bytes.extend_from_slice(&transformed_event.to_bytes());
                         }
                     }
 
-                    let transformed_chunk = Bytes::from(transformed_sub_chunks_as_strings.concat());
+                    let transformed_chunk = Bytes::from(transformed_chunk_bytes);
+                    user_body_aggregator.extend_from_slice(&transformed_chunk);
 
-                    // Forward the transformed chunk to the client
                     if !transformed_chunk.is_empty() {
                         yield Ok::<_, std::io::Error>(transformed_chunk);
                     }
@@ -524,130 +505,79 @@ async fn handle_streaming_response(
                     let stream_error_message = format!("LLM stream error: {}", e);
                     error!("{}", stream_error_message);
                     let completed_at = Utc::now().timestamp_millis();
-                    let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
 
-                    log_final_update(
-                        log_id, "LLM stream error", &url_owned, &data_owned, Some(status_code),
-                        Some(None), true, first_chunk_ts, completed_at, None, billing_plan_clone.as_ref(), Some(RequestStatus::Error),
-                    );
+                    let mut context = log_context_clone.lock().await;
+                    context.request_url = Some(url_owned.clone());
+                    context.llm_status = Some(status_code);
+                    context.completion_ts = Some(completed_at);
+                    context.billing_plan = billing_plan_clone.clone();
+                    context.overall_status = RequestStatus::Error;
+                    context.user_request_body = Some(original_request_body.clone());
+                    context.llm_request_body = Some(data_owned.clone());
+                    context.llm_response_body = Some(Bytes::from(llm_body_aggregator.clone()));
+                    context.user_response_body = Some(Bytes::from(user_body_aggregator.clone()));
+                    get_log_manager().log(context.clone()).await;
+
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, stream_error_message));
                     break;
                 }
             }
         }
 
-        // After the upstream is closed, check if we need to send a [DONE] message.
         if status_code.is_success() && api_type == LlmApiType::OpenAI && target_api_type == LlmApiType::Gemini {
-            // The client expects an OpenAI stream, which must end with [DONE].
-            // The Gemini stream we just consumed doesn't have this, so we add it.
             debug!("[handle_streaming_response] Appending [DONE] chunk for OpenAI client.");
             let done_chunk = Bytes::from("data: [DONE]\n\n");
+            user_body_aggregator.extend_from_slice(&done_chunk);
             yield Ok::<_, std::io::Error>(done_chunk);
         }
 
         let llm_response_completed_at = Utc::now().timestamp_millis();
 
-        if status_code.is_success() && !*logged_sse_success.lock().unwrap() {
-            if let Some(data_json_str) = latest_event_data {
-                if let Ok(data_value) = serde_json::from_str::<Value>(&data_json_str) {
-                    debug!("[proxy] final response from stream end {:?}", data_value);
-                    let parsed_usage_info = parse_usage_info(&data_value, target_api_type);
-                    let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
+        if status_code.is_success() {
+            let mut context = log_context_clone.lock().await;
+            context.request_url = Some(url_owned.clone());
+            context.llm_status = Some(status_code);
+            context.completion_ts = Some(llm_response_completed_at);
+            context.billing_plan = billing_plan_clone.clone();
+            context.overall_status = RequestStatus::Success;
+            context.user_request_body = Some(original_request_body.clone());
+            context.llm_request_body = Some(data_owned.clone());
+            context.llm_response_body = Some(Bytes::from(llm_body_aggregator));
+            context.user_response_body = Some(Bytes::from(user_body_aggregator));
 
-                    log_final_update(
-                        log_id, "SSE stream end", &url_owned, &data_owned, Some(status_code),
-                        Some(None), true, first_chunk_ts, llm_response_completed_at,
-                        parsed_usage_info.as_ref(), billing_plan_clone.as_ref(), Some(RequestStatus::Success),
-                    );
-                    info!("{}: SSE stream completed at stream end.", model_str);
-                } else {
-                    error!("Failed to parse final SSE data JSON at stream end for log_id {}: {}", log_id, data_json_str);
-                }
-            } else {
-                info!("{}: SSE stream completed without a final data chunk to parse.", model_str);
-                let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-                log_final_update(
-                    log_id, "SSE stream end (no final chunk)", &url_owned, &data_owned, Some(status_code),
-                    Some(None), true, first_chunk_ts, llm_response_completed_at,
-                    None, billing_plan_clone.as_ref(), Some(RequestStatus::Success),
-                );
+            context.usage = transformer.parse_usage_info();
+            if context.usage.is_none() {
+                info!("{}: SSE stream completed without usage info.", model_str);
             }
-        } else if !status_code.is_success() {
-            let error_body_str = "Error during stream".to_string();
-            let first_chunk_ts = if first_chunk_received_at_proxy == 0 { None } else { Some(first_chunk_received_at_proxy) };
-            log_final_update(
-                log_id, "LLM error status", &url_owned, &data_owned, Some(status_code),
-                Some(Some(error_body_str)), true, first_chunk_ts,
-                llm_response_completed_at, None, billing_plan_clone.as_ref(), Some(RequestStatus::Error),
-            );
+
+            get_log_manager().log(context.clone()).await;
+            info!("{}: SSE stream completed.", model_str);
+
+        } else { // !status_code.is_success()
+            let mut context = log_context_clone.lock().await;
+            context.request_url = Some(url_owned.clone());
+            context.llm_status = Some(status_code);
+            context.completion_ts = Some(llm_response_completed_at);
+            context.billing_plan = billing_plan_clone.clone();
+            context.overall_status = RequestStatus::Error;
+            context.user_request_body = Some(original_request_body.clone());
+            context.llm_request_body = Some(data_owned.clone());
+            context.llm_response_body = Some(Bytes::from(llm_body_aggregator));
+            context.user_response_body = Some(Bytes::from(user_body_aggregator));
+            get_log_manager().log(context.clone()).await;
         }
     };
 
     match response_builder.body(Body::from_stream(monitored_stream)) {
         Ok(final_response) => Ok(final_response),
         Err(e) => {
-            let error_message =
-                format!("Failed to build client response for log_id {}: {}", log_id, e);
+            let log_id = log_context.lock().await.id;
+            let error_message = format!(
+                "Failed to build client response for log_id {}: {}",
+                log_id, e
+            );
             error!("{}", error_message);
             Err((StatusCode::INTERNAL_SERVER_ERROR, error_message))
         }
-    }
-}
-
-// Dispatches to the correct response handler based on whether the response is a stream.
-pub(super) async fn handle_llm_response(
-    log_id: i64,
-    model_str: String,
-    response: reqwest::Response,
-    url: &str,
-    data: &str,
-    billing_plan: Option<CacheBillingPlan>,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-) -> Result<Response<Body>, (StatusCode, String)> {
-    let is_sse = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .map_or(false, |value| {
-            value.to_str().unwrap_or("").contains("text/event-stream")
-        });
-
-    if let Err(e) = RequestLog::update_request_with_completion_details(
-        log_id,
-        &UpdateRequestLogData {
-            is_stream: Some(is_sse),
-            ..Default::default()
-        },
-    ) {
-        error!(
-            "Failed to update request log (is_stream) for log_id {}: {:?}",
-            log_id, e
-        );
-    }
-
-    if is_sse {
-        handle_streaming_response(
-            log_id,
-            model_str,
-            response,
-            url,
-            data,
-            billing_plan,
-            api_type,
-            target_api_type,
-        )
-        .await
-    } else {
-        handle_non_streaming_response(
-            log_id,
-            model_str,
-            response,
-            url,
-            data,
-            billing_plan.as_ref(),
-            api_type,
-            target_api_type,
-        )
-        .await
     }
 }

@@ -1,14 +1,15 @@
 use super::auth::*;
 use super::core::proxy_request;
-use super::logging::create_request_log;
+use super::logging::RequestLogContext;
 use super::prepare::*;
 use super::util::*;
 
 use crate::controller::llm_types::LlmApiType;
 use crate::service::app_state::AppState;
-use crate::service::cache::types::{CacheProvider, CacheModel};
+use crate::service::cache::types::{CacheModel, CacheProvider};
 use crate::service::transform::transform_request_data;
 use axum::{body::Body, extract::Request, response::Response};
+use bytes::Bytes;
 use chrono::Utc;
 use cyder_tools::log::{debug, error, info, warn};
 use reqwest::StatusCode;
@@ -36,7 +37,21 @@ pub async fn handle_openai_request(
     let external_id = api_key_check_result.external_id;
 
     // Step 2: Parse the incoming request body.
-    let mut data = parse_request_body(request).await?;
+    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to read request body: {}", e),
+            )
+        })?;
+    let mut data: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse request body: {}", e),
+        )
+    })?;
+    let original_request_body = body_bytes;
     debug!(
         "[proxy] original request data: {}",
         serde_json::to_string(&data).unwrap_or_default()
@@ -55,10 +70,13 @@ pub async fn handle_openai_request(
 
     info!("Processing OpenAI request for model: {}", pre_model_str);
 
-    let (provider, model): (Arc<CacheProvider>, Arc<CacheModel>) = get_provider_and_model(&app_state, pre_model_str).await.map_err(|e: String| {
-        warn!("Failed to resolve model '{}': {}", pre_model_str, e);
-        (StatusCode::BAD_REQUEST, e)
-    })?;
+    let (provider, model): (Arc<CacheProvider>, Arc<CacheModel>) =
+        get_provider_and_model(&app_state, pre_model_str)
+            .await
+            .map_err(|e: String| {
+                warn!("Failed to resolve model '{}': {}", pre_model_str, e);
+                (StatusCode::BAD_REQUEST, e)
+            })?;
 
     let target_api_type = determine_target_api_type(&provider);
     let is_stream = data.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -67,16 +85,16 @@ pub async fn handle_openai_request(
     let billing_plan = get_pricing_info(&model, &app_state).await;
 
     // Step 4: If an access policy is present, check if the request is allowed.
-    check_access_control(&system_api_key, &provider, &model, &app_state).await
+    check_access_control(&system_api_key, &provider, &model, &app_state)
+        .await
         .map_err(|e| {
             warn!("Access control check failed: {:?}", e);
             e
         })?;
 
-    // Step 5: Prepare the downstream request details (URL, headers, body).
-    let (final_url, final_headers, final_body, provider_api_key_id) = match target_api_type {
-        LlmApiType::OpenAI => {
-            prepare_llm_request(
+    let (final_url, final_headers, final_body_value, provider_api_key_id) =
+        match target_api_type {
+            LlmApiType::OpenAI => prepare_llm_request(
                 &provider,
                 &model,
                 data,
@@ -88,10 +106,8 @@ pub async fn handle_openai_request(
             .map_err(|e| {
                 error!("Failed to prepare OpenAI LLM request: {:?}", e);
                 e
-            })?
-        }
-        LlmApiType::Gemini => {
-            prepare_gemini_llm_request(
+            })?,
+            LlmApiType::Gemini => prepare_gemini_llm_request(
                 &provider,
                 &model,
                 data,
@@ -104,19 +120,25 @@ pub async fn handle_openai_request(
             .map_err(|e| {
                 error!("Failed to prepare Gemini LLM request: {:?}", e);
                 e
-            })?
-        }
-        _ => {
-            error!("Unsupported target API type: {:?}", target_api_type);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "unsupported api type".to_string(),
-            ));
-        }
-    };
+            })?,
+            _ => {
+                error!("Unsupported target API type: {:?}", target_api_type);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unsupported api type".to_string(),
+                ));
+            }
+        };
+
+    let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize final request body: {}", e),
+        )
+    })?);
 
     // Step 6: Create an initial log entry for the request.
-    let log_id = create_request_log(
+    let log_context = RequestLogContext::new(
         &system_api_key,
         &provider,
         &model,
@@ -132,7 +154,7 @@ pub async fn handle_openai_request(
     let model_str = format_model_str(&provider, &model);
 
     proxy_request(
-        log_id,
+        log_context,
         final_url,
         final_body,
         final_headers,
@@ -141,6 +163,7 @@ pub async fn handle_openai_request(
         billing_plan,
         LlmApiType::OpenAI,
         target_api_type,
+        original_request_body,
     )
     .await
 }

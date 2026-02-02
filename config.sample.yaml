@@ -19,3 +19,17 @@ proxy: http://10.0.0.2:1081
 #   negative_ttl: 60 # 1 minute
 #   redis:
 #     key_prefix: "cache:"
+
+storage:
+  driver: local # local/s3
+  local:
+    root: storage/storage
+  s3:
+    endpoint: s3.amazonaws.com
+    region: us-east-1
+    bucket: your-bucket-name
+    access_mode: proxy # proxy/redirect
+    access_key: your_access_key
+    secret_key: your_secret_key
+    force_path_style: true 
+    public_url: https://cdn.example.com

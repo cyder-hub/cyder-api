@@ -1,3 +1,4 @@
+use bincode::{Decode, Encode};
 // Cache-specific types optimized for caching layer
 // These structures contain only the fields needed for cache operations,
 // reducing memory footprint and improving cache performance.
@@ -10,14 +11,14 @@ use crate::schema::enum_def::{Action, RuleScope, ProviderType, FieldPlacement, F
 /// Represents an entry in the cache, which can either be a value (Positive)
 /// or a marker indicating the value does not exist (Negative).
 #[serde_as]
-#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
-pub enum CacheEntry<T: Clone + Serialize + de::DeserializeOwned> {
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub enum CacheEntry<T: Clone + Serialize + de:: DeserializeOwned> {
     Positive(#[serde_as(as = "Arc<serde_with::Same>")] Arc<T>),
     Negative,
 }
 
 /// Cached system API key with only essential fields
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheSystemApiKey {
     pub id: i64,
     pub name: String,
@@ -26,7 +27,7 @@ pub struct CacheSystemApiKey {
 }
 
 /// Cached model with only essential fields
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheModel {
     pub id: i64,
     pub provider_id: i64,
@@ -36,7 +37,7 @@ pub struct CacheModel {
 }
 
 /// Cached provider with only essential fields
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheProvider {
     pub id: i64,
     pub provider_key: String,
@@ -47,7 +48,7 @@ pub struct CacheProvider {
 }
 
 /// Cached provider API key
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheProviderKey {
     pub id: i64,
     pub provider_id: i64,
@@ -55,7 +56,7 @@ pub struct CacheProviderKey {
 }
 
 /// Cached access control rule (part of CacheAccessControl)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheAccessControlRule {
     pub id: i64,
     pub rule_type: Action,
@@ -66,7 +67,7 @@ pub struct CacheAccessControlRule {
 }
 
 /// Cached access control policy with embedded rules
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheAccessControl {
     pub id: i64,
     pub name: String,
@@ -75,7 +76,7 @@ pub struct CacheAccessControl {
 }
 
 /// Cached custom field definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheCustomField {
     pub id: i64,
     pub field_name: String,
@@ -88,7 +89,7 @@ pub struct CacheCustomField {
 }
 
 /// Cached price rule (part of CacheBillingPlan)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CachePriceRule {
     pub effective_from: i64,
     pub effective_until: Option<i64>,
@@ -103,7 +104,7 @@ pub struct CachePriceRule {
 }
 
 /// Cached billing plan with embedded price rules
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheBillingPlan {
     pub id: i64,
     pub name: String,

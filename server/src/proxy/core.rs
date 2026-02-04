@@ -6,7 +6,7 @@ use crate::controller::llm_types::LlmApiType;
 use crate::schema::enum_def::RequestStatus;
 use crate::service::cache::types::CacheBillingPlan;
 use crate::service::transform::{transform_result, StreamTransformer};
-use crate::utils::billing::{parse_usage_info, UsageInfo};
+use crate::utils::billing::parse_usage_info;
 use crate::utils::sse::SseParser;
 
 use axum::{
@@ -23,7 +23,7 @@ use reqwest::{
 };
 use serde_json::Value;
 use std::io::Read;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 struct RequestLogContextGuard {

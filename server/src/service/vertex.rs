@@ -128,18 +128,11 @@ pub async fn request_google_token(service_account_str: &str) -> Result<VertexTok
         exp: iat + EXPIRE,
     };
 
-    let header = Header {
-        typ: Some("JWT".to_string()),
-        alg: Algorithm::RS256,
-        kid: Some(private_key_id.to_string()),
-        cty: None,
-        jku: None,
-        jwk: None,
-        x5u: None,
-        x5c: None,
-        x5t: None,
-        x5t_s256: None,
-    };
+    let mut header = Header::new(Algorithm::HS512);
+    header.typ = Some("JWT".to_string());
+    header.alg = Algorithm::RS256;
+    header.kid = Some(private_key_id.to_string());
+
     let body_str = serde_urlencoded::to_string(&Payload {
         grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
         assertion: &encode(&header, &claims, &private_key).unwrap(),

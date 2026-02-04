@@ -38,7 +38,7 @@ async fn initialize_pool() -> Option<RedisPool> {
                     return None;
                 }
             };
-            if let Err(e) = redis::cmd("PING").query_async::<_, ()>(&mut *conn).await {
+            if let Err(e) = redis::cmd("PING").query_async::<()>(&mut *conn).await {
                 error!("Failed to ping redis: {}", e);
                 return None;
             }

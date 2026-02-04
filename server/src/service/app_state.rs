@@ -66,14 +66,14 @@ impl<'a> ToString for CacheKey<'a> {
 }
 
 #[derive(Clone)]
-enum AnyCacheRepo<T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static> {
+enum AnyCacheRepo<T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static + bincode::Encode + bincode::Decode<()>> {
     Memory(CacheRepository<T, MemoryCacheBackend<T>>),
     Redis(CacheRepository<T, RedisCacheBackend<T>>),
 }
 
 impl<T> AnyCacheRepo<T>
 where
-    T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+    T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static + bincode::Encode + bincode::Decode<()>,
 {
     async fn get(&self, key: &str) -> Result<Option<Arc<T>>, CacheError> {
         match self {
@@ -198,7 +198,7 @@ impl AppState {
 
     fn create_repo<T>(ttl: Option<Duration>, pool: Option<&RedisPool>) -> CacheRepo<T>
     where
-        T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+        T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static + bincode::Encode + bincode::Decode<()>,
     {
         if let Some(pool) = pool {
             let redis_config = CONFIG.redis.as_ref().expect("Redis config should exist if pool exists");

@@ -32,9 +32,15 @@ pub enum CacheError {
     DatabaseError(String),
 }
 
-impl From<bincode::Error> for CacheError {
-    fn from(e: bincode::Error) -> Self {
+impl From<bincode::error::EncodeError> for CacheError {
+    fn from(e: bincode::error::EncodeError) -> Self {
         CacheError::SerializationError(e.to_string())
+    }
+}
+
+impl From<bincode::error::DecodeError> for CacheError {
+    fn from(e: bincode::error::DecodeError) -> Self {
+        CacheError::DeserializationError(e.to_string())
     }
 }
 

@@ -1,7 +1,8 @@
+use bincode::{Decode, Encode};
 use diesel_derive_enum::DbEnum;
 use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "provider_type_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -14,7 +15,7 @@ pub enum ProviderType {
     Ollama,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "provider_api_key_mode_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -24,7 +25,7 @@ pub enum ProviderApiKeyMode {
     Random,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "action_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -34,7 +35,7 @@ pub enum Action {
     Allow,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "rule_scope_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -44,7 +45,7 @@ pub enum RuleScope {
     Model,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "field_placement_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -55,7 +56,7 @@ pub enum FieldPlacement {
     Query,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "field_type_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -69,7 +70,7 @@ pub enum FieldType {
     JsonString,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "request_status_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -81,7 +82,7 @@ pub enum RequestStatus {
     Cancelled,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, strum_macros::Display)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, strum_macros::Display, Encode, Decode)]
 #[db_enum(pg_type = "storage_type_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

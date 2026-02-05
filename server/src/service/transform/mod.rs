@@ -1,7 +1,7 @@
 use cyder_tools::log::{debug, error};
 use serde_json::Value;
 
-use crate::controller::llm_types::LlmApiType;
+use crate::schema::enum_def::LlmApiType;
 use crate::utils::billing::{self, UsageInfo};
 use crate::utils::sse::SseEvent;
 
@@ -44,10 +44,11 @@ pub fn transform_request_data(
 
     // Step 1: Deserialize to UnifiedRequest
     let mut unified_request: UnifiedRequest = match api_type {
-        LlmApiType::OpenAI => deserialize!(openai::OpenAiRequestPayload, "OpenAI"),
+        LlmApiType::Openai => deserialize!(openai::OpenAiRequestPayload, "OpenAI"),
         LlmApiType::Gemini => deserialize!(gemini::GeminiRequestPayload, "Gemini"),
         LlmApiType::Ollama => deserialize!(ollama::OllamaRequestPayload, "Ollama"),
         LlmApiType::Anthropic => deserialize!(anthropic::AnthropicRequestPayload, "Anthropic"),
+        LlmApiType::Responses => todo!(),
     };
 
     // The `is_stream` from the request URL is the source of truth.
@@ -79,10 +80,11 @@ pub fn transform_request_data(
 
     // Step 2: Serialize from UnifiedRequest to target format
     let target_payload_result = match target_api_type {
-        LlmApiType::OpenAI => serialize!(openai::OpenAiRequestPayload),
+        LlmApiType::Openai => serialize!(openai::OpenAiRequestPayload),
         LlmApiType::Gemini => serialize!(gemini::GeminiRequestPayload),
         LlmApiType::Ollama => serialize!(ollama::OllamaRequestPayload),
         LlmApiType::Anthropic => serialize!(anthropic::AnthropicRequestPayload),
+        LlmApiType::Responses => todo!(),
     };
 
     match target_payload_result {
@@ -124,7 +126,7 @@ mod tests {
 
         let transformed = transform_request_data(
             openai_request,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
             LlmApiType::Gemini,
             false,
         );
@@ -199,7 +201,7 @@ mod tests {
 
         let transformed = transform_request_data(
             openai_request,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
             LlmApiType::Gemini,
             false,
         );
@@ -286,7 +288,7 @@ mod tests {
         let transformed = transform_request_data(
             gemini_request,
             LlmApiType::Gemini,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
             true, // is_stream
         );
 
@@ -361,7 +363,7 @@ mod tests {
         let transformed = transform_request_data(
             gemini_request,
             LlmApiType::Gemini,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
             false,
         );
 
@@ -457,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_transform_result_chunk_openai_to_gemini() {
-        let mut transformer = StreamTransformer::new(LlmApiType::OpenAI, LlmApiType::Gemini);
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Gemini);
 
         // Test case 1: Content chunk
         let openai_data_content = "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}";
@@ -547,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_transform_result_chunk_gemini_to_openai() {
-        let mut transformer = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::OpenAI);
+        let mut transformer = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::Openai);
 
         // Test case 1: Content chunk
         let gemini_data_content = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" World\"}],\"role\":\"model\"},\"index\":0}]}";
@@ -661,7 +663,7 @@ mod tests {
 
         let transformed = transform_result(
             openai_result,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
             LlmApiType::Gemini,
         );
 
@@ -726,7 +728,7 @@ mod tests {
         let transformed = transform_result(
             gemini_result,
             LlmApiType::Gemini,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
         );
 
         let mut transformed_obj = transformed.as_object().unwrap().clone();
@@ -792,7 +794,7 @@ mod tests {
 
         let transformed = transform_result(
             openai_result,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
             LlmApiType::Gemini,
         );
 
@@ -859,7 +861,7 @@ mod tests {
         let transformed = transform_result(
             gemini_result,
             LlmApiType::Gemini,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
         );
 
         let mut transformed_obj = transformed.as_object().unwrap().clone();
@@ -928,7 +930,7 @@ mod tests {
         let transformed = transform_result(
             gemini_result,
             LlmApiType::Gemini,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
         );
 
         let mut transformed_obj = transformed.as_object().unwrap().clone();
@@ -979,8 +981,8 @@ mod tests {
 
         let transformed = transform_request_data(
             openai_request.clone(),
-            LlmApiType::OpenAI,
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
+            LlmApiType::Openai,
             false,
         );
 
@@ -996,7 +998,7 @@ mod tests {
 
         let transformed = transform_result(
             malformed_openai_result.clone(),
-            LlmApiType::OpenAI,
+            LlmApiType::Openai,
             LlmApiType::Gemini,
         );
 
@@ -1010,22 +1012,23 @@ pub fn transform_result(
     data: Value,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-) -> Value {
-    if api_type == target_api_type {
-        return data;
-    }
-
-    debug!(
-        "[transform_result] API type mismatch. Incoming: {:?}, Target: {:?}. Transforming response body.",
-        api_type, target_api_type
-    );
-
-    // Step 1: Deserialize to UnifiedResponse
+) -> (Value, Option<UsageInfo>) {
+    // Step 1: Deserialize to UnifiedResponse. This is now UNCONDITIONAL.
+    // This allows us to get usage info from a typed struct.
     let unified_response_result: Result<UnifiedResponse, serde_json::Error> = match api_type {
-        LlmApiType::OpenAI => serde_json::from_value::<openai::OpenAiResponse>(data.clone()).map(Into::into),
-        LlmApiType::Gemini => serde_json::from_value::<gemini::GeminiResponse>(data.clone()).map(Into::into),
-        LlmApiType::Ollama => serde_json::from_value::<ollama::OllamaResponse>(data.clone()).map(Into::into),
-        LlmApiType::Anthropic => serde_json::from_value::<anthropic::AnthropicResponse>(data.clone()).map(Into::into),
+        LlmApiType::Openai => {
+            serde_json::from_value::<openai::OpenAiResponse>(data.clone()).map(Into::into)
+        }
+        LlmApiType::Gemini => {
+            serde_json::from_value::<gemini::GeminiResponse>(data.clone()).map(Into::into)
+        }
+        LlmApiType::Ollama => {
+            serde_json::from_value::<ollama::OllamaResponse>(data.clone()).map(Into::into)
+        }
+        LlmApiType::Anthropic => {
+            serde_json::from_value::<anthropic::AnthropicResponse>(data.clone()).map(Into::into)
+        }
+        LlmApiType::Responses => todo!(),
     };
 
     let unified_response = match unified_response_result {
@@ -1035,16 +1038,31 @@ pub fn transform_result(
                 "[transform_result] Failed to deserialize to UnifiedResponse from {:?}: {}. Returning original data.",
                 api_type, e
             );
-            return data;
+            return (data, None);
         }
     };
 
+    let usage_info: Option<UsageInfo> = unified_response.usage.clone().map(Into::into);
+
+    if api_type == target_api_type {
+        // No transformation needed, return original data and parsed usage.
+        return (data, usage_info);
+    }
+
+    debug!(
+        "[transform_result] API type mismatch. Incoming: {:?}, Target: {:?}. Transforming response body.",
+        api_type, target_api_type
+    );
+
     // Step 2: Serialize from UnifiedResponse to target format
     let target_payload_result = match target_api_type {
-        LlmApiType::OpenAI => serde_json::to_value(openai::OpenAiResponse::from(unified_response)),
+        LlmApiType::Openai => serde_json::to_value(openai::OpenAiResponse::from(unified_response)),
         LlmApiType::Gemini => serde_json::to_value(gemini::GeminiResponse::from(unified_response)),
         LlmApiType::Ollama => serde_json::to_value(ollama::OllamaResponse::from(unified_response)),
-        LlmApiType::Anthropic => serde_json::to_value(anthropic::AnthropicResponse::from(unified_response)),
+        LlmApiType::Anthropic => {
+            serde_json::to_value(anthropic::AnthropicResponse::from(unified_response))
+        }
+        LlmApiType::Responses => todo!(),
     };
 
     match target_payload_result {
@@ -1053,14 +1071,14 @@ pub fn transform_result(
                 "[transform_result] Transformation complete. Result: {}",
                 serde_json::to_string(&value).unwrap_or_default()
             );
-            value
+            (value, usage_info)
         }
         Err(e) => {
             error!(
                 "[transform_result] Failed to serialize to target response format: {}. Returning original data.",
                 e
             );
-            data
+            (data, usage_info)
         }
     }
 }
@@ -1110,7 +1128,7 @@ impl StreamTransformer {
         }
 
         match self.api_type {
-            LlmApiType::OpenAI => {
+            LlmApiType::Openai => {
                 // For OpenAI, the last event is "[DONE]", usage is in the second to last.
                 if self.original_events.len() < 2 {
                     return None;
@@ -1129,11 +1147,11 @@ impl StreamTransformer {
             }
             LlmApiType::Gemini | LlmApiType::Ollama => {
                 // For Gemini and Ollama, it's usually in the last chunk.
+                // We search backwards for an event that contains usage information.
                 self.original_events
                     .iter()
                     .rev()
-                    .find(|e| !e.data.is_empty())
-                    .and_then(|e| {
+                    .find_map(|e| {
                         serde_json::from_str::<Value>(&e.data)
                             .ok()
                             .and_then(|v| billing::parse_usage_info(&v, self.api_type))
@@ -1157,6 +1175,7 @@ impl StreamTransformer {
                             .and_then(|v| billing::parse_usage_info(&v, self.api_type))
                     })
             }
+            LlmApiType::Responses => todo!()
         }
     }
 
@@ -1177,7 +1196,7 @@ impl StreamTransformer {
         }
 
         // Handle OpenAI's stream termination marker
-        if self.api_type == LlmApiType::OpenAI && event.data == "[DONE]" {
+        if self.api_type == LlmApiType::Openai && event.data == "[DONE]" {
             // Gemini, Ollama, and Anthropic streams just end, so we return None to not send anything.
             return if self.target_api_type == LlmApiType::Gemini
                 || self.target_api_type == LlmApiType::Ollama
@@ -1196,7 +1215,7 @@ impl StreamTransformer {
 
         // Step 1: Deserialize to UnifiedChunkResponse
         let unified_chunk_result: Result<UnifiedChunkResponse, _> = match self.api_type {
-            LlmApiType::OpenAI => serde_json::from_str::<openai::OpenAiChunkResponse>(&event.data)
+            LlmApiType::Openai => serde_json::from_str::<openai::OpenAiChunkResponse>(&event.data)
                 .map(|p| p.into()),
             LlmApiType::Gemini => serde_json::from_str::<gemini::GeminiChunkResponse>(&event.data)
                 .map(|p| p.into()),
@@ -1207,6 +1226,7 @@ impl StreamTransformer {
                     serde_json::from_str(&event.data);
                 event_result.map(|event| event.into())
             }
+            LlmApiType::Responses => todo!()
         };
 
         let mut unified_chunk = match unified_chunk_result {
@@ -1230,7 +1250,7 @@ impl StreamTransformer {
 
         // Step 2: Serialize from UnifiedChunkResponse to target format
         match self.target_api_type {
-            LlmApiType::OpenAI => {
+            LlmApiType::Openai => {
                 let value =
                     serde_json::to_value(openai::OpenAiChunkResponse::from(unified_chunk)).ok()?;
                 Some(vec![SseEvent {
@@ -1262,6 +1282,7 @@ impl StreamTransformer {
             LlmApiType::Anthropic => {
                 anthropic::transform_unified_chunk_to_anthropic_events(unified_chunk, self)
             }
+            LlmApiType::Responses => todo!()
         }
     }
 

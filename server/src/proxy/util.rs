@@ -5,12 +5,14 @@ use cyder_tools::log::debug;
 use serde_json::Value;
 
 use crate::{
-    controller::llm_types::LlmApiType,
+    schema::enum_def::LlmApiType,
     schema::enum_def::ProviderType,
     service::app_state::AppState,
     utils::billing::UsageInfo,
     service::cache::types::{CacheBillingPlan, CacheProvider, CacheModel},
 };
+use bytes::Bytes;
+use super::logging::RequestBodyVariant;
 
 
 // Helper to serialize reqwest::header::HeaderMap to JSON String
@@ -92,10 +94,13 @@ pub(super) fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInf
         });
 
     tokens.map(|t| UsageInfo {
-        prompt_tokens: t as i32,
-        completion_tokens: 0,
+        input_tokens: t as i32,
+        output_tokens: 0,
         total_tokens: t as i32,
         reasoning_tokens: 0,
+        input_image_tokens: 0,
+        output_image_tokens: 0,
+        cached_tokens: 0,
     })
 }
 
@@ -106,7 +111,7 @@ pub(super) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType 
     } else if provider.provider_type == ProviderType::Ollama {
         LlmApiType::Ollama
     } else {
-        LlmApiType::OpenAI
+        LlmApiType::Openai
     }
 }
 
@@ -118,7 +123,7 @@ pub(super) fn format_model_str(provider: &CacheProvider, model: &CacheModel) -> 
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or(&model.model_name);
-    
+
     if model.model_name == real_model_name {
         format!("{}/{}", &provider.provider_key, &model.model_name)
     } else {
@@ -126,5 +131,32 @@ pub(super) fn format_model_str(provider: &CacheProvider, model: &CacheModel) -> 
             "{}/{}({})",
             &provider.provider_key, &model.model_name, real_model_name
         )
+    }
+}
+
+pub(super) fn calculate_llm_request_body_for_log(
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+    original_request_value: &serde_json::Value,
+    final_body_value: &serde_json::Value,
+    final_body_bytes: &Bytes,
+) -> Result<RequestBodyVariant, (StatusCode, String)> {
+    if api_type == target_api_type {
+        let patch = json_patch::diff(original_request_value, final_body_value);
+        if patch.is_empty() {
+            // If there's no difference, we can treat it as a full body
+            // that is identical to the user request body, allowing for hash optimization.
+            Ok(RequestBodyVariant::Full(final_body_bytes.clone()))
+        } else {
+            let patch_bytes = Bytes::from(serde_json::to_vec(&patch).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to serialize json-patch: {}", e),
+                )
+            })?);
+            Ok(RequestBodyVariant::Patch(patch_bytes))
+        }
+    } else {
+        Ok(RequestBodyVariant::Full(final_body_bytes.clone()))
     }
 }

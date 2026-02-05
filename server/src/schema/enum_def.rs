@@ -13,6 +13,21 @@ pub enum ProviderType {
     Vertex,
     VertexOpenai,
     Ollama,
+    Anthropic,
+    Responses,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "llm_api_type_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LlmApiType {
+    #[default]
+    Openai,
+    Gemini,
+    Ollama,
+    Anthropic,
+    Responses,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]

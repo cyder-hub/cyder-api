@@ -508,15 +508,44 @@ pub(super) struct GeminiCandidate {
     citation_metadata: Option<GeminiCitationMetadata>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub(super) enum Modality {
+    ModalityUnspecified,
+    Text,
+    Image,
+    Video,
+    Audio,
+    Document,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ModalityTokenCount {
+    modality: Modality,
+    token_count: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiUsageMetadata {
-    #[serde(rename = "promptTokenCount")]
     prompt_token_count: u32,
-    #[serde(rename = "candidatesTokenCount")]
     candidates_token_count: u32,
-    #[serde(rename = "totalTokenCount")]
     total_token_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thoughts_token_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_content_token_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_use_prompt_token_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    prompt_tokens_details: Vec<ModalityTokenCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cache_tokens_details: Vec<ModalityTokenCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    candidates_tokens_details: Vec<ModalityTokenCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_use_prompt_tokens_details: Vec<ModalityTokenCount>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -656,10 +685,36 @@ impl From<GeminiResponse> for UnifiedResponse {
             })
             .collect();
 
-        let usage = gemini_res.usage_metadata.map(|u| UnifiedUsage {
-            prompt_tokens: u.prompt_token_count,
-            completion_tokens: u.candidates_token_count,
-            total_tokens: u.total_token_count,
+        let usage = gemini_res.usage_metadata.map(|u| {
+            let mut usage = UnifiedUsage {
+                input_tokens: u.prompt_token_count,
+                output_tokens: u.candidates_token_count,
+                total_tokens: u.total_token_count,
+                reasoning_tokens: u.thoughts_token_count,
+                cached_tokens: u.cached_content_token_count,
+                ..Default::default()
+            };
+
+            // Handle image tokens from details
+            let input_image_tokens = u
+                .prompt_tokens_details
+                .iter()
+                .find(|d| d.modality == Modality::Image)
+                .map(|d| d.token_count);
+            if input_image_tokens.is_some() {
+                usage.input_image_tokens = input_image_tokens;
+            }
+
+            let output_image_tokens = u
+                .candidates_tokens_details
+                .iter()
+                .find(|d| d.modality == Modality::Image)
+                .map(|d| d.token_count);
+            if output_image_tokens.is_some() {
+                usage.output_image_tokens = output_image_tokens;
+            }
+
+            usage
         });
 
         UnifiedResponse {
@@ -773,10 +828,53 @@ impl From<UnifiedResponse> for GeminiResponse {
             })
             .collect();
 
-        let usage_metadata = unified_res.usage.map(|u| GeminiUsageMetadata {
-            prompt_token_count: u.prompt_tokens,
-            candidates_token_count: u.completion_tokens,
-            total_token_count: u.total_tokens,
+        let usage_metadata = unified_res.usage.map(|u| {
+            let mut prompt_tokens_details = vec![];
+            let text_prompt_tokens = u.input_tokens.saturating_sub(u.input_image_tokens.unwrap_or(0));
+            if text_prompt_tokens > 0 {
+                prompt_tokens_details.push(ModalityTokenCount {
+                    modality: Modality::Text,
+                    token_count: text_prompt_tokens,
+                });
+            }
+            if let Some(token_count) = u.input_image_tokens {
+                if token_count > 0 {
+                    prompt_tokens_details.push(ModalityTokenCount {
+                        modality: Modality::Image,
+                        token_count,
+                    });
+                }
+            }
+
+            let mut candidates_tokens_details = vec![];
+            let text_candidates_tokens = u.output_tokens.saturating_sub(u.output_image_tokens.unwrap_or(0));
+            if text_candidates_tokens > 0 {
+                candidates_tokens_details.push(ModalityTokenCount {
+                    modality: Modality::Text,
+                    token_count: text_candidates_tokens,
+                });
+            }
+            if let Some(token_count) = u.output_image_tokens {
+                if token_count > 0 {
+                    candidates_tokens_details.push(ModalityTokenCount {
+                        modality: Modality::Image,
+                        token_count,
+                    });
+                }
+            }
+
+            GeminiUsageMetadata {
+                prompt_token_count: u.input_tokens,
+                candidates_token_count: u.output_tokens,
+                total_token_count: u.total_tokens,
+                thoughts_token_count: u.reasoning_tokens,
+                cached_content_token_count: u.cached_tokens,
+                tool_use_prompt_token_count: None,
+                prompt_tokens_details,
+                candidates_tokens_details,
+                cache_tokens_details: vec![],
+                tool_use_prompt_tokens_details: vec![],
+            }
         });
 
         GeminiResponse {
@@ -884,8 +982,8 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
             .collect();
 
         let usage_metadata = unified_chunk.usage.map(|u| GeminiChunkUsageMetadata {
-            prompt_token_count: u.prompt_tokens,
-            candidates_token_count: Some(u.completion_tokens),
+            prompt_token_count: u.input_tokens,
+            candidates_token_count: Some(u.output_tokens),
             total_token_count: u.total_tokens,
         });
 
@@ -982,9 +1080,10 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
             .collect();
 
         let usage = gemini_chunk.usage_metadata.map(|u| UnifiedUsage {
-            prompt_tokens: u.prompt_token_count,
-            completion_tokens: u.candidates_token_count.unwrap_or(0),
+            input_tokens: u.prompt_token_count,
+            output_tokens: u.candidates_token_count.unwrap_or(0),
             total_tokens: u.total_token_count,
+            ..Default::default()
         });
 
         UnifiedChunkResponse {
@@ -1151,6 +1250,8 @@ mod tests {
                 prompt_token_count: 10,
                 candidates_token_count: 20,
                 total_token_count: 30,
+                thoughts_token_count: None,
+                cached_content_token_count: None,
             }),
         };
 
@@ -1167,8 +1268,8 @@ mod tests {
 
         assert!(unified_res.usage.is_some());
         let usage = unified_res.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 20);
         assert_eq!(usage.total_tokens, 30);
     }
 
@@ -1187,9 +1288,10 @@ mod tests {
                 logprobs: None,
             }],
             usage: Some(UnifiedUsage {
-                prompt_tokens: 10,
-                completion_tokens: 20,
+                input_tokens: 10,
+                output_tokens: 20,
                 total_tokens: 30,
+                ..Default::default()
             }),
             created: Some(1234567890),
             object: Some("chat.completion".to_string()),

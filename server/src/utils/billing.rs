@@ -3,21 +3,24 @@ use cyder_tools::log::debug;
 use serde_json::Value;
 
 use crate::{
-    controller::llm_types::LlmApiType,
-    database::request_log::UpdateRequestLogData, service::cache::types::{CacheBillingPlan, CachePriceRule},
+    schema::enum_def::LlmApiType,
+    service::cache::types::CachePriceRule,
 };
 
 #[derive(Debug, Clone)]
 pub struct UsageInfo {
-    pub prompt_tokens: i32,
-    pub completion_tokens: i32,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub input_image_tokens: i32,
+    pub output_image_tokens: i32,
+    pub cached_tokens: i32,
     pub reasoning_tokens: i32,
     pub total_tokens: i32,
 }
 
 pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<UsageInfo> {
     match api_type {
-        LlmApiType::OpenAI => {
+        LlmApiType::Openai => {
             let usage_val = response_body.get("usage");
             if let Some(usage) = usage_val {
                 if usage.is_null() {
@@ -53,8 +56,11 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                     });
 
                 Some(UsageInfo {
-                    prompt_tokens,
-                    completion_tokens,
+                    input_tokens: prompt_tokens,
+                    output_tokens: completion_tokens,
+                    input_image_tokens: 0,
+                    output_image_tokens: 0,
+                    cached_tokens: 0,
                     reasoning_tokens,
                     total_tokens,
                 })
@@ -76,10 +82,17 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                     usage.get("totalTokenCount").and_then(Value::as_i64).unwrap_or(0) as i32;
                 let reasoning_tokens =
                     usage.get("thoughtsTokenCount").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let cached_tokens = usage
+                    .get("cachedContentTokenCount")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
 
                 Some(UsageInfo {
-                    prompt_tokens,
-                    completion_tokens,
+                    input_tokens: prompt_tokens,
+                    output_tokens: completion_tokens,
+                    input_image_tokens: 0,
+                    output_image_tokens: 0,
+                    cached_tokens,
                     reasoning_tokens,
                     total_tokens,
                 })
@@ -100,8 +113,11 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 let total_tokens = prompt_tokens + completion_tokens;
 
                 Some(UsageInfo {
-                    prompt_tokens,
-                    completion_tokens,
+                    input_tokens: prompt_tokens,
+                    output_tokens: completion_tokens,
+                    input_image_tokens: 0,
+                    output_image_tokens: 0,
+                    cached_tokens: 0,
                     reasoning_tokens: 0,
                     total_tokens,
                 })
@@ -147,18 +163,18 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[CachePriceRule]) ->
 
     // Calculate cost for prompt tokens
     if let Some(rule) = find_best_rule("PROMPT") {
-        if usage_info.prompt_tokens > 0 {
+        if usage_info.input_tokens > 0 {
             // Price is per 1000 tokens
-            let cost = usage_info.prompt_tokens as i64 * rule.price_in_micro_units.unwrap_or(0);
+            let cost = usage_info.input_tokens as i64 * rule.price_in_micro_units.unwrap_or(0);
             total_cost += cost;
         }
     }
 
     // Calculate cost for completion tokens
     if let Some(rule) = find_best_rule("COMPLETION") {
-        if usage_info.completion_tokens > 0 {
+        if usage_info.output_tokens > 0 {
             // Price is per 1000 tokens
-            let cost = usage_info.completion_tokens as i64 * rule.price_in_micro_units.unwrap_or(0);
+            let cost = usage_info.output_tokens as i64 * rule.price_in_micro_units.unwrap_or(0);
             total_cost += cost;
         }
     }
@@ -173,26 +189,3 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[CachePriceRule]) ->
     total_cost
 }
 
-// Helper function to populate token and cost fields in UpdateRequestLogData
-pub fn populate_token_cost_fields(
-    update_data: &mut UpdateRequestLogData,
-    usage_info: Option<&UsageInfo>,
-    billing_plan: Option<&CacheBillingPlan>,
-) {
-    debug!("[populate_token_cost_fields] Populating with usage_info: {:?}, billing_plan: {:?}", usage_info, billing_plan);
-    if let Some(u) = usage_info {
-        update_data.prompt_tokens = Some(u.prompt_tokens);
-        update_data.completion_tokens = Some(u.completion_tokens);
-        update_data.reasoning_tokens = Some(u.reasoning_tokens);
-        update_data.total_tokens = Some(u.total_tokens);
-
-        if let Some(bp) = billing_plan {
-            let cost = calculate_cost(u, bp.price_rules.as_slice());
-            update_data.calculated_cost = Some(cost);
-            if cost > 0 {
-                update_data.cost_currency = Some(Some(bp.currency.clone()));
-            }
-        }
-    }
-    debug!("[populate_token_cost_fields] Resulting update_data: {:?}", update_data);
-}

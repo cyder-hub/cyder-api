@@ -3,7 +3,7 @@ mod auth;
 mod core;
 mod gemini;
 mod handlers;
-mod logging;
+pub(super) mod logging;
 mod models;
 mod ollama;
 mod openai;

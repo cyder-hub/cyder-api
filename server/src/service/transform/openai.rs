@@ -449,6 +449,93 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
 
 // --- OpenAI Response to Unified ---
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(super) struct OpenAiCompletionTokenDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_tokens: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(super) struct OpenAiPromptTokenDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_tokens: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub(super) struct OpenAiUsage {
+    completion_tokens: u32,
+    prompt_tokens: u32,
+    total_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_tokens_details: Option<OpenAiCompletionTokenDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_tokens_details: Option<OpenAiPromptTokenDetails>,
+}
+
+impl From<OpenAiUsage> for UnifiedUsage {
+    fn from(openai_usage: OpenAiUsage) -> Self {
+        let mut reasoning_tokens = openai_usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens);
+
+        if reasoning_tokens.is_none() {
+            let calculated_reasoning = openai_usage
+                .total_tokens
+                .saturating_sub(openai_usage.prompt_tokens)
+                .saturating_sub(openai_usage.completion_tokens);
+            if calculated_reasoning > 0 {
+                reasoning_tokens = Some(calculated_reasoning);
+            }
+        }
+
+        let cached_tokens = openai_usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens);
+
+        UnifiedUsage {
+            input_tokens: openai_usage.prompt_tokens,
+            output_tokens: openai_usage.completion_tokens,
+            total_tokens: openai_usage.total_tokens,
+            reasoning_tokens,
+            cached_tokens,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<UnifiedUsage> for OpenAiUsage {
+    fn from(unified_usage: UnifiedUsage) -> Self {
+        let completion_tokens_details = unified_usage.reasoning_tokens.map(|rt| {
+            OpenAiCompletionTokenDetails {
+                reasoning_tokens: Some(rt),
+                audio_tokens: None, // No source for this
+            }
+        });
+
+        let prompt_tokens_details = unified_usage.cached_tokens.map(|ct| {
+            OpenAiPromptTokenDetails {
+                cached_tokens: Some(ct),
+                audio_tokens: None, // No source for this
+            }
+        });
+
+        OpenAiUsage {
+            prompt_tokens: unified_usage.input_tokens,
+            completion_tokens: unified_usage.output_tokens,
+            total_tokens: unified_usage.total_tokens,
+            completion_tokens_details,
+            prompt_tokens_details,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) struct OpenAiResponse {
@@ -460,7 +547,7 @@ pub(super) struct OpenAiResponse {
     system_fingerprint: Option<String>,
     choices: Vec<OpenAiChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<UnifiedUsage>,
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -525,7 +612,7 @@ impl From<OpenAiResponse> for UnifiedResponse {
                 }
 
                 if let Some(tool_call_id) = choice.message.tool_call_id {
-                     // Extract text content if available to be the result content
+                    // Extract text content if available to be the result content
                     let result_content = content
                         .iter()
                         .find_map(|p| match p {
@@ -533,7 +620,7 @@ impl From<OpenAiResponse> for UnifiedResponse {
                             _ => None,
                         })
                         .unwrap_or_default();
-                    
+
                     // Clear text parts as they are consumed
                     content.retain(|p| !matches!(p, UnifiedContentPart::Text { .. }));
 
@@ -550,7 +637,9 @@ impl From<OpenAiResponse> for UnifiedResponse {
                     index: choice.index,
                     message,
                     finish_reason: choice.finish_reason,
-                    logprobs: choice.logprobs.map(|lp| serde_json::to_value(lp).unwrap_or(Value::Null)),
+                    logprobs: choice
+                        .logprobs
+                        .map(|lp| serde_json::to_value(lp).unwrap_or(Value::Null)),
                 }
             })
             .collect();
@@ -559,7 +648,7 @@ impl From<OpenAiResponse> for UnifiedResponse {
             id: openai_res.id,
             model: openai_res.model,
             choices,
-            usage: openai_res.usage,
+            usage: openai_res.usage.map(|u| u.into()),
             created: Some(openai_res.created),
             object: Some(openai_res.object),
             system_fingerprint: openai_res.system_fingerprint,
@@ -599,9 +688,9 @@ impl From<UnifiedResponse> for OpenAiResponse {
                                 image_url: OpenAiImageUrl { url, detail },
                             });
                         }
-                        UnifiedContentPart::ImageData { .. } | 
-                        UnifiedContentPart::FileData { .. } | 
-                        UnifiedContentPart::ExecutableCode { .. } => {
+                        UnifiedContentPart::ImageData { .. }
+                        | UnifiedContentPart::FileData { .. }
+                        | UnifiedContentPart::ExecutableCode { .. } => {
                             // These content types don't map to OpenAI's format, skip them
                         }
                         UnifiedContentPart::ToolCall(call) => tool_calls.push(OpenAiToolCall {
@@ -615,10 +704,12 @@ impl From<UnifiedResponse> for OpenAiResponse {
                         UnifiedContentPart::ToolResult(result) => {
                             // If there's a tool result in the response, we treat it as content
                             // This is rare for a response object.
-                            content_parts.push(OpenAiContentPart::Text { text: result.content });
+                            content_parts.push(OpenAiContentPart::Text {
+                                text: result.content,
+                            });
                             tool_call_id = Some(result.tool_call_id);
                             name = Some(result.name);
-                        },
+                        }
                     }
                 }
 
@@ -639,7 +730,11 @@ impl From<UnifiedResponse> for OpenAiResponse {
                 let message = OpenAiMessage {
                     role,
                     content,
-                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
                     name,
                     tool_call_id,
                     refusal: None,
@@ -656,12 +751,16 @@ impl From<UnifiedResponse> for OpenAiResponse {
 
         OpenAiResponse {
             id: unified_res.id,
-            object: unified_res.object.unwrap_or_else(|| "chat.completion".to_string()),
-            created: unified_res.created.unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            object: unified_res
+                .object
+                .unwrap_or_else(|| "chat.completion".to_string()),
+            created: unified_res
+                .created
+                .unwrap_or_else(|| chrono::Utc::now().timestamp()),
             model: unified_res.model,
             system_fingerprint: unified_res.system_fingerprint,
             choices,
-            usage: unified_res.usage,
+            usage: unified_res.usage.map(|u| u.into()),
         }
     }
 }
@@ -679,7 +778,7 @@ pub(super) struct OpenAiChunkResponse {
     system_fingerprint: Option<String>,
     choices: Vec<OpenAiChunkChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<UnifiedUsage>, // Usually only present in the last chunk
+    usage: Option<OpenAiUsage>, // Usually only present in the last chunk
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -767,8 +866,16 @@ impl From<UnifiedChunkResponse> for OpenAiChunkResponse {
 
                 let delta = OpenAiChunkDelta {
                     role,
-                    content: if content.is_empty() { None } else { Some(content) },
-                    tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+                    content: if content.is_empty() {
+                        None
+                    } else {
+                        Some(content)
+                    },
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
                     refusal: None,
                     name: None,
                 };
@@ -784,12 +891,16 @@ impl From<UnifiedChunkResponse> for OpenAiChunkResponse {
 
         OpenAiChunkResponse {
             id: unified_chunk.id,
-            object: unified_chunk.object.unwrap_or_else(|| "chat.completion.chunk".to_string()),
-            created: unified_chunk.created.unwrap_or_else(|| Utc::now().timestamp()),
+            object: unified_chunk
+                .object
+                .unwrap_or_else(|| "chat.completion.chunk".to_string()),
+            created: unified_chunk
+                .created
+                .unwrap_or_else(|| Utc::now().timestamp()),
             model: unified_chunk.model,
             system_fingerprint: None,
             choices,
-            usage: unified_chunk.usage,
+            usage: unified_chunk.usage.map(|u| u.into()),
         }
     }
 }
@@ -819,19 +930,18 @@ impl From<OpenAiChunkResponse> for UnifiedChunkResponse {
 
                 if let Some(tool_calls) = choice.delta.tool_calls {
                     for tc in tool_calls {
-                        content.push(UnifiedContentPartDelta::ToolCallDelta(UnifiedToolCallDelta {
-                            index: tc.index,
-                            id: tc.id,
-                            name: tc.function.name,
-                            arguments: tc.function.arguments,
-                        }));
+                        content.push(UnifiedContentPartDelta::ToolCallDelta(
+                            UnifiedToolCallDelta {
+                                index: tc.index,
+                                id: tc.id,
+                                name: tc.function.name,
+                                arguments: tc.function.arguments,
+                            },
+                        ));
                     }
                 }
 
-                let delta = UnifiedMessageDelta {
-                    role,
-                    content,
-                };
+                let delta = UnifiedMessageDelta { role, content };
 
                 UnifiedChunkChoice {
                     index: choice.index,
@@ -845,7 +955,7 @@ impl From<OpenAiChunkResponse> for UnifiedChunkResponse {
             id: openai_chunk.id,
             model: openai_chunk.model,
             choices,
-            usage: openai_chunk.usage,
+            usage: openai_chunk.usage.map(|u| u.into()),
             created: Some(openai_chunk.created),
             object: Some(openai_chunk.object),
         }
@@ -988,10 +1098,12 @@ mod tests {
                 logprobs: None,
                 finish_reason: Some("stop".to_string()),
             }],
-            usage: Some(UnifiedUsage {
+            usage: Some(OpenAiUsage {
                 prompt_tokens: 10,
                 completion_tokens: 20,
                 total_tokens: 30,
+                completion_tokens_details: None,
+                prompt_tokens_details: None,
             }),
         };
 
@@ -1002,13 +1114,15 @@ mod tests {
         assert_eq!(choice.message.role, UnifiedRole::Assistant);
         assert_eq!(
             choice.message.content,
-            vec![UnifiedContentPart::Text { text: "Hi there!".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "Hi there!".to_string()
+            }]
         );
         assert_eq!(choice.finish_reason, Some("stop".to_string()));
         assert!(unified_res.usage.is_some());
         let usage = unified_res.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 20);
         assert_eq!(usage.total_tokens, 30);
     }
 
@@ -1021,15 +1135,18 @@ mod tests {
                 index: 0,
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
-                    content: vec![UnifiedContentPart::Text { text: "Hi there!".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "Hi there!".to_string()
+                    }],
                 },
                 finish_reason: Some("stop".to_string()),
                 logprobs: None,
             }],
             usage: Some(UnifiedUsage {
-                prompt_tokens: 10,
-                completion_tokens: 20,
+                input_tokens: 10,
+                output_tokens: 20,
                 total_tokens: 30,
+                ..Default::default()
             }),
             created: Some(12345),
             object: Some("chat.completion".to_string()),

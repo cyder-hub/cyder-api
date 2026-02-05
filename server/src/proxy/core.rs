@@ -2,11 +2,9 @@ use super::logging::{get_log_manager, RequestLogContext};
 use super::util::serialize_reqwest_headers;
 
 use crate::config::CONFIG;
-use crate::controller::llm_types::LlmApiType;
-use crate::schema::enum_def::RequestStatus;
+use crate::schema::enum_def::{LlmApiType, RequestStatus};
 use crate::service::cache::types::CacheBillingPlan;
 use crate::service::transform::{transform_result, StreamTransformer};
-use crate::utils::billing::parse_usage_info;
 use crate::utils::sse::SseParser;
 
 use axum::{
@@ -186,13 +184,13 @@ pub(super) async fn proxy_request(
     billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-    original_request_body: Bytes,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     info!(
         "Starting proxy request for log_id {}, model {}",
         log_context.id, model_str
     );
     let log_context = Arc::new(TokioMutex::new(log_context));
+
     // 1. Build HTTP client, with proxy if configured
     let client = build_reqwest_client(use_proxy)?;
 
@@ -203,7 +201,7 @@ pub(super) async fn proxy_request(
     let response = match client
         .request(Method::POST, &url)
         .headers(headers)
-        .body(data.clone()) // Clone here for potential retries or logging
+        .body(data) // Clone here for potential retries or logging
         .send()
         .await
     {
@@ -219,7 +217,6 @@ pub(super) async fn proxy_request(
             context.completion_ts = Some(completed_at);
             context.billing_plan = billing_plan.clone();
             context.overall_status = RequestStatus::Error;
-            context.llm_request_body = Some(data);
             get_log_manager().log(context.clone()).await;
 
             return Err((StatusCode::BAD_GATEWAY, error_message));
@@ -245,11 +242,9 @@ pub(super) async fn proxy_request(
             model_str,
             response,
             &url,
-            &data,
             billing_plan,
             api_type,
             target_api_type,
-            original_request_body,
         )
         .await
     } else {
@@ -258,11 +253,9 @@ pub(super) async fn proxy_request(
             model_str,
             response,
             &url,
-            &data,
             billing_plan.as_ref(),
             api_type,
             target_api_type,
-            original_request_body,
         )
         .await
     };
@@ -276,11 +269,9 @@ async fn handle_non_streaming_response(
     model_str: String,
     response: reqwest::Response,
     url: &str,
-    data: &Bytes,
     billing_plan: Option<&CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-    original_request_body: Bytes,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -312,7 +303,6 @@ async fn handle_non_streaming_response(
             context.completion_ts = Some(completed_at);
             context.billing_plan = billing_plan.cloned();
             context.overall_status = RequestStatus::Error;
-            context.llm_request_body = Some(data.clone());
             context.llm_response_body = Some(Bytes::from(err_msg.clone()));
             get_log_manager().log(context.clone()).await;
 
@@ -341,39 +331,39 @@ async fn handle_non_streaming_response(
     let llm_response_completed_at = Utc::now().timestamp_millis();
 
     if status_code.is_success() {
-        let parsed_usage_info = serde_json::from_slice::<Value>(&decompressed_body)
-            .ok()
-            .and_then(|val| parse_usage_info(&val, target_api_type));
+        let (final_body, parsed_usage_info) =
+            match serde_json::from_slice::<Value>(&decompressed_body) {
+                Ok(original_value) => {
+                    let (transformed_value, usage_info) =
+                        transform_result(original_value, target_api_type, api_type);
 
-        let final_body = if api_type != target_api_type {
-            let original_value: Value = match serde_json::from_slice(&decompressed_body) {
-                Ok(v) => v,
+                    // OPTIMIZATION: If the API type is the same, no transformation occurred.
+                    // We can return the original, untouched body and avoid re-serializing.
+                    let body_bytes = if api_type == target_api_type {
+                        decompressed_body.clone()
+                    } else {
+                        match serde_json::to_vec(&transformed_value) {
+                            Ok(b) => Bytes::from(b),
+                            Err(e) => {
+                                error!(
+                                "Failed to serialize transformed response: {}. Returning original body.",
+                                e
+                            );
+                                decompressed_body.clone()
+                            }
+                        }
+                    };
+                    (body_bytes, usage_info)
+                }
                 Err(e) => {
-                    error!(
-                        "Failed to parse LLM response for transformation: {}. Returning original body.",
-                        e
+                    // response is not JSON. No transformation or usage parsing possible.
+                    debug!(
+                        "Response body is not valid JSON, cannot parse usage or transform: {}. Body: {:?}",
+                        e, String::from_utf8_lossy(&decompressed_body)
                     );
-                    return Ok(response_builder
-                        .body(Body::from(decompressed_body))
-                        .unwrap());
+                    (decompressed_body.clone(), None)
                 }
             };
-
-            let transformed_value = transform_result(original_value, target_api_type, api_type);
-
-            match serde_json::to_vec(&transformed_value) {
-                Ok(b) => Bytes::from(b),
-                Err(e) => {
-                    error!(
-                        "Failed to serialize transformed response: {}. Returning original body.",
-                        e
-                    );
-                    decompressed_body.clone()
-                }
-            }
-        } else {
-            decompressed_body.clone()
-        };
 
         let mut context = log_context.lock().await;
         context.request_url = Some(url.to_string());
@@ -382,8 +372,6 @@ async fn handle_non_streaming_response(
         context.usage = parsed_usage_info;
         context.billing_plan = billing_plan.cloned();
         context.overall_status = RequestStatus::Success;
-        context.user_request_body = Some(original_request_body);
-        context.llm_request_body = Some(data.clone());
         context.llm_response_body = Some(decompressed_body.clone());
         context.user_response_body = Some(final_body.clone());
         get_log_manager().log(context.clone()).await;
@@ -407,8 +395,6 @@ async fn handle_non_streaming_response(
         context.completion_ts = Some(llm_response_completed_at);
         context.billing_plan = billing_plan.cloned();
         context.overall_status = RequestStatus::Error;
-        context.user_request_body = Some(original_request_body);
-        context.llm_request_body = Some(data.clone());
         context.llm_response_body = Some(decompressed_body.clone());
         context.user_response_body = Some(decompressed_body.clone());
         get_log_manager().log(context.clone()).await;
@@ -425,11 +411,9 @@ async fn handle_streaming_response(
     model_str: String,
     response: reqwest::Response,
     url: &str,
-    data: &Bytes,
     billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-    original_request_body: Bytes,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -444,7 +428,6 @@ async fn handle_streaming_response(
     let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
 
     let url_owned = url.to_string();
-    let data_owned = data.clone();
     let billing_plan_clone = billing_plan.clone();
 
     tokio::spawn(async move {
@@ -512,8 +495,6 @@ async fn handle_streaming_response(
                     context.completion_ts = Some(completed_at);
                     context.billing_plan = billing_plan_clone.clone();
                     context.overall_status = RequestStatus::Error;
-                    context.user_request_body = Some(original_request_body.clone());
-                    context.llm_request_body = Some(data_owned.clone());
                     context.llm_response_body = Some(Bytes::from(llm_body_aggregator.clone()));
                     context.user_response_body = Some(Bytes::from(user_body_aggregator.clone()));
                     get_log_manager().log(context.clone()).await;
@@ -524,7 +505,7 @@ async fn handle_streaming_response(
             }
         }
 
-        if status_code.is_success() && api_type == LlmApiType::OpenAI && target_api_type == LlmApiType::Gemini {
+        if status_code.is_success() && api_type == LlmApiType::Openai && target_api_type == LlmApiType::Gemini {
             debug!("[handle_streaming_response] Appending [DONE] chunk for OpenAI client.");
             let done_chunk = Bytes::from("data: [DONE]\n\n");
             user_body_aggregator.extend_from_slice(&done_chunk);
@@ -540,8 +521,6 @@ async fn handle_streaming_response(
             context.completion_ts = Some(llm_response_completed_at);
             context.billing_plan = billing_plan_clone.clone();
             context.overall_status = RequestStatus::Success;
-            context.user_request_body = Some(original_request_body.clone());
-            context.llm_request_body = Some(data_owned.clone());
             context.llm_response_body = Some(Bytes::from(llm_body_aggregator));
             context.user_response_body = Some(Bytes::from(user_body_aggregator));
 
@@ -560,8 +539,6 @@ async fn handle_streaming_response(
             context.completion_ts = Some(llm_response_completed_at);
             context.billing_plan = billing_plan_clone.clone();
             context.overall_status = RequestStatus::Error;
-            context.user_request_body = Some(original_request_body.clone());
-            context.llm_request_body = Some(data_owned.clone());
             context.llm_response_body = Some(Bytes::from(llm_body_aggregator));
             context.user_response_body = Some(Bytes::from(user_body_aggregator));
             get_log_manager().log(context.clone()).await;

@@ -49,17 +49,17 @@ interface RecordItem {
     llm_request_sent_at: number | null;
     llm_response_first_chunk_at: number | null;
     llm_response_completed_at: number | null;
-    response_sent_to_client_at: number | null;
     status: string | null;
     is_stream: boolean;
     calculated_cost: number | null;
     cost_currency: string | null;
-    prompt_tokens: number | null;
-    completion_tokens: number | null;
+    input_tokens: number | null;
+    output_tokens: number | null;
+    input_image_tokens: number | null;
+    output_image_tokens: number | null;
+    cached_tokens: number | null;
     reasoning_tokens: number | null;
     total_tokens: number | null;
-    channel: string | null;
-    external_id: string | null;
     created_at: number;
     updated_at: number;
     storage_type: string | null;
@@ -230,7 +230,7 @@ function RecordPage() {
                 const totalRespTimeDisplay = (backendRecord.llm_response_completed_at != null && backendRecord.llm_request_sent_at != null) ? ((backendRecord.llm_response_completed_at - backendRecord.llm_request_sent_at) / 1000).toFixed(3) : '/';
 
                 let tpsDisplay = '/';
-                if (backendRecord.completion_tokens != null && backendRecord.llm_response_completed_at != null) {
+                if (backendRecord.output_tokens != null && backendRecord.llm_response_completed_at != null) {
                     let durationMs;
                     if (backendRecord.is_stream) {
                         if (backendRecord.llm_response_first_chunk_at != null) {
@@ -242,7 +242,7 @@ function RecordPage() {
                         }
                     }
                     if (durationMs != null && durationMs > 0) {
-                        tpsDisplay = (backendRecord.completion_tokens / (durationMs / 1000)).toFixed(2);
+                        tpsDisplay = (backendRecord.output_tokens / (durationMs / 1000)).toFixed(2);
                     }
                 }
 
@@ -254,8 +254,8 @@ function RecordPage() {
                     provider_id: backendRecord.provider_id ?? null,
                     system_api_key_id: backendRecord.system_api_key_id ?? null,
                     status: status,
-                    prompt_tokens: backendRecord.prompt_tokens ?? null,
-                    completion_tokens: backendRecord.completion_tokens ?? null,
+                    input_tokens: backendRecord.input_tokens ?? null,
+                    output_tokens: backendRecord.output_tokens ?? null,
                     reasoning_tokens: backendRecord.reasoning_tokens ?? null,
                     total_tokens: backendRecord.total_tokens ?? null,
                     is_stream: backendRecord.is_stream ?? false,
@@ -265,8 +265,6 @@ function RecordPage() {
                     llm_response_completed_at: backendRecord.llm_response_completed_at ?? null,
                     calculated_cost: backendRecord.calculated_cost ?? null,
                     cost_currency: backendRecord.cost_currency || null,
-                    channel: backendRecord.channel || null,
-                    external_id: backendRecord.external_id || null,
                     model_id: backendRecord.model_id ?? null,
                     provider_api_key_id: backendRecord.provider_api_key_id ?? null,
                     real_model_name: backendRecord.real_model_name || null,
@@ -580,8 +578,6 @@ function RecordPage() {
                                             <TableColumnHeader>{t('recordPage.table.modelName')}</TableColumnHeader>
                                             <TableColumnHeader>{t('recordPage.table.provider')}</TableColumnHeader>
                                             <TableColumnHeader>{t('recordPage.table.apiKey')}</TableColumnHeader>
-                                            <TableColumnHeader>{t('recordPage.table.channel')}</TableColumnHeader>
-                                            <TableColumnHeader>{t('recordPage.table.externalId')}</TableColumnHeader>
                                             <TableColumnHeader>{t('recordPage.table.status')}</TableColumnHeader>
                                             <TableColumnHeader>{t('recordPage.table.promptTokens')}</TableColumnHeader>
                                             <TableColumnHeader>{t('recordPage.table.completionTokens')}</TableColumnHeader>
@@ -610,11 +606,9 @@ function RecordPage() {
                                                     <TableCell>{record.model_name || '/'}</TableCell>
                                                     <TableCell>{record.providerName}</TableCell>
                                                     <TableCell>{record.apiKeyName}</TableCell>
-                                                    <TableCell>{record.channel || '/'}</TableCell>
-                                                    <TableCell>{record.external_id || '/'}</TableCell>
                                                     <TableCell><StatusBadge status={record.status} /></TableCell>
-                                                    <TableCell class="text-right">{record.prompt_tokens ?? '/'}</TableCell>
-                                                    <TableCell class="text-right">{record.completion_tokens ?? '/'}</TableCell>
+                                                    <TableCell class="text-right">{record.input_tokens ?? '/'}</TableCell>
+                                                    <TableCell class="text-right">{record.output_tokens ?? '/'}</TableCell>
                                                     <TableCell class="text-right">{record.reasoning_tokens ?? '/'}</TableCell>
                                                     <TableCell class="text-right">{record.total_tokens ?? '/'}</TableCell>
                                                     <TableCell>{record.isStreamDisplay}</TableCell>
@@ -703,8 +697,6 @@ function RecordPage() {
                                             <DetailItem label="API Key">{record().system_api_key_id != null ? apiKeyMap().get(record().system_api_key_id) || '/' : '/'}</DetailItem>
                                             <DetailItem label="Model Name">{record().model_name}</DetailItem>
                                             <DetailItem label="Real Model Name">{record().real_model_name}</DetailItem>
-                                            <DetailItem label="Channel">{record().channel}</DetailItem>
-                                            <DetailItem label="External ID">{record().external_id}</DetailItem>
                                             <DetailItem label="Stream">{record().is_stream ? t('common.yes') : t('common.no')}</DetailItem>
                                         </dl>
                                     </section>
@@ -721,9 +713,12 @@ function RecordPage() {
                                     <section>
                                         <h3 class="text-base font-semibold text-gray-900 border-b pb-2 mb-2">Usage & Cost</h3>
                                         <dl class="divide-y divide-gray-100">
-                                            <DetailItem label="Prompt Tokens">{record().prompt_tokens}</DetailItem>
-                                            <DetailItem label="Completion Tokens">{record().completion_tokens}</DetailItem>
-                                            <DetailItem label="Reasoning Tokens">{record().reasoning_tokens}</DetailItem>
+                                            <DetailItem label="Prompt Tokens">{record().input_tokens}</DetailItem>
+                                            <DetailItem label="Completion Tokens">{record().output_tokens}</DetailItem>
+                                            {record().input_image_tokens && <DetailItem label="Input Image Tokens">{record().input_image_tokens}</DetailItem>}
+                                            {record().output_image_tokens && <DetailItem label="Output Image Tokens">{record().output_image_tokens}</DetailItem>}
+                                            {record().cached_tokens && <DetailItem label="Cached Tokens">{record().cached_tokens}</DetailItem>}
+                                            {record().reasoning_tokens && <DetailItem label="Reasoning Tokens">{record().reasoning_tokens}</DetailItem>}
                                             <DetailItem label="Total Tokens">{record().total_tokens}</DetailItem>
                                             <DetailItem label="Calculated Cost">{record().calculated_cost != null ? `${record().cost_currency || ''} ${(record().calculated_cost / 1000000000)}` : '/'}</DetailItem>
                                             <DetailItem label="Storage Type">{record().storage_type}</DetailItem>

@@ -176,23 +176,22 @@ diesel::table! {
 diesel::table! {
     use crate::schema::enum_def::RequestStatusMapping;
     use crate::schema::enum_def::StorageTypeMapping;
-    use diesel::sql_types::{Bool, Int4, Int8, Text, Nullable, Jsonb};
+    use crate::schema::enum_def::LlmApiTypeMapping;
+    use diesel::sql_types::{Bool, Int4, Int8, Text, Nullable};
 
     request_log (id) {
         id -> Int8,
-        system_api_key_id -> Nullable<Int8>,
-        provider_id -> Nullable<Int8>,
-        model_id -> Nullable<Int8>,
-        provider_api_key_id -> Nullable<Int8>,
-        model_name -> Nullable<Text>,
-        real_model_name -> Nullable<Text>,
+        system_api_key_id -> Int8,
+        provider_id -> Int8,
+        model_id -> Int8,
+        provider_api_key_id -> Int8,
+        model_name -> Text,
+        real_model_name -> Text,
         request_received_at -> Int8,
-        llm_request_sent_at -> Nullable<Int8>,
+        llm_request_sent_at -> Int8,
         llm_response_first_chunk_at -> Nullable<Int8>,
         llm_response_completed_at -> Nullable<Int8>,
-        response_sent_to_client_at -> Nullable<Int8>,
         client_ip -> Nullable<Text>,
-        external_request_uri -> Nullable<Text>,
         llm_request_uri -> Nullable<Text>,
         llm_response_status -> Nullable<Int4>,
         status -> Nullable<RequestStatusMapping>,
@@ -201,18 +200,20 @@ diesel::table! {
         cost_currency -> Nullable<Text>,
         created_at -> Int8,
         updated_at -> Int8,
-        prompt_tokens -> Nullable<Int4>,
-        completion_tokens -> Nullable<Int4>,
+        input_tokens -> Nullable<Int4>,
+        output_tokens -> Nullable<Int4>,
+        input_image_tokens -> Nullable<Int4>,
+        output_image_tokens -> Nullable<Int4>,
+        cached_tokens -> Nullable<Int4>,
         reasoning_tokens -> Nullable<Int4>,
         total_tokens -> Nullable<Int4>,
-        channel -> Nullable<Text>,
-        external_id -> Nullable<Text>,
-        metadata -> Nullable<Jsonb>,
         storage_type -> Nullable<StorageTypeMapping>,
         user_request_body -> Nullable<Text>,
         llm_request_body -> Nullable<Text>,
         llm_response_body -> Nullable<Text>,
         user_response_body -> Nullable<Text>,
+        user_api_type -> LlmApiTypeMapping,
+        llm_api_type -> LlmApiTypeMapping,
     }
 }
 
@@ -227,8 +228,6 @@ diesel::table! {
         deleted_at -> Nullable<Int8>,
         created_at -> Int8,
         updated_at -> Int8,
-        #[sql_name = "ref"]
-        ref_ -> Nullable<Text>,
     }
 }
 

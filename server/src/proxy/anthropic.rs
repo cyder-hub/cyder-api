@@ -4,7 +4,7 @@ use super::logging::RequestLogContext;
 use super::prepare::*;
 use super::util::*;
 
-use crate::controller::llm_types::LlmApiType;
+use crate::schema::enum_def::LlmApiType;
 use crate::schema::enum_def::ProviderType;
 use crate::service::app_state::AppState;
 use crate::service::transform::transform_request_data;
@@ -32,8 +32,6 @@ pub async fn handle_anthropic_request(
     let api_key_check_result =
         authenticate_anthropic_request(&original_headers, &app_state).await?;
     let system_api_key = api_key_check_result.api_key;
-    let channel = api_key_check_result.channel;
-    let external_id = api_key_check_result.external_id;
 
     // Step 2: Parse the incoming request body.
     let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
@@ -50,6 +48,7 @@ pub async fn handle_anthropic_request(
             format!("Failed to parse request body: {}", e),
         )
     })?;
+    let original_request_value = data.clone();
     let original_request_body = body_bytes;
     debug!(
         "[proxy] original request data: {}",
@@ -74,7 +73,7 @@ pub async fn handle_anthropic_request(
         if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
             LlmApiType::Gemini
         } else {
-            LlmApiType::OpenAI
+            LlmApiType::Openai
         };
 
     let api_type = LlmApiType::Anthropic;
@@ -88,7 +87,7 @@ pub async fn handle_anthropic_request(
     check_access_control(&system_api_key, &provider, &model, &app_state).await?;
 
     let (final_url, final_headers, final_body_value, provider_api_key_id) = match target_api_type {
-        LlmApiType::OpenAI => {
+        LlmApiType::Openai => {
             prepare_llm_request(
                 &provider,
                 &model,
@@ -127,32 +126,27 @@ pub async fn handle_anthropic_request(
     })?);
 
     // Step 6: Create an initial log entry for the request.
-    let log_context = RequestLogContext::new(
+    let llm_request_body_for_log = calculate_llm_request_body_for_log(
+        api_type,
+        target_api_type,
+        &original_request_value,
+        &final_body_value,
+        &final_body,
+    )?;
+
+    let mut log_context = RequestLogContext::new(
         &system_api_key,
         &provider,
         &model,
         provider_api_key_id,
         start_time,
         &client_ip_addr,
-        &request_uri_path,
-        &channel,
-        &external_id,
     );
+    log_context.llm_request_body = Some(llm_request_body_for_log);
+    log_context.user_request_body = Some(original_request_body);
 
     // Step 7: Execute the request against the downstream LLM service.
-    let real_model_name = model
-        .real_model_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&model.model_name);
-    let model_str = if model.model_name == real_model_name {
-        format!("{}/{}", &provider.provider_key, &model.model_name)
-    } else {
-        format!(
-            "{}/{}({})",
-            &provider.provider_key, &model.model_name, real_model_name
-        )
-    };
+    let model_str = format_model_str(&provider, &model);
 
     proxy_request(
         log_context,
@@ -164,7 +158,6 @@ pub async fn handle_anthropic_request(
         billing_plan,
         api_type,
         target_api_type,
-        original_request_body,
     )
     .await
 }

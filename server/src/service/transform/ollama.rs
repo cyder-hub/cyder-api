@@ -236,9 +236,10 @@ impl From<OllamaResponse> for UnifiedResponse {
             (ollama_res.prompt_tokens, ollama_res.completion_tokens)
         {
             Some(UnifiedUsage {
-                prompt_tokens,
-                completion_tokens,
+                input_tokens: prompt_tokens,
+                output_tokens: completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
+                ..Default::default()
             })
         } else {
             None
@@ -284,7 +285,7 @@ impl From<UnifiedResponse> for OllamaResponse {
         };
 
         let (prompt_tokens, completion_tokens) = if let Some(usage) = unified_res.usage {
-            (Some(usage.prompt_tokens), Some(usage.completion_tokens))
+            (Some(usage.input_tokens), Some(usage.output_tokens))
         } else {
             (None, None)
         };
@@ -449,8 +450,8 @@ mod tests {
         );
         assert_eq!(choice.finish_reason, Some("stop".to_string()));
         let usage = unified_res.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
     }
 
@@ -469,9 +470,10 @@ mod tests {
                 logprobs: None,
             }],
             usage: Some(UnifiedUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
+                input_tokens: 10,
+                output_tokens: 5,
                 total_tokens: 15,
+                ..Default::default()
             }),
             created: Some(12345),
             object: Some("chat.completion.chunk".to_string()),
@@ -543,8 +545,8 @@ mod tests {
         assert!(final_choice.delta.content.is_empty());
         assert_eq!(final_choice.finish_reason, Some("stop".to_string()));
         let usage = unified_final_chunk.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
     }
 
@@ -588,9 +590,10 @@ mod tests {
                 finish_reason: Some("stop".to_string()),
             }],
             usage: Some(UnifiedUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
+                input_tokens: 10,
+                output_tokens: 5,
                 total_tokens: 15,
+                ..Default::default()
             }),
             created: Some(12345),
             object: Some("chat.completion.chunk".to_string()),
@@ -669,9 +672,10 @@ impl From<OllamaChunkResponse> for UnifiedChunkResponse {
             (ollama_chunk.prompt_tokens, ollama_chunk.completion_tokens)
         {
             Some(UnifiedUsage {
-                prompt_tokens,
-                completion_tokens,
+                input_tokens: prompt_tokens,
+                output_tokens: completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
+                ..Default::default()
             })
         } else {
             None
@@ -718,7 +722,7 @@ impl From<UnifiedChunkResponse> for OllamaChunkResponse {
         };
 
         let (prompt_tokens, completion_tokens) = if let Some(usage) = unified_chunk.usage {
-            (Some(usage.prompt_tokens), Some(usage.completion_tokens))
+            (Some(usage.input_tokens), Some(usage.output_tokens))
         } else {
             (None, None)
         };

@@ -23,7 +23,6 @@ db_object! {
         pub deleted_at: Option<i64>,
         pub created_at: i64,
         pub updated_at: i64,
-        pub ref_: Option<String>,
     }
 
     // Struct for inserting a new SystemApiKey.
@@ -40,7 +39,6 @@ db_object! {
         pub deleted_at: Option<i64>,
         pub created_at: i64,
         pub updated_at: i64,
-        pub ref_: Option<String>,
     }
 
     // Struct for updating an existing SystemApiKey.
@@ -89,7 +87,6 @@ impl SystemApiKey {
             deleted_at: None, // Default for new keys
             created_at: now,
             updated_at: now,
-            ref_: None,
         };
 
         let conn = &mut get_connection();
@@ -124,35 +121,6 @@ impl SystemApiKey {
                 .map_err(|e| {
                     BaseError::DatabaseFatal(Some(format!(
                         "Failed to update system API key {}: {}",
-                        id_value, e
-                    )))
-                })?;
-            Ok(updated_db_key.from_db())
-        })
-    }
-
-    /// Refreshes the `ref` field of a system API key.
-    pub fn refresh_ref(id_value: i64) -> DbResult<SystemApiKey> {
-        let conn = &mut get_connection();
-        let current_time = Utc::now().timestamp_millis();
-
-        let random_ref: String = rng()
-            .sample_iter(&Alphanumeric)
-            .take(48)
-            .map(char::from)
-            .collect();
-
-        db_execute!(conn, {
-            let updated_db_key = diesel::update(system_api_key::table.find(id_value))
-                .set((
-                    system_api_key::dsl::ref_.eq(Some(random_ref)),
-                    system_api_key::dsl::updated_at.eq(current_time),
-                ))
-                .returning(SystemApiKeyDb::as_returning())
-                .get_result::<SystemApiKeyDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to refresh ref for system API key {}: {}",
                         id_value, e
                     )))
                 })?;
@@ -252,34 +220,6 @@ impl SystemApiKey {
                     ))),
                     _ => BaseError::DatabaseFatal(Some(format!(
                         "Error fetching system API key by key value: {}",
-                        e
-                    ))),
-                })?;
-            Ok(db_key.from_db())
-        })
-    }
-
-    /// Retrieves an active system API key by its ref string.
-    /// Active means not deleted and enabled.
-    pub fn get_by_ref(ref_value: &str) -> DbResult<SystemApiKey> {
-        let conn = &mut get_connection();
-        db_execute!(conn, {
-            let db_key = system_api_key::table
-                .filter(
-                    system_api_key::dsl::ref_
-                        .eq(ref_value)
-                        .and(system_api_key::dsl::deleted_at.is_null())
-                        .and(system_api_key::dsl::is_enabled.eq(true)),
-                )
-                .select(SystemApiKeyDb::as_select())
-                .first::<SystemApiKeyDb>(conn)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(format!(
-                        "System API key with ref '{}' not found, deleted, or disabled",
-                        ref_value
-                    ))),
-                    _ => BaseError::DatabaseFatal(Some(format!(
-                        "Error fetching system API key by ref value: {}",
                         e
                     ))),
                 })?;

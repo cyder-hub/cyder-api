@@ -1,31 +1,27 @@
-use chrono::Utc;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::{get_connection, DbResult, ListResult};
 use crate::controller::BaseError;
-use crate::schema::enum_def::{RequestStatus, StorageType};
+use crate::schema::enum_def::{RequestStatus, StorageType, LlmApiType};
 use crate::{db_execute, db_object};
 
 db_object! {
-    #[derive(Queryable, Selectable, Identifiable, Serialize, Debug, Clone)]
+    #[derive(Insertable, Queryable, Selectable, Identifiable, Serialize, Debug, Clone)]
     #[diesel(table_name = request_log)]
     pub struct RequestLog {
         pub id: i64,
-        pub system_api_key_id: Option<i64>,
-        pub provider_id: Option<i64>,
-        pub model_id: Option<i64>,
-        pub provider_api_key_id: Option<i64>,
-        pub model_name: Option<String>,
-        pub real_model_name: Option<String>,
+        pub system_api_key_id: i64,
+        pub provider_id: i64,
+        pub model_id: i64,
+        pub provider_api_key_id: i64,
+        pub model_name: String,
+        pub real_model_name: String,
         pub request_received_at: i64,
-        pub llm_request_sent_at: Option<i64>,
+        pub llm_request_sent_at: i64,
         pub llm_response_first_chunk_at: Option<i64>,
         pub llm_response_completed_at: Option<i64>,
-        pub response_sent_to_client_at: Option<i64>,
         pub client_ip: Option<String>,
-        pub external_request_uri: Option<String>,
         pub llm_request_uri: Option<String>,
         pub llm_response_status: Option<i32>,
         pub status: Option<RequestStatus>,
@@ -34,66 +30,20 @@ db_object! {
         pub cost_currency: Option<String>,
         pub created_at: i64,
         pub updated_at: i64,
-        pub prompt_tokens: Option<i32>,
-        pub completion_tokens: Option<i32>,
+        pub input_tokens: Option<i32>,
+        pub output_tokens: Option<i32>,
+        pub input_image_tokens: Option<i32>,
+        pub output_image_tokens: Option<i32>,
+        pub cached_tokens: Option<i32>,
         pub reasoning_tokens: Option<i32>,
         pub total_tokens: Option<i32>,
-        pub channel: Option<String>,
-        pub external_id: Option<String>,
-        pub metadata: Option<Value>,
         pub storage_type: Option<StorageType>,
         pub user_request_body: Option<String>,
         pub llm_request_body: Option<String>,
         pub llm_response_body: Option<String>,
         pub user_response_body: Option<String>,
-    }
-
-    // Struct for inserting the initial part of a request log.
-    #[derive(Insertable, Deserialize, Debug)]
-    #[diesel(table_name = request_log)]
-    pub struct NewRequestLog {
-        pub id: i64,
-        pub system_api_key_id: i64,
-        pub provider_id: i64,
-        pub model_id: i64,
-        pub provider_api_key_id: i64,
-        pub model_name: String,
-        pub real_model_name: String, // Nullable in schema
-        pub request_received_at: i64,
-        pub llm_request_sent_at: i64,
-        pub client_ip: Option<String>,
-        pub external_request_uri: Option<String>,
-        pub status: RequestStatus,
-        pub created_at: i64,
-        pub updated_at: i64,
-        pub channel: Option<String>,
-        pub external_id: Option<String>,
-    }
-
-    // Struct for updating a request log with completion details.
-    #[derive(AsChangeset, Deserialize, Debug, Default)]
-    #[diesel(table_name = request_log)]
-    pub struct UpdateRequestLogData {
-        pub prompt_tokens: Option<i32>,
-        pub completion_tokens: Option<i32>,
-        pub reasoning_tokens: Option<i32>,
-        pub total_tokens: Option<i32>,
-        pub llm_response_first_chunk_at: Option<i64>,
-        pub llm_response_completed_at: Option<i64>,
-        pub response_sent_to_client_at: Option<i64>,
-        pub status: Option<RequestStatus>,
-        pub calculated_cost: Option<i64>,
-        pub cost_currency: Option<Option<String>>,
-        pub is_stream: Option<bool>,
-        pub llm_request_uri: Option<Option<String>>,
-        pub llm_response_status: Option<Option<i32>>,
-        pub metadata: Option<Option<Value>>,
-        pub storage_type: Option<Option<StorageType>>,
-        pub user_request_body: Option<Option<String>>,
-        pub llm_request_body: Option<Option<String>>,
-        pub llm_response_body: Option<Option<String>>,
-        pub user_response_body: Option<Option<String>>,
-        // updated_at is handled manually
+        pub user_api_type: LlmApiType,
+        pub llm_api_type: LlmApiType,
     }
 }
 
@@ -112,43 +62,17 @@ pub struct RequestLogQueryPayload {
 
 impl RequestLog {
     /// Inserts a new request log entry with initial details.
-    pub fn insert(new_log_data: &NewRequestLog) -> DbResult<RequestLog> {
+    pub fn insert(new_log_data: &RequestLog) -> DbResult<RequestLog> {
         let conn = &mut get_connection();
         db_execute!(conn, {
             let inserted_log_db = diesel::insert_into(request_log::table)
-                .values(NewRequestLogDb::to_db(new_log_data))
+                .values(RequestLogDb::to_db(new_log_data))
                 .returning(RequestLogDb::as_returning())
                 .get_result::<RequestLogDb>(conn)
                 .map_err(|e| {
                     BaseError::DatabaseFatal(Some(format!("Failed to insert request log: {}", e)))
                 })?;
             Ok(inserted_log_db.from_db())
-        })
-    }
-
-    /// Updates an existing request log with completion details.
-    pub fn update_completion_details(
-        log_id: i64,
-        update_data: &UpdateRequestLogData,
-    ) -> DbResult<RequestLog> {
-        let conn = &mut get_connection();
-        let current_time = Utc::now().timestamp_millis();
-
-        db_execute!(conn, {
-            let updated_log_db = diesel::update(request_log::table.find(log_id))
-                .set((
-                    UpdateRequestLogDataDb::to_db(update_data),
-                    request_log::dsl::updated_at.eq(current_time),
-                ))
-                .returning(RequestLogDb::as_returning())
-                .get_result::<RequestLogDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to update request log {}: {}",
-                        log_id, e
-                    )))
-                })?;
-            Ok(updated_log_db.from_db())
         })
     }
 
@@ -233,9 +157,7 @@ impl RequestLog {
                 if !search_term.is_empty() {
                     let pattern = format!("%{}%", search_term);
                     let search_filter = request_log::dsl::model_name
-                        .like(pattern)
-                        .or(request_log::dsl::channel.eq(search_term))
-                        .or(request_log::dsl::external_id.eq(search_term));
+                        .like(pattern);
                     query = query.filter(search_filter.clone());
                     count_query = count_query.filter(search_filter);
                 }
@@ -276,55 +198,4 @@ impl RequestLog {
             })
         })
     }
-
-    /// Creates an initial request log entry as the first step of a two-step commit.
-    ///
-    /// The caller is responsible for providing an `id` (e.g., generated by a snowflake algorithm),
-    /// setting `initial_data.is_success` to `false`, and ensuring fields not known at this stage
-    /// (like `initial_data.real_model_name`, `initial_data.external_request_body_full`) are `None`.
-    pub fn create_initial_request(initial_data: &NewRequestLog) -> DbResult<RequestLog> {
-        let conn = &mut get_connection();
-        db_execute!(conn, {
-            let inserted_log_db = diesel::insert_into(request_log::table)
-                .values(NewRequestLogDb::to_db(initial_data))
-                .returning(RequestLogDb::as_returning())
-                .get_result::<RequestLogDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to insert initial request log via create_initial_request: {}",
-                        e
-                    )))
-                })?;
-            Ok(inserted_log_db.from_db())
-        })
-    }
-
-    /// Updates an existing request log with completion details as the second step of a two-step commit.
-    ///
-    /// This includes details obtained after interacting with the LLM and sending the response to the client.
-    pub fn update_request_with_completion_details(
-        log_id: i64,
-        completion_data: &UpdateRequestLogData, // This struct now includes real_model_name
-    ) -> DbResult<RequestLog> {
-        let conn = &mut get_connection();
-        let current_time = Utc::now().timestamp_millis();
-
-        db_execute!(conn, {
-            let updated_log_db = diesel::update(request_log::table.find(log_id))
-                .set((
-                    UpdateRequestLogDataDb::to_db(completion_data),
-                    request_log::dsl::updated_at.eq(current_time),
-                ))
-                .returning(RequestLogDb::as_returning())
-                .get_result::<RequestLogDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to update request log {} with completion details via update_request_with_completion_details: {}",
-                        log_id, e
-                    )))
-                })?;
-            Ok(updated_log_db.from_db())
-        })
-    }
-
 }

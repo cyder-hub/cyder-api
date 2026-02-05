@@ -392,9 +392,10 @@ impl From<AnthropicResponse> for UnifiedResponse {
         };
 
         let usage = Some(UnifiedUsage {
-            prompt_tokens: anthropic_res.usage.input_tokens,
-            completion_tokens: anthropic_res.usage.output_tokens,
+            input_tokens: anthropic_res.usage.input_tokens,
+            output_tokens: anthropic_res.usage.output_tokens,
             total_tokens: anthropic_res.usage.input_tokens + anthropic_res.usage.output_tokens,
+            ..Default::default()
         });
 
         UnifiedResponse {
@@ -461,8 +462,8 @@ impl From<UnifiedResponse> for AnthropicResponse {
                 output_tokens: 0,
             },
             |u| AnthropicUsage {
-                input_tokens: u.prompt_tokens,
-                output_tokens: u.completion_tokens,
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
             },
         );
 
@@ -833,8 +834,8 @@ mod tests {
         );
         assert_eq!(choice.finish_reason, Some("stop".to_string()));
         let usage = unified_response.usage.unwrap();
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 20);
         assert_eq!(usage.total_tokens, 30);
     }
 
@@ -855,9 +856,10 @@ mod tests {
                 logprobs: None,
             }],
             usage: Some(UnifiedUsage {
-                prompt_tokens: 10,
-                completion_tokens: 20,
+                input_tokens: 10,
+                output_tokens: 20,
                 total_tokens: 30,
+                ..Default::default()
             }),
             created: Some(12345),
             object: Some("chat.completion".to_string()),
@@ -942,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_transform_unified_chunk_to_anthropic_events() {
-        let mut state = StreamTransformer::new(LlmApiType::OpenAI, LlmApiType::Anthropic);
+        let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
 
         // Role chunk
         let unified_chunk_role = UnifiedChunkResponse {

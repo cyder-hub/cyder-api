@@ -22,7 +22,6 @@ pub enum CacheEntry<T: Clone + Serialize + de:: DeserializeOwned> {
 pub struct CacheSystemApiKey {
     pub id: i64,
     pub name: String,
-    pub ref_: Option<String>,
     pub access_control_policy_id: Option<i64>,
 }
 
@@ -119,7 +118,6 @@ impl From<crate::database::system_api_key::SystemApiKey> for CacheSystemApiKey {
         Self {
             id: db.id,
             name: db.name,
-            ref_: db.ref_,
             access_control_policy_id: db.access_control_policy_id,
         }
     }

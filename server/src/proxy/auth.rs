@@ -1,12 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::http::HeaderMap;
-use reqwest::{header::AUTHORIZATION, StatusCode};
+use reqwest::{StatusCode, header::AUTHORIZATION};
 
 use crate::{
-    service::app_state::{AppStoreError, AppState},
-    service::cache::types::{CacheSystemApiKey, CacheProvider, CacheModel},
-    utils::{auth::decode_api_key_jwt, limit::LIMITER},
+    service::app_state::{AppState, AppStoreError},
+    service::cache::types::{CacheModel, CacheProvider, CacheSystemApiKey},
+    utils::limit::LIMITER,
 };
 use cyder_tools::log::{debug, error, info, warn};
 
@@ -20,8 +20,6 @@ pub enum ApiKeyPosition {
 
 pub struct ApiKeyCheckResult {
     pub api_key: Arc<CacheSystemApiKey>,
-    pub channel: Option<String>,
-    pub external_id: Option<String>,
     pub position: ApiKeyPosition,
 }
 
@@ -32,8 +30,8 @@ pub async fn authenticate_openai_request(
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
     debug!("Authenticating OpenAI request");
-    let (system_api_key_str, position) = parse_token_from_request(headers, params)
-        .map_err(|err_msg| {
+    let (system_api_key_str, position) =
+        parse_token_from_request(headers, params).map_err(|err_msg| {
             warn!("OpenAI auth failed: {}", err_msg);
             (StatusCode::UNAUTHORIZED, err_msg)
         })?;
@@ -126,8 +124,8 @@ pub async fn authenticate_ollama_request(
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
     debug!("Authenticating Ollama request");
-    let (system_api_key_str, position) = parse_token_from_request(headers, params)
-        .map_err(|err_msg| {
+    let (system_api_key_str, position) =
+        parse_token_from_request(headers, params).map_err(|err_msg| {
             warn!("Ollama auth failed: {}", err_msg);
             (StatusCode::UNAUTHORIZED, err_msg)
         })?;
@@ -215,12 +213,7 @@ pub async fn check_system_api_key(
 ) -> Result<ApiKeyCheckResult, String> {
     if key_str.starts_with("cyder-") {
         match app_state.get_system_api_key(key_str).await {
-            Ok(Some(api_key)) => Ok(ApiKeyCheckResult {
-                api_key,
-                channel: None,
-                external_id: None,
-                position,
-            }),
+            Ok(Some(api_key)) => Ok(ApiKeyCheckResult { api_key, position }),
             Ok(None) => Err("api key invalid or not found".to_string()),
             Err(AppStoreError::LockError(e)) => {
                 error!("AppState lock error: {}", e);
@@ -231,31 +224,7 @@ pub async fn check_system_api_key(
                 Err("Internal server error while checking API key".to_string())
             }
         }
-    } else if let Some(token) = key_str.strip_prefix("jwt-") {
-        let jwt_result =
-            decode_api_key_jwt(token).map_err(|e| format!("Invalid JWT token: {:?}", e))?;
-
-        match app_state.get_system_api_key(&jwt_result.key_ref).await {
-            Ok(Some(api_key)) => Ok(ApiKeyCheckResult {
-                api_key,
-                channel: Some(jwt_result.channel),
-                external_id: Some(jwt_result.sub),
-                position,
-            }),
-            Ok(None) => Err(format!(
-                "api key for ref '{}' invalid or not found",
-                jwt_result.key_ref
-            )),
-            Err(AppStoreError::LockError(e)) => {
-                error!("AppState lock error: {}", e);
-                Err("Internal server error while checking API key by ref".to_string())
-            }
-            Err(e) => {
-                error!("AppState error: {:?}", e);
-                Err("Internal server error while checking API key by ref".to_string())
-            }
-        }
     } else {
-        Err("Invalid api key format. Must start with 'cyder-' or 'jwt-'".to_string())
+        Err("Invalid api key format. Must start with 'cyder-'".to_string())
     }
 }

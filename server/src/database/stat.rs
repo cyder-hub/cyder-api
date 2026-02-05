@@ -20,10 +20,10 @@ db_object! {
 pub struct RequestLogEntryForStats {
     // from request_log
     pub created_at: i64,
-    pub provider_id: Option<i64>,
-    pub model_id: Option<i64>,
-    pub prompt_tokens: Option<i32>,
-    pub completion_tokens: Option<i32>,
+    pub provider_id: i64,
+    pub model_id: i64,
+    pub input_tokens: Option<i32>,
+    pub output_tokens: Option<i32>,
     pub reasoning_tokens: Option<i32>,
     pub total_tokens: Option<i32>,
     pub calculated_cost: Option<i64>,
@@ -44,8 +44,8 @@ pub struct SystemOverviewStats {
 #[derive(Serialize, Debug, Default)]
 pub struct TodayRequestLogStats {
     pub requests_count: i64,
-    pub total_prompt_tokens: i64,
-    pub total_completion_tokens: i64,
+    pub total_input_tokens: i64,
+    pub total_output_tokens: i64,
     pub total_reasoning_tokens: i64,
     pub total_tokens: i64,
     pub total_cost: HashMap<String, i64>,
@@ -90,8 +90,8 @@ pub fn get_request_logs_in_range(
     let conn = &mut get_connection();
     let result = db_execute!(conn, {
         let mut query = request_log::table
-            .left_join(provider::table.on(request_log::dsl::provider_id.eq(provider::dsl::id.nullable())))
-            .left_join(model::table.on(request_log::dsl::model_id.eq(model::dsl::id.nullable())))
+            .left_join(provider::table.on(request_log::dsl::provider_id.eq(provider::dsl::id)))
+            .left_join(model::table.on(request_log::dsl::model_id.eq(model::dsl::id)))
             .filter(request_log::dsl::created_at.ge(start_time_ms))
             .filter(request_log::dsl::created_at.lt(end_time_ms))
             .into_boxed();
@@ -114,8 +114,8 @@ pub fn get_request_logs_in_range(
                 request_log::dsl::created_at,
                 request_log::dsl::provider_id,
                 request_log::dsl::model_id,
-                request_log::dsl::prompt_tokens,
-                request_log::dsl::completion_tokens,
+                request_log::dsl::input_tokens,
+                request_log::dsl::output_tokens,
                 request_log::dsl::reasoning_tokens,
                 request_log::dsl::total_tokens,
                 request_log::dsl::calculated_cost,
@@ -157,18 +157,18 @@ pub fn get_today_request_log_stats() -> DbResult<TodayRequestLogStats> {
     let prompt_tokens_sum: Option<i64> = db_execute!(conn, {
         request_log::table
             .filter(request_log::dsl::created_at.ge(start_of_today))
-            .select(sum(request_log::dsl::prompt_tokens))
+            .select(sum(request_log::dsl::input_tokens))
             .first(conn)
     })?;
-    stats.total_prompt_tokens = prompt_tokens_sum.unwrap_or(0);
+    stats.total_input_tokens = prompt_tokens_sum.unwrap_or(0);
 
     let completion_tokens_sum: Option<i64> = db_execute!(conn, {
         request_log::table
             .filter(request_log::dsl::created_at.ge(start_of_today))
-            .select(sum(request_log::dsl::completion_tokens))
+            .select(sum(request_log::dsl::output_tokens))
             .first(conn)
     })?;
-    stats.total_completion_tokens = completion_tokens_sum.unwrap_or(0);
+    stats.total_output_tokens = completion_tokens_sum.unwrap_or(0);
 
     let reasoning_tokens_sum: Option<i64> = db_execute!(conn, {
         request_log::table

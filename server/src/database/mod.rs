@@ -169,6 +169,18 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
 
     let mut connection = SqliteConnection::establish(db_url).expect("failed to establish migration connection");
 
+    {
+        use diesel::prelude::*;
+        use diesel::sql_types::Text;
+        let version: Result<String, _> = diesel::select(diesel::dsl::sql::<Text>("sqlite_version()"))
+            .get_result(&mut connection);
+
+        match version {
+            Ok(v) => println!("database sqlite version: {}", v),
+            Err(e) => println!("failed to get sqlite version: {}", e),
+        }
+    }
+
     connection.run_pending_migrations(SQLITE_MIGRATIONS).expect("failed to run migrations");
 
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);

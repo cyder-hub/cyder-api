@@ -7,7 +7,7 @@ use axum::{
 };
 
 use crate::{
-    controller::llm_types::LlmApiType,
+    schema::enum_def::LlmApiType,
     service::app_state::{create_state_router, StateRouter},
 };
 
@@ -59,7 +59,7 @@ fn create_openai_router() -> StateRouter {
                 |State(app_state),
                  Query(params): Query<HashMap<String, String>>,
                  request: Request<Body>| async move {
-                    list_models_handler(app_state, params, request, LlmApiType::OpenAI).await
+                    list_models_handler(app_state, params, request, LlmApiType::Openai).await
                 },
             ),
         )

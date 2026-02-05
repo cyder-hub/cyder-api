@@ -64,13 +64,13 @@ impl Interval {
 
 #[derive(Serialize, Debug, Default, Clone)]
 pub struct UsageStatItem {
-    provider_id: Option<i64>,
-    model_id: Option<i64>,
-    provider_key: Option<String>,
-    model_name: Option<String>,
+    provider_id: i64,
+    model_id: i64,
+    provider_key: String,
+    model_name: String,
     real_model_name: Option<String>,
-    prompt_tokens: i64,
-    completion_tokens: i64,
+    input_tokens: i64,
+    output_tokens: i64,
     reasoning_tokens: i64,
     total_tokens: i64,
     request_count: i64,
@@ -188,7 +188,7 @@ async fn system_usage_stats(
         params.provider_api_key_id,
     )?;
 
-    let mut aggregated_data: HashMap<i64, HashMap<(Option<i64>, Option<i64>), UsageStatItem>> =
+    let mut aggregated_data: HashMap<i64, HashMap<(i64, i64), UsageStatItem>> =
         HashMap::new();
 
     for log_entry in logs {
@@ -200,15 +200,15 @@ async fn system_usage_stats(
             UsageStatItem {
                 provider_id: log_entry.provider_id,
                 model_id: log_entry.model_id,
-                provider_key: log_entry.provider_key.clone(),
-                model_name: log_entry.model_name.clone(),
+                provider_key: log_entry.provider_key.clone().unwrap_or_default(),
+                model_name: log_entry.model_name.clone().unwrap_or_default(),
                 real_model_name: log_entry.real_model_name.clone(),
                 ..Default::default()
             }
         });
 
-        stat_item.prompt_tokens += log_entry.prompt_tokens.unwrap_or(0) as i64;
-        stat_item.completion_tokens += log_entry.completion_tokens.unwrap_or(0) as i64;
+        stat_item.input_tokens += log_entry.input_tokens.unwrap_or(0) as i64;
+        stat_item.output_tokens += log_entry.output_tokens.unwrap_or(0) as i64;
         stat_item.reasoning_tokens += log_entry.reasoning_tokens.unwrap_or(0) as i64;
         stat_item.total_tokens += log_entry.total_tokens.unwrap_or(0) as i64;
         stat_item.request_count += 1;

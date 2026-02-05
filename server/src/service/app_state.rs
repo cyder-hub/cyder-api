@@ -231,13 +231,6 @@ impl AppState {
                 let hashed_api_key = Self::hash_api_key(&key.api_key);
                 let api_key_cache_key = CacheKey::SystemApiKey(&hashed_api_key).to_string();
                 let _ = self.system_api_key_cache.set_positive(&api_key_cache_key, &cache_item).await;
-
-                // Cache by ref if present
-                if let Some(ref_val) = &key.ref_ {
-                    let hashed_ref = Self::hash_api_key(ref_val);
-                    let ref_cache_key = CacheKey::SystemApiKey(&hashed_ref).to_string();
-                    let _ = self.system_api_key_cache.set_positive(&ref_cache_key, &cache_item).await;
-                }
             }
         }
 
@@ -404,7 +397,7 @@ impl AppState {
         debug!("cache miss: {}", &cache_key);
 
         // DB lookup: try by key first, then by ref.
-        let db_key_result = SystemApiKey::get_by_key(key).or_else(|_| SystemApiKey::get_by_ref(key));
+        let db_key_result = SystemApiKey::get_by_key(key);
 
         if let Ok(db_key) = db_key_result {
             let cache_item = Arc::new(CacheSystemApiKey::from(db_key.clone()));
@@ -412,13 +405,6 @@ impl AppState {
             // Cache by api_key
             let hashed_api_key = Self::hash_api_key(&db_key.api_key);
             self.system_api_key_cache.set_positive(&CacheKey::SystemApiKey(&hashed_api_key).to_string(), &cache_item).await?;
-
-            // Cache by ref if present
-            if let Some(ref_val) = &db_key.ref_ {
-                let hashed_ref = Self::hash_api_key(ref_val);
-                self.system_api_key_cache.set_positive(&CacheKey::SystemApiKey(&hashed_ref).to_string(), &cache_item).await?;
-            }
-            
             Ok(Some(cache_item))
         } else {
             self.system_api_key_cache.set_negative(&cache_key, self.negative_cache_ttl).await?;
@@ -430,14 +416,6 @@ impl AppState {
         let hashed_key_to_find = Self::hash_api_key(key);
         let cache_key_to_find = CacheKey::SystemApiKey(&hashed_key_to_find).to_string();
         debug!("invalidate: {}", &cache_key_to_find);
-        
-        // Try to get from cache to find the full object.
-        if let Ok(Some(cached_entry)) = self.system_api_key_cache.get(&cache_key_to_find).await {
-            if let Some(ref_val) = &cached_entry.ref_ {
-                let hashed_ref = Self::hash_api_key(ref_val);
-                self.system_api_key_cache.delete(&CacheKey::SystemApiKey(&hashed_ref).to_string()).await?;
-            }
-        }
         self.system_api_key_cache.delete(&cache_key_to_find).await?;
         
         Ok(())

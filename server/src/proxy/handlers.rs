@@ -7,7 +7,7 @@ use super::models::{
 use super::prepare::*;
 use super::util::*;
 
-use crate::controller::llm_types::LlmApiType;
+use crate::schema::enum_def::LlmApiType;
 use crate::schema::enum_def::{ProviderType, RequestStatus};
 use crate::service::app_state::AppState;
 use crate::service::cache::types::{CacheModel, CacheProvider};
@@ -36,15 +36,12 @@ pub async fn openai_utility_handler(
 ) -> Result<Response<Body>, (StatusCode, String)> {
     let client_ip_addr = Some(addr.ip().to_string());
     let start_time = Utc::now().timestamp_millis();
-    let request_uri_path = request.uri().path().to_string();
     let original_headers = request.headers().clone();
 
     // Step 1: Authenticate
     let api_key_check_result =
         authenticate_openai_request(&original_headers, &params, &app_state).await?;
     let system_api_key = api_key_check_result.api_key;
-    let channel = api_key_check_result.channel;
-    let external_id = api_key_check_result.external_id;
 
     // Step 2: Parse body
     let data = parse_request_body(request).await?;
@@ -81,10 +78,10 @@ pub async fn openai_utility_handler(
         if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
             LlmApiType::Gemini
         } else {
-            LlmApiType::OpenAI
+            LlmApiType::Openai
         };
 
-    if target_api_type != LlmApiType::OpenAI {
+    if target_api_type != LlmApiType::Openai {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
@@ -132,10 +129,7 @@ pub async fn openai_utility_handler(
         &model,
         provider_api_key_id,
         start_time,
-        &client_ip_addr,
-        &request_uri_path,
-        &channel,
-        &external_id,
+        &client_ip_addr
     );
 
     // Step 8: Execute request against downstream
@@ -238,7 +232,9 @@ pub async fn openai_utility_handler(
         log_context.billing_plan = billing_plan;
         log_context.overall_status = RequestStatus::Success;
         log_context.user_request_body = Some(Bytes::from(original_request_body_str));
-        log_context.llm_request_body = Some(Bytes::from(final_body));
+        log_context.llm_request_body = Some(super::logging::RequestBodyVariant::Full(Bytes::from(
+            final_body,
+        )));
         log_context.llm_response_body = Some(Bytes::from(llm_response_body_str));
         log_context.user_response_body = Some(Bytes::from(user_response_body_str));
 
@@ -276,7 +272,7 @@ pub async fn list_models_handler(
     // 1. Authenticate based on api_type
     let original_headers = request.headers().clone();
     let api_key_check_result = match api_type {
-        LlmApiType::OpenAI => {
+        LlmApiType::Openai => {
             authenticate_openai_request(&original_headers, &params, &app_state).await?
         }
         LlmApiType::Gemini => {
@@ -299,7 +295,7 @@ pub async fn list_models_handler(
 
     // 3. Format response based on api_type
     let response = match api_type {
-        LlmApiType::OpenAI | LlmApiType::Anthropic => {
+        LlmApiType::Openai | LlmApiType::Anthropic => {
             let mut available_models: Vec<ModelInfo> = all_accessible_models
                 .into_iter()
                 .map(|m| ModelInfo {

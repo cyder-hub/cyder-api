@@ -7,7 +7,7 @@ use crate::{
     service::cache::types::CachePriceRule,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageInfo {
     pub input_tokens: i32,
     pub output_tokens: i32,

@@ -5,30 +5,23 @@ use crate::utils::billing::calculate_cost;
 use crate::{
     database::request_log::RequestLog,
     schema::enum_def::RequestStatus,
-    service::storage::get_storage,
+    service::storage::{get_storage, types::PutObjectOptions, Storage},
     utils::{
         billing::UsageInfo,
-        storage::generate_storage_path_from_hash,
+        storage::{generate_storage_path_from_id, LogBodies},
         ID_GENERATOR,
     },
 };
 use bytes::Bytes;
 use chrono::Utc;
-use cyder_tools::log::error;
+use cyder_tools::log::{debug, error};
+use flate2::{write::GzEncoder, Compression};
 use once_cell::sync::Lazy;
 use reqwest::StatusCode;
-use sha2::{Digest, Sha256};
+use rmp_serde::to_vec_named;
+use serde::Serialize;
+use std::io::Write;
 use tokio::sync::mpsc;
-
-// server/src/proxy/logging.rs
-
-// ... (imports)
-
-#[derive(Debug, Clone)]
-pub enum RequestBodyVariant {
-    Full(Bytes),
-    Patch(Bytes),
-}
 
 #[derive(Debug, Clone)]
 pub struct RequestLogContext {
@@ -54,7 +47,7 @@ pub struct RequestLogContext {
     pub billing_plan: Option<CacheBillingPlan>,
     pub overall_status: RequestStatus,
     pub user_request_body: Option<Bytes>,
-    pub llm_request_body: Option<RequestBodyVariant>,
+    pub llm_request_body: Option<Bytes>,
     pub llm_response_body: Option<Bytes>,
     pub user_response_body: Option<Bytes>,
 }
@@ -124,57 +117,54 @@ impl LogManager {
         }
     }
 
+    async fn store_bodies(
+        storage: &dyn Storage,
+        storage_type: &crate::schema::enum_def::StorageType,
+        created_at: i64,
+        id: i64,
+        bodies: &LogBodies,
+    ) -> bool {
+        let serialized_body = match to_vec_named(bodies) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to serialize log bodies for log_id {}: {:?}", id, e);
+                return false;
+            }
+        };
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        if let Err(e) = encoder.write_all(&serialized_body) {
+            error!("Failed to gzip log bodies for log_id {}: {:?}", id, e);
+            return false;
+        };
+        let compressed_body = match encoder.finish() {
+            Ok(v) => Bytes::from(v),
+            Err(e) => {
+                error!("Failed to finish gzip for log_id {}: {:?}", id, e);
+                return false;
+            }
+        };
+
+        let key = generate_storage_path_from_id(created_at, id, storage_type);
+
+        debug!("Storing log bodies for log_id {}: {:?}", id, key);
+
+        storage
+            .put_object(
+                &key,
+                compressed_body,
+                Some(PutObjectOptions {
+                    content_type: Some("application/msgpack"),
+                    content_encoding: Some("gzip"),
+                }),
+            )
+            .await
+            .is_ok()
+    }
+
     async fn process_log(context: RequestLogContext) {
         let log_id = context.id;
         let created_at = context.request_received_at;
-
-        let storage = get_storage().await;
-        let storage_type = storage.get_storage_type();
-
-        let mut user_request_body_hash = None;
-        if let Some(body) = &context.user_request_body {
-            let mut hasher = Sha256::new();
-            hasher.update(body);
-            let hash = format!("{:x}", hasher.finalize());
-            let key = generate_storage_path_from_hash(created_at, &hash, &storage_type);
-            if storage
-                .put_object(&key, body.clone(), Some("application/json"))
-                .await
-                .is_ok()
-            {
-                user_request_body_hash = Some(hash);
-            }
-        }
-
-        let mut llm_request_body_hash = None;
-        if let Some(variant) = &context.llm_request_body {
-            let body = match variant {
-                RequestBodyVariant::Full(b) => b,
-                RequestBodyVariant::Patch(b) => b,
-            };
-
-            let mut should_compute_hash = true;
-            if let RequestBodyVariant::Full(full_body) = variant {
-                if Some(full_body) == context.user_request_body.as_ref() {
-                    llm_request_body_hash = user_request_body_hash.clone();
-                    should_compute_hash = false;
-                }
-            }
-
-            if should_compute_hash {
-                let mut hasher = Sha256::new();
-                hasher.update(body);
-                let hash = format!("{:x}", hasher.finalize());
-                let key = generate_storage_path_from_hash(created_at, &hash, &storage_type);
-                if storage
-                    .put_object(&key, body.clone(), Some("application/json"))
-                    .await
-                    .is_ok()
-                {
-                    llm_request_body_hash = Some(hash);
-                }
-            }
-        }
 
         let normalized_llm_response_body_opt = context.llm_response_body.as_ref().map(|body| {
             // Fast path: if there's no '\r', no conversion is needed.
@@ -196,39 +186,25 @@ impl LogManager {
             Bytes::from(result)
         });
 
-        let mut llm_response_body_hash = None;
-        if let Some(body) = &normalized_llm_response_body_opt {
-            let mut hasher = Sha256::new();
-            hasher.update(body);
-            let hash = format!("{:x}", hasher.finalize());
-            let key = generate_storage_path_from_hash(created_at, &hash, &storage_type);
-            if storage
-                .put_object(&key, body.clone(), Some("text/plain"))
-                .await
-                .is_ok()
+        let bodies = LogBodies {
+            user_request_body: context.user_request_body.clone(),
+            llm_request_body: context.llm_request_body.clone(),
+            llm_response_body: normalized_llm_response_body_opt.clone(),
+            user_response_body: if normalized_llm_response_body_opt.as_ref()
+                == context.llm_response_body.as_ref()
             {
-                llm_response_body_hash = Some(hash);
-            }
-        }
-
-        let mut user_response_body_hash = None;
-        if let Some(body) = &context.user_response_body {
-            // Compare user body with the *normalized* LLM body to check for equality.
-            if normalized_llm_response_body_opt.as_ref() == Some(body) {
-                user_response_body_hash = llm_response_body_hash.clone();
+                None
             } else {
-                let mut hasher = Sha256::new();
-                hasher.update(body);
-                let hash = format!("{:x}", hasher.finalize());
-                let key = generate_storage_path_from_hash(created_at, &hash, &storage_type);
-                if storage
-                    .put_object(&key, body.clone(), Some("text/plain"))
-                    .await
-                    .is_ok()
-                {
-                    user_response_body_hash = Some(hash);
-                }
-            }
+                context.user_response_body.clone()
+            },
+        };
+
+        let storage = get_storage().await;
+        let mut final_storage_type = None;
+
+        let storage_type = storage.get_storage_type();
+        if Self::store_bodies(&**storage, &storage_type, created_at, log_id, &bodies).await {
+            final_storage_type = Some(storage_type);
         }
 
         let now = Utc::now().timestamp_millis();
@@ -251,11 +227,11 @@ impl LogManager {
             llm_response_first_chunk_at: context.first_chunk_ts,
             llm_response_completed_at: context.completion_ts,
             status: Some(context.overall_status.clone()),
-            storage_type: Some(storage_type.clone()),
-            user_request_body: user_request_body_hash,
-            llm_request_body: llm_request_body_hash,
-            llm_response_body: llm_response_body_hash,
-            user_response_body: user_response_body_hash,
+            storage_type: final_storage_type,
+            user_request_body: None,
+            llm_request_body: None,
+            llm_response_body: None,
+            user_response_body: None,
             input_tokens: context.usage.as_ref().map(|u| u.input_tokens),
             output_tokens: context.usage.as_ref().map(|u| u.output_tokens),
             reasoning_tokens: context.usage.as_ref().map(|u| u.reasoning_tokens),

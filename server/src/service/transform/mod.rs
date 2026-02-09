@@ -661,11 +661,8 @@ mod tests {
           }
         });
 
-        let transformed = transform_result(
-            openai_result,
-            LlmApiType::Openai,
-            LlmApiType::Gemini,
-        );
+        let (transformed, usage_info) =
+            transform_result(openai_result, LlmApiType::Openai, LlmApiType::Gemini);
 
         let expected_gemini_result = json!({
           "candidates": [
@@ -691,11 +688,22 @@ mod tests {
           "usageMetadata": {
             "promptTokenCount": 9,
             "candidatesTokenCount": 12,
-            "totalTokenCount": 21
+            "totalTokenCount": 21,
+            "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 9}],
+            "candidatesTokensDetails": [{"modality": "TEXT", "tokenCount": 12}]
           }
         });
 
         assert_eq!(transformed, expected_gemini_result);
+        assert_eq!(
+            usage_info,
+            Some(UsageInfo {
+                input_tokens: 9,
+                output_tokens: 12,
+                total_tokens: 21,
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -725,14 +733,16 @@ mod tests {
           }
         });
 
-        let transformed = transform_result(
-            gemini_result,
-            LlmApiType::Gemini,
-            LlmApiType::Openai,
-        );
+        let (transformed, usage_info) =
+            transform_result(gemini_result, LlmApiType::Gemini, LlmApiType::Openai);
 
         let mut transformed_obj = transformed.as_object().unwrap().clone();
-        assert!(transformed_obj.get("id").unwrap().as_str().unwrap().starts_with("chatcmpl-"));
+        assert!(transformed_obj
+            .get("id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with("chatcmpl-"));
         assert!(transformed_obj.get("created").unwrap().is_number());
         transformed_obj.remove("id");
         transformed_obj.remove("created");
@@ -757,7 +767,19 @@ mod tests {
           }
         });
 
-        assert_eq!(serde_json::to_value(transformed_obj).unwrap(), expected_openai_result);
+        assert_eq!(
+            serde_json::to_value(transformed_obj).unwrap(),
+            expected_openai_result
+        );
+        assert_eq!(
+            usage_info,
+            Some(UsageInfo {
+                input_tokens: 10,
+                output_tokens: 8,
+                total_tokens: 18,
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -792,11 +814,8 @@ mod tests {
           }
         });
 
-        let transformed = transform_result(
-            openai_result,
-            LlmApiType::Openai,
-            LlmApiType::Gemini,
-        );
+        let (transformed, usage_info) =
+            transform_result(openai_result, LlmApiType::Openai, LlmApiType::Gemini);
 
         let expected_gemini_result = json!({
           "candidates": [
@@ -827,11 +846,22 @@ mod tests {
           "usageMetadata": {
             "promptTokenCount": 9,
             "candidatesTokenCount": 12,
-            "totalTokenCount": 21
+            "totalTokenCount": 21,
+            "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 9}],
+            "candidatesTokensDetails": [{"modality": "TEXT", "tokenCount": 12}]
           }
         });
 
         assert_eq!(transformed, expected_gemini_result);
+        assert_eq!(
+            usage_info,
+            Some(UsageInfo {
+                input_tokens: 9,
+                output_tokens: 12,
+                total_tokens: 21,
+                ..Default::default()
+            })
+        );
     }
 
     #[test]
@@ -858,21 +888,31 @@ mod tests {
           ]
         });
 
-        let transformed = transform_result(
-            gemini_result,
-            LlmApiType::Gemini,
-            LlmApiType::Openai,
-        );
+        let (transformed, usage_info) =
+            transform_result(gemini_result, LlmApiType::Gemini, LlmApiType::Openai);
 
         let mut transformed_obj = transformed.as_object().unwrap().clone();
         transformed_obj.remove("id");
         transformed_obj.remove("created");
 
-        let choices = transformed_obj.get_mut("choices").unwrap().as_array_mut().unwrap();
+        let choices = transformed_obj
+            .get_mut("choices")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
         let message = choices[0].get_mut("message").unwrap().as_object_mut().unwrap();
-        let tool_calls = message.get_mut("tool_calls").unwrap().as_array_mut().unwrap();
+        let tool_calls = message
+            .get_mut("tool_calls")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
         let tool_call = tool_calls[0].as_object_mut().unwrap();
-        assert!(tool_call.get("id").unwrap().as_str().unwrap().starts_with("call_"));
+        assert!(tool_call
+            .get("id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with("call_"));
         tool_call.insert("id".to_string(), json!("FIXED_ID_FOR_TEST"));
 
         let expected_openai_result = json!({
@@ -900,7 +940,11 @@ mod tests {
           ]
         });
 
-        assert_eq!(serde_json::to_value(transformed_obj).unwrap(), expected_openai_result);
+        assert_eq!(
+            serde_json::to_value(transformed_obj).unwrap(),
+            expected_openai_result
+        );
+        assert!(usage_info.is_none());
     }
 
     #[test]
@@ -927,21 +971,31 @@ mod tests {
           ]
         });
 
-        let transformed = transform_result(
-            gemini_result,
-            LlmApiType::Gemini,
-            LlmApiType::Openai,
-        );
+        let (transformed, usage_info) =
+            transform_result(gemini_result, LlmApiType::Gemini, LlmApiType::Openai);
 
         let mut transformed_obj = transformed.as_object().unwrap().clone();
         transformed_obj.remove("id");
         transformed_obj.remove("created");
 
-        let choices = transformed_obj.get_mut("choices").unwrap().as_array_mut().unwrap();
+        let choices = transformed_obj
+            .get_mut("choices")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
         let message = choices[0].get_mut("message").unwrap().as_object_mut().unwrap();
-        let tool_calls = message.get_mut("tool_calls").unwrap().as_array_mut().unwrap();
+        let tool_calls = message
+            .get_mut("tool_calls")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
         let tool_call = tool_calls[0].as_object_mut().unwrap();
-        assert!(tool_call.get("id").unwrap().as_str().unwrap().starts_with("call_"));
+        assert!(tool_call
+            .get("id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with("call_"));
         tool_call.insert("id".to_string(), json!("FIXED_ID_FOR_TEST"));
 
         let expected_openai_result = json!({
@@ -969,7 +1023,11 @@ mod tests {
           ]
         });
 
-        assert_eq!(serde_json::to_value(transformed_obj).unwrap(), expected_openai_result);
+        assert_eq!(
+            serde_json::to_value(transformed_obj).unwrap(),
+            expected_openai_result
+        );
+        assert!(usage_info.is_none());
     }
 
     #[test]
@@ -996,7 +1054,7 @@ mod tests {
             "choices": "this should be an array"
         });
 
-        let transformed = transform_result(
+        let (transformed, usage_info) = transform_result(
             malformed_openai_result.clone(),
             LlmApiType::Openai,
             LlmApiType::Gemini,
@@ -1004,6 +1062,7 @@ mod tests {
 
         // On error, the original data should be returned
         assert_eq!(transformed, malformed_openai_result);
+        assert!(usage_info.is_none());
     }
 
 }

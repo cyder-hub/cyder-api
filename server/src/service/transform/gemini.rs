@@ -1252,6 +1252,11 @@ mod tests {
                 total_token_count: 30,
                 thoughts_token_count: None,
                 cached_content_token_count: None,
+                tool_use_prompt_token_count: None,
+                prompt_tokens_details: vec![],
+                cache_tokens_details: vec![],
+                candidates_tokens_details: vec![],
+                tool_use_prompt_tokens_details: vec![],
             }),
         };
 

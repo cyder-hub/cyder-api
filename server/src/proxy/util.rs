@@ -12,8 +12,6 @@ use crate::{
     service::cache::types::{CacheBillingPlan, CacheProvider, CacheModel},
 };
 use bytes::Bytes;
-use super::logging::RequestBodyVariant;
-
 
 // Helper to serialize reqwest::header::HeaderMap to JSON String
 pub(super) fn serialize_reqwest_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
@@ -140,13 +138,13 @@ pub(super) fn calculate_llm_request_body_for_log(
     original_request_value: &serde_json::Value,
     final_body_value: &serde_json::Value,
     final_body_bytes: &Bytes,
-) -> Result<RequestBodyVariant, (StatusCode, String)> {
+) -> Result<Option<Bytes>, (StatusCode, String)> {
     if api_type == target_api_type {
         let patch = json_patch::diff(original_request_value, final_body_value);
         if patch.is_empty() {
             // If there's no difference, we can treat it as a full body
             // that is identical to the user request body, allowing for hash optimization.
-            Ok(RequestBodyVariant::Full(final_body_bytes.clone()))
+            Ok(None)
         } else {
             let patch_bytes = Bytes::from(serde_json::to_vec(&patch).map_err(|e| {
                 (
@@ -154,9 +152,9 @@ pub(super) fn calculate_llm_request_body_for_log(
                     format!("Failed to serialize json-patch: {}", e),
                 )
             })?);
-            Ok(RequestBodyVariant::Patch(patch_bytes))
+            Ok(Some(patch_bytes))
         }
     } else {
-        Ok(RequestBodyVariant::Full(final_body_bytes.clone()))
+        Ok(Some(final_body_bytes.clone()))
     }
 }

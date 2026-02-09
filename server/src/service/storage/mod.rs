@@ -2,7 +2,7 @@ use crate::config::{StorageConfig, CONFIG};
 use crate::schema::enum_def::StorageType;
 use crate::service::storage::local::LocalStorage;
 use crate::service::storage::s3::S3Storage;
-use crate::service::storage::types::StorageResult;
+use crate::service::storage::types::{GetObjectOptions, PutObjectOptions, StorageResult};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::OnceCell;
@@ -18,9 +18,9 @@ pub trait Storage: Send + Sync {
         &self,
         key: &str,
         data: Bytes,
-        mimetype: Option<&str>,
+        options: Option<PutObjectOptions<'_>>,
     ) -> StorageResult<()>;
-    async fn get_object(&self, key: &str) -> StorageResult<Bytes>;
+    async fn get_object(&self, key: &str, options: Option<GetObjectOptions<'_>>,) -> StorageResult<Bytes>;
     async fn delete_object(&self, key: &str) -> StorageResult<()>;
     async fn get_presigned_url(&self, _key: &str) -> StorageResult<String> {
         Err(types::StorageError::Unsupported(

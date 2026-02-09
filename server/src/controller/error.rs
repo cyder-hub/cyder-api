@@ -13,6 +13,7 @@ pub enum BaseError {
     NotFound(Option<String>),
     Unauthorized(Option<String>),
     StoreError(Option<String>), // For AppStoreError
+    InternalServerError(Option<String>),
 }
 
 impl From<crate::service::app_state::AppStoreError> for BaseError {
@@ -59,6 +60,11 @@ impl IntoResponse for BaseError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 1200, // New error code category for store errors
                 msg.unwrap_or("Application cache/store operation failed".to_string()),
+            ),
+            BaseError::InternalServerError(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                0,
+                msg.unwrap_or("internal server error".to_string()),
             ),
         };
         let body = Json(json!({

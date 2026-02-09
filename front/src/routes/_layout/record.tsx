@@ -3,6 +3,7 @@ import type { Resource, Component } from 'solid-js';
 import { createFileRoute } from '@tanstack/solid-router';
 import { useI18n } from '@/i18n'; // Import the i18n hook
 import { Button } from '@/components/ui/Button';
+import { applyPatch } from 'fast-json-patch';
 import {
     DialogRoot,
     DialogContent,
@@ -24,10 +25,12 @@ import {
 import { request } from '@/services/api'; // Import the centralized request function
 import styles from './record.module.css';
 import { parseSse } from '@/utils/sse';
+import * as msgpack from '@msgpack/msgpack';
 
 import { providers as globalProviders, loadProviders } from '@/store/providerStore'; // Import global providers
 import { apiKeys as globalApiKeys, loadApiKeys } from '@/store/apiKeyStore'; // Import global API keys
 import type { ProviderListItem, ProviderBase, ApiKeyItem as GlobalApiKeyItem } from '@/store/types'; // Import shared types, rename ApiKeyItem to avoid conflict
+import { U } from '@kobalte/core/dist/index-30251fee';
 
 interface SseEvent {
 	id?: string;
@@ -356,35 +359,6 @@ function RecordPage() {
         );
     };
 
-    const JsonViewer: Component<{ data: any; title: string }> = (props) => {
-        const contentToDisplay = createMemo(() => {
-            if (props.data === null || props.data === undefined) return null;
-            if (typeof props.data === 'string') {
-                try {
-                    return JSON.stringify(JSON.parse(props.data), null, 2);
-                } catch (error) {
-                    return props.data;
-                }
-            }
-            try {
-                return JSON.stringify(props.data, null, 2);
-            } catch (error) {
-                return 'Error: Could not display object.';
-            }
-        });
-
-        return (
-            <Show when={contentToDisplay()}>
-                <div>
-                    <h4 class="text-md font-medium text-gray-700">{props.title}</h4>
-                    <div class="mt-1 text-xs bg-gray-50 p-2 rounded-md max-h-[40rem] overflow-y-auto">
-                        <pre class="whitespace-pre-wrap break-all">{contentToDisplay()}</pre>
-                    </div>
-                </div>
-            </Show>
-        );
-    };
-
     const SseEventViewer: Component<{ event: SseEvent }> = (props) => {
         const eventData = createMemo(() => {
             if (!props.event.data) return { type: 'empty' };
@@ -394,7 +368,7 @@ function RecordPage() {
                 return { type: 'text', content: props.event.data };
             }
         });
-    
+
         return (
             <div class="mb-2 border-b border-gray-200 pb-2 last:border-b-0 last:pb-0">
                 <p class="font-semibold text-gray-600">event: {props.event.event}</p>
@@ -405,25 +379,55 @@ function RecordPage() {
         );
     };
 
-    const ResponseBodyViewer: Component<{ data: any; title: string; status: string | null; }> = (props) => {
-        const contentToDisplay = createMemo(() => {
-            if (props.data === null || props.data === undefined) return { type: 'empty' };
-            const dataString = typeof props.data === 'string' ? props.data : JSON.stringify(props.data);
-    
+    const SingleRequestBodyContent: Component<{ content: string | null, title: string, children?: any }> = (props) => {
+        const displayContent = createMemo(() => {
+            if (props.content === null || props.content === undefined) return { type: 'empty' };
             try {
-                return { type: 'json', content: JSON.stringify(JSON.parse(dataString), null, 2) };
+                // It's a json, display it as a formatted JSON string
+                return { type: 'json', content: JSON.stringify(JSON.parse(props.content), null, 2) };
+            } catch (e) {
+                // It's not a json, display it as a raw text
+                return { type: 'text', content: props.content };
+            }
+        });
+
+        return (
+            <div>
+                <Show when={props.title}>
+                    <div class="flex items-center justify-between mb-1">
+                        <h4 class="text-md font-medium text-gray-700 py-1">{props.title}</h4>
+                        {props.children}
+                    </div>
+                </Show>
+                <Show when={displayContent().type !== 'empty'}>
+                    <div class="mt-1 text-xs bg-gray-50 p-2 rounded-md max-h-[40rem] overflow-y-auto">
+                        <pre class="whitespace-pre-wrap break-all">{displayContent().content}</pre>
+                    </div>
+                </Show>
+            </div>
+        );
+    };
+
+    const SingleResponseBodyContent: Component<{ content: string | null, title: string, status: string | null }> = (props) => {
+        const contentToDisplay = createMemo(() => {
+            if (props.content === null || props.content === undefined) return { type: 'empty' };
+
+            try {
+                return { type: 'json', content: JSON.stringify(JSON.parse(props.content), null, 2) };
             } catch (e) { /* Not JSON */ }
-    
+
             if (props.status === 'SUCCESS') {
                 try {
-                    const sseEvents = parseSse(dataString);
-                    if (sseEvents.length > 0) return { type: 'sse', content: sseEvents };
+                    const sseEvents = parseSse(props.content);
+                    if (sseEvents.some(e => e.data && e.data.trim() !== '')) {
+                        return { type: 'sse', content: sseEvents };
+                    }
                 } catch (e) { /* Not SSE */ }
             }
-    
-            return { type: 'text', content: dataString };
+
+            return { type: 'text', content: props.content };
         });
-    
+
         return (
             <Show when={contentToDisplay().type !== 'empty'}>
                 <div>
@@ -444,78 +448,121 @@ function RecordPage() {
             </Show>
         );
     };
-    
-    const RemoteLogViewer: Component<{ path: string | null | undefined, title: string }> = (props) => {
-        const [content, setContent] = createSignal<string | null>(null);
-        const [isLoading, setIsLoading] = createSignal(false);
-        const [error, setError] = createSignal<string | null>(null);
-    
-        const fetchContent = async () => {
-            if (!props.path) return;
-            setIsLoading(true);
-            setError(null);
-            try {
-                const data = await request<any>(`/ai/manager/api${props.path}`);
-                setContent(typeof data === 'string' ? data : JSON.stringify(data));
-            } catch (err) {
-                setError((err as Error).message || 'Failed to fetch log content.');
-            } finally {
-                setIsLoading(false);
-            }
-        };
-    
-        createEffect(() => {
-            if (props.path) fetchContent();
-        });
-    
-        return (
-            <div>
-                <Show when={isLoading()}><p>Loading...</p></Show>
-                <Show when={error()}><p class="text-red-600">Error: {error()}</p></Show>
-                <Show when={content()}>
-                    <JsonViewer data={content()} title={props.title} />
-                </Show>
-                <Show when={!isLoading() && !content() && !error() && props.path}>
-                    <p>No content to display.</p>
-                </Show>
-            </div>
-        );
-    };
 
-    const RemoteResponseBodyViewer: Component<{ path: string | null | undefined, title: string, status: string | null }> = (props) => {
-        const [content, setContent] = createSignal<string | null>(null);
-        const [isLoading, setIsLoading] = createSignal(false);
-        const [error, setError] = createSignal<string | null>(null);
-    
-        const fetchContent = async () => {
-            if (!props.path) return;
-            setIsLoading(true);
-            setError(null);
+    const BodyViewer: Component<{
+        recordId: number,
+        storageType: string | null,
+        status: string | null,
+    }> = (props) => {
+        const fetchAndDecodeBody = async () => {
+            if (!props.storageType || !props.recordId) {
+                return null;
+            }
             try {
-                const data = await request<any>(`/ai/manager/api${props.path}`);
-                setContent(typeof data === 'string' ? data : JSON.stringify(data));
-            } catch (err) {
-                setError((err as Error).message || 'Failed to fetch log content.');
-            } finally {
-                setIsLoading(false);
+                // Assuming `request` can be configured to return an ArrayBuffer
+                // The actual implementation might need adjustment based on `api.ts`
+                const response = await request(
+                    `/ai/manager/api/request_log/${props.recordId}/content`,
+                    { headers: { 'Content-Type': 'application/msgpack' } }
+                );
+                const decoded = msgpack.decode(new Uint8Array(response as ArrayBuffer)) as {
+                    user_request_body?: Uint8Array;
+                    llm_request_body?: Uint8Array;
+                    user_response_body?: Uint8Array;
+                    llm_response_body?: Uint8Array;
+                };
+                const textDecoder = new TextDecoder();
+                return {
+                    user_request_body: decoded.user_request_body ? textDecoder.decode(decoded.user_request_body) : null,
+                    llm_request_body: decoded.llm_request_body ? textDecoder.decode(decoded.llm_request_body) : null,
+                    user_response_body: decoded.user_response_body ? textDecoder.decode(decoded.user_response_body) : null,
+                    llm_response_body: decoded.llm_response_body ? textDecoder.decode(decoded.llm_response_body) : null,
+                };
+            } catch (error) {
+                console.error("Failed to fetch or decode body content:", error);
+                return {
+                    user_request_body: `Error loading content: ${error}`,
+                    llm_request_body: `Error loading content: ${error}`,
+                    user_response_body: `Error loading content: ${error}`,
+                    llm_response_body: `Error loading content: ${error}`,
+                };
             }
         };
-    
-        createEffect(() => {
-            if (props.path) fetchContent();
+
+        const [bodies] = createResource(fetchAndDecodeBody);
+
+        const [showPatched, setShowPatched] = createSignal(true);
+        const patchInfo = createMemo(() => {
+            const userContent = bodies()?.user_request_body;
+            const llmContent = bodies()?.llm_request_body;
+            if (!userContent || !llmContent || userContent === llmContent) {
+                return { isPatch: false, patchedContent: null, error: null };
+            }
+
+            try {
+                const userJson = JSON.parse(userContent);
+                const patch = JSON.parse(llmContent);
+
+                if (Array.isArray(patch) && patch.every(op => 'op' in op && 'path' in op)) {
+                    const { newDocument } = applyPatch(userJson, patch, true, false);
+                    return { isPatch: true, patchedContent: JSON.stringify(newDocument, null, 2), error: null };
+                }
+                return { isPatch: false, patchedContent: null, error: null };
+            } catch (error) {
+                return { isPatch: false, patchedContent: null, error: (error as Error).message };
+            }
         });
-    
+
         return (
-            <div>
-                <Show when={isLoading()}><p>Loading...</p></Show>
-                <Show when={error()}><p class="text-red-600">Error: {error()}</p></Show>
-                <Show when={content()}>
-                    <ResponseBodyViewer data={content()} title={props.title} status={props.status} />
+            <Suspense fallback={<p>Loading bodies...</p>}>
+                <Show when={bodies()}>
+                    {data => (
+                        <div class="space-y-4">
+                            {/* Request Body Section */}
+                            <Show when={data().user_request_body === data().llm_request_body || !data().user_request_body || !data().llm_request_body}
+                                fallback={
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <SingleRequestBodyContent content={data().user_request_body} title="User Request Body" />
+                                        <Show when={patchInfo().isPatch}
+                                            fallback={<SingleRequestBodyContent content={data().llm_request_body} title="LLM Request Body" />}
+                                        >
+                                            <SingleRequestBodyContent
+                                                content={showPatched() ? patchInfo().patchedContent : data().llm_request_body}
+                                                title="LLM Request Body"
+                                            >
+                                                <Button size="sm" variant="ghost" onClick={() => setShowPatched(!showPatched())}>
+                                                    {showPatched() ? "Show Raw Patch" : "Show Patched Body"}
+                                                </Button>
+                                            </SingleRequestBodyContent>
+                                        </Show>
+                                    </div>
+                                }
+                            >
+                                <SingleRequestBodyContent
+                                    content={data().user_request_body ? data().user_request_body : data().llm_request_body}
+                                    title="User & LLM Request Body"
+                                />
+                            </Show>
+
+                            {/* Response Body Section */}
+                            <Show when={data().user_response_body === data().llm_response_body || !data().user_response_body || !data().llm_response_body}
+                                fallback={
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <SingleResponseBodyContent content={data().llm_response_body} title="LLM Response Body" status={props.status} />
+                                        <SingleResponseBodyContent content={data().user_response_body} title="User Response Body" status={props.status} />
+                                    </div>
+                                }
+                            >
+                                <SingleResponseBodyContent
+                                    content={data().user_response_body ? data().user_response_body : data().llm_response_body}
+                                    title="User & LLM Response Body"
+                                    status={props.status}
+                                />
+                            </Show>
+                        </div>
+                    )}
                 </Show>
-                <Show when={!isLoading() && !content() && !error() && props.path}>
-                    <p>No content to display.</p>
-                </Show>
-            </div>
+            </Suspense>
         );
     };
 
@@ -727,70 +774,22 @@ function RecordPage() {
                                     <section>
                                         <h3 class="text-base font-semibold text-gray-900 border-b pb-2 mb-2">Payloads</h3>
                                         <div class="space-y-4">
-                                            <Show
-                                                when={record().user_request_body === record().llm_request_body}
+                                            <Show 
+                                                when={record().storage_type}
                                                 fallback={
-                                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                        <div>
-                                                            <Show 
-                                                                when={record().storage_type}
-                                                                fallback={<JsonViewer data={record().user_request_body} title="User Request Body" />}
-                                                            >
-                                                                <RemoteLogViewer path={record().user_request_body} title="User Request Body" />
-                                                            </Show>
-                                                        </div>
-                                                        <div>
-                                                            <Show 
-                                                                when={record().storage_type}
-                                                                fallback={<JsonViewer data={record().llm_request_body} title="LLM Request Body" />}
-                                                            >
-                                                                <RemoteLogViewer path={record().llm_request_body} title="LLM Request Body" />
-                                                            </Show>
-                                                        </div>
-                                                    </div>
+                                                    <>
+                                                        <SingleRequestBodyContent content={record().user_request_body} title="User Request Body" />
+                                                        <SingleRequestBodyContent content={record().llm_request_body} title="LLM Request Body" />
+                                                        <SingleResponseBodyContent content={record().llm_response_body} title="LLM Response Body" status={record().status} />
+                                                        <SingleResponseBodyContent content={record().user_response_body} title="User Response Body" status={record().status} />
+                                                    </>
                                                 }
                                             >
-                                                <div>
-                                                    <Show 
-                                                        when={record().storage_type}
-                                                        fallback={<JsonViewer data={record().user_request_body} title="User & LLM Request Body" />}
-                                                    >
-                                                        <RemoteLogViewer path={record().user_request_body} title="User & LLM Request Body" />
-                                                    </Show>
-                                                </div>
-                                            </Show>
-
-                                            <Show
-                                                when={record().user_response_body === record().llm_response_body}
-                                                fallback={
-                                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                        <div>
-                                                            <Show 
-                                                                when={record().storage_type}
-                                                                fallback={<ResponseBodyViewer data={record().llm_response_body} title="LLM Response Body" status={record().status} />}
-                                                            >
-                                                                <RemoteResponseBodyViewer path={record().llm_response_body} title="LLM Response Body" status={record().status} />
-                                                            </Show>
-                                                        </div>
-                                                        <div>
-                                                            <Show 
-                                                                when={record().storage_type}
-                                                                fallback={<ResponseBodyViewer data={record().user_response_body} title="User Response Body" status={record().status} />}
-                                                            >
-                                                                <RemoteResponseBodyViewer path={record().user_response_body} title="User Response Body" status={record().status} />
-                                                            </Show>
-                                                        </div>
-                                                    </div>
-                                                }
-                                            >
-                                                <div>
-                                                    <Show 
-                                                        when={record().storage_type}
-                                                        fallback={<ResponseBodyViewer data={record().user_response_body} title="User & LLM Response Body" status={record().status} />}
-                                                    >
-                                                        <RemoteResponseBodyViewer path={record().user_response_body} title="User & LLM Response Body" status={record().status} />
-                                                    </Show>
-                                                </div>
+                                                <BodyViewer
+                                                    recordId={record().id}
+                                                    storageType={record().storage_type}
+                                                    status={record().status}
+                                                />
                                             </Show>
                                         </div>
                                     </section>

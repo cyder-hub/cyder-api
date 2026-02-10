@@ -1,12 +1,11 @@
 use axum::{
-    extract::{Json, Path, Query},
+    extract::{Path, Query},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use cyder_tools::log::{debug, info};
+use cyder_tools::log::debug;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -242,112 +241,6 @@ async fn get_content_from_hash(
         .map(|bytes| bytes.into())
 }
 
-async fn flush_original_log(Json(ids): Json<Vec<i64>>) -> Result<HttpResult<()>, BaseError> {
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
-    use rmp_serde::to_vec_named;
-    use std::io::Write;
-
-    info!("Start flushing original log for {} ids", ids.len());
-
-    for id in ids {
-        info!("[Log ID: {}] Start processing.", id);
-        let request_log = RequestLog::get_by_id(id)?;
-
-        if request_log.storage_type.is_none() {
-            info!("[Log ID: {}] Storage type is none, skipping.", id);
-            continue;
-        }
-        let storage_type = request_log.storage_type.as_ref().unwrap();
-
-        let storage: &dyn Storage = match storage_type {
-            StorageType::FileSystem => get_local_storage().await,
-            StorageType::S3 => get_s3_storage()
-                .await
-                .ok_or_else(|| BaseError::NotFound(Some("S3 storage not available".to_string())))?,
-        };
-
-        let dt =
-            DateTime::from_timestamp_millis(request_log.created_at).unwrap_or_else(|| Utc::now());
-        let date_str = dt.format("%Y-%m-%d").to_string();
-
-        let mut bodies = LogBodies::default();
-        if let Some(hash) = &request_log.user_request_body {
-            if !hash.is_empty() {
-                bodies.user_request_body = Some(Bytes::from(
-                    get_content_from_hash(storage, storage_type, &date_str, hash).await?,
-                ));
-            }
-        }
-        if let Some(hash) = &request_log.llm_request_body {
-            if !hash.is_empty() {
-                bodies.llm_request_body = Some(Bytes::from(
-                    get_content_from_hash(storage, storage_type, &date_str, hash).await?,
-                ));
-            }
-        }
-        if let Some(hash) = &request_log.llm_response_body {
-            if !hash.is_empty() {
-                bodies.llm_response_body = Some(Bytes::from(
-                    get_content_from_hash(storage, storage_type, &date_str, hash).await?,
-                ));
-            }
-        }
-        if let Some(hash) = &request_log.user_response_body {
-            if !hash.is_empty() {
-                bodies.user_response_body = Some(Bytes::from(
-                    get_content_from_hash(storage, storage_type, &date_str, hash).await?,
-                ));
-            }
-        }
-        info!("[Log ID: {}] Successfully fetched original bodies.", id);
-
-        if bodies.llm_request_body == bodies.user_request_body {
-            bodies.llm_request_body = None;
-        }
-        if bodies.user_response_body == bodies.llm_response_body {
-            bodies.user_response_body = None;
-        }
-
-        let packed_data = to_vec_named(&bodies).map_err(|e| {
-            BaseError::InternalServerError(Some(format!("Failed to pack log data: {}", e)))
-        })?;
-
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&packed_data).map_err(|e| {
-            BaseError::InternalServerError(Some(format!("Failed to gzip log data: {}", e)))
-        })?;
-        let compressed_data = encoder.finish().map_err(|e| {
-            BaseError::InternalServerError(Some(format!("Failed to finish gzip encoding: {}", e)))
-        })?;
-        info!("[Log ID: {}] Successfully packed and compressed data.", id);
-
-        let key =
-            generate_storage_path_from_id(request_log.created_at, request_log.id, storage_type);
-        storage
-            .put_object(
-                &key,
-                compressed_data.into(),
-                Some(PutObjectOptions {
-                    content_type: Some("application/msgpack"),
-                    content_encoding: Some("gzip"),
-                }),
-            )
-            .await
-            .map_err(|e| {
-                BaseError::DatabaseFatal(Some(format!("Failed to put new log object: {}", e)))
-            })?;
-        info!(
-            "[Log ID: {}] Successfully stored new compressed data to key: {}",
-            id, key
-        );
-
-        RequestLog::clear_body_fields(id)?;
-        info!("[Log ID: {}] Successfully updated database record.", id);
-    }
-    Ok(HttpResult::new(()))
-}
-
 pub fn create_record_router() -> StateRouter {
     StateRouter::new().nest(
         "/request_log",
@@ -355,7 +248,6 @@ pub fn create_record_router() -> StateRouter {
             .route("/list", get(list_request_log))
             .route("/{id}", get(get_request_log))
             .route("/{id}/content", get(get_request_log_content))
-            .route("/flush", post(flush_original_log))
             .route(
                 "/{storage_type}/{date}/{hash}",
                 get(get_request_log_content_by_hash),

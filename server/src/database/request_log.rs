@@ -205,22 +205,4 @@ impl RequestLog {
             })
         })
     }
-
-    pub fn clear_body_fields(log_id: i64) -> DbResult<()> {
-        let conn = &mut get_connection();
-        db_execute!(conn, {
-            diesel::update(request_log::table.find(log_id))
-                .set((
-                    request_log::user_request_body.eq(None::<String>),
-                    request_log::llm_request_body.eq(None::<String>),
-                    request_log::llm_response_body.eq(None::<String>),
-                    request_log::user_response_body.eq(None::<String>),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Failed to update request log: {}", e)))
-                })?;
-            Ok(())
-        })
-    }
 }

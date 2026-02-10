@@ -32,6 +32,8 @@ export async function request(url: string, options: RequestInit = {}, isRetry: b
         }
         // Handle cases where response might be just the data directly or different structure
         return data; // Adjust as needed based on your API conventions
+      } else if (contentType && contentType.includes('application/msgpack')) {
+        return response.arrayBuffer();
       } else {
         return response.text(); // Return as plain text if not JSON
       }

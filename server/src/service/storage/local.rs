@@ -1,4 +1,4 @@
-use crate::service::storage::types::{StorageError, StorageResult};
+use crate::service::storage::types::{GetObjectOptions, PutObjectOptions, StorageError, StorageResult};
 use crate::service::storage::Storage;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -39,7 +39,7 @@ impl Storage for LocalStorage {
         &self,
         key: &str,
         data: Bytes,
-        _mimetype: Option<&str>,
+        _options: Option<PutObjectOptions<'_>>,
     ) -> StorageResult<()> {
         let full_path = self.get_full_path(key);
         if let Some(parent) = full_path.parent() {
@@ -54,20 +54,78 @@ impl Storage for LocalStorage {
             .map_err(|e| StorageError::Put(format!("Failed to write to file: {}", e)))
     }
 
-    async fn get_object(&self, key: &str) -> StorageResult<Bytes> {
+    async fn get_object(&self, key: &str, options: Option<GetObjectOptions<'_>>) -> StorageResult<Bytes> {
         let full_path = self.get_full_path(key);
-        fs::read(&full_path).map(Bytes::from).map_err(|e| {
+        let data = fs::read(&full_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 StorageError::NotFound
             } else {
                 StorageError::Get(format!("Failed to read file: {}", e))
             }
-        })
+        })?;
+
+        if let Some(opts) = options {
+            if let Some("gzip") = opts.content_encoding {
+                use flate2::read::GzDecoder;
+                use std::io::Read;
+                let mut decoder = GzDecoder::new(&data[..]);
+                let mut decompressed_data = Vec::new();
+                decoder
+                    .read_to_end(&mut decompressed_data)
+                    .map_err(|e| StorageError::Get(format!("Failed to decompress file: {}", e)))?;
+                return Ok(Bytes::from(decompressed_data));
+            }
+        }
+
+        Ok(Bytes::from(data))
     }
 
     async fn delete_object(&self, key: &str) -> StorageResult<()> {
         let full_path = self.get_full_path(key);
         fs::remove_file(full_path)
             .map_err(|e| StorageError::Delete(format!("Failed to delete file: {}", e)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_local_storage_gzip_compression() {
+        let dir = tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path().to_str().unwrap());
+        let key = "test_gzip.txt";
+        let original_data = Bytes::from("some data to be compressed");
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&original_data).unwrap();
+        let compressed_data = Bytes::from(encoder.finish().unwrap());
+
+        storage
+            .put_object(key, compressed_data.clone(), None)
+            .await
+            .unwrap();
+
+        // 1. Get with decompression
+        let decompressed_result = storage
+            .get_object(
+                key,
+                Some(GetObjectOptions {
+                    content_encoding: Some("gzip"),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decompressed_result, original_data);
+
+        // 2. Get without decompression
+        let raw_result = storage.get_object(key, None).await.unwrap();
+        assert_eq!(raw_result, compressed_data);
+
+        storage.delete_object(key).await.unwrap();
     }
 }

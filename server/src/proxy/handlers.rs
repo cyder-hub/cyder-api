@@ -232,9 +232,7 @@ pub async fn openai_utility_handler(
         log_context.billing_plan = billing_plan;
         log_context.overall_status = RequestStatus::Success;
         log_context.user_request_body = Some(Bytes::from(original_request_body_str));
-        log_context.llm_request_body = Some(super::logging::RequestBodyVariant::Full(Bytes::from(
-            final_body,
-        )));
+        log_context.llm_request_body = Some(Bytes::from(final_body));
         log_context.llm_response_body = Some(Bytes::from(llm_response_body_str));
         log_context.user_response_body = Some(Bytes::from(user_response_body_str));
 

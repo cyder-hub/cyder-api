@@ -156,10 +156,17 @@ impl RequestLog {
             if let Some(search_term) = payload.search.as_ref() {
                 if !search_term.is_empty() {
                     let pattern = format!("%{}%", search_term);
-                    let search_filter = request_log::dsl::model_name
-                        .like(pattern);
-                    query = query.filter(search_filter.clone());
-                    count_query = count_query.filter(search_filter);
+                    if let Ok(id_search) = search_term.parse::<i64>() {
+                        let search_filter = request_log::dsl::id
+                            .eq(id_search)
+                            .or(request_log::dsl::model_name.like(pattern.clone()));
+                        query = query.filter(search_filter.clone());
+                        count_query = count_query.filter(search_filter);
+                    } else {
+                        let search_filter = request_log::dsl::model_name.like(pattern);
+                        query = query.filter(search_filter.clone());
+                        count_query = count_query.filter(search_filter);
+                    }
                 }
             }
             if let Some(st_time) = payload.start_time {
@@ -196,6 +203,24 @@ impl RequestLog {
                 page_size,
                 list,
             })
+        })
+    }
+
+    pub fn clear_body_fields(log_id: i64) -> DbResult<()> {
+        let conn = &mut get_connection();
+        db_execute!(conn, {
+            diesel::update(request_log::table.find(log_id))
+                .set((
+                    request_log::user_request_body.eq(None::<String>),
+                    request_log::llm_request_body.eq(None::<String>),
+                    request_log::llm_response_body.eq(None::<String>),
+                    request_log::user_response_body.eq(None::<String>),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!("Failed to update request log: {}", e)))
+                })?;
+            Ok(())
         })
     }
 }

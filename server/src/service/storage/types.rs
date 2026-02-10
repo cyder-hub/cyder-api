@@ -19,3 +19,14 @@ pub enum StorageError {
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;
+
+#[derive(Debug, Default, Clone)]
+pub struct PutObjectOptions<'a> {
+    pub content_type: Option<&'a str>,
+    pub content_encoding: Option<&'a str>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct GetObjectOptions<'a> {
+    pub content_encoding: Option<&'a str>,
+}

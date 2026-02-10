@@ -706,7 +706,7 @@ pub fn transform_unified_chunk_to_anthropic_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controller::llm_types::LlmApiType;
+    use crate::schema::enum_def::LlmApiType;
     use crate::service::transform::StreamTransformer;
     use serde_json::json;
 
@@ -1112,9 +1112,10 @@ mod tests {
                 logprobs: None,
             }],
             usage: Some(UnifiedUsage {
-                prompt_tokens: 10,
-                completion_tokens: 20,
+                input_tokens: 10,
+                output_tokens: 20,
                 total_tokens: 30,
+                ..Default::default()
             }),
             created: Some(12345),
             object: Some("chat.completion".to_string()),

@@ -162,7 +162,7 @@ pub async fn handle_ollama_request(
         start_time,
         &client_ip_addr,
     );
-    log_context.llm_request_body = Some(llm_request_body_for_log);
+    log_context.llm_request_body = llm_request_body_for_log;
     log_context.user_request_body = Some(original_request_body);
 
     // Step 7: Execute the request against the downstream LLM service.

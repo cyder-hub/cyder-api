@@ -1,8 +1,10 @@
-FROM rust:1.89.0-alpine3.22
+FROM rust:1.93.0-alpine3.23
 
 ENV NODE_VERSION 24.8.0
 
 # install nodejs follow https://github.com/nodejs/docker-node/blob/main/24/alpine3.22/Dockerfile
+ENV NODE_VERSION=24.13.0
+
 RUN addgroup -g 1000 node \
     && adduser -u 1000 -G node -s /bin/sh -D node \
     && apk add --no-cache \
@@ -11,7 +13,7 @@ RUN addgroup -g 1000 node \
         curl \
     && ARCH= OPENSSL_ARCH='linux*' && alpineArch="$(apk --print-arch)" \
       && case "${alpineArch##*-}" in \
-        x86_64) ARCH='x64' CHECKSUM="499edb81e6369b28fbdeef6c7befe1f299ba1ac10a3734272c358a672081a4f5" OPENSSL_ARCH=linux-x86_64;; \
+        x86_64) ARCH='x64' CHECKSUM="d2fc40cf688de9de1d85ac67536ede51445a45925e1823255db1c3365b83ac44" OPENSSL_ARCH=linux-x86_64;; \
         x86) OPENSSL_ARCH=linux-elf;; \
         aarch64) OPENSSL_ARCH=linux-aarch64;; \
         arm*) OPENSSL_ARCH=linux-armv4;; \
@@ -79,7 +81,7 @@ RUN addgroup -g 1000 node \
   && npm --version \
   && rm -rf /tmp/*
 
-ENV YARN_VERSION 1.22.22
+ENV YARN_VERSION=1.22.22
 
 RUN apk add --no-cache --virtual .build-deps-yarn curl gnupg tar \
   # use pre-existing gpg directory, see https://github.com/nodejs/docker-node/pull/1895#issuecomment-1550389150
@@ -106,4 +108,10 @@ RUN apk add --no-cache --virtual .build-deps-yarn curl gnupg tar \
   && rm -rf /tmp/*
 
 # add denpendency
-RUN apk add musl-dev build-base perl cmake ncurses-dev libtirpc-dev --no-cache
+RUN apk add musl-dev \
+  build-base \
+  perl \
+  cmake \
+  ncurses-dev \
+  libtirpc-dev \
+  --no-cache

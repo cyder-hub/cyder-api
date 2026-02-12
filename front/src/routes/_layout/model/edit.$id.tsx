@@ -198,7 +198,11 @@ export default function ModelEditPage() {
     const selectedPlan = () => billingPlans()?.find(p => p.id === editingData?.billing_plan_id);
 
     const handleNavigateBack = () => {
-        router.navigate({ to: '/provider' }); // Navigate back to provider list
+        if (router.history.canGoBack()) {
+            router.history.back();
+        } else {
+            router.navigate({ to: '/provider' }); // Fallback to provider list
+        }
     };
 
     const handleSaveModel = async () => {

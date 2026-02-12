@@ -356,7 +356,7 @@ impl CustomFieldDefinition {
         let conn = &mut get_connection();
 
         let page = payload.page.unwrap_or(1);
-        let page_size = payload.page_size.unwrap_or(10); // Default page size
+        let page_size = payload.page_size.unwrap_or(100); // Default page size
         let offset = (page - 1) * page_size;
 
         db_execute!(conn, {

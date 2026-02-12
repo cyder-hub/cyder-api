@@ -401,11 +401,13 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
             })
             .collect();
 
-        let stop = unified_req.stop.map(|v| {
-            if v.len() == 1 {
-                OpenAiStop::String(v.into_iter().next().unwrap())
+        let stop = unified_req.stop.and_then(|v| {
+            if v.is_empty() {
+                None
+            } else if v.len() == 1 {
+                Some(OpenAiStop::String(v.into_iter().next().unwrap()))
             } else {
-                OpenAiStop::Array(v)
+                Some(OpenAiStop::Array(v))
             }
         });
 

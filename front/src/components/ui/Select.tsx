@@ -53,6 +53,7 @@ const SelectContent: Component<SelectContentProps> = (props) => {
       <SelectPrimitive.Content
         class={twMerge(
           'relative z-50 min-w-[8rem] overflow-hidden rounded-md bg-white text-gray-800 shadow-2xl data-[expanded]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[expanded]:fade-in-0 data-[closed]:zoom-out-95 data-[expanded]:zoom-in-95 data-[popper-placement=bottom]:mt-2 data-[popper-placement=top]:-mt-2',
+          'max-h-96 overflow-y-auto',
           local.class
         )}
         {...rest}

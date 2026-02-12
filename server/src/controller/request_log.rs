@@ -6,7 +6,6 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use cyder_tools::log::debug;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     config::CONFIG,
@@ -19,12 +18,12 @@ use crate::{
         app_state::StateRouter,
         storage::{
             get_local_storage, get_s3_storage,
-            types::{GetObjectOptions, PutObjectOptions},
+            types::GetObjectOptions,
             Storage,
         },
     },
     utils::{
-        storage::{generate_storage_path_from_id, LogBodies},
+        storage::generate_storage_path_from_id,
         HttpResult,
     },
 };

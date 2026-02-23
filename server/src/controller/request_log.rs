@@ -2,11 +2,10 @@ use axum::{
     extract::{Path, Query},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
 };
 use chrono::{DateTime, Utc};
 use cyder_tools::log::debug;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     config::CONFIG,
@@ -19,12 +18,12 @@ use crate::{
         app_state::StateRouter,
         storage::{
             get_local_storage, get_s3_storage,
-            types::{GetObjectOptions, PutObjectOptions},
+            types::GetObjectOptions,
             Storage,
         },
     },
     utils::{
-        storage::{generate_storage_path_from_id, LogBodies},
+        storage::generate_storage_path_from_id,
         HttpResult,
     },
 };
@@ -208,37 +207,6 @@ async fn get_request_log_content_by_hash(
     );
 
     Ok(response)
-}
-
-async fn get_content_from_hash(
-    storage: &dyn Storage,
-    storage_type: &StorageType,
-    date_str: &str,
-    hash: &str,
-) -> Result<Vec<u8>, BaseError> {
-    let key = match storage_type {
-        StorageType::FileSystem => {
-            if hash.len() < 2 {
-                return Err(BaseError::ParamInvalid(Some(
-                    "Invalid hash format".to_string(),
-                )));
-            }
-            let hash_prefix = &hash[..2];
-            format!("{}/{}/{}", date_str, hash_prefix, hash)
-        }
-        StorageType::S3 => format!("logs/{}/{}", date_str, hash),
-    };
-    storage
-        .get_object(
-            &key,
-            None,
-            //Some(GetObjectOptions {
-            //    content_encoding: Some(""),
-            //}),
-        )
-        .await
-        .map_err(|e| BaseError::DatabaseFatal(Some(e.to_string())))
-        .map(|bytes| bytes.into())
 }
 
 pub fn create_record_router() -> StateRouter {

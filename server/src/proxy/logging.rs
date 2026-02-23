@@ -19,7 +19,6 @@ use flate2::{write::GzEncoder, Compression};
 use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use rmp_serde::to_vec_named;
-use serde::Serialize;
 use std::io::Write;
 use tokio::sync::mpsc;
 

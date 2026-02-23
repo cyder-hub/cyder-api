@@ -16,10 +16,11 @@ impl From<UnifiedUsage> for UsageInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UnifiedRole {
     System,
+    #[default]
     User,
     Assistant,
     Tool,
@@ -79,7 +80,7 @@ impl UnifiedContentPart {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UnifiedMessage {
     pub role: UnifiedRole,
     pub content: Vec<UnifiedContentPart>,

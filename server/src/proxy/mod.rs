@@ -8,6 +8,7 @@ mod models;
 mod ollama;
 mod openai;
 mod prepare;
+pub mod responses;
 mod router;
 mod util;
 

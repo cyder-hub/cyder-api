@@ -9,6 +9,7 @@ pub mod openai;
 pub mod gemini;
 pub mod ollama;
 pub mod anthropic;
+pub mod responses;
 pub mod unified;
 use unified::*;
 
@@ -48,7 +49,7 @@ pub fn transform_request_data(
         LlmApiType::Gemini => deserialize!(gemini::GeminiRequestPayload, "Gemini"),
         LlmApiType::Ollama => deserialize!(ollama::OllamaRequestPayload, "Ollama"),
         LlmApiType::Anthropic => deserialize!(anthropic::AnthropicRequestPayload, "Anthropic"),
-        LlmApiType::Responses => todo!(),
+        LlmApiType::Responses => deserialize!(responses::ResponsesRequestPayload, "Responses"),
     };
 
     // The `is_stream` from the request URL is the source of truth.
@@ -84,7 +85,7 @@ pub fn transform_request_data(
         LlmApiType::Gemini => serialize!(gemini::GeminiRequestPayload),
         LlmApiType::Ollama => serialize!(ollama::OllamaRequestPayload),
         LlmApiType::Anthropic => serialize!(anthropic::AnthropicRequestPayload),
-        LlmApiType::Responses => todo!(),
+        LlmApiType::Responses => serialize!(responses::ResponsesRequestPayload),
     };
 
     match target_payload_result {
@@ -1087,7 +1088,9 @@ pub fn transform_result(
         LlmApiType::Anthropic => {
             serde_json::from_value::<anthropic::AnthropicResponse>(data.clone()).map(Into::into)
         }
-        LlmApiType::Responses => todo!(),
+        LlmApiType::Responses => {
+            serde_json::from_value::<responses::ResponsesResponse>(data.clone()).map(Into::into)
+        }
     };
 
     let unified_response = match unified_response_result {
@@ -1121,7 +1124,7 @@ pub fn transform_result(
         LlmApiType::Anthropic => {
             serde_json::to_value(anthropic::AnthropicResponse::from(unified_response))
         }
-        LlmApiType::Responses => todo!(),
+        LlmApiType::Responses => serde_json::to_value(responses::ResponsesResponse::from(unified_response)),
     };
 
     match target_payload_result {
@@ -1234,7 +1237,17 @@ impl StreamTransformer {
                             .and_then(|v| billing::parse_usage_info(&v, self.api_type))
                     })
             }
-            LlmApiType::Responses => todo!()
+            LlmApiType::Responses => {
+                // Responses format is similar to OpenAI, usage is in the last chunk.
+                self.original_events
+                    .iter()
+                    .rev()
+                    .find_map(|e| {
+                        serde_json::from_str::<Value>(&e.data)
+                            .ok()
+                            .and_then(|v| billing::parse_usage_info(&v, self.api_type))
+                    })
+            }
         }
     }
 
@@ -1285,7 +1298,8 @@ impl StreamTransformer {
                     serde_json::from_str(&event.data);
                 event_result.map(|event| event.into())
             }
-            LlmApiType::Responses => todo!()
+            LlmApiType::Responses => serde_json::from_str::<responses::ResponsesChunkResponse>(&event.data)
+                .map(|p| p.into()),
         };
 
         let mut unified_chunk = match unified_chunk_result {
@@ -1341,7 +1355,14 @@ impl StreamTransformer {
             LlmApiType::Anthropic => {
                 anthropic::transform_unified_chunk_to_anthropic_events(unified_chunk, self)
             }
-            LlmApiType::Responses => todo!()
+            LlmApiType::Responses => {
+                let value =
+                    serde_json::to_value(responses::ResponsesChunkResponse::from(unified_chunk)).ok()?;
+                Some(vec![SseEvent {
+                    data: serde_json::to_string(&value).unwrap_or_default(),
+                    ..Default::default()
+                }])
+            }
         }
     }
 

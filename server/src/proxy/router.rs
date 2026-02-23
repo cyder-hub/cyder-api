@@ -5,6 +5,7 @@ use axum::{
     extract::{ConnectInfo, Path, Query, Request, State},
     routing::{any, get},
 };
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     schema::enum_def::LlmApiType,
@@ -16,6 +17,7 @@ use super::gemini::handle_gemini_request;
 use super::handlers::{list_models_handler, openai_utility_handler};
 use super::ollama::handle_ollama_request;
 use super::openai::handle_openai_request;
+use super::responses::handle_responses_request;
 
 fn create_openai_router() -> StateRouter {
     create_state_router()
@@ -134,16 +136,48 @@ fn create_ollama_router() -> StateRouter {
         )
 }
 
+fn create_responses_router() -> StateRouter {
+    create_state_router()
+        .route(
+            "/",
+            any(
+                |State(app_state),
+                 Query(query_params): Query<HashMap<String, String>>,
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    handle_responses_request(app_state, addr, query_params, request).await
+                },
+            ),
+        )
+        .route(
+            "/models",
+            get(
+                |State(app_state),
+                 Query(params): Query<HashMap<String, String>>,
+                 request: Request<Body>| async move {
+                    list_models_handler(app_state, params, request, LlmApiType::Responses).await
+                },
+            ),
+        )
+}
+
 pub fn create_proxy_router() -> StateRouter {
     let openai_router = create_openai_router();
     let anthropic_router = create_anthropic_router();
     let ollama_router = create_ollama_router();
+    let responses_router = create_responses_router();
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
     create_state_router()
         .nest("/openai", openai_router.clone())
         .nest("/openai/v1", openai_router)
         .nest("/anthropic", anthropic_router.clone())
         .nest("/anthropic/v1", anthropic_router)
         .nest("/ollama", ollama_router)
+        .nest("/responses", responses_router.clone())
+        .nest("/responses/v1", responses_router)
         .route(
             "/gemini/v1beta/models", // Exact match for listing models
             get(
@@ -167,4 +201,5 @@ pub fn create_proxy_router() -> StateRouter {
                 },
             ),
         )
+        .layer(cors)
 }

@@ -1,72 +1,118 @@
-import { getAccessToken, tryRefreshToken } from './auth';
-// Optional: Import router or navigation functions if needed for redirects
-// import { useNavigate } from "@solidjs/router";
+import axios from "axios";
+import { useAuthStore } from "@/store/authStore";
+import router from "@/router";
 
-export async function request(url: string, options: RequestInit = {}, isRetry: boolean = false): Promise<any> {
-  // const navigate = useNavigate(); // If using router for redirects
-  const token = getAccessToken(); // Get token from global signal
+const apiClient = axios.create({
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
 
-  const headers = new Headers(options.headers);
+apiClient.interceptors.request.use(
+  (config) => {
+    const authStore = useAuthStore();
+    const token = authStore.accessToken;
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  },
+);
 
-  // Set a default Content-Type if one isn't provided by the caller.
-  if (!headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
-  }
+let isRefreshing = false;
+let failedQueue: {
+  resolve: (value?: any) => void;
+  reject: (reason?: any) => void;
+}[] = [];
 
-  // Add Authorization header only if token exists, potentially overwriting.
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
+const processQueue = (error: any, token: string | null = null) => {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token);
+    }
+  });
+  failedQueue = [];
+};
 
-  try {
-    const response = await fetch(url, { ...options, headers });
+apiClient.interceptors.response.use(
+  (response) => {
+    // If responseType is arraybuffer, blob, etc., return response.data directly
+    if (
+      response.config.responseType &&
+      response.config.responseType !== "json"
+    ) {
+      return response.data;
+    }
+    // For JSON, handle optional .data wrapper if it exists and matches our API structure
+    if (
+      response.data &&
+      typeof response.data === "object" &&
+      "data" in response.data
+    ) {
+      return response.data.data;
+    }
+    return response.data;
+  },
+  async (error) => {
+    const originalRequest = error.config;
+    const authStore = useAuthStore();
 
-    if (response.ok) {
-      const contentType = response.headers.get('content-type');
-      if (contentType && contentType.includes('application/json')) {
-        const data = await response.json();
-        // Assuming API response structure is { data: [...] } or { data: {...} }
-        // Or sometimes { code: ..., message: ..., data: ... }
-        if (data && typeof data.data !== 'undefined') {
-          return data.data;
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        })
+          .then((token) => {
+            originalRequest.headers["Authorization"] = "Bearer " + token;
+            return apiClient(originalRequest);
+          })
+          .catch((err) => {
+            return Promise.reject(err);
+          });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      const refreshToken = localStorage.getItem("auth_token");
+      if (!refreshToken) {
+        // Handle logout
+        return Promise.reject(error);
+      }
+
+      try {
+        const response = await axios.post(
+          "/ai/manager/api/auth/refresh_token",
+          {},
+          {
+            headers: { Authorization: `Bearer ${refreshToken}` },
+          },
+        );
+        const newAccessToken = response.data.data;
+        authStore.setAccessToken(newAccessToken);
+        originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
+        processQueue(null, newAccessToken);
+        return apiClient(originalRequest);
+      } catch (refreshError: any) {
+        processQueue(refreshError, null);
+        if (refreshError.response?.status === 401) {
+          authStore.setAccessToken(null);
+          localStorage.removeItem("auth_token");
+          router.push({ name: "Login" });
         }
-        // Handle cases where response might be just the data directly or different structure
-        return data; // Adjust as needed based on your API conventions
-      } else if (contentType && contentType.includes('application/msgpack')) {
-        return response.arrayBuffer();
-      } else {
-        return response.text(); // Return as plain text if not JSON
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
       }
     }
 
-    // --- Token Refresh Logic ---
-    if ((response.status === 401 || response.status === 403) && !isRetry) {
-      console.log("Access token expired or invalid, attempting refresh...");
-      const refreshed = await tryRefreshToken();
+    return Promise.reject(error);
+  },
+);
 
-      if (refreshed) {
-        console.log("Token refreshed, retrying original request...");
-        // Retry the request with the new token (obtained via getAccessToken inside the recursive call)
-        return request(url, options, true); // Pass isRetry = true to prevent infinite loops
-      } else {
-        console.error("Token refresh failed. Logging out or redirecting.");
-        // Optional: Clear tokens and redirect to login
-        // logout(); // Assuming logout clears tokens
-        // navigate('/login', { replace: true });
-        throw new Error(`Authentication error: Refresh failed (${response.status})`);
-      }
-    }
-    // --- End Token Refresh Logic ---
-
-    // Handle other non-ok responses
-    console.error("API request failed:", response.status, response.statusText);
-    const errorBody = await response.text();
-    console.error("Error body:", errorBody);
-    throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-
-  } catch (error) {
-    console.error("Network or other error during API request:", error);
-    // Re-throw the error so calling code can handle it
-    throw error;
-  }
-}
+export const request = apiClient;

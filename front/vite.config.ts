@@ -1,26 +1,14 @@
-import { fileURLToPath, URL } from "node:url";
+import path from 'path'
+import { defineConfig } from 'vite'
+import vue from '@vitejs/plugin-vue'
+import tailwindcss from '@tailwindcss/vite'
 
-import { defineConfig } from 'vite';
-import { tanstackRouter } from '@tanstack/router-plugin/vite';
-import solidPlugin from 'vite-plugin-solid';
-import tailwindcss from '@tailwindcss/vite';
-import devtools from 'solid-devtools/vite';
-
+// https://vite.dev/config/
 export default defineConfig({
-  plugins: [
-    devtools({
-      autoname: true, // e.g. signal name will be based on variable name
-    }),
-    tanstackRouter({
-        target: 'solid',
-        autoCodeSplitting: true,
-    }),
-    solidPlugin(),
-    tailwindcss(),
-  ],
-  base: "/ai/manager/ui",
+  base: '/ai/manager/ui',
+  plugins: [vue(), tailwindcss()],
   server: {
-    port: 29528,
+    port: 29528, // Matches front/vite.config.ts port
     allowedHosts: true,
     proxy: {
       '/ai/manager/api': {
@@ -29,12 +17,9 @@ export default defineConfig({
       },
     },
   },
-  build: {
-    target: 'esnext',
-  },
   resolve: {
-			alias: {
-				'@': fileURLToPath(new URL('./src', import.meta.url)),
-			},
-		},
-});
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+})

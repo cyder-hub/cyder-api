@@ -1,0 +1,571 @@
+<template>
+  <div class="p-6 space-y-6">
+    <!-- Page Header -->
+    <div class="flex justify-between items-start">
+      <div>
+        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
+          {{ $t("customFieldsPage.title") }}
+        </h1>
+        <p class="mt-1 text-sm text-gray-500">
+          {{ $t("customFieldsPage.description") }}
+        </p>
+      </div>
+      <Button @click="handleOpenAddModal" variant="outline" :disabled="loading">
+        <Plus class="h-4 w-4 mr-1.5" />
+        {{ $t("customFieldsPage.addCustomField") }}
+      </Button>
+    </div>
+
+    <!-- Data Table -->
+    <div
+      v-if="loading"
+      class="flex items-center justify-center py-16 text-gray-400"
+    >
+      <Loader2 class="h-5 w-5 animate-spin mr-2" />
+      <span class="text-sm">{{ $t("loading") }}</span>
+    </div>
+
+    <div
+      v-else-if="!store.customFields.length"
+      class="flex flex-col items-center justify-center py-20 text-gray-400"
+    >
+      <FileText class="h-10 w-10 mb-3 stroke-1" />
+      <p class="text-sm font-medium text-gray-500">
+        {{ $t("customFieldsPage.noData") }}
+      </p>
+    </div>
+
+    <div v-else class="border border-gray-200 rounded-lg overflow-hidden">
+      <Table>
+        <TableHeader>
+          <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
+            <TableHead
+              class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >{{ $t("customFieldsPage.table.name") }}</TableHead
+            >
+            <TableHead
+              class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >{{ $t("customFieldsPage.table.fieldName") }}</TableHead
+            >
+            <TableHead
+              class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >{{ $t("customFieldsPage.table.fieldType") }}</TableHead
+            >
+            <TableHead
+              class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >{{ $t("customFieldsPage.table.placement") }}</TableHead
+            >
+            <TableHead
+              class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >{{ $t("customFieldsPage.table.enabled") }}</TableHead
+            >
+            <TableHead
+              class="text-xs font-medium text-gray-500 uppercase tracking-wider text-right"
+              >{{ $t("actions") }}</TableHead
+            >
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow v-for="field in store.customFields" :key="field.id">
+            <TableCell class="font-medium text-gray-900">{{
+              field.name || "—"
+            }}</TableCell>
+            <TableCell class="font-mono text-xs text-gray-600">{{
+              field.field_name
+            }}</TableCell>
+            <TableCell>
+              <Badge variant="secondary" class="font-mono text-xs">{{
+                field.field_type
+              }}</Badge>
+            </TableCell>
+            <TableCell>
+              <Badge variant="outline" class="text-xs">{{
+                field.field_placement
+              }}</Badge>
+            </TableCell>
+            <TableCell>
+              <Checkbox
+                :checked="field.is_enabled"
+                @update:checked="() => handleToggleEnable(field)"
+              />
+            </TableCell>
+            <TableCell class="text-right">
+              <Button
+                variant="ghost"
+                size="sm"
+                class="text-gray-600 hover:text-gray-900"
+                @click="handleOpenEditModal(field)"
+              >
+                <Pencil class="h-3.5 w-3.5 mr-1" />
+                {{ $t("edit") }}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="text-gray-400 hover:text-red-600"
+                @click="handleDelete(field.id, field.name || field.field_name)"
+              >
+                <Trash2 class="h-3.5 w-3.5 mr-1" />
+                {{ $t("delete") }}
+              </Button>
+            </TableCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+    </div>
+
+    <!-- Edit/Add Modal -->
+    <Dialog :open="showEditModal" @update:open="setShowEditModal">
+      <DialogContent class="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle class="text-lg font-semibold text-gray-900">
+            {{
+              editingField.id
+                ? $t("customFieldsPage.modal.titleEdit")
+                : $t("customFieldsPage.modal.titleAdd")
+            }}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div class="space-y-4 pt-2">
+          <div class="grid grid-cols-2 gap-4">
+            <!-- Field Name (Required) -->
+            <div class="space-y-1.5">
+              <Label class="text-gray-700">
+                {{ $t("customFieldsPage.modal.labelFieldName") }}
+                <span class="text-red-500 ml-0.5">*</span>
+              </Label>
+              <Input
+                v-model="editingField.field_name"
+                :placeholder="$t('customFieldsPage.modal.placeholderFieldName')"
+                class="font-mono text-sm"
+              />
+            </div>
+
+            <!-- Name -->
+            <div class="space-y-1.5">
+              <Label class="text-gray-700">{{
+                $t("customFieldsPage.modal.labelName")
+              }}</Label>
+              <Input
+                v-model="editingField.name"
+                :placeholder="$t('customFieldsPage.modal.placeholderName')"
+              />
+            </div>
+          </div>
+
+          <!-- Description -->
+          <div class="space-y-1.5">
+            <Label class="text-gray-700">{{
+              $t("customFieldsPage.modal.labelDescription")
+            }}</Label>
+            <Input
+              v-model="editingField.description"
+              :placeholder="$t('customFieldsPage.modal.placeholderDescription')"
+            />
+          </div>
+
+          <!-- Placement & Type row -->
+          <div class="grid grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+              <Label class="text-gray-700">
+                {{ $t("customFieldsPage.modal.labelPlacement") }}
+                <span class="text-red-500 ml-0.5">*</span>
+              </Label>
+              <Select v-model="editingField.field_placement">
+                <SelectTrigger class="w-full">
+                  <SelectValue
+                    :placeholder="
+                      $t('customFieldsPage.modal.placeholderPlacement')
+                    "
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="opt in fieldPlacements"
+                    :key="opt"
+                    :value="opt"
+                    >{{ opt }}</SelectItem
+                  >
+                </SelectContent>
+              </Select>
+            </div>
+            <div class="space-y-1.5">
+              <Label class="text-gray-700">
+                {{ $t("customFieldsPage.modal.labelFieldType") }}
+                <span class="text-red-500 ml-0.5">*</span>
+              </Label>
+              <Select v-model="editingField.field_type">
+                <SelectTrigger class="w-full">
+                  <SelectValue
+                    :placeholder="
+                      $t('customFieldsPage.modal.placeholderFieldType')
+                    "
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="opt in fieldTypes"
+                    :key="opt"
+                    :value="opt"
+                    >{{ opt }}</SelectItem
+                  >
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <!-- Conditional Value Fields -->
+          <template v-if="editingField.field_type !== 'UNSET'">
+            <div class="pt-2">
+              <hr class="border-gray-100" />
+            </div>
+
+            <div
+              v-if="['STRING', 'JSON_STRING'].includes(editingField.field_type)"
+              class="space-y-1.5"
+            >
+              <Label class="text-gray-700">{{
+                $t("customFieldsPage.modal.labelValue")
+              }}</Label>
+              <Input
+                v-model="editingField.string_value"
+                :placeholder="
+                  editingField.field_type === 'STRING'
+                    ? $t('customFieldsPage.modal.placeholderStringValue')
+                    : $t('customFieldsPage.modal.placeholderJsonStringValue')
+                "
+                :class="{
+                  'font-mono text-sm':
+                    editingField.field_type === 'JSON_STRING',
+                }"
+              />
+            </div>
+
+            <div
+              v-else-if="editingField.field_type === 'INTEGER'"
+              class="space-y-1.5"
+            >
+              <Label class="text-gray-700">{{
+                $t("customFieldsPage.modal.labelValue")
+              }}</Label>
+              <Input
+                type="number"
+                v-model.number="editingField.integer_value"
+                step="1"
+                :placeholder="
+                  $t('customFieldsPage.modal.placeholderIntegerValue')
+                "
+                class="font-mono text-sm"
+              />
+            </div>
+
+            <div
+              v-else-if="editingField.field_type === 'NUMBER'"
+              class="space-y-1.5"
+            >
+              <Label class="text-gray-700">{{
+                $t("customFieldsPage.modal.labelValue")
+              }}</Label>
+              <Input
+                type="number"
+                v-model.number="editingField.number_value"
+                :placeholder="
+                  $t('customFieldsPage.modal.placeholderNumberValue')
+                "
+                class="font-mono text-sm"
+              />
+            </div>
+
+            <div
+              v-else-if="editingField.field_type === 'BOOLEAN'"
+              class="flex items-center justify-between p-3.5 border border-gray-200 rounded-lg"
+            >
+              <Label
+                for="boolean_value_checkbox"
+                class="text-gray-700 font-medium cursor-pointer"
+                >{{ $t("customFieldsPage.modal.labelValue") }}</Label
+              >
+              <Checkbox
+                id="boolean_value_checkbox"
+                :checked="editingField.boolean_value"
+                @update:checked="
+                  (val: boolean) => (editingField.boolean_value = val)
+                "
+              />
+            </div>
+          </template>
+
+          <div class="pt-2">
+            <hr class="border-gray-100" />
+          </div>
+
+          <!-- Enabled -->
+          <div
+            class="flex items-center justify-between p-3.5 border border-gray-200 rounded-lg"
+          >
+            <Label
+              for="is_enabled_checkbox"
+              class="text-gray-700 font-medium cursor-pointer"
+              >{{ $t("customFieldsPage.modal.labelEnabled") }}</Label
+            >
+            <Checkbox
+              id="is_enabled_checkbox"
+              :checked="editingField.is_enabled"
+              @update:checked="
+                (val: boolean) => (editingField.is_enabled = val)
+              "
+            />
+          </div>
+        </div>
+
+        <DialogFooter class="pt-4 mt-2 border-t border-gray-100">
+          <Button
+            @click="handleCloseModal"
+            variant="ghost"
+            class="text-gray-600"
+            >{{ $t("common.cancel") }}</Button
+          >
+          <Button @click="handleSave" variant="default">{{
+            $t("common.save")
+          }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
+import { Plus, Pencil, Trash2, Loader2, FileText } from "lucide-vue-next";
+import { Api } from "@/services/request";
+import { useCustomFieldStore } from "@/store/customFieldStore";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+
+const { t: $t } = useI18n();
+const store = useCustomFieldStore();
+
+const loading = ref(true);
+const showEditModal = ref(false);
+
+const setShowEditModal = (val: boolean) => {
+  showEditModal.value = val;
+};
+
+type CustomFieldType =
+  | "STRING"
+  | "INTEGER"
+  | "NUMBER"
+  | "BOOLEAN"
+  | "JSON_STRING"
+  | "UNSET";
+const fieldPlacements = ["HEADER", "QUERY", "BODY"];
+const fieldTypes: CustomFieldType[] = [
+  "STRING",
+  "INTEGER",
+  "NUMBER",
+  "BOOLEAN",
+  "JSON_STRING",
+  "UNSET",
+];
+
+interface EditingCustomField {
+  id: number | null;
+  name: string | undefined;
+  description: string | undefined;
+  field_name: string;
+  field_placement: string;
+  field_type: CustomFieldType | string;
+  string_value: string | undefined;
+  integer_value: number | undefined;
+  number_value: number | undefined;
+  boolean_value: boolean;
+  is_enabled: boolean;
+}
+
+const newCustomFieldTemplate = (): EditingCustomField => ({
+  id: null,
+  name: "",
+  description: "",
+  field_name: "",
+  field_placement: "",
+  field_type: "UNSET",
+  string_value: undefined,
+  integer_value: undefined,
+  number_value: undefined,
+  boolean_value: false,
+  is_enabled: true,
+});
+
+const editingField = ref<EditingCustomField>(newCustomFieldTemplate());
+
+onMounted(async () => {
+  loading.value = true;
+  await store.fetchCustomFields();
+  loading.value = false;
+});
+
+const fetchCustomFieldDetailAPI = async (id: number) => {
+  try {
+    const response = await Api.getCustomFieldDetail(id);
+    return response as any;
+  } catch (error) {
+    console.error(`Failed to fetch custom field detail for id ${id}:`, error);
+    return null;
+  }
+};
+
+const handleOpenAddModal = () => {
+  editingField.value = newCustomFieldTemplate();
+  showEditModal.value = true;
+};
+
+const handleOpenEditModal = async (field: any) => {
+  const detail = await fetchCustomFieldDetailAPI(field.id);
+  if (detail) {
+    editingField.value = {
+      id: detail.id,
+      name: detail.name,
+      description: detail.description,
+      field_name: detail.field_name,
+      field_placement: detail.field_placement,
+      field_type: detail.field_type as CustomFieldType,
+      string_value: detail.string_value,
+      integer_value: detail.integer_value,
+      number_value: detail.number_value,
+      boolean_value: detail.boolean_value,
+      is_enabled: detail.is_enabled,
+    };
+    showEditModal.value = true;
+  } else {
+    alert($t("customFieldsPage.alert.loadDetailFailed"));
+  }
+};
+
+const handleCloseModal = () => {
+  showEditModal.value = false;
+};
+
+const handleSave = async () => {
+  const field = editingField.value;
+  if (!field.field_name?.trim()) {
+    alert($t("customFieldsPage.alert.nameAndTypeRequired"));
+    return;
+  }
+
+  const payload = {
+    name: field.name,
+    description: field.description,
+    field_name: field.field_name,
+    field_placement: field.field_placement,
+    field_type: field.field_type,
+    string_value:
+      field.field_type === "STRING" || field.field_type === "JSON_STRING"
+        ? field.string_value
+        : null,
+    integer_value: field.field_type === "INTEGER" ? field.integer_value : null,
+    number_value: field.field_type === "NUMBER" ? field.number_value : null,
+    boolean_value: field.field_type === "BOOLEAN" ? field.boolean_value : null,
+    is_enabled: field.is_enabled,
+  };
+
+  try {
+    if (field.id) {
+      await Api.updateCustomField(field.id, payload);
+    } else {
+      await Api.createCustomField(payload);
+    }
+    showEditModal.value = false;
+    await store.fetchCustomFields();
+  } catch (error: any) {
+    console.error("Failed to save custom field:", error);
+    alert(
+      $t("customFieldsPage.alert.saveFailed", {
+        error: error.message || $t("unknownError"),
+      }),
+    );
+  }
+};
+
+const handleToggleEnable = async (field: any) => {
+  const updatedField = {
+    ...field,
+    is_enabled: !field.is_enabled,
+  };
+
+  const payload = {
+    name: updatedField.name,
+    description: updatedField.description,
+    field_name: updatedField.field_name,
+    field_placement: updatedField.field_placement,
+    field_type: updatedField.field_type,
+    string_value:
+      updatedField.field_type === "STRING" ||
+      updatedField.field_type === "JSON_STRING"
+        ? updatedField.string_value
+        : null,
+    integer_value:
+      updatedField.field_type === "INTEGER" ? updatedField.integer_value : null,
+    number_value:
+      updatedField.field_type === "NUMBER" ? updatedField.number_value : null,
+    boolean_value:
+      updatedField.field_type === "BOOLEAN" ? updatedField.boolean_value : null,
+    is_enabled: updatedField.is_enabled,
+  };
+
+  try {
+    await Api.updateCustomField(updatedField.id, payload);
+    await store.fetchCustomFields();
+  } catch (error: any) {
+    console.error("Failed to toggle custom field status:", error);
+    alert(
+      $t("customFieldsPage.alert.toggleFailed", {
+        error: error.message || $t("unknownError"),
+      }),
+    );
+  }
+};
+
+const handleDelete = async (id: number, name: string) => {
+  if (confirm($t("customFieldsPage.confirmDelete", { name: name }))) {
+    try {
+      await Api.deleteCustomField(id);
+      await store.fetchCustomFields();
+    } catch (error: any) {
+      console.error("Failed to delete custom field:", error);
+      alert(
+        $t("customFieldsPage.alert.deleteFailed", {
+          error: error.message || $t("unknownError"),
+        }),
+      );
+    }
+  }
+};
+</script>

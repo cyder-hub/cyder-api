@@ -4,7 +4,7 @@ use std::collections::{HashSet, HashMap};
 use std::time::Duration;
 
 use axum::Router;
-use cyder_tools::log::{debug, info};
+use cyder_tools::log::{debug, info, error};
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 use sha2::{Sha256, Digest};
@@ -816,13 +816,25 @@ impl AppState {
         
         let results = self.custom_field_cache.mget(&key_refs).await?;
         
-        results.iter().zip(key_refs.iter()).for_each(|(res, key)| {
-            if res.is_none() {
-                debug!("cache miss: {}", key);
+        let mut final_fields = Vec::new();
+        for (id, res) in ids.iter().zip(results.into_iter()) {
+            match res {
+                Some(field) => final_fields.push(field),
+                None => {
+                    let id_val = *id;
+                    debug!("cache miss for custom field {}, fetching from DB", id_val);
+                    if let Ok(field_db) = CustomFieldDefinition::get_by_id(id_val) {
+                        let cache_item = Arc::new(CacheCustomField::from(CustomFieldDefinition::from(field_db)));
+                        let _ = self.custom_field_cache.set_positive(&CacheKey::CustomField(id_val).to_string(), &cache_item).await;
+                        final_fields.push(cache_item);
+                    } else {
+                        error!("Failed to fetch custom field {} from DB after cache miss", id_val);
+                    }
+                }
             }
-        });
+        }
         
-        Ok(results.into_iter().flatten().collect())
+        Ok(final_fields)
     }
 
     pub async fn invalidate_custom_field(&self, id: i64) -> Result<(), AppStoreError> {

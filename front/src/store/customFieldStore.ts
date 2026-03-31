@@ -1,48 +1,28 @@
-import { createResource, createSignal, createRoot } from 'solid-js';
-import { request } from '@/services/api';
+import { defineStore } from "pinia";
+import { ref } from "vue";
+import { Api } from "@/services/request";
+import type { CustomFieldDefinition } from "./types";
 
-export interface CustomFieldDefinition {
-    id: number;
-    name: string | null;
-    description: string | null;
-    field_name: string;
-    field_placement: string;
-    field_type: string;
-    string_value: string | null;
-    integer_value: number | null;
-    number_value: number | null;
-    boolean_value: boolean | null;
-    is_enabled: boolean;
-}
+export const useCustomFieldStore = defineStore("customField", () => {
+  const customFields = ref<CustomFieldDefinition[]>([]);
 
-const fetchCustomFieldsAPI = async (): Promise<CustomFieldDefinition[]> => {
+  async function fetchCustomFields() {
     try {
-        const response = await request("/ai/manager/api/custom_field_definition/list?page_size=1000");
-        return response.list || [];
+      const response = await Api.getCustomFieldList();
+      customFields.value = response.list || [];
     } catch (error) {
-        console.error("Failed to fetch custom fields:", error);
-        throw error;
+      console.error("Failed to fetch custom fields:", error);
+      customFields.value = [];
     }
-};
+  }
 
-function createCustomFieldStore() {
-    const [shouldFetch, setShouldFetch] = createSignal(false);
+  const refetchCustomFields = fetchCustomFields;
+  const loadCustomFields = fetchCustomFields;
 
-    const [resource, { refetch }] = createResource<CustomFieldDefinition[]>(shouldFetch, fetchCustomFieldsAPI, { initialValue: [] });
-
-    function loadCustomFields() {
-        setShouldFetch(true);
-    }
-
-    return {
-        customFields: resource,
-        refetchCustomFields: refetch,
-        loadCustomFields,
-    };
-}
-
-const store = createRoot(createCustomFieldStore);
-
-export const customFields = store.customFields;
-export const refetchCustomFields = store.refetchCustomFields;
-export const loadCustomFields = store.loadCustomFields;
+  return {
+    customFields,
+    fetchCustomFields,
+    refetchCustomFields,
+    loadCustomFields,
+  };
+});

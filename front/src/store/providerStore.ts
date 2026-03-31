@@ -1,28 +1,24 @@
-import { createResource, createSignal, createRoot } from 'solid-js';
-import { request } from '../services/api';
-import type { ProviderListItem } from './types';
+import { defineStore } from "pinia";
+import { ref } from "vue";
+import { Api } from "@/services/request";
+import type { ProviderListItem } from "./types";
 
-const fetchProvidersAPI = async (): Promise<ProviderListItem[]> => {
+// --- Pinia Store Definition ---
+
+export const useProviderStore = defineStore("provider", () => {
+  const providers = ref<ProviderListItem[]>([]);
+
+  async function fetchProviders() {
     try {
-        const response = await request("/ai/manager/api/provider/detail/list");
-        return response || []; // Assuming `request` returns the data array or null/undefined
+      providers.value = await Api.getProviderDetailList();
     } catch (error) {
-        console.error("Failed to fetch global providers:", error);
-        return [];
+      console.error("Failed to fetch global providers:", error);
+      providers.value = [];
     }
-};
+  }
 
-function createProviderStore() {
-    const [shouldFetch, setShouldFetch] = createSignal(false);
+  const refetchProviders = fetchProviders;
+  const loadProviders = fetchProviders;
 
-    const [providers, { refetch: refetchProviders }] = createResource<ProviderListItem[]>(shouldFetch, fetchProvidersAPI, { initialValue: [] });
-
-    function loadProviders() {
-        setShouldFetch(true);
-    }
-    return { providers, refetchProviders, loadProviders };
-}
-
-const { providers, refetchProviders, loadProviders } = createRoot(createProviderStore);
-
-export { providers, refetchProviders, loadProviders };
+  return { providers, fetchProviders, refetchProviders, loadProviders };
+});

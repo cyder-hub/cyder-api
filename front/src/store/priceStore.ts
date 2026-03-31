@@ -1,81 +1,64 @@
-import { createResource, createSignal, createRoot } from 'solid-js';
-import { request } from '@/services/api';
-import { toastController } from '@/components/GlobalMessage';
+import { defineStore } from "pinia";
+import { ref, watch } from "vue";
+import { Api } from "@/services/request";
+import type { BillingPlan, PriceRule } from "./types";
 
-export interface BillingPlan {
-    id: number;
-    name: string;
-    description: string | null;
-    currency: string;
-    created_at: number;
-    updated_at: number;
-}
+export const usePriceStore = defineStore("price", () => {
+  const billingPlans = ref<BillingPlan[]>([]);
+  const priceRules = ref<PriceRule[]>([]);
+  const selectedPlanId = ref<number | null>(null);
 
-export interface PriceRule {
-    id: number;
-    plan_id: number;
-    description: string | null;
-    is_enabled: boolean;
-    effective_from: number;
-    effective_until: number | null;
-    usage_type: string;
-    media_type: string | null;
-    price_in_micro_units: number;
-}
-
-const fetchBillingPlansAPI = async (): Promise<BillingPlan[]> => {
+  async function fetchBillingPlans() {
     try {
-        const response = await request('/ai/manager/api/price/plan/list');
-        return response || [];
+      billingPlans.value = await Api.getBillingPlanList();
     } catch (error) {
-        console.error("Failed to fetch billing plans", error);
-        toastController.error("Failed to fetch billing plans");
-        return [];
+      console.error("Failed to fetch billing plans", error);
+      billingPlans.value = [];
     }
-};
+  }
 
-const fetchPriceRulesAPI = async (planId: number | null): Promise<PriceRule[]> => {
-    if (!planId) return [];
+  async function fetchPriceRules(planId: number) {
+    if (!planId) {
+      priceRules.value = [];
+      return;
+    }
     try {
-        const response = await request(`/ai/manager/api/price/rule/list_by_plan?plan_id=${planId}`);
-        return response || [];
+      priceRules.value = await Api.getPriceRuleListByPlan(planId);
     } catch (error) {
-        console.error(`Failed to fetch price rules for plan ${planId}`, error);
-        toastController.error(`Failed to fetch price rules for plan ${planId}`);
-        return [];
+      console.error(`Failed to fetch price rules for plan ${planId}`, error);
+      priceRules.value = [];
     }
-};
+  }
 
-function createPriceStore() {
-    const [shouldFetchPlans, setShouldFetchPlans] = createSignal(false);
+  function setSelectedPlanId(planId: number | null) {
+    selectedPlanId.value = planId;
+  }
 
-    const [plans, { refetch: refetchPlans }] = createResource<BillingPlan[]>(shouldFetchPlans, fetchBillingPlansAPI, { initialValue: [] });
-
-    const [selectedPlanId, setSelectedPlanId] = createSignal<number | null>(null);
-
-    const [rules, { refetch: refetchRules }] = createResource(selectedPlanId, fetchPriceRulesAPI);
-
-    function loadBillingPlans() {
-        setShouldFetchPlans(true);
+  watch(selectedPlanId, (newPlanId) => {
+    if (newPlanId !== null) {
+      fetchPriceRules(newPlanId);
+    } else {
+      priceRules.value = [];
     }
+  });
 
-    return {
-        billingPlans: plans,
-        refetchBillingPlans: refetchPlans,
-        selectedPlanId,
-        setSelectedPlanId,
-        priceRules: rules,
-        refetchPriceRules: refetchRules,
-        loadBillingPlans,
-    };
-}
+  const refetchBillingPlans = fetchBillingPlans;
+  const loadBillingPlans = fetchBillingPlans;
+  const refetchPriceRules = () => {
+    if (selectedPlanId.value !== null) {
+      fetchPriceRules(selectedPlanId.value);
+    }
+  };
 
-const store = createRoot(createPriceStore);
-
-export const billingPlans = store.billingPlans;
-export const refetchBillingPlans = store.refetchBillingPlans;
-export const selectedPlanId = store.selectedPlanId;
-export const setSelectedPlanId = store.setSelectedPlanId;
-export const priceRules = store.priceRules;
-export const refetchPriceRules = store.refetchPriceRules;
-export const loadBillingPlans = store.loadBillingPlans;
+  return {
+    billingPlans,
+    priceRules,
+    selectedPlanId,
+    fetchBillingPlans,
+    fetchPriceRules,
+    setSelectedPlanId,
+    refetchBillingPlans,
+    loadBillingPlans,
+    refetchPriceRules,
+  };
+});

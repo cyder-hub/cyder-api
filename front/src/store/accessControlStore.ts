@@ -1,55 +1,30 @@
-import { createResource, createSignal, createRoot } from 'solid-js';
-import { request } from '../services/api';
+import { defineStore } from "pinia";
+import { ref } from "vue";
+import { Api } from "@/services/request";
+import type { AccessControlPolicyFromAPI } from "./types";
 
-interface AccessControlPolicyBase {
-    name: string;
-    default_action: 'ALLOW' | 'DENY';
-    description: string | null;
-}
+export const useAccessControlStore = defineStore("accessControl", () => {
+  const policies = ref<AccessControlPolicyFromAPI[]>([]);
 
-// API response for a single policy (summary or detail)
-export interface AccessControlPolicyFromAPI extends AccessControlPolicyBase {
-    id: number;
-    created_at: number;
-    updated_at: number;
-    rules: Array<{
-        id: number;
-        policy_id: number;
-        rule_type: string;
-        priority: number;
-        scope: string;
-        provider_id: number | null;
-        model_id: number | null;
-        is_enabled: boolean;
-        description: string | null;
-        created_at: number;
-        updated_at: number;
-        deleted_at: number | null;
-    }>;
-}
-
-export const fetchPoliciesAPI = async (): Promise<AccessControlPolicyFromAPI[]> => {
+  async function fetchPolicies() {
     try {
-        const response = await request("/ai/manager/api/access_control/list");
-        return response || [];
+      const response = await Api.getAccessControlList();
+      policies.value = response || [];
     } catch (error) {
-        console.error("Failed to fetch policies:", error);
-        return [];
+      console.error("Failed to fetch policies:", error);
+      policies.value = [];
     }
-};
+  }
 
-function createAccessControlStore() {
-    const [shouldFetch, setShouldFetch] = createSignal(false);
+  // In Pinia, refetching is often just calling the fetch action again.
+  // We can alias it for clarity if we want.
+  const refetchPolicies = fetchPolicies;
 
-    // Eagerly fetch policies on demand
-    const [policies, { refetch: refetchPolicies }] = createResource<AccessControlPolicyFromAPI[]>(shouldFetch, fetchPoliciesAPI, { initialValue: [] });
+  // The concept of 'loadPolicies' which seems to be a deferred fetch
+  // can be handled by simply calling fetchPolicies when needed.
+  // In SolidJS it was used to trigger the resource fetch.
+  // In Vue, we can call this action from any component.
+  const loadPolicies = fetchPolicies;
 
-    function loadPolicies() {
-        setShouldFetch(true);
-    }
-    return { policies, refetchPolicies, loadPolicies };
-}
-
-const { policies, refetchPolicies, loadPolicies } = createRoot(createAccessControlStore);
-
-export { policies, refetchPolicies, loadPolicies };
+  return { policies, fetchPolicies, refetchPolicies, loadPolicies };
+});

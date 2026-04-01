@@ -89,7 +89,7 @@ impl SystemApiKey {
             updated_at: now,
         };
 
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let inserted_db_key = diesel::insert_into(system_api_key::table)
                 .values(NewSystemApiKeyDb::to_db(&new_system_api_key_data)) // Use NewSystemApiKey directly
@@ -107,7 +107,7 @@ impl SystemApiKey {
 
     /// Updates an existing system API key.
     pub fn update(id_value: i64, data: &UpdateSystemApiKeyData) -> DbResult<SystemApiKey> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -130,7 +130,7 @@ impl SystemApiKey {
 
     /// Soft-deletes a system API key by ID.
     pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -152,7 +152,7 @@ impl SystemApiKey {
 
     /// Lists all system API keys that are not marked as deleted.
     pub fn list_all() -> DbResult<Vec<SystemApiKey>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_keys = system_api_key::table
                 .filter(system_api_key::dsl::deleted_at.is_null())
@@ -168,7 +168,7 @@ impl SystemApiKey {
 
     /// Retrieves a system API key by its ID, if not deleted.
     pub fn get_by_id(id_value: i64) -> DbResult<SystemApiKey> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_key = system_api_key::table
                 .filter(
@@ -195,7 +195,7 @@ impl SystemApiKey {
     /// Retrieves an active system API key by its string value.
     /// Active means not deleted and enabled.
     pub fn get_by_key(key_value: &str) -> DbResult<SystemApiKey> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_key = system_api_key::table
                 .filter(

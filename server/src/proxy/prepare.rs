@@ -3,10 +3,11 @@ use std::{collections::HashMap, sync::Arc};
 use axum::http::{HeaderMap, HeaderValue};
 use reqwest::{
     header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST},
-    StatusCode, Url,
+    Url,
 };
 use serde_json::{json, Value};
 
+use super::ProxyError;
 use crate::{
     schema::enum_def::{FieldPlacement, FieldType, ProviderType},
     service::{
@@ -18,10 +19,179 @@ use crate::{
 };
 use cyder_tools::log::{debug, error};
 
+/// Resolved API key info for a provider, including the selected key ID and the
+/// final request credential (which may be a Vertex AI OAuth token).
+struct ProviderCredentials {
+    /// The database ID of the selected provider API key.
+    key_id: i64,
+    /// The credential to use for the downstream request. For Vertex AI providers,
+    /// this is an OAuth token; for others, it's the raw API key.
+    request_key: String,
+}
+
+/// Resolves the API key and authentication credential for a provider.
+///
+/// This handles: selecting a provider API key via the queue strategy, and
+/// exchanging it for a Vertex AI OAuth token when the provider type requires it.
+async fn resolve_provider_credentials(
+    provider: &CacheProvider,
+    app_state: &Arc<AppState>,
+) -> Result<ProviderCredentials, ProxyError> {
+    let selected_key = app_state
+        .get_one_provider_api_key_by_provider(provider.id, GroupItemSelectionStrategy::Queue)
+        .await
+        .map_err(|e| {
+            error!(
+                "Failed to get provider API key from cache for provider_id {}: {:?}",
+                provider.id, e
+            );
+            ProxyError::InternalError(format!(
+                "Failed to retrieve API key for provider '{}'",
+                provider.name
+            ))
+        })?
+        .ok_or_else(|| {
+            ProxyError::InternalError(format!(
+                "No API keys configured for provider '{}'",
+                provider.name
+            ))
+        })?;
+
+    let request_key = match provider.provider_type {
+        ProviderType::Vertex | ProviderType::VertexOpenai => {
+            get_vertex_token(
+                &app_state.proxy_client,
+                selected_key.id,
+                &selected_key.api_key,
+            )
+            .await
+            .map_err(|err_msg| ProxyError::BadRequest(err_msg))?
+        }
+        _ => selected_key.api_key.clone(),
+    };
+
+    Ok(ProviderCredentials {
+        key_id: selected_key.id,
+        request_key,
+    })
+}
+
+/// Fetches custom fields for both the provider and model, merging them with
+/// model-level fields taking precedence over provider-level fields (by ID).
+async fn fetch_combined_custom_fields(
+    provider: &CacheProvider,
+    model: &CacheModel,
+    app_state: &Arc<AppState>,
+) -> Result<Vec<Arc<CacheCustomField>>, ProxyError> {
+    let provider_cfs = app_state
+        .get_custom_fields_by_provider_id(provider.id)
+        .await
+        .map_err(|e| {
+            error!(
+                "Failed to get custom fields for provider_id {}: {:?}",
+                provider.id, e
+            );
+            ProxyError::InternalError(
+                "Failed to retrieve custom fields for provider".to_string(),
+            )
+        })?;
+    let model_cfs = app_state
+        .get_custom_fields_by_model_id(model.id)
+        .await
+        .map_err(|e| {
+            error!(
+                "Failed to get custom fields for model_id {}: {:?}",
+                model.id, e
+            );
+            ProxyError::InternalError(
+                "Failed to retrieve custom fields for model".to_string(),
+            )
+        })?;
+
+    let mut combined_map: HashMap<i64, Arc<CacheCustomField>> = HashMap::new();
+    for cf in provider_cfs {
+        combined_map.insert(cf.id, cf);
+    }
+    for cf in model_cfs {
+        combined_map.insert(cf.id, cf);
+    }
+    let fields: Vec<Arc<CacheCustomField>> = combined_map.into_values().collect();
+    debug!(
+        "Fetched {} custom fields for provider and model",
+        fields.len()
+    );
+    Ok(fields)
+}
+
+/// Builds headers for a Gemini-native request.
+///
+/// Filters out auth-related headers from the original request and sets the
+/// appropriate auth header: `Authorization: Bearer` for Vertex AI, or
+/// `X-Goog-Api-Key` for native Gemini.
+fn build_gemini_headers(
+    original_headers: &HeaderMap,
+    provider: &CacheProvider,
+    api_key: &str,
+) -> HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in original_headers.iter() {
+        if name != HOST
+            && name != CONTENT_LENGTH
+            && name != ACCEPT_ENCODING
+            && name != "x-api-key"
+            && name != "x-goog-api-key"
+            && name != AUTHORIZATION
+        {
+            headers.insert(name.clone(), value.clone());
+        }
+    }
+
+    if provider.provider_type == ProviderType::Vertex {
+        let bearer_token = format!("Bearer {}", api_key);
+        headers.insert(
+            AUTHORIZATION,
+            reqwest::header::HeaderValue::try_from(bearer_token).unwrap(),
+        );
+    } else {
+        headers.insert(
+            "X-Goog-Api-Key",
+            reqwest::header::HeaderValue::try_from(api_key).unwrap(),
+        );
+    }
+
+    headers
+}
+
+/// Builds the Gemini-style URL: `{endpoint}/{model_name}:{action}`, appending
+/// original query params (excluding `key`) and optionally `alt=sse` for streaming.
+fn build_gemini_url(
+    provider: &CacheProvider,
+    real_model_name: &str,
+    action: &str,
+    params: &HashMap<String, String>,
+    is_stream: bool,
+) -> Result<Url, ProxyError> {
+    let target_url_str = format!("{}/{}:{}", provider.endpoint, real_model_name, action);
+    let mut url = Url::parse(&target_url_str)
+        .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
+
+    for (k, v) in params {
+        if k != "key" {
+            url.query_pairs_mut().append_pair(k, v);
+        }
+    }
+
+    if is_stream {
+        url.query_pairs_mut().append_pair("alt", "sse");
+    }
+
+    Ok(url)
+}
+
 pub fn build_new_headers(
     pre_headers: &HeaderMap,
     api_key: &str,
-) -> Result<HeaderMap, (StatusCode, String)> {
+) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in pre_headers.iter() {
         if name != HOST // do not expose host to api endpoint
@@ -38,6 +208,15 @@ pub fn build_new_headers(
     Ok(headers)
 }
 
+/// Resolves the real model name, preferring `real_model_name` over `model_name`.
+fn resolve_real_model_name(model: &CacheModel) -> &str {
+    model
+        .real_model_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&model.model_name)
+}
+
 // Prepares all elements for the downstream LLM request including URL, headers, and body.
 pub async fn prepare_llm_request(
     provider: &CacheProvider,
@@ -46,115 +225,32 @@ pub async fn prepare_llm_request(
     original_headers: &HeaderMap,
     app_state: &Arc<AppState>,
     path: &str,
-) -> Result<(String, HeaderMap, Value, i64), (StatusCode, String)> {
+) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
     debug!(
         "Preparing LLM request for provider: {}, model: {}",
         provider.name, model.model_name
     );
 
-    // 1. Get provider API key
-    // TODO: Make selection strategy configurable on the provider. Using Queue for now.
-    let selected_provider_api_key = app_state
-        .get_one_provider_api_key_by_provider(provider.id, GroupItemSelectionStrategy::Queue)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get provider API key from cache for provider_id {}: {:?}",
-                provider.id, e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to retrieve API key for provider '{}'", provider.name),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("No API keys configured for provider '{}'", provider.name),
-            )
-        })?;
+    let creds = resolve_provider_credentials(provider, app_state).await?;
+    let custom_fields = fetch_combined_custom_fields(provider, model, app_state).await?;
 
-    // 2. Get provider-specific token if needed (e.g., Vertex AI)
-    let request_api_key = if provider.provider_type == ProviderType::VertexOpenai {
-        get_vertex_token(
-            selected_provider_api_key.id,
-            &selected_provider_api_key.api_key,
-        )
-        .await
-        .map_err(|err_msg| (StatusCode::BAD_REQUEST, err_msg))?
-    } else {
-        selected_provider_api_key.api_key.clone()
-    };
-
-    // 3. Fetch and combine custom fields for the provider and model
-    let provider_cfs = app_state
-        .get_custom_fields_by_provider_id(provider.id)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get custom fields for provider_id {}: {:?}",
-                provider.id, e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to retrieve custom fields for provider".to_string(),
-            )
-        })?;
-    let model_cfs = app_state
-        
-        .get_custom_fields_by_model_id(model.id)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get custom fields for model_id {}: {:?}",
-                model.id, e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to retrieve custom fields for model".to_string(),
-            )
-        })?;
-
-    let mut combined_cfs_map: HashMap<i64, Arc<CacheCustomField>> = HashMap::new();
-    for cf in provider_cfs {
-        combined_cfs_map.insert(cf.id, cf);
-    }
-    for cf in model_cfs {
-        combined_cfs_map.insert(cf.id, cf);
-    }
-    let custom_fields: Vec<Arc<CacheCustomField>> = combined_cfs_map.values().cloned().collect();
-    debug!(
-        "Fetched {} custom fields for provider and model",
-        custom_fields.len()
-    );
-
-    // 4. Prepare URL, headers, and apply custom fields
+    // Prepare URL, headers, and apply custom fields
     let target_url = format!("{}/{}", provider.endpoint, path);
     let mut url = Url::parse(&target_url)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "failed to parse target url".to_string()))?;
-    let mut headers = build_new_headers(original_headers, &request_api_key)?;
+        .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
+    let mut headers = build_new_headers(original_headers, &creds.request_key)?;
 
     handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
 
-    // 5. Set the real model name in the request body
-    let real_model_name_str = model
-        .real_model_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&model.model_name);
+    // Set the real model name in the request body
+    let real_model_name_str = resolve_real_model_name(model);
     if let Some(obj) = data.as_object_mut() {
         obj.insert("model".to_string(), json!(real_model_name_str));
     }
 
     process_stream_options(&mut data);
 
-    // 6. Serialize final body and return all parts
-    Ok((
-        url.to_string(),
-        headers,
-        data,
-        selected_provider_api_key.id,
-    ))
+    Ok((url.to_string(), headers, data, creds.key_id))
 }
 
 // Prepares a simple Gemini request for utility endpoints, without custom fields or body transformation.
@@ -165,96 +261,19 @@ pub async fn prepare_simple_gemini_request(
     app_state: &Arc<AppState>,
     action: &str,
     params: &HashMap<String, String>,
-) -> Result<(String, HeaderMap, i64), (StatusCode, String)> {
+) -> Result<(String, HeaderMap, i64), ProxyError> {
     debug!(
         "Preparing simple Gemini request for provider: {}, model: {}, action: {}",
         provider.name, model.model_name, action
     );
 
-    // 1. Get provider API key
-    let selected_provider_api_key = app_state
-        
-        .get_one_provider_api_key_by_provider(provider.id, GroupItemSelectionStrategy::Queue)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get provider API key from cache for provider_id {}: {:?}",
-                provider.id, e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to retrieve API key for provider '{}'", provider.name),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("No API keys configured for provider '{}'", provider.name),
-            )
-        })?;
+    let creds = resolve_provider_credentials(provider, app_state).await?;
 
-    // 2. Get provider-specific token if needed (e.g., Vertex AI)
-    let request_api_key = if provider.provider_type == ProviderType::Vertex {
-        get_vertex_token(
-            selected_provider_api_key.id,
-            &selected_provider_api_key.api_key,
-        )
-        .await
-        .map_err(|err_msg| (StatusCode::BAD_REQUEST, err_msg))?
-    } else {
-        selected_provider_api_key.api_key.clone()
-    };
+    let real_model_name = resolve_real_model_name(model);
+    let url = build_gemini_url(provider, real_model_name, action, params, false)?;
+    let headers = build_gemini_headers(original_headers, provider, &creds.request_key);
 
-    // 3. Prepare URL
-    let real_model_name = model
-        .real_model_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&model.model_name);
-    let target_url_str = format!("{}/{}:{}", provider.endpoint, real_model_name, action);
-    let mut url = Url::parse(&target_url_str)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "failed to parse target url".to_string()))?;
-
-    // Append original query params, except 'key'
-    for (k, v) in params {
-        if k != "key" {
-            url.query_pairs_mut().append_pair(k, v);
-        }
-    }
-
-    // 4. Prepare headers
-    let mut final_headers = reqwest::header::HeaderMap::new();
-    for (name, value) in original_headers.iter() {
-        if name != HOST
-            && name != CONTENT_LENGTH
-            && name != ACCEPT_ENCODING
-            && name != "x-api-key"
-            && name != "x-goog-api-key"
-            && name != AUTHORIZATION
-        {
-            final_headers.insert(name.clone(), value.clone());
-        }
-    }
-
-    if provider.provider_type == ProviderType::Vertex {
-        let bearer_token = format!("Bearer {}", request_api_key);
-        final_headers.insert(
-            AUTHORIZATION,
-            reqwest::header::HeaderValue::try_from(bearer_token).unwrap(),
-        );
-    } else {
-        // For Gemini, use X-Goog-Api-Key
-        final_headers.insert(
-            "X-Goog-Api-Key",
-            reqwest::header::HeaderValue::try_from(request_api_key).unwrap(),
-        );
-    }
-
-    Ok((
-        url.to_string(),
-        final_headers,
-        selected_provider_api_key.id,
-    ))
+    Ok((url.to_string(), headers, creds.key_id))
 }
 
 // Prepares all elements for a downstream Gemini LLM request.
@@ -266,152 +285,27 @@ pub async fn prepare_gemini_llm_request(
     app_state: &Arc<AppState>,
     is_stream: bool,
     params: &HashMap<String, String>,
-) -> Result<(String, HeaderMap, Value, i64), (StatusCode, String)> {
+) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
     debug!(
         "Preparing Gemini LLM request for provider: {}, model: {}",
         provider.name, model.model_name
     );
 
-    // 1. Get provider API key
-    let selected_provider_api_key = app_state
-        
-        .get_one_provider_api_key_by_provider(provider.id, GroupItemSelectionStrategy::Queue)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get provider API key from cache for provider_id {}: {:?}",
-                provider.id, e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to retrieve API key for provider '{}'", provider.name),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("No API keys configured for provider '{}'", provider.name),
-            )
-        })?;
+    let creds = resolve_provider_credentials(provider, app_state).await?;
+    let custom_fields = fetch_combined_custom_fields(provider, model, app_state).await?;
 
-    // 2. Get provider-specific token if needed (e.g., Vertex AI)
-    let request_api_key = if provider.provider_type == ProviderType::Vertex {
-        get_vertex_token(
-            selected_provider_api_key.id,
-            &selected_provider_api_key.api_key,
-        )
-        .await
-        .map_err(|err_msg| (StatusCode::BAD_REQUEST, err_msg))?
-    } else {
-        selected_provider_api_key.api_key.clone()
-    };
-
-    // 3. Prepare URL, headers, and apply custom fields
+    let real_model_name = resolve_real_model_name(model);
     let action = if is_stream {
         "streamGenerateContent"
     } else {
         "generateContent"
     };
-    let real_model_name = model
-        .real_model_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&model.model_name);
-    let target_url_str = format!("{}/{}:{}", provider.endpoint, real_model_name, action);
-    let mut url = Url::parse(&target_url_str)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "failed to parse target url".to_string()))?;
+    let mut url = build_gemini_url(provider, real_model_name, action, params, is_stream)?;
+    let mut headers = build_gemini_headers(original_headers, provider, &creds.request_key);
 
-    // Append original query params, except 'key'
-    for (k, v) in params {
-        if k != "key" {
-            url.query_pairs_mut().append_pair(k, v);
-        }
-    }
+    handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
 
-    if is_stream {
-        url.query_pairs_mut().append_pair("alt", "sse");
-    }
-
-    let mut final_headers = reqwest::header::HeaderMap::new();
-    for (name, value) in original_headers.iter() {
-        if name != HOST
-            && name != CONTENT_LENGTH
-            && name != ACCEPT_ENCODING
-            && name != "x-api-key"
-            && name != "x-goog-api-key"
-            && name != AUTHORIZATION
-        {
-            final_headers.insert(name.clone(), value.clone());
-        }
-    }
-
-    if provider.provider_type == ProviderType::Vertex {
-        let bearer_token = format!("Bearer {}", request_api_key);
-        final_headers.insert(
-            AUTHORIZATION,
-            reqwest::header::HeaderValue::try_from(bearer_token).unwrap(),
-        );
-    } else {
-        // For Gemini, use X-Goog-Api-Key
-        final_headers.insert(
-            "X-Goog-Api-Key",
-            reqwest::header::HeaderValue::try_from(request_api_key).unwrap(),
-        );
-    }
-
-    // Fetch and combine custom fields for the provider and model
-    let provider_cfs = app_state
-        
-        .get_custom_fields_by_provider_id(provider.id)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get custom fields for provider_id {}: {:?}",
-                provider.id, e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to retrieve custom fields for provider".to_string(),
-            )
-        })?;
-    let model_cfs = app_state
-        
-        .get_custom_fields_by_model_id(model.id)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get custom fields for model_id {}: {:?}",
-                model.id, e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to retrieve custom fields for model".to_string(),
-            )
-        })?;
-
-    let mut combined_cfs_map: HashMap<i64, Arc<CacheCustomField>> = HashMap::new();
-    for cf in provider_cfs {
-        combined_cfs_map.insert(cf.id, cf);
-    }
-    for cf in model_cfs {
-        combined_cfs_map.insert(cf.id, cf);
-    }
-    let custom_fields: Vec<Arc<CacheCustomField>> = combined_cfs_map.values().cloned().collect();
-    debug!(
-        "Fetched {} custom fields for provider and model",
-        custom_fields.len()
-    );
-
-    handle_custom_fields(&mut data, &mut url, &mut final_headers, &custom_fields);
-
-    let final_url = url.to_string();
-
-    Ok((
-        final_url,
-        final_headers,
-        data,
-        selected_provider_api_key.id,
-    ))
+    Ok((url.to_string(), headers, data, creds.key_id))
 }
 
 fn parse_provider_model(pm: &str) -> (&str, &str) {

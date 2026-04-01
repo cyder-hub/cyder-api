@@ -52,7 +52,7 @@ pub struct TodayRequestLogStats {
 }
 
 pub fn get_system_overview_stats() -> DbResult<SystemOverviewStats> {
-    let conn = &mut get_connection();
+    let conn = &mut get_connection()?;
     let mut stats = SystemOverviewStats::default();
 
     stats.providers_count = db_execute!(conn, {
@@ -87,7 +87,7 @@ pub fn get_request_logs_in_range(
     system_api_key_id_filter: Option<i64>,
     provider_api_key_id_filter: Option<i64>,
 ) -> DbResult<Vec<RequestLogEntryForStats>> {
-    let conn = &mut get_connection();
+    let conn = &mut get_connection()?;
     let result = db_execute!(conn, {
         let mut query = request_log::table
             .left_join(provider::table.on(request_log::dsl::provider_id.eq(provider::dsl::id)))
@@ -131,7 +131,7 @@ pub fn get_request_logs_in_range(
 }
 
 pub fn get_today_request_log_stats() -> DbResult<TodayRequestLogStats> {
-    let conn = &mut get_connection();
+    let conn = &mut get_connection()?;
     let mut stats = TodayRequestLogStats::default();
 
     let tz: Tz = CONFIG

@@ -192,7 +192,7 @@ impl AccessControlPolicy { // Renamed from LimitStrategy
     }
 
     pub fn create(payload: ApiCreateAccessControlPolicyPayload) -> DbResult<ApiAccessControlPolicy> { // Renamed
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
         let policy_id = ID_GENERATOR.generate_id(); // Renamed
 
@@ -226,7 +226,7 @@ impl AccessControlPolicy { // Renamed from LimitStrategy
         policy_id: i64, // Renamed
         payload: ApiUpdateAccessControlPolicyPayload, // Renamed
     ) -> DbResult<ApiAccessControlPolicy> { // Renamed
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
 
         let update_policy_data = DbUpdateAccessControlPolicy { // Renamed
@@ -256,7 +256,7 @@ impl AccessControlPolicy { // Renamed from LimitStrategy
     }
 
     pub fn delete(policy_id: i64) -> DbResult<usize> { // Renamed
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
 
         // Soft delete the policy
@@ -288,7 +288,7 @@ impl AccessControlPolicy { // Renamed from LimitStrategy
     }
 
     pub fn get_by_id(policy_id: i64) -> DbResult<ApiAccessControlPolicy> { // Renamed
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let policy: AccessControlPolicy = db_execute!(conn, { // Renamed
             access_control_policy::table // Updated table
                 .filter(access_control_policy::dsl::id.eq(policy_id)) // Updated field
@@ -328,7 +328,7 @@ impl AccessControlPolicy { // Renamed from LimitStrategy
     }
 
     pub fn list_all() -> DbResult<Vec<ApiAccessControlPolicy>> { // Renamed
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let policies: Vec<AccessControlPolicy> = db_execute!(conn, { // Renamed
             access_control_policy::table // Updated table
                 .filter(access_control_policy::dsl::deleted_at.is_null()) // Updated field

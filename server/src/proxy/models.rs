@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use reqwest::StatusCode;
 use serde::Serialize;
 
+use super::ProxyError;
 use crate::{
     database::{
         model::Model, model_alias::ModelAlias, provider::Provider
@@ -23,7 +23,7 @@ pub(super) struct AccessibleModel {
 pub(super) async fn get_accessible_models(
     app_state: &Arc<AppState>,
     system_api_key: &CacheSystemApiKey,
-) -> Result<Vec<AccessibleModel>, (StatusCode, String)> {
+) -> Result<Vec<AccessibleModel>, ProxyError> {
     debug!(
         "Fetching accessible models for SystemApiKey ID: {}",
         system_api_key.id
@@ -36,20 +36,17 @@ pub(super) async fn get_accessible_models(
                 Ok(Some(policy)) => Some(policy),
                 Ok(None) => {
                     error!("Access control policy with id {} not found in store (configured on SystemApiKey {}).", policy_id, system_api_key.id);
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "Access control policy id {} configured but not found in application cache.",
-                            policy_id
-                        ),
-                    ));
+                    return Err(ProxyError::InternalError(format!(
+                        "Access control policy id {} configured but not found in application cache.",
+                        policy_id
+                    )));
                 }
                 Err(store_err) => {
                     error!("Failed to fetch access control policy with id {} from store: {:?}", policy_id, store_err);
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Error accessing application cache for access control policy id {}: {}", policy_id, store_err),
-                    ));
+                    return Err(ProxyError::InternalError(format!(
+                        "Error accessing application cache for access control policy id {}: {}",
+                        policy_id, store_err
+                    )));
                 }
             }
         } else {
@@ -61,10 +58,7 @@ pub(super) async fn get_accessible_models(
     // 2. Get all active providers
     let active_providers = Provider::list_all_active().map_err(|e| {
         error!("Failed to list active providers: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to retrieve provider list".to_string(),
-        )
+        ProxyError::InternalError("Failed to retrieve provider list".to_string())
     })?;
 
     debug!("Found {} active providers", active_providers.len());
@@ -76,13 +70,10 @@ pub(super) async fn get_accessible_models(
                 "Failed to list active models for provider {}: {:?}",
                 provider.id, e
             );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "Failed to retrieve model list for provider {}",
-                    provider.name
-                ),
-            )
+            ProxyError::InternalError(format!(
+                "Failed to retrieve model list for provider {}",
+                provider.name
+            ))
         })?;
 
         for model in active_models {
@@ -127,10 +118,7 @@ pub(super) async fn get_accessible_models(
     // 5. Get all model aliases and check their accessibility
     let all_aliases = ModelAlias::list_all().map_err(|e| {
         error!("Failed to get model aliases from store: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to retrieve model alias list".to_string(),
-        )
+        ProxyError::InternalError("Failed to retrieve model alias list".to_string())
     })?;
 
     for alias in all_aliases {
@@ -204,4 +192,3 @@ pub(super) struct GeminiModelListResponse {
 pub(super) struct GeminiModelInfo {
     pub name: String,
 }
-

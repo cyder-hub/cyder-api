@@ -1,12 +1,11 @@
 use crate::utils::auth::authorization_access_middleware;
 use auth::create_auth_router;
-use custom_field::create_custom_field_router; // Add this import
+use custom_field::create_custom_field_router;
 use access_control::create_access_control_policy_router;
 use price::create_price_router;
 use stat::routes as create_stat_router;
 use system_api_key::create_api_key_router;
 use crate::service::app_state::{create_state_router, StateRouter};
-// Removed duplicate: use stat::routes as create_stat_router; // Add this import
 use axum::{
     http::{self, header::CACHE_CONTROL, HeaderValue},
     middleware,
@@ -20,7 +19,7 @@ use request_log::create_record_router;
 use tower_http::{services::{ServeDir, ServeFile}, set_header::SetResponseHeaderLayer};
 
 mod auth;
-mod custom_field; // Add this module declaration
+mod custom_field;
 mod error;
 
 mod access_control;
@@ -28,7 +27,7 @@ mod model;
 mod model_alias;
 mod provider;
 mod request_log;
-mod stat; // Add this module declaration
+mod stat;
 mod system_api_key;
 mod price;
 
@@ -55,9 +54,9 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_model_router())
             .merge(create_model_alias_router())
             .merge(create_access_control_policy_router())
-            .merge(create_custom_field_router()) // Add this line
+            .merge(create_custom_field_router())
             .merge(create_price_router())
-            .merge(create_stat_router()) // Add this line
+            .merge(create_stat_router())
             .layer(middleware::from_fn(authorization_access_middleware))
             .merge(create_auth_router()),
     );

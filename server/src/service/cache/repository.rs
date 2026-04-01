@@ -1,9 +1,28 @@
+use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::{CacheBackend, CacheError, types::CacheEntry};
+
+/// Type-erased cache repository trait for dynamic dispatch.
+///
+/// This trait allows `AppState` to hold cache repositories without knowing
+/// the concrete backend type (Memory vs Redis), avoiding the need for an
+/// enum wrapper with match arms on every operation.
+#[async_trait]
+pub trait DynCacheRepo<T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static>:
+    Send + Sync
+{
+    async fn get(&self, key: &str) -> Result<Option<Arc<T>>, CacheError>;
+    async fn mget(&self, keys: &[&str]) -> Result<Vec<Option<Arc<T>>>, CacheError>;
+    async fn get_entry(&self, key: &str) -> Result<Option<Arc<CacheEntry<T>>>, CacheError>;
+    async fn set_positive(&self, key: &str, value: &T) -> Result<(), CacheError>;
+    async fn set_negative(&self, key: &str, ttl: Duration) -> Result<(), CacheError>;
+    async fn delete(&self, key: &str) -> Result<(), CacheError>;
+    async fn clear(&self) -> Result<(), CacheError>;
+}
 
 /// Simplified cache repository - just basic KV operations
 /// No more CacheStorable trait with id(), key(), group_id()
@@ -104,6 +123,42 @@ where
         
         self.backend.mset(&arc_entries, self.default_ttl).await
             .map_err(|e| CacheError::BackendError(e.to_string()))
+    }
+}
+
+/// Implement DynCacheRepo for CacheRepository, enabling type-erased dispatch.
+#[async_trait]
+impl<T, B> DynCacheRepo<T> for CacheRepository<T, B>
+where
+    T: Serialize + DeserializeOwned + Send + Sync + Clone + 'static,
+    B: CacheBackend<T>,
+{
+    async fn get(&self, key: &str) -> Result<Option<Arc<T>>, CacheError> {
+        CacheRepository::get(self, key).await
+    }
+
+    async fn mget(&self, keys: &[&str]) -> Result<Vec<Option<Arc<T>>>, CacheError> {
+        CacheRepository::mget(self, keys).await
+    }
+
+    async fn get_entry(&self, key: &str) -> Result<Option<Arc<CacheEntry<T>>>, CacheError> {
+        CacheRepository::get_entry(self, key).await
+    }
+
+    async fn set_positive(&self, key: &str, value: &T) -> Result<(), CacheError> {
+        CacheRepository::set_positive(self, key, value).await
+    }
+
+    async fn set_negative(&self, key: &str, ttl: Duration) -> Result<(), CacheError> {
+        CacheRepository::set_negative(self, key, ttl).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), CacheError> {
+        CacheRepository::delete(self, key).await
+    }
+
+    async fn clear(&self) -> Result<(), CacheError> {
+        CacheRepository::clear(self).await
     }
 }
 

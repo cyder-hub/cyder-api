@@ -1,10 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{body::Body, extract::Request, http::StatusCode};
+use axum::{body::Body, extract::Request};
 use cyder_tools::log::debug;
 use serde_json::Value;
 
+use super::ProxyError;
 use crate::{
+    config::CONFIG,
     schema::enum_def::LlmApiType,
     schema::enum_def::ProviderType,
     service::app_state::AppState,
@@ -65,17 +67,17 @@ pub(super) async fn get_pricing_info(model: &CacheModel, app_state: &Arc<AppStat
 
 
 // Parses the request body into a JSON Value.
-pub(super) async fn parse_request_body(request: Request<Body>) -> Result<Value, (StatusCode, String)> {
-    let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+pub(super) async fn parse_request_body(request: Request<Body>) -> Result<Value, ProxyError> {
+    let body = axum::body::to_bytes(request.into_body(), CONFIG.max_body_size)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e)))?;
+        .map_err(|e| ProxyError::BadRequest(format!("Failed to read body: {}", e)))?;
 
     if body.is_empty() {
         return Ok(Value::Null);
     }
 
     serde_json::from_slice(&body)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to parse JSON body: {}", e)))
+        .map_err(|e| ProxyError::BadRequest(format!("Failed to parse JSON body: {}", e)))
 }
 
 pub(super) fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInfo> {
@@ -138,7 +140,7 @@ pub(super) fn calculate_llm_request_body_for_log(
     original_request_value: &serde_json::Value,
     final_body_value: &serde_json::Value,
     final_body_bytes: &Bytes,
-) -> Result<Option<Bytes>, (StatusCode, String)> {
+) -> Result<Option<Bytes>, ProxyError> {
     if api_type == target_api_type {
         let patch = json_patch::diff(original_request_value, final_body_value);
         if patch.is_empty() {
@@ -147,10 +149,7 @@ pub(super) fn calculate_llm_request_body_for_log(
             Ok(None)
         } else {
             let patch_bytes = Bytes::from(serde_json::to_vec(&patch).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to serialize json-patch: {}", e),
-                )
+                ProxyError::InternalError(format!("Failed to serialize json-patch: {}", e))
             })?);
             Ok(Some(patch_bytes))
         }

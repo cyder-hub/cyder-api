@@ -1,14 +1,14 @@
 use super::auth::*;
-use super::core::build_reqwest_client;
 use super::logging::{get_log_manager, RequestLogContext};
 use super::models::{
     get_accessible_models, GeminiModelInfo, GeminiModelListResponse, ModelInfo, ModelListResponse,
 };
 use super::prepare::*;
 use super::util::*;
+use super::ProxyError;
 
 use crate::schema::enum_def::LlmApiType;
-use crate::schema::enum_def::{ProviderType, RequestStatus};
+use crate::schema::enum_def::RequestStatus;
 use crate::service::app_state::AppState;
 use crate::service::cache::types::{CacheModel, CacheProvider};
 use axum::{
@@ -33,7 +33,7 @@ pub async fn openai_utility_handler(
     params: HashMap<String, String>,
     request: Request<Body>,
     downstream_path: &str,
-) -> Result<Response<Body>, (StatusCode, String)> {
+) -> Result<Response<Body>, ProxyError> {
     let client_ip_addr = Some(addr.ip().to_string());
     let start_time = Utc::now().timestamp_millis();
     let original_headers = request.headers().clone();
@@ -54,10 +54,7 @@ pub async fn openai_utility_handler(
 
     // Step 3: Get provider and model
     let pre_model_str = data.get("model").and_then(Value::as_str).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "'model' field must be a string".to_string(),
-        )
+        ProxyError::BadRequest("'model' field must be a string".to_string())
     })?;
 
     info!(
@@ -70,25 +67,17 @@ pub async fn openai_utility_handler(
             .await
             .map_err(|e: String| {
                 warn!("Failed to resolve model '{}': {}", pre_model_str, e);
-                (StatusCode::BAD_REQUEST, e)
+                ProxyError::BadRequest(e)
             })?;
 
     // Step 4: Check if provider is OpenAI compatible
-    let target_api_type =
-        if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
-            LlmApiType::Gemini
-        } else {
-            LlmApiType::Openai
-        };
+    let target_api_type = determine_target_api_type(&provider);
 
     if target_api_type != LlmApiType::Openai {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "'{}' is only supported for OpenAI-compatible providers.",
-                downstream_path
-            ),
-        ));
+        return Err(ProxyError::BadRequest(format!(
+            "'{}' is only supported for OpenAI-compatible providers.",
+            downstream_path
+        )));
     }
 
     // Step 5: Pricing info
@@ -117,10 +106,7 @@ pub async fn openai_utility_handler(
         })?;
 
     let final_body = serde_json::to_string(&final_body_value).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize final request body: {}", e),
-        )
+        ProxyError::InternalError(format!("Failed to serialize final request body: {}", e))
     })?;
 
     let mut log_context = RequestLogContext::new(
@@ -133,7 +119,11 @@ pub async fn openai_utility_handler(
     );
 
     // Step 8: Execute request against downstream
-    let client = build_reqwest_client(provider.use_proxy)?;
+    let client = if provider.use_proxy {
+        &app_state.proxy_client
+    } else {
+        &app_state.client
+    };
 
     debug!(
         "[{}] proxy request header: {:?}",
@@ -156,7 +146,7 @@ pub async fn openai_utility_handler(
             error!("[{}] {}", downstream_path, error_message);
             log_context.overall_status = RequestStatus::Error;
             get_log_manager().log(log_context).await;
-            return Err((StatusCode::BAD_GATEWAY, error_message));
+            return Err(ProxyError::BadGateway(error_message));
         }
     };
 
@@ -187,7 +177,7 @@ pub async fn openai_utility_handler(
             error!("[{}] {}", downstream_path, err_msg);
             log_context.overall_status = RequestStatus::Error;
             get_log_manager().log(log_context).await;
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+            return Err(ProxyError::InternalError(err_msg));
         }
     };
 
@@ -264,7 +254,7 @@ pub async fn list_models_handler(
     params: HashMap<String, String>,
     request: Request<Body>,
     api_type: LlmApiType,
-) -> Result<Response<Body>, (StatusCode, String)> {
+) -> Result<Response<Body>, ProxyError> {
     info!("Listing models for api_type: {:?}", api_type);
 
     // 1. Authenticate based on api_type
@@ -280,8 +270,7 @@ pub async fn list_models_handler(
             authenticate_anthropic_request(&original_headers, &app_state).await?
         }
         _ => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return Err(ProxyError::InternalError(
                 "unsupported api type".to_string(),
             ))
         }
@@ -334,8 +323,7 @@ pub async fn list_models_handler(
                 .unwrap()
         }
         _ => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return Err(ProxyError::InternalError(
                 "unsupported api type".to_string(),
             ))
         }

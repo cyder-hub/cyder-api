@@ -12,7 +12,7 @@ use axum::{
 use chrono::Utc;
 use crate::config::CONFIG;
 use crate::service::app_state::{create_state_router, StateRouter, AppState}; // Added AppState
-use reqwest::{Client, Proxy, StatusCode, Url};
+use reqwest::{Client, StatusCode, Url};
 use std::sync::Arc; // Added Arc
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -170,21 +170,8 @@ struct CheckProviderPayload {
     provider_api_key: Option<String>,
 }
 
-fn build_provider_client(use_proxy: bool) -> Result<Client, BaseError> {
-    let mut client_builder = Client::builder();
-    if use_proxy {
-        if let Some(proxy_url) = &CONFIG.proxy {
-            let proxy = Proxy::https(proxy_url)
-                .map_err(|e| BaseError::ParamInvalid(Some(format!("Invalid proxy URL: {}", e))))?;
-            client_builder = client_builder.proxy(proxy);
-        }
-    }
-    client_builder
-        .build()
-        .map_err(|e| BaseError::ParamInvalid(Some(format!("Failed to build HTTP client: {}", e))))
-}
-
 async fn check_provider(
+    State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(payload): Json<CheckProviderPayload>,
 ) -> Result<HttpResult<Value>, BaseError> {
@@ -231,7 +218,11 @@ async fn check_provider(
 
     let provider = Provider::get_by_id(id)?;
 
-    let client = build_provider_client(provider.use_proxy)?;
+    let client = if provider.use_proxy {
+        &app_state.proxy_client
+    } else {
+        &app_state.client
+    };
 
     let url = format!("{}/chat/completions", provider.endpoint.trim_end_matches('/'));
 
@@ -274,6 +265,7 @@ async fn check_provider(
 }
 
 async fn get_remote_models(
+    State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<Value>, BaseError> {
     let provider = Provider::get_by_id(id)?;
@@ -283,7 +275,11 @@ async fn get_remote_models(
         BaseError::ParamInvalid(Some("No API key found for this provider.".to_string()))
     })?;
 
-    let client = build_provider_client(provider.use_proxy)?;
+    let client = if provider.use_proxy {
+        &app_state.proxy_client
+    } else {
+        &app_state.client
+    };
 
     let response = if provider.provider_type == ProviderType::Gemini {
         let mut url = Url::parse(&provider.endpoint).map_err(|e| {
@@ -296,7 +292,7 @@ async fn get_remote_models(
             BaseError::ParamInvalid(Some(format!("Failed to fetch remote models: {}", e)))
         })?
     } else if provider.provider_type == ProviderType::Vertex {
-        let token = get_vertex_token(api_key_record.id, &api_key_record.api_key)
+        let token = get_vertex_token(client, api_key_record.id, &api_key_record.api_key)
             .await
             .map_err(|e| BaseError::ParamInvalid(Some(format!("Failed to get vertex token: {}", e))))?;
 

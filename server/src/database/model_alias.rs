@@ -90,7 +90,7 @@ impl ModelAlias {
             updated_at: now,
         };
 
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let inserted_db_alias = diesel::insert_into(model_alias::table)
                 .values(NewModelAliasDb::to_db(&new_model_alias_data))
@@ -105,7 +105,7 @@ impl ModelAlias {
 
     /// Updates an existing model alias.
     pub fn update(id_value: i64, data: &UpdateModelAliasData) -> DbResult<ModelAlias> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -129,7 +129,7 @@ impl ModelAlias {
     /// Soft-deletes a model alias by ID.
     /// Sets `deleted_at` to current time and `is_enabled` to false.
     pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -151,7 +151,7 @@ impl ModelAlias {
 
     /// Retrieves a model alias by its ID, if not deleted.
     pub fn get_by_id(id_value: i64) -> DbResult<ModelAlias> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_alias = model_alias::table
                 .filter(
@@ -177,7 +177,7 @@ impl ModelAlias {
 
     /// Lists all model aliases that are not marked as deleted.
     pub fn list_all() -> DbResult<Vec<ModelAlias>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_aliases = model_alias::table
                 .filter(model_alias::dsl::deleted_at.is_null())
@@ -193,7 +193,7 @@ impl ModelAlias {
 
     /// Lists all model aliases with their target model details, that are not marked as deleted.
     pub fn list_all_details() -> DbResult<Vec<ModelAliasDetails>> {
-            let conn = &mut get_connection();
+            let conn = &mut get_connection()?;
             db_execute!(conn, {
                 let results = model_alias::table
                     .inner_join(model::table.on(model_alias::dsl::target_model_id.eq(model::dsl::id)))
@@ -230,7 +230,7 @@ impl ModelAlias {
     
         /// Lists all model aliases for a given target_model_id that are not marked as deleted.
     pub fn list_by_target_model_id(target_model_id_val: i64) -> DbResult<Vec<ModelAlias>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_aliases = model_alias::table
                 .filter(
@@ -257,7 +257,7 @@ impl ModelAlias {
     /// Retrieves an active model alias by its alias name.
     /// Active means not deleted and enabled.
     pub fn get_by_alias_name(name: &str) -> DbResult<Option<ModelAlias>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_alias = model_alias::table
                 .filter(

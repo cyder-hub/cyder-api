@@ -104,7 +104,7 @@ pub struct ProviderDetail {
 impl Provider {
     /// Inserts a new provider record into the database.
     pub fn create(new_provider_data: &NewProvider) -> DbResult<Provider> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             // Inside db_execute!, `ProviderDb` refers to the DB-specific generated struct (_postgres_model::ProviderDb or _sqlite_model::ProviderDb).
             // `provider::table` refers to the table from the DB-specific schema.
@@ -121,7 +121,7 @@ impl Provider {
 
     /// Updates an existing provider record in the database.
     pub fn update(id_value: i64, update_data: &UpdateProviderData) -> DbResult<Provider> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -140,7 +140,7 @@ impl Provider {
 
     /// Soft deletes a provider record by setting `deleted_at` to the current time and `is_enabled` to false.
     pub fn delete(target_id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -157,7 +157,7 @@ impl Provider {
 
     /// Retrieves a provider by its key, if it's not marked as deleted.
     pub fn get_by_key(provider_key_val: &str) -> DbResult<Option<Provider>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_provider_opt = provider::table
                 .filter(provider::dsl::provider_key.eq(provider_key_val).and(provider::dsl::deleted_at.is_null()))
@@ -175,7 +175,7 @@ impl Provider {
 
     /// Retrieves a provider by its ID, if it's not marked as deleted.
     pub fn get_by_id(target_id_value: i64) -> DbResult<Provider> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_provider = provider::table
                 .filter(provider::dsl::id.eq(target_id_value).and(provider::dsl::deleted_at.is_null()))
@@ -194,7 +194,7 @@ impl Provider {
 
     /// Lists all provider records that are not marked as deleted, ordered by creation date.
     pub fn list_all() -> DbResult<Vec<Provider>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_providers = provider::table
                 .filter(provider::dsl::deleted_at.is_null())
@@ -210,7 +210,7 @@ impl Provider {
 
     /// Lists all active (not deleted and enabled) provider records, ordered by creation date.
     pub fn list_all_active() -> DbResult<Vec<Provider>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_providers = provider::table
                 .filter(
@@ -254,7 +254,7 @@ impl Provider {
 impl ProviderApiKey {
     /// Inserts a new provider API key record.
     pub fn insert(new_key_data: &NewProviderApiKey) -> DbResult<ProviderApiKey> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_key = diesel::insert_into(provider_api_key::table)
                 .values(NewProviderApiKeyDb::to_db(new_key_data))
@@ -267,7 +267,7 @@ impl ProviderApiKey {
 
     /// Updates an existing provider API key.
     pub fn update(key_id: i64, update_data: &UpdateProviderApiKeyData) -> DbResult<ProviderApiKey> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
         db_execute!(conn, {
             let db_key = diesel::update(provider_api_key::table.find(key_id))
@@ -284,7 +284,7 @@ impl ProviderApiKey {
 
     /// Soft deletes a provider API key.
     pub fn delete(key_id: i64) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
         db_execute!(conn, {
             diesel::update(provider_api_key::table.find(key_id))
@@ -300,7 +300,7 @@ impl ProviderApiKey {
 
     /// Retrieves a provider API key by its ID.
     pub fn get_by_id(key_id: i64) -> DbResult<ProviderApiKey> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_key = provider_api_key::table
                 .filter(provider_api_key::dsl::id.eq(key_id).and(provider_api_key::dsl::deleted_at.is_null()))
@@ -319,7 +319,7 @@ impl ProviderApiKey {
 
     /// Lists all non-deleted API keys for a specific provider.
     pub fn list_by_provider_id(p_id: i64) -> DbResult<Vec<ProviderApiKey>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_keys = provider_api_key::table
                 .filter(provider_api_key::dsl::provider_id.eq(p_id).and(provider_api_key::dsl::deleted_at.is_null()))
@@ -333,7 +333,7 @@ impl ProviderApiKey {
 
     /// Lists all provider API key records that are not marked as deleted.
     pub fn list_all() -> DbResult<Vec<ProviderApiKey>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_keys = provider_api_key::table
                 .filter(provider_api_key::dsl::deleted_at.is_null())

@@ -3,16 +3,17 @@ use super::core::{proxy_request, simple_proxy_request};
 use super::logging::RequestLogContext;
 use super::prepare::*;
 use super::util::*;
+use super::ProxyError;
 
+use crate::config::CONFIG;
 use crate::schema::enum_def::LlmApiType;
-use crate::schema::enum_def::ProviderType;
+
 use crate::service::app_state::AppState;
 use crate::service::transform::transform_request_data;
 use axum::{body::Body, extract::Request, response::Response};
 use bytes::Bytes;
 use chrono::Utc;
 use cyder_tools::log::{debug, error};
-use reqwest::StatusCode;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 pub async fn handle_gemini_request(
@@ -21,7 +22,7 @@ pub async fn handle_gemini_request(
     path_segment: String,
     query_params: HashMap<String, String>,
     request: Request<Body>,
-) -> Result<Response<Body>, (StatusCode, String)> {
+) -> Result<Response<Body>, ProxyError> {
     let client_ip_addr = Some(addr.ip().to_string());
     let start_time = Utc::now().timestamp_millis();
     let request_uri_path = request.uri().path().to_string();
@@ -35,19 +36,11 @@ pub async fn handle_gemini_request(
     let system_api_key = api_key_check_result.api_key;
 
     // Step 2: Parse the incoming request body.
-    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
+    let body_bytes = axum::body::to_bytes(request.into_body(), CONFIG.max_body_size)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to read request body: {}", e),
-            )
-        })?;
+        .map_err(|e| ProxyError::BadRequest(format!("Failed to read request body: {}", e)))?;
     let mut data: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Failed to parse request body: {}", e),
-        )
+        ProxyError::BadRequest(format!("Failed to parse request body: {}", e))
     })?;
     let original_request_value = data.clone();
     let original_request_body = body_bytes;
@@ -65,7 +58,7 @@ pub async fn handle_gemini_request(
             model_action_segment
         );
         error!("[gemini_models_handler] {}", err_msg);
-        return Err((StatusCode::BAD_REQUEST, err_msg));
+        return Err(ProxyError::BadRequest(err_msg));
     }
     let model_name = parts[1];
     let action = parts[0];
@@ -78,25 +71,17 @@ pub async fn handle_gemini_request(
         // Handle utility actions: simple proxy, no logging
         let (provider, model) = get_provider_and_model(&app_state, model_name)
             .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            .map_err(|e| ProxyError::BadRequest(e))?;
 
-        let target_api_type =
-            if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
-                LlmApiType::Gemini
-            } else {
-                LlmApiType::Openai
-            };
+        let target_api_type = determine_target_api_type(&provider);
 
         debug!("{:?}", provider.provider_type);
 
         if target_api_type != LlmApiType::Gemini {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "Action '{}' is only supported for Gemini-compatible providers.",
-                    action
-                ),
-            ));
+            return Err(ProxyError::BadRequest(format!(
+                "Action '{}' is only supported for Gemini-compatible providers.",
+                action
+            )));
         }
 
         let (final_url, final_headers, _) = prepare_simple_gemini_request(
@@ -110,13 +95,10 @@ pub async fn handle_gemini_request(
         .await?;
 
         let final_body = serde_json::to_string(&data).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to serialize final request body: {}", e),
-            )
+            ProxyError::InternalError(format!("Failed to serialize final request body: {}", e))
         })?;
 
-        return simple_proxy_request(final_url, final_body, final_headers, provider.use_proxy)
+        return simple_proxy_request(&app_state, final_url, final_body, final_headers, provider.use_proxy)
             .await;
     }
 
@@ -126,19 +108,14 @@ pub async fn handle_gemini_request(
             action
         );
         error!("[gemini_models_handler] {}", err_msg);
-        return Err((StatusCode::BAD_REQUEST, err_msg));
+        return Err(ProxyError::BadRequest(err_msg));
     }
 
     let (provider, model) = get_provider_and_model(&app_state, model_name)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| ProxyError::BadRequest(e))?;
 
-    let target_api_type =
-        if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
-            LlmApiType::Gemini
-        } else {
-            LlmApiType::Openai
-        };
+    let target_api_type = determine_target_api_type(&provider);
 
     let api_type = LlmApiType::Gemini;
     let is_stream = action == "streamGenerateContent";
@@ -175,18 +152,14 @@ pub async fn handle_gemini_request(
             .await?
         }
         _ => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+            return Err(ProxyError::InternalError(
                 "unsupported api type".to_string(),
             ))
         }
     };
 
     let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize final request body: {}", e),
-        )
+        ProxyError::InternalError(format!("Failed to serialize final request body: {}", e))
     })?);
 
     // Step 6: Create an initial log entry for the request.
@@ -213,6 +186,7 @@ pub async fn handle_gemini_request(
     let model_str = format_model_str(&provider, &model);
 
     proxy_request(
+        app_state,
         log_context,
         final_url,
         final_body,

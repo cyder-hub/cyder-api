@@ -26,28 +26,6 @@ impl Default for RedisConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PartialRedisConfig {
-    pub url: Option<String>,
-    pub pool_size: Option<usize>,
-    pub key_prefix: Option<String>,
-}
-
-impl PartialRedisConfig {
-    fn merge_into(self, final_config: &mut RedisConfig) {
-        if let Some(url) = self.url {
-            final_config.url = url;
-        }
-        if let Some(pool_size) = self.pool_size {
-            final_config.pool_size = pool_size;
-        }
-        if let Some(key_prefix) = self.key_prefix {
-            final_config.key_prefix = key_prefix;
-        }
-    }
-}
-
 // --- START CACHE CONFIG ---
 
 /// Cache backend type
@@ -114,42 +92,6 @@ impl CacheConfig {
     }
 }
 
-// --- PARTIAL CACHE CONFIG for merging ---
-
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PartialCacheRedisConfig {
-    pub key_prefix: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PartialCacheConfig {
-    pub backend: Option<CacheBackendType>,
-    pub ttl: Option<u64>,
-    pub negative_ttl: Option<u64>,
-    pub redis: Option<PartialCacheRedisConfig>,
-}
-
-impl PartialCacheConfig {
-    fn merge_into(self, final_config: &mut CacheConfig) {
-        if let Some(backend) = self.backend {
-            final_config.backend = backend;
-        }
-        if let Some(ttl) = self.ttl {
-            final_config.ttl = ttl;
-        }
-        if let Some(negative_ttl) = self.negative_ttl {
-            final_config.negative_ttl = negative_ttl;
-        }
-        if let Some(redis) = self.redis {
-            if let Some(key_prefix) = redis.key_prefix {
-                final_config.redis.key_prefix = key_prefix;
-            }
-        }
-    }
-}
 
 // --- START STORAGE CONFIG ---
 
@@ -232,79 +174,6 @@ impl Default for StorageConfig {
     }
 }
 
-
-// --- PARTIAL STORAGE CONFIG for merging ---
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PartialLocalStorageConfig {
-    pub root: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PartialS3StorageConfig {
-    pub endpoint: Option<String>,
-    pub region: Option<String>,
-    pub bucket: Option<String>,
-    pub access_mode: Option<S3AccessMode>,
-    pub access_key: Option<String>,
-    pub secret_key: Option<String>,
-    pub force_path_style: Option<bool>,
-    pub public_url: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PartialStorageConfig {
-    pub driver: Option<StorageDriver>,
-    pub local: Option<PartialLocalStorageConfig>,
-    pub s3: Option<PartialS3StorageConfig>,
-}
-
-impl PartialStorageConfig {
-    fn merge_into(self, final_config: &mut StorageConfig) {
-        if let Some(driver) = self.driver {
-            final_config.driver = driver;
-        }
-
-        if let Some(local_partial) = self.local {
-            if let Some(root) = local_partial.root {
-                final_config.local.root = root;
-            }
-        }
-
-        if let Some(s3_partial) = self.s3 {
-            match &mut final_config.s3 {
-                Some(s3_final) => { // s3 config already exists, merge into it
-                    if let Some(endpoint) = s3_partial.endpoint { s3_final.endpoint = Some(endpoint); }
-                    if let Some(region) = s3_partial.region { s3_final.region = Some(region); }
-                    if let Some(bucket) = s3_partial.bucket { s3_final.bucket = bucket; }
-                    if let Some(access_mode) = s3_partial.access_mode { s3_final.access_mode = access_mode; }
-                    if let Some(access_key) = s3_partial.access_key { s3_final.access_key = Some(access_key); }
-                    if let Some(secret_key) = s3_partial.secret_key { s3_final.secret_key = Some(secret_key); }
-                    if let Some(force_path_style) = s3_partial.force_path_style { s3_final.force_path_style = force_path_style; }
-                    if let Some(public_url) = s3_partial.public_url { s3_final.public_url = Some(public_url); }
-                }
-                None => { // no s3 config, try to create from partial
-                    if let Some(bucket) = s3_partial.bucket {
-                        final_config.s3 = Some(S3StorageConfig {
-                            bucket,
-                            endpoint: s3_partial.endpoint,
-                            region: s3_partial.region,
-                            access_mode: s3_partial.access_mode.unwrap_or_default(),
-                            access_key: s3_partial.access_key,
-                            secret_key: s3_partial.secret_key,
-                            force_path_style: s3_partial.force_path_style.unwrap_or(false),
-                            public_url: s3_partial.public_url,
-                        });
-                    }
-                }
-            }
-        }
-    }
-}
-
 // Default values for cache
 fn default_ttl_seconds() -> u64 {
     3600 // 1 hour
@@ -334,53 +203,6 @@ fn default_local_storage_root() -> String {
     "storage/storage".to_string()
 }
 
-
-// Used for deserializing user-provided config files where all fields are optional.
-#[derive(Debug, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PartialConfig {
-    pub host: Option<String>,
-    pub port: Option<u16>,
-    pub base_path: Option<String>,
-    pub secret_key: Option<String>,
-    pub password_salt: Option<String>,
-    pub jwt_secret: Option<String>,
-    pub api_key_jwt_secret: Option<String>,
-    pub db_url: Option<String>,
-    pub proxy: Option<String>,
-    pub log_level: Option<String>,
-    pub timezone: Option<String>,
-    pub redis: Option<PartialRedisConfig>,
-    pub cache: Option<PartialCacheConfig>,
-    pub storage: Option<PartialStorageConfig>,
-}
-
-impl PartialConfig {
-    /// Merges the fields of this partial config into a final config, overwriting existing values.
-    fn merge_into(self, final_config: &mut FinalConfig) {
-        if let Some(host) = self.host { final_config.host = host; }
-        if let Some(port) = self.port { final_config.port = port; }
-        if let Some(base_path) = self.base_path { final_config.base_path = base_path; }
-        if let Some(secret_key) = self.secret_key { final_config.secret_key = secret_key; }
-        if let Some(password_salt) = self.password_salt { final_config.password_salt = password_salt; }
-        if let Some(jwt_secret) = self.jwt_secret { final_config.jwt_secret = jwt_secret; }
-        if let Some(api_key_jwt_secret) = self.api_key_jwt_secret { final_config.api_key_jwt_secret = api_key_jwt_secret; }
-        if let Some(db_url) = self.db_url { final_config.db_url = db_url; }
-        if let Some(proxy) = self.proxy { final_config.proxy = Some(proxy); }
-        if let Some(log_level) = self.log_level { final_config.log_level = log_level; }
-        if let Some(timezone) = self.timezone { final_config.timezone = Some(timezone); }
-        if let Some(redis) = self.redis {
-            redis.merge_into(final_config.redis.get_or_insert_with(Default::default));
-        }
-        if let Some(cache) = self.cache {
-            cache.merge_into(&mut final_config.cache)
-        }
-        if let Some(storage) = self.storage {
-            storage.merge_into(&mut final_config.storage)
-        }
-    }
-}
-
 // The fully resolved configuration used by the application.
 // This is also the format for the default configuration file.
 #[derive(Debug, Deserialize, Serialize)]
@@ -396,8 +218,12 @@ pub struct FinalConfig {
     pub proxy: Option<String>,
     pub log_level: String,
     pub timezone: Option<String>,
+    pub max_body_size: usize,
+    pub db_pool_size: u32,
     pub redis: Option<RedisConfig>,
+    #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
 }
 
@@ -407,29 +233,6 @@ fn generate_random_string(len: usize) -> String {
         .take(len)
         .map(char::from)
         .collect()
-}
-
-fn get_env_var<T: std::str::FromStr>(key: &str) -> Option<T> {
-    std::env::var(key).ok().and_then(|v| v.parse().ok())
-}
-
-fn get_config_from_env() -> PartialConfig {
-    PartialConfig {
-        host: get_env_var("HOST"),
-        port: get_env_var("PORT"),
-        base_path: get_env_var("BASE_PATH"),
-        secret_key: get_env_var("SECRET_KEY"),
-        password_salt: get_env_var("PASSWORD_SALT"),
-        jwt_secret: get_env_var("JWT_SECRET"),
-        api_key_jwt_secret: get_env_var("API_KEY_JWT_SECRET"),
-        db_url: get_env_var("DB_URL"),
-        proxy: get_env_var("PROXY"),
-        log_level: get_env_var("LOG_LEVEL"),
-        timezone: get_env_var("TIMEZONE"),
-        redis: None,
-        cache: None,
-        storage: None,
-    }
 }
 
 pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
@@ -454,7 +257,7 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
     };
 
     // Create a FinalConfig with programmatic defaults.
-    let mut effective_default_config = FinalConfig {
+    let effective_default_config = FinalConfig {
         host: "0.0.0.0".to_string(),
         port: 8000,
         base_path: "/ai".to_string(),
@@ -466,43 +269,53 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
         proxy: None,
         log_level: "info".to_string(),
         timezone: None,
+        max_body_size: 100 * 1024 * 1024, // 100MB
+        db_pool_size: 5,
         redis: None,
         cache: CacheConfig::default(),
         storage: StorageConfig::default(),
     };
 
-    // If a default config file exists, load it as partial and merge it over the programmatic defaults.
-    if default_config_path.exists() {
-        if let Ok(config_str) = fs::read_to_string(default_config_path) {
-            let file_defaults: PartialConfig = serde_yaml::from_str(&config_str)
-                .unwrap_or_else(|e| panic!("Failed to parse default configuration file at {:?}: {}", default_config_path, e));
+    let default_yaml_str = serde_yaml::to_string(&effective_default_config).unwrap();
 
-            file_defaults.merge_into(&mut effective_default_config);
-        }
+    // First stage: parse default config
+    let mut default_builder = config::Config::builder()
+        .add_source(config::File::from_str(&default_yaml_str, config::FileFormat::Yaml));
+
+    if default_config_path.exists() {
+        default_builder = default_builder.add_source(config::File::from(default_config_path).required(false));
     }
 
-    // Write the (potentially updated) defaults back to the file.
-    // This ensures new fields are added to config.default.yaml.
-    let yaml_str = serde_yaml::to_string(&effective_default_config).unwrap();
-    fs::write(default_config_path, yaml_str)
+    let default_config: FinalConfig = default_builder
+        .build()
+        .expect("Failed to build default block in config")
+        .try_deserialize()
+        .expect("Failed to deserialize default configuration");
+
+    let merged_default_yaml = serde_yaml::to_string(&default_config).unwrap();
+    fs::write(default_config_path, &merged_default_yaml)
         .unwrap_or_else(|err| panic!("Failed to write default configuration file: {}", err));
 
-    // Start with the effective defaults.
-    let mut final_config = effective_default_config;
+    // Second stage: user config and optionally override env vars
+    let mut builder = config::Config::builder()
+        .add_source(config::File::from_str(&merged_default_yaml, config::FileFormat::Yaml));
 
-    // Load the user's config if it exists. It's optional and overrides the defaults.
     if user_config_path.exists() {
-        if let Ok(config_str) = fs::read_to_string(user_config_path) {
-            let user_config: PartialConfig = serde_yaml::from_str(&config_str)
-                .unwrap_or_else(|e| panic!("Failed to parse user configuration file at {:?}: {}", user_config_path, e));
-
-            // Merge user overrides into the final config
-            user_config.merge_into(&mut final_config);
-        }
+        builder = builder.add_source(config::File::from(user_config_path).required(false));
     }
 
-    // Load config from environment variables, which have the highest priority.
-    get_config_from_env().merge_into(&mut final_config);
+    // Load configuration from environment variables, which have the highest priority.
+    let env_config = config::Environment::default()
+        .try_parsing(true)
+        .ignore_empty(true);
+
+    builder = builder.add_source(env_config);
+
+    let mut final_config: FinalConfig = builder
+        .build()
+        .expect("Failed to build user and environment merged config")
+        .try_deserialize()
+        .expect("Failed to deserialize final configuration from merged tree");
 
     if final_config.redis.is_none() && final_config.cache.backend == CacheBackendType::Redis {
         final_config.cache.backend = CacheBackendType::Memory;

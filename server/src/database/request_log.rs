@@ -63,7 +63,7 @@ pub struct RequestLogQueryPayload {
 impl RequestLog {
     /// Inserts a new request log entry with initial details.
     pub fn insert(new_log_data: &RequestLog) -> DbResult<RequestLog> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let inserted_log_db = diesel::insert_into(request_log::table)
                 .values(RequestLogDb::to_db(new_log_data))
@@ -78,7 +78,7 @@ impl RequestLog {
 
     /// Retrieves a request log by its ID.
     pub fn get_by_id(log_id: i64) -> DbResult<RequestLog> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let log_db = request_log::table
                 .find(log_id)
@@ -99,7 +99,7 @@ impl RequestLog {
     }
 
     pub fn find_by_hash(storage_type: StorageType, hash: &str) -> DbResult<RequestLog> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let log_db = request_log::table
                 .filter(request_log::dsl::storage_type.eq(storage_type))
@@ -128,7 +128,7 @@ impl RequestLog {
 
     /// Lists request logs with filtering and pagination.
     pub fn list(payload: RequestLogQueryPayload) -> DbResult<ListResult<RequestLog>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let page_size = payload.page_size.unwrap_or(20); // Default page size
         let page = payload.page.unwrap_or(1);
         let offset = (page - 1) * page_size;

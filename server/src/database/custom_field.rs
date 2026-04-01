@@ -232,7 +232,7 @@ impl CustomFieldDefinition {
     pub fn create(
         payload: ApiCreateCustomFieldDefinitionPayload,
     ) -> DbResult<ApiCustomFieldDefinition> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
         let new_id = ID_GENERATOR.generate_id();
 
@@ -272,7 +272,7 @@ impl CustomFieldDefinition {
         id_value: i64,
         payload: ApiUpdateCustomFieldDefinitionPayload,
     ) -> DbResult<ApiCustomFieldDefinition> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
 
         let update_cfd_data = DbUpdateCustomFieldDefinition {
@@ -311,7 +311,7 @@ impl CustomFieldDefinition {
     }
 
     pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -332,7 +332,7 @@ impl CustomFieldDefinition {
     }
 
     pub fn get_by_id(id_value: i64) -> DbResult<ApiCustomFieldDefinition> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let cfd_db = custom_field_definition::table
                 .filter(custom_field_definition::dsl::id.eq(id_value))
@@ -353,7 +353,7 @@ impl CustomFieldDefinition {
     pub fn list(
         payload: ListCustomFieldQueryPayload,
     ) -> DbResult<ListResult<ApiCustomFieldDefinition>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
 
         let page = payload.page.unwrap_or(1);
         let page_size = payload.page_size.unwrap_or(10); // Default page size
@@ -403,7 +403,7 @@ impl CustomFieldDefinition {
     }
 
     pub fn list_all_active() -> DbResult<Vec<CustomFieldDefinition>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             custom_field_definition::table
                 .filter(custom_field_definition::dsl::deleted_at.is_null())
@@ -421,7 +421,7 @@ impl CustomFieldDefinition {
         model_id_val: i64,
         is_enabled_val: bool,
     ) -> DbResult<ModelCustomFieldAssignment> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
 
         let new_assignment_db = DbNewModelCustomFieldAssignment {
@@ -458,7 +458,7 @@ impl CustomFieldDefinition {
         custom_field_definition_id_val: i64,
         model_id_val: i64,
     ) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             diesel::delete(
                 model_custom_field_assignment::table
@@ -476,7 +476,7 @@ impl CustomFieldDefinition {
     }
 
     pub fn list_all_enabled_model_assignments() -> DbResult<Vec<ModelCustomFieldAssignment>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             model_custom_field_assignment::table
                 .filter(model_custom_field_assignment::dsl::is_enabled.eq(true))
@@ -488,7 +488,7 @@ impl CustomFieldDefinition {
     }
 
     pub fn list_enabled_model_assignments_by_model_id(model_id_val: i64) -> DbResult<Vec<ModelCustomFieldAssignment>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             model_custom_field_assignment::table
                 .filter(model_custom_field_assignment::dsl::is_enabled.eq(true))
@@ -506,7 +506,7 @@ impl CustomFieldDefinition {
         provider_id_val: i64,
         is_enabled_val: bool,
     ) -> DbResult<ProviderCustomFieldAssignment> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
 
         let new_assignment_db = DbNewProviderCustomFieldAssignment {
@@ -543,7 +543,7 @@ impl CustomFieldDefinition {
         custom_field_definition_id_val: i64,
         provider_id_val: i64,
     ) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             diesel::delete(
                 provider_custom_field_assignment::table
@@ -561,7 +561,7 @@ impl CustomFieldDefinition {
     }
 
     pub fn list_all_enabled_provider_assignments() -> DbResult<Vec<ProviderCustomFieldAssignment>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             provider_custom_field_assignment::table
                 .filter(provider_custom_field_assignment::dsl::is_enabled.eq(true))
@@ -573,7 +573,7 @@ impl CustomFieldDefinition {
     }
 
     pub fn list_enabled_provider_assignments_by_provider_id(provider_id_val: i64) -> DbResult<Vec<ProviderCustomFieldAssignment>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             provider_custom_field_assignment::table
                 .filter(provider_custom_field_assignment::dsl::is_enabled.eq(true))
@@ -588,7 +588,7 @@ impl CustomFieldDefinition {
     pub fn list_by_provider_id(
         provider_id_val: i64,
     ) -> DbResult<Vec<ApiCustomFieldDefinition>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
 
         db_execute!(conn, {
             let query = custom_field_definition::table
@@ -620,7 +620,7 @@ impl CustomFieldDefinition {
     pub fn list_by_model_id(
         model_id_val: i64,
     ) -> DbResult<Vec<ApiCustomFieldDefinition>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
 
         db_execute!(conn, {
             let query = custom_field_definition::table
@@ -653,7 +653,7 @@ impl CustomFieldDefinition {
         provider_id_val: i64,
         model_id_val: i64,
     ) -> DbResult<Vec<ApiCustomFieldDefinition>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
 
         db_execute!(conn, {
             // Ensure DSLs are in scope. db_object! should handle this.

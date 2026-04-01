@@ -36,10 +36,16 @@ pub enum DbConnection {
     Sqlite(PooledConnection<ConnectionManager<SqliteConnection>>),
 }
 
-pub fn get_connection() -> DbConnection {
+pub fn get_connection() -> DbResult<DbConnection> {
     match &*DB_POOL {
-        DbPool::Postgres(pool) => DbConnection::Postgres(pool.get().unwrap()),
-        DbPool::Sqlite(pool) => DbConnection::Sqlite(pool.get().unwrap()),
+        DbPool::Postgres(pool) => {
+            let conn = pool.get().map_err(|e| BaseError::DatabaseFatal(Some(format!("Postgres pool error: {}", e))))?;
+            Ok(DbConnection::Postgres(conn))
+        },
+        DbPool::Sqlite(pool) => {
+            let conn = pool.get().map_err(|e| BaseError::DatabaseFatal(Some(format!("Sqlite pool error: {}", e))))?;
+            Ok(DbConnection::Sqlite(conn))
+        },
     }
 }
 
@@ -186,7 +192,7 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);
     Pool::builder()
         .test_on_check_out(true)
-        .max_size(5)
+        .max_size(CONFIG.db_pool_size)
         .build(manager)
         .expect("Failed to create pool.")
 }
@@ -198,7 +204,7 @@ fn init_pg_pool(db_url: &str) -> Pool<ConnectionManager<PgConnection>> {
 
     let manager = ConnectionManager::<PgConnection>::new(db_url);
     Pool::builder()
-        .max_size(5)
+        .max_size(CONFIG.db_pool_size)
         .build(manager)
         .expect("Failed to create pool.")
 }

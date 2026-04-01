@@ -123,7 +123,7 @@ impl BillingPlan {
             updated_at: now,
         };
 
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let inserted_db_plan = diesel::insert_into(billing_plans::table)
                 .values(NewBillingPlanDb::to_db(&new_billing_plan))
@@ -137,7 +137,7 @@ impl BillingPlan {
     }
 
     pub fn get_by_id(id_value: i64) -> DbResult<BillingPlan> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_plan = billing_plans::table
                 .find(id_value)
@@ -154,7 +154,7 @@ impl BillingPlan {
     }
 
     pub fn update(id_value: i64, data: &UpdateBillingPlanData) -> DbResult<BillingPlan> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -176,7 +176,7 @@ impl BillingPlan {
     }
 
     pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
         db_execute!(conn, {
             diesel::update(billing_plans::table.find(id_value))
@@ -192,7 +192,7 @@ impl BillingPlan {
     }
 
     pub fn list_all() -> DbResult<Vec<BillingPlan>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_plans = billing_plans::table
                 .filter(billing_plans::dsl::deleted_at.is_null())
@@ -251,7 +251,7 @@ impl PriceRule {
             updated_at: now,
         };
 
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let inserted_db_rule = diesel::insert_into(price_rules::table)
                 .values(NewPriceRuleDb::to_db(&new_price_rule))
@@ -265,7 +265,7 @@ impl PriceRule {
     }
 
     pub fn update(id_value: i64, data: &UpdatePriceRuleData) -> DbResult<PriceRule> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -287,7 +287,7 @@ impl PriceRule {
     }
 
     pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             diesel::delete(price_rules::table.find(id_value))
                 .execute(conn)
@@ -301,7 +301,7 @@ impl PriceRule {
     }
 
     pub fn list_all() -> DbResult<Vec<PriceRule>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_rules = price_rules::table
                 .order(price_rules::dsl::created_at.desc())
@@ -318,7 +318,7 @@ impl PriceRule {
     }
 
     pub fn list_by_plan_id(plan_id_value: i64) -> DbResult<Vec<PriceRule>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_rules = price_rules::table
                 .filter(price_rules::dsl::plan_id.eq(plan_id_value))
@@ -339,7 +339,7 @@ impl PriceRule {
     }
 
     pub fn get_by_id(id_value: i64) -> DbResult<PriceRule> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_rule = price_rules::table
                 .find(id_value)

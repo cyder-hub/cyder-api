@@ -77,7 +77,7 @@ impl Model {
             updated_at: now,
         };
 
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let inserted_db_model = diesel::insert_into(model::table)
                 .values(NewModelDb::to_db(&new_model_data))
@@ -92,7 +92,7 @@ impl Model {
 
     /// Updates an existing model record.
     pub fn update(id_value: i64, data: &UpdateModelData) -> DbResult<Model> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -115,7 +115,7 @@ impl Model {
 
     /// Soft-deletes a model by ID (sets deleted_at to current time and is_enabled to false).
     pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
 
         db_execute!(conn, {
@@ -140,7 +140,7 @@ impl Model {
         model_name_val: &str,
         provider_id_val: i64,
     ) -> DbResult<Option<Model>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_model_opt = model::table
                 .filter(
@@ -166,7 +166,7 @@ impl Model {
 
     /// Retrieves a model by its ID, if not deleted.
     pub fn get_by_id(id_value: i64) -> DbResult<Model> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_model = model::table
                 .filter(
@@ -201,7 +201,7 @@ impl Model {
 
     /// Lists all models for a given provider_id that are not marked as deleted.
     pub fn list_by_provider_id(provider_id_val: i64) -> DbResult<Vec<Model>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_models = model::table
                 .filter(
@@ -224,7 +224,7 @@ impl Model {
 
     /// Lists all models that are not marked as deleted.
     pub fn list_all() -> DbResult<Vec<Model>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_models = model::table
                 .left_join(provider::table.on(provider::dsl::id.eq(model::dsl::provider_id)))
@@ -242,7 +242,7 @@ impl Model {
 
     /// Lists all active (not deleted and enabled) models for a given provider_id.
     pub fn list_active_by_provider_id(provider_id_val: i64) -> DbResult<Vec<Model>> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_models = model::table
                 .filter(
@@ -272,7 +272,7 @@ impl Model {
         model_name_val: &str,
         real_model_name_val: Option<&str>,
     ) -> DbResult<Model> {
-        let conn = &mut get_connection();
+        let conn = &mut get_connection()?;
         db_execute!(conn, {
             let existing_model_db = model::table
                 .filter(

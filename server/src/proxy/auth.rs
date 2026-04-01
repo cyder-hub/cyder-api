@@ -1,8 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::http::HeaderMap;
-use reqwest::{StatusCode, header::AUTHORIZATION};
+use reqwest::header::AUTHORIZATION;
 
+use super::ProxyError;
 use crate::{
     service::app_state::{AppState, AppStoreError},
     service::cache::types::{CacheModel, CacheProvider, CacheSystemApiKey},
@@ -28,18 +29,18 @@ pub async fn authenticate_openai_request(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
     app_state: &Arc<AppState>,
-) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
+) -> Result<ApiKeyCheckResult, ProxyError> {
     debug!("Authenticating OpenAI request");
     let (system_api_key_str, position) =
         parse_token_from_request(headers, params).map_err(|err_msg| {
             warn!("OpenAI auth failed: {}", err_msg);
-            (StatusCode::UNAUTHORIZED, err_msg)
+            ProxyError::Unauthorized(err_msg)
         })?;
     check_system_api_key(app_state, &system_api_key_str, position)
         .await
         .map_err(|err_msg| {
             warn!("OpenAI system key check failed: {}", err_msg);
-            (StatusCode::UNAUTHORIZED, err_msg)
+            ProxyError::Unauthorized(err_msg)
         })
 }
 
@@ -48,15 +49,14 @@ pub async fn authenticate_gemini_request(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
     app_state: &Arc<AppState>,
-) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
+) -> Result<ApiKeyCheckResult, ProxyError> {
     debug!("Authenticating Gemini request");
     let (system_api_key_str, position) = match headers.get("X-Goog-Api-Key") {
         Some(header_value) => match header_value.to_str() {
             Ok(key) => (key.to_string(), ApiKeyPosition::XGoogApiKeyHeader),
             Err(_) => {
                 warn!("Invalid characters in X-Goog-Api-Key header");
-                return Err((
-                    StatusCode::BAD_REQUEST,
+                return Err(ProxyError::BadRequest(
                     "Invalid characters in X-Goog-Api-Key header".to_string(),
                 ));
             }
@@ -65,8 +65,7 @@ pub async fn authenticate_gemini_request(
             Some(key) => (key.clone(), ApiKeyPosition::KeyQuery),
             None => {
                 warn!("Missing API key for Gemini request");
-                return Err((
-                    StatusCode::UNAUTHORIZED,
+                return Err(ProxyError::Unauthorized(
                     "Missing API key. Provide it in 'X-Goog-Api-Key' header or 'key' query parameter.".to_string()
                 ));
             }
@@ -76,7 +75,7 @@ pub async fn authenticate_gemini_request(
         .await
         .map_err(|err_msg| {
             warn!("Gemini system key check failed: {}", err_msg);
-            (StatusCode::UNAUTHORIZED, err_msg)
+            ProxyError::Unauthorized(err_msg)
         })
 }
 
@@ -84,23 +83,21 @@ pub async fn authenticate_gemini_request(
 pub async fn authenticate_anthropic_request(
     headers: &HeaderMap,
     app_state: &Arc<AppState>,
-) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
+) -> Result<ApiKeyCheckResult, ProxyError> {
     debug!("Authenticating Anthropic request");
     let system_api_key_str = match headers.get("x-api-key") {
         Some(header_value) => match header_value.to_str() {
             Ok(key) => key.to_string(),
             Err(_) => {
                 warn!("Invalid characters in x-api-key header");
-                return Err((
-                    StatusCode::BAD_REQUEST,
+                return Err(ProxyError::BadRequest(
                     "Invalid characters in x-api-key header".to_string(),
                 ));
             }
         },
         None => {
             warn!("Missing API key for Anthropic request");
-            return Err((
-                StatusCode::UNAUTHORIZED,
+            return Err(ProxyError::Unauthorized(
                 "Missing API key. Provide it in 'x-api-key' header.".to_string(),
             ));
         }
@@ -113,7 +110,7 @@ pub async fn authenticate_anthropic_request(
     .await
     .map_err(|err_msg| {
         warn!("Anthropic system key check failed: {}", err_msg);
-        (StatusCode::UNAUTHORIZED, err_msg)
+        ProxyError::Unauthorized(err_msg)
     })
 }
 
@@ -122,18 +119,18 @@ pub async fn authenticate_ollama_request(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
     app_state: &Arc<AppState>,
-) -> Result<ApiKeyCheckResult, (StatusCode, String)> {
+) -> Result<ApiKeyCheckResult, ProxyError> {
     debug!("Authenticating Ollama request");
     let (system_api_key_str, position) =
         parse_token_from_request(headers, params).map_err(|err_msg| {
             warn!("Ollama auth failed: {}", err_msg);
-            (StatusCode::UNAUTHORIZED, err_msg)
+            ProxyError::Unauthorized(err_msg)
         })?;
     check_system_api_key(app_state, &system_api_key_str, position)
         .await
         .map_err(|err_msg| {
             warn!("Ollama system key check failed: {}", err_msg);
-            (StatusCode::UNAUTHORIZED, err_msg)
+            ProxyError::Unauthorized(err_msg)
         })
 }
 
@@ -143,7 +140,7 @@ pub async fn check_access_control(
     provider: &CacheProvider,
     model: &CacheModel,
     app_state: &Arc<AppState>,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ProxyError> {
     if let Some(policy_id) = system_api_key.access_control_policy_id {
         match app_state.get_access_control_policy(policy_id).await {
             Ok(Some(policy)) => {
@@ -152,10 +149,10 @@ pub async fn check_access_control(
                         "Access denied by policy '{}' for SystemApiKey ID {}, Provider ID {}, Model ID {}. Reason: {}",
                         policy.name, system_api_key.id, provider.id, model.id, reason
                     );
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        format!("Access denied by access control policy: {}", reason),
-                    ));
+                    return Err(ProxyError::Forbidden(format!(
+                        "Access denied by access control policy: {}",
+                        reason,
+                    )));
                 }
             }
             Ok(None) => {
@@ -164,7 +161,7 @@ pub async fn check_access_control(
                     policy_id
                 );
                 error!("{}, SystemApiKey ID: {}", err_msg, system_api_key.id);
-                return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+                return Err(ProxyError::InternalError(err_msg));
             }
             Err(store_err) => {
                 let err_msg = format!(
@@ -172,7 +169,7 @@ pub async fn check_access_control(
                     policy_id, store_err
                 );
                 error!("{}, SystemApiKey ID: {}", err_msg, system_api_key.id);
-                return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+                return Err(ProxyError::InternalError(err_msg));
             }
         }
     }

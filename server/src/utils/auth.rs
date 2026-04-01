@@ -180,12 +180,18 @@ pub async fn authorization_refresh_middleware(
     let auth_header = req.headers_mut().get(http::header::AUTHORIZATION);
 
     let auth_header = match auth_header {
-        Some(header) => header.to_str().unwrap(),
+        Some(header) => match header.to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(AuthError::Invalid),
+        },
         None => return Err(AuthError::Empty),
     };
     let mut header = auth_header.split_whitespace();
-    let (_, token) = (header.next(), header.next());
-    let token = token.unwrap();
+    let _ = header.next();
+    let token = match header.next() {
+        Some(t) => t,
+        None => return Err(AuthError::Invalid),
+    };
     let token_data = match decode_refresh_token(token) {
         Ok(data) => data,
         Err(_) => {
@@ -203,12 +209,18 @@ pub async fn authorization_access_middleware(
     let auth_header = req.headers_mut().get(http::header::AUTHORIZATION);
 
     let auth_header = match auth_header {
-        Some(header) => header.to_str().unwrap(),
+        Some(header) => match header.to_str() {
+            Ok(s) => s,
+            Err(_) => return Err(AuthError::Invalid),
+        },
         None => return Err(AuthError::Empty),
     };
     let mut header = auth_header.split_whitespace();
-    let (_, token) = (header.next(), header.next());
-    let token = token.unwrap();
+    let _ = header.next();
+    let token = match header.next() {
+        Some(t) => t,
+        None => return Err(AuthError::Invalid),
+    };
     let token_data = match decode_access_token(token) {
         Ok(data) => data,
         Err(_) => {

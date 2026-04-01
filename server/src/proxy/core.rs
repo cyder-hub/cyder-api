@@ -1,8 +1,10 @@
 use super::logging::{get_log_manager, RequestLogContext};
 use super::util::serialize_reqwest_headers;
+use super::ProxyError;
 
 use crate::config::CONFIG;
 use crate::schema::enum_def::{LlmApiType, RequestStatus};
+use crate::service::app_state::AppState;
 use crate::service::cache::types::CacheBillingPlan;
 use crate::service::transform::{transform_result, StreamTransformer};
 use crate::utils::sse::SseParser;
@@ -17,7 +19,7 @@ use flate2::read::GzDecoder;
 use futures::StreamExt;
 use reqwest::{
     header::{HeaderMap, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
-    Method, Proxy, StatusCode,
+    Method, StatusCode,
 };
 use serde_json::Value;
 use std::io::Read;
@@ -60,40 +62,20 @@ impl Drop for RequestLogContextGuard {
     }
 }
 
-pub(super) fn build_reqwest_client(
-    use_proxy: bool,
-) -> Result<reqwest::Client, (StatusCode, String)> {
-    let mut client_builder = reqwest::Client::builder();
-    if use_proxy {
-        if let Some(proxy_url) = &CONFIG.proxy {
-            let proxy = Proxy::https(proxy_url).map_err(|e| {
-                error!("Invalid proxy URL '{}': {}", proxy_url, e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Invalid proxy configuration".to_string(),
-                )
-            })?;
-            client_builder = client_builder.proxy(proxy);
-        }
-    }
-    client_builder.build().map_err(|e| {
-        error!("Failed to build reqwest client: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to build HTTP client".to_string(),
-        )
-    })
-}
-
 // A simple proxy that sends a request and returns the response, handling streaming and gzip.
 // It does not perform logging or response transformation.
 pub(super) async fn simple_proxy_request(
+    app_state: &AppState,
     url: String,
     data: String,
     headers: reqwest::header::HeaderMap,
     use_proxy: bool,
-) -> Result<Response<Body>, (StatusCode, String)> {
-    let client = build_reqwest_client(use_proxy)?;
+) -> Result<Response<Body>, ProxyError> {
+    let client = if use_proxy {
+        &app_state.proxy_client
+    } else {
+        &app_state.client
+    };
 
     debug!(
         "[simple_proxy_request] request header: {:?}",
@@ -112,7 +94,7 @@ pub(super) async fn simple_proxy_request(
         Err(e) => {
             let error_message = format!("LLM request failed: {}", e);
             error!("{}", error_message);
-            return Err((StatusCode::BAD_GATEWAY, error_message));
+            return Err(ProxyError::BadGateway(error_message));
         }
     };
 
@@ -146,7 +128,7 @@ pub(super) async fn simple_proxy_request(
             Err(e) => {
                 let err_msg = format!("Failed to read LLM response body: {}", e);
                 error!("[simple_proxy_request] {}", err_msg);
-                return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+                return Err(ProxyError::InternalError(err_msg));
             }
         };
 
@@ -175,6 +157,7 @@ pub(super) async fn simple_proxy_request(
 
 // Builds the HTTP client, sends the request to the LLM, and passes the response to be handled.
 pub(super) async fn proxy_request(
+    app_state: Arc<AppState>,
     log_context: RequestLogContext,
     url: String,
     data: Bytes,
@@ -184,15 +167,19 @@ pub(super) async fn proxy_request(
     billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-) -> Result<Response<Body>, (StatusCode, String)> {
+) -> Result<Response<Body>, ProxyError> {
     info!(
         "Starting proxy request for log_id {}, model {}",
         log_context.id, model_str
     );
     let log_context = Arc::new(TokioMutex::new(log_context));
 
-    // 1. Build HTTP client, with proxy if configured
-    let client = build_reqwest_client(use_proxy)?;
+    // 1. Get HTTP client from AppState, with proxy if configured
+    let client = if use_proxy {
+        &app_state.proxy_client
+    } else {
+        &app_state.client
+    };
 
     let mut cancellation_guard = RequestLogContextGuard::new(log_context.clone());
 
@@ -219,7 +206,7 @@ pub(super) async fn proxy_request(
             context.overall_status = RequestStatus::Error;
             get_log_manager().log(context.clone()).await;
 
-            return Err((StatusCode::BAD_GATEWAY, error_message));
+            return Err(ProxyError::BadGateway(error_message));
         }
     };
 
@@ -272,7 +259,7 @@ async fn handle_non_streaming_response(
     billing_plan: Option<&CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-) -> Result<Response<Body>, (StatusCode, String)> {
+) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
     debug!(
@@ -306,7 +293,7 @@ async fn handle_non_streaming_response(
             context.llm_response_body = Some(Bytes::from(err_msg.clone()));
             get_log_manager().log(context.clone()).await;
 
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, err_msg));
+            return Err(ProxyError::InternalError(err_msg));
         }
     };
 
@@ -414,7 +401,7 @@ async fn handle_streaming_response(
     billing_plan: Option<CacheBillingPlan>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-) -> Result<Response<Body>, (StatusCode, String)> {
+) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
 
@@ -554,7 +541,7 @@ async fn handle_streaming_response(
                 log_id, e
             );
             error!("{}", error_message);
-            Err((StatusCode::INTERNAL_SERVER_ERROR, error_message))
+            Err(ProxyError::InternalError(error_message))
         }
     }
 }

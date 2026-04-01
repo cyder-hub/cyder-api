@@ -1,16 +1,11 @@
-use std::{
-    collections::HashMap,
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use cyder_tools::log::info;
+use cyder_tools::log::{error, info};
+use dashmap::DashMap;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use once_cell::sync::Lazy;
-use reqwest::{header::CONTENT_TYPE, Proxy};
+use reqwest::{header::CONTENT_TYPE, Client};
 use serde::Deserialize;
-
-use crate::config::CONFIG;
 
 #[derive(Clone, Debug)]
 struct CachedToken {
@@ -18,8 +13,7 @@ struct CachedToken {
     expiry_time: u64, // Store expiry time as Unix timestamp
 }
 
-static VERTEX_TOKEN_CACHE: Lazy<Mutex<HashMap<i64, CachedToken>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static VERTEX_TOKEN_CACHE: Lazy<DashMap<i64, CachedToken>> = Lazy::new(DashMap::new);
 
 #[derive(serde::Serialize)]
 struct Payload<'a> {
@@ -28,7 +22,14 @@ struct Payload<'a> {
 }
 
 fn issued_at() -> u64 {
-    SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs() - 10
+    SystemTime::UNIX_EPOCH
+        .elapsed()
+        .map(|d| d.as_secs())
+        .unwrap_or_else(|_| {
+            error!("SystemTime::UNIX_EPOCH.elapsed() failed");
+            0
+        })
+        .saturating_sub(10)
 }
 
 #[derive(serde::Serialize)]
@@ -57,16 +58,18 @@ pub struct VertexTokenResult {
 fn get_current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
+        .unwrap_or_else(|_| {
+            error!("Time went backwards");
+            SystemTime::UNIX_EPOCH.duration_since(UNIX_EPOCH).unwrap()
+        })
         .as_secs()
 }
 
 fn get_token_from_cache(key: &i64) -> Option<String> {
-    let cache = VERTEX_TOKEN_CACHE.lock().unwrap();
     let now = get_current_timestamp();
 
     // Check cache first
-    if let Some(cached) = cache.get(key) {
+    if let Some(cached) = VERTEX_TOKEN_CACHE.get(key) {
         // Check if token is still valid (add a small buffer, e.g., 60 seconds)
         if cached.expiry_time > now + 60 {
             return Some(cached.access_token.clone());
@@ -76,6 +79,7 @@ fn get_token_from_cache(key: &i64) -> Option<String> {
 }
 
 pub async fn get_vertex_token(
+    client: &Client,
     provider_key_id: i64,
     service_account_str: &str,
 ) -> Result<String, String> {
@@ -86,24 +90,27 @@ pub async fn get_vertex_token(
     // If not in cache or expired, request a new token
     let now = get_current_timestamp();
     info!("{provider_key_id} vertex token not in cache or expired, regenerate token");
-    let vertex_token_result = request_google_token(service_account_str).await?;
+    let vertex_token_result = request_google_token(client, service_account_str).await?;
     let expiry_time = now + vertex_token_result.expires_in as u64;
 
     let new_cached_token = CachedToken {
         access_token: vertex_token_result.access_token.clone(),
         expiry_time,
     };
-    let mut cache = VERTEX_TOKEN_CACHE.lock().unwrap();
-    cache.insert(provider_key_id, new_cached_token);
+    VERTEX_TOKEN_CACHE.insert(provider_key_id, new_cached_token);
 
     Ok(vertex_token_result.access_token)
 }
 
-pub async fn request_google_token(service_account_str: &str) -> Result<VertexTokenResult, String> {
-    let vertex_account: VertexServiceAccount = serde_json::from_str(service_account_str).unwrap();
+pub async fn request_google_token(
+    client: &Client,
+    service_account_str: &str,
+) -> Result<VertexTokenResult, String> {
+    let vertex_account: VertexServiceAccount =
+        serde_json::from_str(service_account_str).map_err(|e| e.to_string())?;
     let client_email = &vertex_account.client_email;
     let token_uri = &vertex_account.token_uri;
-    let private_key = &vertex_account.private_key;
+    let private_key_str = &vertex_account.private_key;
     let private_key_id = &vertex_account.private_key_id;
 
     let scope = "https://www.googleapis.com/auth/cloud-platform";
@@ -111,18 +118,12 @@ pub async fn request_google_token(service_account_str: &str) -> Result<VertexTok
     const EXPIRE: u64 = 60 * 60;
     let iat = issued_at();
 
-    let private_key =
-        EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(|e| e.to_string())?;
+    let private_key = EncodingKey::from_rsa_pem(private_key_str.as_bytes())
+        .map_err(|e| format!("Failed to load private key: {}", e))?;
 
-    let mut client_builder = reqwest::Client::builder();
-    if let Some(proxy_url) = &CONFIG.proxy {
-        let proxy = Proxy::https(proxy_url).map_err(|e| e.to_string())?;
-        client_builder = client_builder.proxy(proxy);
-    }
-    let client = client_builder.build().map_err(|e| e.to_string())?;
     let claims = Claims {
         iss: client_email,
-        scope: scope,
+        scope,
         aud: token_uri,
         iat,
         exp: iat + EXPIRE,
@@ -133,11 +134,13 @@ pub async fn request_google_token(service_account_str: &str) -> Result<VertexTok
     header.alg = Algorithm::RS256;
     header.kid = Some(private_key_id.to_string());
 
+    let assertion = encode(&header, &claims, &private_key).map_err(|e| e.to_string())?;
+
     let body_str = serde_urlencoded::to_string(&Payload {
         grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        assertion: &encode(&header, &claims, &private_key).unwrap(),
+        assertion: &assertion,
     })
-    .unwrap();
+    .map_err(|e| e.to_string())?;
 
     let response = client
         .post(token_uri)
@@ -145,13 +148,16 @@ pub async fn request_google_token(service_account_str: &str) -> Result<VertexTok
         .body(body_str)
         .send()
         .await
-        .unwrap();
+        .map_err(|e| e.to_string())?;
 
-    match response.status() {
-        reqwest::StatusCode::OK => {
-            let token_result: VertexTokenResult = response.json().await.unwrap();
-            Ok(token_result)
-        }
-        _ => Err("fail".to_string()),
+    let status = response.status();
+    if status.is_success() {
+        let token_result: VertexTokenResult = response.json().await.map_err(|e| e.to_string())?;
+        Ok(token_result)
+    } else {
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        error!("Vertex token request failed with status {}: {}", status, error_text);
+        Err(format!("Vertex token request failed with status {}: {}", status, error_text))
     }
 }
+

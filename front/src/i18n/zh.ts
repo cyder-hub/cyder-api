@@ -1,21 +1,24 @@
 export const zhDict = {
   providerPage: {
     editModel: "编辑模型: {model_name}",
+    title: "渠道管理",
+    description: "管理渠道并配置关联的模型和API Key。",
+    addProvider: "添加新渠道",
+    loading: "正在加载渠道...",
+    error: "加载渠道错误: {error}",
+    noData: '未找到渠道。点击"添加新渠道"开始。',
+    table: {
+      key: "密钥",
+      name: "名称",
+      type: "类型",
+      useProxy: "使用代理",
+      limitModel: "限制模型",
+      models: "模型",
+      apiKeys: "API密钥",
+    },
+    confirmDelete: '您确定要删除渠道"{name}"吗？',
+    deleteFailed: "删除渠道失败: {error}",
   },
-  providerPageTitle: "渠道管理",
-  providerPageDescription: "管理渠道并配置关联的模型和API Key。",
-  addProvider: "添加新渠道",
-  providersLoading: "正在加载渠道...",
-  providersError: "加载渠道错误: {error}",
-  noProviders: '未找到渠道。点击"添加新渠道"开始。',
-  tableHeaderKey: "密钥",
-  name: "名称",
-  tableHeaderType: "类型",
-  tableHeaderUseProxy: "使用代理",
-  tableHeaderLimitModel: "限制模型",
-  providerModels: "模型",
-  providerApiKeys: "API密钥",
-  actions: "操作",
   dashboard: {
     description: "查看系统整体运行状态、资源统计及各种日常耗费指标。",
     systemOverview: {
@@ -78,18 +81,12 @@ export const zhDict = {
     },
     errorLoading: "加载统计数据错误: {error}",
   },
-  edit: "编辑",
-  delete: "删除",
-  confirmDeleteProvider: '您确定要删除渠道"{name}"吗？',
-  deleteFailed: "删除渠道失败: {error}",
-  unknownError: "发生未知错误。",
-  recordYes: "是",
-  recordNo: "否",
+
   currencies: {
     USD: "美元",
     CNY: "人民币",
   },
-  loading: "加载中...",
+
   sidebar: {
     dashboard: "仪表盘",
     record: "记录",
@@ -100,9 +97,11 @@ export const zhDict = {
     customFields: "自定义字段",
     price: "价格",
   },
-  appHeader: "AI网关管理器",
-  appFooter: "© 2025 AI网关管理器. 版权所有.",
-  toggleSidebar: "切换侧边栏",
+  app: {
+    header: "AI网关管理器",
+    footer: "© 2025 AI网关管理器. 版权所有.",
+    toggleSidebar: "切换侧边栏",
+  },
   language: {
     english: "英文",
     chinese: "中文",
@@ -160,6 +159,8 @@ export const zhDict = {
     detailModal: {
       title: "请求详情",
       fetchFailed: "获取记录详情失败",
+      general: "通用信息",
+      timings: "时间信息 (UTC)",
     },
     pagination: {
       previousPage: "上一页",
@@ -172,6 +173,8 @@ export const zhDict = {
     },
   },
   common: {
+    unknownError: "发生未知错误。",
+    loading: "加载中...",
     yes: "是",
     no: "否",
     edit: "编辑",
@@ -182,6 +185,7 @@ export const zhDict = {
     refresh: "刷新",
     check: "检查",
     close: "关闭",
+    confirm: "确认",
   },
   apiKeyPage: {
     title: "API Key 管理",
@@ -203,6 +207,7 @@ export const zhDict = {
     copy: "复制完整密钥",
     copied: "已复制!",
     confirmDelete: '您确定要删除 API Key "{name}" 吗？',
+    deleteFailed: "删除 API Key 失败: {error}",
     copyFailed: "复制 API Key 失败。",
     toggleStatusFailed: "切换 API Key 状态失败: {error}",
     refreshRef: "刷新引用",
@@ -370,6 +375,9 @@ export const zhDict = {
       noNewModels: "没有新模型可添加。所有远程模型可能已存在。",
       uncommittedCleared: "已清除未提交的模型。",
       noUncommittedToClear: "没有未提交的模型可清除。",
+      noModels: "暂无模型",
+      noApiKeys: "暂无 API Key",
+      noCustomFields: "暂无自定义字段",
       apiKeySaveSuccess: "API 密钥保存成功。",
       modelSaveSuccess: "模型保存成功。",
       modelDeleteSuccess: "模型删除成功。",

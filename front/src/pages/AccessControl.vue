@@ -1,14 +1,11 @@
 <template>
-  <div class="p-6 space-y-6">
-    <div class="flex justify-between items-start">
-      <div>
-        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ $t("accessControlPage.title") }}
-        </h1>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("accessControlPage.description") }}
-        </p>
-      </div>
+  <CrudPageLayout
+    :title="$t('accessControlPage.title')"
+    :description="$t('accessControlPage.description')"
+    :loading="storeLoading"
+    :empty="!store.policies.length"
+  >
+    <template #actions>
       <Button
         @click="handleOpenAddModal"
         variant="outline"
@@ -17,25 +14,27 @@
         <Plus class="h-4 w-4 mr-1.5" />
         {{ $t("accessControlPage.addPolicy") }}
       </Button>
-    </div>
+    </template>
 
-    <!-- Data Table -->
-    <div v-if="storeLoading" class="flex items-center justify-center py-16">
-      <Loader2 class="h-5 w-5 animate-spin mr-2" />
-      <span class="text-sm text-gray-500">{{
-        $t("accessControlPage.loading")
-      }}</span>
-    </div>
-    <div
-      v-else-if="!store.policies.length"
-      class="flex flex-col items-center justify-center py-20"
-    >
-      <ShieldAlert class="h-10 w-10 stroke-1 text-gray-400 mb-2" />
-      <span class="text-sm font-medium text-gray-500">{{
-        $t("accessControlPage.noData")
-      }}</span>
-    </div>
-    <div v-else class="border border-gray-200 rounded-lg overflow-hidden">
+    <template #loading>
+      <div class="flex items-center justify-center py-16">
+        <Loader2 class="h-5 w-5 animate-spin mr-2" />
+        <span class="text-sm text-gray-500">{{
+          $t("accessControlPage.loading")
+        }}</span>
+      </div>
+    </template>
+
+    <template #empty>
+      <div class="flex flex-col items-center justify-center py-20">
+        <ShieldAlert class="h-10 w-10 stroke-1 text-gray-400 mb-2" />
+        <span class="text-sm font-medium text-gray-500">{{
+          $t("accessControlPage.noData")
+        }}</span>
+      </div>
+    </template>
+
+    <div class="border border-gray-200 rounded-lg overflow-hidden">
       <Table>
         <TableHeader>
           <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
@@ -104,20 +103,21 @@
       </Table>
     </div>
 
-    <!-- Edit/Add Modal -->
-    <Dialog :open="showEditModal" @update:open="setShowEditModal">
-      <DialogContent
-        class="max-w-4xl max-h-[90vh] flex flex-col p-6 overflow-hidden"
-      >
-        <DialogHeader>
-          <DialogTitle class="text-lg font-semibold text-gray-900">{{
-            editingPolicy.id
-              ? $t("accessControlPage.modal.titleEdit")
-              : $t("accessControlPage.modal.titleAdd")
-          }}</DialogTitle>
-        </DialogHeader>
+    <template #modals>
+      <!-- Edit/Add Modal -->
+      <Dialog :open="showEditModal" @update:open="setShowEditModal">
+        <DialogContent
+          class="max-w-4xl max-h-[90vh] flex flex-col p-6 overflow-hidden"
+        >
+          <DialogHeader>
+            <DialogTitle class="text-lg font-semibold text-gray-900">{{
+              editingPolicy.id
+                ? $t("accessControlPage.modal.titleEdit")
+                : $t("accessControlPage.modal.titleAdd")
+            }}</DialogTitle>
+          </DialogHeader>
 
-        <div class="space-y-4 overflow-y-auto flex-1 pr-2">
+          <div class="space-y-4 overflow-y-auto flex-1 pr-2">
           <!-- Policy Fields -->
           <div class="space-y-4">
             <div>
@@ -340,20 +340,21 @@
           </div>
         </div>
 
-        <DialogFooter class="border-t border-gray-100 pt-4 mt-2">
-          <Button
-            @click="handleCloseModal"
-            variant="ghost"
-            class="text-gray-600"
-            >{{ $t("common.cancel") }}</Button
-          >
-          <Button @click="handleSavePolicy" variant="default">{{
-            $t("common.save")
-          }}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  </div>
+          <DialogFooter class="border-t border-gray-100 pt-4 mt-2">
+            <Button
+              @click="handleCloseModal"
+              variant="ghost"
+              class="text-gray-600"
+              >{{ $t("common.cancel") }}</Button
+            >
+            <Button @click="handleSavePolicy" variant="default">{{
+              $t("common.save")
+            }}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </template>
+  </CrudPageLayout>
 </template>
 
 <script setup lang="ts">
@@ -361,6 +362,8 @@ import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
 import { useAccessControlStore } from "@/store/accessControlStore";
+import type { AccessControlRule } from "@/store/types";
+import { useProviderStore } from "@/store/providerStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -387,10 +390,14 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
+import CrudPageLayout from "@/components/CrudPageLayout.vue";
 import { Plus, Edit2, Trash2, ShieldAlert, Loader2 } from "lucide-vue-next";
+import { confirm } from "@/lib/confirmController";
+import { toastController } from "@/lib/toastController";
 
 const { t: $t } = useI18n();
 const store = useAccessControlStore();
+const providerStore = useProviderStore();
 
 // UI States
 const storeLoading = ref(true);
@@ -401,32 +408,8 @@ const setShowEditModal = (val: boolean) => {
   showEditModal.value = val;
 };
 
-// Data Models
-interface Model {
-  id: number;
-  model_name: string;
-}
-interface Provider {
-  id: number;
-  name: string;
-}
-interface ProviderDetail {
-  provider: Provider;
-  models: Model[];
-}
-
-const providers = ref<ProviderDetail[]>([]);
-
-const newPolicyTemplate = () => ({
-  id: null as number | null,
-  name: "",
-  default_action: "ALLOW" as "ALLOW" | "DENY",
-  description: "",
-  rules: [] as any[],
-});
-
 const newRuleTemplate = () => ({
-  id: null,
+  id: null as number | null,
   rule_type: "ALLOW",
   priority: 0,
   scope: "PROVIDER",
@@ -434,6 +417,16 @@ const newRuleTemplate = () => ({
   model_id: null as string | null,
   description: "",
   is_enabled: true,
+});
+
+type EditingRule = ReturnType<typeof newRuleTemplate>;
+
+const newPolicyTemplate = () => ({
+  id: null as number | null,
+  name: "",
+  default_action: "ALLOW" as "ALLOW" | "DENY",
+  description: "",
+  rules: [] as EditingRule[],
 });
 
 const editingPolicy = ref(newPolicyTemplate());
@@ -458,7 +451,7 @@ const scopeOptions = computed(() =>
   })),
 );
 const providerOptions = computed(() =>
-  providers.value.map((p) => ({
+  providerStore.providers.map((p) => ({
     value: p.provider.id,
     label: p.provider.name,
   })),
@@ -467,36 +460,26 @@ const providerOptions = computed(() =>
 const getModelOptions = (providerIdStr: string | null) => {
   const providerId = Number(providerIdStr);
   if (!providerId || isNaN(providerId)) return [];
-  const pDetail = providers.value.find((p) => p.provider.id === providerId);
+  const pDetail = providerStore.providers.find((p) => p.provider.id === providerId);
   return (pDetail?.models || []).map((m) => ({
-    value: m.id,
-    label: m.model_name,
+    value: m.model.id,
+    label: m.model.model_name,
   }));
 };
 
-const onScopeChange = (rule: any) => {
+const onScopeChange = (rule: EditingRule) => {
   if (rule.scope === "PROVIDER") rule.model_id = null;
 };
 
-const onProviderChange = (rule: any) => {
+const onProviderChange = (rule: EditingRule) => {
   rule.model_id = null;
 };
 
 // Methods
-const fetchProvidersWithModelsAPI = async () => {
-  try {
-    const response = await Api.getProviderDetailList();
-    return response as unknown as ProviderDetail[];
-  } catch (error) {
-    console.error("Failed to fetch providers:", error);
-    return [];
-  }
-};
-
 const fetchPolicyDetailAPI = async (id: number) => {
   try {
     const response = await Api.getAccessControlDetail(id);
-    return response as any;
+    return response;
   } catch (error) {
     console.error("Failed to fetch policy detail:", error);
     return null;
@@ -514,24 +497,24 @@ const handleOpenEditModal = async (id: number) => {
     editingPolicy.value = {
       id: detail.id,
       name: detail.name,
-      default_action: detail.default_action.toUpperCase(),
-      description: detail.description,
+      default_action: detail.default_action.toUpperCase() as "ALLOW" | "DENY",
+      description: detail.description || "",
       rules: (detail.rules || [])
-        .map((r: any) => ({
+        .map((r: AccessControlRule) => ({
           id: r.id,
           rule_type: r.rule_type.toUpperCase(),
           priority: r.priority,
           scope: r.scope.toUpperCase(),
           provider_id: r.provider_id ? String(r.provider_id) : null,
           model_id: r.model_id ? String(r.model_id) : null,
-          description: r.description,
+          description: r.description || "",
           is_enabled: r.is_enabled,
         }))
-        .sort((a: any, b: any) => a.priority - b.priority),
+        .sort((a, b) => a.priority - b.priority),
     };
     showEditModal.value = true;
   } else {
-    alert($t("accessControlPage.alert.loadDetailFailed"));
+    toastController.error($t("accessControlPage.alert.loadDetailFailed"));
   }
 };
 
@@ -540,14 +523,18 @@ const handleCloseModal = () => {
 };
 
 const handleDeletePolicy = async (id: number, name: string) => {
-  if (confirm($t("accessControlPage.confirmDelete", { name }))) {
+  if (
+    await confirm({
+      title: $t("accessControlPage.confirmDelete", { name }),
+    })
+  ) {
     try {
       await Api.deleteAccessControl(id);
       await store.fetchPolicies();
-    } catch (error: any) {
-      alert(
+    } catch (error: unknown) {
+      toastController.error(
         $t("accessControlPage.alert.deleteFailed", {
-          error: error.message || "Unknown Error",
+          error: (error as Error).message || "Unknown Error",
         }),
       );
     }
@@ -556,7 +543,7 @@ const handleDeletePolicy = async (id: number, name: string) => {
 
 const handleSavePolicy = async () => {
   if (!editingPolicy.value.name) {
-    alert($t("accessControlPage.alert.nameRequired"));
+    toastController.error($t("accessControlPage.alert.nameRequired"));
     return;
   }
 
@@ -584,10 +571,10 @@ const handleSavePolicy = async () => {
     }
     showEditModal.value = false;
     await store.fetchPolicies();
-  } catch (error: any) {
-    alert(
+  } catch (error: unknown) {
+    toastController.error(
       $t("accessControlPage.alert.saveFailed", {
-        error: error.message || "Unknown Error",
+        error: (error as Error).message || "Unknown Error",
       }),
     );
   }
@@ -607,7 +594,7 @@ onMounted(async () => {
   storeLoading.value = false;
 
   providersLoading.value = true;
-  providers.value = await fetchProvidersWithModelsAPI();
+  await providerStore.fetchProviders();
   providersLoading.value = false;
 });
 </script>

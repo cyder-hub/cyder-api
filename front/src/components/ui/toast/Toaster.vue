@@ -13,7 +13,11 @@ const { toasts } = useToast();
 <template>
   <ToastProvider>
     <template v-for="toast in toasts" :key="toast.id">
-      <Toast :duration="toast.duration">
+      <Toast
+        :duration="toast.duration"
+        :variant="toast.variant"
+        :class="toast.class"
+      >
         <div class="grid gap-1">
           <ToastTitle v-if="toast.title">
             {{ toast.title }}

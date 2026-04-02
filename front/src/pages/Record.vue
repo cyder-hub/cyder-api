@@ -21,7 +21,7 @@
           @update:model-value="(val) => (filters.api_key_id = Number(val))"
         >
           <SelectTrigger class="w-[200px]">
-            <SelectValue :placeholder="$t('recordPage.filter.allApiKeys')" />
+            <SelectValue :placeholder="$t('recordPage.filter.allApiKeys')"/>
           </SelectTrigger>
           <SelectContent>
             <SelectItem
@@ -41,7 +41,7 @@
           @update:model-value="(val) => (filters.provider_id = Number(val))"
         >
           <SelectTrigger class="w-[200px]">
-            <SelectValue :placeholder="$t('recordPage.filter.allProviders')" />
+            <SelectValue :placeholder="$t('recordPage.filter.allProviders')"/>
           </SelectTrigger>
           <SelectContent>
             <SelectItem
@@ -58,7 +58,7 @@
       <div class="flex flex-col space-y-1">
         <Select v-model="filters.status">
           <SelectTrigger class="w-[150px]">
-            <SelectValue :placeholder="$t('recordPage.filter.allStatuses')" />
+            <SelectValue :placeholder="$t('recordPage.filter.allStatuses')"/>
           </SelectTrigger>
           <SelectContent>
             <SelectItem
@@ -95,17 +95,17 @@
     <!-- Table -->
     <div
       v-if="isLoading"
-      class="text-center py-10 text-gray-500 dark:text-gray-400"
+      class="text-center py-10 text-gray-500"
     >
       <div
-        class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 dark:border-gray-100 mb-2"
+        class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mb-2"
       ></div>
       <div>{{ $t("recordPage.loading") }}</div>
     </div>
 
     <div
       v-else-if="errorMsg"
-      class="text-center py-4 text-red-600 bg-red-100 dark:bg-red-900/30 border border-red-400 dark:border-red-800 rounded p-4"
+      class="text-center py-4 text-red-600 bg-red-100 border border-red-400 rounded p-4"
     >
       {{ $t("recordPage.errorPrefix") }} {{ errorMsg }}
     </div>
@@ -182,7 +182,7 @@
           </TableHeader>
           <TableBody>
             <TableRow v-if="records.length === 0">
-              <TableCell colspan="15" class="text-center py-6">
+              <TableCell colspan="15"class="text-center py-6">
                 {{
                   totalRecords === 0
                     ? $t("recordPage.table.noRecordsMatch")
@@ -193,7 +193,7 @@
             <TableRow
               v-for="record in records"
               :key="record.id"
-              class="hover:bg-gray-50 dark:hover:bg-zinc-800/50"
+              class="hover:bg-gray-50 "
             >
               <TableCell class="font-medium">{{
                 record.model_name || "/"
@@ -299,10 +299,10 @@
           show-edges
           class="order-1 sm:order-2 mx-0 w-auto"
         >
-          <PaginationContent v-slot="{ items }" class="flex items-center gap-1">
+          <PaginationContent v-slot="{ items }"class="flex items-center gap-1">
             <PaginationFirst />
             <PaginationPrevious />
-            <template v-for="(item, index) in items" :key="index">
+            <template v-for="(item, index) in items":key="index">
               <PaginationItem
                 v-if="item.type === 'page'"
                 :value="item.value"
@@ -331,20 +331,20 @@
         </DialogHeader>
 
         <div class="flex-grow overflow-y-auto p-6 pt-2">
-          <div v-if="isDetailLoading" class="text-center py-10">
+          <div v-if="isDetailLoading"class="text-center py-10">
             <div
-              class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 dark:border-gray-100 mb-2"
+              class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900  mb-2"
             ></div>
             <div>{{ $t("recordPage.loading") }}</div>
           </div>
-          <div v-else-if="detailedRecord" class="space-y-6 text-sm">
+          <div v-else-if="detailedRecord"class="space-y-6 text-sm">
             <section>
               <h3
-                class="text-base font-semibold text-gray-900 dark:text-gray-100 border-b dark:border-zinc-700 pb-2 mb-2"
+                class="text-base font-semibold text-gray-900  border-b  pb-2 mb-2"
               >
-                General
+                {{ $t('recordPage.detailModal.general') }}
               </h3>
-              <dl class="divide-y divide-gray-100 dark:divide-zinc-800">
+              <dl class="divide-y divide-gray-100 ">
                 <DetailItem label="ID">{{ detailedRecord.id }}</DetailItem>
                 <DetailItem label="Status">
                   <Badge
@@ -373,11 +373,11 @@
 
             <section>
               <h3
-                class="text-base font-semibold text-gray-900 dark:text-gray-100 border-b dark:border-zinc-700 pb-2 mb-2"
+                class="text-base font-semibold text-gray-900  border-b  pb-2 mb-2"
               >
-                Timings (UTC)
+                {{ $t('recordPage.detailModal.timings') }}
               </h3>
-              <dl class="divide-y divide-gray-100 dark:divide-zinc-800">
+              <dl class="divide-y divide-gray-100 ">
                 <DetailItem label="Request Received">{{
                   formatDate(detailedRecord.request_received_at)
                 }}</DetailItem>
@@ -398,11 +398,11 @@
 
             <section>
               <h3
-                class="text-base font-semibold text-gray-900 dark:text-gray-100 border-b dark:border-zinc-700 pb-2 mb-2"
+                class="text-base font-semibold text-gray-900  border-b  pb-2 mb-2"
               >
                 Usage & Cost
               </h3>
-              <dl class="divide-y divide-gray-100 dark:divide-zinc-800">
+              <dl class="divide-y divide-gray-100 ">
                 <DetailItem label="Prompt Tokens">{{
                   detailedRecord.input_tokens
                 }}</DetailItem>
@@ -429,7 +429,7 @@
                   label="Reasoning Tokens"
                   >{{ detailedRecord.reasoning_tokens }}</DetailItem
                 >
-                <DetailItem label="Total Tokens" class="font-bold">{{
+                <DetailItem label="Total Tokens"class="font-bold">{{
                   detailedRecord.total_tokens
                 }}</DetailItem>
                 <DetailItem label="Calculated Cost">{{
@@ -445,7 +445,7 @@
 
             <section>
               <h3
-                class="text-base font-semibold text-gray-900 dark:text-gray-100 border-b dark:border-zinc-700 pb-2 mb-2"
+                class="text-base font-semibold text-gray-900  border-b  pb-2 mb-2"
               >
                 Payloads
               </h3>
@@ -484,8 +484,8 @@
           </div>
         </div>
 
-        <DialogFooter class="p-6 pt-2 border-t dark:border-zinc-700">
-          <Button variant="secondary" @click="isDetailModalOpen = false">
+        <DialogFooter class="p-6 pt-2 border-t ">
+          <Button variant="secondary"@click="isDetailModalOpen = false">
             {{ $t("common.close", "Close") }}
           </Button>
         </DialogFooter>
@@ -501,8 +501,6 @@ import {
   computed,
   onMounted,
   watch,
-  h,
-  defineComponent,
 } from "vue";
 import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
@@ -544,10 +542,10 @@ import {
   PaginationPrevious,
 } from "@/components/ui/pagination";
 import { Badge } from "@/components/ui/badge";
-import { parseSse } from "@/utils/sse";
-import * as msgpack from "@msgpack/msgpack";
-import { applyPatch } from "fast-json-patch";
 import type { RecordListItem, RecordDetail } from "@/store/types";
+import DetailItem from "@/components/record/DetailItem.vue";
+import BodyViewer from "@/components/record/BodyViewer.vue";
+import { formatTimestamp } from "@/lib/utils";
 
 const { t: $t } = useI18n();
 const providerStore = useProviderStore();
@@ -573,7 +571,7 @@ const errorMsg = ref<string | null>(null);
 const currentPage = ref(1);
 const pageSize = ref(Number(localStorage.getItem("pageSize")) || 10);
 const searchInput = ref("");
-let searchDebounceTimer: any = null;
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const filters = reactive({
   api_key_id: 0,
@@ -595,7 +593,7 @@ const hasActiveFilters = computed(() => {
   return (
     filters.api_key_id !== 0 ||
     filters.provider_id !== 0 ||
-    filters.status !== "ALL" ||
+    filters.status !== "ALL"||
     filters.search !== ""
   );
 });
@@ -640,12 +638,12 @@ const fetchRecords = async () => {
       page_size: pageSize.value,
       system_api_key_id: filters.api_key_id || undefined,
       provider_id: filters.provider_id || undefined,
-      status: filters.status === "ALL" ? undefined : filters.status,
+      status: filters.status === "ALL"? undefined : filters.status,
       search: filters.search || undefined,
     };
     const result = await Api.getRecordList(params);
 
-    records.value = (result.list || []).map((r: any) => {
+    records.value = (result.list || []).map((r: RecordListItem) => {
       // Formatting and display logic
       const providerName =
         r.provider_id != null
@@ -710,9 +708,9 @@ const fetchRecords = async () => {
       };
     });
     totalRecords.value = result.total || 0;
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Failed to fetch records:", err);
-    errorMsg.value = err.message || String(err);
+    errorMsg.value = (err as Error).message || String(err);
   } finally {
     isLoading.value = false;
   }
@@ -738,7 +736,7 @@ const handlePageChange = (page: number) => {
   fetchRecords();
 };
 
-const handlePageSizeChange = (val: any) => {
+const handlePageSizeChange = (val: unknown) => {
   const size = Number(val);
   pageSize.value = size;
   localStorage.setItem("pageSize", String(size));
@@ -752,11 +750,11 @@ const handleViewDetails = async (id: number) => {
   detailedRecord.value = null;
   try {
     detailedRecord.value = await Api.getRecordDetail(id);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Failed to fetch record detail:", err);
     toastController.error(
       $t("recordPage.detailModal.fetchFailed", "Failed to fetch record detail"),
-      err.message || String(err),
+      (err as Error).message || String(err),
     );
   } finally {
     isDetailLoading.value = false;
@@ -764,14 +762,7 @@ const handleViewDetails = async (id: number) => {
 };
 
 const formatDate = (timestamp: number | null | undefined) => {
-  if (!timestamp) return "/";
-  try {
-    const date = new Date(timestamp);
-    if (isNaN(date.getTime())) return "/";
-    return date.toISOString().replace("T", " ").substring(0, 19);
-  } catch (e) {
-    return "/";
-  }
+  return formatTimestamp(timestamp) || "/";
 };
 
 const getStatusBadgeVariant = (status: string | null) => {
@@ -791,7 +782,7 @@ const getProviderName = (id: number | null) => {
   if (id == null) return "/";
   return (
     providerStore.providers.find((p) => p.provider.id === id)?.provider.name ||
-    "/"
+ "/"
   );
 };
 
@@ -809,335 +800,8 @@ watch(searchInput, (newVal) => {
 });
 
 onMounted(async () => {
-  await Promise.all([providerStore.loadProviders(), apiKeyStore.loadApiKeys()]);
+  await Promise.all([providerStore.fetchProviders(), apiKeyStore.fetchApiKeys()]);
   fetchRecords();
-});
-
-// --- Internal Components using render functions (h()) ---
-// Note: template strings don't work with Vue 3 runtime-only build (default with Vite).
-// Using h() render functions instead.
-
-// Detail Item Component
-const DetailItem = defineComponent({
-  props: ["label"],
-  setup(props, { slots }) {
-    return () =>
-      h("div", { class: "py-2 sm:grid sm:grid-cols-3 sm:gap-4" }, [
-        h(
-          "dt",
-          { class: "text-sm font-medium text-gray-500 dark:text-gray-400" },
-          props.label,
-        ),
-        h(
-          "dd",
-          {
-            class:
-              "mt-1 text-sm text-gray-900 dark:text-gray-100 sm:mt-0 sm:col-span-2",
-          },
-          slots.default?.() ?? "/",
-        ),
-      ]);
-  },
-});
-
-// SSE Event Viewer
-const SseEventViewer = defineComponent({
-  props: ["event"],
-  setup(props) {
-    const eventData = computed(() => {
-      if (!props.event.data) return { type: "empty" };
-      try {
-        return {
-          type: "json",
-          content: JSON.stringify(JSON.parse(props.event.data), null, 2),
-        };
-      } catch (e) {
-        return { type: "text", content: props.event.data };
-      }
-    });
-    return () =>
-      h(
-        "div",
-        {
-          class:
-            "mb-2 border-b border-gray-200 dark:border-zinc-700 pb-2 last:border-b-0 last:pb-0",
-        },
-        [
-          h(
-            "p",
-            { class: "font-semibold text-gray-600 dark:text-gray-400" },
-            `event: ${props.event.event}`,
-          ),
-          eventData.value.type !== "empty"
-            ? h(
-                "pre",
-                { class: "mt-1 whitespace-pre-wrap break-all text-[10px]" },
-                eventData.value.content,
-              )
-            : null,
-        ],
-      );
-  },
-});
-
-// Single Request Body Content
-const SingleRequestBodyContent = defineComponent({
-  props: ["content", "title"],
-  setup(props, { slots }) {
-    const displayContent = computed(() => {
-      if (!props.content) return { type: "empty" };
-      try {
-        return {
-          type: "json",
-          content: JSON.stringify(JSON.parse(props.content), null, 2),
-        };
-      } catch (e) {
-        return { type: "text", content: props.content };
-      }
-    });
-    return () =>
-      h("div", null, [
-        h("div", { class: "flex items-center justify-between mb-1" }, [
-          h(
-            "h4",
-            {
-              class:
-                "text-sm font-medium text-gray-700 dark:text-gray-300 py-1",
-            },
-            props.title,
-          ),
-          slots.action?.(),
-        ]),
-        displayContent.value.type !== "empty"
-          ? h(
-              "div",
-              {
-                class:
-                  "mt-1 text-[10px] bg-gray-50 dark:bg-zinc-900/50 p-2 rounded-md max-h-[30rem] overflow-y-auto border dark:border-zinc-800",
-              },
-              [
-                h(
-                  "pre",
-                  { class: "whitespace-pre-wrap break-all" },
-                  displayContent.value.content,
-                ),
-              ],
-            )
-          : null,
-      ]);
-  },
-});
-
-// Single Response Body Content
-const SingleResponseBodyContent = defineComponent({
-  props: ["content", "title", "status"],
-  setup(props) {
-    const contentToDisplay = computed(() => {
-      if (!props.content) return { type: "empty" as const };
-      try {
-        return {
-          type: "json" as const,
-          content: JSON.stringify(JSON.parse(props.content), null, 2),
-        };
-      } catch (e) {}
-
-      if (props.status === "SUCCESS") {
-        try {
-          const sseEvents = parseSse(props.content);
-          if (sseEvents.some((e: any) => e.data && e.data.trim() !== "")) {
-            return { type: "sse" as const, content: sseEvents };
-          }
-        } catch (e) {}
-      }
-      return { type: "text" as const, content: props.content };
-    });
-
-    return () => {
-      if (contentToDisplay.value.type === "empty") return null;
-      return h("div", null, [
-        h(
-          "h4",
-          {
-            class: "text-sm font-medium text-gray-700 dark:text-gray-300 mb-1",
-          },
-          props.title,
-        ),
-        h(
-          "div",
-          {
-            class:
-              "mt-1 text-[10px] bg-gray-50 dark:bg-zinc-900/50 p-2 rounded-md max-h-[30rem] overflow-y-auto border dark:border-zinc-800",
-          },
-          contentToDisplay.value.type === "sse"
-            ? (contentToDisplay.value.content as any[]).map(
-                (ev: any, idx: number) =>
-                  h(SseEventViewer, { key: idx, event: ev }),
-              )
-            : [
-                h(
-                  "pre",
-                  { class: "whitespace-pre-wrap break-all" },
-                  (contentToDisplay.value as any).content,
-                ),
-              ],
-        ),
-      ]);
-    };
-  },
-});
-
-// Body Viewer (Handles Msgpack Decoding and JSON Patching)
-const BodyViewer = defineComponent({
-  props: ["recordId", "storageType", "status"],
-  setup(props) {
-    const bodies = ref<any>(null);
-    const isLoadingBodies = ref(false);
-    const showPatched = ref(true);
-
-    const fetchAndDecodeBody = async () => {
-      if (!props.storageType || !props.recordId) return;
-      isLoadingBodies.value = true;
-      try {
-        const buffer = await Api.getRecordContent(props.recordId);
-        const decoded = msgpack.decode(new Uint8Array(buffer)) as any;
-        const textDecoder = new TextDecoder();
-        bodies.value = {
-          user_request_body: decoded.user_request_body
-            ? textDecoder.decode(decoded.user_request_body)
-            : null,
-          llm_request_body: decoded.llm_request_body
-            ? textDecoder.decode(decoded.llm_request_body)
-            : null,
-          user_response_body: decoded.user_response_body
-            ? textDecoder.decode(decoded.user_response_body)
-            : null,
-          llm_response_body: decoded.llm_response_body
-            ? textDecoder.decode(decoded.llm_response_body)
-            : null,
-        };
-      } catch (error) {
-        console.error("Failed to fetch or decode body content:", error);
-      } finally {
-        isLoadingBodies.value = false;
-      }
-    };
-
-    const patchInfo = computed(() => {
-      const userContent = bodies.value?.user_request_body;
-      const llmContent = bodies.value?.llm_request_body;
-      if (!userContent || !llmContent || userContent === llmContent) {
-        return { isPatch: false, patchedContent: null };
-      }
-      try {
-        const userJson = JSON.parse(userContent);
-        const patch = JSON.parse(llmContent);
-        if (
-          Array.isArray(patch) &&
-          patch.every((op) => "op" in op && "path" in op)
-        ) {
-          const { newDocument } = applyPatch(userJson, patch, true, false);
-          return {
-            isPatch: true,
-            patchedContent: JSON.stringify(newDocument, null, 2),
-          };
-        }
-      } catch (e) {}
-      return { isPatch: false, patchedContent: null };
-    });
-
-    onMounted(fetchAndDecodeBody);
-
-    return () => {
-      if (isLoadingBodies.value) {
-        return h("div", { class: "text-center py-4" }, "Loading bodies...");
-      }
-      if (!bodies.value) return null;
-
-      const requestSection = (() => {
-        const b = bodies.value;
-        if (
-          b.user_request_body !== b.llm_request_body &&
-          b.user_request_body &&
-          b.llm_request_body
-        ) {
-          const llmContent =
-            patchInfo.value.isPatch && showPatched.value
-              ? patchInfo.value.patchedContent
-              : b.llm_request_body;
-          const llmTitle =
-            patchInfo.value.isPatch && showPatched.value
-              ? "LLM Request Body (Patched)"
-              : "LLM Request Body (Raw Patch)";
-          return h("div", { class: "grid grid-cols-1 md:grid-cols-2 gap-4" }, [
-            h(SingleRequestBodyContent, {
-              content: b.user_request_body,
-              title: "User Request Body",
-            }),
-            h(
-              SingleRequestBodyContent,
-              { content: llmContent, title: llmTitle },
-              {
-                action: patchInfo.value.isPatch
-                  ? () =>
-                      h(
-                        Button,
-                        {
-                          size: "sm",
-                          variant: "ghost",
-                          onClick: () => {
-                            showPatched.value = !showPatched.value;
-                          },
-                          class: "h-6 text-[10px]",
-                        },
-                        () =>
-                          showPatched.value
-                            ? "Show Raw Patch"
-                            : "Show Patched Body",
-                      )
-                  : undefined,
-              },
-            ),
-          ]);
-        }
-        return h(SingleRequestBodyContent, {
-          content: b.user_request_body || b.llm_request_body,
-          title: "Request Body",
-        });
-      })();
-
-      const responseSection = (() => {
-        const b = bodies.value;
-        if (
-          b.user_response_body !== b.llm_response_body &&
-          b.user_response_body &&
-          b.llm_response_body
-        ) {
-          return h("div", { class: "grid grid-cols-1 md:grid-cols-2 gap-4" }, [
-            h(SingleResponseBodyContent, {
-              content: b.llm_response_body,
-              title: "LLM Response Body",
-              status: props.status,
-            }),
-            h(SingleResponseBodyContent, {
-              content: b.user_response_body,
-              title: "User Response Body",
-              status: props.status,
-            }),
-          ]);
-        }
-        return h(SingleResponseBodyContent, {
-          content: b.user_response_body || b.llm_response_body,
-          title: "Response Body",
-          status: props.status,
-        });
-      })();
-
-      return h("div", { class: "space-y-4" }, [
-        requestSection,
-        responseSection,
-      ]);
-    };
-  },
 });
 </script>
 

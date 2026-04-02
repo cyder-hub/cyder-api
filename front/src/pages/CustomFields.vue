@@ -1,41 +1,34 @@
 <template>
-  <div class="p-6 space-y-6">
-    <!-- Page Header -->
-    <div class="flex justify-between items-start">
-      <div>
-        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ $t("customFieldsPage.title") }}
-        </h1>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("customFieldsPage.description") }}
-        </p>
-      </div>
+  <CrudPageLayout
+    :title="$t('customFieldsPage.title')"
+    :description="$t('customFieldsPage.description')"
+    :loading="loading"
+    :empty="!store.customFields.length"
+  >
+    <template #actions>
       <Button @click="handleOpenAddModal" variant="outline" :disabled="loading">
         <Plus class="h-4 w-4 mr-1.5" />
         {{ $t("customFieldsPage.addCustomField") }}
       </Button>
-    </div>
+    </template>
 
-    <!-- Data Table -->
-    <div
-      v-if="loading"
-      class="flex items-center justify-center py-16 text-gray-400"
-    >
-      <Loader2 class="h-5 w-5 animate-spin mr-2" />
-      <span class="text-sm">{{ $t("loading") }}</span>
-    </div>
+    <template #loading>
+      <div class="flex items-center justify-center py-16 text-gray-400">
+        <Loader2 class="h-5 w-5 animate-spin mr-2" />
+        <span class="text-sm">{{ $t("common.loading") }}</span>
+      </div>
+    </template>
 
-    <div
-      v-else-if="!store.customFields.length"
-      class="flex flex-col items-center justify-center py-20 text-gray-400"
-    >
-      <FileText class="h-10 w-10 mb-3 stroke-1" />
-      <p class="text-sm font-medium text-gray-500">
-        {{ $t("customFieldsPage.noData") }}
-      </p>
-    </div>
+    <template #empty>
+      <div class="flex flex-col items-center justify-center py-20 text-gray-400">
+        <FileText class="h-10 w-10 mb-3 stroke-1" />
+        <p class="text-sm font-medium text-gray-500">
+          {{ $t("customFieldsPage.noData") }}
+        </p>
+      </div>
+    </template>
 
-    <div v-else class="border border-gray-200 rounded-lg overflow-hidden">
+    <div class="border border-gray-200 rounded-lg overflow-hidden">
       <Table>
         <TableHeader>
           <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
@@ -61,7 +54,7 @@
             >
             <TableHead
               class="text-xs font-medium text-gray-500 uppercase tracking-wider text-right"
-              >{{ $t("actions") }}</TableHead
+              >{{ $t("common.actions") }}</TableHead
             >
           </TableRow>
         </TableHeader>
@@ -97,7 +90,7 @@
                 @click="handleOpenEditModal(field)"
               >
                 <Pencil class="h-3.5 w-3.5 mr-1" />
-                {{ $t("edit") }}
+                {{ $t("common.edit") }}
               </Button>
               <Button
                 variant="ghost"
@@ -106,7 +99,7 @@
                 @click="handleDelete(field.id, field.name || field.field_name)"
               >
                 <Trash2 class="h-3.5 w-3.5 mr-1" />
-                {{ $t("delete") }}
+                {{ $t("common.delete") }}
               </Button>
             </TableCell>
           </TableRow>
@@ -114,20 +107,21 @@
       </Table>
     </div>
 
-    <!-- Edit/Add Modal -->
-    <Dialog :open="showEditModal" @update:open="setShowEditModal">
-      <DialogContent class="max-w-lg max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle class="text-lg font-semibold text-gray-900">
-            {{
-              editingField.id
-                ? $t("customFieldsPage.modal.titleEdit")
-                : $t("customFieldsPage.modal.titleAdd")
-            }}
-          </DialogTitle>
-        </DialogHeader>
+    <template #modals>
+      <!-- Edit/Add Modal -->
+      <Dialog :open="showEditModal" @update:open="setShowEditModal">
+        <DialogContent class="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle class="text-lg font-semibold text-gray-900">
+              {{
+                editingField.id
+                  ? $t("customFieldsPage.modal.titleEdit")
+                  : $t("customFieldsPage.modal.titleAdd")
+              }}
+            </DialogTitle>
+          </DialogHeader>
 
-        <div class="space-y-4 pt-2">
+          <div class="space-y-4 pt-2">
           <div class="grid grid-cols-2 gap-4">
             <!-- Field Name (Required) -->
             <div class="space-y-1.5">
@@ -319,20 +313,21 @@
           </div>
         </div>
 
-        <DialogFooter class="pt-4 mt-2 border-t border-gray-100">
-          <Button
-            @click="handleCloseModal"
-            variant="ghost"
-            class="text-gray-600"
-            >{{ $t("common.cancel") }}</Button
-          >
-          <Button @click="handleSave" variant="default">{{
-            $t("common.save")
-          }}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  </div>
+          <DialogFooter class="pt-4 mt-2 border-t border-gray-100">
+            <Button
+              @click="handleCloseModal"
+              variant="ghost"
+              class="text-gray-600"
+              >{{ $t("common.cancel") }}</Button
+            >
+            <Button @click="handleSave" variant="default">{{
+              $t("common.save")
+            }}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </template>
+  </CrudPageLayout>
 </template>
 
 <script setup lang="ts">
@@ -368,6 +363,9 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import CrudPageLayout from "@/components/CrudPageLayout.vue";
+import { confirm } from "@/lib/confirmController";
+import { toastController } from "@/lib/toastController";
 
 const { t: $t } = useI18n();
 const store = useCustomFieldStore();
@@ -465,7 +463,7 @@ const handleOpenEditModal = async (field: any) => {
     };
     showEditModal.value = true;
   } else {
-    alert($t("customFieldsPage.alert.loadDetailFailed"));
+    toastController.error($t("customFieldsPage.alert.loadDetailFailed"));
   }
 };
 
@@ -476,7 +474,7 @@ const handleCloseModal = () => {
 const handleSave = async () => {
   const field = editingField.value;
   if (!field.field_name?.trim()) {
-    alert($t("customFieldsPage.alert.nameAndTypeRequired"));
+    toastController.error($t("customFieldsPage.alert.nameAndTypeRequired"));
     return;
   }
 
@@ -506,9 +504,9 @@ const handleSave = async () => {
     await store.fetchCustomFields();
   } catch (error: any) {
     console.error("Failed to save custom field:", error);
-    alert(
+    toastController.error(
       $t("customFieldsPage.alert.saveFailed", {
-        error: error.message || $t("unknownError"),
+        error: error.message || $t("common.unknownError"),
       }),
     );
   }
@@ -545,24 +543,28 @@ const handleToggleEnable = async (field: any) => {
     await store.fetchCustomFields();
   } catch (error: any) {
     console.error("Failed to toggle custom field status:", error);
-    alert(
+    toastController.error(
       $t("customFieldsPage.alert.toggleFailed", {
-        error: error.message || $t("unknownError"),
+        error: error.message || $t("common.unknownError"),
       }),
     );
   }
 };
 
 const handleDelete = async (id: number, name: string) => {
-  if (confirm($t("customFieldsPage.confirmDelete", { name: name }))) {
+  if (
+    await confirm({
+      title: $t("customFieldsPage.confirmDelete", { name: name }),
+    })
+  ) {
     try {
       await Api.deleteCustomField(id);
       await store.fetchCustomFields();
     } catch (error: any) {
       console.error("Failed to delete custom field:", error);
-      alert(
+      toastController.error(
         $t("customFieldsPage.alert.deleteFailed", {
-          error: error.message || $t("unknownError"),
+          error: error.message || $t("common.unknownError"),
         }),
       );
     }

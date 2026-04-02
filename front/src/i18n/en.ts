@@ -1,23 +1,27 @@
 export const enDict = {
   providerPage: {
     editModel: "Edit model: {model_name}",
+    title: "Providers Management",
+    description: "Manage AI model providers, API keys, and model lists.",
+    addProvider: "Add New Provider",
+    loading: "Loading providers...",
+    error: "Error loading providers: {error}",
+    noData: "No providers found. Click 'Add New Provider' to get started.",
+    table: {
+      key: "Key",
+      name: "Name",
+      type: "Type",
+      useProxy: "Use Proxy",
+      limitModel: "Limit Model",
+      models: "Models",
+      apiKeys: "API Keys",
+    },
+    confirmDelete: "Are you sure you want to delete the provider '{name}'?",
+    deleteFailed: "Failed to delete provider: {error}",
   },
-  providerPageTitle: "Providers Management",
-  providerPageDescription: "Manage AI model providers, API keys, and model lists.",
-  addProvider: "Add New Provider",
-  providersLoading: "Loading providers...",
-  providersError: "Error loading providers: {error}",
-  noProviders: "No providers found. Click 'Add New Provider' to get started.",
-  tableHeaderKey: "Key",
-  name: "Name",
-  tableHeaderType: "Type",
-  tableHeaderUseProxy: "Use Proxy",
-  tableHeaderLimitModel: "Limit Model",
-  providerModels: "Models",
-  providerApiKeys: "API Keys",
-  actions: "Actions",
   dashboard: {
-    description: "View overall system status, resource statistics, and daily consumption metrics.",
+    description:
+      "View overall system status, resource statistics, and daily consumption metrics.",
     systemOverview: {
       title: "System Overview",
       providers: "Total Providers",
@@ -78,20 +82,13 @@ export const enDict = {
     },
     errorLoading: "Error loading stats: {error}",
   },
-  edit: "Edit",
-  delete: "Delete",
-  confirmDeleteProvider:
-    "Are you sure you want to delete the provider '{name}'?",
-  deleteFailed: "Failed to delete provider: {error}",
-  unknownError: "An unknown error occurred.",
-  recordYes: "Yes",
-  recordNo: "No",
+
   currencies: {
     USD: "USD",
     CNY: "CNY",
   },
   // Add other general translations if needed
-  loading: "Loading...",
+
   sidebar: {
     dashboard: "Dashboard",
     record: "Record",
@@ -102,9 +99,11 @@ export const enDict = {
     customFields: "Custom Fields",
     price: "Price",
   },
-  appHeader: "AI Gateway Manager",
-  appFooter: "© 2025 AI Gateway Manager. All rights reserved.",
-  toggleSidebar: "Toggle Sidebar",
+  app: {
+    header: "AI Gateway Manager",
+    footer: "© 2025 AI Gateway Manager. All rights reserved.",
+    toggleSidebar: "Toggle Sidebar",
+  },
   language: {
     english: "English",
     chinese: "Chinese",
@@ -162,6 +161,8 @@ export const enDict = {
     detailModal: {
       title: "Log Details",
       fetchFailed: "Failed to fetch record detail",
+      general: "General",
+      timings: "Timings (UTC)",
     },
     pagination: {
       previousPage: "Previous Page",
@@ -174,6 +175,8 @@ export const enDict = {
     },
   },
   common: {
+    unknownError: "An unknown error occurred.",
+    loading: "Loading...",
     yes: "Yes",
     no: "No",
     edit: "Edit",
@@ -184,6 +187,7 @@ export const enDict = {
     refresh: "Refresh",
     check: "Check",
     close: "Close",
+    confirm: "Confirm",
   },
   apiKeyPage: {
     title: "API Key Management",
@@ -205,6 +209,7 @@ export const enDict = {
     copy: "Copy full key",
     copied: "Copied!",
     confirmDelete: "Are you sure you want to delete API Key '{name}'?",
+    deleteFailed: "Failed to delete API Key: {error}",
     copyFailed: "Failed to copy API key.",
     toggleStatusFailed: "Error toggling API key status: {error}",
     refreshRef: "Refresh Ref",
@@ -261,7 +266,8 @@ export const enDict = {
   },
   modelAliasPage: {
     title: "Model Transform",
-    description: "Configure the mapping between model aliases and the underlying real models.",
+    description:
+      "Configure the mapping between model aliases and the underlying real models.",
     addModelAlias: "Add Model Transform",
     loading: "Loading model transforms...",
     errorPrefix: "Error loading model transforms.",
@@ -295,7 +301,8 @@ export const enDict = {
   },
   accessControlPage: {
     title: "Access Control Policies",
-    description: "Manage access control permissions based on models or providers.",
+    description:
+      "Manage access control permissions based on models or providers.",
     addPolicy: "Add Policy",
     loading: "Loading policies...",
     error: "Error loading policies.",
@@ -379,6 +386,9 @@ export const enDict = {
       noNewModels: "No new models to add. All remote models may already exist.",
       uncommittedCleared: "Uncommitted models have been cleared.",
       noUncommittedToClear: "No uncommitted models to clear.",
+      noModels: "No models available.",
+      noApiKeys: "No API Keys available.",
+      noCustomFields: "No custom fields available.",
       apiKeySaveSuccess: "API Key saved successfully.",
       modelSaveSuccess: "Model saved successfully.",
       modelDeleteSuccess: "Model deleted successfully.",

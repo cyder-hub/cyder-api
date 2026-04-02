@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import type { Component, VNode } from "vue";
+import type { ToastProps } from "./types";
 
 const TOAST_REMOVE_DELAY = 1000000;
 
@@ -18,7 +19,7 @@ interface Toast {
   description?: StringOrVNode;
   action?: Component;
   duration?: number;
-  variant?: "default" | "destructive" | string;
+  variant?: ToastProps["variant"];
   class?: string;
 }
 

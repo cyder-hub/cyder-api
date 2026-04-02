@@ -1,15 +1,8 @@
 <template>
-  <div class="p-6 space-y-6">
-    <div class="flex justify-between items-start">
-      <div>
-        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ $t("pricePage.title") }}
-        </h1>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("pricePage.description", "Manage billing plans and rules") }}
-        </p>
-      </div>
-    </div>
+  <CrudPageLayout
+    :title="$t('pricePage.title')"
+    :description="$t('pricePage.description', 'Manage billing plans and rules')"
+  >
 
     <!-- Billing Plans Section -->
     <div class="space-y-4">
@@ -57,7 +50,7 @@
               :key="plan.id"
               class="cursor-pointer transition-colors"
               :class="{
-                'bg-blue-50 dark:bg-blue-900/20 font-medium':
+                'bg-gray-100 font-medium':
                   priceStore.selectedPlanId === plan.id,
               }"
               @click="handleSelectPlan(plan.id)"
@@ -210,8 +203,9 @@
       </div>
     </div>
 
-    <!-- Billing Plan Modal -->
-    <Dialog :open="isPlanModalOpen" @update:open="setIsPlanModalOpen">
+    <template #modals>
+      <!-- Billing Plan Modal -->
+      <Dialog :open="isPlanModalOpen" @update:open="setIsPlanModalOpen">
       <DialogContent class="max-w-lg">
         <DialogHeader>
           <DialogTitle class="text-lg font-semibold text-gray-900">{{
@@ -260,10 +254,10 @@
           }}</Button>
         </DialogFooter>
       </DialogContent>
-    </Dialog>
+      </Dialog>
 
-    <!-- Price Rule Modal -->
-    <Dialog :open="isRuleModalOpen" @update:open="setIsRuleModalOpen">
+      <!-- Price Rule Modal -->
+      <Dialog :open="isRuleModalOpen" @update:open="setIsRuleModalOpen">
       <DialogContent class="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle class="text-lg font-semibold text-gray-900">{{
@@ -386,8 +380,9 @@
           }}</Button>
         </DialogFooter>
       </DialogContent>
-    </Dialog>
-  </div>
+      </Dialog>
+    </template>
+  </CrudPageLayout>
 </template>
 
 <script setup lang="ts">
@@ -423,7 +418,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import CrudPageLayout from "@/components/CrudPageLayout.vue";
 import { Plus, Edit, Trash2 } from "lucide-vue-next";
+import { confirm } from "@/lib/confirmController";
+import { toastController } from "@/lib/toastController";
+import { formatTimestamp } from "@/lib/utils";
 
 const { t: $t } = useI18n();
 const priceStore = usePriceStore();
@@ -481,7 +480,7 @@ const openEditPlanModal = (plan: BillingPlan) => {
 const handleSavePlan = async () => {
   const plan = editingPlan.value;
   if (!plan.name) {
-    alert($t("pricePage.alert.planNameRequired"));
+    toastController.error($t("pricePage.alert.planNameRequired"));
     return;
   }
 
@@ -500,16 +499,20 @@ const handleSavePlan = async () => {
     isPlanModalOpen.value = false;
     priceStore.refetchBillingPlans();
   } catch (error: any) {
-    alert(
+    toastController.error(
       $t("pricePage.alert.planSaveFailed", {
-        error: error.message || $t("unknownError"),
+        error: error.message || $t("common.unknownError"),
       }),
     );
   }
 };
 
 const handleDeletePlan = async (planId: number, planName: string) => {
-  if (confirm($t("pricePage.confirmDeletePlan", { name: planName }))) {
+  if (
+    await confirm({
+      title: $t("pricePage.confirmDeletePlan", { name: planName }),
+    })
+  ) {
     try {
       await Api.deleteBillingPlan(planId);
       priceStore.refetchBillingPlans();
@@ -517,9 +520,9 @@ const handleDeletePlan = async (planId: number, planName: string) => {
         priceStore.setSelectedPlanId(null);
       }
     } catch (error: any) {
-      alert(
+      toastController.error(
         $t("pricePage.alert.planDeleteFailed", {
-          error: error.message || $t("unknownError"),
+          error: error.message || $t("common.unknownError"),
         }),
       );
     }
@@ -546,7 +549,7 @@ const editingRule = ref<{
 
 const openNewRuleModal = () => {
   if (!priceStore.selectedPlanId) {
-    alert($t("pricePage.alert.selectPlanFirst"));
+    toastController.error($t("pricePage.alert.selectPlanFirst"));
     return;
   }
   editingRule.value = {
@@ -596,23 +599,27 @@ const handleSaveRule = async () => {
     isRuleModalOpen.value = false;
     priceStore.refetchPriceRules();
   } catch (error: any) {
-    alert(
+    toastController.error(
       $t("pricePage.alert.ruleSaveFailed", {
-        error: error.message || $t("unknownError"),
+        error: error.message || $t("common.unknownError"),
       }),
     );
   }
 };
 
 const handleDeleteRule = async (ruleId: number) => {
-  if (confirm($t("pricePage.confirmDeleteRule"))) {
+  if (
+    await confirm({
+      title: $t("pricePage.confirmDeleteRule"),
+    })
+  ) {
     try {
       await Api.deletePriceRule(ruleId);
       priceStore.refetchPriceRules();
     } catch (error: any) {
-      alert(
+      toastController.error(
         $t("pricePage.alert.ruleDeleteFailed", {
-          error: error.message || $t("unknownError"),
+          error: error.message || $t("common.unknownError"),
         }),
       );
     }
@@ -633,13 +640,6 @@ const MEDIA_TYPES = [
   value: mt || "UNSET",
   label: mt || $t("pricePage.rules.modal.mediaTypeDefault"),
 }));
-
-const formatTimestamp = (ms: number | undefined | null): string => {
-  if (!ms) return "";
-  const date = new Date(ms);
-  return date.toLocaleString();
-};
-
 const toDateTimeLocal = (ms: number | null | undefined): string => {
   if (!ms) return "";
   const date = new Date(ms);

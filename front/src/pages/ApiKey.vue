@@ -121,10 +121,10 @@
             <TableCell>
               <Badge
                 variant="secondary"
-                v-if="(key as any).access_control_policy_name"
+                v-if="key.access_control_policy_name"
                 class="font-mono text-xs"
               >
-                {{ (key as any).access_control_policy_name }}
+                {{ key.access_control_policy_name }}
               </Badge>
               <span v-else class="text-gray-400">-</span>
             </TableCell>
@@ -198,6 +198,8 @@ import CrudPageLayout from "@/components/CrudPageLayout.vue";
 import ApiKeyEditModal from "@/components/ApiKeyEditModal.vue";
 import { useApiKeyStore } from "@/store/apiKeyStore";
 import { useAccessControlStore } from "@/store/accessControlStore";
+import type { ApiKeyItem } from "@/store/types";
+import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
 import { confirm } from "@/lib/confirmController";
 
@@ -207,7 +209,7 @@ const apiKeyStore = useApiKeyStore();
 const accessControlStore = useAccessControlStore();
 
 const showEditModal = ref(false);
-const selectedApiKey = ref<any | null>(null);
+const selectedApiKey = ref<ApiKeyItem | null>(null);
 const copiedKeyId = ref<number | null>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
@@ -220,8 +222,8 @@ const fetchData = async () => {
       apiKeyStore.fetchApiKeys(),
       accessControlStore.fetchPolicies(),
     ]);
-  } catch (err: any) {
-    error.value = err.message || $t("common.unknownError");
+  } catch (err: unknown) {
+    error.value = normalizeError(err, $t("common.unknownError")).message;
   } finally {
     loading.value = false;
   }
@@ -231,12 +233,12 @@ onMounted(() => {
   fetchData();
 });
 
-const handleStartEditing = (apiKey?: any) => {
+const handleStartEditing = (apiKey?: ApiKeyItem) => {
   selectedApiKey.value = apiKey || null;
   showEditModal.value = true;
 };
 
-const handleToggleEnable = async (apiKey: any, newVal: boolean) => {
+const handleToggleEnable = async (apiKey: ApiKeyItem, newVal: boolean) => {
   const updatedApiKey = { ...apiKey, is_enabled: newVal };
   try {
     const payload = {
@@ -244,38 +246,53 @@ const handleToggleEnable = async (apiKey: any, newVal: boolean) => {
       api_key: updatedApiKey.api_key,
       description: updatedApiKey.description,
       is_enabled: updatedApiKey.is_enabled,
-      access_control_policy_id: updatedApiKey.access_control_policy_id,
+      access_control_policy_id: updatedApiKey.access_control_policy_id ?? null,
     };
     await Api.updateApiKey(updatedApiKey.id, payload);
     await apiKeyStore.fetchApiKeys(); // Refetch to update data
-  } catch (err: any) {
-    console.error("Failed to toggle API key status:", err);
+  } catch (err: unknown) {
+    const normalizedError = normalizeError(err, $t("common.unknownError"));
     toastController.error(
       $t("apiKeyPage.toggleStatusFailed", {
-        error: err.message || $t("common.unknownError"),
+        error: normalizedError.message,
       }),
     );
-    await apiKeyStore.fetchApiKeys(); // Refetch to revert
+    try {
+      await apiKeyStore.fetchApiKeys(); // Refetch to revert
+    } catch (refreshErr: unknown) {
+      toastController.error(
+        $t("apiKeyPage.errorPrefix"),
+        normalizeError(refreshErr, $t("common.unknownError")).message,
+      );
+    }
   }
 };
 
 const handleSaveSuccess = async () => {
-  await apiKeyStore.fetchApiKeys();
-  showEditModal.value = false;
-  selectedApiKey.value = null;
+  try {
+    await apiKeyStore.fetchApiKeys();
+    showEditModal.value = false;
+    selectedApiKey.value = null;
+  } catch (err: unknown) {
+    toastController.error(
+      $t("apiKeyPage.errorPrefix"),
+      normalizeError(err, $t("common.unknownError")).message,
+    );
+  }
 };
 
-const handleDeleteApiKey = async (apiKey: any) => {
+const handleDeleteApiKey = async (apiKey: ApiKeyItem) => {
   if (
     await confirm($t("apiKeyPage.confirmDelete", { name: apiKey.name }))
   ) {
     try {
       await Api.deleteApiKey(apiKey.id);
       await apiKeyStore.fetchApiKeys();
-    } catch (err: any) {
-      console.error("Failed to delete API key:", err);
+    } catch (err: unknown) {
       toastController.error(
-        $t("apiKeyPage.deleteFailed", { error: err.message || $t("common.unknownError") }),
+        $t("apiKeyPage.deleteFailed", {
+          error: normalizeError(err, $t("common.unknownError")).message,
+        }),
       );
     }
   }

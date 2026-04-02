@@ -3,6 +3,7 @@
     :title="$t('accessControlPage.title')"
     :description="$t('accessControlPage.description')"
     :loading="storeLoading"
+    :error="pageError"
     :empty="!store.policies.length"
   >
     <template #actions>
@@ -22,6 +23,16 @@
         <span class="text-sm text-gray-500">{{
           $t("accessControlPage.loading")
         }}</span>
+      </div>
+    </template>
+
+    <template #error="{ error }">
+      <div class="flex flex-col items-center justify-center py-20">
+        <div
+          class="text-red-600 bg-red-50 border border-red-200 rounded-lg p-4 max-w-lg text-sm"
+        >
+          {{ error }}
+        </div>
       </div>
     </template>
 
@@ -364,6 +375,7 @@ import { Api } from "@/services/request";
 import { useAccessControlStore } from "@/store/accessControlStore";
 import type { AccessControlRule } from "@/store/types";
 import { useProviderStore } from "@/store/providerStore";
+import { normalizeError } from "@/lib/error";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -403,6 +415,7 @@ const providerStore = useProviderStore();
 const storeLoading = ref(true);
 const providersLoading = ref(true);
 const showEditModal = ref(false);
+const pageError = ref<string | null>(null);
 
 const setShowEditModal = (val: boolean) => {
   showEditModal.value = val;
@@ -589,12 +602,24 @@ const removeRule = (index: number) => {
 };
 
 onMounted(async () => {
+  pageError.value = null;
+
   storeLoading.value = true;
-  await store.fetchPolicies();
-  storeLoading.value = false;
+  try {
+    await store.fetchPolicies();
+  } catch (error: unknown) {
+    pageError.value = normalizeError(error, "Unknown Error").message;
+  } finally {
+    storeLoading.value = false;
+  }
 
   providersLoading.value = true;
-  await providerStore.fetchProviders();
-  providersLoading.value = false;
+  try {
+    await providerStore.fetchProviders();
+  } catch (error: unknown) {
+    pageError.value = pageError.value || normalizeError(error, "Unknown Error").message;
+  } finally {
+    providersLoading.value = false;
+  }
 });
 </script>

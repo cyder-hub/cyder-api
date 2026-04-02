@@ -1,9 +1,9 @@
+use super::ProxyError;
 use super::auth::*;
 use super::core::proxy_request;
 use super::logging::RequestLogContext;
 use super::prepare::*;
 use super::util::*;
-use super::ProxyError;
 
 use crate::config::CONFIG;
 use crate::schema::enum_def::LlmApiType;
@@ -51,7 +51,7 @@ pub async fn unified_proxy_handler(
             return Err(ProxyError::InternalError(format!(
                 "Unsupported API type for unified handler: {:?}",
                 api_type
-            )))
+            )));
         }
     }
     .api_key;
@@ -60,9 +60,8 @@ pub async fn unified_proxy_handler(
     let body_bytes = axum::body::to_bytes(request.into_body(), CONFIG.max_body_size)
         .await
         .map_err(|e| ProxyError::BadRequest(format!("Failed to read request body: {}", e)))?;
-    let mut data: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ProxyError::BadRequest(format!("Failed to parse request body: {}", e))
-    })?;
+    let mut data: Value = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ProxyError::BadRequest(format!("Failed to parse request body: {}", e)))?;
     let original_request_value = data.clone();
     let original_request_body = body_bytes;
     debug!(
@@ -76,7 +75,10 @@ pub async fn unified_proxy_handler(
         .and_then(Value::as_str)
         .ok_or_else(|| ProxyError::BadRequest("'model' field must be a string".to_string()))?;
 
-    info!("Processing {:?} request for model: {}", api_type, pre_model_str);
+    info!(
+        "Processing {:?} request for model: {}",
+        api_type, pre_model_str
+    );
 
     let (provider, model) = get_provider_and_model(&app_state, pre_model_str)
         .await
@@ -100,55 +102,54 @@ pub async fn unified_proxy_handler(
         })?;
 
     // Step 5: Prepare the downstream request details (URL, headers, body).
-    let (final_url, final_headers, final_body_value, provider_api_key_id) =
-        match target_api_type {
-            LlmApiType::Openai => prepare_llm_request(
-                &provider,
-                &model,
-                data,
-                &original_headers,
-                &app_state,
-                "chat/completions",
-            )
-            .await
-            .map_err(|e| {
-                error!("Failed to prepare OpenAI LLM request: {:?}", e);
-                e
-            })?,
-            LlmApiType::Ollama => prepare_llm_request(
-                &provider,
-                &model,
-                data,
-                &original_headers,
-                &app_state,
-                "api/chat",
-            )
-            .await
-            .map_err(|e| {
-                error!("Failed to prepare Ollama LLM request: {:?}", e);
-                e
-            })?,
-            LlmApiType::Gemini => prepare_gemini_llm_request(
-                &provider,
-                &model,
-                data,
-                &original_headers,
-                &app_state,
-                is_stream,
-                &query_params,
-            )
-            .await
-            .map_err(|e| {
-                error!("Failed to prepare Gemini LLM request: {:?}", e);
-                e
-            })?,
-            _ => {
-                error!("Unsupported target API type: {:?}", target_api_type);
-                return Err(ProxyError::InternalError(
-                    "unsupported api type".to_string(),
-                ));
-            }
-        };
+    let (final_url, final_headers, final_body_value, provider_api_key_id) = match target_api_type {
+        LlmApiType::Openai => prepare_llm_request(
+            &provider,
+            &model,
+            data,
+            &original_headers,
+            &app_state,
+            "chat/completions",
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to prepare OpenAI LLM request: {:?}", e);
+            e
+        })?,
+        LlmApiType::Ollama => prepare_llm_request(
+            &provider,
+            &model,
+            data,
+            &original_headers,
+            &app_state,
+            "api/chat",
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to prepare Ollama LLM request: {:?}", e);
+            e
+        })?,
+        LlmApiType::Gemini => prepare_gemini_llm_request(
+            &provider,
+            &model,
+            data,
+            &original_headers,
+            &app_state,
+            is_stream,
+            &query_params,
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to prepare Gemini LLM request: {:?}", e);
+            e
+        })?,
+        _ => {
+            error!("Unsupported target API type: {:?}", target_api_type);
+            return Err(ProxyError::InternalError(
+                "unsupported api type".to_string(),
+            ));
+        }
+    };
 
     let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
         ProxyError::InternalError(format!("Failed to serialize final request body: {}", e))

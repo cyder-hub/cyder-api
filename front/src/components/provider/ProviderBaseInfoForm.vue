@@ -134,7 +134,9 @@ const handleUpdateProviderBaseInfo = async () => {
       data.id = newProvider.id;
       toastController.success($t("providerEditPage.alert.createSuccess"));
     }
-    providerStore.fetchProviders();
+    void providerStore.fetchProviders().catch((error) => {
+      console.error("Failed to refresh providers after save:", error);
+    });
   } catch (error) {
     console.error("Failed to save provider base info:", error);
     toastController.error(

@@ -1,8 +1,8 @@
 use crate::config::CONFIG;
 use bb8::Pool;
-use bb8_redis::{redis, RedisConnectionManager};
+use bb8_redis::{RedisConnectionManager, redis};
+use cyder_tools::log::{error, info};
 use tokio::sync::OnceCell;
-use cyder_tools::log::{info, error};
 
 pub type RedisPool = Pool<RedisConnectionManager>;
 

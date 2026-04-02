@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use axum::{
+    Json, // Router will be replaced by StateRouter
     extract::{Path, Query, State},
     routing::{delete, get, post, put},
-    Json, // Router will be replaced by StateRouter
 };
 // Removed StatusCode as it's not directly used in the success path of list
-use crate::service::app_state::{create_state_router, AppState, StateRouter};
+use crate::service::app_state::{AppState, StateRouter, create_state_router};
 // use reqwest::StatusCode;
 // serde::Deserialize is implicitly used by Query extractor
 
@@ -14,17 +14,19 @@ use serde_json::json; // For flexible JSON responses
 
 use crate::{
     database::{
+        ListResult,
         custom_field::{
-            ApiCreateCustomFieldDefinitionPayload, ApiCustomFieldDefinition,
-            ApiLinkCustomFieldPayload, // New payload
+            ApiCreateCustomFieldDefinitionPayload,
+            ApiCustomFieldDefinition,
+            ApiLinkCustomFieldPayload,   // New payload
             ApiUnlinkCustomFieldPayload, // New payload
-            ApiUpdateCustomFieldDefinitionPayload, CustomFieldDefinition,
+            ApiUpdateCustomFieldDefinitionPayload,
+            CustomFieldDefinition,
             ListByProviderModelQueryPayload, // New payload for filtered list
             ListCustomFieldQueryPayload,
             // ModelCustomFieldAssignment,    // Removed unused import
             // ProviderCustomFieldAssignment, // Removed unused import
         },
-        ListResult,
     },
     utils::HttpResult,
 };
@@ -61,13 +63,16 @@ async fn update_one(
     Json(payload): Json<ApiUpdateCustomFieldDefinitionPayload>,
 ) -> Result<HttpResult<ApiCustomFieldDefinition>, BaseError> {
     let updated_cfd = CustomFieldDefinition::update(id, payload)?;
-    
+
     // Update in cache
     if let Err(e) = app_state.invalidate_custom_field(id).await {
         use cyder_tools::log::warn;
-        warn!("Failed to update CustomFieldDefinition id {} in cache: {:?}", updated_cfd.id, e);
+        warn!(
+            "Failed to update CustomFieldDefinition id {} in cache: {:?}",
+            updated_cfd.id, e
+        );
     }
-    
+
     Ok(HttpResult::new(updated_cfd))
 }
 
@@ -80,7 +85,10 @@ async fn delete_one(
             // Delete from cache
             if let Err(e) = app_state.invalidate_custom_field(id).await {
                 use cyder_tools::log::warn;
-                warn!("Failed to delete CustomFieldDefinition id {} from cache: {:?}", id, e);
+                warn!(
+                    "Failed to delete CustomFieldDefinition id {} from cache: {:?}",
+                    id, e
+                );
             }
             Ok(HttpResult::new(()))
         }
@@ -102,7 +110,9 @@ async fn link_custom_field(
                 model_id,
                 is_enabled,
             )?;
-            let _ = app_state.invalidate_custom_field(custom_field_definition_id).await;
+            let _ = app_state
+                .invalidate_custom_field(custom_field_definition_id)
+                .await;
             let _ = app_state.invalidate_model_custom_fields(model_id).await;
             Ok(HttpResult::new(json!(assignment)))
         }
@@ -112,8 +122,12 @@ async fn link_custom_field(
                 provider_id,
                 is_enabled,
             )?;
-            let _ = app_state.invalidate_custom_field(custom_field_definition_id).await;
-            let _ = app_state.invalidate_provider_custom_fields(provider_id).await;
+            let _ = app_state
+                .invalidate_custom_field(custom_field_definition_id)
+                .await;
+            let _ = app_state
+                .invalidate_provider_custom_fields(provider_id)
+                .await;
             Ok(HttpResult::new(json!(assignment)))
         }
         (Some(_), Some(_)) => Err(BaseError::ParamInvalid(Some(
@@ -134,25 +148,28 @@ async fn unlink_custom_field(
     match (payload.model_id, payload.provider_id) {
         (Some(model_id), None) => {
             let count = CustomFieldDefinition::unlink_model(custom_field_definition_id, model_id)?;
-            
+
             // Remove link from cache
             if let Err(e) = app_state.invalidate_model_custom_fields(model_id).await {
                 use cyder_tools::log::warn;
                 warn!("Failed to remove custom field link from cache: {:?}", e);
             }
-            
+
             Ok(HttpResult::new(count))
         }
         (None, Some(provider_id)) => {
             let count =
                 CustomFieldDefinition::unlink_provider(custom_field_definition_id, provider_id)?;
-            
+
             // Remove link from cache
-            if let Err(e) = app_state.invalidate_provider_custom_fields(provider_id).await {
+            if let Err(e) = app_state
+                .invalidate_provider_custom_fields(provider_id)
+                .await
+            {
                 use cyder_tools::log::warn;
                 warn!("Failed to remove custom field link from cache: {:?}", e);
             }
-            
+
             Ok(HttpResult::new(count))
         }
         (Some(_), Some(_)) => Err(BaseError::ParamInvalid(Some(

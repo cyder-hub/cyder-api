@@ -1,8 +1,8 @@
+use anyhow::{bail, Context, Result};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use anyhow::{bail, Context, Result};
 
 fn main() -> Result<()> {
     let mut args = pico_args::Arguments::from_env();
@@ -76,7 +76,6 @@ Commands:
     );
 }
 
-
 // New combined dev command
 fn cmd_dev() -> Result<()> {
     println!("🚀 Starting backend and frontend development servers...");
@@ -84,16 +83,18 @@ fn cmd_dev() -> Result<()> {
     let backend_handle = thread::spawn(|| {
         println!("▶️ Starting backend dev server...");
         // Call the dedicated backend dev function
-        if let Err(e) = cmd_dev_backend() { // Change this line
-             eprintln!("Backend dev server failed: {}", e);
+        if let Err(e) = cmd_dev_backend() {
+            // Change this line
+            eprintln!("Backend dev server failed: {}", e);
         }
     });
 
     let frontend_handle = thread::spawn(|| {
         println!("▶️ Starting frontend dev server (will install deps if needed)..."); // Update print statement slightly
-         // Call the dedicated frontend dev function (which includes dep install)
-        if let Err(e) = cmd_dev_front() { // Change this line
-             eprintln!("Frontend dev server failed: {}", e);
+                                                                                      // Call the dedicated frontend dev function (which includes dep install)
+        if let Err(e) = cmd_dev_front() {
+            // Change this line
+            eprintln!("Frontend dev server failed: {}", e);
         }
     });
 
@@ -107,7 +108,7 @@ fn cmd_dev() -> Result<()> {
     if backend_res.is_err() {
         eprintln!("Error joining backend thread.");
     }
-     if frontend_res.is_err() {
+    if frontend_res.is_err() {
         eprintln!("Error joining frontend thread.");
     }
 
@@ -118,7 +119,6 @@ fn cmd_dev() -> Result<()> {
 
     Ok(())
 }
-
 
 // New combined build command
 fn cmd_build() -> Result<()> {
@@ -161,7 +161,11 @@ fn cmd_test(args: pico_args::Arguments) -> Result<()> {
 
     // All remaining arguments are for cargo test.
     let test_args: Vec<std::ffi::OsString> = args.finish();
-    cargo_args.extend(test_args.into_iter().map(|s| s.to_string_lossy().into_owned()));
+    cargo_args.extend(
+        test_args
+            .into_iter()
+            .map(|s| s.to_string_lossy().into_owned()),
+    );
 
     let cargo_args_str: Vec<&str> = cargo_args.iter().map(|s| s.as_str()).collect();
     run_cargo("test", &cargo_args_str, &server_dir)?;
@@ -223,7 +227,9 @@ fn run_cargo(command: &str, args: &[&str], directory: &Path) -> Result<ExitStatu
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
 
-    let status = cmd.status().with_context(|| format!("Failed to execute: {:?} in {:?}", cmd, directory.display()))?;
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to execute: {:?} in {:?}", cmd, directory.display()))?;
 
     if !status.success() {
         bail!("Command `{:?}` failed with status {}", cmd, status);
@@ -244,7 +250,9 @@ fn run_npm(npm_command: &str, args: &[&str], directory: &Path) -> Result<ExitSta
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
 
-    let status = cmd.status().with_context(|| format!("Failed to execute: {:?} in {:?}", cmd, directory.display()))?;
+    let status = cmd
+        .status()
+        .with_context(|| format!("Failed to execute: {:?} in {:?}", cmd, directory.display()))?;
 
     if !status.success() {
         bail!("npm command `{:?}` failed with status {}", cmd, status);

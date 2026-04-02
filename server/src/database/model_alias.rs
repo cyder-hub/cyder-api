@@ -2,7 +2,7 @@ use chrono::Utc;
 use diesel::prelude::*;
 use serde::Deserialize; // For API input deserialization and output serialization
 
-use super::{get_connection, model::Model, provider::Provider, DbResult};
+use super::{DbResult, get_connection, model::Model, provider::Provider};
 use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
@@ -193,42 +193,43 @@ impl ModelAlias {
 
     /// Lists all model aliases with their target model details, that are not marked as deleted.
     pub fn list_all_details() -> DbResult<Vec<ModelAliasDetails>> {
-            let conn = &mut get_connection()?;
-            db_execute!(conn, {
-                let results = model_alias::table
-                    .inner_join(model::table.on(model_alias::dsl::target_model_id.eq(model::dsl::id)))
-                    .inner_join(provider::table.on(model::dsl::provider_id.eq(provider::dsl::id))) // Added join with provider table
-                    .filter(model_alias::dsl::deleted_at.is_null())
-                    .order(model_alias::dsl::created_at.desc())
-                    .select((
-                        ModelAliasDb::as_select(),
-                        model::dsl::model_name,
-                        provider::dsl::provider_key, // Selected provider_key
-                        model::dsl::real_model_name,
-                    ))
-                    .load::<(ModelAliasDb, String, String, Option<String>)>(conn) // Load type remains the same as provider_key is also String
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to list model alias details: {}",
-                            e
-                        )))
-                    })?;
-    
-                Ok(results
-                    .into_iter()
-                    .map(
-                        |(alias_db, model_name, provider_key, real_model_name)| ModelAliasDetails { // Updated mapping
-                            alias: alias_db.from_db(),
-                            model_name,
-                            provider_key,
-                            real_model_name,
-                        },
-                    )
-                    .collect())
-            })
-        }
-    
-        /// Lists all model aliases for a given target_model_id that are not marked as deleted.
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let results = model_alias::table
+                .inner_join(model::table.on(model_alias::dsl::target_model_id.eq(model::dsl::id)))
+                .inner_join(provider::table.on(model::dsl::provider_id.eq(provider::dsl::id))) // Added join with provider table
+                .filter(model_alias::dsl::deleted_at.is_null())
+                .order(model_alias::dsl::created_at.desc())
+                .select((
+                    ModelAliasDb::as_select(),
+                    model::dsl::model_name,
+                    provider::dsl::provider_key, // Selected provider_key
+                    model::dsl::real_model_name,
+                ))
+                .load::<(ModelAliasDb, String, String, Option<String>)>(conn) // Load type remains the same as provider_key is also String
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list model alias details: {}",
+                        e
+                    )))
+                })?;
+
+            Ok(results
+                .into_iter()
+                .map(
+                    |(alias_db, model_name, provider_key, real_model_name)| ModelAliasDetails {
+                        // Updated mapping
+                        alias: alias_db.from_db(),
+                        model_name,
+                        provider_key,
+                        real_model_name,
+                    },
+                )
+                .collect())
+        })
+    }
+
+    /// Lists all model aliases for a given target_model_id that are not marked as deleted.
     pub fn list_by_target_model_id(target_model_id_val: i64) -> DbResult<Vec<ModelAlias>> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {

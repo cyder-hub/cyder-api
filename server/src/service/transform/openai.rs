@@ -1,6 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::unified::*;
 
@@ -209,8 +209,8 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
 
                 if let Some(tool_calls) = msg.tool_calls {
                     for tc in tool_calls {
-                        let args: Value = serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(json!({}));
+                        let args: Value =
+                            serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
                         content.push(UnifiedContentPart::ToolCall(UnifiedToolCall {
                             id: tc.id,
                             name: tc.function.name,
@@ -257,12 +257,15 @@ impl From<OpenAiRequestPayload> for UnifiedRequest {
             passthrough_fields.insert("top_logprobs".to_string(), json!(top_logprobs));
         }
         if let Some(parallel_tool_calls) = openai_req.parallel_tool_calls {
-            passthrough_fields.insert("parallel_tool_calls".to_string(), json!(parallel_tool_calls));
+            passthrough_fields.insert(
+                "parallel_tool_calls".to_string(),
+                json!(parallel_tool_calls),
+            );
         }
         if let Some(reasoning_effort) = openai_req.reasoning_effort {
             passthrough_fields.insert("reasoning_effort".to_string(), json!(reasoning_effort));
         }
-        
+
         let passthrough = if passthrough_fields.is_empty() {
             None
         } else {
@@ -328,9 +331,9 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                                 image_url: OpenAiImageUrl { url, detail },
                             });
                         }
-                        UnifiedContentPart::ImageData { .. } | 
-                        UnifiedContentPart::FileData { .. } | 
-                        UnifiedContentPart::ExecutableCode { .. } => {
+                        UnifiedContentPart::ImageData { .. }
+                        | UnifiedContentPart::FileData { .. }
+                        | UnifiedContentPart::ExecutableCode { .. } => {
                             // These content types don't map to OpenAI's format, skip them
                         }
                         UnifiedContentPart::ToolCall(call) => tool_calls.push(OpenAiToolCall {
@@ -368,7 +371,11 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
                     generated_messages.push(OpenAiMessage {
                         role: role.clone(),
                         content: Some(c),
-                        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls.clone()) },
+                        tool_calls: if tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(tool_calls.clone())
+                        },
                         name: None,
                         tool_call_id: None,
                         refusal: None,
@@ -410,13 +417,20 @@ impl From<UnifiedRequest> for OpenAiRequestPayload {
         });
 
         // Extract OpenAI-specific fields from passthrough if present
-        let (logprobs, top_logprobs, parallel_tool_calls, reasoning_effort) = 
+        let (logprobs, top_logprobs, parallel_tool_calls, reasoning_effort) =
             if let Some(passthrough) = &unified_req.passthrough {
                 (
                     passthrough.get("logprobs").and_then(|v| v.as_bool()),
-                    passthrough.get("top_logprobs").and_then(|v| v.as_u64()).map(|v| v as u32),
-                    passthrough.get("parallel_tool_calls").and_then(|v| v.as_bool()),
-                    passthrough.get("reasoning_effort").and_then(|v| serde_json::from_value(v.clone()).ok()),
+                    passthrough
+                        .get("top_logprobs")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32),
+                    passthrough
+                        .get("parallel_tool_calls")
+                        .and_then(|v| v.as_bool()),
+                    passthrough
+                        .get("reasoning_effort")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok()),
                 )
             } else {
                 (None, None, None, None)
@@ -601,8 +615,8 @@ impl From<OpenAiResponse> for UnifiedResponse {
 
                 if let Some(tool_calls) = choice.message.tool_calls {
                     for tc in tool_calls {
-                        let args: Value = serde_json::from_str(&tc.function.arguments)
-                            .unwrap_or(json!({}));
+                        let args: Value =
+                            serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
                         content.push(UnifiedContentPart::ToolCall(UnifiedToolCall {
                             id: tc.id,
                             name: tc.function.name,
@@ -809,7 +823,7 @@ pub(super) struct OpenAiChunkDelta {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct OpenAiChunkToolCall {
-    index: u32, // OpenAI includes index in chunk tool calls
+    index: u32,         // OpenAI includes index in chunk tool calls
     id: Option<String>, // ID is optional in chunks
     #[serde(rename = "type")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -973,7 +987,9 @@ mod tests {
             messages: vec![
                 OpenAiMessage {
                     role: "system".to_string(),
-                    content: Some(OpenAiContent::Text("You are a helpful assistant.".to_string())),
+                    content: Some(OpenAiContent::Text(
+                        "You are a helpful assistant.".to_string(),
+                    )),
                     tool_calls: None,
                     name: None,
                     tool_call_id: None,
@@ -1015,12 +1031,16 @@ mod tests {
         assert_eq!(unified_req.messages[0].role, UnifiedRole::System);
         assert_eq!(
             unified_req.messages[0].content,
-            vec![UnifiedContentPart::Text { text: "You are a helpful assistant.".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "You are a helpful assistant.".to_string()
+            }]
         );
         assert_eq!(unified_req.messages[1].role, UnifiedRole::User);
         assert_eq!(
             unified_req.messages[1].content,
-            vec![UnifiedContentPart::Text { text: "Hello".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "Hello".to_string()
+            }]
         );
         assert_eq!(unified_req.temperature, Some(0.8));
         assert_eq!(unified_req.max_tokens, Some(100));
@@ -1035,11 +1055,15 @@ mod tests {
             messages: vec![
                 UnifiedMessage {
                     role: UnifiedRole::System,
-                    content: vec![UnifiedContentPart::Text { text: "You are a helpful assistant.".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "You are a helpful assistant.".to_string(),
+                    }],
                 },
                 UnifiedMessage {
                     role: UnifiedRole::User,
-                    content: vec![UnifiedContentPart::Text { text: "Hello".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "Hello".to_string(),
+                    }],
                 },
             ],
             tools: None,
@@ -1136,7 +1160,7 @@ mod tests {
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
                     content: vec![UnifiedContentPart::Text {
-                        text: "Hi there!".to_string()
+                        text: "Hi there!".to_string(),
                     }],
                 },
                 finish_reason: Some("stop".to_string()),
@@ -1198,7 +1222,13 @@ mod tests {
         assert_eq!(unified_chunk.choices.len(), 1);
         let choice = &unified_chunk.choices[0];
         assert_eq!(choice.delta.role, Some(UnifiedRole::Assistant));
-        assert_eq!(choice.delta.content, vec![UnifiedContentPartDelta::TextDelta { index: 0, text: "Hello".to_string() }]);
+        assert_eq!(
+            choice.delta.content,
+            vec![UnifiedContentPartDelta::TextDelta {
+                index: 0,
+                text: "Hello".to_string()
+            }]
+        );
         assert!(choice.finish_reason.is_none());
     }
 
@@ -1211,7 +1241,10 @@ mod tests {
                 index: 0,
                 delta: UnifiedMessageDelta {
                     role: Some(UnifiedRole::Assistant),
-                    content: vec![UnifiedContentPartDelta::TextDelta { index: 0, text: "Hello".to_string() }],
+                    content: vec![UnifiedContentPartDelta::TextDelta {
+                        index: 0,
+                        text: "Hello".to_string(),
+                    }],
                 },
                 finish_reason: None,
             }],

@@ -1,8 +1,6 @@
-use std::{fs, path::Path, time::Duration};
-
-use once_cell::sync::Lazy;
-use rand::{distr::Alphanumeric, rng, Rng};
+use rand::{Rng, distr::Alphanumeric, rng};
 use serde::{Deserialize, Serialize};
+use std::{fs, path::Path, sync::LazyLock, time::Duration};
 
 // --- START REDIS CONFIG ---
 
@@ -41,7 +39,6 @@ impl Default for CacheBackendType {
         CacheBackendType::Memory
     }
 }
-
 
 /// Redis cache specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +89,34 @@ impl CacheConfig {
     }
 }
 
+// --- START PROXY REQUEST CONFIG ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyRequestConfig {
+    #[serde(default = "default_proxy_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+}
+
+impl Default for ProxyRequestConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_seconds: default_proxy_connect_timeout_seconds(),
+            timeout_seconds: None,
+        }
+    }
+}
+
+impl ProxyRequestConfig {
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_secs(self.connect_timeout_seconds)
+    }
+
+    pub fn request_timeout(&self) -> Option<Duration> {
+        self.timeout_seconds.map(Duration::from_secs)
+    }
+}
 
 // --- START STORAGE CONFIG ---
 
@@ -108,7 +133,6 @@ impl Default for S3AccessMode {
         S3AccessMode::Proxy
     }
 }
-
 
 /// Storage driver type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -183,6 +207,10 @@ fn default_negative_ttl_seconds() -> u64 {
     60 // 1 minute
 }
 
+fn default_proxy_connect_timeout_seconds() -> u64 {
+    10
+}
+
 fn default_pool_size() -> usize {
     10
 }
@@ -222,6 +250,8 @@ pub struct FinalConfig {
     pub db_pool_size: u32,
     pub redis: Option<RedisConfig>,
     #[serde(default)]
+    pub proxy_request: ProxyRequestConfig,
+    #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
     pub storage: StorageConfig,
@@ -235,7 +265,7 @@ fn generate_random_string(len: usize) -> String {
         .collect()
 }
 
-pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
+pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
     let default_config_path = if cfg!(debug_assertions) {
         Path::new("../config.default.yaml")
     } else {
@@ -272,6 +302,7 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
         max_body_size: 100 * 1024 * 1024, // 100MB
         db_pool_size: 5,
         redis: None,
+        proxy_request: ProxyRequestConfig::default(),
         cache: CacheConfig::default(),
         storage: StorageConfig::default(),
     };
@@ -279,11 +310,14 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
     let default_yaml_str = serde_yaml::to_string(&effective_default_config).unwrap();
 
     // First stage: parse default config
-    let mut default_builder = config::Config::builder()
-        .add_source(config::File::from_str(&default_yaml_str, config::FileFormat::Yaml));
+    let mut default_builder = config::Config::builder().add_source(config::File::from_str(
+        &default_yaml_str,
+        config::FileFormat::Yaml,
+    ));
 
     if default_config_path.exists() {
-        default_builder = default_builder.add_source(config::File::from(default_config_path).required(false));
+        default_builder =
+            default_builder.add_source(config::File::from(default_config_path).required(false));
     }
 
     let default_config: FinalConfig = default_builder
@@ -297,8 +331,10 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
         .unwrap_or_else(|err| panic!("Failed to write default configuration file: {}", err));
 
     // Second stage: user config and optionally override env vars
-    let mut builder = config::Config::builder()
-        .add_source(config::File::from_str(&merged_default_yaml, config::FileFormat::Yaml));
+    let mut builder = config::Config::builder().add_source(config::File::from_str(
+        &merged_default_yaml,
+        config::FileFormat::Yaml,
+    ));
 
     if user_config_path.exists() {
         builder = builder.add_source(config::File::from(user_config_path).required(false));
@@ -327,3 +363,49 @@ pub static CONFIG: Lazy<FinalConfig> = Lazy::new(|| {
 
     final_config
 });
+
+#[cfg(test)]
+mod tests {
+    use super::{FinalConfig, ProxyRequestConfig};
+
+    #[test]
+    fn proxy_request_config_defaults_keep_overall_timeout_disabled() {
+        let config = ProxyRequestConfig::default();
+        assert_eq!(config.connect_timeout_seconds, 10);
+        assert_eq!(config.connect_timeout().as_secs(), 10);
+        assert_eq!(config.request_timeout(), None);
+    }
+
+    #[test]
+    fn final_config_deserializes_proxy_request_overrides() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+proxy_request:
+  connect_timeout_seconds: 3
+  timeout_seconds: 600
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        assert_eq!(config.proxy_request.connect_timeout_seconds, 3);
+        assert_eq!(config.proxy_request.timeout_seconds, Some(600));
+        assert_eq!(
+            config
+                .proxy_request
+                .request_timeout()
+                .map(|value| value.as_secs()),
+            Some(600)
+        );
+    }
+}

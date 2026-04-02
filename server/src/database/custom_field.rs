@@ -2,12 +2,12 @@ use chrono::Utc;
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::{get_connection, DbResult, ListResult};
+use super::{DbResult, ListResult, get_connection};
 // Removed: use crate::controller::custom_field::ListCustomFieldQueryPayload;
 use crate::controller::BaseError;
+use crate::schema::enum_def::{FieldPlacement, FieldType};
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
-use crate::schema::enum_def::{FieldPlacement, FieldType};
 
 // --- Core Database Object Struct (managed by db_object!) ---
 db_object! {
@@ -88,7 +88,7 @@ pub struct DbUpdateCustomFieldDefinition {
         pub created_at: i64,
         pub updated_at: i64,
     }
-    
+
     #[derive(Insertable, Debug)]
     #[diesel(table_name = model_custom_field_assignment)]
     pub struct DbNewModelCustomFieldAssignment {
@@ -109,7 +109,6 @@ pub struct DbNewProviderCustomFieldAssignment {
     pub updated_at: i64,
 }
 }
-
 
 // --- Payload Structs for API interaction (moved from controller) ---
 #[derive(Deserialize, Debug, Default)] // Added Default for convenience if needed elsewhere
@@ -186,7 +185,6 @@ pub struct ApiUnlinkCustomFieldPayload {
     pub model_id: Option<i64>,
     pub provider_id: Option<i64>,
 }
-
 
 // Helper to convert DB model (from db_object!) to API response model
 fn to_api_response(cfd: CustomFieldDefinition) -> ApiCustomFieldDefinition {
@@ -364,7 +362,7 @@ impl CustomFieldDefinition {
             let query = custom_field_definition::table // Removed mut
                 .into_boxed()
                 .filter(custom_field_definition::dsl::deleted_at.is_null());
-            
+
             let count_query = custom_field_definition::table // Removed mut
                 .into_boxed()
                 .filter(custom_field_definition::dsl::deleted_at.is_null());
@@ -378,7 +376,12 @@ impl CustomFieldDefinition {
             let total = count_query
                 .select(diesel::dsl::count_star())
                 .first::<i64>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to count custom field definitions: {}", e))))?;
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to count custom field definitions: {}",
+                        e
+                    )))
+                })?;
 
             let items_db = query
                 .order(custom_field_definition::dsl::created_at.desc())
@@ -386,7 +389,12 @@ impl CustomFieldDefinition {
                 .offset(offset)
                 .select(CustomFieldDefinitionDb::as_select())
                 .load::<CustomFieldDefinitionDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list custom field definitions: {}", e))))?;
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list custom field definitions: {}",
+                        e
+                    )))
+                })?;
 
             let api_list: Vec<ApiCustomFieldDefinition> = items_db
                 .into_iter()
@@ -410,8 +418,18 @@ impl CustomFieldDefinition {
                 .filter(custom_field_definition::dsl::is_definition_enabled.eq(true))
                 .select(CustomFieldDefinitionDb::as_select())
                 .load::<CustomFieldDefinitionDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list all active custom field definitions: {}", e))))
-                .map(|vec_db| vec_db.into_iter().map(|db_item| db_item.from_db()).collect())
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list all active custom field definitions: {}",
+                        e
+                    )))
+                })
+                .map(|vec_db| {
+                    vec_db
+                        .into_iter()
+                        .map(|db_item| db_item.from_db())
+                        .collect()
+                })
         })
     }
 
@@ -441,7 +459,8 @@ impl CustomFieldDefinition {
                     diesel::result::Error::DatabaseError(
                         diesel::result::DatabaseErrorKind::UniqueViolation,
                         info,
-                    ) => BaseError::DatabaseFatal(Some(format!( // Changed to Conflict
+                    ) => BaseError::DatabaseFatal(Some(format!(
+                        // Changed to Conflict
                         "Custom field already assigned to this model: {}",
                         info.message()
                     ))),
@@ -454,15 +473,15 @@ impl CustomFieldDefinition {
         })
     }
 
-    pub fn unlink_model(
-        custom_field_definition_id_val: i64,
-        model_id_val: i64,
-    ) -> DbResult<usize> {
+    pub fn unlink_model(custom_field_definition_id_val: i64, model_id_val: i64) -> DbResult<usize> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
             diesel::delete(
                 model_custom_field_assignment::table
-                    .filter(model_custom_field_assignment::dsl::custom_field_definition_id.eq(custom_field_definition_id_val))
+                    .filter(
+                        model_custom_field_assignment::dsl::custom_field_definition_id
+                            .eq(custom_field_definition_id_val),
+                    )
                     .filter(model_custom_field_assignment::dsl::model_id.eq(model_id_val)),
             )
             .execute(conn)
@@ -482,12 +501,24 @@ impl CustomFieldDefinition {
                 .filter(model_custom_field_assignment::dsl::is_enabled.eq(true))
                 .select(ModelCustomFieldAssignmentDb::as_select())
                 .load::<ModelCustomFieldAssignmentDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list all enabled model custom field assignments: {}", e))))
-                .map(|vec_db| vec_db.into_iter().map(|db_item| db_item.from_db()).collect())
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list all enabled model custom field assignments: {}",
+                        e
+                    )))
+                })
+                .map(|vec_db| {
+                    vec_db
+                        .into_iter()
+                        .map(|db_item| db_item.from_db())
+                        .collect()
+                })
         })
     }
 
-    pub fn list_enabled_model_assignments_by_model_id(model_id_val: i64) -> DbResult<Vec<ModelCustomFieldAssignment>> {
+    pub fn list_enabled_model_assignments_by_model_id(
+        model_id_val: i64,
+    ) -> DbResult<Vec<ModelCustomFieldAssignment>> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
             model_custom_field_assignment::table
@@ -495,8 +526,18 @@ impl CustomFieldDefinition {
                 .filter(model_custom_field_assignment::dsl::model_id.eq(model_id_val))
                 .select(ModelCustomFieldAssignmentDb::as_select())
                 .load::<ModelCustomFieldAssignmentDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list enabled model custom field assignments by model id: {}", e))))
-                .map(|vec_db| vec_db.into_iter().map(|db_item| db_item.from_db()).collect())
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list enabled model custom field assignments by model id: {}",
+                        e
+                    )))
+                })
+                .map(|vec_db| {
+                    vec_db
+                        .into_iter()
+                        .map(|db_item| db_item.from_db())
+                        .collect()
+                })
         })
     }
 
@@ -519,14 +560,17 @@ impl CustomFieldDefinition {
 
         db_execute!(conn, {
             diesel::insert_into(provider_custom_field_assignment::table)
-                .values(DbNewProviderCustomFieldAssignmentDb::to_db(&new_assignment_db))
+                .values(DbNewProviderCustomFieldAssignmentDb::to_db(
+                    &new_assignment_db,
+                ))
                 .returning(ProviderCustomFieldAssignmentDb::as_returning())
                 .get_result::<ProviderCustomFieldAssignmentDb>(conn)
                 .map_err(|e| match e {
                     diesel::result::Error::DatabaseError(
                         diesel::result::DatabaseErrorKind::UniqueViolation,
                         info,
-                    ) => BaseError::DatabaseFatal(Some(format!( // Changed to Conflict
+                    ) => BaseError::DatabaseFatal(Some(format!(
+                        // Changed to Conflict
                         "Custom field already assigned to this provider: {}",
                         info.message()
                     ))),
@@ -547,7 +591,10 @@ impl CustomFieldDefinition {
         db_execute!(conn, {
             diesel::delete(
                 provider_custom_field_assignment::table
-                    .filter(provider_custom_field_assignment::dsl::custom_field_definition_id.eq(custom_field_definition_id_val))
+                    .filter(
+                        provider_custom_field_assignment::dsl::custom_field_definition_id
+                            .eq(custom_field_definition_id_val),
+                    )
                     .filter(provider_custom_field_assignment::dsl::provider_id.eq(provider_id_val)),
             )
             .execute(conn)
@@ -567,12 +614,24 @@ impl CustomFieldDefinition {
                 .filter(provider_custom_field_assignment::dsl::is_enabled.eq(true))
                 .select(ProviderCustomFieldAssignmentDb::as_select())
                 .load::<ProviderCustomFieldAssignmentDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list all enabled provider custom field assignments: {}", e))))
-                .map(|vec_db| vec_db.into_iter().map(|db_item| db_item.from_db()).collect())
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list all enabled provider custom field assignments: {}",
+                        e
+                    )))
+                })
+                .map(|vec_db| {
+                    vec_db
+                        .into_iter()
+                        .map(|db_item| db_item.from_db())
+                        .collect()
+                })
         })
     }
 
-    pub fn list_enabled_provider_assignments_by_provider_id(provider_id_val: i64) -> DbResult<Vec<ProviderCustomFieldAssignment>> {
+    pub fn list_enabled_provider_assignments_by_provider_id(
+        provider_id_val: i64,
+    ) -> DbResult<Vec<ProviderCustomFieldAssignment>> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
             provider_custom_field_assignment::table
@@ -585,28 +644,31 @@ impl CustomFieldDefinition {
         })
     }
 
-    pub fn list_by_provider_id(
-        provider_id_val: i64,
-    ) -> DbResult<Vec<ApiCustomFieldDefinition>> {
+    pub fn list_by_provider_id(provider_id_val: i64) -> DbResult<Vec<ApiCustomFieldDefinition>> {
         let conn = &mut get_connection()?;
 
         db_execute!(conn, {
             let query = custom_field_definition::table
-                .inner_join(provider_custom_field_assignment::table.on(
-                    custom_field_definition::dsl::id.eq(provider_custom_field_assignment::dsl::custom_field_definition_id)
-                ))
+                .inner_join(
+                    provider_custom_field_assignment::table.on(custom_field_definition::dsl::id
+                        .eq(provider_custom_field_assignment::dsl::custom_field_definition_id)),
+                )
                 .filter(custom_field_definition::dsl::deleted_at.is_null())
                 .filter(custom_field_definition::dsl::is_definition_enabled.eq(true))
                 .filter(
-                    provider_custom_field_assignment::dsl::provider_id.eq(provider_id_val)
-                    .and(provider_custom_field_assignment::dsl::is_enabled.eq(true))
+                    provider_custom_field_assignment::dsl::provider_id
+                        .eq(provider_id_val)
+                        .and(provider_custom_field_assignment::dsl::is_enabled.eq(true)),
                 )
                 .select(CustomFieldDefinitionDb::as_select())
                 .distinct();
 
-            let items_db = query
-                .load::<CustomFieldDefinitionDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list custom fields by provider: {}", e))))?;
+            let items_db = query.load::<CustomFieldDefinitionDb>(conn).map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to list custom fields by provider: {}",
+                    e
+                )))
+            })?;
 
             let api_list: Vec<ApiCustomFieldDefinition> = items_db
                 .into_iter()
@@ -617,28 +679,31 @@ impl CustomFieldDefinition {
         })
     }
 
-    pub fn list_by_model_id(
-        model_id_val: i64,
-    ) -> DbResult<Vec<ApiCustomFieldDefinition>> {
+    pub fn list_by_model_id(model_id_val: i64) -> DbResult<Vec<ApiCustomFieldDefinition>> {
         let conn = &mut get_connection()?;
 
         db_execute!(conn, {
             let query = custom_field_definition::table
-                .inner_join(model_custom_field_assignment::table.on(
-                    custom_field_definition::dsl::id.eq(model_custom_field_assignment::dsl::custom_field_definition_id)
-                ))
+                .inner_join(
+                    model_custom_field_assignment::table.on(custom_field_definition::dsl::id
+                        .eq(model_custom_field_assignment::dsl::custom_field_definition_id)),
+                )
                 .filter(custom_field_definition::dsl::deleted_at.is_null())
                 .filter(custom_field_definition::dsl::is_definition_enabled.eq(true))
                 .filter(
-                    model_custom_field_assignment::dsl::model_id.eq(model_id_val)
-                    .and(model_custom_field_assignment::dsl::is_enabled.eq(true))
+                    model_custom_field_assignment::dsl::model_id
+                        .eq(model_id_val)
+                        .and(model_custom_field_assignment::dsl::is_enabled.eq(true)),
                 )
                 .select(CustomFieldDefinitionDb::as_select())
                 .distinct();
 
-            let items_db = query
-                .load::<CustomFieldDefinitionDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list custom fields by model: {}", e))))?;
+            let items_db = query.load::<CustomFieldDefinitionDb>(conn).map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to list custom fields by model: {}",
+                    e
+                )))
+            })?;
 
             let api_list: Vec<ApiCustomFieldDefinition> = items_db
                 .into_iter()
@@ -660,28 +725,33 @@ impl CustomFieldDefinition {
             // use crate::schema::{custom_field_definition, model_custom_field_assignment, provider_custom_field_assignment};
 
             let query = custom_field_definition::table
-                .left_join(model_custom_field_assignment::table.on(
-                    custom_field_definition::dsl::id.eq(model_custom_field_assignment::dsl::custom_field_definition_id)
-                ))
-                .left_join(provider_custom_field_assignment::table.on(
-                    custom_field_definition::dsl::id.eq(provider_custom_field_assignment::dsl::custom_field_definition_id)
-                ))
+                .left_join(
+                    model_custom_field_assignment::table.on(custom_field_definition::dsl::id
+                        .eq(model_custom_field_assignment::dsl::custom_field_definition_id)),
+                )
+                .left_join(
+                    provider_custom_field_assignment::table.on(custom_field_definition::dsl::id
+                        .eq(provider_custom_field_assignment::dsl::custom_field_definition_id)),
+                )
                 .filter(custom_field_definition::dsl::deleted_at.is_null())
                 .filter(custom_field_definition::dsl::is_definition_enabled.eq(true))
                 .filter(
-                    model_custom_field_assignment::dsl::model_id.eq(model_id_val)
+                    model_custom_field_assignment::dsl::model_id
+                        .eq(model_id_val)
                         .and(model_custom_field_assignment::dsl::is_enabled.eq(true))
-                    .or(
-                        provider_custom_field_assignment::dsl::provider_id.eq(provider_id_val)
-                        .and(provider_custom_field_assignment::dsl::is_enabled.eq(true))
-                    )
+                        .or(provider_custom_field_assignment::dsl::provider_id
+                            .eq(provider_id_val)
+                            .and(provider_custom_field_assignment::dsl::is_enabled.eq(true))),
                 )
                 .select(CustomFieldDefinitionDb::as_select())
                 .distinct();
 
-            let items_db = query
-                .load::<CustomFieldDefinitionDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list custom fields by provider/model: {}", e))))?;
+            let items_db = query.load::<CustomFieldDefinitionDb>(conn).map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to list custom fields by provider/model: {}",
+                    e
+                )))
+            })?;
 
             let api_list: Vec<ApiCustomFieldDefinition> = items_db
                 .into_iter()

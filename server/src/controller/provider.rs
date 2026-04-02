@@ -1,22 +1,24 @@
 use crate::database::{
-    provider::{
-        NewProvider, Provider, UpdateProviderData, ProviderApiKey, NewProviderApiKey,
-        UpdateProviderApiKeyData
-    },
     DbResult,
+    provider::{
+        NewProvider, NewProviderApiKey, Provider, ProviderApiKey, UpdateProviderApiKeyData,
+        UpdateProviderData,
+    },
 };
+use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use axum::{
     extract::{Json, Path, State}, // Added State
     routing::{delete, get, post, put},
 };
 use chrono::Utc;
-use crate::config::CONFIG;
-use crate::service::app_state::{create_state_router, StateRouter, AppState}; // Added AppState
-use reqwest::{Client, StatusCode, Url};
-use std::sync::Arc; // Added Arc
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use cyder_tools::log::warn;
+use reqwest::{
+    StatusCode, Url,
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::sync::Arc; // Added Arc
 
 use crate::service::vertex::get_vertex_token;
 use crate::utils::{HttpResult, ID_GENERATOR};
@@ -24,7 +26,7 @@ use crate::utils::{HttpResult, ID_GENERATOR};
 use super::BaseError;
 use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
 use crate::database::model::Model;
-use crate::schema::enum_def::ProviderType;
+use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
 
 #[derive(Serialize)]
 struct ModelDetail {
@@ -40,9 +42,9 @@ struct ProviderDetail {
     custom_fields: Vec<ApiCustomFieldDefinition>,
 }
 
-async fn list() -> (StatusCode, HttpResult<Vec<Provider>>) {
-    let result = Provider::list_all().unwrap_or_else(|_| vec![]); // Adjusted to list_all and handle error case
-    (StatusCode::OK, HttpResult::new(result))
+async fn list() -> DbResult<HttpResult<Vec<Provider>>> {
+    let result = Provider::list_all()?;
+    Ok(HttpResult::new(result))
 }
 
 #[derive(Deserialize)]
@@ -52,11 +54,10 @@ struct InserPayload {
     pub endpoint: String,
     pub use_proxy: bool,
     pub provider_type: Option<ProviderType>,
+    pub provider_api_key_mode: Option<ProviderApiKeyMode>,
 }
 
-async fn insert(
-    Json(payload): Json<InserPayload>
-) -> DbResult<HttpResult<Provider>> {
+async fn insert(Json(payload): Json<InserPayload>) -> DbResult<HttpResult<Provider>> {
     let current_time = Utc::now().timestamp_millis();
     let new_provider_data = NewProvider {
         id: ID_GENERATOR.generate_id(),
@@ -67,7 +68,12 @@ async fn insert(
         is_enabled: true, // Default for new providers
         created_at: current_time,
         updated_at: current_time,
-        provider_type: payload.provider_type.unwrap_or_else(|| ProviderType::Openai),
+        provider_type: payload
+            .provider_type
+            .unwrap_or_else(|| ProviderType::Openai),
+        provider_api_key_mode: payload
+            .provider_api_key_mode
+            .unwrap_or_else(|| ProviderApiKeyMode::Queue),
     };
     let created_provider = Provider::create(&new_provider_data)?;
 
@@ -77,9 +83,7 @@ async fn insert(
     Ok(HttpResult::new(created_provider))
 }
 
-async fn get_provider(
-    Path(id): Path<i64>
-) -> Result<HttpResult<Provider>, BaseError> {
+async fn get_provider(Path(id): Path<i64>) -> Result<HttpResult<Provider>, BaseError> {
     let provider = Provider::get_by_id(id)?;
 
     Ok(HttpResult::new(provider))
@@ -97,12 +101,16 @@ async fn update_provider(
         use_proxy: Some(payload.use_proxy),
         is_enabled: None, // InserPayload doesn't have is_enabled. Set to None to not change it unless specified.
         provider_type: payload.provider_type,
+        provider_api_key_mode: payload.provider_api_key_mode,
     };
     // Note: payload.api_keys, payload.omit_config, payload.limit_model are not used by Provider::update.
     let updated_provider = Provider::update(id, &update_data)?;
 
     // Invalidate cache - next read will load fresh data from database
-    if let Err(e) = app_state.invalidate_provider(id, Some(&updated_provider.provider_key)).await {
+    if let Err(e) = app_state
+        .invalidate_provider(id, Some(&updated_provider.provider_key))
+        .await
+    {
         warn!("Failed to invalidate Provider id {} in cache: {:?}", id, e);
     }
 
@@ -111,24 +119,31 @@ async fn update_provider(
 
 async fn delete_provider(
     State(app_state): State<Arc<AppState>>,
-    Path(id): Path<i64>
+    Path(id): Path<i64>,
 ) -> Result<HttpResult<()>, BaseError> {
     // Fetch provider details before deleting to get the key for store removal
     // Fetch provider details to ensure it exists before DB delete.
     // Not strictly needed for cache operation if ID is the only thing used, but good practice.
     let _provider_to_delete_from_db = Provider::get_by_id(id)?;
 
-    match Provider::delete(id) { // This is DB soft-delete
+    match Provider::delete(id) {
+        // This is DB soft-delete
         Ok(num_deleted_db) => {
             if num_deleted_db > 0 {
                 // Invalidate provider cache (key not available after delete, so pass None)
                 if let Err(e) = app_state.invalidate_provider(id, None).await {
-                    warn!("Provider id {} successfully deleted from DB, but failed to invalidate cache: {:?}", id, e);
+                    warn!(
+                        "Provider id {} successfully deleted from DB, but failed to invalidate cache: {:?}",
+                        id, e
+                    );
                 }
 
                 // Invalidate associated API keys cache
                 if let Err(e) = app_state.invalidate_provider_api_keys(id).await {
-                    warn!("Error invalidating provider API keys cache for provider {}: {:?}", id, e);
+                    warn!(
+                        "Error invalidating provider API keys cache for provider {}: {:?}",
+                        id, e
+                    );
                 }
             }
             Ok(HttpResult::new(())) // Success if DB operation was successful
@@ -170,6 +185,157 @@ struct CheckProviderPayload {
     provider_api_key: Option<String>,
 }
 
+struct ProviderCheckRequest {
+    url: String,
+    headers: HeaderMap,
+    body: Value,
+}
+
+async fn build_provider_check_request(
+    client: &reqwest::Client,
+    provider: &Provider,
+    provider_api_key_id: i64,
+    api_key: &str,
+    model_name: &str,
+) -> Result<ProviderCheckRequest, BaseError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+    let request = match provider.provider_type {
+        ProviderType::Gemini => {
+            headers.insert("x-goog-api-key", header_value(api_key)?);
+            ProviderCheckRequest {
+                url: format_gemini_generate_content_url(provider, model_name),
+                headers,
+                body: json!({
+                    "contents": [
+                        {
+                            "parts": [
+                                { "text": "hi" }
+                            ]
+                        }
+                    ]
+                }),
+            }
+        }
+        ProviderType::Vertex => {
+            let token = get_vertex_token(client, provider_api_key_id, api_key)
+                .await
+                .map_err(|e| {
+                    BaseError::ParamInvalid(Some(format!("Failed to get vertex token: {}", e)))
+                })?;
+            headers.insert(AUTHORIZATION, header_value(&format!("Bearer {}", token))?);
+            ProviderCheckRequest {
+                url: format_gemini_generate_content_url(provider, model_name),
+                headers,
+                body: json!({
+                    "contents": [
+                        {
+                            "parts": [
+                                { "text": "hi" }
+                            ]
+                        }
+                    ]
+                }),
+            }
+        }
+        ProviderType::VertexOpenai => {
+            let token = get_vertex_token(client, provider_api_key_id, api_key)
+                .await
+                .map_err(|e| {
+                    BaseError::ParamInvalid(Some(format!("Failed to get vertex token: {}", e)))
+                })?;
+            headers.insert(AUTHORIZATION, header_value(&format!("Bearer {}", token))?);
+            ProviderCheckRequest {
+                url: format_openai_check_url(provider),
+                headers,
+                body: json!({
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "hi"
+                        }
+                    ]
+                }),
+            }
+        }
+        ProviderType::Anthropic => {
+            headers.insert("x-api-key", header_value(api_key)?);
+            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+            ProviderCheckRequest {
+                url: format!("{}/messages", provider.endpoint.trim_end_matches('/')),
+                headers,
+                body: json!({
+                    "model": model_name,
+                    "max_tokens": 1,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "hi"
+                        }
+                    ]
+                }),
+            }
+        }
+        ProviderType::Ollama => {
+            headers.insert(AUTHORIZATION, header_value(&format!("Bearer {}", api_key))?);
+            ProviderCheckRequest {
+                url: format!("{}/api/chat", provider.endpoint.trim_end_matches('/')),
+                headers,
+                body: json!({
+                    "model": model_name,
+                    "stream": false,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "hi"
+                        }
+                    ]
+                }),
+            }
+        }
+        ProviderType::Openai | ProviderType::Responses => {
+            headers.insert(AUTHORIZATION, header_value(&format!("Bearer {}", api_key))?);
+            ProviderCheckRequest {
+                url: format_openai_check_url(provider),
+                headers,
+                body: json!({
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "hi"
+                        }
+                    ]
+                }),
+            }
+        }
+    };
+
+    Ok(request)
+}
+
+fn format_openai_check_url(provider: &Provider) -> String {
+    format!(
+        "{}/chat/completions",
+        provider.endpoint.trim_end_matches('/')
+    )
+}
+
+fn format_gemini_generate_content_url(provider: &Provider, model_name: &str) -> String {
+    format!(
+        "{}/{}:generateContent",
+        provider.endpoint.trim_end_matches('/'),
+        model_name
+    )
+}
+
+fn header_value(value: &str) -> Result<HeaderValue, BaseError> {
+    HeaderValue::from_str(value)
+        .map_err(|e| BaseError::ParamInvalid(Some(format!("Invalid request header value: {}", e))))
+}
+
 async fn check_provider(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -197,24 +363,25 @@ async fn check_provider(
         }
     };
 
-    let api_key = match (payload.provider_api_key_id, payload.provider_api_key) {
-        (Some(key_id), _) => {
-            let provider_api_key = ProviderApiKey::get_by_id(key_id)?;
-            if provider_api_key.provider_id != id {
-                return Err(BaseError::ParamInvalid(Some(format!(
-                    "API key {} does not belong to provider {}",
-                    key_id, id
-                ))));
+    let (provider_api_key_id, api_key) =
+        match (payload.provider_api_key_id, payload.provider_api_key) {
+            (Some(key_id), _) => {
+                let provider_api_key = ProviderApiKey::get_by_id(key_id)?;
+                if provider_api_key.provider_id != id {
+                    return Err(BaseError::ParamInvalid(Some(format!(
+                        "API key {} does not belong to provider {}",
+                        key_id, id
+                    ))));
+                }
+                (provider_api_key.id, provider_api_key.api_key)
             }
-            provider_api_key.api_key
-        }
-        (_, Some(api_key)) => api_key,
-        (None, None) => {
-            return Err(BaseError::ParamInvalid(Some(
-                "Either provider_api_key_id or provider_api_key must be provided.".to_string(),
-            )));
-        }
-    };
+            (_, Some(api_key)) => (0, api_key),
+            (None, None) => {
+                return Err(BaseError::ParamInvalid(Some(
+                    "Either provider_api_key_id or provider_api_key must be provided.".to_string(),
+                )));
+            }
+        };
 
     let provider = Provider::get_by_id(id)?;
 
@@ -224,22 +391,19 @@ async fn check_provider(
         &app_state.client
     };
 
-    let url = format!("{}/chat/completions", provider.endpoint.trim_end_matches('/'));
-
-    let request_body = serde_json::json!({
-        "model": model_name,
-        "messages": [
-            {
-                "role": "user",
-                "content": "hi"
-            }
-        ]
-    });
+    let check_request = build_provider_check_request(
+        client,
+        &provider,
+        provider_api_key_id,
+        &api_key,
+        &model_name,
+    )
+    .await?;
 
     let response = client
-        .post(&url)
-        .bearer_auth(&api_key)
-        .json(&request_body)
+        .post(&check_request.url)
+        .headers(check_request.headers)
+        .json(&check_request.body)
         .send()
         .await
         .map_err(|e| {
@@ -283,7 +447,10 @@ async fn get_remote_models(
 
     let response = if provider.provider_type == ProviderType::Gemini {
         let mut url = Url::parse(&provider.endpoint).map_err(|e| {
-            BaseError::ParamInvalid(Some(format!("Failed to parse provider endpoint as URL: {}", e)))
+            BaseError::ParamInvalid(Some(format!(
+                "Failed to parse provider endpoint as URL: {}",
+                e
+            )))
         })?;
         url.query_pairs_mut()
             .append_pair("key", &api_key_record.api_key);
@@ -294,7 +461,9 @@ async fn get_remote_models(
     } else if provider.provider_type == ProviderType::Vertex {
         let token = get_vertex_token(client, api_key_record.id, &api_key_record.api_key)
             .await
-            .map_err(|e| BaseError::ParamInvalid(Some(format!("Failed to get vertex token: {}", e))))?;
+            .map_err(|e| {
+                BaseError::ParamInvalid(Some(format!("Failed to get vertex token: {}", e)))
+            })?;
 
         client
             .get(&provider.endpoint)
@@ -403,7 +572,10 @@ async fn add_provider_api_key(
     // No need to manually update cache - it will be loaded on first read
     // Also invalidate the provider's key list cache
     if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
-        warn!("Failed to invalidate provider API keys cache for provider {}: {:?}", provider_id, e);
+        warn!(
+            "Failed to invalidate provider API keys cache for provider {}: {:?}",
+            provider_id, e
+        );
     }
 
     Ok(HttpResult::new(created_key))
@@ -413,9 +585,9 @@ async fn list_provider_api_keys(
     Path(provider_id): Path<i64>,
 ) -> Result<HttpResult<Vec<ProviderApiKey>>, BaseError> {
     let _provider = Provider::get_by_id(provider_id)?;
-    
+
     let keys = ProviderApiKey::list_by_provider_id(provider_id)?;
-    
+
     Ok(HttpResult::new(keys))
 }
 
@@ -425,7 +597,7 @@ async fn get_provider_api_key(
     let _provider = Provider::get_by_id(provider_id)?;
 
     let key = ProviderApiKey::get_by_id(key_id)?;
-    
+
     Ok(HttpResult::new(key))
 }
 
@@ -462,7 +634,10 @@ async fn update_provider_api_key(
 
     // Also invalidate the provider's key list
     if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
-        warn!("Failed to invalidate provider API keys cache for provider {}: {:?}", provider_id, e);
+        warn!(
+            "Failed to invalidate provider API keys cache for provider {}: {:?}",
+            provider_id, e
+        );
     }
 
     Ok(HttpResult::new(updated_key))
@@ -477,7 +652,7 @@ async fn delete_provider_api_key(
     // Fetch the key to ensure it belongs to the provider before deleting
     let key_to_delete_from_db = ProviderApiKey::get_by_id(key_id)?; // Or use app_state.provider_api_key_store.get_by_id(key_id)
     if key_to_delete_from_db.provider_id != provider_id {
-         return Err(BaseError::ParamInvalid(Some(format!(
+        return Err(BaseError::ParamInvalid(Some(format!(
             "API key {} does not belong to provider {}",
             key_id, provider_id
         ))));
@@ -487,7 +662,10 @@ async fn delete_provider_api_key(
 
     // Also invalidate the provider's key list
     if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
-        warn!("Failed to invalidate provider API keys cache for provider {}: {:?}", provider_id, e);
+        warn!(
+            "Failed to invalidate provider API keys cache for provider {}: {:?}",
+            provider_id, e
+        );
     }
 
     Ok(HttpResult::new(()))
@@ -510,17 +688,137 @@ pub fn create_provider_router() -> StateRouter {
             // Provider API Key routes
             .route("/{id}/provider_key", post(add_provider_api_key))
             .route("/{id}/provider_keys", get(list_provider_api_keys)) // List keys for a provider
-            .route(
-                "/{id}/provider_key/{key_id}",
-                get(get_provider_api_key),
-            ) // Get specific key
-            .route(
-                "/{id}/provider_key/{key_id}",
-                put(update_provider_api_key),
-            ) // Update specific key
+            .route("/{id}/provider_key/{key_id}", get(get_provider_api_key)) // Get specific key
+            .route("/{id}/provider_key/{key_id}", put(update_provider_api_key)) // Update specific key
             .route(
                 "/{id}/provider_key/{key_id}",
                 delete(delete_provider_api_key),
-            ) // Delete specific key
+            ), // Delete specific key
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::header_value;
+    use crate::database::provider::Provider;
+    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+
+    #[tokio::test]
+    async fn openai_style_check_request_uses_chat_completions() {
+        let provider = sample_provider(ProviderType::Openai, "https://api.example.com/v1");
+        let request = super::build_provider_check_request(
+            &reqwest::Client::new(),
+            &provider,
+            0,
+            "sk-test",
+            "gpt-4o-mini",
+        )
+        .await
+        .expect("request should build");
+
+        assert_eq!(request.url, "https://api.example.com/v1/chat/completions");
+        assert_eq!(
+            request
+                .headers
+                .get(reqwest::header::AUTHORIZATION)
+                .expect("auth header"),
+            &header_value("Bearer sk-test").unwrap()
+        );
+        assert_eq!(request.body["model"], "gpt-4o-mini");
+        assert_eq!(request.body["messages"][0]["content"], "hi");
+    }
+
+    #[tokio::test]
+    async fn anthropic_check_request_uses_messages_and_version_header() {
+        let provider = sample_provider(ProviderType::Anthropic, "https://api.anthropic.com/v1");
+        let request = super::build_provider_check_request(
+            &reqwest::Client::new(),
+            &provider,
+            0,
+            "ak-test",
+            "claude-3-5-haiku-latest",
+        )
+        .await
+        .expect("request should build");
+
+        assert_eq!(request.url, "https://api.anthropic.com/v1/messages");
+        assert_eq!(
+            request.headers.get("x-api-key").expect("x-api-key"),
+            &header_value("ak-test").unwrap()
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("anthropic-version")
+                .expect("anthropic-version"),
+            "2023-06-01"
+        );
+        assert_eq!(request.body["model"], "claude-3-5-haiku-latest");
+        assert_eq!(request.body["max_tokens"], 1);
+    }
+
+    #[tokio::test]
+    async fn gemini_check_request_uses_generate_content() {
+        let provider = sample_provider(
+            ProviderType::Gemini,
+            "https://generativelanguage.googleapis.com/v1beta/models",
+        );
+        let request = super::build_provider_check_request(
+            &reqwest::Client::new(),
+            &provider,
+            0,
+            "gm-test",
+            "gemini-2.0-flash",
+        )
+        .await
+        .expect("request should build");
+
+        assert_eq!(
+            request.url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("x-goog-api-key")
+                .expect("x-goog-api-key"),
+            &header_value("gm-test").unwrap()
+        );
+        assert_eq!(request.body["contents"][0]["parts"][0]["text"], "hi");
+    }
+
+    #[tokio::test]
+    async fn ollama_check_request_uses_api_chat() {
+        let provider = sample_provider(ProviderType::Ollama, "http://localhost:11434");
+        let request = super::build_provider_check_request(
+            &reqwest::Client::new(),
+            &provider,
+            0,
+            "ollama-key",
+            "llama3.1",
+        )
+        .await
+        .expect("request should build");
+
+        assert_eq!(request.url, "http://localhost:11434/api/chat");
+        assert_eq!(request.body["model"], "llama3.1");
+        assert_eq!(request.body["stream"], false);
+        assert_eq!(request.body["messages"][0]["content"], "hi");
+    }
+
+    fn sample_provider(provider_type: ProviderType, endpoint: &str) -> Provider {
+        Provider {
+            id: 1,
+            provider_key: "provider".to_string(),
+            name: "provider".to_string(),
+            endpoint: endpoint.to_string(),
+            use_proxy: false,
+            is_enabled: true,
+            deleted_at: None,
+            created_at: 0,
+            updated_at: 0,
+            provider_type,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        }
+    }
 }

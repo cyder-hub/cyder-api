@@ -1,16 +1,16 @@
+use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
+use crate::{
+    controller::BaseError,
+    database::model::{Model, ModelDetail, UpdateModelData},
+    utils::HttpResult, // Import HttpResult
+};
 use axum::{
     extract::{Path, State}, // Added State
     response::Json,
     routing::{delete, get, post, put},
 };
 use serde::Deserialize;
-use crate::service::app_state::{create_state_router, StateRouter, AppState}; // Added AppState
 use std::sync::Arc; // Added Arc
-use crate::{
-    controller::BaseError,
-    database::model::{Model, ModelDetail, UpdateModelData},
-    utils::HttpResult, // Import HttpResult
-};
 
 fn default_true() -> bool {
     true
@@ -40,14 +40,17 @@ async fn insert_model(
 
 async fn delete_model(
     State(app_state): State<Arc<AppState>>,
-    Path(id): Path<i64>
+    Path(id): Path<i64>,
 ) -> Result<HttpResult<()>, BaseError> {
     let num_deleted = Model::delete(id)?;
 
     if num_deleted > 0 {
         // Invalidate from cache
         if let Err(store_err) = app_state.invalidate_model(id, None).await {
-            eprintln!("Failed to invalidate model from cache after DB delete: {:?}", store_err);
+            eprintln!(
+                "Failed to invalidate model from cache after DB delete: {:?}",
+                store_err
+            );
         }
     }
     Ok(HttpResult::new(()))
@@ -77,7 +80,10 @@ async fn update_model(
 
     // Invalidate from cache
     if let Err(store_err) = app_state.invalidate_model(id, None).await {
-        eprintln!("Failed to invalidate model in cache after DB update: {:?}", store_err);
+        eprintln!(
+            "Failed to invalidate model in cache after DB update: {:?}",
+            store_err
+        );
     }
 
     Ok(HttpResult::new(updated_model))

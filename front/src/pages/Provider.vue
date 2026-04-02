@@ -172,6 +172,7 @@ import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { useProviderStore } from "@/store/providerStore";
 import type { ProviderBase } from "@/store/types";
+import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
 import { confirm } from "@/lib/confirmController";
 import { Api } from "@/services/request";
@@ -203,9 +204,11 @@ const loadData = async () => {
   error.value = null;
   try {
     await store.fetchProviders();
-  } catch (err: any) {
-    console.error("Failed to fetch providers:", err);
-    error.value = err.message || $t("common.unknownError", "Unknown Error");
+  } catch (err: unknown) {
+    error.value = normalizeError(
+      err,
+      $t("common.unknownError", "Unknown Error"),
+    ).message;
   } finally {
     isLoading.value = false;
   }

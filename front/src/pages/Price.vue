@@ -432,7 +432,7 @@ const loadingRules = ref(false); // Can be tied to a watch if needed
 
 onMounted(async () => {
   loadingPlans.value = true;
-  await priceStore.loadBillingPlans();
+  await priceStore.fetchBillingPlans();
   loadingPlans.value = false;
 });
 
@@ -497,7 +497,7 @@ const handleSavePlan = async () => {
       await Api.createBillingPlan(payload);
     }
     isPlanModalOpen.value = false;
-    priceStore.refetchBillingPlans();
+    await priceStore.fetchBillingPlans();
   } catch (error: any) {
     toastController.error(
       $t("pricePage.alert.planSaveFailed", {
@@ -515,7 +515,7 @@ const handleDeletePlan = async (planId: number, planName: string) => {
   ) {
     try {
       await Api.deleteBillingPlan(planId);
-      priceStore.refetchBillingPlans();
+      await priceStore.fetchBillingPlans();
       if (priceStore.selectedPlanId === planId) {
         priceStore.setSelectedPlanId(null);
       }
@@ -597,7 +597,9 @@ const handleSaveRule = async () => {
       await Api.createPriceRule(payload);
     }
     isRuleModalOpen.value = false;
-    priceStore.refetchPriceRules();
+    if (priceStore.selectedPlanId !== null) {
+      await priceStore.fetchPriceRules(priceStore.selectedPlanId);
+    }
   } catch (error: any) {
     toastController.error(
       $t("pricePage.alert.ruleSaveFailed", {
@@ -615,7 +617,9 @@ const handleDeleteRule = async (ruleId: number) => {
   ) {
     try {
       await Api.deletePriceRule(ruleId);
-      priceStore.refetchPriceRules();
+      if (priceStore.selectedPlanId !== null) {
+        await priceStore.fetchPriceRules(priceStore.selectedPlanId);
+      }
     } catch (error: any) {
       toastController.error(
         $t("pricePage.alert.ruleDeleteFailed", {

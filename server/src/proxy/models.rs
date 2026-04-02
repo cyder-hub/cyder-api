@@ -4,11 +4,12 @@ use serde::Serialize;
 
 use super::ProxyError;
 use crate::{
-    database::{
-        model::Model, model_alias::ModelAlias, provider::Provider
-    },
+    database::{model::Model, model_alias::ModelAlias, provider::Provider},
     schema::enum_def::ProviderType,
-    service::{app_state::AppState, cache::types::{CacheAccessControl, CacheSystemApiKey}},
+    service::{
+        app_state::AppState,
+        cache::types::{CacheAccessControl, CacheSystemApiKey},
+    },
     utils::limit::LIMITER,
 };
 use cyder_tools::log::{debug, error};
@@ -30,28 +31,35 @@ pub(super) async fn get_accessible_models(
     );
 
     // 1. Fetch Access Control Policy if ID is present
-    let access_control_policy_opt: Option<Arc<CacheAccessControl>> =
-        if let Some(policy_id) = system_api_key.access_control_policy_id {
-            match app_state.get_access_control_policy(policy_id).await {
-                Ok(Some(policy)) => Some(policy),
-                Ok(None) => {
-                    error!("Access control policy with id {} not found in store (configured on SystemApiKey {}).", policy_id, system_api_key.id);
-                    return Err(ProxyError::InternalError(format!(
-                        "Access control policy id {} configured but not found in application cache.",
-                        policy_id
-                    )));
-                }
-                Err(store_err) => {
-                    error!("Failed to fetch access control policy with id {} from store: {:?}", policy_id, store_err);
-                    return Err(ProxyError::InternalError(format!(
-                        "Error accessing application cache for access control policy id {}: {}",
-                        policy_id, store_err
-                    )));
-                }
+    let access_control_policy_opt: Option<Arc<CacheAccessControl>> = if let Some(policy_id) =
+        system_api_key.access_control_policy_id
+    {
+        match app_state.get_access_control_policy(policy_id).await {
+            Ok(Some(policy)) => Some(policy),
+            Ok(None) => {
+                error!(
+                    "Access control policy with id {} not found in store (configured on SystemApiKey {}).",
+                    policy_id, system_api_key.id
+                );
+                return Err(ProxyError::InternalError(format!(
+                    "Access control policy id {} configured but not found in application cache.",
+                    policy_id
+                )));
             }
-        } else {
-            None
-        };
+            Err(store_err) => {
+                error!(
+                    "Failed to fetch access control policy with id {} from store: {:?}",
+                    policy_id, store_err
+                );
+                return Err(ProxyError::InternalError(format!(
+                    "Error accessing application cache for access control policy id {}: {}",
+                    policy_id, store_err
+                )));
+            }
+        }
+    } else {
+        None
+    };
 
     let mut available_models: Vec<AccessibleModel> = Vec::new();
 
@@ -139,7 +147,12 @@ pub(super) async fn get_accessible_models(
                         Err(reason) => {
                             debug!(
                                 "Model alias '{}' (target: {}/{}) denied by policy '{}' for SystemApiKey ID {}. Reason: {}",
-                                alias.alias_name, provider.provider_key, model.model_name, policy.name, system_api_key.id, reason
+                                alias.alias_name,
+                                provider.provider_key,
+                                model.model_name,
+                                policy.name,
+                                system_api_key.id,
+                                reason
                             );
                         }
                     }
@@ -180,7 +193,6 @@ pub(super) struct ModelInfo {
     pub object: String,
     pub owned_by: String, // provider.provider_key
 }
-
 
 // --- Structs for Gemini /models endpoint response ---
 #[derive(Serialize, Debug)]

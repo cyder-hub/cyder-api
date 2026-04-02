@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "cyder-api"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -919,7 +919,6 @@ dependencies = [
  "json-patch",
  "jsonwebtoken 10.3.0",
  "libsqlite3-sys",
- "once_cell",
  "openssl",
  "paste",
  "pq-sys",

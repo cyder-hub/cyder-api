@@ -1,23 +1,24 @@
 use diesel::{
-    r2d2::{ConnectionManager, Pool, PooledConnection}, Connection, PgConnection, SqliteConnection
+    Connection, PgConnection, SqliteConnection,
+    r2d2::{ConnectionManager, Pool, PooledConnection},
 };
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-use std::path::Path;
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use std::fs::File;
-use once_cell::sync::Lazy;
+use std::path::Path;
+use std::sync::LazyLock;
 
 use crate::{config::CONFIG, controller::BaseError};
 use serde::Serialize;
 
-pub mod provider;
-pub mod system_api_key;
+pub mod access_control;
+pub mod custom_field;
 pub mod model;
 pub mod model_alias;
-pub mod access_control;
+pub mod price;
+pub mod provider;
 pub mod request_log;
 pub mod stat;
-pub mod custom_field;
-pub mod price;
+pub mod system_api_key;
 //pub mod record; // Assuming this will be replaced or removed if request_log supersedes it
 //pub mod model_transform;
 
@@ -39,13 +40,17 @@ pub enum DbConnection {
 pub fn get_connection() -> DbResult<DbConnection> {
     match &*DB_POOL {
         DbPool::Postgres(pool) => {
-            let conn = pool.get().map_err(|e| BaseError::DatabaseFatal(Some(format!("Postgres pool error: {}", e))))?;
+            let conn = pool.get().map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!("Postgres pool error: {}", e)))
+            })?;
             Ok(DbConnection::Postgres(conn))
-        },
+        }
         DbPool::Sqlite(pool) => {
-            let conn = pool.get().map_err(|e| BaseError::DatabaseFatal(Some(format!("Sqlite pool error: {}", e))))?;
+            let conn = pool
+                .get()
+                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Sqlite pool error: {}", e))))?;
             Ok(DbConnection::Sqlite(conn))
-        },
+        }
     }
 }
 
@@ -157,7 +162,7 @@ macro_rules! db_execute {
     };
 }
 
-static DB_POOL: Lazy<DbPool> = Lazy::new(|| DbPool::establish());
+static DB_POOL: LazyLock<DbPool> = LazyLock::new(DbPool::establish);
 const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 const POSTGRES_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
 
@@ -166,20 +171,21 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
     if !db_path.exists() {
         if let Some(parent_dir) = db_path.parent() {
             if !parent_dir.exists() {
-                std::fs::create_dir_all(parent_dir)
-                    .expect("failed to create database directory");
+                std::fs::create_dir_all(parent_dir).expect("failed to create database directory");
             }
         }
         File::create(db_path).expect("failed to create database file");
     }
 
-    let mut connection = SqliteConnection::establish(db_url).expect("failed to establish migration connection");
+    let mut connection =
+        SqliteConnection::establish(db_url).expect("failed to establish migration connection");
 
     {
         use diesel::prelude::*;
         use diesel::sql_types::Text;
-        let version: Result<String, _> = diesel::select(diesel::dsl::sql::<Text>("sqlite_version()"))
-            .get_result(&mut connection);
+        let version: Result<String, _> =
+            diesel::select(diesel::dsl::sql::<Text>("sqlite_version()"))
+                .get_result(&mut connection);
 
         match version {
             Ok(v) => println!("database sqlite version: {}", v),
@@ -187,7 +193,9 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
         }
     }
 
-    connection.run_pending_migrations(SQLITE_MIGRATIONS).expect("failed to run migrations");
+    connection
+        .run_pending_migrations(SQLITE_MIGRATIONS)
+        .expect("failed to run migrations");
 
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);
     Pool::builder()
@@ -198,9 +206,12 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
 }
 
 fn init_pg_pool(db_url: &str) -> Pool<ConnectionManager<PgConnection>> {
-    let mut connection = PgConnection::establish(db_url).expect("failed to establish migration connection");
+    let mut connection =
+        PgConnection::establish(db_url).expect("failed to establish migration connection");
 
-    connection.run_pending_migrations(POSTGRES_MIGRATIONS).expect("failed to run migrations");
+    connection
+        .run_pending_migrations(POSTGRES_MIGRATIONS)
+        .expect("failed to run migrations");
 
     let manager = ConnectionManager::<PgConnection>::new(db_url);
     Pool::builder()

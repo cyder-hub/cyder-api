@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
 import { toastController } from "@/lib/toastController";
 import type { EditingProviderData } from "@/components/provider/types";
+import type { ProviderCheckPayload } from "@/store/types";
 
 export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
   const { t: $t } = useI18n();
@@ -56,7 +57,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     const modelItem = data.models[modelIndex];
     const keyItem = data.provider_keys[apiKeyIndex];
 
-    const payload: Record<string, any> = {
+    const payload: ProviderCheckPayload = {
       ...(modelItem.id
         ? { model_id: modelItem.id }
         : { model_name: modelItem.real_model_name || modelItem.model_name }),
@@ -95,7 +96,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
 
     let successCount = 0;
     for (const [index, model] of data.models.entries()) {
-      const payload: Record<string, any> = {
+      const payload: ProviderCheckPayload = {
         ...(model.id
           ? { model_id: model.id }
           : { model_name: model.real_model_name || model.model_name }),
@@ -139,7 +140,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
 
     let successCount = 0;
     for (const [index, key] of data.provider_keys.entries()) {
-      const payload: Record<string, any> = {
+      const payload: ProviderCheckPayload = {
         ...(model.id
           ? { model_id: model.id }
           : { model_name: model.real_model_name || model.model_name }),

@@ -1,10 +1,8 @@
 use async_trait::async_trait;
 use bb8_redis::bb8;
-use bb8_redis::redis::{
-    cmd, AsyncCommands, FromRedisValue, RedisError, ToRedisArgs, Value,
-};
+use bb8_redis::redis::{AsyncCommands, FromRedisValue, RedisError, ToRedisArgs, Value, cmd};
 use redis::{ParsingError, ToSingleRedisArg};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,9 +10,9 @@ use thiserror::Error;
 
 use crate::service::redis::RedisPool;
 
-use super::{metrics::CacheMetrics, types::CacheEntry, CacheBackend};
+use super::{CacheBackend, metrics::CacheMetrics, types::CacheEntry};
 
-use bincode::{config, Decode, Encode};
+use bincode::{Decode, Encode, config};
 
 #[derive(Debug, Error)]
 pub enum RedisCacheError {
@@ -45,11 +43,14 @@ impl<T: Clone + Serialize + DeserializeOwned + bincode::Encode> ToRedisArgs for 
 
 impl<T: Clone + Serialize + DeserializeOwned + bincode::Encode> ToSingleRedisArg for CacheValue<T> {}
 
-impl<T: Clone + Serialize + DeserializeOwned + bincode::Decode<()>> FromRedisValue for CacheValue<T> {
+impl<T: Clone + Serialize + DeserializeOwned + bincode::Decode<()>> FromRedisValue
+    for CacheValue<T>
+{
     fn from_redis_value(v: Value) -> Result<Self, ParsingError> {
         let bytes: Vec<u8> = redis::from_redis_value(v)?;
-        let (decoded, _) = bincode::decode_from_slice::<CacheEntry<T>, _>(&bytes, config::standard())
-            .map_err(|e| ParsingError::from(format!("bincode deserialize failed: {}", e)))?;
+        let (decoded, _) =
+            bincode::decode_from_slice::<CacheEntry<T>, _>(&bytes, config::standard())
+                .map_err(|e| ParsingError::from(format!("bincode deserialize failed: {}", e)))?;
         Ok(CacheValue(Arc::new(decoded)))
     }
 }
@@ -58,7 +59,14 @@ impl<T: Clone + Serialize + DeserializeOwned + bincode::Decode<()>> FromRedisVal
 #[derive(Clone)]
 pub struct RedisCacheBackend<T>
 where
-    T: Serialize + DeserializeOwned + Send + Sync + 'static + Clone + bincode::Encode + bincode::Decode<()>,
+    T: Serialize
+        + DeserializeOwned
+        + Send
+        + Sync
+        + 'static
+        + Clone
+        + bincode::Encode
+        + bincode::Decode<()>,
 {
     pool: RedisPool,
     metrics: Arc<CacheMetrics>,
@@ -68,12 +76,16 @@ where
 
 impl<T> RedisCacheBackend<T>
 where
-    T: Serialize + DeserializeOwned + Send + Sync + 'static + Clone + bincode::Encode + bincode::Decode<()>,
+    T: Serialize
+        + DeserializeOwned
+        + Send
+        + Sync
+        + 'static
+        + Clone
+        + bincode::Encode
+        + bincode::Decode<()>,
 {
-    pub fn new(
-        pool: RedisPool,
-        key_prefix: String,
-    ) -> Self {
+    pub fn new(pool: RedisPool, key_prefix: String) -> Self {
         Self {
             pool,
             metrics: Arc::new(CacheMetrics::new()),
@@ -94,7 +106,14 @@ where
 #[async_trait]
 impl<T> CacheBackend<T> for RedisCacheBackend<T>
 where
-    T: Serialize + DeserializeOwned + Send + Sync + 'static + Clone + bincode::Encode + bincode::Decode<()>,
+    T: Serialize
+        + DeserializeOwned
+        + Send
+        + Sync
+        + 'static
+        + Clone
+        + bincode::Encode
+        + bincode::Decode<()>,
 {
     type Error = RedisCacheError;
 
@@ -115,7 +134,12 @@ where
         }
     }
 
-    async fn set(&self, key: &str, value: Arc<CacheEntry<T>>, ttl: Option<Duration>) -> Result<(), Self::Error> {
+    async fn set(
+        &self,
+        key: &str,
+        value: Arc<CacheEntry<T>>,
+        ttl: Option<Duration>,
+    ) -> Result<(), Self::Error> {
         let mut conn = self.pool.get().await?;
         let full_key = self.get_full_key(key);
         let cache_value = CacheValue(value);
@@ -140,11 +164,11 @@ where
     async fn clear(&self) -> Result<(), Self::Error> {
         let mut conn = self.pool.get().await?;
         let pattern = format!("{}*", self.key_prefix);
-        
+
         // SCAN logic to find all keys with the prefix
         let mut keys_to_delete: Vec<String> = Vec::new();
         let mut cursor: i64 = 0;
-        
+
         loop {
             let (next_cursor, keys): (i64, Vec<String>) = cmd("SCAN")
                 .arg(cursor)
@@ -156,13 +180,13 @@ where
                 .await?;
 
             keys_to_delete.extend(keys);
-            
+
             if next_cursor == 0 {
                 break;
             }
             cursor = next_cursor;
         }
-        
+
         // Delete the keys in chunks to avoid blocking the server
         if !keys_to_delete.is_empty() {
             let mut pipe = redis::pipe();
@@ -170,7 +194,11 @@ where
                 pipe.del(key);
             }
             pipe.query_async::<()>(&mut *conn).await?;
-            cyder_tools::log::info!("Cleared {} keys from Redis cache with prefix '{}'", keys_to_delete.len(), self.key_prefix);
+            cyder_tools::log::info!(
+                "Cleared {} keys from Redis cache with prefix '{}'",
+                keys_to_delete.len(),
+                self.key_prefix
+            );
         }
 
         Ok(())
@@ -194,7 +222,11 @@ where
         Ok(final_results)
     }
 
-    async fn mset(&self, entries: &[(&str, Arc<CacheEntry<T>>)], ttl: Option<Duration>) -> Result<(), Self::Error> {
+    async fn mset(
+        &self,
+        entries: &[(&str, Arc<CacheEntry<T>>)],
+        ttl: Option<Duration>,
+    ) -> Result<(), Self::Error> {
         let mut conn = self.pool.get().await?;
         let mut pipe = redis::pipe();
         let items: Vec<_> = entries
@@ -220,4 +252,3 @@ where
         Ok(())
     }
 }
-

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,20 +20,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Api } from "@/services/request";
-import type { ApiKeyItem } from "@/store/types";
-// Assuming a Pinia store is set up
-// import { useAccessControlStore } from '../store/accessControlStore';
-
-// Mock store for now
-const useAccessControlStore = () => ({
-  policies: ref([
-    { id: 1, name: "Admin Policy" },
-    { id: 2, name: "User Policy" },
-  ]),
-});
-
-const accessControlStore = useAccessControlStore();
-const policies = accessControlStore.policies;
+import type { ApiKeyCreatePayload, ApiKeyItem, ApiKeyUpdatePayload } from "@/store/types";
+import { useAccessControlStore } from "@/store/accessControlStore";
+import { normalizeError } from "@/lib/error";
+import { toastController } from "@/lib/toastController";
 
 export interface EditingApiKeyData {
   id: number | null;
@@ -52,6 +42,9 @@ const props = defineProps<ApiKeyEditModalProps>();
 const emit = defineEmits(["update:isOpen", "saveSuccess"]);
 
 const { t } = useI18n();
+const accessControlStore = useAccessControlStore();
+const isSubmitting = ref(false);
+const isLoadingPolicies = ref(false);
 
 const getEmptyEditingData = (): EditingApiKeyData => ({
   id: null,
@@ -65,25 +58,42 @@ const editingData = ref<EditingApiKeyData>(getEmptyEditingData());
 
 const policyOptions = computed(() => {
   const noPolicy = { value: null, label: t("apiKeyEditModal.noPolicy") };
-  const policiesList = (policies.value || []).map((p) => ({
+  const policiesList = (accessControlStore.policies || []).map((p) => ({
     value: p.id,
     label: p.name,
   }));
   return [noPolicy, ...policiesList];
 });
 
+const loadPolicies = async () => {
+  if (accessControlStore.policies.length > 0) return;
+
+  isLoadingPolicies.value = true;
+  try {
+    await accessControlStore.fetchPolicies();
+  } catch (error: unknown) {
+    toastController.error(
+      t("apiKeyEditModal.alert.saveFailed", {
+        error: normalizeError(error, t("common.unknownError")).message,
+      }),
+    );
+  } finally {
+    isLoadingPolicies.value = false;
+  }
+};
+
 watch(
   () => props.isOpen,
-  (newVal) => {
+  async (newVal) => {
     if (newVal) {
+      await loadPolicies();
       if (props.initialData) {
         editingData.value = {
           id: props.initialData.id,
           name: props.initialData.name,
           description: props.initialData.description,
           is_enabled: props.initialData.is_enabled,
-          access_control_policy_id:
-            (props.initialData as any).access_control_policy_id ?? null,
+          access_control_policy_id: props.initialData.access_control_policy_id ?? null,
         };
       } else {
         editingData.value = getEmptyEditingData();
@@ -92,27 +102,32 @@ watch(
   },
 );
 
+onMounted(() => {
+  void loadPolicies();
+});
+
 const handleCommit = async () => {
   const currentFormState = editingData.value;
 
   if (!currentFormState) {
-    alert(t("apiKeyEditModal.alert.formDataError"));
+    toastController.error(t("apiKeyEditModal.alert.formDataError"));
     return;
   }
 
   if (!currentFormState.name.trim()) {
-    alert(t("apiKeyEditModal.alert.nameRequired"));
+    toastController.error(t("apiKeyEditModal.alert.nameRequired"));
     return;
   }
 
-  const payload: any = {
-    name: currentFormState.name,
-    description: currentFormState.description,
+  const payload: ApiKeyCreatePayload | ApiKeyUpdatePayload = {
+    name: currentFormState.name.trim(),
+    description: currentFormState.description.trim(),
     is_enabled: currentFormState.is_enabled,
     access_control_policy_id: currentFormState.access_control_policy_id,
   };
 
   try {
+    isSubmitting.value = true;
     if (currentFormState.id) {
       await Api.updateApiKey(currentFormState.id, payload);
     } else {
@@ -120,13 +135,16 @@ const handleCommit = async () => {
     }
     emit("saveSuccess");
     emit("update:isOpen", false);
-  } catch (error) {
-    console.error("Failed to commit API key:", error);
-    alert(
+  } catch (error: unknown) {
+    const normalizedError = normalizeError(error, t("common.unknownError"));
+    console.error("Failed to commit API key:", normalizedError);
+    toastController.error(
       t("apiKeyEditModal.alert.saveFailed", {
-        error: (error as Error).message || t("unknownError"),
+        error: normalizedError.message,
       }),
     );
+  } finally {
+    isSubmitting.value = false;
   }
 };
 
@@ -165,7 +183,19 @@ const handleOpenChange = (open: boolean) => {
           <Label class="text-gray-700">{{
             t("apiKeyEditModal.labelAccessControlPolicy")
           }}</Label>
-          <Select v-model="editingData.access_control_policy_id">
+          <Select
+            :model-value="
+              editingData.access_control_policy_id == null
+                ? 'none'
+                : String(editingData.access_control_policy_id)
+            "
+            @update:model-value="
+              (value) =>
+                (editingData.access_control_policy_id =
+                  value === 'none' ? null : Number(value))
+            "
+            :disabled="isLoadingPolicies"
+          >
             <SelectTrigger class="w-full">
               <SelectValue
                 :placeholder="
@@ -177,7 +207,7 @@ const handleOpenChange = (open: boolean) => {
               <SelectItem
                 v-for="policy in policyOptions"
                 :key="policy.value || 'none'"
-                :value="policy.value"
+                :value="policy.value == null ? 'none' : String(policy.value)"
               >
                 {{ policy.label }}
               </SelectItem>
@@ -205,9 +235,14 @@ const handleOpenChange = (open: boolean) => {
           variant="ghost"
           class="text-gray-600"
           @click="handleOpenChange(false)"
+          :disabled="isSubmitting"
           >{{ t("common.cancel") }}</Button
         >
-        <Button variant="default" @click="handleCommit">{{
+        <Button
+          variant="default"
+          @click="handleCommit"
+          :disabled="isSubmitting || isLoadingPolicies"
+        >{{
           t("common.save")
         }}</Button>
       </DialogFooter>

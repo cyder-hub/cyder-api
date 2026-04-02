@@ -1,18 +1,15 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::Json;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{self, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-use cyder_tools::auth::{
-    decode_jwt, issue_jwt, DecodingKey,
-    EncodingKey, JwtError, JwtValidation
-};
-use once_cell::sync::Lazy;
+use cyder_tools::auth::{DecodingKey, EncodingKey, JwtError, JwtValidation, decode_jwt, issue_jwt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 use crate::config::CONFIG;
@@ -31,8 +28,7 @@ impl Keys {
     }
 }
 
-static KEYS: Lazy<Keys> =
-    Lazy::new(|| Keys::new(CONFIG.jwt_secret.as_bytes()));
+static KEYS: LazyLock<Keys> = LazyLock::new(|| Keys::new(CONFIG.jwt_secret.as_bytes()));
 
 const ISSUER: &str = "cyder-api";
 const REFRESH_TOKEN_SUBJECT: &str = "REFRESH_TOKEN";

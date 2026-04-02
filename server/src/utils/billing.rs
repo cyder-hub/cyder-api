@@ -2,10 +2,7 @@ use chrono::Utc;
 use cyder_tools::log::debug;
 use serde_json::Value;
 
-use crate::{
-    schema::enum_def::LlmApiType,
-    service::cache::types::CachePriceRule,
-};
+use crate::{schema::enum_def::LlmApiType, service::cache::types::CachePriceRule};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageInfo {
@@ -46,8 +43,7 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                     .and_then(Value::as_i64)
                     .map(|rt| rt as i32)
                     .unwrap_or_else(|| {
-                        let calculated_reasoning =
-                            total_tokens - prompt_tokens - completion_tokens;
+                        let calculated_reasoning = total_tokens - prompt_tokens - completion_tokens;
                         if calculated_reasoning < 0 {
                             0
                         } else {
@@ -74,14 +70,22 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 if usage.is_null() {
                     return None;
                 }
-                let prompt_tokens =
-                    usage.get("promptTokenCount").and_then(Value::as_i64).unwrap_or(0) as i32;
-                let completion_tokens =
-                    usage.get("candidatesTokenCount").and_then(Value::as_i64).unwrap_or(0) as i32;
-                let total_tokens =
-                    usage.get("totalTokenCount").and_then(Value::as_i64).unwrap_or(0) as i32;
-                let reasoning_tokens =
-                    usage.get("thoughtsTokenCount").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let prompt_tokens = usage
+                    .get("promptTokenCount")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let completion_tokens = usage
+                    .get("candidatesTokenCount")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let total_tokens = usage
+                    .get("totalTokenCount")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let reasoning_tokens = usage
+                    .get("thoughtsTokenCount")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
                 let cached_tokens = usage
                     .get("cachedContentTokenCount")
                     .and_then(Value::as_i64)
@@ -106,10 +110,14 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 if usage.is_null() {
                     return None;
                 }
-                let prompt_tokens =
-                    usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0) as i32;
-                let completion_tokens =
-                    usage.get("output_tokens").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let prompt_tokens = usage
+                    .get("input_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let completion_tokens = usage
+                    .get("output_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
                 let total_tokens = prompt_tokens + completion_tokens;
 
                 Some(UsageInfo {
@@ -143,7 +151,10 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
 ///
 /// The total calculated cost in micro-units.
 pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[CachePriceRule]) -> i64 {
-    debug!("[calculate_cost] Calculating cost for usage: {:?}, with price rules: {:?}", usage_info, price_rules);
+    debug!(
+        "[calculate_cost] Calculating cost for usage: {:?}, with price rules: {:?}",
+        usage_info, price_rules
+    );
     let now = Utc::now().timestamp_millis();
     let mut total_cost: i64 = 0;
 
@@ -188,4 +199,3 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[CachePriceRule]) ->
     debug!("[calculate_cost] Final calculated cost: {}", total_cost);
     total_cost
 }
-

@@ -1,11 +1,11 @@
+use super::ProxyError;
 use super::auth::*;
-use super::logging::{get_log_manager, RequestLogContext};
+use super::logging::{RequestLogContext, get_log_manager};
 use super::models::{
-    get_accessible_models, GeminiModelInfo, GeminiModelListResponse, ModelInfo, ModelListResponse,
+    GeminiModelInfo, GeminiModelListResponse, ModelInfo, ModelListResponse, get_accessible_models,
 };
 use super::prepare::*;
 use super::util::*;
-use super::ProxyError;
 
 use crate::schema::enum_def::LlmApiType;
 use crate::schema::enum_def::RequestStatus;
@@ -20,8 +20,8 @@ use chrono::Utc;
 use cyder_tools::log::{debug, error, info, warn};
 use flate2::read::GzDecoder;
 use reqwest::{
-    header::{CONTENT_ENCODING, CONTENT_TYPE},
     Method, StatusCode,
+    header::{CONTENT_ENCODING, CONTENT_TYPE},
 };
 use serde_json::Value;
 use std::{collections::HashMap, io::Read, net::SocketAddr, sync::Arc};
@@ -53,9 +53,10 @@ pub async fn openai_utility_handler(
     );
 
     // Step 3: Get provider and model
-    let pre_model_str = data.get("model").and_then(Value::as_str).ok_or_else(|| {
-        ProxyError::BadRequest("'model' field must be a string".to_string())
-    })?;
+    let pre_model_str = data
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProxyError::BadRequest("'model' field must be a string".to_string()))?;
 
     info!(
         "Processing utility request ({}) for model: {}",
@@ -90,20 +91,19 @@ pub async fn openai_utility_handler(
     }
 
     // Step 7: Prepare downstream request
-    let (final_url, final_headers, final_body_value, provider_api_key_id) =
-        prepare_llm_request(
-            &provider,
-            &model,
-            data,
-            &original_headers,
-            &app_state,
-            downstream_path,
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to prepare LLM request: {:?}", e);
-            e
-        })?;
+    let (final_url, final_headers, final_body_value, provider_api_key_id) = prepare_llm_request(
+        &provider,
+        &model,
+        data,
+        &original_headers,
+        &app_state,
+        downstream_path,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to prepare LLM request: {:?}", e);
+        e
+    })?;
 
     let final_body = serde_json::to_string(&final_body_value).map_err(|e| {
         ProxyError::InternalError(format!("Failed to serialize final request body: {}", e))
@@ -115,7 +115,7 @@ pub async fn openai_utility_handler(
         &model,
         provider_api_key_id,
         start_time,
-        &client_ip_addr
+        &client_ip_addr,
     );
 
     // Step 8: Execute request against downstream
@@ -272,7 +272,7 @@ pub async fn list_models_handler(
         _ => {
             return Err(ProxyError::InternalError(
                 "unsupported api type".to_string(),
-            ))
+            ));
         }
     };
     let system_api_key = api_key_check_result.api_key;
@@ -325,7 +325,7 @@ pub async fn list_models_handler(
         _ => {
             return Err(ProxyError::InternalError(
                 "unsupported api type".to_string(),
-            ))
+            ));
         }
     };
     Ok(response)

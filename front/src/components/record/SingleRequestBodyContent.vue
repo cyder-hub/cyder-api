@@ -4,8 +4,8 @@
       <h4 class="text-sm font-medium text-gray-700 py-1">{{ title }}</h4>
       <slot name="action"></slot>
     </div>
-    <div v-if="displayContent.type !== 'empty'" class="mt-1 text-[10px] bg-gray-50 p-2 rounded-md max-h-[30rem] overflow-y-auto border">
-      <pre class="whitespace-pre-wrap break-all">{{ displayContent.content }}</pre>
+    <div v-if="displayContent.type !== 'empty'" class="mt-1 overflow-auto rounded-md border bg-gray-50 p-2 text-[10px] max-h-[30rem]">
+      <pre class="whitespace-pre font-mono">{{ displayContent.content }}</pre>
     </div>
   </div>
 </template>

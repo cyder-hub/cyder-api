@@ -1,6 +1,6 @@
 use bincode::{Decode, Encode};
 use diesel_derive_enum::DbEnum;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "provider_type_enum")]
@@ -97,7 +97,18 @@ pub enum RequestStatus {
     Cancelled,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, strum_macros::Display, Encode, Decode)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    DbEnum,
+    Default,
+    strum_macros::Display,
+    Encode,
+    Decode,
+)]
 #[db_enum(pg_type = "storage_type_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

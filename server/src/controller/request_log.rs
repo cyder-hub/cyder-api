@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -10,22 +10,15 @@ use cyder_tools::log::debug;
 use crate::{
     config::CONFIG,
     database::{
-        request_log::{RequestLog, RequestLogQueryPayload},
         ListResult,
+        request_log::{RequestLog, RequestLogQueryPayload},
     },
     schema::enum_def::StorageType,
     service::{
         app_state::StateRouter,
-        storage::{
-            get_local_storage, get_s3_storage,
-            types::GetObjectOptions,
-            Storage,
-        },
+        storage::{Storage, get_local_storage, get_s3_storage, types::GetObjectOptions},
     },
-    utils::{
-        storage::generate_storage_path_from_id,
-        HttpResult,
-    },
+    utils::{HttpResult, storage::generate_storage_path_from_id},
 };
 
 use super::error::BaseError;
@@ -182,10 +175,7 @@ async fn get_request_log_content_by_hash(
     };
 
     let content = storage
-        .get_object(
-            &key,
-            None,
-        )
+        .get_object(&key, None)
         .await
         .map_err(|e| BaseError::DatabaseFatal(Some(e.to_string())))?;
 

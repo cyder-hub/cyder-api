@@ -3,6 +3,7 @@
     :title="$t('customFieldsPage.title')"
     :description="$t('customFieldsPage.description')"
     :loading="loading"
+    :error="error"
     :empty="!store.customFields.length"
   >
     <template #actions>
@@ -16,6 +17,16 @@
       <div class="flex items-center justify-center py-16 text-gray-400">
         <Loader2 class="h-5 w-5 animate-spin mr-2" />
         <span class="text-sm">{{ $t("common.loading") }}</span>
+      </div>
+    </template>
+
+    <template #error="{ error: pageError }">
+      <div class="flex flex-col items-center justify-center py-20">
+        <div
+          class="text-red-600 bg-red-50 border border-red-200 rounded-lg p-4 max-w-lg text-sm"
+        >
+          {{ pageError }}
+        </div>
       </div>
     </template>
 
@@ -334,8 +345,10 @@
 import { ref, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { Plus, Pencil, Trash2, Loader2, FileText } from "lucide-vue-next";
+import { normalizeError } from "@/lib/error";
 import { Api } from "@/services/request";
 import { useCustomFieldStore } from "@/store/customFieldStore";
+import type { CustomFieldDefinition } from "@/store/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -371,6 +384,7 @@ const { t: $t } = useI18n();
 const store = useCustomFieldStore();
 
 const loading = ref(true);
+const error = ref<string | null>(null);
 const showEditModal = ref(false);
 
 const setShowEditModal = (val: boolean) => {
@@ -426,14 +440,21 @@ const editingField = ref<EditingCustomField>(newCustomFieldTemplate());
 
 onMounted(async () => {
   loading.value = true;
-  await store.fetchCustomFields();
-  loading.value = false;
+  error.value = null;
+  try {
+    await store.fetchCustomFields();
+  } catch (err: unknown) {
+    error.value = normalizeError(err, $t("common.unknownError")).message;
+  } finally {
+    loading.value = false;
+  }
 });
 
-const fetchCustomFieldDetailAPI = async (id: number) => {
+const fetchCustomFieldDetailAPI = async (
+  id: number,
+): Promise<CustomFieldDefinition | null> => {
   try {
-    const response = await Api.getCustomFieldDetail(id);
-    return response as any;
+    return await Api.getCustomFieldDetail(id);
   } catch (error) {
     console.error(`Failed to fetch custom field detail for id ${id}:`, error);
     return null;
@@ -445,20 +466,20 @@ const handleOpenAddModal = () => {
   showEditModal.value = true;
 };
 
-const handleOpenEditModal = async (field: any) => {
+const handleOpenEditModal = async (field: CustomFieldDefinition) => {
   const detail = await fetchCustomFieldDetailAPI(field.id);
   if (detail) {
     editingField.value = {
       id: detail.id,
-      name: detail.name,
-      description: detail.description,
+      name: detail.name ?? undefined,
+      description: detail.description ?? undefined,
       field_name: detail.field_name,
       field_placement: detail.field_placement,
       field_type: detail.field_type as CustomFieldType,
-      string_value: detail.string_value,
-      integer_value: detail.integer_value,
-      number_value: detail.number_value,
-      boolean_value: detail.boolean_value,
+      string_value: detail.string_value ?? undefined,
+      integer_value: detail.integer_value ?? undefined,
+      number_value: detail.number_value ?? undefined,
+      boolean_value: detail.boolean_value ?? false,
       is_enabled: detail.is_enabled,
     };
     showEditModal.value = true;
@@ -502,17 +523,17 @@ const handleSave = async () => {
     }
     showEditModal.value = false;
     await store.fetchCustomFields();
-  } catch (error: any) {
-    console.error("Failed to save custom field:", error);
+  } catch (error: unknown) {
+    const normalizedError = normalizeError(error, $t("common.unknownError"));
     toastController.error(
       $t("customFieldsPage.alert.saveFailed", {
-        error: error.message || $t("common.unknownError"),
+        error: normalizedError.message,
       }),
     );
   }
 };
 
-const handleToggleEnable = async (field: any) => {
+const handleToggleEnable = async (field: CustomFieldDefinition) => {
   const updatedField = {
     ...field,
     is_enabled: !field.is_enabled,
@@ -541,11 +562,11 @@ const handleToggleEnable = async (field: any) => {
   try {
     await Api.updateCustomField(updatedField.id, payload);
     await store.fetchCustomFields();
-  } catch (error: any) {
-    console.error("Failed to toggle custom field status:", error);
+  } catch (error: unknown) {
+    const normalizedError = normalizeError(error, $t("common.unknownError"));
     toastController.error(
       $t("customFieldsPage.alert.toggleFailed", {
-        error: error.message || $t("common.unknownError"),
+        error: normalizedError.message,
       }),
     );
   }
@@ -560,11 +581,11 @@ const handleDelete = async (id: number, name: string) => {
     try {
       await Api.deleteCustomField(id);
       await store.fetchCustomFields();
-    } catch (error: any) {
-      console.error("Failed to delete custom field:", error);
+    } catch (error: unknown) {
+      const normalizedError = normalizeError(error, $t("common.unknownError"));
       toastController.error(
         $t("customFieldsPage.alert.deleteFailed", {
-          error: error.message || $t("common.unknownError"),
+          error: normalizedError.message,
         }),
       );
     }

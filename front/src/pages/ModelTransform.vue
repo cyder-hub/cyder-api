@@ -226,6 +226,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
+import { normalizeError } from "@/lib/error";
 import { Api } from "@/services/request";
 import { useProviderStore } from "@/store/providerStore";
 import type { ModelAliasListItem, EditingModelAlias } from "@/store/types";
@@ -345,8 +346,13 @@ const fetchModelAliassAPI = async () => {
 };
 
 onMounted(async () => {
-  await providerStore.fetchProviders();
-  fetchModelAliassAPI();
+  try {
+    await providerStore.fetchProviders();
+    fetchModelAliassAPI();
+  } catch (err: unknown) {
+    error.value = normalizeError(err, $t("common.unknownError")).message;
+    loading.value = false;
+  }
 });
 
 const handleOpenAddModal = () => {

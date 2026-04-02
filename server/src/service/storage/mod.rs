@@ -1,4 +1,4 @@
-use crate::config::{StorageConfig, CONFIG};
+use crate::config::{CONFIG, StorageConfig};
 use crate::schema::enum_def::StorageType;
 use crate::service::storage::local::LocalStorage;
 use crate::service::storage::s3::S3Storage;
@@ -20,7 +20,11 @@ pub trait Storage: Send + Sync {
         data: Bytes,
         options: Option<PutObjectOptions<'_>>,
     ) -> StorageResult<()>;
-    async fn get_object(&self, key: &str, options: Option<GetObjectOptions<'_>>,) -> StorageResult<Bytes>;
+    async fn get_object(
+        &self,
+        key: &str,
+        options: Option<GetObjectOptions<'_>>,
+    ) -> StorageResult<Bytes>;
     async fn delete_object(&self, key: &str) -> StorageResult<()>;
     async fn get_presigned_url(&self, _key: &str) -> StorageResult<String> {
         Err(types::StorageError::Unsupported(

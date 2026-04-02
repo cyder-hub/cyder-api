@@ -1,9 +1,9 @@
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::{get_connection, DbResult, ListResult};
+use super::{DbResult, ListResult, get_connection};
 use crate::controller::BaseError;
-use crate::schema::enum_def::{RequestStatus, StorageType, LlmApiType};
+use crate::schema::enum_def::{LlmApiType, RequestStatus, StorageType};
 use crate::{db_execute, db_object};
 
 db_object! {
@@ -195,7 +195,10 @@ impl RequestLog {
                     BaseError::DatabaseFatal(Some(format!("Failed to list request logs: {}", e)))
                 })?;
 
-            let list = results_db.into_iter().map(|db_log| db_log.from_db()).collect();
+            let list = results_db
+                .into_iter()
+                .map(|db_log| db_log.from_db())
+                .collect();
 
             Ok(ListResult {
                 total,

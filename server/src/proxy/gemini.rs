@@ -1,9 +1,9 @@
+use super::ProxyError;
 use super::auth::*;
 use super::core::{proxy_request, simple_proxy_request};
 use super::logging::RequestLogContext;
 use super::prepare::*;
 use super::util::*;
-use super::ProxyError;
 
 use crate::config::CONFIG;
 use crate::schema::enum_def::LlmApiType;
@@ -39,9 +39,8 @@ pub async fn handle_gemini_request(
     let body_bytes = axum::body::to_bytes(request.into_body(), CONFIG.max_body_size)
         .await
         .map_err(|e| ProxyError::BadRequest(format!("Failed to read request body: {}", e)))?;
-    let mut data: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-        ProxyError::BadRequest(format!("Failed to parse request body: {}", e))
-    })?;
+    let mut data: serde_json::Value = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ProxyError::BadRequest(format!("Failed to parse request body: {}", e)))?;
     let original_request_value = data.clone();
     let original_request_body = body_bytes;
     debug!(
@@ -98,8 +97,14 @@ pub async fn handle_gemini_request(
             ProxyError::InternalError(format!("Failed to serialize final request body: {}", e))
         })?;
 
-        return simple_proxy_request(&app_state, final_url, final_body, final_headers, provider.use_proxy)
-            .await;
+        return simple_proxy_request(
+            &app_state,
+            final_url,
+            final_body,
+            final_headers,
+            provider.use_proxy,
+        )
+        .await;
     }
 
     if !GEMINI_GENERATION_ACTIONS.contains(&action) {
@@ -154,7 +159,7 @@ pub async fn handle_gemini_request(
         _ => {
             return Err(ProxyError::InternalError(
                 "unsupported api type".to_string(),
-            ))
+            ));
         }
     };
 

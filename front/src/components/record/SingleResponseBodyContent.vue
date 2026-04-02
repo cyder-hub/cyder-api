@@ -1,11 +1,11 @@
 <template>
   <div v-if="contentToDisplay.type !== 'empty'">
     <h4 class="text-sm font-medium text-gray-700 mb-1">{{ title }}</h4>
-    <div class="mt-1 text-[10px] bg-gray-50 p-2 rounded-md max-h-[30rem] overflow-y-auto border">
+    <div class="mt-1 overflow-auto rounded-md border bg-gray-50 p-2 text-[10px] max-h-[30rem]">
       <template v-if="contentToDisplay.type === 'sse'">
         <SseEventViewer v-for="(ev, idx) in contentToDisplay.content" :key="idx" :event="ev" />
       </template>
-      <pre v-else class="whitespace-pre-wrap break-all">{{ contentToDisplay.content }}</pre>
+      <pre v-else class="whitespace-pre font-mono">{{ contentToDisplay.content }}</pre>
     </div>
   </div>
 </template>

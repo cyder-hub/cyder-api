@@ -1,3 +1,4 @@
+use rand::{Rng, rng};
 use reqwest::{Client, Proxy};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
@@ -17,6 +18,7 @@ use crate::database::model_alias::ModelAlias;
 use crate::database::price::{BillingPlan, PriceRule};
 use crate::database::provider::{Provider, ProviderApiKey};
 use crate::database::system_api_key::SystemApiKey;
+use crate::schema::enum_def::ProviderApiKeyMode;
 
 use super::cache::repository::{CacheRepository, DynCacheRepo};
 use super::cache::types::{
@@ -25,9 +27,19 @@ use super::cache::types::{
 };
 use super::cache::{CacheError, memory::MemoryCacheBackend};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupItemSelectionStrategy {
     Random,
     Queue,
+}
+
+impl From<ProviderApiKeyMode> for GroupItemSelectionStrategy {
+    fn from(value: ProviderApiKeyMode) -> Self {
+        match value {
+            ProviderApiKeyMode::Queue => GroupItemSelectionStrategy::Queue,
+            ProviderApiKeyMode::Random => GroupItemSelectionStrategy::Random,
+        }
+    }
 }
 
 use super::cache::redis::RedisCacheBackend;
@@ -132,6 +144,9 @@ pub struct AppState {
 
     // Config for negative caching TTL
     negative_cache_ttl: Duration,
+
+    // In-process selection cursor for provider API key queue mode.
+    provider_key_queue_state: Arc<tokio::sync::Mutex<HashMap<i64, usize>>>,
 }
 
 impl AppState {
@@ -156,18 +171,9 @@ impl AppState {
 
         let pool = redis_pool.as_ref();
 
-        let client = Client::builder()
-            .build()
-            .expect("Failed to build default reqwest client");
+        let client = Self::build_http_client(false);
 
-        let mut proxy_builder = Client::builder();
-        if let Some(proxy_url) = &CONFIG.proxy {
-            let proxy = Proxy::all(proxy_url).expect("Invalid proxy URL in configuration");
-            proxy_builder = proxy_builder.proxy(proxy);
-        }
-        let proxy_client = proxy_builder
-            .build()
-            .expect("Failed to build proxy reqwest client");
+        let proxy_client = Self::build_http_client(true);
 
         Self {
             system_api_key_cache: Self::create_repo(ttl, pool),
@@ -182,7 +188,40 @@ impl AppState {
             client,
             proxy_client,
             negative_cache_ttl,
+            provider_key_queue_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    fn build_http_client(use_proxy: bool) -> Client {
+        let proxy_request_config = &CONFIG.proxy_request;
+        let connect_timeout = proxy_request_config.connect_timeout();
+        let request_timeout = proxy_request_config.request_timeout();
+
+        let mut builder = Client::builder().connect_timeout(connect_timeout);
+
+        if let Some(timeout) = request_timeout {
+            builder = builder.timeout(timeout);
+        }
+
+        if use_proxy {
+            if let Some(proxy_url) = &CONFIG.proxy {
+                let proxy = Proxy::all(proxy_url).expect("Invalid proxy URL in configuration");
+                builder = builder.proxy(proxy);
+            }
+        }
+
+        info!(
+            "Building reqwest client (use_proxy: {}, connect_timeout: {:?}, overall_timeout: {:?})",
+            use_proxy, connect_timeout, request_timeout
+        );
+
+        builder.build().unwrap_or_else(|err| {
+            panic!(
+                "Failed to build {} reqwest client: {}",
+                if use_proxy { "proxy" } else { "default" },
+                err
+            )
+        })
     }
 
     fn create_repo<T>(ttl: Option<Duration>, pool: Option<&RedisPool>) -> CacheRepo<T>
@@ -731,17 +770,13 @@ impl AppState {
     ) -> Result<Option<Arc<CacheAccessControl>>, AppStoreError> {
         let cache_key = CacheKey::AccessControlPolicy(id).to_compact_string();
 
-        self.get_or_load(
-            &self.access_control_policy_cache,
-            &cache_key,
-            || async {
-                if let Ok(db_policy) = DbAccessControlPolicy::get_by_id(id) {
-                    Ok(Some(CacheAccessControl::from(db_policy)))
-                } else {
-                    Ok(None)
-                }
-            },
-        )
+        self.get_or_load(&self.access_control_policy_cache, &cache_key, || async {
+            if let Ok(db_policy) = DbAccessControlPolicy::get_by_id(id) {
+                Ok(Some(CacheAccessControl::from(db_policy)))
+            } else {
+                Ok(None)
+            }
+        })
         .await
     }
 
@@ -757,7 +792,7 @@ impl AppState {
     pub async fn get_provider_api_keys(
         &self,
         provider_id: i64,
-    ) -> Result<Vec<Arc<CacheProviderKey>>, AppStoreError> {
+    ) -> Result<Arc<Vec<CacheProviderKey>>, AppStoreError> {
         let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
 
         let arc_list = self
@@ -772,20 +807,30 @@ impl AppState {
             })
             .await?;
 
-        Ok(arc_list
-            .map(|arc| arc.iter().map(|k| Arc::new(k.clone())).collect())
-            .unwrap_or_default())
+        Ok(arc_list.unwrap_or_else(|| Arc::new(Vec::new())))
     }
 
     pub async fn get_one_provider_api_key_by_provider(
         &self,
         provider_id: i64,
-        _strategy: GroupItemSelectionStrategy,
+        strategy: GroupItemSelectionStrategy,
     ) -> Result<Option<Arc<CacheProviderKey>>, AppStoreError> {
         let keys = self.get_provider_api_keys(provider_id).await?;
-        // TODO: Implement strategy
-        // For now, we return the first key
-        Ok(keys.into_iter().next())
+
+        match keys.len() {
+            0 => Ok(None),
+            1 => Ok(keys.first().cloned().map(Arc::new)),
+            _ => match strategy {
+                GroupItemSelectionStrategy::Queue => {
+                    let index = self.next_queue_index(provider_id, keys.len()).await;
+                    Ok(keys.get(index).cloned().map(Arc::new))
+                }
+                GroupItemSelectionStrategy::Random => {
+                    let index = Self::random_index(keys.len());
+                    Ok(keys.get(index).cloned().map(Arc::new))
+                }
+            },
+        }
     }
 
     pub async fn invalidate_provider_api_keys(
@@ -794,7 +839,36 @@ impl AppState {
     ) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
         debug!("invalidate: {}", &cache_key);
+        self.provider_key_queue_state
+            .lock()
+            .await
+            .remove(&provider_id);
         Ok(self.provider_api_keys_cache.delete(&cache_key).await?)
+    }
+
+    async fn next_queue_index(&self, provider_id: i64, key_count: usize) -> usize {
+        let mut state = self.provider_key_queue_state.lock().await;
+        let index = Self::advance_queue_cursor(&mut state, provider_id, key_count);
+        debug!(
+            "Selected provider API key by queue strategy: provider_id={}, key_count={}, index={}",
+            provider_id, key_count, index
+        );
+        index
+    }
+
+    fn advance_queue_cursor(
+        state: &mut HashMap<i64, usize>,
+        provider_id: i64,
+        key_count: usize,
+    ) -> usize {
+        let next_slot = state.entry(provider_id).or_insert(0);
+        let selected_index = *next_slot % key_count;
+        *next_slot = (selected_index + 1) % key_count;
+        selected_index
+    }
+
+    fn random_index(key_count: usize) -> usize {
+        rng().random_range(0..key_count)
     }
 
     // ============================================================================================
@@ -806,22 +880,18 @@ impl AppState {
     ) -> Result<Option<Arc<HashSet<i64>>>, AppStoreError> {
         let cache_key = CacheKey::CustomFieldsAssignment(model_id).to_compact_string();
 
-        self.get_or_load(
-            &self.custom_fields_assignment_cache,
-            &cache_key,
-            || async {
-                match CustomFieldDefinition::list_enabled_model_assignments_by_model_id(model_id) {
-                    Ok(assignments) if !assignments.is_empty() => {
-                        let field_ids: HashSet<i64> = assignments
-                            .into_iter()
-                            .map(|a| a.custom_field_definition_id)
-                            .collect();
-                        Ok(Some(field_ids))
-                    }
-                    _ => Ok(None),
+        self.get_or_load(&self.custom_fields_assignment_cache, &cache_key, || async {
+            match CustomFieldDefinition::list_enabled_model_assignments_by_model_id(model_id) {
+                Ok(assignments) if !assignments.is_empty() => {
+                    let field_ids: HashSet<i64> = assignments
+                        .into_iter()
+                        .map(|a| a.custom_field_definition_id)
+                        .collect();
+                    Ok(Some(field_ids))
                 }
-            },
-        )
+                _ => Ok(None),
+            }
+        })
         .await
     }
 
@@ -831,24 +901,20 @@ impl AppState {
     ) -> Result<Option<Arc<HashSet<i64>>>, AppStoreError> {
         let cache_key = CacheKey::CustomFieldsAssignment(provider_id).to_compact_string();
 
-        self.get_or_load(
-            &self.custom_fields_assignment_cache,
-            &cache_key,
-            || async {
-                match CustomFieldDefinition::list_enabled_provider_assignments_by_provider_id(
-                    provider_id,
-                ) {
-                    Ok(assignments) if !assignments.is_empty() => {
-                        let field_ids: HashSet<i64> = assignments
-                            .into_iter()
-                            .map(|a| a.custom_field_definition_id)
-                            .collect();
-                        Ok(Some(field_ids))
-                    }
-                    _ => Ok(None),
+        self.get_or_load(&self.custom_fields_assignment_cache, &cache_key, || async {
+            match CustomFieldDefinition::list_enabled_provider_assignments_by_provider_id(
+                provider_id,
+            ) {
+                Ok(assignments) if !assignments.is_empty() => {
+                    let field_ids: HashSet<i64> = assignments
+                        .into_iter()
+                        .map(|a| a.custom_field_definition_id)
+                        .collect();
+                    Ok(Some(field_ids))
                 }
-            },
-        )
+                _ => Ok(None),
+            }
+        })
         .await
     }
 
@@ -1020,4 +1086,43 @@ pub type StateRouter = Router<Arc<AppState>>;
 
 pub fn create_state_router() -> StateRouter {
     Router::<Arc<AppState>>::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppState, GroupItemSelectionStrategy};
+    use crate::schema::enum_def::ProviderApiKeyMode;
+    use std::collections::HashMap;
+
+    #[test]
+    fn queue_strategy_advances_and_wraps() {
+        let mut state = HashMap::new();
+
+        assert_eq!(AppState::advance_queue_cursor(&mut state, 42, 3), 0);
+        assert_eq!(AppState::advance_queue_cursor(&mut state, 42, 3), 1);
+        assert_eq!(AppState::advance_queue_cursor(&mut state, 42, 3), 2);
+        assert_eq!(AppState::advance_queue_cursor(&mut state, 42, 3), 0);
+    }
+
+    #[test]
+    fn queue_strategy_handles_key_count_changes() {
+        let mut state = HashMap::new();
+
+        assert_eq!(AppState::advance_queue_cursor(&mut state, 7, 4), 0);
+        assert_eq!(AppState::advance_queue_cursor(&mut state, 7, 4), 1);
+        assert_eq!(AppState::advance_queue_cursor(&mut state, 7, 2), 0);
+        assert_eq!(AppState::advance_queue_cursor(&mut state, 7, 2), 1);
+    }
+
+    #[test]
+    fn provider_api_key_mode_maps_to_runtime_strategy() {
+        assert_eq!(
+            GroupItemSelectionStrategy::from(ProviderApiKeyMode::Queue),
+            GroupItemSelectionStrategy::Queue
+        );
+        assert_eq!(
+            GroupItemSelectionStrategy::from(ProviderApiKeyMode::Random),
+            GroupItemSelectionStrategy::Random
+        );
+    }
 }

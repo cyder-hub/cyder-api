@@ -1,12 +1,14 @@
 use crate::config::S3StorageConfig;
-use crate::service::storage::types::{GetObjectOptions, PutObjectOptions, StorageError, StorageResult};
 use crate::service::storage::Storage;
+use crate::service::storage::types::{
+    GetObjectOptions, PutObjectOptions, StorageError, StorageResult,
+};
 use async_trait::async_trait;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{
-    config::{Credentials, Region},
     Client, Config,
+    config::{Credentials, Region},
 };
 use bytes::Bytes;
 use cyder_tools::log::info;
@@ -34,7 +36,9 @@ impl S3Storage {
             .region(region)
             .credentials_provider(credentials)
             .behavior_version_latest()
-            .response_checksum_validation(aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired);
+            .response_checksum_validation(
+                aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired,
+            );
 
         if let Some(endpoint) = &config.endpoint {
             s3_config_builder = s3_config_builder
@@ -89,12 +93,12 @@ impl Storage for S3Storage {
             .map_err(|e| StorageError::Put(e.to_string()))
     }
 
-    async fn get_object(&self, key: &str, options: Option<GetObjectOptions<'_>>) -> StorageResult<Bytes> {
-        let mut request = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key);
+    async fn get_object(
+        &self,
+        key: &str,
+        options: Option<GetObjectOptions<'_>>,
+    ) -> StorageResult<Bytes> {
+        let mut request = self.client.get_object().bucket(&self.bucket).key(key);
 
         if let Some(opts) = options {
             if let Some(ce) = opts.content_encoding {
@@ -105,18 +109,14 @@ impl Storage for S3Storage {
         let resp = request
             .send()
             .await
-            .map_err(|e| {
-                StorageError::Get(e.to_string())
-             })?;
+            .map_err(|e| StorageError::Get(e.to_string()))?;
 
         let data = resp
             .body
             .collect()
             .await
             .map(|d| d.into_bytes())
-            .map_err(|e| {
-                StorageError::Get(e.to_string())
-            })?;
+            .map_err(|e| StorageError::Get(e.to_string()))?;
         Ok(data)
     }
 
@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use crate::config::CONFIG;
     use bytes::Bytes;
-    use flate2::{write::GzEncoder, Compression};
+    use flate2::{Compression, write::GzEncoder};
     use std::io::Write;
 
     // Helper to get S3 storage, skipping the test if not configured.
@@ -164,8 +164,10 @@ mod tests {
         let s3_config = CONFIG.storage.s3.as_ref().unwrap();
         // Check for placeholder values, as the config might exist but be empty
         if s3_config.access_key.is_none() || s3_config.access_key.as_deref() == Some("") {
-             println!("Skipping S3 storage test: S3 configuration is present but seems to be a placeholder.");
-             return None;
+            println!(
+                "Skipping S3 storage test: S3 configuration is present but seems to be a placeholder."
+            );
+            return None;
         }
         Some(S3Storage::new(s3_config).await)
     }

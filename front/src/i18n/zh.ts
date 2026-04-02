@@ -187,6 +187,15 @@ export const zhDict = {
     close: "关闭",
     confirm: "确认",
   },
+  loginPage: {
+    title: "管理员登录",
+    description: "请输入管理员密码以继续访问系统。",
+    passwordLabel: "密码",
+    passwordPlaceholder: "请输入密码",
+    submit: "确认",
+    submitting: "登录中...",
+    loginFailed: "登录失败，请检查密码是否正确。",
+  },
   apiKeyPage: {
     title: "API Key 管理",
     description: "管理用于访问系统API的鉴权密钥。",

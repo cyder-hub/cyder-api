@@ -1,9 +1,9 @@
 use chrono::Utc;
 use diesel::prelude::*;
-use rand::{distr::Alphanumeric, rng, Rng};
+use rand::{Rng, distr::Alphanumeric, rng};
 use serde::Deserialize; // For potential deserialization into New/Update structs if needed from API
 
-use super::{get_connection, DbResult};
+use super::{DbResult, get_connection};
 use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
@@ -83,7 +83,7 @@ impl SystemApiKey {
             name: name.to_string(),
             description: description.map(|s| s.to_string()),
             access_control_policy_id,
-            is_enabled: true,  // Default for new keys
+            is_enabled: true, // Default for new keys
             deleted_at: None, // Default for new keys
             created_at: now,
             updated_at: now,
@@ -227,4 +227,3 @@ impl SystemApiKey {
         })
     }
 }
-

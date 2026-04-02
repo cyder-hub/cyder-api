@@ -1,18 +1,18 @@
+use crate::config::CONFIG;
+use crate::service::app_state::{StateRouter, create_state_router};
+use crate::{
+    controller::error::BaseError,
+    database::stat::{
+        SystemOverviewStats, TodayRequestLogStats, get_request_logs_in_range,
+        get_system_overview_stats, get_today_request_log_stats,
+    },
+    utils::HttpResult,
+};
 use axum::{extract::Query, routing::get};
 use chrono::{Datelike, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::config::CONFIG;
-use crate::service::app_state::{create_state_router, StateRouter};
-use crate::{
-    controller::error::BaseError,
-    database::stat::{
-        get_system_overview_stats, get_today_request_log_stats, SystemOverviewStats,
-        TodayRequestLogStats, get_request_logs_in_range,
-    },
-    utils::HttpResult,
-};
 
 #[derive(Deserialize, Debug)]
 pub struct UsageStatsParams {
@@ -57,7 +57,10 @@ impl Interval {
             "hour" => Ok(Interval::Hour),
             "day" => Ok(Interval::Day),
             "month" => Ok(Interval::Month),
-            _ => Err(format!("Invalid interval: {}. Supported intervals are 'minute', 'hour', 'day', 'month'.", s)),
+            _ => Err(format!(
+                "Invalid interval: {}. Supported intervals are 'minute', 'hour', 'day', 'month'.",
+                s
+            )),
         }
     }
 }
@@ -188,24 +191,23 @@ async fn system_usage_stats(
         params.provider_api_key_id,
     )?;
 
-    let mut aggregated_data: HashMap<i64, HashMap<(i64, i64), UsageStatItem>> =
-        HashMap::new();
+    let mut aggregated_data: HashMap<i64, HashMap<(i64, i64), UsageStatItem>> = HashMap::new();
 
     for log_entry in logs {
         let time_bucket = get_time_bucket(log_entry.created_at, interval, tz);
         let provider_model_key = (log_entry.provider_id, log_entry.model_id);
 
         let period_map = aggregated_data.entry(time_bucket).or_default();
-        let stat_item = period_map.entry(provider_model_key).or_insert_with(|| {
-            UsageStatItem {
+        let stat_item = period_map
+            .entry(provider_model_key)
+            .or_insert_with(|| UsageStatItem {
                 provider_id: log_entry.provider_id,
                 model_id: log_entry.model_id,
                 provider_key: log_entry.provider_key.clone().unwrap_or_default(),
                 model_name: log_entry.model_name.clone().unwrap_or_default(),
                 real_model_name: log_entry.real_model_name.clone(),
                 ..Default::default()
-            }
-        });
+            });
 
         stat_item.input_tokens += log_entry.input_tokens.unwrap_or(0) as i64;
         stat_item.output_tokens += log_entry.output_tokens.unwrap_or(0) as i64;

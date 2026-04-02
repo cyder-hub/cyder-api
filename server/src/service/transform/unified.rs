@@ -1,6 +1,6 @@
+use crate::utils::billing::UsageInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::utils::billing::UsageInfo;
 
 impl From<UnifiedUsage> for UsageInfo {
     fn from(unified_usage: UnifiedUsage) -> Self {
@@ -43,7 +43,9 @@ pub struct UnifiedToolResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UnifiedContentPart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     ImageUrl {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,7 +94,7 @@ impl UnifiedMessage {
         self.content.retain(|part| !part.is_empty());
         self
     }
-    
+
     /// Returns true if this message has no meaningful content
     pub fn is_empty(&self) -> bool {
         self.content.is_empty() || self.content.iter().all(|p| p.is_empty())
@@ -125,7 +127,7 @@ pub struct UnifiedRequest {
     pub max_tokens: Option<u32>,
     pub top_p: Option<f64>,
     /// Top-K sampling parameter
-    /// 
+    ///
     /// Note: This is primarily supported by Anthropic. Other providers may ignore this field.
     /// When converting from Anthropic requests, this field will be populated.
     /// When converting to non-Anthropic providers, this field will be silently dropped.
@@ -156,7 +158,7 @@ pub struct UnifiedRequest {
     pub format: Option<String>, // Output format (e.g., "json")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<String>, // Model keep-alive duration
-    
+
     // Passthrough fields for provider-specific features not mapped to unified structure
     // This allows preserving fields like OpenAI's logprobs, parallel_tool_calls, etc.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,7 +169,8 @@ impl UnifiedRequest {
     /// Filters out empty content parts and empty messages
     pub fn filter_empty(mut self) -> Self {
         // Filter empty content from each message
-        self.messages = self.messages
+        self.messages = self
+            .messages
             .into_iter()
             .map(|msg| msg.filter_empty_content())
             .filter(|msg| !msg.is_empty())
@@ -229,7 +232,10 @@ pub struct UnifiedToolCallDelta {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UnifiedContentPartDelta {
-    TextDelta { index: u32, text: String },
+    TextDelta {
+        index: u32,
+        text: String,
+    },
     ImageDelta {
         index: u32,
         url: Option<String>,

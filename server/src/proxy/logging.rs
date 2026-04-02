@@ -5,21 +5,21 @@ use crate::utils::billing::calculate_cost;
 use crate::{
     database::request_log::RequestLog,
     schema::enum_def::RequestStatus,
-    service::storage::{get_storage, types::PutObjectOptions, Storage},
+    service::storage::{Storage, get_storage, types::PutObjectOptions},
     utils::{
-        billing::UsageInfo,
-        storage::{generate_storage_path_from_id, LogBodies},
         ID_GENERATOR,
+        billing::UsageInfo,
+        storage::{LogBodies, generate_storage_path_from_id},
     },
 };
 use bytes::Bytes;
 use chrono::Utc;
 use cyder_tools::log::{debug, error};
-use flate2::{write::GzEncoder, Compression};
-use once_cell::sync::Lazy;
+use flate2::{Compression, write::GzEncoder};
 use reqwest::StatusCode;
 use rmp_serde::to_vec_named;
 use std::io::Write;
+use std::sync::LazyLock;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -251,7 +251,7 @@ impl LogManager {
     }
 }
 
-static LOG_MANAGER: Lazy<LogManager> = Lazy::new(LogManager::new);
+static LOG_MANAGER: LazyLock<LogManager> = LazyLock::new(LogManager::new);
 
 pub fn get_log_manager() -> &'static LogManager {
     &LOG_MANAGER

@@ -18,7 +18,7 @@
       <div class="flex flex-col space-y-1">
         <Select
           :model-value="String(filters.api_key_id)"
-          @update:model-value="(val) => (filters.api_key_id = Number(val))"
+          @update:model-value="handleApiKeyFilterChange"
         >
           <SelectTrigger class="w-[200px]">
             <SelectValue :placeholder="$t('recordPage.filter.allApiKeys')"/>
@@ -38,7 +38,7 @@
       <div class="flex flex-col space-y-1">
         <Select
           :model-value="String(filters.provider_id)"
-          @update:model-value="(val) => (filters.provider_id = Number(val))"
+          @update:model-value="handleProviderFilterChange"
         >
           <SelectTrigger class="w-[200px]">
             <SelectValue :placeholder="$t('recordPage.filter.allProviders')"/>
@@ -56,7 +56,10 @@
       </div>
 
       <div class="flex flex-col space-y-1">
-        <Select v-model="filters.status">
+        <Select
+          :model-value="filters.status"
+          @update:model-value="handleStatusFilterChange"
+        >
           <SelectTrigger class="w-[150px]">
             <SelectValue :placeholder="$t('recordPage.filter.allStatuses')"/>
           </SelectTrigger>
@@ -72,11 +75,22 @@
         </Select>
       </div>
 
-      <Input
-        v-model="searchInput"
-        :placeholder="$t('recordPage.filter.searchPlaceholder')"
-        class="w-[250px]"
-      />
+      <div class="relative w-[250px]">
+        <Input
+          v-model="searchInput"
+          :placeholder="$t('recordPage.filter.searchPlaceholder')"
+          class="pr-9"
+          @keydown.enter="handleApplyFilter"
+        />
+        <button
+          v-if="searchInput"
+          type="button"
+          class="absolute inset-y-0 right-0 flex w-9 items-center justify-center text-gray-400 transition-colors hover:text-gray-600"
+          @click="handleClearSearch"
+        >
+          <X class="h-4 w-4" />
+        </button>
+      </div>
 
       <div class="flex gap-2 flex-wrap">
         <Button @click="handleApplyFilter">{{
@@ -445,11 +459,11 @@
 
             <section>
               <h3
-                class="text-base font-semibold text-gray-900  border-b  pb-2 mb-2"
+                class="text-base font-semibold text-gray-900 border-b pb-2 mb-2"
               >
                 Payloads
               </h3>
-              <div class="space-y-4">
+              <div v-if="showPayloads" class="space-y-4">
                 <template v-if="detailedRecord.storage_type">
                   <BodyViewer
                     :record-id="detailedRecord.id"
@@ -480,6 +494,9 @@
                   </div>
                 </template>
               </div>
+              <p v-else class="text-sm text-gray-500">
+                Rendering request and response payloads...
+              </p>
             </section>
           </div>
         </div>
@@ -501,8 +518,12 @@ import {
   computed,
   onMounted,
   watch,
+  nextTick,
 } from "vue";
 import { useI18n } from "vue-i18n";
+import { useRoute, useRouter, type LocationQuery } from "vue-router";
+import { X } from "lucide-vue-next";
+import { normalizeError } from "@/lib/error";
 import { Api } from "@/services/request";
 import { useProviderStore } from "@/store/providerStore";
 import { useApiKeyStore } from "@/store/apiKeyStore";
@@ -548,8 +569,28 @@ import BodyViewer from "@/components/record/BodyViewer.vue";
 import { formatTimestamp } from "@/lib/utils";
 
 const { t: $t } = useI18n();
+const route = useRoute();
+const router = useRouter();
 const providerStore = useProviderStore();
 const apiKeyStore = useApiKeyStore();
+
+const DEFAULT_PAGE = 1;
+const FALLBACK_PAGE_SIZE = 10;
+const getStoredPageSize = () =>
+  Number(localStorage.getItem("pageSize")) || FALLBACK_PAGE_SIZE;
+type RecordFilters = {
+  api_key_id: number;
+  provider_id: number;
+  status: string;
+  search: string;
+};
+const DEFAULT_FILTERS: RecordFilters = {
+  api_key_id: 0,
+  provider_id: 0,
+  status: "ALL",
+  search: "",
+};
+const VALID_STATUSES = new Set(["ALL", "SUCCESS", "PENDING", "ERROR"]);
 
 // --- State ---
 const records = ref<
@@ -568,21 +609,21 @@ const totalRecords = ref(0);
 const isLoading = ref(false);
 const errorMsg = ref<string | null>(null);
 
-const currentPage = ref(1);
-const pageSize = ref(Number(localStorage.getItem("pageSize")) || 10);
+const currentPage = ref(DEFAULT_PAGE);
+const pageSize = ref(getStoredPageSize());
 const searchInput = ref("");
-let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-const filters = reactive({
-  api_key_id: 0,
-  provider_id: 0,
-  status: "ALL",
-  search: "",
+const filters = reactive<RecordFilters>({
+  api_key_id: DEFAULT_FILTERS.api_key_id,
+  provider_id: DEFAULT_FILTERS.provider_id,
+  status: DEFAULT_FILTERS.status,
+  search: DEFAULT_FILTERS.search,
 });
 
 const isDetailModalOpen = ref(false);
 const isDetailLoading = ref(false);
 const detailedRecord = ref<RecordDetail | null>(null);
+const showPayloads = ref(false);
 
 // --- Computed ---
 const totalPages = computed(() =>
@@ -618,7 +659,7 @@ const providerOptions = computed(() => {
 
 const statusOptions = computed(() => {
   const allStatus = {
-    value: "ALL",
+    value: DEFAULT_FILTERS.status,
     label: $t("recordPage.filter.allStatuses"),
   };
   const statuses = ["SUCCESS", "PENDING", "ERROR"].map((s) => ({
@@ -627,6 +668,115 @@ const statusOptions = computed(() => {
   }));
   return [allStatus, ...statuses];
 });
+
+const getSingleQueryValue = (value: LocationQuery[string]) => {
+  if (Array.isArray(value)) return value[0];
+  return value;
+};
+
+const parsePositiveIntQuery = (value: LocationQuery[string], fallback: number) => {
+  const raw = getSingleQueryValue(value);
+  if (raw == null || raw === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const parseStatusQuery = (value: LocationQuery[string]) => {
+  const raw = getSingleQueryValue(value);
+  return raw && VALID_STATUSES.has(raw) ? raw : DEFAULT_FILTERS.status;
+};
+
+const parseSearchQuery = (value: LocationQuery[string]) => {
+  const raw = getSingleQueryValue(value);
+  return typeof raw === "string" ? raw : DEFAULT_FILTERS.search;
+};
+
+const hasProviderId = (id: number) => {
+  return providerStore.providers.some((item) => item.provider.id === id);
+};
+
+const hasApiKeyId = (id: number) => {
+  return apiKeyStore.apiKeys.some((item) => item.id === id);
+};
+
+const applyQueryToState = (query: LocationQuery) => {
+  currentPage.value = parsePositiveIntQuery(query.page, DEFAULT_PAGE);
+  pageSize.value = parsePositiveIntQuery(query.page_size, getStoredPageSize());
+  localStorage.setItem("pageSize", String(pageSize.value));
+
+  const providerId = parsePositiveIntQuery(
+    query.provider_id,
+    DEFAULT_FILTERS.provider_id,
+  );
+  const apiKeyId = parsePositiveIntQuery(
+    query.api_key_id,
+    DEFAULT_FILTERS.api_key_id,
+  );
+
+  filters.provider_id =
+    providerId > 0 && hasProviderId(providerId)
+      ? providerId
+      : DEFAULT_FILTERS.provider_id;
+  filters.api_key_id =
+    apiKeyId > 0 && hasApiKeyId(apiKeyId)
+      ? apiKeyId
+      : DEFAULT_FILTERS.api_key_id;
+  filters.status = parseStatusQuery(query.status);
+  filters.search = parseSearchQuery(query.search);
+  searchInput.value = filters.search;
+};
+
+const buildQueryFromState = () => {
+  const query: Record<string, string> = {};
+  if (currentPage.value !== DEFAULT_PAGE) {
+    query.page = String(currentPage.value);
+  }
+  if (pageSize.value !== FALLBACK_PAGE_SIZE) {
+    query.page_size = String(pageSize.value);
+  }
+  if (filters.provider_id !== DEFAULT_FILTERS.provider_id) {
+    query.provider_id = String(filters.provider_id);
+  }
+  if (filters.api_key_id !== DEFAULT_FILTERS.api_key_id) {
+    query.api_key_id = String(filters.api_key_id);
+  }
+  if (filters.status !== DEFAULT_FILTERS.status) {
+    query.status = filters.status;
+  }
+  if (filters.search !== DEFAULT_FILTERS.search) {
+    query.search = filters.search;
+  }
+  return query;
+};
+
+const isSameQuery = (
+  currentQuery: LocationQuery,
+  nextQuery: Record<string, string>,
+) => {
+  const currentEntries = Object.entries(currentQuery)
+    .map(([key, value]) => [key, getSingleQueryValue(value) ?? ""])
+    .filter(([, value]) => value !== "")
+    .sort(([left], [right]) => left.localeCompare(right));
+  const nextEntries = Object.entries(nextQuery).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+
+  if (currentEntries.length !== nextEntries.length) return false;
+
+  return currentEntries.every(([key, value], index) => {
+    const [nextKey, nextValue] = nextEntries[index];
+    return key === nextKey && value === nextValue;
+  });
+};
+
+const syncRouteWithState = async () => {
+  const nextQuery = buildQueryFromState();
+  if (isSameQuery(route.query, nextQuery)) {
+    return false;
+  }
+  await router.replace({ query: nextQuery });
+  return true;
+};
 
 // --- Methods ---
 const fetchRecords = async () => {
@@ -638,7 +788,8 @@ const fetchRecords = async () => {
       page_size: pageSize.value,
       system_api_key_id: filters.api_key_id || undefined,
       provider_id: filters.provider_id || undefined,
-      status: filters.status === "ALL"? undefined : filters.status,
+      status:
+        filters.status === DEFAULT_FILTERS.status ? undefined : filters.status,
       search: filters.search || undefined,
     };
     const result = await Api.getRecordList(params);
@@ -717,39 +868,116 @@ const fetchRecords = async () => {
 };
 
 const handleApplyFilter = () => {
-  currentPage.value = 1;
-  fetchRecords();
+  filters.search = searchInput.value.trim();
+  currentPage.value = DEFAULT_PAGE;
+  void syncRouteWithState().then((updated) => {
+    if (!updated) {
+      void fetchRecords();
+    }
+  });
+};
+
+const handleClearSearch = () => {
+  if (!searchInput.value && !filters.search) return;
+  searchInput.value = DEFAULT_FILTERS.search;
+  filters.search = DEFAULT_FILTERS.search;
+  currentPage.value = DEFAULT_PAGE;
+  void syncRouteWithState().then((updated) => {
+    if (!updated) {
+      void fetchRecords();
+    }
+  });
+};
+
+const handleApiKeyFilterChange = (val: unknown) => {
+  const nextId = Number(val);
+  filters.api_key_id =
+    Number.isInteger(nextId) && nextId >= 0 ? nextId : DEFAULT_FILTERS.api_key_id;
+  currentPage.value = DEFAULT_PAGE;
+  void syncRouteWithState().then((updated) => {
+    if (!updated) {
+      void fetchRecords();
+    }
+  });
+};
+
+const handleProviderFilterChange = (val: unknown) => {
+  const nextId = Number(val);
+  filters.provider_id =
+    Number.isInteger(nextId) && nextId >= 0 ? nextId : DEFAULT_FILTERS.provider_id;
+  currentPage.value = DEFAULT_PAGE;
+  void syncRouteWithState().then((updated) => {
+    if (!updated) {
+      void fetchRecords();
+    }
+  });
+};
+
+const handleStatusFilterChange = (val: unknown) => {
+  const nextStatus =
+    typeof val === "string" && VALID_STATUSES.has(val)
+      ? val
+      : DEFAULT_FILTERS.status;
+  filters.status = nextStatus;
+  currentPage.value = DEFAULT_PAGE;
+  void syncRouteWithState().then((updated) => {
+    if (!updated) {
+      void fetchRecords();
+    }
+  });
 };
 
 const handleResetFilter = () => {
-  searchInput.value = "";
-  filters.api_key_id = 0;
-  filters.provider_id = 0;
-  filters.status = "ALL";
-  filters.search = "";
-  currentPage.value = 1;
-  fetchRecords();
+  searchInput.value = DEFAULT_FILTERS.search;
+  filters.api_key_id = DEFAULT_FILTERS.api_key_id;
+  filters.provider_id = DEFAULT_FILTERS.provider_id;
+  filters.status = DEFAULT_FILTERS.status;
+  filters.search = DEFAULT_FILTERS.search;
+  currentPage.value = DEFAULT_PAGE;
+  void syncRouteWithState().then((updated) => {
+    if (!updated) {
+      void fetchRecords();
+    }
+  });
 };
 
 const handlePageChange = (page: number) => {
   currentPage.value = page;
-  fetchRecords();
+  void syncRouteWithState().then((updated) => {
+    if (!updated) {
+      void fetchRecords();
+    }
+  });
 };
 
 const handlePageSizeChange = (val: unknown) => {
   const size = Number(val);
+  if (!Number.isInteger(size) || size <= 0) return;
   pageSize.value = size;
   localStorage.setItem("pageSize", String(size));
-  currentPage.value = 1;
-  fetchRecords();
+  currentPage.value = DEFAULT_PAGE;
+  void syncRouteWithState().then((updated) => {
+    if (!updated) {
+      void fetchRecords();
+    }
+  });
 };
 
 const handleViewDetails = async (id: number) => {
   isDetailModalOpen.value = true;
   isDetailLoading.value = true;
   detailedRecord.value = null;
+  showPayloads.value = false;
   try {
     detailedRecord.value = await Api.getRecordDetail(id);
+    await nextTick();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (isDetailModalOpen.value && detailedRecord.value?.id === id) {
+          showPayloads.value = true;
+        }
+      });
+    });
   } catch (err: unknown) {
     console.error("Failed to fetch record detail:", err);
     toastController.error(
@@ -760,6 +988,12 @@ const handleViewDetails = async (id: number) => {
     isDetailLoading.value = false;
   }
 };
+
+watch(isDetailModalOpen, (isOpen) => {
+  if (!isOpen) {
+    showPayloads.value = false;
+  }
+});
 
 const formatDate = (timestamp: number | null | undefined) => {
   return formatTimestamp(timestamp) || "/";
@@ -782,7 +1016,7 @@ const getProviderName = (id: number | null) => {
   if (id == null) return "/";
   return (
     providerStore.providers.find((p) => p.provider.id === id)?.provider.name ||
- "/"
+    "/"
   );
 };
 
@@ -791,17 +1025,28 @@ const getApiKeyName = (id: number | null) => {
   return apiKeyStore.apiKeys.find((k) => k.id === id)?.name || "/";
 };
 
-// --- Watchers ---
-watch(searchInput, (newVal) => {
-  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-  searchDebounceTimer = setTimeout(() => {
-    filters.search = newVal;
-  }, 600);
-});
+watch(
+  () => route.query,
+  async (query) => {
+    applyQueryToState(query);
+    const updated = await syncRouteWithState();
+    if (!updated) {
+      await fetchRecords();
+    }
+  },
+);
 
 onMounted(async () => {
-  await Promise.all([providerStore.fetchProviders(), apiKeyStore.fetchApiKeys()]);
-  fetchRecords();
+  try {
+    await Promise.all([providerStore.fetchProviders(), apiKeyStore.fetchApiKeys()]);
+    applyQueryToState(route.query);
+    const updated = await syncRouteWithState();
+    if (!updated) {
+      await fetchRecords();
+    }
+  } catch (error: unknown) {
+    errorMsg.value = normalizeError(error, $t("common.unknownError")).message;
+  }
 });
 </script>
 

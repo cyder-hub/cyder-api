@@ -2,7 +2,7 @@ use chrono::Utc;
 use diesel::prelude::*;
 use serde::Deserialize;
 
-use super::{get_connection, DbResult};
+use super::{DbResult, get_connection};
 use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};

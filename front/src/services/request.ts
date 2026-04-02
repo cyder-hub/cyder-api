@@ -25,11 +25,15 @@ import type {
   PriceRulePayload,
   RecordListItem,
   RecordDetail,
+  RecordListParams,
   ProviderPayload,
   ProviderKeyPayload,
   ModelPayload,
+  ModelDetailResponse,
   CustomFieldLinkPayload,
   CustomFieldUnlinkPayload,
+  ProviderRemoteModelsResponse,
+  ProviderCheckPayload,
 } from "@/store/types";
 
 export const Api = {
@@ -179,16 +183,13 @@ export const Api = {
 
   // ========== Request Log ==========
   getRecordList(
-    params: Record<string, any>,
+    params: RecordListParams,
   ): Promise<PaginatedResponse<RecordListItem>> {
     // Filter undefined/null/empty values
     const validParams: Record<string, string> = {};
-    for (const key in params) {
-      if (Object.prototype.hasOwnProperty.call(params, key)) {
-        const v = params[key];
-        if (v !== undefined && v !== null && v !== "") {
-          validParams[key] = String(v);
-        }
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        validParams[key] = String(value);
       }
     }
     const qs = new URLSearchParams(validParams).toString();
@@ -217,7 +218,9 @@ export const Api = {
   getProviderDetail(id: number | string): Promise<ProviderListItem> {
     return request.get(`/ai/manager/api/provider/${id}/detail`);
   },
-  getProviderRemoteModels(id: number | string): Promise<unknown> {
+  getProviderRemoteModels(
+    id: number | string,
+  ): Promise<ProviderRemoteModelsResponse> {
     return request.get(`/ai/manager/api/provider/${id}/remote_models`);
   },
   createProviderKey(
@@ -236,8 +239,8 @@ export const Api = {
   },
   checkProviderConnection(
     id: number | string,
-    payload?: Record<string, any>,
-  ): Promise<any> {
+    payload?: ProviderCheckPayload,
+  ): Promise<null> {
     return request.post(`/ai/manager/api/provider/${id}/check`, payload || {});
   },
 
@@ -251,7 +254,7 @@ export const Api = {
   deleteModel(id: number | string): Promise<void> {
     return request.delete(`/ai/manager/api/model/${id}`);
   },
-  getModelDetail(id: number | string): Promise<any> {
+  getModelDetail(id: number | string): Promise<ModelDetailResponse> {
     return request.get(`/ai/manager/api/model/${id}/detail`);
   },
 

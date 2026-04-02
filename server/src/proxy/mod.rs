@@ -10,5 +10,5 @@ mod router;
 mod unified;
 mod util;
 
-pub use router::create_proxy_router;
 use error::ProxyError;
+pub use router::create_proxy_router;

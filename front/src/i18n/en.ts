@@ -189,6 +189,15 @@ export const enDict = {
     close: "Close",
     confirm: "Confirm",
   },
+  loginPage: {
+    title: "Admin Login",
+    description: "Sign in with the administrator password to continue.",
+    passwordLabel: "Password",
+    passwordPlaceholder: "Enter your password",
+    submit: "Confirm",
+    submitting: "Logging in...",
+    loginFailed: "Login failed. Please check your password.",
+  },
   apiKeyPage: {
     title: "API Key Management",
     description: "Manage authentication keys used to access the system API.",

@@ -1,12 +1,12 @@
-use super::logging::{get_log_manager, RequestLogContext};
-use super::util::serialize_reqwest_headers;
 use super::ProxyError;
+use super::logging::{RequestLogContext, get_log_manager};
+use super::util::serialize_reqwest_headers;
 
 use crate::config::CONFIG;
 use crate::schema::enum_def::{LlmApiType, RequestStatus};
 use crate::service::app_state::AppState;
 use crate::service::cache::types::CacheBillingPlan;
-use crate::service::transform::{transform_result, StreamTransformer};
+use crate::service::transform::{StreamTransformer, transform_result};
 use crate::utils::sse::SseParser;
 
 use axum::{
@@ -18,13 +18,13 @@ use cyder_tools::log::{debug, error, info, warn};
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use reqwest::{
-    header::{HeaderMap, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
     Method, StatusCode,
+    header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, TRANSFER_ENCODING},
 };
 use serde_json::Value;
 use std::io::Read;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 struct RequestLogContextGuard {
     context: Arc<TokioMutex<RequestLogContext>>,
@@ -211,12 +211,9 @@ pub(super) async fn proxy_request(
     };
 
     // 3. Process the response stream
-    let is_sse = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .map_or(false, |value| {
-            value.to_str().unwrap_or("").contains("text/event-stream")
-        });
+    let is_sse = response.headers().get(CONTENT_TYPE).map_or(false, |value| {
+        value.to_str().unwrap_or("").contains("text/event-stream")
+    });
 
     {
         let mut context = log_context.lock().await;
@@ -318,39 +315,41 @@ async fn handle_non_streaming_response(
     let llm_response_completed_at = Utc::now().timestamp_millis();
 
     if status_code.is_success() {
-        let (final_body, parsed_usage_info) =
-            match serde_json::from_slice::<Value>(&decompressed_body) {
-                Ok(original_value) => {
-                    let (transformed_value, usage_info) =
-                        transform_result(original_value, target_api_type, api_type);
+        let (final_body, parsed_usage_info) = match serde_json::from_slice::<Value>(
+            &decompressed_body,
+        ) {
+            Ok(original_value) => {
+                let (transformed_value, usage_info) =
+                    transform_result(original_value, target_api_type, api_type);
 
-                    // OPTIMIZATION: If the API type is the same, no transformation occurred.
-                    // We can return the original, untouched body and avoid re-serializing.
-                    let body_bytes = if api_type == target_api_type {
-                        decompressed_body.clone()
-                    } else {
-                        match serde_json::to_vec(&transformed_value) {
-                            Ok(b) => Bytes::from(b),
-                            Err(e) => {
-                                error!(
+                // OPTIMIZATION: If the API type is the same, no transformation occurred.
+                // We can return the original, untouched body and avoid re-serializing.
+                let body_bytes = if api_type == target_api_type {
+                    decompressed_body.clone()
+                } else {
+                    match serde_json::to_vec(&transformed_value) {
+                        Ok(b) => Bytes::from(b),
+                        Err(e) => {
+                            error!(
                                 "Failed to serialize transformed response: {}. Returning original body.",
                                 e
                             );
-                                decompressed_body.clone()
-                            }
+                            decompressed_body.clone()
                         }
-                    };
-                    (body_bytes, usage_info)
-                }
-                Err(e) => {
-                    // response is not JSON. No transformation or usage parsing possible.
-                    debug!(
-                        "Response body is not valid JSON, cannot parse usage or transform: {}. Body: {:?}",
-                        e, String::from_utf8_lossy(&decompressed_body)
-                    );
-                    (decompressed_body.clone(), None)
-                }
-            };
+                    }
+                };
+                (body_bytes, usage_info)
+            }
+            Err(e) => {
+                // response is not JSON. No transformation or usage parsing possible.
+                debug!(
+                    "Response body is not valid JSON, cannot parse usage or transform: {}. Body: {:?}",
+                    e,
+                    String::from_utf8_lossy(&decompressed_body)
+                );
+                (decompressed_body.clone(), None)
+            }
+        };
 
         let mut context = log_context.lock().await;
         context.request_url = Some(url.to_string());

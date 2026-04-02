@@ -1,18 +1,19 @@
-use crate::database::system_api_key::{SystemApiKey, UpdateSystemApiKeyData}; // Updated import
 use crate::database::DbResult;
+use crate::database::system_api_key::{SystemApiKey, UpdateSystemApiKeyData}; // Updated import
+use crate::service::app_state::{AppState, StateRouter, create_state_router};
+use crate::utils::HttpResult;
 use axum::{
+    Json, // Router will be replaced by StateRouter
     extract::{Path, State},
     routing::{delete, get, post, put},
-    Json, // Router will be replaced by StateRouter
 };
+use cyder_tools::log::warn;
 use serde::Deserialize;
 use std::sync::Arc;
-use crate::service::app_state::{create_state_router, AppState, StateRouter};
-use crate::utils::HttpResult;
-use cyder_tools::log::warn;
 
 #[derive(Deserialize)]
-struct InsertApiKeyRequest { // Renamed for clarity
+struct InsertApiKeyRequest {
+    // Renamed for clarity
     name: String,
     access_control_policy_id: Option<i64>,
     description: Option<String>,
@@ -20,16 +21,17 @@ struct InsertApiKeyRequest { // Renamed for clarity
 }
 
 #[derive(Deserialize)]
-struct UpdateApiKeyRequest { // Renamed for clarity
+struct UpdateApiKeyRequest {
+    // Renamed for clarity
     // api_key field is not updatable via UpdateSystemApiKeyData
     name: Option<String>,
     access_control_policy_id: Option<Option<i64>>, // Allow setting to null
-    description: Option<Option<String>>,   // Allow setting to null
+    description: Option<Option<String>>,           // Allow setting to null
     is_enabled: Option<bool>,
 }
 
 async fn insert_one(
-    Json(payload): Json<InsertApiKeyRequest>
+    Json(payload): Json<InsertApiKeyRequest>,
 ) -> DbResult<HttpResult<SystemApiKey>> {
     let created_api_key = SystemApiKey::create(
         &payload.name,
@@ -99,6 +101,6 @@ pub fn create_api_key_router() -> StateRouter {
             .route("/", post(insert_one))
             .route("/{id}", delete(delete_one))
             .route("/{id}", put(update_one))
-            .route("/list", get(list))
+            .route("/list", get(list)),
     )
 }

@@ -9,7 +9,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     schema::enum_def::LlmApiType,
-    service::app_state::{create_state_router, StateRouter},
+    service::app_state::{StateRouter, create_state_router},
 };
 
 use super::gemini::handle_gemini_request;
@@ -25,7 +25,14 @@ fn create_openai_router() -> StateRouter {
                  Query(query_params): Query<HashMap<String, String>>,
                  ConnectInfo(addr),
                  request: Request<Body>| async move {
-                    unified_proxy_handler(app_state, addr, query_params, LlmApiType::Openai, request).await
+                    unified_proxy_handler(
+                        app_state,
+                        addr,
+                        query_params,
+                        LlmApiType::Openai,
+                        request,
+                    )
+                    .await
                 },
             ),
         )
@@ -36,8 +43,7 @@ fn create_openai_router() -> StateRouter {
                  Query(params): Query<HashMap<String, String>>,
                  ConnectInfo(addr),
                  request: Request<Body>| async move {
-                    openai_utility_handler(app_state, addr, params, request, "embeddings")
-                        .await
+                    openai_utility_handler(app_state, addr, params, request, "embeddings").await
                 },
             ),
         )
@@ -102,7 +108,14 @@ fn create_ollama_router() -> StateRouter {
                  Query(query_params): Query<HashMap<String, String>>,
                  ConnectInfo(addr),
                  request: Request<Body>| async move {
-                    unified_proxy_handler(app_state, addr, query_params, LlmApiType::Ollama, request).await
+                    unified_proxy_handler(
+                        app_state,
+                        addr,
+                        query_params,
+                        LlmApiType::Ollama,
+                        request,
+                    )
+                    .await
                 },
             ),
         )
@@ -113,7 +126,14 @@ fn create_ollama_router() -> StateRouter {
                  Query(query_params): Query<HashMap<String, String>>,
                  ConnectInfo(addr),
                  request: Request<Body>| async move {
-                    unified_proxy_handler(app_state, addr, query_params, LlmApiType::Ollama, request).await
+                    unified_proxy_handler(
+                        app_state,
+                        addr,
+                        query_params,
+                        LlmApiType::Ollama,
+                        request,
+                    )
+                    .await
                 },
             ),
         )
@@ -124,7 +144,14 @@ fn create_ollama_router() -> StateRouter {
                  Query(query_params): Query<HashMap<String, String>>,
                  ConnectInfo(addr),
                  request: Request<Body>| async move {
-                    unified_proxy_handler(app_state, addr, query_params, LlmApiType::Ollama, request).await
+                    unified_proxy_handler(
+                        app_state,
+                        addr,
+                        query_params,
+                        LlmApiType::Ollama,
+                        request,
+                    )
+                    .await
                 },
             ),
         )

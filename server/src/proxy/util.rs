@@ -10,8 +10,8 @@ use crate::{
     schema::enum_def::LlmApiType,
     schema::enum_def::ProviderType,
     service::app_state::AppState,
+    service::cache::types::{CacheBillingPlan, CacheModel, CacheProvider},
     utils::billing::UsageInfo,
-    service::cache::types::{CacheBillingPlan, CacheProvider, CacheModel},
 };
 use bytes::Bytes;
 
@@ -46,9 +46,11 @@ pub(super) fn _serialize_axum_headers(headers: &axum::http::HeaderMap) -> Option
     serde_json::to_string(&header_map_simplified).ok()
 }
 
-
 // Retrieves pricing rules and currency for a given model.
-pub(super) async fn get_pricing_info(model: &CacheModel, app_state: &Arc<AppState>) -> Option<CacheBillingPlan> {
+pub(super) async fn get_pricing_info(
+    model: &CacheModel,
+    app_state: &Arc<AppState>,
+) -> Option<CacheBillingPlan> {
     debug!(
         "Fetching pricing info for model: {}, plan_id: {:?}",
         model.model_name, model.billing_plan_id
@@ -64,7 +66,6 @@ pub(super) async fn get_pricing_info(model: &CacheModel, app_state: &Arc<AppStat
         None
     }
 }
-
 
 // Parses the request body into a JSON Value.
 pub(super) async fn parse_request_body(request: Request<Body>) -> Result<Value, ProxyError> {
@@ -106,7 +107,9 @@ pub(super) fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInf
 
 // Determines the target API type based on the provider type.
 pub(super) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType {
-    if provider.provider_type == ProviderType::Vertex || provider.provider_type == ProviderType::Gemini {
+    if provider.provider_type == ProviderType::Vertex
+        || provider.provider_type == ProviderType::Gemini
+    {
         LlmApiType::Gemini
     } else if provider.provider_type == ProviderType::Ollama {
         LlmApiType::Ollama

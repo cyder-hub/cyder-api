@@ -1,5 +1,5 @@
 use crate::config::CONFIG;
-use crate::database::{get_connection, DbResult};
+use crate::database::{DbResult, get_connection};
 use crate::{db_execute, db_object};
 use chrono::{TimeZone, Utc};
 use chrono_tz::Tz;

@@ -1,5 +1,7 @@
-use crate::service::storage::types::{GetObjectOptions, PutObjectOptions, StorageError, StorageResult};
 use crate::service::storage::Storage;
+use crate::service::storage::types::{
+    GetObjectOptions, PutObjectOptions, StorageError, StorageResult,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cyder_tools::log::error;
@@ -54,7 +56,11 @@ impl Storage for LocalStorage {
             .map_err(|e| StorageError::Put(format!("Failed to write to file: {}", e)))
     }
 
-    async fn get_object(&self, key: &str, options: Option<GetObjectOptions<'_>>) -> StorageResult<Bytes> {
+    async fn get_object(
+        &self,
+        key: &str,
+        options: Option<GetObjectOptions<'_>>,
+    ) -> StorageResult<Bytes> {
         let full_path = self.get_full_path(key);
         let data = fs::read(&full_path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -90,7 +96,7 @@ impl Storage for LocalStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::{write::GzEncoder, Compression};
+    use flate2::{Compression, write::GzEncoder};
     use std::io::Write;
     use tempfile::tempdir;
 

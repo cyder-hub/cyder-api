@@ -182,7 +182,12 @@ import { ref, reactive, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { Api } from "@/services/request";
-import type { CustomFieldType, CustomFieldItem } from "@/store/types";
+import type {
+  CustomFieldType,
+  CustomFieldItem,
+  CustomFieldDefinition,
+  ProviderListItem,
+} from "@/store/types";
 import { toastController } from "@/lib/toastController";
 import { Button } from "@/components/ui/button";
 import {
@@ -246,22 +251,38 @@ const {
   handleConfirmApiKeySelection,
 } = useProviderCheck(editingData);
 
+const toEditableCustomField = (
+  field: Pick<
+    CustomFieldDefinition,
+    | "id"
+    | "name"
+    | "field_name"
+    | "string_value"
+    | "integer_value"
+    | "number_value"
+    | "boolean_value"
+    | "description"
+    | "field_type"
+  >,
+): CustomFieldItem => ({
+  id: field.id,
+  name: field.name,
+  field_name: field.field_name,
+  field_value:
+    (field.string_value ??
+      field.integer_value?.toString() ??
+      field.number_value?.toString() ??
+      field.boolean_value?.toString()) ||
+    "",
+  description: field.description,
+  field_type: (field.field_type?.toLowerCase() as CustomFieldType) || "unset",
+});
+
 const fetchAllCustomFields = async (): Promise<CustomFieldItem[]> => {
   try {
     const response = await Api.getCustomFieldList(1000);
     if (response && response.list) {
-      return response.list.map((f: any) => ({
-        id: f.id,
-        field_name: f.field_name,
-        field_value:
-          (f.string_value ??
-            f.integer_value?.toString() ??
-            f.number_value?.toString() ??
-            f.boolean_value?.toString()) ||
-          "",
-        description: f.description,
-        field_type: (f.field_type?.toLowerCase() as CustomFieldType) || "unset",
-      }));
+      return response.list.map(toEditableCustomField);
     }
     return [];
   } catch (error) {
@@ -271,7 +292,9 @@ const fetchAllCustomFields = async (): Promise<CustomFieldItem[]> => {
   }
 };
 
-const fetchProviderDetail = async (id: number) => {
+const fetchProviderDetail = async (
+  id: number,
+): Promise<ProviderListItem | null> => {
   try {
     const response = await Api.getProviderDetail(id);
     return response || null;
@@ -316,33 +339,21 @@ onMounted(async () => {
         provider_type: detail.provider.provider_type || "OPENAI",
         endpoint: detail.provider.endpoint,
         use_proxy: detail.provider.use_proxy,
-        models: detail.models.map((m: any) => ({
+        models: detail.models.map((m) => ({
           id: m.model.id,
           model_name: m.model.model_name,
           real_model_name: m.model.real_model_name ?? null,
           isEditing: false,
           checkStatus: "unchecked" as const,
         })),
-        provider_keys: detail.provider_keys.map((k: any) => ({
+        provider_keys: detail.provider_keys.map((k) => ({
           id: k.id,
           api_key: k.api_key,
           description: k.description ?? null,
           isEditing: false,
           checkStatus: "unchecked" as const,
         })),
-        custom_fields: (detail.custom_fields || []).map((f: any) => ({
-          id: f.id,
-          field_name: f.field_name,
-          field_value:
-            (f.string_value ??
-              f.integer_value?.toString() ??
-              f.number_value?.toString() ??
-              f.boolean_value?.toString()) ||
-            "",
-          description: f.description,
-          field_type:
-            (f.field_type?.toLowerCase() as CustomFieldType) || "unset",
-        })),
+        custom_fields: (detail.custom_fields || []).map(toEditableCustomField),
       });
     } else {
       errorMsg.value = $t("providerEditPage.alert.loadDataFailed", {

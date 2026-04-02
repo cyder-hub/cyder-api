@@ -1,7 +1,7 @@
+use chrono::Utc;
 use diesel::prelude::*;
 use serde::Deserialize; // Serialize on Provider is via db_object!, Deserialize for helper structs
 use serde::Serialize;
-use chrono::Utc;
 
 use crate::database::{DbResult, get_connection};
 use crate::{db_execute, db_object};
@@ -9,7 +9,7 @@ use crate::{db_execute, db_object};
 // BaseError is assumed to be accessible, e.g., from `crate::controller::BaseError`.
 use crate::controller::BaseError;
 use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
-use crate::schema::enum_def::ProviderType;
+use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
 
 // Define the main Provider struct and its DB representations using db_object!
 // The attributes like `#[derive(Queryable, ...)]` and `#[diesel(table_name = ...)]`
@@ -29,6 +29,7 @@ db_object! {
         pub created_at: i64,
         pub updated_at: i64,
         pub provider_type: ProviderType,
+        pub provider_api_key_mode: ProviderApiKeyMode,
     }
 
 // Data structure for inserting a new provider.
@@ -36,29 +37,31 @@ db_object! {
 // `crate::schema::postgres::provider` is the path to the table definition.
 #[derive(Insertable, Deserialize, Debug)]
 #[diesel(table_name = provider)]
-pub struct NewProvider {
-    pub id: i64,
-    pub provider_key: String,
-    pub name: String,
+    pub struct NewProvider {
+        pub id: i64,
+        pub provider_key: String,
+        pub name: String,
     pub endpoint: String,
     pub use_proxy: bool,
     pub is_enabled: bool,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub provider_type: ProviderType,
-}
+        pub created_at: i64,
+        pub updated_at: i64,
+        pub provider_type: ProviderType,
+        pub provider_api_key_mode: ProviderApiKeyMode,
+    }
 
 // Data structure for updating an existing provider.
 #[derive(AsChangeset, Deserialize, Debug)]
 #[diesel(table_name = provider)]
-pub struct UpdateProviderData {
-    pub provider_key: Option<String>,
-    pub name: Option<String>,
-    pub endpoint: Option<String>,
-    pub use_proxy: Option<bool>,
-    pub is_enabled: Option<bool>,
-    pub provider_type: Option<ProviderType>,
-}
+    pub struct UpdateProviderData {
+        pub provider_key: Option<String>,
+        pub name: Option<String>,
+        pub endpoint: Option<String>,
+        pub use_proxy: Option<bool>,
+        pub is_enabled: Option<bool>,
+        pub provider_type: Option<ProviderType>,
+        pub provider_api_key_mode: Option<ProviderApiKeyMode>,
+    }
 
 // Define ProviderApiKey struct and its DB representations
     #[derive(Queryable, Selectable, Identifiable, Associations, AsChangeset)]
@@ -113,8 +116,10 @@ impl Provider {
             let db_provider = diesel::insert_into(provider::table)
                 .values(NewProviderDb::to_db(new_provider_data))
                 .returning(ProviderDb::as_returning()) // Use the generated ProviderDb for returning
-                .get_result::<ProviderDb>(conn)        // Expect a ProviderDb instance
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to insert provider: {}", e))))?;
+                .get_result::<ProviderDb>(conn) // Expect a ProviderDb instance
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!("Failed to insert provider: {}", e)))
+                })?;
             Ok(db_provider.from_db()) // Convert ProviderDb to the main Provider struct
         })
     }
@@ -129,11 +134,16 @@ impl Provider {
             let db_provider = diesel::update(provider::table.find(id_value))
                 .set((
                     UpdateProviderDataDb::to_db(update_data),
-                    provider::dsl::updated_at.eq(current_time)
+                    provider::dsl::updated_at.eq(current_time),
                 ))
                 .returning(ProviderDb::as_returning())
                 .get_result::<ProviderDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to update provider {}: {}", id_value, e))))?;
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to update provider {}: {}",
+                        id_value, e
+                    )))
+                })?;
             Ok(db_provider.from_db())
         })
     }
@@ -148,10 +158,15 @@ impl Provider {
                 .set((
                     provider::dsl::deleted_at.eq(current_time),
                     provider::dsl::is_enabled.eq(false), // Typically, disable when soft-deleting
-                    provider::dsl::updated_at.eq(current_time)
+                    provider::dsl::updated_at.eq(current_time),
                 ))
                 .execute(conn) // Returns the number of affected rows
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to delete provider {}: {}", target_id_value, e))))
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete provider {}: {}",
+                        target_id_value, e
+                    )))
+                })
         })
     }
 
@@ -160,15 +175,22 @@ impl Provider {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_provider_opt = provider::table
-                .filter(provider::dsl::provider_key.eq(provider_key_val).and(provider::dsl::deleted_at.is_null()))
+                .filter(
+                    provider::dsl::provider_key
+                        .eq(provider_key_val)
+                        .and(provider::dsl::deleted_at.is_null()),
+                )
                 .select(ProviderDb::as_select())
                 .first::<ProviderDb>(conn)
                 .optional() // Returns Ok(None) if not found, rather than Err
                 .map_err(|e| {
                     // We only expect NotFound to be handled by optional(), other errors are fatal
-                    BaseError::DatabaseFatal(Some(format!("Error fetching provider by key '{}': {}", provider_key_val, e)))
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Error fetching provider by key '{}': {}",
+                        provider_key_val, e
+                    )))
                 })?;
-            
+
             Ok(db_provider_opt.map(|db_p| db_p.from_db()))
         })
     }
@@ -178,14 +200,24 @@ impl Provider {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_provider = provider::table
-                .filter(provider::dsl::id.eq(target_id_value).and(provider::dsl::deleted_at.is_null()))
+                .filter(
+                    provider::dsl::id
+                        .eq(target_id_value)
+                        .and(provider::dsl::deleted_at.is_null()),
+                )
                 .select(ProviderDb::as_select()) // Select as ProviderDb
-                .first::<ProviderDb>(conn)       // Expect a ProviderDb instance
+                .first::<ProviderDb>(conn) // Expect a ProviderDb instance
                 .map_err(|e| {
                     if matches!(e, diesel::result::Error::NotFound) {
-                        BaseError::ParamInvalid(Some(format!("Provider with id {} not found", target_id_value)))
+                        BaseError::ParamInvalid(Some(format!(
+                            "Provider with id {} not found",
+                            target_id_value
+                        )))
                     } else {
-                        BaseError::DatabaseFatal(Some(format!("Error fetching provider {}: {}", target_id_value, e)))
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Error fetching provider {}: {}",
+                            target_id_value, e
+                        )))
                     }
                 })?;
             Ok(db_provider.from_db())
@@ -200,11 +232,16 @@ impl Provider {
                 .filter(provider::dsl::deleted_at.is_null())
                 .order(provider::dsl::created_at.desc())
                 .select(ProviderDb::as_select()) // Select as Vec<ProviderDb>
-                .load::<ProviderDb>(conn)        // Expect Vec<ProviderDb>
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list providers: {}", e))))?;
-            
+                .load::<ProviderDb>(conn) // Expect Vec<ProviderDb>
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!("Failed to list providers: {}", e)))
+                })?;
+
             // Convert Vec<ProviderDb> to Vec<Provider>
-            Ok(db_providers.into_iter().map(|db_p| db_p.from_db()).collect())
+            Ok(db_providers
+                .into_iter()
+                .map(|db_p| db_p.from_db())
+                .collect())
         })
     }
 
@@ -228,11 +265,14 @@ impl Provider {
                     )))
                 })?;
 
-            Ok(db_providers.into_iter().map(|db_p| db_p.from_db()).collect())
+            Ok(db_providers
+                .into_iter()
+                .map(|db_p| db_p.from_db())
+                .collect())
         })
     }
 
-/// Retrieves a provider's details including API keys and custom fields by its ID.
+    /// Retrieves a provider's details including API keys and custom fields by its ID.
     pub fn get_detail_by_id(provider_id_val: i64) -> DbResult<ProviderDetail> {
         // Get the main provider data
         let provider = Provider::get_by_id(provider_id_val)?;
@@ -260,7 +300,12 @@ impl ProviderApiKey {
                 .values(NewProviderApiKeyDb::to_db(new_key_data))
                 .returning(ProviderApiKeyDb::as_returning())
                 .get_result::<ProviderApiKeyDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to insert provider API key: {}", e))))?;
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to insert provider API key: {}",
+                        e
+                    )))
+                })?;
             Ok(db_key.from_db())
         })
     }
@@ -273,11 +318,16 @@ impl ProviderApiKey {
             let db_key = diesel::update(provider_api_key::table.find(key_id))
                 .set((
                     UpdateProviderApiKeyDataDb::to_db(update_data),
-                    provider_api_key::dsl::updated_at.eq(current_time)
+                    provider_api_key::dsl::updated_at.eq(current_time),
                 ))
                 .returning(ProviderApiKeyDb::as_returning())
                 .get_result::<ProviderApiKeyDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to update provider API key {}: {}", key_id, e))))?;
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to update provider API key {}: {}",
+                        key_id, e
+                    )))
+                })?;
             Ok(db_key.from_db())
         })
     }
@@ -291,10 +341,15 @@ impl ProviderApiKey {
                 .set((
                     provider_api_key::dsl::deleted_at.eq(current_time),
                     provider_api_key::dsl::is_enabled.eq(false),
-                    provider_api_key::dsl::updated_at.eq(current_time)
+                    provider_api_key::dsl::updated_at.eq(current_time),
                 ))
                 .execute(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to delete provider API key {}: {}", key_id, e))))
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete provider API key {}: {}",
+                        key_id, e
+                    )))
+                })
         })
     }
 
@@ -303,14 +358,24 @@ impl ProviderApiKey {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_key = provider_api_key::table
-                .filter(provider_api_key::dsl::id.eq(key_id).and(provider_api_key::dsl::deleted_at.is_null()))
+                .filter(
+                    provider_api_key::dsl::id
+                        .eq(key_id)
+                        .and(provider_api_key::dsl::deleted_at.is_null()),
+                )
                 .select(ProviderApiKeyDb::as_select())
                 .first::<ProviderApiKeyDb>(conn)
                 .map_err(|e| {
                     if matches!(e, diesel::result::Error::NotFound) {
-                        BaseError::ParamInvalid(Some(format!("Provider API key with id {} not found", key_id)))
+                        BaseError::ParamInvalid(Some(format!(
+                            "Provider API key with id {} not found",
+                            key_id
+                        )))
                     } else {
-                        BaseError::DatabaseFatal(Some(format!("Error fetching provider API key {}: {}", key_id, e)))
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Error fetching provider API key {}: {}",
+                            key_id, e
+                        )))
                     }
                 })?;
             Ok(db_key.from_db())
@@ -322,11 +387,20 @@ impl ProviderApiKey {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
             let db_keys = provider_api_key::table
-                .filter(provider_api_key::dsl::provider_id.eq(p_id).and(provider_api_key::dsl::deleted_at.is_null()))
+                .filter(
+                    provider_api_key::dsl::provider_id
+                        .eq(p_id)
+                        .and(provider_api_key::dsl::deleted_at.is_null()),
+                )
                 .order(provider_api_key::dsl::created_at.desc())
                 .select(ProviderApiKeyDb::as_select())
                 .load::<ProviderApiKeyDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list API keys for provider {}: {}", p_id, e))))?;
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list API keys for provider {}: {}",
+                        p_id, e
+                    )))
+                })?;
             Ok(db_keys.into_iter().map(|db_k| db_k.from_db()).collect())
         })
     }
@@ -340,8 +414,13 @@ impl ProviderApiKey {
                 .order(provider_api_key::dsl::created_at.desc())
                 .select(ProviderApiKeyDb::as_select())
                 .load::<ProviderApiKeyDb>(conn)
-                .map_err(|e| BaseError::DatabaseFatal(Some(format!("Failed to list all provider API keys: {}", e))))?;
-            
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list all provider API keys: {}",
+                        e
+                    )))
+                })?;
+
             Ok(db_keys.into_iter().map(|db_k| db_k.from_db()).collect())
         })
     }

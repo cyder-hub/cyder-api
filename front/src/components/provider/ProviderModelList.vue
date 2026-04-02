@@ -137,6 +137,10 @@ import { useRouter } from "vue-router";
 import { Api } from "@/services/request";
 import { toastController } from "@/lib/toastController";
 import type { EditingProviderData, LocalEditableModelItem } from "./types";
+import type {
+  ProviderRemoteModelItem,
+  ProviderRemoteModelsResponse,
+} from "@/store/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Check, CloudDownload, Box, Loader2, AlertCircle, Edit2, Trash2, Plus } from "lucide-vue-next";
@@ -241,18 +245,22 @@ const handleFetchRemoteModels = async () => {
   }
 
   try {
-    const response = await Api.getProviderRemoteModels(data.id) as Record<string, unknown> | unknown[];
+    const response = await Api.getProviderRemoteModels(data.id);
 
-    let remoteModels: Record<string, unknown>[] = [];
+    let remoteModels: ProviderRemoteModelItem[] = [];
     let isGeminiLike = false;
     if (response) {
-      if (Array.isArray((response as Record<string, unknown>).data)) {
-        remoteModels = (response as Record<string, unknown>).data as Record<string, unknown>[];
-      } else if (Array.isArray((response as Record<string, unknown>).models)) {
-        remoteModels = (response as Record<string, unknown>).models as Record<string, unknown>[];
+      const wrappedResponse = response as Exclude<
+        ProviderRemoteModelsResponse,
+        ProviderRemoteModelItem[]
+      >;
+      if (Array.isArray(wrappedResponse.data)) {
+        remoteModels = wrappedResponse.data;
+      } else if (Array.isArray(wrappedResponse.models)) {
+        remoteModels = wrappedResponse.models;
         isGeminiLike = true;
       } else if (Array.isArray(response)) {
-        remoteModels = response as Record<string, unknown>[];
+        remoteModels = response;
       }
     }
 

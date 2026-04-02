@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
+import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
 import { useProviderStore } from "@/store/providerStore";
 import type {
@@ -10,6 +11,8 @@ import type {
   CustomFieldItem,
   BillingPlan,
   PriceRule,
+  CustomFieldDefinition,
+  ModelDetailResponse,
 } from "@/store/types";
 
 import { Button } from "@/components/ui/button";
@@ -53,7 +56,7 @@ const providerStore = useProviderStore();
 
 const modelId = parseInt(route.params.id as string);
 const isLoading = ref(true);
-const modelDetail = ref<any>(null);
+const modelDetail = ref<ModelDetailResponse | null>(null);
 const allCustomFields = ref<CustomFieldItem[]>([]);
 const billingPlans = ref<BillingPlan[]>([]);
 const priceRules = ref<PriceRule[]>([]);
@@ -61,6 +64,34 @@ const isLoadingPriceRules = ref(false);
 
 const editingData = ref<EditingModelData | null>(null);
 const selectedCustomFieldId = ref<string | null>(null);
+
+const toEditableCustomField = (
+  field: Pick<
+    CustomFieldDefinition,
+    | "id"
+    | "name"
+    | "field_name"
+    | "string_value"
+    | "integer_value"
+    | "number_value"
+    | "boolean_value"
+    | "description"
+    | "field_type"
+  >,
+): CustomFieldItem => ({
+  id: field.id,
+  name: field.name,
+  field_name: field.field_name,
+  field_value:
+    (field.string_value ??
+      field.integer_value?.toString() ??
+      field.number_value?.toString() ??
+      field.boolean_value?.toString()) ||
+    "",
+  description: field.description,
+  field_type: (field.field_type?.toLowerCase() as CustomFieldType) || "unset",
+});
+
 const fetchData = async () => {
   if (isNaN(modelId)) {
     toastController.error(
@@ -82,19 +113,7 @@ const fetchData = async () => {
     billingPlans.value = plans;
 
     if (customFieldsRes && customFieldsRes.list) {
-      allCustomFields.value = customFieldsRes.list.map((f: any) => ({
-        id: f.id,
-        name: f.name,
-        field_name: f.field_name,
-        field_value:
-          (f.string_value ??
-            f.integer_value?.toString() ??
-            f.number_value?.toString() ??
-            f.boolean_value?.toString()) ||
-          "",
-        description: f.description,
-        field_type: (f.field_type?.toLowerCase() as CustomFieldType) || "unset",
-      }));
+      allCustomFields.value = customFieldsRes.list.map(toEditableCustomField);
     }
 
     if (detail) {
@@ -105,26 +124,14 @@ const fetchData = async () => {
         model_name: detail.model.model_name,
         real_model_name: detail.model.real_model_name ?? "",
         is_enabled: detail.model.is_enabled,
-        custom_fields: (detail.custom_fields || []).map((f: any) => ({
-          id: f.id,
-          name: f.name,
-          field_name: f.field_name,
-          field_value:
-            (f.string_value ??
-              f.integer_value?.toString() ??
-              f.number_value?.toString() ??
-              f.boolean_value?.toString()) ||
-            "",
-          description: f.description,
-          field_type:
-            (f.field_type?.toLowerCase() as CustomFieldType) || "unset",
-        })),
+        custom_fields: (detail.custom_fields || []).map(toEditableCustomField),
       };
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const normalizedError = normalizeError(error, t("common.unknownError"));
     toastController.error(
       t("modelEditPage.alert.loadDataFailed", { modelId: modelId }),
-      error.message,
+      normalizedError.message,
     );
   } finally {
     isLoading.value = false;
@@ -139,10 +146,11 @@ const fetchPriceRules = async (planId: number | null) => {
   try {
     isLoadingPriceRules.value = true;
     priceRules.value = await Api.getPriceRuleListByPlan(planId);
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const normalizedError = normalizeError(error, t("common.unknownError"));
     toastController.error(
       t("modelEditPage.priceSection.loadingRules"),
-      error.message,
+      normalizedError.message,
     );
     priceRules.value = [];
   } finally {
@@ -169,7 +177,7 @@ const availableCustomFields = computed(() => {
   const linkedIds = new Set(editingData.value.custom_fields.map((f) => f.id));
   return allCustomFields.value
     .filter((f) => f.id && !linkedIds.has(f.id))
-    .map((f) => ({ ...f, displayName: (f as any).name || f.field_name }));
+    .map((f) => ({ ...f, displayName: f.name || f.field_name }));
 });
 
 const handleSaveModel = async () => {
@@ -190,12 +198,15 @@ const handleSaveModel = async () => {
   try {
     await Api.updateModel(editingData.value.id, payload);
     toastController.success(t("modelEditPage.alert.updateSuccess"));
-    providerStore.fetchProviders();
+    void providerStore.fetchProviders().catch((error) => {
+      console.error("Failed to refresh providers after saving model:", error);
+    });
     fetchData();
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const normalizedError = normalizeError(error, t("common.unknownError"));
     toastController.error(
       t("modelEditPage.alert.saveFailed", {
-        error: error.message || t("unknownError"),
+        error: normalizedError.message,
       }),
     );
   }
@@ -224,10 +235,11 @@ const handleLinkCustomField = async () => {
     selectedCustomFieldId.value = null;
     toastController.success(t("modelEditPage.alert.linkSuccess"));
     fetchData();
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const normalizedError = normalizeError(error, t("common.unknownError"));
     toastController.error(
       t("modelEditPage.alert.linkFailed", {
-        error: error.message || t("unknownError"),
+        error: normalizedError.message,
       }),
     );
   }
@@ -248,10 +260,11 @@ const handleUnlinkCustomField = async (fieldId: number) => {
 
     toastController.success(t("modelEditPage.alert.unlinkSuccess"));
     fetchData();
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const normalizedError = normalizeError(error, t("common.unknownError"));
     toastController.error(
       t("modelEditPage.alert.unlinkFailed", {
-        error: error.message || t("unknownError"),
+        error: normalizedError.message,
       }),
     );
   }

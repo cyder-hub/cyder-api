@@ -1,6 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::unified::*;
 use crate::utils::ID_GENERATOR;
@@ -26,9 +26,7 @@ pub(super) struct GeminiRequestPayload {
 #[serde(untagged)]
 pub(super) enum GeminiSystemInstruction {
     String(String),
-    Object {
-        parts: Vec<GeminiPart>,
-    },
+    Object { parts: Vec<GeminiPart> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -136,22 +134,22 @@ pub(super) struct GeminiSafetySetting {
 impl From<GeminiRequestPayload> for UnifiedRequest {
     fn from(gemini_req: GeminiRequestPayload) -> Self {
         let mut messages = Vec::new();
-        let mut tool_call_ids: std::collections::HashMap<String, std::collections::VecDeque<String>> =
-            std::collections::HashMap::new();
+        let mut tool_call_ids: std::collections::HashMap<
+            String,
+            std::collections::VecDeque<String>,
+        > = std::collections::HashMap::new();
 
         if let Some(system_instruction) = gemini_req.system_instruction {
             let content = match system_instruction {
                 GeminiSystemInstruction::String(text) => text,
-                GeminiSystemInstruction::Object { parts } => {
-                    parts
-                        .into_iter()
-                        .filter_map(|p| match p {
-                            GeminiPart::Text { text } => Some(text),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                }
+                GeminiSystemInstruction::Object { parts } => parts
+                    .into_iter()
+                    .filter_map(|p| match p {
+                        GeminiPart::Text { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             };
             if !content.is_empty() {
                 messages.push(UnifiedMessage {
@@ -165,8 +163,12 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
             let role = content_item.role.as_deref().unwrap_or("user");
             let parts = content_item.parts;
 
-            let has_function_call = parts.iter().any(|p| matches!(p, GeminiPart::FunctionCall { .. }));
-            let has_function_response = parts.iter().any(|p| matches!(p, GeminiPart::FunctionResponse { .. }));
+            let has_function_call = parts
+                .iter()
+                .any(|p| matches!(p, GeminiPart::FunctionCall { .. }));
+            let has_function_response = parts
+                .iter()
+                .any(|p| matches!(p, GeminiPart::FunctionResponse { .. }));
 
             if role == "model" && has_function_call {
                 let mut content_parts = Vec::new();
@@ -183,10 +185,10 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                                 name: function_call.name,
                                 arguments: function_call.args,
                             }));
-                        },
+                        }
                         GeminiPart::Text { text } => {
-                             content_parts.push(UnifiedContentPart::Text { text });
-                        },
+                            content_parts.push(UnifiedContentPart::Text { text });
+                        }
                         _ => {}
                     }
                 }
@@ -198,7 +200,9 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                 parts
                     .into_iter()
                     .filter_map(|p| match p {
-                        GeminiPart::FunctionResponse { function_response } => Some(function_response),
+                        GeminiPart::FunctionResponse { function_response } => {
+                            Some(function_response)
+                        }
                         _ => None,
                     })
                     .for_each(|fr| {
@@ -207,10 +211,13 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                             .and_then(|ids| ids.pop_front())
                             .unwrap_or_else(|| format!("call_{}", ID_GENERATOR.generate_id()));
 
-                        let content = fr.response
+                        let content = fr
+                            .response
                             .get("result")
                             .and_then(|v| v.as_str().map(String::from))
-                            .unwrap_or_else(|| serde_json::to_string(&fr.response).unwrap_or_default());
+                            .unwrap_or_else(|| {
+                                serde_json::to_string(&fr.response).unwrap_or_default()
+                            });
 
                         messages.push(UnifiedMessage {
                             role: UnifiedRole::Tool,
@@ -227,7 +234,7 @@ impl From<GeminiRequestPayload> for UnifiedRequest {
                 } else {
                     UnifiedRole::User
                 };
-                
+
                 let mut content_parts = Vec::new();
                 for p in parts {
                     match p {
@@ -317,14 +324,15 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
         for msg in unified_req.messages {
             match msg.role {
                 UnifiedRole::System => {
-                    let system_texts: Vec<String> = msg.content
+                    let system_texts: Vec<String> = msg
+                        .content
                         .iter()
                         .filter_map(|part| match part {
                             UnifiedContentPart::Text { text } => Some(text.clone()),
                             _ => None,
                         })
                         .collect();
-                    
+
                     if !system_texts.is_empty() {
                         // Use object format with parts to match expected test format
                         let parts: Vec<GeminiPart> = system_texts
@@ -344,19 +352,19 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::ImageUrl { url, .. } => {
                                 // Gemini doesn't support image URLs directly, would need to fetch and convert
                                 // For now, skip this or could add a comment in text
-                                parts.push(GeminiPart::Text { 
-                                    text: format!("[Image: {}]", url) 
+                                parts.push(GeminiPart::Text {
+                                    text: format!("[Image: {}]", url),
                                 });
                             }
                             UnifiedContentPart::ImageData { mime_type, data } => {
                                 parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type,
-                                        data,
-                                    },
+                                    inline_data: GeminiInlineData { mime_type, data },
                                 });
                             }
-                            UnifiedContentPart::FileData { file_uri, mime_type } => {
+                            UnifiedContentPart::FileData {
+                                file_uri,
+                                mime_type,
+                            } => {
                                 parts.push(GeminiPart::FileData {
                                     file_data: GeminiFileData {
                                         mime_type,
@@ -383,13 +391,13 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             }
                             UnifiedContentPart::ImageData { mime_type, data } => {
                                 parts.push(GeminiPart::InlineData {
-                                    inline_data: GeminiInlineData {
-                                        mime_type,
-                                        data,
-                                    },
+                                    inline_data: GeminiInlineData { mime_type, data },
                                 });
                             }
-                            UnifiedContentPart::FileData { file_uri, mime_type } => {
+                            UnifiedContentPart::FileData {
+                                file_uri,
+                                mime_type,
+                            } => {
                                 parts.push(GeminiPart::FileData {
                                     file_data: GeminiFileData {
                                         mime_type,
@@ -673,7 +681,10 @@ impl From<GeminiResponse> for UnifiedResponse {
                 };
 
                 let finish_reason = candidate.finish_reason.map(|fr| {
-                    crate::service::transform::unified::map_gemini_finish_reason_to_openai(&fr, has_function_call)
+                    crate::service::transform::unified::map_gemini_finish_reason_to_openai(
+                        &fr,
+                        has_function_call,
+                    )
                 });
 
                 UnifiedChoice {
@@ -750,13 +761,13 @@ impl From<UnifiedResponse> for GeminiResponse {
                         }
                         UnifiedContentPart::ImageData { mime_type, data } => {
                             parts.push(GeminiPart::InlineData {
-                                inline_data: GeminiInlineData {
-                                    mime_type,
-                                    data,
-                                },
+                                inline_data: GeminiInlineData { mime_type, data },
                             });
                         }
-                        UnifiedContentPart::FileData { file_uri, mime_type } => {
+                        UnifiedContentPart::FileData {
+                            file_uri,
+                            mime_type,
+                        } => {
                             parts.push(GeminiPart::FileData {
                                 file_data: GeminiFileData {
                                     mime_type,
@@ -830,7 +841,9 @@ impl From<UnifiedResponse> for GeminiResponse {
 
         let usage_metadata = unified_res.usage.map(|u| {
             let mut prompt_tokens_details = vec![];
-            let text_prompt_tokens = u.input_tokens.saturating_sub(u.input_image_tokens.unwrap_or(0));
+            let text_prompt_tokens = u
+                .input_tokens
+                .saturating_sub(u.input_image_tokens.unwrap_or(0));
             if text_prompt_tokens > 0 {
                 prompt_tokens_details.push(ModalityTokenCount {
                     modality: Modality::Text,
@@ -847,7 +860,9 @@ impl From<UnifiedResponse> for GeminiResponse {
             }
 
             let mut candidates_tokens_details = vec![];
-            let text_candidates_tokens = u.output_tokens.saturating_sub(u.output_image_tokens.unwrap_or(0));
+            let text_candidates_tokens = u
+                .output_tokens
+                .saturating_sub(u.output_image_tokens.unwrap_or(0));
             if text_candidates_tokens > 0 {
                 candidates_tokens_details.push(ModalityTokenCount {
                     modality: Modality::Text,
@@ -908,7 +923,7 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
                     match part {
                         UnifiedContentPartDelta::TextDelta { text, .. } => {
                             parts.push(GeminiPart::Text { text });
-                        },
+                        }
                         UnifiedContentPartDelta::ImageDelta { .. } => {
                             // Image content not fully supported in Gemini chunk conversion yet
                         }
@@ -919,11 +934,8 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
                             // Assuming we get a complete call or handle it simplified:
                             if let (Some(name), Some(args_str)) = (tc.name, tc.arguments) {
                                 if let Ok(args) = serde_json::from_str(&args_str) {
-                                     parts.push(GeminiPart::FunctionCall {
-                                        function_call: GeminiFunctionCall {
-                                            name,
-                                            args,
-                                        },
+                                    parts.push(GeminiPart::FunctionCall {
+                                        function_call: GeminiFunctionCall { name, args },
                                     });
                                 }
                             }
@@ -938,7 +950,7 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
                 };
 
                 let finish_reason = choice.finish_reason.as_ref().map(|fr| {
-                    // Note: Gemini doesn't have a direct "tool_calls" finish reason, 
+                    // Note: Gemini doesn't have a direct "tool_calls" finish reason,
                     // so we map it to "STOP" which is semantically closest
                     crate::service::transform::unified::map_openai_finish_reason_to_gemini(fr)
                 });
@@ -1019,9 +1031,9 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
                     for part in content.parts {
                         match part {
                             GeminiPart::Text { text } => {
-                                delta.content.push(UnifiedContentPartDelta::TextDelta { 
-                                    index: text_index, 
-                                    text 
+                                delta.content.push(UnifiedContentPartDelta::TextDelta {
+                                    index: text_index,
+                                    text,
                                 });
                                 text_index += 1;
                             }
@@ -1038,28 +1050,32 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
                             }
                             GeminiPart::ExecutableCode { executable_code } => {
                                 has_function_call = true;
-                                delta.content.push(UnifiedContentPartDelta::ToolCallDelta(UnifiedToolCallDelta {
-                                    index: tool_call_index,
-                                    id: Some(format!("call_{}", ID_GENERATOR.generate_id())),
-                                    name: Some("code_interpreter".to_string()),
-                                    arguments: Some(
-                                        json!({
-                                            "language": executable_code.language,
-                                            "code": executable_code.code,
-                                        })
-                                        .to_string(),
-                                    ),
-                                }));
+                                delta.content.push(UnifiedContentPartDelta::ToolCallDelta(
+                                    UnifiedToolCallDelta {
+                                        index: tool_call_index,
+                                        id: Some(format!("call_{}", ID_GENERATOR.generate_id())),
+                                        name: Some("code_interpreter".to_string()),
+                                        arguments: Some(
+                                            json!({
+                                                "language": executable_code.language,
+                                                "code": executable_code.code,
+                                            })
+                                            .to_string(),
+                                        ),
+                                    },
+                                ));
                                 tool_call_index += 1;
                             }
                             GeminiPart::FunctionCall { function_call } => {
                                 has_function_call = true;
-                                delta.content.push(UnifiedContentPartDelta::ToolCallDelta(UnifiedToolCallDelta {
-                                    index: tool_call_index,
-                                    id: Some(format!("call_{}", ID_GENERATOR.generate_id())),
-                                    name: Some(function_call.name),
-                                    arguments: Some(function_call.args.to_string()),
-                                }));
+                                delta.content.push(UnifiedContentPartDelta::ToolCallDelta(
+                                    UnifiedToolCallDelta {
+                                        index: tool_call_index,
+                                        id: Some(format!("call_{}", ID_GENERATOR.generate_id())),
+                                        name: Some(function_call.name),
+                                        arguments: Some(function_call.args.to_string()),
+                                    },
+                                ));
                                 tool_call_index += 1;
                             }
                             _ => {}
@@ -1068,7 +1084,10 @@ impl From<GeminiChunkResponse> for UnifiedChunkResponse {
                 }
 
                 let finish_reason = candidate.finish_reason.map(|fr| {
-                    crate::service::transform::unified::map_gemini_finish_reason_to_openai(&fr, has_function_call)
+                    crate::service::transform::unified::map_gemini_finish_reason_to_openai(
+                        &fr,
+                        has_function_call,
+                    )
                 });
 
                 UnifiedChunkChoice {
@@ -1155,12 +1174,16 @@ mod tests {
         assert_eq!(unified_req.messages[0].role, UnifiedRole::System);
         assert_eq!(
             unified_req.messages[0].content,
-            vec![UnifiedContentPart::Text { text: "You are a helpful assistant.".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "You are a helpful assistant.".to_string()
+            }]
         );
         assert_eq!(unified_req.messages[1].role, UnifiedRole::User);
         assert_eq!(
             unified_req.messages[1].content,
-            vec![UnifiedContentPart::Text { text: "Hello".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "Hello".to_string()
+            }]
         );
         assert_eq!(unified_req.temperature, Some(0.8));
         assert_eq!(unified_req.max_tokens, Some(100));
@@ -1175,11 +1198,15 @@ mod tests {
             messages: vec![
                 UnifiedMessage {
                     role: UnifiedRole::System,
-                    content: vec![UnifiedContentPart::Text { text: "You are a helpful assistant.".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "You are a helpful assistant.".to_string(),
+                    }],
                 },
                 UnifiedMessage {
                     role: UnifiedRole::User,
-                    content: vec![UnifiedContentPart::Text { text: "Hello".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "Hello".to_string(),
+                    }],
                 },
             ],
             tools: None,
@@ -1267,7 +1294,9 @@ mod tests {
         assert_eq!(choice.message.role, UnifiedRole::Assistant);
         assert_eq!(
             choice.message.content,
-            vec![UnifiedContentPart::Text { text: "Hi there!".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "Hi there!".to_string()
+            }]
         );
         assert_eq!(choice.finish_reason, Some("stop".to_string()));
 
@@ -1287,7 +1316,9 @@ mod tests {
                 index: 0,
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
-                    content: vec![UnifiedContentPart::Text { text: "Hi there!".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "Hi there!".to_string(),
+                    }],
                 },
                 finish_reason: Some("stop".to_string()),
                 logprobs: None,
@@ -1350,7 +1381,13 @@ mod tests {
         assert_eq!(unified_chunk.choices.len(), 1);
         let choice = &unified_chunk.choices[0];
         assert_eq!(choice.delta.role, Some(UnifiedRole::Assistant));
-        assert_eq!(choice.delta.content, vec![UnifiedContentPartDelta::TextDelta { index: 0, text: "Hello".to_string() }]);
+        assert_eq!(
+            choice.delta.content,
+            vec![UnifiedContentPartDelta::TextDelta {
+                index: 0,
+                text: "Hello".to_string()
+            }]
+        );
         assert!(choice.finish_reason.is_none());
     }
 
@@ -1363,7 +1400,10 @@ mod tests {
                 index: 0,
                 delta: UnifiedMessageDelta {
                     role: Some(UnifiedRole::Assistant),
-                    content: vec![UnifiedContentPartDelta::TextDelta { index: 0, text: "Hello".to_string() }],
+                    content: vec![UnifiedContentPartDelta::TextDelta {
+                        index: 0,
+                        text: "Hello".to_string(),
+                    }],
                 },
                 finish_reason: None,
             }],
@@ -1422,7 +1462,7 @@ mod tests {
         let choice = &unified_res.choices[0];
         assert_eq!(choice.message.role, UnifiedRole::Assistant);
         assert_eq!(choice.finish_reason, Some("tool_calls".to_string()));
-        
+
         match &choice.message.content[0] {
             UnifiedContentPart::Text { text } => assert_eq!(text, "I should call a tool"),
             _ => panic!("Expected text content"),
@@ -1430,7 +1470,7 @@ mod tests {
         match &choice.message.content[1] {
             UnifiedContentPart::ToolCall(tc) => {
                 assert_eq!(tc.name, "get_weather");
-            },
+            }
             _ => panic!("Expected tool call content"),
         }
     }
@@ -1445,7 +1485,9 @@ mod tests {
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
                     content: vec![
-                        UnifiedContentPart::Text { text: "I will call a tool".to_string() },
+                        UnifiedContentPart::Text {
+                            text: "I will call a tool".to_string(),
+                        },
                         UnifiedContentPart::ToolCall(UnifiedToolCall {
                             id: "call_123".to_string(),
                             name: "get_weather".to_string(),
@@ -1512,16 +1554,16 @@ mod tests {
         assert_eq!(unified_chunk.choices.len(), 1);
         let choice = &unified_chunk.choices[0];
         assert_eq!(choice.delta.role, Some(UnifiedRole::Assistant));
-        
+
         match &choice.delta.content[0] {
             UnifiedContentPartDelta::TextDelta { text, .. } => assert_eq!(text, "Thinking..."),
             _ => panic!("Expected text delta"),
         }
-        
+
         match &choice.delta.content[1] {
             UnifiedContentPartDelta::ToolCallDelta(tc) => {
                 assert_eq!(tc.name, Some("search".to_string()));
-            },
+            }
             _ => panic!("Expected tool call delta"),
         }
     }
@@ -1536,7 +1578,10 @@ mod tests {
                 delta: UnifiedMessageDelta {
                     role: Some(UnifiedRole::Assistant),
                     content: vec![
-                        UnifiedContentPartDelta::TextDelta { index: 0, text: "Thinking...".to_string() },
+                        UnifiedContentPartDelta::TextDelta {
+                            index: 0,
+                            text: "Thinking...".to_string(),
+                        },
                         UnifiedContentPartDelta::ToolCallDelta(UnifiedToolCallDelta {
                             index: 0,
                             id: Some("call_123".to_string()),

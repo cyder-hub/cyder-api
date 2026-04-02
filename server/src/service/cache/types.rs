@@ -3,16 +3,18 @@ use bincode::{Decode, Encode};
 // These structures contain only the fields needed for cache operations,
 // reducing memory footprint and improving cache performance.
 
-use serde::{de, Deserialize, Serialize};
-use std::sync::Arc;
+use crate::schema::enum_def::{
+    Action, FieldPlacement, FieldType, ProviderApiKeyMode, ProviderType, RuleScope,
+};
+use serde::{Deserialize, Serialize, de};
 use serde_with::serde_as;
-use crate::schema::enum_def::{Action, RuleScope, ProviderType, FieldPlacement, FieldType};
+use std::sync::Arc;
 
 /// Represents an entry in the cache, which can either be a value (Positive)
 /// or a marker indicating the value does not exist (Negative).
 #[serde_as]
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub enum CacheEntry<T: Clone + Serialize + de:: DeserializeOwned> {
+pub enum CacheEntry<T: Clone + Serialize + de::DeserializeOwned> {
     Positive(#[serde_as(as = "Arc<serde_with::Same>")] Arc<T>),
     Negative,
 }
@@ -44,6 +46,7 @@ pub struct CacheProvider {
     pub endpoint: String,
     pub use_proxy: bool,
     pub provider_type: ProviderType,
+    pub provider_api_key_mode: ProviderApiKeyMode,
 }
 
 /// Cached provider API key
@@ -59,7 +62,7 @@ pub struct CacheProviderKey {
 pub struct CacheAccessControlRule {
     pub id: i64,
     pub rule_type: Action,
-    pub priority: i32, 
+    pub priority: i32,
     pub scope: RuleScope,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
@@ -145,6 +148,7 @@ impl From<crate::database::provider::Provider> for CacheProvider {
             endpoint: db.endpoint,
             use_proxy: db.use_proxy,
             provider_type: db.provider_type,
+            provider_api_key_mode: db.provider_api_key_mode,
         }
     }
 }

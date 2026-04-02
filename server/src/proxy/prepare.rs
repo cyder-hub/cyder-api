@@ -2,18 +2,18 @@ use std::{collections::HashMap, sync::Arc};
 
 use axum::http::{HeaderMap, HeaderValue};
 use reqwest::{
-    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST},
     Url,
+    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::ProxyError;
 use crate::{
     schema::enum_def::{FieldPlacement, FieldType, ProviderType},
     service::{
         app_state::{AppState, GroupItemSelectionStrategy},
+        cache::types::{CacheCustomField, CacheModel, CacheProvider},
         vertex::get_vertex_token,
-        cache::types::{CacheProvider, CacheModel, CacheCustomField},
     },
     utils::process_stream_options,
 };
@@ -31,14 +31,16 @@ struct ProviderCredentials {
 
 /// Resolves the API key and authentication credential for a provider.
 ///
-/// This handles: selecting a provider API key via the queue strategy, and
-/// exchanging it for a Vertex AI OAuth token when the provider type requires it.
+/// This handles: selecting a provider API key via the provider's configured
+/// selection strategy, and exchanging it for a Vertex AI OAuth token when the
+/// provider type requires it.
 async fn resolve_provider_credentials(
     provider: &CacheProvider,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredentials, ProxyError> {
+    let strategy = GroupItemSelectionStrategy::from(provider.provider_api_key_mode.clone());
     let selected_key = app_state
-        .get_one_provider_api_key_by_provider(provider.id, GroupItemSelectionStrategy::Queue)
+        .get_one_provider_api_key_by_provider(provider.id, strategy)
         .await
         .map_err(|e| {
             error!(
@@ -58,15 +60,13 @@ async fn resolve_provider_credentials(
         })?;
 
     let request_key = match provider.provider_type {
-        ProviderType::Vertex | ProviderType::VertexOpenai => {
-            get_vertex_token(
-                &app_state.proxy_client,
-                selected_key.id,
-                &selected_key.api_key,
-            )
-            .await
-            .map_err(|err_msg| ProxyError::BadRequest(err_msg))?
-        }
+        ProviderType::Vertex | ProviderType::VertexOpenai => get_vertex_token(
+            &app_state.proxy_client,
+            selected_key.id,
+            &selected_key.api_key,
+        )
+        .await
+        .map_err(|err_msg| ProxyError::BadRequest(err_msg))?,
         _ => selected_key.api_key.clone(),
     };
 
@@ -91,9 +91,7 @@ async fn fetch_combined_custom_fields(
                 "Failed to get custom fields for provider_id {}: {:?}",
                 provider.id, e
             );
-            ProxyError::InternalError(
-                "Failed to retrieve custom fields for provider".to_string(),
-            )
+            ProxyError::InternalError("Failed to retrieve custom fields for provider".to_string())
         })?;
     let model_cfs = app_state
         .get_custom_fields_by_model_id(model.id)
@@ -103,9 +101,7 @@ async fn fetch_combined_custom_fields(
                 "Failed to get custom fields for model_id {}: {:?}",
                 model.id, e
             );
-            ProxyError::InternalError(
-                "Failed to retrieve custom fields for model".to_string(),
-            )
+            ProxyError::InternalError("Failed to retrieve custom fields for model".to_string())
         })?;
 
     let mut combined_map: HashMap<i64, Arc<CacheCustomField>> = HashMap::new();
@@ -188,10 +184,7 @@ fn build_gemini_url(
     Ok(url)
 }
 
-pub fn build_new_headers(
-    pre_headers: &HeaderMap,
-    api_key: &str,
-) -> Result<HeaderMap, ProxyError> {
+pub fn build_new_headers(pre_headers: &HeaderMap, api_key: &str) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in pre_headers.iter() {
         if name != HOST // do not expose host to api endpoint
@@ -354,8 +347,8 @@ fn set_nested_value(data: &mut Value, path: &str, value_to_set: Option<Value>) {
 }
 
 pub fn handle_custom_fields(
-    data: &mut Value,    // For "BODY"
-    url: &mut Url,       // For "QUERY"
+    data: &mut Value,        // For "BODY"
+    url: &mut Url,           // For "QUERY"
     headers: &mut HeaderMap, // For "HEADER" (reqwest::header::HeaderMap)
     custom_fields: &Vec<Arc<CacheCustomField>>,
 ) {
@@ -401,17 +394,28 @@ pub fn handle_custom_fields(
 
                 match cf.field_type {
                     FieldType::Unset => { /* new_value_opt remains None, effectively removing */ }
-                    FieldType::String => { new_value_opt = cf.string_value.clone(); }
-                    FieldType::Integer => { new_value_opt = cf.integer_value.map(|v| v.to_string()); }
-                    FieldType::Number => { new_value_opt = cf.number_value.map(|v| v.to_string()); }
-                    FieldType::Boolean => { new_value_opt = cf.boolean_value.map(|v| v.to_string()); }
-                    FieldType::JsonString => { new_value_opt = cf.string_value.clone(); } // JSON as string for query
+                    FieldType::String => {
+                        new_value_opt = cf.string_value.clone();
+                    }
+                    FieldType::Integer => {
+                        new_value_opt = cf.integer_value.map(|v| v.to_string());
+                    }
+                    FieldType::Number => {
+                        new_value_opt = cf.number_value.map(|v| v.to_string());
+                    }
+                    FieldType::Boolean => {
+                        new_value_opt = cf.boolean_value.map(|v| v.to_string());
+                    }
+                    FieldType::JsonString => {
+                        new_value_opt = cf.string_value.clone();
+                    } // JSON as string for query
                 }
 
                 // Rebuild query parameters to ensure replacement
                 // First, collect existing pairs to drop the immutable borrow of url.
-                let existing_pairs: Vec<(String, String)> = url.query_pairs()
-                    .map(|(k,v)| (k.into_owned(), v.into_owned()))
+                let existing_pairs: Vec<(String, String)> = url
+                    .query_pairs()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
                     .filter(|(k, _)| k != &field_name_key) // Keep pairs not matching current field name
                     .collect();
 
@@ -433,7 +437,8 @@ pub fn handle_custom_fields(
                     FieldType::Unset => {
                         headers.remove(&cf.field_name);
                     }
-                    _ => { // For all other types, convert to string and set header
+                    _ => {
+                        // For all other types, convert to string and set header
                         let value_str_opt: Option<String> = match cf.field_type {
                             FieldType::String => cf.string_value.clone(),
                             FieldType::Integer => cf.integer_value.map(|v| v.to_string()),
@@ -450,7 +455,8 @@ pub fn handle_custom_fields(
                         };
 
                         if let Some(value_str) = value_str_opt {
-                            match reqwest::header::HeaderName::from_bytes(cf.field_name.as_bytes()) {
+                            match reqwest::header::HeaderName::from_bytes(cf.field_name.as_bytes())
+                            {
                                 Ok(header_name) => {
                                     match reqwest::header::HeaderValue::from_str(&value_str) {
                                         Ok(header_value) => {
@@ -479,7 +485,6 @@ pub fn handle_custom_fields(
     }
 }
 
-
 // Fetches provider and model from AppState cache, resolving aliases first.
 pub async fn get_provider_and_model(
     app_state: &Arc<AppState>,
@@ -488,27 +493,27 @@ pub async fn get_provider_and_model(
     // Attempt to resolve as a model alias first
     match app_state.get_model_by_alias(pre_model_value).await {
         Ok(Some(model)) => {
-                let provider = app_state
-                    .get_provider_by_id(model.provider_id)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "Error accessing cache for provider ID {}: {:?}",
-                            model.provider_id, e
-                        )
-                    })?
-                    .ok_or_else(|| {
-                        format!(
-                            "Provider ID {} for model '{}' (from alias '{}') not found in cache.",
-                            model.provider_id, model.model_name, pre_model_value
-                        )
-                    })?;
+            let provider = app_state
+                .get_provider_by_id(model.provider_id)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Error accessing cache for provider ID {}: {:?}",
+                        model.provider_id, e
+                    )
+                })?
+                .ok_or_else(|| {
+                    format!(
+                        "Provider ID {} for model '{}' (from alias '{}') not found in cache.",
+                        model.provider_id, model.model_name, pre_model_value
+                    )
+                })?;
 
-                debug!(
-                    "Resolved '{}' as an alias to model '{}' from provider '{}'",
-                    pre_model_value, model.model_name, provider.name
-                );
-                return Ok((provider, model));
+            debug!(
+                "Resolved '{}' as an alias to model '{}' from provider '{}'",
+                pre_model_value, model.model_name, provider.name
+            );
+            return Ok((provider, model));
         }
         Ok(None) => {
             debug!(

@@ -62,10 +62,7 @@ impl From<OllamaRequestPayload> for UnifiedRequest {
                 // NOTE: Ollama's `images` field is ignored for now.
                 // UnifiedRequest would need to be updated to handle multimodal content.
                 let content = vec![UnifiedContentPart::Text { text: msg.content }];
-                UnifiedMessage {
-                    role,
-                    content,
-                }
+                UnifiedMessage { role, content }
             })
             .collect();
 
@@ -122,11 +119,11 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                 .to_string();
 
                 let mut final_content = String::new();
-                
+
                 for part in msg.content {
                     match part {
                         UnifiedContentPart::Text { text } => {
-                             final_content.push_str(&text);
+                            final_content.push_str(&text);
                         }
                         _ => {}
                     }
@@ -207,7 +204,9 @@ impl From<OllamaResponse> for UnifiedResponse {
     fn from(ollama_res: OllamaResponse) -> Self {
         let message = UnifiedMessage {
             role: UnifiedRole::Assistant, // Ollama response is always assistant
-            content: vec![UnifiedContentPart::Text { text: ollama_res.message.content }],
+            content: vec![UnifiedContentPart::Text {
+                text: ollama_res.message.content,
+            }],
         };
 
         let finish_reason = if ollama_res.done {
@@ -215,7 +214,7 @@ impl From<OllamaResponse> for UnifiedResponse {
         } else {
             None
         };
-        
+
         // Map Ollama's done_reason to unified finish_reason
         let finish_reason = finish_reason.map(|reason| {
             match reason.as_str() {
@@ -259,8 +258,11 @@ impl From<OllamaResponse> for UnifiedResponse {
 
 impl From<UnifiedResponse> for OllamaResponse {
     fn from(unified_res: UnifiedResponse) -> Self {
-        let choice = unified_res.choices.into_iter().next().unwrap_or_else(|| {
-            UnifiedChoice {
+        let choice = unified_res
+            .choices
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| UnifiedChoice {
                 index: 0,
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
@@ -268,8 +270,7 @@ impl From<UnifiedResponse> for OllamaResponse {
                 },
                 finish_reason: None,
                 logprobs: None,
-            }
-        });
+            });
 
         let mut content = String::new();
         for part in choice.message.content {
@@ -290,13 +291,14 @@ impl From<UnifiedResponse> for OllamaResponse {
             (None, None)
         };
 
-        let done_reason = choice.finish_reason.as_ref().map(|reason| {
-            match reason.as_str() {
+        let done_reason = choice
+            .finish_reason
+            .as_ref()
+            .map(|reason| match reason.as_str() {
                 "stop" => "stop".to_string(),
                 "length" => "length".to_string(),
                 _ => "stop".to_string(),
-            }
-        });
+            });
 
         OllamaResponse {
             model: unified_res.model,
@@ -325,11 +327,15 @@ mod tests {
             messages: vec![
                 UnifiedMessage {
                     role: UnifiedRole::System,
-                    content: vec![UnifiedContentPart::Text { text: "You are a bot.".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "You are a bot.".to_string(),
+                    }],
                 },
                 UnifiedMessage {
                     role: UnifiedRole::User,
-                    content: vec![UnifiedContentPart::Text { text: "Hello".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "Hello".to_string(),
+                    }],
                 },
             ],
             stream: true,
@@ -400,12 +406,16 @@ mod tests {
         assert_eq!(unified_req.messages[0].role, UnifiedRole::System);
         assert_eq!(
             unified_req.messages[0].content,
-            vec![UnifiedContentPart::Text { text: "You are a bot.".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "You are a bot.".to_string()
+            }]
         );
         assert_eq!(unified_req.messages[1].role, UnifiedRole::User);
         assert_eq!(
             unified_req.messages[1].content,
-            vec![UnifiedContentPart::Text { text: "Hello".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "Hello".to_string()
+            }]
         );
         assert_eq!(unified_req.stream, true);
         assert_eq!(unified_req.temperature, Some(0.8));
@@ -446,7 +456,9 @@ mod tests {
         assert_eq!(choice.message.role, UnifiedRole::Assistant);
         assert_eq!(
             choice.message.content,
-            vec![UnifiedContentPart::Text { text: "Hello there!".to_string() }]
+            vec![UnifiedContentPart::Text {
+                text: "Hello there!".to_string()
+            }]
         );
         assert_eq!(choice.finish_reason, Some("stop".to_string()));
         let usage = unified_res.usage.unwrap();
@@ -464,7 +476,9 @@ mod tests {
                 index: 0,
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
-                    content: vec![UnifiedContentPart::Text { text: "Hello there!".to_string() }],
+                    content: vec![UnifiedContentPart::Text {
+                        text: "Hello there!".to_string(),
+                    }],
                 },
                 finish_reason: Some("stop".to_string()),
                 logprobs: None,
@@ -518,7 +532,13 @@ mod tests {
         let choice = &unified_chunk.choices[0];
         assert_eq!(choice.index, 0);
         assert_eq!(choice.delta.role, Some(UnifiedRole::Assistant));
-        assert_eq!(choice.delta.content, vec![UnifiedContentPartDelta::TextDelta { index: 0, text: "Hello".to_string() }]);
+        assert_eq!(
+            choice.delta.content,
+            vec![UnifiedContentPartDelta::TextDelta {
+                index: 0,
+                text: "Hello".to_string()
+            }]
+        );
         assert!(choice.finish_reason.is_none());
         assert!(unified_chunk.usage.is_none());
 
@@ -560,7 +580,10 @@ mod tests {
                 index: 0,
                 delta: UnifiedMessageDelta {
                     role: Some(UnifiedRole::Assistant),
-                    content: vec![UnifiedContentPartDelta::TextDelta { index: 0, text: " World".to_string() }],
+                    content: vec![UnifiedContentPartDelta::TextDelta {
+                        index: 0,
+                        text: " World".to_string(),
+                    }],
                 },
                 finish_reason: None,
             }],
@@ -641,18 +664,23 @@ impl From<OllamaChunkResponse> for UnifiedChunkResponse {
         let delta = if let Some(message) = ollama_chunk.message {
             UnifiedMessageDelta {
                 role: Some(UnifiedRole::Assistant),
-                content: vec![UnifiedContentPartDelta::TextDelta { index: 0, text: message.content }],
+                content: vec![UnifiedContentPartDelta::TextDelta {
+                    index: 0,
+                    text: message.content,
+                }],
             }
         } else {
             UnifiedMessageDelta::default()
         };
 
         let finish_reason = if ollama_chunk.done {
-            ollama_chunk.done_reason.or_else(|| Some("stop".to_string()))
+            ollama_chunk
+                .done_reason
+                .or_else(|| Some("stop".to_string()))
         } else {
             None
         };
-        
+
         // Map Ollama's done_reason to unified finish_reason
         let finish_reason = finish_reason.map(|reason| {
             match reason.as_str() {
@@ -694,19 +722,20 @@ impl From<OllamaChunkResponse> for UnifiedChunkResponse {
 
 impl From<UnifiedChunkResponse> for OllamaChunkResponse {
     fn from(unified_chunk: UnifiedChunkResponse) -> Self {
-        let choice = unified_chunk
-            .choices
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| UnifiedChunkChoice {
-                index: 0,
-                delta: UnifiedMessageDelta::default(),
-                finish_reason: None,
-            });
+        let choice =
+            unified_chunk
+                .choices
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| UnifiedChunkChoice {
+                    index: 0,
+                    delta: UnifiedMessageDelta::default(),
+                    finish_reason: None,
+                });
 
         let mut final_content = String::new();
         for part in choice.delta.content {
-             if let UnifiedContentPartDelta::TextDelta { text, .. } = part {
+            if let UnifiedContentPartDelta::TextDelta { text, .. } = part {
                 final_content.push_str(&text);
             }
         }
@@ -727,13 +756,14 @@ impl From<UnifiedChunkResponse> for OllamaChunkResponse {
             (None, None)
         };
 
-        let done_reason = choice.finish_reason.as_ref().map(|reason| {
-            match reason.as_str() {
+        let done_reason = choice
+            .finish_reason
+            .as_ref()
+            .map(|reason| match reason.as_str() {
                 "stop" => "stop".to_string(),
                 "length" => "length".to_string(),
                 _ => "stop".to_string(),
-            }
-        });
+            });
 
         OllamaChunkResponse {
             model: unified_chunk.model,

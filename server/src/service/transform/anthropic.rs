@@ -1,9 +1,9 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::unified::*;
 use super::StreamTransformer;
+use super::unified::*;
 use crate::utils::ID_GENERATOR;
 use crate::utils::sse::SseEvent;
 
@@ -72,7 +72,8 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
     fn from(anthropic_req: AnthropicRequestPayload) -> Self {
         let mut messages = Vec::new();
         // Track tool call ID to name mapping for tool results
-        let mut tool_id_to_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut tool_id_to_name: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         if let Some(system_prompt) = anthropic_req.system {
             let text = match system_prompt {
@@ -127,7 +128,7 @@ impl From<AnthropicRequestPayload> for UnifiedRequest {
                             ) {
                                 // Track the tool ID to name mapping
                                 tool_id_to_name.insert(id.to_string(), name.to_string());
-                                
+
                                 content_parts.push(UnifiedContentPart::ToolCall(UnifiedToolCall {
                                     id: id.to_string(),
                                     name: name.to_string(),
@@ -252,10 +253,10 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                             UnifiedContentPart::Text { text } => {
                                 content_blocks.push(json!({ "type": "text", "text": text }));
                             }
-                            UnifiedContentPart::ImageUrl { .. } | 
-                            UnifiedContentPart::ImageData { .. } | 
-                            UnifiedContentPart::FileData { .. } | 
-                            UnifiedContentPart::ExecutableCode { .. } => {
+                            UnifiedContentPart::ImageUrl { .. }
+                            | UnifiedContentPart::ImageData { .. }
+                            | UnifiedContentPart::FileData { .. }
+                            | UnifiedContentPart::ExecutableCode { .. } => {
                                 // Multimodal content not fully supported in Anthropic conversion yet
                             }
                             UnifiedContentPart::ToolCall(call) => {
@@ -279,10 +280,7 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                     // Anthropic's API has a special case for single-text-block messages
                     // where the `content` can be a plain string.
                     let content = if content_blocks.len() == 1
-                        && content_blocks[0]
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            == Some("text")
+                        && content_blocks[0].get("type").and_then(|t| t.as_str()) == Some("text")
                     {
                         content_blocks.remove(0)["text"].take()
                     } else {
@@ -412,8 +410,11 @@ impl From<AnthropicResponse> for UnifiedResponse {
 
 impl From<UnifiedResponse> for AnthropicResponse {
     fn from(unified_res: UnifiedResponse) -> Self {
-        let choice = unified_res.choices.into_iter().next().unwrap_or_else(|| {
-            UnifiedChoice {
+        let choice = unified_res
+            .choices
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| UnifiedChoice {
                 index: 0,
                 message: UnifiedMessage {
                     role: UnifiedRole::Assistant,
@@ -423,31 +424,26 @@ impl From<UnifiedResponse> for AnthropicResponse {
                 },
                 finish_reason: None,
                 logprobs: None,
-            }
-        });
+            });
 
         let content: Vec<AnthropicContentBlock> = choice
             .message
             .content
             .into_iter()
             .filter_map(|part| match part {
-                UnifiedContentPart::Text { text } => {
-                    Some(AnthropicContentBlock::Text { text })
-                }
-                UnifiedContentPart::ImageUrl { .. } | 
-                UnifiedContentPart::ImageData { .. } | 
-                UnifiedContentPart::FileData { .. } | 
-                UnifiedContentPart::ExecutableCode { .. } => {
+                UnifiedContentPart::Text { text } => Some(AnthropicContentBlock::Text { text }),
+                UnifiedContentPart::ImageUrl { .. }
+                | UnifiedContentPart::ImageData { .. }
+                | UnifiedContentPart::FileData { .. }
+                | UnifiedContentPart::ExecutableCode { .. } => {
                     // Multimodal content not fully supported in Anthropic conversion yet
                     None
                 }
-                UnifiedContentPart::ToolCall(call) => {
-                    Some(AnthropicContentBlock::ToolUse {
-                        id: call.id,
-                        name: call.name,
-                        input: call.arguments,
-                    })
-                }
+                UnifiedContentPart::ToolCall(call) => Some(AnthropicContentBlock::ToolUse {
+                    id: call.id,
+                    name: call.name,
+                    input: call.arguments,
+                }),
                 UnifiedContentPart::ToolResult(_) => None, // Not applicable for assistant response
             })
             .collect();
@@ -485,13 +481,27 @@ impl From<UnifiedResponse> for AnthropicResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicEvent {
-    MessageStart { message: AnthropicStreamMessage },
-    ContentBlockStart { index: u32, content_block: AnthropicContentBlock },
-    ContentBlockDelta { index: u32, delta: AnthropicContentDelta },
-    ContentBlockStop { index: u32 },
-    MessageDelta { delta: MessageDelta },
+    MessageStart {
+        message: AnthropicStreamMessage,
+    },
+    ContentBlockStart {
+        index: u32,
+        content_block: AnthropicContentBlock,
+    },
+    ContentBlockDelta {
+        index: u32,
+        delta: AnthropicContentDelta,
+    },
+    ContentBlockStop {
+        index: u32,
+    },
+    MessageDelta {
+        delta: MessageDelta,
+    },
     MessageStop,
-    Error { error: Value },
+    Error {
+        error: Value,
+    },
     #[serde(other)]
     Ping,
 }
@@ -516,7 +526,9 @@ pub struct AnthropicStreamMessage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AnthropicContentDelta {
-    TextDelta { text: String },
+    TextDelta {
+        text: String,
+    },
     InputJsonDelta {
         #[serde(rename = "type")]
         type_: String,
@@ -565,7 +577,9 @@ impl From<AnthropicEvent> for UnifiedChunkResponse {
             AnthropicEvent::MessageDelta { delta } => {
                 if let Some(stop_reason) = &delta.stop_reason {
                     choice.finish_reason = Some(
-                        crate::service::transform::unified::map_anthropic_finish_reason_to_openai(stop_reason)
+                        crate::service::transform::unified::map_anthropic_finish_reason_to_openai(
+                            stop_reason,
+                        ),
                     );
                 }
             }
@@ -583,7 +597,6 @@ impl From<AnthropicEvent> for UnifiedChunkResponse {
         }
     }
 }
-
 
 pub fn transform_unified_chunk_to_anthropic_events(
     unified_chunk: UnifiedChunkResponse,
@@ -642,7 +655,8 @@ pub fn transform_unified_chunk_to_anthropic_events(
                 UnifiedContentPartDelta::TextDelta { index, text } => {
                     // Anthropic's content_block_delta for text has delta as {"text": "..."}
                     let delta = json!({"text": text});
-                    let event = json!({"type": "content_block_delta", "index": *index, "delta": delta});
+                    let event =
+                        json!({"type": "content_block_delta", "index": *index, "delta": delta});
                     events.push(SseEvent {
                         event: Some("content_block_delta".to_string()),
                         data: serde_json::to_string(&event).unwrap(),
@@ -672,7 +686,9 @@ pub fn transform_unified_chunk_to_anthropic_events(
                 });
             }
 
-            let reason = crate::service::transform::unified::map_openai_finish_reason_to_anthropic(finish_reason);
+            let reason = crate::service::transform::unified::map_openai_finish_reason_to_anthropic(
+                finish_reason,
+            );
             // Anthropic's message_delta has usage inside delta object
             let delta = json!({
                 "stop_reason": reason,
@@ -733,13 +749,13 @@ mod tests {
 
         let unified_request: UnifiedRequest = anthropic_request.into();
 
-        assert_eq!(unified_request.model, Some("claude-3-opus-20240229".to_string()));
+        assert_eq!(
+            unified_request.model,
+            Some("claude-3-opus-20240229".to_string())
+        );
         assert_eq!(unified_request.messages.len(), 2);
         assert_eq!(unified_request.messages[0].role, UnifiedRole::System);
-        assert_eq!(
-            unified_request.messages[0].content.len(),
-            1
-        );
+        assert_eq!(unified_request.messages[0].content.len(), 1);
         assert_eq!(
             unified_request.messages[0].content[0],
             UnifiedContentPart::Text {
@@ -794,7 +810,10 @@ mod tests {
         }
         assert_eq!(anthropic_request.messages.len(), 1);
         assert_eq!(anthropic_request.messages[0].role, "user");
-        assert_eq!(anthropic_request.messages[0].content, json!("Hello, world!"));
+        assert_eq!(
+            anthropic_request.messages[0].content,
+            json!("Hello, world!")
+        );
         assert_eq!(anthropic_request.max_tokens, 100);
         assert_eq!(anthropic_request.temperature, Some(0.7));
         assert_eq!(anthropic_request.stream, Some(true));
@@ -987,8 +1006,14 @@ mod tests {
         let events_content =
             transform_unified_chunk_to_anthropic_events(unified_chunk_content, &mut state).unwrap();
         assert_eq!(events_content.len(), 2);
-        assert_eq!(events_content[0].event.as_deref(), Some("content_block_start"));
-        assert_eq!(events_content[1].event.as_deref(), Some("content_block_delta"));
+        assert_eq!(
+            events_content[0].event.as_deref(),
+            Some("content_block_start")
+        );
+        assert_eq!(
+            events_content[1].event.as_deref(),
+            Some("content_block_delta")
+        );
         assert!(events_content[1].data.contains("\"text\":\"Hello\""));
         assert!(!state.is_first_content_chunk);
 
@@ -1009,9 +1034,16 @@ mod tests {
         let events_finish =
             transform_unified_chunk_to_anthropic_events(unified_chunk_finish, &mut state).unwrap();
         assert_eq!(events_finish.len(), 3);
-        assert_eq!(events_finish[0].event.as_deref(), Some("content_block_stop"));
+        assert_eq!(
+            events_finish[0].event.as_deref(),
+            Some("content_block_stop")
+        );
         assert_eq!(events_finish[1].event.as_deref(), Some("message_delta"));
-        assert!(events_finish[1].data.contains("\"stop_reason\":\"end_turn\""));
+        assert!(
+            events_finish[1]
+                .data
+                .contains("\"stop_reason\":\"end_turn\"")
+        );
         assert_eq!(events_finish[2].event.as_deref(), Some("message_stop"));
 
         // Thinking content chunk - NOTE: This behavior is no longer supported directly
@@ -1132,10 +1164,6 @@ mod tests {
             AnthropicContentBlock::ToolUse { name, .. } => assert_eq!(name, "get_weather"),
             _ => panic!("Expected tool use content block"),
         }
-        assert_eq!(
-            anthropic_response.stop_reason,
-            Some("tool_use".to_string())
-        );
+        assert_eq!(anthropic_response.stop_reason, Some("tool_use".to_string()));
     }
 }
-

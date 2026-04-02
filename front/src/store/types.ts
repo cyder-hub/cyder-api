@@ -47,6 +47,8 @@ export interface ApiKeyItem {
   api_key: string;
   description: string;
   is_enabled: boolean;
+  access_control_policy_id?: number | null;
+  access_control_policy_name?: string | null;
   created_at: number;
   updated_at: number;
   created_at_formatted?: string;
@@ -148,7 +150,7 @@ export interface ProviderListItem {
   provider: ProviderBase;
   models: ModelDetail[];
   provider_keys: ProviderApiKeyItem[];
-  custom_fields: CustomFieldItem[];
+  custom_fields: CustomFieldDefinition[];
 }
 
 // ========== Model Alias Types ==========
@@ -194,6 +196,7 @@ export type CustomFieldType =
 
 export interface CustomFieldItem {
   id?: number;
+  name?: string | null;
   field_name: string;
   field_value: string;
   description?: string | null;
@@ -214,9 +217,26 @@ export interface CustomFieldDefinition {
   is_enabled: boolean;
 }
 
+export interface ModelDetailModel {
+  id: number;
+  provider_id: number;
+  model_name: string;
+  real_model_name: string | null;
+  billing_plan_id: number | null;
+  deleted_at: number | null;
+  is_enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ModelDetailResponse {
+  model: ModelDetailModel;
+  custom_fields: CustomFieldDefinition[];
+}
+
 export interface CustomFieldPayload {
-  name?: string;
-  description?: string;
+  name?: string | null;
+  description?: string | null;
   field_name: string;
   field_placement: string;
   field_type: string;
@@ -302,15 +322,52 @@ export interface RecordDetail extends RecordListItem {
   user_response_body?: string | null;
 }
 
+export interface RecordListParams {
+  page?: number;
+  page_size?: number;
+  system_api_key_id?: number;
+  provider_id?: number;
+  status?: string;
+  search?: string;
+  [key: string]: string | number | undefined;
+}
+
 // ========== Provider CRUD Payloads ==========
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
+
+export interface ProviderRemoteModelItem {
+  [key: string]: JsonValue | undefined;
+  id?: string;
+  name?: string;
+  owned_by?: string;
+}
+
+export type ProviderRemoteModelsResponse =
+  | ProviderRemoteModelItem[]
+  | {
+      data?: ProviderRemoteModelItem[];
+      models?: ProviderRemoteModelItem[];
+    };
+
+export interface ProviderCheckPayload {
+  model_id?: number;
+  model_name?: string;
+  provider_api_key_id?: number;
+  provider_api_key?: string;
+}
+
 export interface ProviderPayload {
   key: string;
   name: string;
   endpoint: string;
   use_proxy: boolean;
   provider_type: string;
-  omit_config?: any;
-  api_keys?: any[];
+  omit_config?: JsonObject | null;
+  api_keys?: ProviderKeyPayload[];
 }
 
 export interface ProviderKeyPayload {

@@ -1,12 +1,12 @@
 use axum::{
+    Json,
     body::Bytes,
     response::{IntoResponse, Response},
-    Json,
 };
 use cyder_tools::snow_flake::Snowflake;
-use once_cell::sync::Lazy;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use std::sync::LazyLock;
 
 pub mod auth;
 pub mod billing;
@@ -73,4 +73,4 @@ pub fn split_chunks(input: Bytes) -> (Vec<Bytes>, Bytes) {
     (lines, remainder)
 }
 
-pub static ID_GENERATOR: Lazy<Snowflake> = Lazy::new(|| Snowflake::new(1));
+pub static ID_GENERATOR: LazyLock<Snowflake> = LazyLock::new(|| Snowflake::new(1));

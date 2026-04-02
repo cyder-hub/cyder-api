@@ -1,22 +1,25 @@
+use crate::service::app_state::{StateRouter, create_state_router};
 use crate::utils::auth::authorization_access_middleware;
-use auth::create_auth_router;
-use custom_field::create_custom_field_router;
 use access_control::create_access_control_policy_router;
-use price::create_price_router;
-use stat::routes as create_stat_router;
-use system_api_key::create_api_key_router;
-use crate::service::app_state::{create_state_router, StateRouter};
+use auth::create_auth_router;
 use axum::{
-    http::{self, header::CACHE_CONTROL, HeaderValue},
+    http::{self, HeaderValue, header::CACHE_CONTROL},
     middleware,
     response::IntoResponse,
 };
+use custom_field::create_custom_field_router;
 use model::create_model_router;
 use model_alias::create_model_alias_router;
+use price::create_price_router;
 use provider::create_provider_router;
 use request_log::create_record_router;
+use stat::routes as create_stat_router;
+use system_api_key::create_api_key_router;
 
-use tower_http::{services::{ServeDir, ServeFile}, set_header::SetResponseHeaderLayer};
+use tower_http::{
+    services::{ServeDir, ServeFile},
+    set_header::SetResponseHeaderLayer,
+};
 
 mod auth;
 mod custom_field;
@@ -25,13 +28,15 @@ mod error;
 mod access_control;
 mod model;
 mod model_alias;
+mod price;
 mod provider;
 mod request_log;
 mod stat;
+mod system;
 mod system_api_key;
-mod price;
 
 pub use error::BaseError;
+pub use system::create_system_router;
 
 pub fn create_manager_router() -> StateRouter {
     let serve_dir = ServeDir::new("public").fallback(ServeFile::new("public/index.html"));
@@ -61,7 +66,10 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_auth_router()),
     );
 
-    create_state_router().nest("/manager", create_state_router().merge(api_router).merge(ui_router))
+    create_state_router().nest(
+        "/manager",
+        create_state_router().merge(api_router).merge(ui_router),
+    )
 }
 
 pub async fn handle_404() -> impl IntoResponse {

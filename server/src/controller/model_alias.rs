@@ -1,15 +1,15 @@
-use crate::database::model_alias::{ModelAlias, ModelAliasDetails, UpdateModelAliasData}; // Updated import
 use crate::database::DbResult;
+use crate::database::model_alias::{ModelAlias, ModelAliasDetails, UpdateModelAliasData}; // Updated import
 use axum::{
+    Json,
     extract::{Path, State},
     routing::{delete, get, post, put},
-    Json,
 };
 use cyder_tools::log::warn;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::service::app_state::{create_state_router, AppState, StateRouter};
+use crate::service::app_state::{AppState, StateRouter, create_state_router};
 use crate::utils::HttpResult;
 
 #[derive(Deserialize)]
@@ -30,9 +30,7 @@ struct UpdateAliasRequest {
     is_enabled: Option<bool>,
 }
 
-async fn create_alias(
-    Json(payload): Json<CreateAliasRequest>,
-) -> DbResult<HttpResult<ModelAlias>> {
+async fn create_alias(Json(payload): Json<CreateAliasRequest>) -> DbResult<HttpResult<ModelAlias>> {
     let created_alias_from_db = ModelAlias::create(
         &payload.alias_name,
         payload.target_model_id,
@@ -40,7 +38,7 @@ async fn create_alias(
         payload.priority,
         payload.is_enabled,
     )?;
-    
+
     Ok(HttpResult::new(created_alias_from_db))
 }
 
@@ -50,11 +48,14 @@ async fn delete_alias(
 ) -> DbResult<HttpResult<()>> {
     let alias_to_delete = ModelAlias::get_by_id(id)?;
     ModelAlias::delete(id)?; // delete returns DbResult<usize>
-    
-    if let Err(e) = app_state.invalidate_model_alias(&alias_to_delete.alias_name).await {
+
+    if let Err(e) = app_state
+        .invalidate_model_alias(&alias_to_delete.alias_name)
+        .await
+    {
         warn!("Failed to delete ModelAlias id {} from cache: {:?}", id, e);
     }
-    
+
     Ok(HttpResult::new(()))
 }
 
@@ -79,7 +80,10 @@ async fn update_alias(
     let updated_alias_from_db = ModelAlias::update(id, &update_data)?;
 
     // Invalidate cache for the original alias name. This handles name changes correctly.
-    if let Err(e) = app_state.invalidate_model_alias(&original_alias.alias_name).await {
+    if let Err(e) = app_state
+        .invalidate_model_alias(&original_alias.alias_name)
+        .await
+    {
         warn!(
             "Failed to invalidate ModelAlias id {} ('{}') in cache: {:?}",
             id, original_alias.alias_name, e

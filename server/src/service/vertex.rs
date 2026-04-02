@@ -2,10 +2,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use cyder_tools::log::{error, info};
 use dashmap::DashMap;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use once_cell::sync::Lazy;
-use reqwest::{header::CONTENT_TYPE, Client};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use reqwest::{Client, header::CONTENT_TYPE};
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 #[derive(Clone, Debug)]
 struct CachedToken {
@@ -13,7 +13,7 @@ struct CachedToken {
     expiry_time: u64, // Store expiry time as Unix timestamp
 }
 
-static VERTEX_TOKEN_CACHE: Lazy<DashMap<i64, CachedToken>> = Lazy::new(DashMap::new);
+static VERTEX_TOKEN_CACHE: LazyLock<DashMap<i64, CachedToken>> = LazyLock::new(DashMap::new);
 
 #[derive(serde::Serialize)]
 struct Payload<'a> {
@@ -155,9 +155,17 @@ pub async fn request_google_token(
         let token_result: VertexTokenResult = response.json().await.map_err(|e| e.to_string())?;
         Ok(token_result)
     } else {
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        error!("Vertex token request failed with status {}: {}", status, error_text);
-        Err(format!("Vertex token request failed with status {}: {}", status, error_text))
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        error!(
+            "Vertex token request failed with status {}: {}",
+            status, error_text
+        );
+        Err(format!(
+            "Vertex token request failed with status {}: {}",
+            status, error_text
+        ))
     }
 }
-

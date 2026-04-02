@@ -36,19 +36,11 @@ export const usePriceStore = defineStore("price", () => {
 
   watch(selectedPlanId, (newPlanId) => {
     if (newPlanId !== null) {
-      fetchPriceRules(newPlanId);
+      void fetchPriceRules(newPlanId);
     } else {
       priceRules.value = [];
     }
   });
-
-  const refetchBillingPlans = fetchBillingPlans;
-  const loadBillingPlans = fetchBillingPlans;
-  const refetchPriceRules = () => {
-    if (selectedPlanId.value !== null) {
-      fetchPriceRules(selectedPlanId.value);
-    }
-  };
 
   return {
     billingPlans,
@@ -57,8 +49,5 @@ export const usePriceStore = defineStore("price", () => {
     fetchBillingPlans,
     fetchPriceRules,
     setSelectedPlanId,
-    refetchBillingPlans,
-    loadBillingPlans,
-    refetchPriceRules,
   };
 });

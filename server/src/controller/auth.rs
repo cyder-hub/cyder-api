@@ -1,11 +1,11 @@
-use axum::{middleware, routing::post, Extension}; // Router will be replaced by StateRouter
-use crate::service::app_state::{create_state_router, StateRouter};
+use crate::service::app_state::{StateRouter, create_state_router};
 use crate::utils::{
-    auth::{
-        authorization_refresh_middleware, issue_access_token, issue_refresh_token, RefreshJwtResult,
-    },
     HttpResult,
+    auth::{
+        RefreshJwtResult, authorization_refresh_middleware, issue_access_token, issue_refresh_token,
+    },
 };
+use axum::{Extension, middleware, routing::post}; // Router will be replaced by StateRouter
 
 use super::error::BaseError;
 

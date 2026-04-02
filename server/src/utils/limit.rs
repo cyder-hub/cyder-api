@@ -1,9 +1,9 @@
 use cyder_tools::log::debug; // Removed info, not used in this file
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 // Removed: use crate::controller::proxy::RequestInfo;
-use crate::service::cache::types::CacheAccessControl;
 use crate::schema::enum_def::{Action, RuleScope};
+use crate::service::cache::types::CacheAccessControl;
 
 pub trait Limiter: Sync + Send {
     fn check_limit_strategy(
@@ -89,11 +89,17 @@ impl MemoryLimiter {
         // If no rules matched, apply default_action
         match policy.default_action {
             Action::Allow => {
-                debug!("Request allowed by default action of policy '{}'", policy.name);
+                debug!(
+                    "Request allowed by default action of policy '{}'",
+                    policy.name
+                );
                 Ok(())
             }
             Action::Deny => {
-                debug!("Request denied by default action of policy '{}'", policy.name);
+                debug!(
+                    "Request denied by default action of policy '{}'",
+                    policy.name
+                );
                 Err(format!(
                     "request denied by default policy action from '{}'",
                     policy.name
@@ -115,5 +121,5 @@ impl Limiter for MemoryLimiter {
     }
 }
 
-pub static LIMITER: Lazy<Box<dyn Limiter + Sync + Send>> =
-    Lazy::new(|| Box::new(MemoryLimiter::new()));
+pub static LIMITER: LazyLock<Box<dyn Limiter + Sync + Send>> =
+    LazyLock::new(|| Box::new(MemoryLimiter::new()));

@@ -16,13 +16,9 @@ export const useCustomFieldStore = defineStore("customField", () => {
     }
   }
 
-  const refetchCustomFields = fetchCustomFields;
-  const loadCustomFields = fetchCustomFields;
 
   return {
     customFields,
     fetchCustomFields,
-    refetchCustomFields,
-    loadCustomFields,
   };
 });

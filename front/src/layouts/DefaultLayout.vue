@@ -49,13 +49,13 @@ const isLinkActive = (itemPath: string) => {
           v-if="!isCollapsed"
           class="text-base font-semibold text-gray-900 whitespace-nowrap overflow-hidden flex-1 tracking-tight"
         >
-          {{ t("appHeader") }}
+          {{ t("app.header") }}
         </span>
         <button
           v-if="!isCollapsed"
           @click="toggleSidebar"
           class="p-1 rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors focus:outline-none"
-          :aria-label="t('toggleSidebar')"
+          :aria-label="t('app.toggleSidebar')"
         >
           <PanelLeftClose class="h-4 w-4" />
         </button>
@@ -102,7 +102,7 @@ const isLinkActive = (itemPath: string) => {
         v-if="isCollapsed"
         @click="toggleSidebar"
         class="mx-auto mb-2 p-1.5 rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors focus:outline-none"
-        :aria-label="t('toggleSidebar')"
+        :aria-label="t('app.toggleSidebar')"
       >
         <PanelLeftOpen class="h-4 w-4" />
       </button>

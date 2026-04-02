@@ -1,57 +1,52 @@
 <template>
-  <div class="p-6 space-y-6">
-    <!-- 页面头部 -->
-    <div class="flex justify-between items-start">
-      <div>
-        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ $t("modelAliasPage.title") }}
-        </h1>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("modelAliasPage.description") }}
-        </p>
-      </div>
+  <CrudPageLayout
+    :title="$t('modelAliasPage.title')"
+    :description="$t('modelAliasPage.description')"
+    :loading="loading"
+    :error="error"
+    :empty="!transforms.length"
+  >
+    <template #actions>
       <Button @click="handleOpenAddModal" variant="outline" :disabled="loading">
         <Plus class="h-4 w-4 mr-1.5" />
         {{ $t("modelAliasPage.addModelAlias") }}
       </Button>
-    </div>
+    </template>
 
-    <!-- 加载/错误/空状态 -->
-    <div
-      v-if="loading"
-      class="flex items-center justify-center py-16 border border-gray-200 rounded-lg bg-white"
-    >
-      <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
-      <span class="text-sm text-gray-500">{{
-        $t("modelAliasPage.loading")
-      }}</span>
-    </div>
-
-    <div
-      v-else-if="error"
-      class="flex flex-col items-center justify-center py-20 border border-gray-200 rounded-lg bg-white"
-    >
-      <AlertCircle class="h-10 w-10 stroke-1 text-red-400 mb-4" />
-      <span class="text-sm font-medium text-red-500"
-        >{{ $t("modelAliasPage.errorPrefix") }} {{ error }}</span
+    <template #loading>
+      <div
+        class="flex items-center justify-center py-16 border border-gray-200 rounded-lg bg-white"
       >
-    </div>
+        <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
+        <span class="text-sm text-gray-500">{{
+          $t("modelAliasPage.loading")
+        }}</span>
+      </div>
+    </template>
 
-    <div
-      v-else-if="!transforms.length"
-      class="flex flex-col items-center justify-center py-20 border border-gray-200 rounded-lg bg-white"
-    >
-      <Inbox class="h-10 w-10 stroke-1 text-gray-400 mb-4" />
-      <span class="text-sm font-medium text-gray-500">{{
-        $t("modelAliasPage.noData")
-      }}</span>
-    </div>
+    <template #error="{ error }">
+      <div
+        class="flex flex-col items-center justify-center py-20 border border-gray-200 rounded-lg bg-white"
+      >
+        <AlertCircle class="h-10 w-10 stroke-1 text-red-400 mb-4" />
+        <span class="text-sm font-medium text-red-500"
+          >{{ $t("modelAliasPage.errorPrefix") }} {{ error }}</span
+        >
+      </div>
+    </template>
 
-    <!-- Data Table -->
-    <div
-      v-else
-      class="border border-gray-200 rounded-lg overflow-hidden bg-white"
-    >
+    <template #empty>
+      <div
+        class="flex flex-col items-center justify-center py-20 border border-gray-200 rounded-lg bg-white"
+      >
+        <Inbox class="h-10 w-10 stroke-1 text-gray-400 mb-4" />
+        <span class="text-sm font-medium text-gray-500">{{
+          $t("modelAliasPage.noData")
+        }}</span>
+      </div>
+    </template>
+
+    <div class="border border-gray-200 rounded-lg overflow-hidden bg-white">
       <Table>
         <TableHeader>
           <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
@@ -69,7 +64,7 @@
             >
             <TableHead
               class="text-xs font-medium text-gray-500 uppercase tracking-wider text-right"
-              >{{ $t("actions") }}</TableHead
+              >{{ $t("common.actions") }}</TableHead
             >
           </TableRow>
         </TableHeader>
@@ -78,9 +73,9 @@
             <TableCell class="font-medium text-gray-900">{{
               transform.alias_name
             }}</TableCell>
-            <TableCell class="text-sm">{{
-              transform.map_model_name
-            }}</TableCell>
+            <TableCell class="text-sm"
+              >{{ transform.provider_key }}/{{ transform.model_name }}</TableCell
+            >
             <TableCell>
               <Checkbox
                 :checked="transform.is_enabled"
@@ -96,7 +91,7 @@
                 @click="handleOpenEditModal(transform.id)"
               >
                 <Pencil class="h-3.5 w-3.5 mr-1" />
-                {{ $t("edit") }}
+                {{ $t("common.edit") }}
               </Button>
               <Button
                 variant="ghost"
@@ -107,7 +102,7 @@
                 "
               >
                 <Trash2 class="h-3.5 w-3.5 mr-1" />
-                {{ $t("delete") }}
+                {{ $t("common.delete") }}
               </Button>
             </TableCell>
           </TableRow>
@@ -115,19 +110,20 @@
       </Table>
     </div>
 
-    <!-- Edit/Add Modal -->
-    <Dialog :open="showEditModal" @update:open="setShowEditModal">
-      <DialogContent class="max-w-lg">
-        <DialogHeader>
-          <DialogTitle class="text-lg font-semibold text-gray-900">
-            {{
-              editingTransform.id
-                ? $t("modelAliasPage.modal.titleEdit")
-                : $t("modelAliasPage.modal.titleAdd")
-            }}
-          </DialogTitle>
-        </DialogHeader>
-        <div class="space-y-4">
+    <template #modals>
+      <!-- Edit/Add Modal -->
+      <Dialog :open="showEditModal" @update:open="setShowEditModal">
+        <DialogContent class="max-w-lg">
+          <DialogHeader>
+            <DialogTitle class="text-lg font-semibold text-gray-900">
+              {{
+                editingTransform.id
+                  ? $t("modelAliasPage.modal.titleEdit")
+                  : $t("modelAliasPage.modal.titleAdd")
+              }}
+            </DialogTitle>
+          </DialogHeader>
+          <div class="space-y-4">
           <div class="space-y-1.5">
             <Label class="text-gray-700">
               {{ $t("modelAliasPage.modal.labelAliasName")
@@ -210,20 +206,21 @@
             />
           </div>
         </div>
-        <DialogFooter class="border-t border-gray-100 pt-4 mt-2">
-          <Button
-            @click="handleCloseModal"
-            variant="ghost"
-            class="text-gray-600"
-            >{{ $t("common.cancel") }}</Button
-          >
-          <Button @click="handleSaveTransform" variant="default">{{
-            $t("common.save")
-          }}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  </div>
+          <DialogFooter class="border-t border-gray-100 pt-4 mt-2">
+            <Button
+              @click="handleCloseModal"
+              variant="ghost"
+              class="text-gray-600"
+              >{{ $t("common.cancel") }}</Button
+            >
+            <Button @click="handleSaveTransform" variant="default">{{
+              $t("common.save")
+            }}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </template>
+  </CrudPageLayout>
 </template>
 
 <script setup lang="ts">
@@ -231,6 +228,7 @@ import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
 import { useProviderStore } from "@/store/providerStore";
+import type { ModelAliasListItem, EditingModelAlias } from "@/store/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -257,6 +255,7 @@ import {
 } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import CrudPageLayout from "@/components/CrudPageLayout.vue";
 import {
   Plus,
   Pencil,
@@ -265,27 +264,11 @@ import {
   Inbox,
   AlertCircle,
 } from "lucide-vue-next";
+import { confirm } from "@/lib/confirmController";
+import { toastController } from "@/lib/toastController";
 
 const { t: $t } = useI18n();
 const providerStore = useProviderStore();
-
-interface ModelAlias {
-  id: number;
-  alias_name: string;
-  map_model_name: string;
-  target_model_id: number;
-  is_enabled: boolean;
-  description: string | null;
-  priority: number;
-}
-
-interface EditingModelAlias {
-  id: number | null;
-  alias_name: string;
-  provider_id: string | null;
-  target_model_id: string | null;
-  is_enabled: boolean;
-}
 
 const newModelAliasTemplate = (): EditingModelAlias => ({
   id: null,
@@ -295,7 +278,7 @@ const newModelAliasTemplate = (): EditingModelAlias => ({
   is_enabled: true,
 });
 
-const transforms = ref<ModelAlias[]>([]);
+const transforms = ref<ModelAliasListItem[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
 const showEditModal = ref(false);
@@ -343,18 +326,19 @@ const fetchModelAliassAPI = async () => {
   loading.value = true;
   try {
     const response = await Api.getModelAliasList();
-    const rawAliases: any[] = (response as any) || [];
+    const rawAliases = (response as any) || [];
     transforms.value = rawAliases.map((item: any) => ({
       id: item.id,
       alias_name: item.alias_name,
-      map_model_name: `${item.provider_key}/${item.model_name}`,
+      provider_key: item.provider_key,
+      model_name: item.model_name,
       target_model_id: item.target_model_id,
       is_enabled: item.is_enabled,
       description: item.description,
       priority: item.priority,
     }));
   } catch (err: any) {
-    error.value = err.message || $t("unknownError");
+    error.value = err.message || $t("common.unknownError");
   } finally {
     loading.value = false;
   }
@@ -384,11 +368,11 @@ const handleOpenEditModal = async (id: number) => {
       };
       showEditModal.value = true;
     } else {
-      alert($t("modelAliasPage.alert.loadDetailFailed"));
+      toastController.error($t("modelAliasPage.alert.loadDetailFailed"));
     }
   } catch (err: any) {
     console.error("Failed to fetch model alias detail:", err);
-    alert($t("modelAliasPage.alert.loadDetailFailed"));
+    toastController.error($t("modelAliasPage.alert.loadDetailFailed"));
   }
 };
 
@@ -399,7 +383,7 @@ const handleCloseModal = () => {
 const handleSaveTransform = async () => {
   const transform = editingTransform.value;
   if (!transform.alias_name.trim() || !transform.target_model_id) {
-    alert($t("modelAliasPage.alert.nameAndTargetRequired"));
+    toastController.error($t("modelAliasPage.alert.nameAndTargetRequired"));
     return;
   }
 
@@ -419,16 +403,16 @@ const handleSaveTransform = async () => {
     fetchModelAliassAPI();
   } catch (err: any) {
     console.error("Failed to save model transform:", err);
-    alert(
+    toastController.error(
       $t("modelAliasPage.alert.saveFailed", {
-        error: err.message || $t("unknownError"),
+        error: err.message || $t("common.unknownError"),
       }),
     );
   }
 };
 
 const handleToggleEnable = async (
-  transform: ModelAlias,
+  transform: ModelAliasListItem,
   updatedIsEnabled: boolean,
 ) => {
   const payload = {
@@ -442,24 +426,28 @@ const handleToggleEnable = async (
     fetchModelAliassAPI();
   } catch (err: any) {
     console.error("Failed to toggle status:", err);
-    alert(
+    toastController.error(
       $t("modelAliasPage.alert.toggleFailed", {
-        error: err.message || $t("unknownError"),
+        error: err.message || $t("common.unknownError"),
       }),
     );
   }
 };
 
 const handleDeleteTransform = async (id: number, name: string) => {
-  if (confirm($t("modelAliasPage.confirmDelete", { name: name }))) {
+  if (
+    await confirm({
+      title: $t("modelAliasPage.confirmDelete", { name: name }),
+    })
+  ) {
     try {
       await Api.deleteModelAlias(id);
       fetchModelAliassAPI();
     } catch (err: any) {
       console.error("Failed to delete model transform:", err);
-      alert(
+      toastController.error(
         $t("modelAliasPage.alert.deleteFailed", {
-          error: err.message || $t("unknownError"),
+          error: err.message || $t("common.unknownError"),
         }),
       );
     }

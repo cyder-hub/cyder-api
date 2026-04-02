@@ -17,8 +17,5 @@ export const useProviderStore = defineStore("provider", () => {
     }
   }
 
-  const refetchProviders = fetchProviders;
-  const loadProviders = fetchProviders;
-
-  return { providers, fetchProviders, refetchProviders, loadProviders };
+  return { providers, fetchProviders };
 });

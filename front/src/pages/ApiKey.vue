@@ -1,49 +1,48 @@
 <template>
-  <div class="p-6 space-y-6">
-    <div
-      class="flex flex-col sm:flex-row justify-between items-start sm:items-center space-y-4 sm:space-y-0"
-    >
-      <div>
-        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ $t("apiKeyPage.title") }}
-        </h1>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("apiKeyPage.description") || $t("apiKeyPage.title") }}
-        </p>
-      </div>
+  <CrudPageLayout
+    :title="$t('apiKeyPage.title')"
+    :description="$t('apiKeyPage.description') || $t('apiKeyPage.title')"
+    :loading="loading"
+    :error="error"
+    :empty="!apiKeyStore.apiKeys.length"
+    header-class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4"
+  >
+    <template #actions>
       <Button variant="outline" @click="handleStartEditing()">
         <Plus class="h-4 w-4 mr-1.5" />
         {{ $t("apiKeyPage.addApiKey") }}
       </Button>
-    </div>
+    </template>
 
-    <!-- Data Table -->
-    <div v-if="loading" class="flex flex-col items-center justify-center py-20">
-      <Loader2 class="h-5 w-5 animate-spin text-gray-400 mb-2" />
-      <span class="text-sm font-medium text-gray-500">{{
-        $t("apiKeyPage.loading")
-      }}</span>
-    </div>
-    <div
-      v-else-if="error"
-      class="flex flex-col items-center justify-center py-20"
-    >
-      <div
-        class="text-red-600 bg-red-50 border border-red-200 rounded-lg p-4 max-w-lg text-sm"
-      >
-        {{ $t("apiKeyPage.errorPrefix") }} {{ error }}
+    <template #loading>
+      <div class="flex flex-col items-center justify-center py-20">
+        <Loader2 class="h-5 w-5 animate-spin text-gray-400 mb-2" />
+        <span class="text-sm font-medium text-gray-500">{{
+          $t("apiKeyPage.loading")
+        }}</span>
       </div>
-    </div>
-    <div
-      v-else-if="!apiKeyStore.apiKeys.length"
-      class="flex flex-col items-center justify-center py-20"
-    >
-      <KeyRound class="h-10 w-10 stroke-1 text-gray-400 mb-4" />
-      <span class="text-sm font-medium text-gray-500">{{
-        $t("apiKeyPage.noData")
-      }}</span>
-    </div>
-    <div v-else class="border border-gray-200 rounded-lg overflow-hidden">
+    </template>
+
+    <template #error="{ error }">
+      <div class="flex flex-col items-center justify-center py-20">
+        <div
+          class="text-red-600 bg-red-50 border border-red-200 rounded-lg p-4 max-w-lg text-sm"
+        >
+          {{ $t("apiKeyPage.errorPrefix") }} {{ error }}
+        </div>
+      </div>
+    </template>
+
+    <template #empty>
+      <div class="flex flex-col items-center justify-center py-20">
+        <KeyRound class="h-10 w-10 stroke-1 text-gray-400 mb-4" />
+        <span class="text-sm font-medium text-gray-500">{{
+          $t("apiKeyPage.noData")
+        }}</span>
+      </div>
+    </template>
+
+    <div class="border border-gray-200 rounded-lg overflow-hidden">
       <Table>
         <TableHeader class="bg-gray-50/80 hover:bg-gray-50/80">
           <TableRow>
@@ -160,13 +159,15 @@
       </Table>
     </div>
 
-    <!-- Edit Modal -->
-    <ApiKeyEditModal
-      v-model:isOpen="showEditModal"
-      :initial-data="selectedApiKey"
-      @save-success="handleSaveSuccess"
-    />
-  </div>
+    <template #modals>
+      <!-- Edit Modal -->
+      <ApiKeyEditModal
+        v-model:isOpen="showEditModal"
+        :initial-data="selectedApiKey"
+        @save-success="handleSaveSuccess"
+      />
+    </template>
+  </CrudPageLayout>
 </template>
 
 <script setup lang="ts">
@@ -193,9 +194,12 @@ import {
   Pencil,
   Trash,
 } from "lucide-vue-next";
+import CrudPageLayout from "@/components/CrudPageLayout.vue";
 import ApiKeyEditModal from "@/components/ApiKeyEditModal.vue";
 import { useApiKeyStore } from "@/store/apiKeyStore";
 import { useAccessControlStore } from "@/store/accessControlStore";
+import { toastController } from "@/lib/toastController";
+import { confirm } from "@/lib/confirmController";
 
 const { t: $t } = useI18n();
 
@@ -217,7 +221,7 @@ const fetchData = async () => {
       accessControlStore.fetchPolicies(),
     ]);
   } catch (err: any) {
-    error.value = err.message || $t("unknownError");
+    error.value = err.message || $t("common.unknownError");
   } finally {
     loading.value = false;
   }
@@ -246,9 +250,9 @@ const handleToggleEnable = async (apiKey: any, newVal: boolean) => {
     await apiKeyStore.fetchApiKeys(); // Refetch to update data
   } catch (err: any) {
     console.error("Failed to toggle API key status:", err);
-    alert(
+    toastController.error(
       $t("apiKeyPage.toggleStatusFailed", {
-        error: err.message || $t("unknownError"),
+        error: err.message || $t("common.unknownError"),
       }),
     );
     await apiKeyStore.fetchApiKeys(); // Refetch to revert
@@ -262,13 +266,17 @@ const handleSaveSuccess = async () => {
 };
 
 const handleDeleteApiKey = async (apiKey: any) => {
-  if (confirm($t("apiKeyPage.confirmDelete", { name: apiKey.name }))) {
+  if (
+    await confirm($t("apiKeyPage.confirmDelete", { name: apiKey.name }))
+  ) {
     try {
       await Api.deleteApiKey(apiKey.id);
       await apiKeyStore.fetchApiKeys();
     } catch (err: any) {
       console.error("Failed to delete API key:", err);
-      alert($t("deleteFailed", { error: err.message || $t("unknownError") }));
+      toastController.error(
+        $t("apiKeyPage.deleteFailed", { error: err.message || $t("common.unknownError") }),
+      );
     }
   }
 };
@@ -283,7 +291,7 @@ const copyApiKeyToClipboard = async (apiKeyString: string, keyId: number) => {
     }, 2000);
   } catch (err) {
     console.error("Failed to copy API key: ", err);
-    alert($t("apiKeyPage.copyFailed"));
+    toastController.error($t("apiKeyPage.copyFailed"));
   }
 };
 </script>

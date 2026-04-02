@@ -7,6 +7,9 @@ import type {
   ApiKeyUpdatePayload,
   ApiKeyCreatePayload,
   IssueTokenPayload,
+  ProviderBase,
+  ProviderApiKeyItem,
+  ModelItem,
   ProviderListItem,
   AccessControlPolicyFromAPI,
   AccessControlPayload,
@@ -202,7 +205,7 @@ export const Api = {
   },
 
   // ========== Provider CRUD (Extended) ==========
-  createProvider(payload: ProviderPayload): Promise<void> {
+  createProvider(payload: ProviderPayload): Promise<ProviderBase> {
     return request.post("/ai/manager/api/provider", payload);
   },
   updateProvider(id: number | string, payload: ProviderPayload): Promise<void> {
@@ -214,13 +217,13 @@ export const Api = {
   getProviderDetail(id: number | string): Promise<ProviderListItem> {
     return request.get(`/ai/manager/api/provider/${id}/detail`);
   },
-  getProviderRemoteModels(id: number | string): Promise<any> {
+  getProviderRemoteModels(id: number | string): Promise<unknown> {
     return request.get(`/ai/manager/api/provider/${id}/remote_models`);
   },
   createProviderKey(
     id: number | string,
     payload: ProviderKeyPayload,
-  ): Promise<void> {
+  ): Promise<ProviderApiKeyItem> {
     return request.post(`/ai/manager/api/provider/${id}/provider_key`, payload);
   },
   deleteProviderKey(
@@ -239,7 +242,7 @@ export const Api = {
   },
 
   // ========== Model CRUD ==========
-  createModel(payload: ModelPayload): Promise<void> {
+  createModel(payload: ModelPayload): Promise<ModelItem> {
     return request.post("/ai/manager/api/model", payload);
   },
   updateModel(id: number | string, payload: ModelPayload): Promise<void> {

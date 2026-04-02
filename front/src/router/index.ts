@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from "vue-router";
 import DefaultLayout from "@/layouts/DefaultLayout.vue";
 import LoginLayout from "@/layouts/LoginLayout.vue";
 import { useAuthStore } from "@/store/authStore";
-import axios from "axios";
+import { tryRefreshToken } from "@/services/auth";
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -108,21 +108,10 @@ router.beforeEach(async (to, _from, next) => {
       const authStore = useAuthStore();
       // Proactively refresh access_token if missing (e.g., after reload)
       if (!authStore.accessToken) {
-        try {
-          const response = await axios.post(
-            "/ai/manager/api/auth/refresh_token",
-            {},
-            {
-              headers: { Authorization: `Bearer ${refreshToken}` },
-            },
-          );
-          const newAccessToken = response.data.data;
-          authStore.setAccessToken(newAccessToken);
+        const refreshed = await tryRefreshToken();
+        if (refreshed) {
           next();
-        } catch (error) {
-          console.error("Token refresh failed in router guard:", error);
-          localStorage.removeItem("auth_token");
-          authStore.setAccessToken(null);
+        } else {
           next({ name: "Login" });
         }
       } else {

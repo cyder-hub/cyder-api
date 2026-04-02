@@ -18,6 +18,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import { formatTimestamp } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -60,13 +61,6 @@ const isLoadingPriceRules = ref(false);
 
 const editingData = ref<EditingModelData | null>(null);
 const selectedCustomFieldId = ref<string | null>(null);
-
-const formatTimestamp = (ms: number | undefined | null): string => {
-  if (!ms) return "";
-  const date = new Date(ms);
-  return date.toLocaleString();
-};
-
 const fetchData = async () => {
   if (isNaN(modelId)) {
     toastController.error(
@@ -196,7 +190,7 @@ const handleSaveModel = async () => {
   try {
     await Api.updateModel(editingData.value.id, payload);
     toastController.success(t("modelEditPage.alert.updateSuccess"));
-    providerStore.refetchProviders();
+    providerStore.fetchProviders();
     fetchData();
   } catch (error: any) {
     toastController.error(

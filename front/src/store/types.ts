@@ -163,6 +163,14 @@ export interface ModelAliasListItem {
   priority: number;
 }
 
+export interface EditingModelAlias {
+  id: number | null;
+  alias_name: string;
+  provider_id: string | null;
+  target_model_id: string | null;
+  is_enabled: boolean;
+}
+
 export interface ModelAliasDetail {
   id: number;
   alias_name: string;

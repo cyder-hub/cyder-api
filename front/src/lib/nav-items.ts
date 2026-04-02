@@ -1,4 +1,4 @@
-import { h } from "vue";
+import type { Component } from "vue";
 import {
   LayoutDashboard,
   KeyRound,
@@ -10,45 +10,51 @@ import {
   Server,
 } from "lucide-vue-next";
 
-export const navItems = [
+type NavItem = {
+  path: string;
+  i18nKey: string;
+  icon: Component;
+};
+
+export const navItems: NavItem[] = [
   {
     path: "/dashboard",
     i18nKey: "sidebar.dashboard",
-    icon: h(LayoutDashboard),
+    icon: LayoutDashboard,
   },
   {
     path: "/record",
     i18nKey: "sidebar.record",
-    icon: h(ClipboardList),
+    icon: ClipboardList,
   },
   {
     path: "/provider",
     i18nKey: "sidebar.provider",
-    icon: h(Server),
+    icon: Server,
   },
   {
     path: "/api_key",
     i18nKey: "sidebar.apiKey",
-    icon: h(KeyRound),
+    icon: KeyRound,
   },
   {
     path: "/model_transform",
     i18nKey: "sidebar.modelTransform",
-    icon: h(ArrowRightLeft),
+    icon: ArrowRightLeft,
   },
   {
     path: "/access_control",
     i18nKey: "sidebar.accessControlPolicy",
-    icon: h(Shield),
+    icon: Shield,
   },
   {
     path: "/custom_fields",
     i18nKey: "sidebar.customFields",
-    icon: h(Type),
+    icon: Type,
   },
   {
     path: "/price",
     i18nKey: "sidebar.price",
-    icon: h(DollarSign),
+    icon: DollarSign,
   },
 ];

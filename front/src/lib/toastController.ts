@@ -6,6 +6,7 @@ export const toastController = {
       title,
       description,
       variant: "default",
+      class: "border-gray-900 bg-gray-900 text-white",
     }),
   error: (title: string, description?: string) =>
     toast({
@@ -18,12 +19,13 @@ export const toastController = {
       title,
       description,
       variant: "default",
-      class: "bg-yellow-500 text-black",
+      class: "border-gray-400 bg-gray-100 text-gray-900",
     }),
   info: (title: string, description?: string) =>
     toast({
       title,
       description,
       variant: "default",
+      class: "border-gray-200 bg-white text-gray-900",
     }),
 };

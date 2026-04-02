@@ -4,20 +4,15 @@
     <div class="flex justify-between items-start">
       <div>
         <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ $t("providerPageTitle") }}
+          {{ $t("providerPage.title") }}
         </h1>
         <p class="mt-1 text-sm text-gray-500">
-          {{
-            $t(
-              "providerPageDescription",
-              "Manage AI model providers, API keys, and model lists.",
-            )
-          }}
+          {{ $t("providerPage.description") }}
         </p>
       </div>
       <Button @click="router.push('/provider/new')" variant="outline">
         <Plus class="h-4 w-4 mr-1.5" />
-        {{ $t("addProvider") }}
+        {{ $t("providerPage.addProvider") }}
       </Button>
     </div>
 
@@ -27,7 +22,7 @@
       class="flex items-center justify-center py-16 border border-gray-200 rounded-lg bg-white"
     >
       <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
-      <span class="text-sm text-gray-500">{{ $t("providersLoading") }}</span>
+      <span class="text-sm text-gray-500">{{ $t("providerPage.loading") }}</span>
     </div>
 
     <div
@@ -36,7 +31,7 @@
     >
       <AlertCircle class="h-10 w-10 stroke-1 text-red-400 mb-4" />
       <span class="text-sm font-medium text-red-500">{{
-        $t("providersError", { error: error })
+        $t("providerPage.error", { error: error })
       }}</span>
     </div>
 
@@ -46,7 +41,7 @@
     >
       <Inbox class="h-10 w-10 stroke-1 text-gray-400 mb-4" />
       <span class="text-sm font-medium text-gray-500">{{
-        $t("noProviders")
+        $t("providerPage.noData")
       }}</span>
     </div>
 
@@ -88,7 +83,7 @@
             <div class="flex items-center justify-between text-gray-500">
               <span class="flex items-center">
                 <Key class="w-3.5 h-3.5 mr-1.5 text-gray-400" />
-                {{ $t("providerApiKeys") }}
+                {{ $t("providerPage.table.apiKeys") }}
               </span>
               <span class="text-gray-900 font-medium">{{
                 item.provider_keys.length
@@ -97,7 +92,7 @@
             <div class="flex items-center justify-between text-gray-500">
               <span class="flex items-center">
                 <Network class="w-3.5 h-3.5 mr-1.5 text-gray-400" />
-                {{ $t("tableHeaderUseProxy") }}
+                {{ $t("providerPage.table.useProxy") }}
               </span>
               <div class="flex items-center text-gray-700 font-medium">
                 <CheckCircle2
@@ -116,7 +111,7 @@
           <div>
             <span class="text-gray-500 mb-2.5 flex items-center text-xs">
               <Box class="w-3.5 h-3.5 mr-1.5 text-gray-400" />
-              {{ $t("providerModels") }} ({{ item.models.length }})
+              {{ $t("providerPage.table.models") }} ({{ item.models.length }})
             </span>
             <div class="flex flex-wrap gap-1.5 mt-1.5">
               <Badge
@@ -154,7 +149,7 @@
             @click="router.push(`/provider/edit/${item.provider.id}`)"
           >
             <Pencil class="w-3.5 h-3.5 mr-1.5 text-gray-500" />
-            {{ $t("edit") }}
+            {{ $t("common.edit") }}
           </Button>
           <Button
             variant="ghost"
@@ -163,7 +158,7 @@
             @click="handleDeleteProvider(item.provider)"
           >
             <Trash2 class="w-3.5 h-3.5 mr-1.5" />
-            {{ $t("delete") }}
+            {{ $t("common.delete") }}
           </Button>
         </div>
       </div>
@@ -178,6 +173,7 @@ import { useRouter } from "vue-router";
 import { useProviderStore } from "@/store/providerStore";
 import type { ProviderBase } from "@/store/types";
 import { toastController } from "@/lib/toastController";
+import { confirm } from "@/lib/confirmController";
 import { Api } from "@/services/request";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -209,7 +205,7 @@ const loadData = async () => {
     await store.fetchProviders();
   } catch (err: any) {
     console.error("Failed to fetch providers:", err);
-    error.value = err.message || $t("unknownError", "Unknown Error");
+    error.value = err.message || $t("common.unknownError", "Unknown Error");
   } finally {
     isLoading.value = false;
   }
@@ -220,15 +216,15 @@ onMounted(() => {
 });
 
 const handleDeleteProvider = async (provider: ProviderBase) => {
-  if (confirm($t("confirmDeleteProvider", { name: provider.name }))) {
+  if (await confirm($t("providerPage.confirmDelete", { name: provider.name }))) {
     try {
       await Api.deleteProvider(provider.id);
       toastController.success($t("deleteSuccess", "Deleted successfully"));
       await loadData();
     } catch (err: any) {
       console.error("Failed to delete provider:", err);
-      const errorMessage = err.message || $t("unknownError", "Unknown Error");
-      toastController.error($t("deleteFailed", { error: errorMessage }));
+      const errorMessage = err.message || $t("common.unknownError", "Unknown Error");
+      toastController.error($t("providerPage.deleteFailed", { error: errorMessage }));
     }
   }
 };

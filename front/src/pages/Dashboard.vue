@@ -14,7 +14,7 @@
 
     <div v-if="isLoading" class="flex items-center justify-center py-16">
       <Loader2 class="h-5 w-5 animate-spin mr-2 text-gray-400" />
-      <span class="text-sm font-medium text-gray-500">{{ $t("loading") }}</span>
+      <span class="text-sm font-medium text-gray-500">{{ $t("common.loading") }}</span>
     </div>
     <div v-else-if="error" class="flex flex-col items-center justify-center py-20">
       <AlertCircle class="h-10 w-10 text-red-500 mb-4 stroke-1" />
@@ -165,7 +165,7 @@ const fetchData = async () => {
     todayStats.value = statsData as any;
   } catch (err: any) {
     console.error("Failed to fetch dashboard data:", err);
-    error.value = err.message || $t("unknownError", "Unknown Error");
+    error.value = err.message || $t("common.unknownError", "Unknown Error");
   } finally {
     isLoading.value = false;
   }

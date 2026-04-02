@@ -12,6 +12,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "./ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "./ui/table";
 import type { EChartsOption } from "echarts";
 
 // Type definitions from the original component
@@ -529,15 +537,15 @@ const chartOptions = computed<EChartsOption>(() => {
 </script>
 
 <template>
-  <div class="mt-6 bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+  <div class="mt-6 bg-white border border-gray-200 p-6 rounded-lg">
     <div class="flex flex-wrap justify-between items-center gap-4 mb-4">
       <div class="flex items-baseline space-x-4">
-        <h2 class="text-xl font-semibold text-gray-700 dark:text-gray-200">
+        <h2 class="text-lg font-semibold text-gray-900">
           {{ t("dashboard.usageStats.title") }}
         </h2>
         <span
           v-if="totalMetricSumText"
-          class="text-lg font-medium text-gray-600 dark:text-gray-300"
+          class="text-lg font-medium text-gray-600"
         >
           {{ t("dashboard.usageStats.total") }}: {{ totalMetricSumText }}
         </span>
@@ -602,60 +610,44 @@ const chartOptions = computed<EChartsOption>(() => {
     <div v-else-if="usageData">
       <ECharts :option="chartOptions" style="height: 400px" />
       <div v-if="sortedModelSum.length > 0" class="mt-4">
-        <h3 class="text-lg font-semibold text-gray-700 dark:text-gray-200 mb-2">
+        <h3 class="text-lg font-semibold text-gray-700 mb-2">
           {{ t("dashboard.usageStats.summary.title") }}
         </h3>
-        <div
-          class="max-h-60 overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-md"
-        >
-          <table
-            class="min-w-full divide-y divide-gray-200 dark:divide-gray-700"
-          >
-            <thead class="bg-gray-50 dark:bg-gray-700 sticky top-0 z-10">
-              <tr>
-                <th
-                  scope="col"
-                  class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
-                >
+        <div class="max-h-60 overflow-y-auto border border-gray-200 rounded-md">
+          <Table>
+            <TableHeader class="bg-gray-50 sticky top-0 z-10">
+              <TableRow>
+                <TableHead>
                   {{ t("dashboard.usageStats.summary.model") }}
-                </th>
-                <th
-                  scope="col"
-                  class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
-                >
+                </TableHead>
+                <TableHead>
                   {{ t(`dashboard.usageStats.metrics.${selectedMetric}`) }}
                   <span v-if="selectedMetric !== 'total_cost'">
                     ({{ t("dashboard.usageStats.total") }})</span
                   >
-                </th>
-              </tr>
-            </thead>
-            <tbody
-              class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700"
-            >
-              <tr
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow
                 v-for="item in sortedModelSum"
                 :key="
                   Array.isArray(item) ? item[0] : item.modelName + item.currency
                 "
               >
-                <td
-                  class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100"
-                >
+                <TableCell class="font-medium text-gray-900">
                   {{ Array.isArray(item) ? item[0] : item.modelName }}
-                </td>
-                <td
-                  class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400"
-                >
+                </TableCell>
+                <TableCell class="text-gray-500">
                   {{
                     Array.isArray(item)
                       ? formatMetric(item[1], selectedMetric)
                       : formatMetric(item.sum, "total_cost", item.currency)
                   }}
-                </td>
-              </tr>
-            </tbody>
-          </table>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
         </div>
       </div>
     </div>

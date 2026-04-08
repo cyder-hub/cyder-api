@@ -1,0 +1,17 @@
+[
+  {
+    "data": "{\"id\":\"chatcmpl_compat_1\",\"object\":\"chat.completion.chunk\",\"created\":1710000300,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}],\"usage\":null}"
+  },
+  {
+    "data": "{\"id\":\"chatcmpl_compat_1\",\"object\":\"chat.completion.chunk\",\"created\":1710000301,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_compat_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}],\"usage\":null}"
+  },
+  {
+    "data": "{\"id\":\"chatcmpl_compat_1\",\"object\":\"chat.completion.chunk\",\"created\":1710000302,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Boston\\\"}\"}}]},\"finish_reason\":null}],\"usage\":null}"
+  },
+  {
+    "data": "{\"id\":\"chatcmpl_compat_1\",\"object\":\"chat.completion.chunk\",\"created\":1710000303,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"One moment.\"},\"finish_reason\":null}],\"usage\":null}"
+  },
+  {
+    "data": "{\"id\":\"chatcmpl_compat_1\",\"object\":\"chat.completion.chunk\",\"created\":1710000304,\"model\":\"deepseek-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":5,\"total_tokens\":11}}"
+  }
+]

@@ -170,7 +170,7 @@ fn create_ollama_router() -> StateRouter {
 fn create_responses_router() -> StateRouter {
     create_state_router()
         .route(
-            "/",
+            "/responses",
             any(
                 |State(app_state),
                  Query(query_params): Query<HashMap<String, String>>,
@@ -199,11 +199,39 @@ fn create_responses_router() -> StateRouter {
         )
 }
 
+fn create_gemini_router() -> StateRouter {
+    create_state_router()
+        .route(
+            "/models",
+            get(
+                |State(app_state),
+                 Query(params): Query<HashMap<String, String>>,
+                 request: Request<Body>| async move {
+                    list_models_handler(app_state, params, request, LlmApiType::Gemini).await
+                },
+            ),
+        )
+        .route(
+            "/models/{*model_action_segment}",
+            any(
+                |Path(path_segment): Path<String>,
+                 Query(query_params): Query<HashMap<String, String>>,
+                 State(app_state),
+                 ConnectInfo(addr),
+                 request: Request<Body>| async move {
+                    handle_gemini_request(app_state, addr, path_segment, query_params, request)
+                        .await
+                },
+            ),
+        )
+}
+
 pub fn create_proxy_router() -> StateRouter {
     let openai_router = create_openai_router();
     let anthropic_router = create_anthropic_router();
     let ollama_router = create_ollama_router();
     let responses_router = create_responses_router();
+    let gemini_router = create_gemini_router();
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -216,28 +244,7 @@ pub fn create_proxy_router() -> StateRouter {
         .nest("/ollama", ollama_router)
         .nest("/responses", responses_router.clone())
         .nest("/responses/v1", responses_router)
-        .route(
-            "/gemini/v1beta/models", // Exact match for listing models
-            get(
-                |State(app_state),
-                 Query(params): Query<HashMap<String, String>>,
-                 request: Request<Body>| async move {
-                    list_models_handler(app_state, params, request, LlmApiType::Gemini).await
-                },
-            ),
-        )
-        .route(
-            "/gemini/v1beta/models/{*model_action_segment}", // Wildcard for model actions
-            any(
-                |Path(path_segment): Path<String>,
-                 Query(query_params): Query<HashMap<String, String>>,
-                 State(app_state),
-                 ConnectInfo(addr),
-                 request: Request<Body>| async move {
-                    handle_gemini_request(app_state, addr, path_segment, query_params, request)
-                        .await
-                },
-            ),
-        )
+        .nest("/gemini/v1beta", gemini_router.clone())
+        .nest("/gemini/v1", gemini_router)
         .layer(cors)
 }

@@ -38,7 +38,7 @@ pub async fn unified_proxy_handler(
 
     // Step 1: Authenticate the request based on API type.
     let system_api_key = match api_type {
-        LlmApiType::Openai | LlmApiType::Responses => {
+        LlmApiType::Openai | LlmApiType::Responses | LlmApiType::GeminiOpenai => {
             authenticate_openai_request(&original_headers, &query_params, &app_state).await?
         }
         LlmApiType::Anthropic => {
@@ -103,7 +103,7 @@ pub async fn unified_proxy_handler(
 
     // Step 5: Prepare the downstream request details (URL, headers, body).
     let (final_url, final_headers, final_body_value, provider_api_key_id) = match target_api_type {
-        LlmApiType::Openai => prepare_llm_request(
+        LlmApiType::Openai | LlmApiType::GeminiOpenai => prepare_llm_request(
             &provider,
             &model,
             data,

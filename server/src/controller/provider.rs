@@ -295,7 +295,7 @@ async fn build_provider_check_request(
                 }),
             }
         }
-        ProviderType::Openai | ProviderType::Responses => {
+        ProviderType::Openai | ProviderType::Responses | ProviderType::GeminiOpenai => {
             headers.insert(AUTHORIZATION, header_value(&format!("Bearer {}", api_key))?);
             ProviderCheckRequest {
                 url: format_openai_check_url(provider),
@@ -725,6 +725,37 @@ mod tests {
             &header_value("Bearer sk-test").unwrap()
         );
         assert_eq!(request.body["model"], "gpt-4o-mini");
+        assert_eq!(request.body["messages"][0]["content"], "hi");
+    }
+
+    #[tokio::test]
+    async fn gemini_openai_check_request_uses_openai_chat_completions() {
+        let provider = sample_provider(
+            ProviderType::GeminiOpenai,
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        );
+        let request = super::build_provider_check_request(
+            &reqwest::Client::new(),
+            &provider,
+            0,
+            "sk-gemini",
+            "gemini-2.5-flash",
+        )
+        .await
+        .expect("request should build");
+
+        assert_eq!(
+            request.url,
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
+        assert_eq!(
+            request
+                .headers
+                .get(reqwest::header::AUTHORIZATION)
+                .expect("auth header"),
+            &header_value("Bearer sk-gemini").unwrap()
+        );
+        assert_eq!(request.body["model"], "gemini-2.5-flash");
         assert_eq!(request.body["messages"][0]["content"], "hi");
     }
 

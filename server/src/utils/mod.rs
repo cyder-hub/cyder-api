@@ -5,7 +5,6 @@ use axum::{
 };
 use cyder_tools::snow_flake::Snowflake;
 use serde::Serialize;
-use serde_json::{Value, json};
 use std::sync::LazyLock;
 
 pub mod auth;
@@ -32,25 +31,6 @@ where
 {
     fn into_response(self) -> Response {
         Json(self).into_response()
-    }
-}
-
-pub fn process_stream_options(data: &mut Value) {
-    let is_stream = if let Some(stream) = data.get("stream") {
-        stream.is_boolean() && stream.as_bool().unwrap_or(false) == true
-    } else {
-        false
-    };
-    if is_stream {
-        if let Some(stream_options) = data.get_mut("stream_options") {
-            if let Some(include_usage) = stream_options.get_mut("include_usage") {
-                *include_usage = Value::Bool(true);
-            } else {
-                stream_options["include_usage"] = Value::Bool(true);
-            }
-        } else {
-            data["stream_options"] = json!({ "include_usage": true });
-        }
     }
 }
 

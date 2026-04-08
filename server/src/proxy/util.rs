@@ -105,16 +105,14 @@ pub(super) fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInf
     })
 }
 
-// Determines the target API type based on the provider type.
 pub(super) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType {
-    if provider.provider_type == ProviderType::Vertex
-        || provider.provider_type == ProviderType::Gemini
-    {
-        LlmApiType::Gemini
-    } else if provider.provider_type == ProviderType::Ollama {
-        LlmApiType::Ollama
-    } else {
-        LlmApiType::Openai
+    match provider.provider_type {
+        ProviderType::Vertex | ProviderType::Gemini => LlmApiType::Gemini,
+        ProviderType::Ollama => LlmApiType::Ollama,
+        ProviderType::Anthropic => LlmApiType::Anthropic,
+        ProviderType::Responses => LlmApiType::Responses,
+        ProviderType::GeminiOpenai => LlmApiType::GeminiOpenai,
+        ProviderType::Openai | ProviderType::VertexOpenai => LlmApiType::Openai,
     }
 }
 
@@ -158,5 +156,30 @@ pub(super) fn calculate_llm_request_body_for_log(
         }
     } else {
         Ok(Some(final_body_bytes.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::determine_target_api_type;
+    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::service::cache::types::CacheProvider;
+
+    #[test]
+    fn determine_target_api_type_maps_gemini_openai_separately() {
+        let provider = CacheProvider {
+            id: 1,
+            provider_key: "provider".to_string(),
+            name: "provider".to_string(),
+            endpoint: "https://example.com".to_string(),
+            use_proxy: false,
+            provider_type: ProviderType::GeminiOpenai,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        };
+
+        assert_eq!(
+            determine_target_api_type(&provider),
+            crate::schema::enum_def::LlmApiType::GeminiOpenai
+        );
     }
 }

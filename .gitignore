@@ -19,3 +19,5 @@ diesel.toml
 .idea
 .vscode
 .aider*
+
+task

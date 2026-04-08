@@ -9,13 +9,13 @@ use serde_json::{Value, json};
 
 use super::ProxyError;
 use crate::{
-    schema::enum_def::{FieldPlacement, FieldType, ProviderType},
+    schema::enum_def::{FieldPlacement, FieldType, LlmApiType, ProviderType},
     service::{
         app_state::{AppState, GroupItemSelectionStrategy},
         cache::types::{CacheCustomField, CacheModel, CacheProvider},
+        transform::finalize_request_data,
         vertex::get_vertex_token,
     },
-    utils::process_stream_options,
 };
 use cyder_tools::log::{debug, error};
 
@@ -241,7 +241,7 @@ pub async fn prepare_llm_request(
         obj.insert("model".to_string(), json!(real_model_name_str));
     }
 
-    process_stream_options(&mut data);
+    data = finalize_request_data(data, LlmApiType::Openai, &provider.provider_type, path);
 
     Ok((url.to_string(), headers, data, creds.key_id))
 }

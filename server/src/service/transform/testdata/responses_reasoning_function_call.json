@@ -1,0 +1,41 @@
+[
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.message.start\",\"id\":\"resp_fixture_1\",\"role\":\"assistant\"}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.reasoning.start\",\"index\":0}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.reasoning.delta\",\"index\":0,\"text\":\"Considering the weather source.\"}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.reasoning.stop\",\"index\":0}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.tool_call.start\",\"index\":1,\"id\":\"call_1\",\"name\":\"lookup_weather\"}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.tool_call.arguments.delta\",\"index\":1,\"id\":\"call_1\",\"name\":\"lookup_weather\",\"arguments\":\"{\\\"city\\\":\\\"Boston\\\"}\"}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.tool_call.stop\",\"index\":1,\"id\":\"call_1\"}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.content_block.start\",\"index\":2,\"kind\":\"text\"}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.content_block.delta\",\"index\":2,\"text\":\"Let me check.\"}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.content_block.stop\",\"index\":2}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.message.delta\",\"finish_reason\":\"tool_calls\"}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.usage\",\"usage\":{\"input_tokens\":10,\"output_tokens\":6,\"total_tokens\":16}}}"
+  },
+  {
+    "data": "{\"id\":\"resp_fixture_1\",\"model\":\"gpt-4.1\",\"delta\":{\"type\":\"response.message.stop\"}}"
+  }
+]

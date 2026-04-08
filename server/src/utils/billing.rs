@@ -17,7 +17,7 @@ pub struct UsageInfo {
 
 pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<UsageInfo> {
     match api_type {
-        LlmApiType::Openai => {
+        LlmApiType::Openai | LlmApiType::GeminiOpenai => {
             let usage_val = response_body.get("usage");
             if let Some(usage) = usage_val {
                 if usage.is_null() {
@@ -133,7 +133,78 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 None
             }
         }
-        _ => return None,
+        LlmApiType::Responses => {
+            let usage_val = response_body
+                .get("usage")
+                .or_else(|| response_body.get("response").and_then(|r| r.get("usage")));
+            if let Some(usage) = usage_val {
+                if usage.is_null() {
+                    return None;
+                }
+                let input_tokens = usage
+                    .get("input_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let output_tokens = usage
+                    .get("output_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let total_tokens = usage
+                    .get("total_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+
+                let cached_tokens = usage
+                    .get("input_tokens_details")
+                    .and_then(|details| details.get("cached_tokens"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+
+                let reasoning_tokens = usage
+                    .get("output_tokens_details")
+                    .and_then(|details| details.get("reasoning_tokens"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+
+                Some(UsageInfo {
+                    input_tokens,
+                    output_tokens,
+                    input_image_tokens: 0,
+                    output_image_tokens: 0,
+                    cached_tokens,
+                    reasoning_tokens,
+                    total_tokens,
+                })
+            } else {
+                None
+            }
+        }
+        LlmApiType::Ollama => {
+            let prompt_tokens = response_body
+                .get("prompt_eval_count")
+                .and_then(Value::as_i64)
+                .map(|v| v as i32);
+            let completion_tokens = response_body
+                .get("eval_count")
+                .and_then(Value::as_i64)
+                .map(|v| v as i32);
+
+            if prompt_tokens.is_some() || completion_tokens.is_some() {
+                let p_tokens = prompt_tokens.unwrap_or(0);
+                let c_tokens = completion_tokens.unwrap_or(0);
+                Some(UsageInfo {
+                    input_tokens: p_tokens,
+                    output_tokens: c_tokens,
+                    input_image_tokens: 0,
+                    output_image_tokens: 0,
+                    cached_tokens: 0,
+                    reasoning_tokens: 0,
+                    total_tokens: p_tokens + c_tokens,
+                })
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -198,4 +269,83 @@ pub fn calculate_cost(usage_info: &UsageInfo, price_rules: &[CachePriceRule]) ->
 
     debug!("[calculate_cost] Final calculated cost: {}", total_cost);
     total_cost
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{UsageInfo, calculate_cost, parse_usage_info};
+    use crate::schema::enum_def::LlmApiType;
+    use crate::service::cache::types::CachePriceRule;
+
+    #[test]
+    fn parse_usage_info_supports_gemini_openai_like_openai() {
+        let response = json!({
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 21,
+                "completion_tokens_details": {
+                    "reasoning_tokens": 3
+                }
+            }
+        });
+
+        let usage = parse_usage_info(&response, LlmApiType::GeminiOpenai).expect("usage");
+        assert_eq!(
+            usage,
+            UsageInfo {
+                input_tokens: 11,
+                output_tokens: 7,
+                input_image_tokens: 0,
+                output_image_tokens: 0,
+                cached_tokens: 0,
+                reasoning_tokens: 3,
+                total_tokens: 21,
+            }
+        );
+    }
+
+    #[test]
+    fn calculate_cost_keeps_existing_behavior() {
+        let usage = UsageInfo {
+            input_tokens: 2,
+            output_tokens: 3,
+            input_image_tokens: 0,
+            output_image_tokens: 0,
+            cached_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 5,
+        };
+
+        let rules = vec![
+            CachePriceRule {
+                effective_from: 0,
+                effective_until: None,
+                period_start_seconds_utc: None,
+                period_end_seconds_utc: None,
+                usage_type: "PROMPT".to_string(),
+                media_type: String::new(),
+                condition_had_reasoning: None,
+                tier_from_tokens: None,
+                tier_to_tokens: None,
+                price_in_micro_units: Some(10),
+            },
+            CachePriceRule {
+                effective_from: 0,
+                effective_until: None,
+                period_start_seconds_utc: None,
+                period_end_seconds_utc: None,
+                usage_type: "COMPLETION".to_string(),
+                media_type: String::new(),
+                condition_had_reasoning: None,
+                tier_from_tokens: None,
+                tier_to_tokens: None,
+                price_in_micro_units: Some(20),
+            },
+        ];
+
+        assert_eq!(calculate_cost(&usage, &rules), 80);
+    }
 }

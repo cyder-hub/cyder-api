@@ -15,6 +15,7 @@ pub enum ProviderType {
     Ollama,
     Anthropic,
     Responses,
+    GeminiOpenai,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
@@ -28,6 +29,7 @@ pub enum LlmApiType {
     Ollama,
     Anthropic,
     Responses,
+    GeminiOpenai,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]

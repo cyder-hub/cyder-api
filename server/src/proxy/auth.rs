@@ -84,34 +84,22 @@ pub async fn authenticate_anthropic_request(
     headers: &HeaderMap,
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, ProxyError> {
-    debug!("Authenticating Anthropic request");
-    let system_api_key_str = match headers.get("x-api-key") {
-        Some(header_value) => match header_value.to_str() {
-            Ok(key) => key.to_string(),
-            Err(_) => {
-                warn!("Invalid characters in x-api-key header");
-                return Err(ProxyError::BadRequest(
-                    "Invalid characters in x-api-key header".to_string(),
-                ));
-            }
-        },
-        None => {
-            warn!("Missing API key for Anthropic request");
-            return Err(ProxyError::Unauthorized(
-                "Missing API key. Provide it in 'x-api-key' header.".to_string(),
-            ));
-        }
-    };
-    check_system_api_key(
-        app_state,
-        &system_api_key_str,
-        ApiKeyPosition::XApiKeyHeader,
-    )
-    .await
-    .map_err(|err_msg| {
-        warn!("Anthropic system key check failed: {}", err_msg);
-        ProxyError::Unauthorized(err_msg)
-    })
+    debug!(
+        "Authenticating Anthropic request: x-api-key={}, authorization={}",
+        headers.contains_key("x-api-key"),
+        headers.contains_key(AUTHORIZATION)
+    );
+    let (system_api_key_str, position) =
+        parse_anthropic_api_key_from_headers(headers).map_err(|err| {
+            warn!("Anthropic auth failed: {}", err);
+            err
+        })?;
+    check_system_api_key(app_state, &system_api_key_str, position)
+        .await
+        .map_err(|err_msg| {
+            warn!("Anthropic system key check failed: {}", err_msg);
+            ProxyError::Unauthorized(err_msg)
+        })
 }
 
 // Authenticates an Ollama-style request (Bearer token or query param, same as OpenAI).
@@ -177,6 +165,39 @@ pub async fn check_access_control(
 }
 
 const BEARER_PREFIX: &str = "Bearer ";
+
+fn parse_anthropic_api_key_from_headers(
+    headers: &HeaderMap,
+) -> Result<(String, ApiKeyPosition), ProxyError> {
+    if let Some(header_value) = headers.get("x-api-key") {
+        return match header_value.to_str() {
+            Ok(key) => Ok((key.to_string(), ApiKeyPosition::XApiKeyHeader)),
+            Err(_) => Err(ProxyError::BadRequest(
+                "Invalid characters in x-api-key header".to_string(),
+            )),
+        };
+    }
+
+    match headers.get(AUTHORIZATION) {
+        Some(header_value) => match header_value.to_str() {
+            Ok(auth_str) => match auth_str.strip_prefix(BEARER_PREFIX) {
+                Some(token) if !token.is_empty() => {
+                    Ok((token.to_string(), ApiKeyPosition::AuthorizationHeader))
+                }
+                _ => Err(ProxyError::Unauthorized(
+                    "Invalid Authorization header. Expected 'Bearer <api-key>'.".to_string(),
+                )),
+            },
+            Err(_) => Err(ProxyError::BadRequest(
+                "Invalid characters in Authorization header".to_string(),
+            )),
+        },
+        None => Err(ProxyError::Unauthorized(
+            "Missing API key. Provide it in 'x-api-key' header or 'Authorization: Bearer <api-key>' header.".to_string(),
+        )),
+    }
+}
+
 pub fn parse_token_from_request(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
@@ -223,5 +244,62 @@ pub async fn check_system_api_key(
         }
     } else {
         Err("Invalid api key format. Must start with 'cyder-'".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ApiKeyPosition, ProxyError, parse_anthropic_api_key_from_headers};
+    use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
+
+    #[test]
+    fn anthropic_auth_prefers_x_api_key_over_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_static("cyder-from-x-api-key"),
+        );
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer cyder-from-authorization"),
+        );
+
+        let (key, position) = parse_anthropic_api_key_from_headers(&headers).unwrap();
+
+        assert_eq!(key, "cyder-from-x-api-key");
+        assert_eq!(position, ApiKeyPosition::XApiKeyHeader);
+    }
+
+    #[test]
+    fn anthropic_auth_falls_back_to_authorization_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer cyder-from-authorization"),
+        );
+
+        let (key, position) = parse_anthropic_api_key_from_headers(&headers).unwrap();
+
+        assert_eq!(key, "cyder-from-authorization");
+        assert_eq!(position, ApiKeyPosition::AuthorizationHeader);
+    }
+
+    #[test]
+    fn anthropic_auth_rejects_invalid_authorization_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Basic abc"));
+
+        let err = parse_anthropic_api_key_from_headers(&headers).unwrap_err();
+
+        assert!(matches!(err, ProxyError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn anthropic_auth_requires_header_when_none_present() {
+        let headers = HeaderMap::new();
+
+        let err = parse_anthropic_api_key_from_headers(&headers).unwrap_err();
+
+        assert!(matches!(err, ProxyError::Unauthorized(_)));
     }
 }

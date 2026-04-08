@@ -260,7 +260,7 @@ pub async fn list_models_handler(
     // 1. Authenticate based on api_type
     let original_headers = request.headers().clone();
     let api_key_check_result = match api_type {
-        LlmApiType::Openai => {
+        LlmApiType::Openai | LlmApiType::Responses | LlmApiType::GeminiOpenai => {
             authenticate_openai_request(&original_headers, &params, &app_state).await?
         }
         LlmApiType::Gemini => {
@@ -282,7 +282,10 @@ pub async fn list_models_handler(
 
     // 3. Format response based on api_type
     let response = match api_type {
-        LlmApiType::Openai | LlmApiType::Anthropic => {
+        LlmApiType::Openai
+        | LlmApiType::Responses
+        | LlmApiType::Anthropic
+        | LlmApiType::GeminiOpenai => {
             let mut available_models: Vec<ModelInfo> = all_accessible_models
                 .into_iter()
                 .map(|m| ModelInfo {

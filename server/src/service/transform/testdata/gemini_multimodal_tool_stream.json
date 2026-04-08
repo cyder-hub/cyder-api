@@ -1,0 +1,5 @@
+[
+  {
+    "data": "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"I found this.\"},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"aGVsbG8=\"}},{\"functionCall\":{\"name\":\"lookup_weather\",\"args\":{\"city\":\"Boston\"}}}]},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":11,\"candidatesTokenCount\":7,\"totalTokenCount\":18}}"
+  }
+]

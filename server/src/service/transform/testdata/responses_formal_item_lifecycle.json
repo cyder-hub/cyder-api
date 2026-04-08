@@ -1,0 +1,32 @@
+[
+  {
+    "data": "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_formal_1\",\"object\":\"response\",\"created_at\":1710000200,\"completed_at\":null,\"status\":\"in_progress\",\"incomplete_details\":null,\"model\":\"gpt-4.1\",\"previous_response_id\":null,\"instructions\":null,\"output\":[],\"error\":null,\"tools\":[],\"tool_choice\":\"auto\",\"truncation\":\"disabled\",\"parallel_tool_calls\":true,\"text\":{\"format\":{\"type\":\"text\"}},\"top_p\":1.0,\"presence_penalty\":0.0,\"frequency_penalty\":0.0,\"top_logprobs\":0,\"temperature\":1.0,\"reasoning\":null,\"usage\":null,\"max_output_tokens\":null,\"max_tool_calls\":null,\"store\":false,\"background\":false,\"service_tier\":\"default\",\"metadata\":{},\"safety_identifier\":null,\"prompt_cache_key\":null}}"
+  },
+  {
+    "data": "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_formal_1\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}]}}"
+  },
+  {
+    "data": "{\"type\":\"response.content_part.added\",\"item_id\":\"msg_formal_1\",\"content_index\":0}"
+  },
+  {
+    "data": "{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_formal_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Need weather.\"}"
+  },
+  {
+    "data": "{\"type\":\"response.content_part.done\",\"item_id\":\"msg_formal_1\",\"content_index\":0}"
+  },
+  {
+    "data": "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_formal_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Need weather.\",\"annotations\":[]}]}}"
+  },
+  {
+    "data": "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_formal_1\",\"call_id\":\"call_formal_1\",\"name\":\"lookup_weather\",\"arguments\":\"\",\"status\":\"in_progress\"}}"
+  },
+  {
+    "data": "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_formal_1\",\"output_index\":1,\"name\":\"lookup_weather\",\"delta\":\"{\\\"city\\\":\\\"Boston\\\"}\"}"
+  },
+  {
+    "data": "{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_formal_1\",\"call_id\":\"call_formal_1\",\"name\":\"lookup_weather\",\"arguments\":\"{\\\"city\\\":\\\"Boston\\\"}\",\"status\":\"completed\"}}"
+  },
+  {
+    "data": "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_formal_1\",\"object\":\"response\",\"created_at\":1710000200,\"completed_at\":1710000205,\"status\":\"completed\",\"incomplete_details\":null,\"model\":\"gpt-4.1\",\"previous_response_id\":null,\"instructions\":null,\"output\":[{\"type\":\"message\",\"id\":\"msg_formal_1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Need weather.\",\"annotations\":[]}]},{\"type\":\"function_call\",\"id\":\"fc_formal_1\",\"call_id\":\"call_formal_1\",\"name\":\"lookup_weather\",\"arguments\":\"{\\\"city\\\":\\\"Boston\\\"}\",\"status\":\"completed\"}],\"error\":null,\"tools\":[],\"tool_choice\":\"auto\",\"truncation\":\"disabled\",\"parallel_tool_calls\":true,\"text\":{\"format\":{\"type\":\"text\"}},\"top_p\":1.0,\"presence_penalty\":0.0,\"frequency_penalty\":0.0,\"top_logprobs\":0,\"temperature\":1.0,\"reasoning\":null,\"usage\":{\"input_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":14},\"max_output_tokens\":null,\"max_tool_calls\":null,\"store\":false,\"background\":false,\"service_tier\":\"default\",\"metadata\":{},\"safety_identifier\":null,\"prompt_cache_key\":null}}"
+  }
+]

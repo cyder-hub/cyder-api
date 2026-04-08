@@ -91,7 +91,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const providerTypes = ["OPENAI", "GEMINI", "VERTEX", "VERTEX_OPENAI", "OLLAMA"];
+const providerTypes = [
+  "OPENAI",
+  "GEMINI",
+  "GEMINI_OPENAI",
+  "VERTEX",
+  "VERTEX_OPENAI",
+  "ANTHROPIC",
+  "RESPONSES",
+  "OLLAMA",
+];
 
 const { t: $t } = useI18n();
 const providerStore = useProviderStore();

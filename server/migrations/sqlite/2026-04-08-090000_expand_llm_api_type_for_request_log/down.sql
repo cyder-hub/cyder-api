@@ -1,0 +1,3 @@
+-- No-op.
+-- This migration intentionally relaxes SQLite constraints for api_type fields.
+-- Reverting to the previous stricter CHECK constraints is not supported automatically.

@@ -133,7 +133,7 @@ pub async fn handle_gemini_request(
     check_access_control(&system_api_key, &provider, &model, &app_state).await?;
 
     let (final_url, final_headers, final_body_value, provider_api_key_id) = match target_api_type {
-        LlmApiType::Openai => {
+        LlmApiType::Openai | LlmApiType::GeminiOpenai => {
             prepare_llm_request(
                 &provider,
                 &model,

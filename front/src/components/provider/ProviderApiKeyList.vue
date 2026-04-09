@@ -1,58 +1,164 @@
 <template>
-  <div class="space-y-4 pt-4 border-t border-gray-100">
-    <div class="flex justify-between items-center">
-      <h3 class="text-lg font-semibold text-gray-900">
-        {{ $t("providerEditPage.sectionApiKeys") }}
-      </h3>
+  <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <h3 class="text-lg font-semibold text-gray-900">
+          {{ $t("providerEditPage.sectionApiKeys") }}
+        </h3>
+        <p class="mt-1 text-sm text-gray-500">
+          {{ editingData.provider_keys.length }} items
+        </p>
+      </div>
       <Button
         variant="outline"
         size="sm"
+        class="w-full sm:w-auto"
         @click="emit('checkBatch')"
         :disabled="!editingData.id || editingData.provider_keys.length === 0"
       >
-        <Check class="h-4 w-4 mr-1.5" />
+        <Check class="mr-1.5 h-4 w-4" />
         {{ $t("providerEditPage.alert.buttonCheckAll") }}
       </Button>
     </div>
 
-    <div class="border border-gray-200 rounded-lg overflow-hidden">
-      <!-- Header -->
-      <div class="grid grid-cols-[2fr_1fr_auto] gap-4 items-center px-4 py-3 bg-gray-50/80 border-b border-gray-200">
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ $t("providerEditPage.tableHeaderApiKey") }}</span>
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ $t("providerEditPage.tableHeaderDescription") }}</span>
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider text-right">{{ $t('common.actions') }}</span>
-      </div>
+    <div v-if="editingData.provider_keys.length === 0" class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10">
+      <Key class="mb-2 h-10 w-10 stroke-1 text-gray-400" />
+      <span class="text-sm font-medium text-gray-500">{{ $t('providerEditPage.alert.noApiKeys') }}</span>
+    </div>
 
-      <div v-if="editingData.provider_keys.length === 0" class="flex flex-col items-center justify-center py-10">
-        <Key class="h-10 w-10 stroke-1 text-gray-400 mb-2" />
-        <span class="text-sm font-medium text-gray-500">{{ $t('providerEditPage.alert.noApiKeys') }}</span>
-      </div>
-
-      <!-- API Key rows -->
-      <div
+    <div v-else class="space-y-3 md:hidden">
+      <MobileCrudCard
         v-for="(keyItem, index) in editingData.provider_keys"
         :key="index"
-        class="grid grid-cols-[2fr_1fr_auto] gap-4 items-center px-4 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50/50 transition-colors"
+        :title="keyItem.description || `API Key ${index + 1}`"
+        :description="keyPreview(keyItem.api_key)"
+      >
+        <div class="space-y-3">
+          <div class="space-y-1.5">
+            <Label class="text-gray-700">
+              {{ $t("providerEditPage.tableHeaderApiKey") }}
+            </Label>
+            <Input
+              v-model="keyItem.api_key"
+              :disabled="!!keyItem.id"
+              :placeholder="$t('providerEditPage.placeholderApiKey')"
+              :type="editingData.provider_type === 'VERTEX' || !!keyItem.id ? 'text' : 'password'"
+              class="font-mono text-sm"
+            />
+          </div>
+          <div class="space-y-1.5">
+            <Label class="text-gray-700">
+              {{ $t("providerEditPage.tableHeaderDescription") }}
+            </Label>
+            <Input
+              :model-value="keyItem.description ?? ''"
+              :disabled="!!keyItem.id && !keyItem.isEditing"
+              :placeholder="$t('providerEditPage.placeholderDescription')"
+              class="text-sm"
+              @update:model-value="(v: string | number) => (keyItem.description = String(v) || null)"
+            />
+          </div>
+        </div>
+
+        <template #header>
+          <Badge variant="secondary" class="font-mono text-xs">
+            {{ keyItem.id ? (keyItem.isEditing ? "editing" : "saved") : "draft" }}
+          </Badge>
+        </template>
+
+        <template #actions>
+          <div class="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2">
+            <Button
+              v-if="!keyItem.id && editingData.id"
+              variant="default"
+              size="sm"
+              class="w-full"
+              @click="handleSaveSingleApiKey(index)"
+            >
+              {{ $t("providerEditPage.buttonSaveThisKey") }}
+            </Button>
+            <Button
+              v-if="keyItem.id && keyItem.isEditing"
+              variant="default"
+              size="sm"
+              class="w-full"
+              @click="handleSaveSingleApiKey(index)"
+            >
+              {{ $t("common.save") }}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              class="w-full"
+              :title="keyItem.checkMessage"
+              @click="emit('checkSingle', index)"
+            >
+              <Loader2 v-if="keyItem.checkStatus === 'checking'" class="h-4 w-4 animate-spin text-blue-500" />
+              <AlertCircle v-else-if="keyItem.checkStatus === 'error'" class="h-4 w-4 text-red-500" />
+              <Check v-else-if="keyItem.checkStatus === 'success'" class="h-4 w-4 text-green-500" />
+              <Check v-else class="h-4 w-4" />
+            </Button>
+            <Button
+              v-if="keyItem.id && !keyItem.isEditing"
+              variant="outline"
+              size="sm"
+              class="w-full"
+              @click="keyItem.isEditing = true"
+            >
+              <Edit2 class="mr-1.5 h-4 w-4" />
+              {{ $t("common.edit") }}
+            </Button>
+            <Button
+              v-if="keyItem.id && keyItem.isEditing"
+              variant="ghost"
+              size="sm"
+              class="w-full"
+              @click="keyItem.isEditing = false"
+            >
+              <X class="mr-1.5 h-4 w-4" />
+              {{ $t("common.cancel") }}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="w-full text-red-600 hover:bg-red-50 hover:text-red-700"
+              @click="handleDeleteApiKey(index)"
+            >
+              <Trash2 class="mr-1.5 h-4 w-4" />
+              {{ $t("common.delete") }}
+            </Button>
+          </div>
+        </template>
+      </MobileCrudCard>
+    </div>
+
+    <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
+      <div class="grid grid-cols-[2fr_1fr_auto] gap-4 items-center border-b border-gray-200 bg-gray-50/80 px-4 py-3">
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderApiKey") }}</span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderDescription") }}</span>
+        <span class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t('common.actions') }}</span>
+      </div>
+
+      <div
+        v-for="(keyItem, index) in editingData.provider_keys"
+        :key="`desktop-${index}`"
+        class="grid grid-cols-[2fr_1fr_auto] gap-4 items-center border-b border-gray-100 px-4 py-3 last:border-0 hover:bg-gray-50/50 transition-colors"
       >
         <Input
           v-model="keyItem.api_key"
           :disabled="!!keyItem.id"
           :placeholder="$t('providerEditPage.placeholderApiKey')"
-          :type="
-            editingData.provider_type === 'VERTEX' || !!keyItem.id
-              ? 'text'
-              : 'password'
-          "
-          class="font-mono text-sm h-8"
+          :type="editingData.provider_type === 'VERTEX' || !!keyItem.id ? 'text' : 'password'"
+          class="h-8 font-mono text-sm"
         />
         <Input
           :model-value="keyItem.description ?? ''"
-          @update:model-value="(v: string | number) => (keyItem.description = String(v) || null)"
           :disabled="!!keyItem.id && !keyItem.isEditing"
           :placeholder="$t('providerEditPage.placeholderDescription')"
-          class="text-sm h-8"
+          class="h-8 text-sm"
+          @update:model-value="(v: string | number) => (keyItem.description = String(v) || null)"
         />
-        <div class="flex items-center space-x-1 justify-end">
+        <div class="flex items-center justify-end space-x-1">
           <template v-if="!keyItem.id && editingData.id">
             <Button variant="default" size="sm" class="h-8" @click="handleSaveSingleApiKey(index)">
               {{ $t("providerEditPage.buttonSaveThisKey") }}
@@ -60,7 +166,7 @@
             <Button
               variant="ghost"
               size="sm"
-              class="h-8 text-gray-600 px-2"
+              class="h-8 px-2 text-gray-600"
               :title="keyItem.checkMessage"
               @click="emit('checkSingle', index)"
             >
@@ -74,7 +180,7 @@
             <Button
               variant="ghost"
               size="sm"
-              class="h-8 text-gray-600 px-2"
+              class="h-8 px-2 text-gray-600"
               :title="keyItem.checkMessage"
               @click="emit('checkSingle', index)"
             >
@@ -86,7 +192,7 @@
             <Button
               variant="ghost"
               size="sm"
-              class="h-8 text-gray-600 px-2"
+              class="h-8 px-2 text-gray-600"
               @click="keyItem.isEditing = true"
             >
               <Edit2 class="h-4 w-4" />
@@ -99,7 +205,7 @@
             <Button
               variant="ghost"
               size="sm"
-              class="h-8 text-gray-600 px-2"
+              class="h-8 px-2 text-gray-600"
               @click="keyItem.isEditing = false"
             >
               <X class="h-4 w-4" />
@@ -108,7 +214,7 @@
           <Button
             variant="ghost"
             size="sm"
-            class="h-8 text-gray-400 hover:text-red-600 px-2"
+            class="h-8 px-2 text-gray-400 hover:text-red-600"
             @click="handleDeleteApiKey(index)"
           >
             <Trash2 class="h-4 w-4" />
@@ -116,13 +222,14 @@
         </div>
       </div>
     </div>
-    <div class="pt-2">
-      <Button variant="outline" size="sm" @click="addApiKey">
-        <Plus class="h-4 w-4 mr-1.5" />
+
+    <div class="border-t border-gray-100 pt-2">
+      <Button variant="outline" size="sm" class="w-full sm:w-auto" @click="addApiKey">
+        <Plus class="mr-1.5 h-4 w-4" />
         {{ $t("providerEditPage.buttonAddApiKey") }}
       </Button>
     </div>
-  </div>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -130,8 +237,11 @@ import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
 import { toastController } from "@/lib/toastController";
 import type { EditingProviderData } from "./types";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Check, Key, Loader2, AlertCircle, Edit2, X, Trash2, Plus } from "lucide-vue-next";
 
 const { t: $t } = useI18n();
@@ -151,6 +261,12 @@ const addApiKey = () => {
     isEditing: false,
     checkStatus: "unchecked",
   });
+};
+
+const keyPreview = (value: string) => {
+  if (!value) return "-";
+  if (value.length <= 16) return value;
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
 };
 
 const handleSaveSingleApiKey = async (index: number) => {

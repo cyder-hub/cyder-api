@@ -1,53 +1,98 @@
 <template>
-  <div class="space-y-4 pt-4 border-t border-gray-100">
-    <h3 class="text-lg font-semibold text-gray-900">
-      {{ $t("providerEditPage.sectionCustomFields") }}
-    </h3>
+  <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+    <div>
+      <h3 class="text-lg font-semibold text-gray-900">
+        {{ $t("providerEditPage.sectionCustomFields") }}
+      </h3>
+      <p class="mt-1 text-sm text-gray-500">
+        {{ editingData.custom_fields.length }} items
+      </p>
+    </div>
 
-    <div class="border border-gray-200 rounded-lg overflow-hidden">
-      <!-- Header -->
-      <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-4 items-center px-4 py-3 bg-gray-50/80 border-b border-gray-200">
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ $t("providerEditPage.tableHeaderFieldName") }}</span>
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ $t("providerEditPage.tableHeaderFieldValue") }}</span>
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ $t("providerEditPage.tableHeaderDescription") }}</span>
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ $t("providerEditPage.tableHeaderFieldType") }}</span>
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider text-right">{{ $t('common.actions') }}</span>
+    <div v-if="editingData.custom_fields.length === 0" class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10">
+      <FileText class="mb-2 h-10 w-10 stroke-1 text-gray-400" />
+      <span class="text-sm font-medium text-gray-500">{{ $t('providerEditPage.alert.noCustomFields') }}</span>
+    </div>
+
+    <div v-else class="space-y-3 md:hidden">
+      <MobileCrudCard
+        v-for="(field, index) in editingData.custom_fields"
+        :key="field.id"
+        :title="field.field_name"
+        :description="field.description || '-'"
+      >
+        <div class="grid grid-cols-1 gap-3">
+          <div class="space-y-1">
+            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+              {{ $t("providerEditPage.tableHeaderFieldValue") }}
+            </p>
+            <p class="break-all font-mono text-sm text-gray-700">
+              {{ field.field_value }}
+            </p>
+          </div>
+          <div class="space-y-1">
+            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+              {{ $t("providerEditPage.tableHeaderFieldType") }}
+            </p>
+            <div>
+              <Badge variant="secondary" class="w-fit font-mono text-xs">
+                {{ field.field_type }}
+              </Badge>
+            </div>
+          </div>
+        </div>
+
+        <template #actions>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full text-red-600 hover:bg-red-50 hover:text-red-700"
+            @click="handleUnlinkCustomField(field.id!, index)"
+          >
+            <Trash2 class="mr-1.5 h-4 w-4" />
+            {{ $t("common.delete") }}
+          </Button>
+        </template>
+      </MobileCrudCard>
+    </div>
+
+    <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
+      <div class="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-4 items-center border-b border-gray-200 bg-gray-50/80 px-4 py-3">
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderFieldName") }}</span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderFieldValue") }}</span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderDescription") }}</span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderFieldType") }}</span>
+        <span class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t('common.actions') }}</span>
       </div>
 
-      <div v-if="editingData.custom_fields.length === 0" class="flex flex-col items-center justify-center py-10">
-        <FileText class="h-10 w-10 stroke-1 text-gray-400 mb-2" />
-        <span class="text-sm font-medium text-gray-500">{{ $t('providerEditPage.alert.noCustomFields') }}</span>
-      </div>
-
-      <!-- Custom field rows -->
       <div
         v-for="(field, index) in editingData.custom_fields"
         :key="field.id"
-        class="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-4 items-center px-4 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50/50 transition-colors"
+        class="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-4 items-center border-b border-gray-100 px-4 py-3 last:border-0 hover:bg-gray-50/50 transition-colors"
       >
         <Input
           :model-value="field.field_name"
           disabled
-          class="font-mono text-sm h-8"
+          class="h-8 font-mono text-sm"
         />
         <Input
           :model-value="field.field_value"
           disabled
-          class="font-mono text-sm h-8"
+          class="h-8 font-mono text-sm"
         />
         <Input
           :model-value="field.description ?? ''"
           disabled
-          class="text-sm h-8"
+          class="h-8 text-sm"
         />
-        <Badge variant="secondary" class="font-mono text-xs w-fit">{{
+        <Badge variant="secondary" class="w-fit font-mono text-xs">{{
           field.field_type
         }}</Badge>
         <div class="flex justify-end">
           <Button
             variant="ghost"
             size="sm"
-            class="h-8 text-gray-400 hover:text-red-600 px-2"
+            class="h-8 px-2 text-gray-400 hover:text-red-600"
             @click="handleUnlinkCustomField(field.id!, index)"
           >
             <Trash2 class="h-4 w-4" />
@@ -56,10 +101,9 @@
       </div>
     </div>
 
-    <!-- Add custom field -->
-    <div class="flex items-center gap-4 pt-2">
+    <div class="flex flex-col gap-3 border-t border-gray-100 pt-3 sm:flex-row sm:items-center">
       <Select v-model="selectedCustomFieldId">
-        <SelectTrigger class="w-64">
+        <SelectTrigger class="w-full sm:w-64">
           <SelectValue
             :placeholder="$t('modelEditPage.placeholderSelectCustomField')"
           />
@@ -76,14 +120,15 @@
       </Select>
       <Button
         variant="outline"
+        class="w-full sm:w-auto"
         @click="handleLinkCustomField"
         :disabled="!selectedCustomFieldId"
       >
-        <Plus class="h-4 w-4 mr-1.5" />
+        <Plus class="mr-1.5 h-4 w-4" />
         {{ $t("providerEditPage.buttonAddCustomField") }}
       </Button>
     </div>
-  </div>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -93,6 +138,7 @@ import { Api } from "@/services/request";
 import { toastController } from "@/lib/toastController";
 import type { CustomFieldItem } from "@/store/types";
 import type { EditingProviderData } from "./types";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";

@@ -21,6 +21,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { formatTimestamp } from "@/lib/utils";
 import {
   Select,
@@ -280,62 +281,63 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="p-6 space-y-6 max-w-4xl mx-auto">
-    <!-- 页面头部 -->
-    <div class="flex justify-between items-start">
-      <div>
-        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ t("modelEditPage.title") }}
-        </h1>
+  <div class="app-page">
+    <div class="app-page-shell app-page-shell--narrow">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0">
+          <h1 class="text-lg font-semibold text-gray-900 tracking-tight sm:text-xl">
+            {{ t("modelEditPage.title") }}
+          </h1>
+        </div>
+        <div class="flex w-full flex-col gap-2 sm:w-auto">
+          <Button variant="outline" @click="handleNavigateBack">
+            {{ t("common.cancel") }}
+          </Button>
+        </div>
       </div>
-      <Button variant="outline" @click="handleNavigateBack">
-        {{ t("common.cancel") }}
-      </Button>
-    </div>
 
-    <!-- 加载状态 -->
-    <div v-if="isLoading" class="flex items-center justify-center py-16">
-      <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
-      <span class="text-sm text-gray-500">{{
-        t("modelEditPage.loading")
-      }}</span>
-    </div>
+      <div v-if="isLoading" class="flex items-center justify-center py-16">
+        <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
+        <span class="text-sm text-gray-500">{{
+          t("modelEditPage.loading")
+        }}</span>
+      </div>
 
-    <!-- 错误状态 -->
-    <div
-      v-else-if="!modelDetail"
-      class="flex flex-col items-center justify-center py-20"
-    >
       <div
-        class="bg-destructive/10 text-destructive border border-destructive/20 rounded-lg p-6 text-center"
+        v-else-if="!modelDetail"
+        class="flex flex-col items-center justify-center py-20"
       >
-        <p class="text-sm font-medium">
-          {{ t("modelEditPage.alert.loadDataFailed", { modelId: modelId }) }}
-        </p>
-        <Button class="mt-4" @click="fetchData">{{ t("common.retry") }}</Button>
+        <div
+          class="bg-destructive/10 text-destructive border border-destructive/20 rounded-lg p-6 text-center"
+        >
+          <p class="text-sm font-medium">
+            {{ t("modelEditPage.alert.loadDataFailed", { modelId: modelId }) }}
+          </p>
+          <Button class="mt-4" @click="fetchData">{{ t("common.retry") }}</Button>
+        </div>
       </div>
-    </div>
 
-    <!-- 表单区域 -->
-    <div v-else-if="editingData" class="space-y-6">
+      <div v-else-if="editingData" class="space-y-6">
       <Card>
         <CardHeader>
           <CardTitle>{{ t("common.basicInfo") }}</CardTitle>
         </CardHeader>
         <CardContent class="space-y-4">
-          <div class="grid gap-1.5">
-            <Label for="model_name" class="text-gray-700">
-              {{ t("modelEditPage.labelModelName") }}
-              <span class="text-red-500 ml-0.5">*</span>
-            </Label>
-            <Input id="model_name" v-model="editingData.model_name" />
-          </div>
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div class="grid gap-1.5">
+              <Label for="model_name" class="text-gray-700">
+                {{ t("modelEditPage.labelModelName") }}
+                <span class="text-red-500 ml-0.5">*</span>
+              </Label>
+              <Input id="model_name" v-model="editingData.model_name" />
+            </div>
 
-          <div class="grid gap-1.5">
-            <Label for="real_model_name" class="text-gray-700">{{
-              t("modelEditPage.labelRealModelName")
-            }}</Label>
-            <Input id="real_model_name" v-model="editingData.real_model_name" />
+            <div class="grid gap-1.5">
+              <Label for="real_model_name" class="text-gray-700">{{
+                t("modelEditPage.labelRealModelName")
+              }}</Label>
+              <Input id="real_model_name" v-model="editingData.real_model_name" />
+            </div>
           </div>
 
           <div
@@ -402,11 +404,53 @@ onMounted(() => {
                 {{ t("modelEditPage.priceSection.loadingRules") }}
               </p>
             </div>
-            <div v-else-if="priceRules.length > 0" class="space-y-2">
+            <div v-else-if="priceRules.length > 0" class="space-y-3">
               <h4 class="text-sm font-semibold text-gray-700">
                 {{ t("modelEditPage.priceSection.rulesTitle") }}
               </h4>
-              <div class="border border-gray-200 rounded-lg overflow-hidden">
+              <div class="space-y-3 md:hidden">
+                <MobileCrudCard
+                  v-for="rule in priceRules"
+                  :key="rule.id"
+                  :title="rule.description || '-'"
+                  :description="formatTimestamp(rule.effective_from)"
+                >
+                  <div class="grid grid-cols-1 gap-3 text-sm min-[360px]:grid-cols-2">
+                    <div class="space-y-1">
+                      <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                        {{ t("pricePage.rules.table.enabled") }}
+                      </p>
+                      <div>
+                        <Badge variant="secondary" class="font-mono text-xs">
+                          {{ rule.is_enabled ? t("common.yes") : t("common.no") }}
+                        </Badge>
+                      </div>
+                    </div>
+                    <div class="space-y-1">
+                      <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                        {{ t("pricePage.rules.table.usageType") }}
+                      </p>
+                      <p class="text-sm text-gray-900">{{ rule.usage_type }}</p>
+                    </div>
+                    <div class="space-y-1">
+                      <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                        {{ t("pricePage.rules.table.mediaType") }}
+                      </p>
+                      <p class="text-sm text-gray-900">{{ rule.media_type || "-" }}</p>
+                    </div>
+                    <div class="space-y-1">
+                      <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                        {{ t("pricePage.rules.table.price") }}
+                      </p>
+                      <p class="break-all font-mono text-sm text-gray-700">
+                        {{ rule.price_in_micro_units / 1000 }} {{ selectedPlan?.currency }}
+                      </p>
+                    </div>
+                  </div>
+                </MobileCrudCard>
+              </div>
+
+              <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
                 <Table>
                   <TableHeader>
                     <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
@@ -484,67 +528,111 @@ onMounted(() => {
             v-if="
               editingData.custom_fields && editingData.custom_fields.length > 0
             "
-            class="border border-gray-200 rounded-lg overflow-hidden"
+            class="space-y-3"
           >
-            <Table>
-              <TableHeader>
-                <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
-                  <TableHead
-                    class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >{{ t("modelEditPage.tableHeaderFieldName") }}</TableHead
+            <div class="space-y-3 md:hidden">
+              <MobileCrudCard
+                v-for="field in editingData.custom_fields"
+                :key="field.id"
+                :title="field.field_name"
+                :description="field.description || '-'"
+              >
+                <div class="grid grid-cols-1 gap-3">
+                  <div class="space-y-1">
+                    <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                      {{ t("modelEditPage.tableHeaderFieldValue") }}
+                    </p>
+                    <p class="break-all font-mono text-sm text-gray-700">
+                      {{ field.field_value }}
+                    </p>
+                  </div>
+                  <div class="space-y-1">
+                    <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                      {{ t("modelEditPage.tableHeaderFieldType") }}
+                    </p>
+                    <div>
+                      <Badge variant="secondary" class="font-mono text-xs">
+                        {{ field.field_type }}
+                      </Badge>
+                    </div>
+                  </div>
+                </div>
+
+                <template #actions>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="w-full text-red-600 hover:bg-red-50 hover:text-red-700"
+                    @click="handleUnlinkCustomField(field.id!)"
                   >
-                  <TableHead
-                    class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >{{ t("modelEditPage.tableHeaderFieldValue") }}</TableHead
-                  >
-                  <TableHead
-                    class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >{{ t("modelEditPage.tableHeaderDescription") }}</TableHead
-                  >
-                  <TableHead
-                    class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >{{ t("modelEditPage.tableHeaderFieldType") }}</TableHead
-                  >
-                  <TableHead class="w-[80px] text-right"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow
-                  v-for="field in editingData.custom_fields"
-                  :key="field.id"
-                >
-                  <TableCell class="text-sm font-medium text-gray-900">{{
-                    field.field_name
-                  }}</TableCell>
-                  <TableCell
-                    class="break-all text-sm font-mono text-gray-600"
-                    >{{ field.field_value }}</TableCell
-                  >
-                  <TableCell class="text-sm text-gray-500">{{
-                    field.description || "-"
-                  }}</TableCell>
-                  <TableCell>
-                    <Badge variant="secondary" class="font-mono text-xs">{{
-                      field.field_type
-                    }}</Badge>
-                  </TableCell>
-                  <TableCell class="text-right">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      class="text-gray-400 hover:text-red-600"
-                      @click="handleUnlinkCustomField(field.id!)"
+                    <Trash2 class="mr-1.5 h-4 w-4" />
+                    {{ t("common.delete") }}
+                  </Button>
+                </template>
+              </MobileCrudCard>
+            </div>
+
+            <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
+                    <TableHead
+                      class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+                      >{{ t("modelEditPage.tableHeaderFieldName") }}</TableHead
                     >
-                      <Trash2 class="h-3.5 w-3.5" />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
+                    <TableHead
+                      class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+                      >{{ t("modelEditPage.tableHeaderFieldValue") }}</TableHead
+                    >
+                    <TableHead
+                      class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+                      >{{ t("modelEditPage.tableHeaderDescription") }}</TableHead
+                    >
+                    <TableHead
+                      class="text-xs font-medium text-gray-500 uppercase tracking-wider"
+                      >{{ t("modelEditPage.tableHeaderFieldType") }}</TableHead
+                    >
+                    <TableHead class="w-[80px] text-right"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow
+                    v-for="field in editingData.custom_fields"
+                    :key="field.id"
+                  >
+                    <TableCell class="text-sm font-medium text-gray-900">{{
+                      field.field_name
+                    }}</TableCell>
+                    <TableCell
+                      class="break-all text-sm font-mono text-gray-600"
+                      >{{ field.field_value }}</TableCell
+                    >
+                    <TableCell class="text-sm text-gray-500">{{
+                      field.description || "-"
+                    }}</TableCell>
+                    <TableCell>
+                      <Badge variant="secondary" class="font-mono text-xs">{{
+                        field.field_type
+                      }}</Badge>
+                    </TableCell>
+                    <TableCell class="text-right">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        class="text-gray-400 hover:text-red-600"
+                        @click="handleUnlinkCustomField(field.id!)"
+                      >
+                        <Trash2 class="h-3.5 w-3.5" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </div>
           </div>
 
-          <div class="flex items-center gap-3 pt-4 border-t border-gray-100">
-            <div class="flex-1 max-w-sm">
+          <div class="flex flex-col gap-3 border-t border-gray-100 pt-4 sm:flex-row sm:items-center">
+            <div class="w-full sm:max-w-sm">
               <Select v-model="selectedCustomFieldId">
                 <SelectTrigger class="w-full">
                   <SelectValue
@@ -566,6 +654,7 @@ onMounted(() => {
             </div>
             <Button
               variant="default"
+              class="w-full sm:w-auto"
               @click="handleLinkCustomField"
               :disabled="!selectedCustomFieldId"
             >
@@ -575,16 +664,17 @@ onMounted(() => {
         </CardContent>
       </Card>
 
-      <div class="flex justify-end gap-3 pt-4 border-t border-gray-100 mt-2">
-        <Button
-          variant="ghost"
-          class="text-gray-600"
-          @click="handleNavigateBack"
-          >{{ t("common.cancel") }}</Button
-        >
-        <Button variant="default" @click="handleSaveModel">{{
-          t("common.save")
-        }}</Button>
+        <div class="flex flex-col gap-2 border-t border-gray-100 pt-4 mt-2 sm:flex-row sm:justify-end">
+          <Button
+            variant="ghost"
+            class="w-full text-gray-600 sm:w-auto"
+            @click="handleNavigateBack"
+            >{{ t("common.cancel") }}</Button
+          >
+          <Button variant="default" class="w-full sm:w-auto" @click="handleSaveModel">{{
+            t("common.save")
+          }}</Button>
+        </div>
       </div>
     </div>
   </div>

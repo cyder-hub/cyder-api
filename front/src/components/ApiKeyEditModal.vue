@@ -155,15 +155,15 @@ const handleOpenChange = (open: boolean) => {
 
 <template>
   <Dialog :open="props.isOpen" @update:open="handleOpenChange">
-    <DialogContent class="max-w-lg max-h-[90vh] flex flex-col">
-      <DialogHeader>
+    <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-lg">
+      <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
         <DialogTitle class="text-lg font-semibold text-gray-900">{{
           editingData?.id
             ? t("apiKeyEditModal.titleEdit")
             : t("apiKeyEditModal.titleAdd")
         }}</DialogTitle>
       </DialogHeader>
-      <div class="overflow-y-auto space-y-4 pr-2">
+      <div class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
         <div class="space-y-1.5">
           <Label for="apiKeyName" class="text-gray-700"
             >{{ t("apiKeyEditModal.labelName")
@@ -230,16 +230,17 @@ const handleOpenChange = (open: boolean) => {
           />
         </div>
       </div>
-      <DialogFooter class="border-t border-gray-100 pt-4 mt-2">
+      <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
         <Button
           variant="ghost"
-          class="text-gray-600"
+          class="w-full text-gray-600 sm:w-auto"
           @click="handleOpenChange(false)"
           :disabled="isSubmitting"
           >{{ t("common.cancel") }}</Button
         >
         <Button
           variant="default"
+          class="w-full sm:w-auto"
           @click="handleCommit"
           :disabled="isSubmitting || isLoadingPolicies"
         >{{

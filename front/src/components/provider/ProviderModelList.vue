@@ -1,64 +1,156 @@
 <template>
-  <div class="space-y-4 pt-4 border-t border-gray-100">
-    <div class="flex justify-between items-center">
-      <h3 class="text-lg font-semibold text-gray-900">
-        {{ $t("providerEditPage.sectionModels") }}
-      </h3>
-      <div class="space-x-2">
+  <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <h3 class="text-lg font-semibold text-gray-900">
+          {{ $t("providerEditPage.sectionModels") }}
+        </h3>
+        <p class="mt-1 text-sm text-gray-500">
+          {{ editingData.models.length }} items
+        </p>
+      </div>
+      <div class="flex flex-col gap-2 sm:w-auto sm:flex-row">
         <Button
           variant="outline"
           size="sm"
+          class="w-full sm:w-auto"
           @click="emit('checkBatch')"
           :disabled="!editingData.id || editingData.models.length === 0"
         >
-          <Check class="h-4 w-4 mr-1.5" />
+          <Check class="mr-1.5 h-4 w-4" />
           {{ $t("providerEditPage.alert.buttonCheckAll") }}
         </Button>
         <Button
           variant="outline"
           size="sm"
+          class="w-full sm:w-auto"
           @click="handleFetchRemoteModels"
           :disabled="!editingData.id"
         >
-          <CloudDownload class="h-4 w-4 mr-1.5" />
+          <CloudDownload class="mr-1.5 h-4 w-4" />
           {{ $t("providerEditPage.buttonFetchRemote") }}
         </Button>
       </div>
     </div>
 
-    <div class="border border-gray-200 rounded-lg overflow-hidden">
-      <!-- Header -->
-      <div class="grid grid-cols-[1fr_1fr_auto] gap-4 items-center px-4 py-3 bg-gray-50/80 border-b border-gray-200">
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ $t("providerEditPage.tableHeaderModelId") }}</span>
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ $t("providerEditPage.tableHeaderMappedModelId") }}</span>
-        <span class="text-xs font-medium text-gray-500 uppercase tracking-wider text-right">{{ $t('common.actions') }}</span>
-      </div>
+    <div v-if="editingData.models.length === 0" class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10">
+      <Box class="mb-2 h-10 w-10 stroke-1 text-gray-400" />
+      <span class="text-sm font-medium text-gray-500">{{ $t('providerEditPage.alert.noModels') }}</span>
+    </div>
 
-      <div v-if="editingData.models.length === 0" class="flex flex-col items-center justify-center py-10">
-        <Box class="h-10 w-10 stroke-1 text-gray-400 mb-2" />
-        <span class="text-sm font-medium text-gray-500">{{ $t('providerEditPage.alert.noModels') }}</span>
-      </div>
-
-      <!-- Models rows -->
-      <div
+    <div v-else class="space-y-3 md:hidden">
+      <MobileCrudCard
         v-for="(model, index) in editingData.models"
         :key="index"
-        class="grid grid-cols-[1fr_1fr_auto] gap-4 items-center px-4 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50/50 transition-colors"
+        :title="model.model_name || $t('providerEditPage.placeholderModelId')"
+        :description="model.real_model_name || '-'"
+      >
+        <div class="space-y-3">
+          <div class="space-y-1.5">
+            <Label class="text-gray-700">
+              {{ $t("providerEditPage.tableHeaderModelId") }}
+            </Label>
+            <Input
+              v-model="model.model_name"
+              :disabled="!!model.id"
+              :placeholder="$t('providerEditPage.placeholderModelId')"
+              class="font-mono text-sm"
+            />
+          </div>
+
+          <div class="space-y-1.5">
+            <Label class="text-gray-700">
+              {{ $t("providerEditPage.tableHeaderMappedModelId") }}
+            </Label>
+            <Input
+              :model-value="model.real_model_name ?? ''"
+              :disabled="!!model.id"
+              :placeholder="$t('providerEditPage.placeholderMappedModelId')"
+              class="font-mono text-sm"
+              @update:model-value="(v: string | number) => (model.real_model_name = String(v) || null)"
+            />
+          </div>
+        </div>
+
+        <template #header>
+          <Badge variant="secondary" class="font-mono text-xs">
+            {{ model.id ? "saved" : "draft" }}
+          </Badge>
+        </template>
+
+        <template #actions>
+          <div class="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2">
+            <Button
+              v-if="!model.id && editingData.id"
+              variant="default"
+              size="sm"
+              class="w-full"
+              @click="handleSaveSingleModel(index)"
+            >
+              {{ $t("providerEditPage.buttonSaveModel") }}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              class="w-full"
+              :title="model.checkMessage"
+              @click="emit('checkSingle', index)"
+            >
+              <Loader2 v-if="model.checkStatus === 'checking'" class="h-4 w-4 animate-spin text-blue-500" />
+              <AlertCircle v-else-if="model.checkStatus === 'error'" class="h-4 w-4 text-red-500" />
+              <Check v-else-if="model.checkStatus === 'success'" class="h-4 w-4 text-green-500" />
+              <Check v-else class="h-4 w-4" />
+            </Button>
+            <Button
+              v-if="model.id"
+              variant="outline"
+              size="sm"
+              class="w-full"
+              @click="router.push(`/model/edit/${model.id}`)"
+            >
+              <Edit2 class="mr-1.5 h-4 w-4" />
+              {{ $t("common.edit") }}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="w-full text-red-600 hover:bg-red-50 hover:text-red-700"
+              @click="handleDeleteModel(index)"
+            >
+              <Trash2 class="mr-1.5 h-4 w-4" />
+              {{ $t("common.delete") }}
+            </Button>
+          </div>
+        </template>
+      </MobileCrudCard>
+    </div>
+
+    <div class="hidden rounded-lg border border-gray-200 overflow-hidden md:block">
+      <div class="grid grid-cols-[1fr_1fr_auto] gap-4 items-center border-b border-gray-200 bg-gray-50/80 px-4 py-3">
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderModelId") }}</span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderMappedModelId") }}</span>
+        <span class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t('common.actions') }}</span>
+      </div>
+
+      <div
+        v-for="(model, index) in editingData.models"
+        :key="`desktop-${index}`"
+        class="grid grid-cols-[1fr_1fr_auto] gap-4 items-center border-b border-gray-100 px-4 py-3 last:border-0 hover:bg-gray-50/50 transition-colors"
       >
         <Input
           v-model="model.model_name"
           :disabled="!!model.id"
           :placeholder="$t('providerEditPage.placeholderModelId')"
-          class="font-mono text-sm h-8"
+          class="h-8 font-mono text-sm"
         />
         <Input
           :model-value="model.real_model_name ?? ''"
-          @update:model-value="(v: string | number) => (model.real_model_name = String(v) || null)"
           :disabled="!!model.id"
           :placeholder="$t('providerEditPage.placeholderMappedModelId')"
-          class="font-mono text-sm h-8"
+          class="h-8 font-mono text-sm"
+          @update:model-value="(v: string | number) => (model.real_model_name = String(v) || null)"
         />
-        <div class="flex items-center space-x-1 justify-end">
+        <div class="flex items-center justify-end space-x-1">
           <template v-if="!model.id && editingData.id">
             <Button variant="default" size="sm" class="h-8" @click="handleSaveSingleModel(index)">
               {{ $t("providerEditPage.buttonSaveModel") }}
@@ -66,7 +158,7 @@
             <Button
               variant="ghost"
               size="sm"
-              class="h-8 text-gray-600 px-2"
+              class="h-8 px-2 text-gray-600"
               :title="model.checkMessage"
               @click="emit('checkSingle', index)"
             >
@@ -80,7 +172,7 @@
             <Button
               variant="ghost"
               size="sm"
-              class="h-8 text-gray-600 px-2"
+              class="h-8 px-2 text-gray-600"
               :title="model.checkMessage"
               @click="emit('checkSingle', index)"
             >
@@ -92,7 +184,7 @@
             <Button
               variant="ghost"
               size="sm"
-              class="h-8 text-gray-600 px-2"
+              class="h-8 px-2 text-gray-600"
               @click="router.push(`/model/edit/${model.id}`)"
             >
               <Edit2 class="h-4 w-4" />
@@ -101,7 +193,7 @@
           <Button
             variant="ghost"
             size="sm"
-            class="h-8 text-gray-400 hover:text-red-600 px-2"
+            class="h-8 px-2 text-gray-400 hover:text-red-600"
             @click="handleDeleteModel(index)"
           >
             <Trash2 class="h-4 w-4" />
@@ -110,24 +202,23 @@
       </div>
     </div>
 
-    <!-- Model action buttons -->
-    <div class="flex items-center gap-2 pt-2">
-      <Button variant="outline" size="sm" @click="addModel">
-        <Plus class="h-4 w-4 mr-1.5" />
+    <div class="flex flex-col gap-2 border-t border-gray-100 pt-2 sm:flex-row sm:items-center">
+      <Button variant="outline" size="sm" class="w-full sm:w-auto" @click="addModel">
+        <Plus class="mr-1.5 h-4 w-4" />
         {{ $t("providerEditPage.buttonAddModel") }}
       </Button>
       <Button
         v-if="hasUncommittedModels"
         variant="outline"
         size="sm"
-        class="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+        class="w-full border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 sm:w-auto"
         @click="handleClearUncommittedModels"
       >
-        <Trash2 class="h-4 w-4 mr-1.5" />
+        <Trash2 class="mr-1.5 h-4 w-4" />
         {{ $t("providerEditPage.buttonClearUncommitted") }}
       </Button>
     </div>
-  </div>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -141,8 +232,11 @@ import type {
   ProviderRemoteModelItem,
   ProviderRemoteModelsResponse,
 } from "@/store/types";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Check, CloudDownload, Box, Loader2, AlertCircle, Edit2, Trash2, Plus } from "lucide-vue-next";
 
 const { t: $t } = useI18n();

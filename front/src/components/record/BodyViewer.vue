@@ -1,25 +1,64 @@
 <template>
-  <div v-if="isLoadingBodies" class="text-center py-4">Loading bodies...</div>
+  <div v-if="isLoadingBodies" class="py-4 text-center text-sm text-gray-500">
+    Loading bodies...
+  </div>
   <div v-else-if="bodies" class="space-y-4">
-    <!-- Request Section -->
-    <div v-if="bodies.user_request_body !== bodies.llm_request_body && bodies.user_request_body && bodies.llm_request_body" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <SingleRequestBodyContent :content="bodies.user_request_body" title="User Request Body" />
+    <div
+      v-if="
+        bodies.user_request_body !== bodies.llm_request_body &&
+        bodies.user_request_body &&
+        bodies.llm_request_body
+      "
+      class="grid grid-cols-1 gap-4 md:grid-cols-2"
+    >
+      <SingleRequestBodyContent
+        :content="bodies.user_request_body"
+        title="User Request Body"
+      />
       <SingleRequestBodyContent :content="llmContent" :title="llmTitle">
-        <template #action v-if="patchInfo.isPatch">
-          <Button size="sm" variant="ghost" @click="showPatched = !showPatched" class="h-6 text-[10px]">
-            {{ showPatched ? 'Show Raw Patch' : 'Show Patched Body' }}
+        <template v-if="patchInfo.isPatch" #action>
+          <Button
+            size="sm"
+            variant="ghost"
+            class="h-8 px-2 text-[11px]"
+            @click="showPatched = !showPatched"
+          >
+            {{ showPatched ? "Show Raw Patch" : "Show Patched Body" }}
           </Button>
         </template>
       </SingleRequestBodyContent>
     </div>
-    <SingleRequestBodyContent v-else :content="bodies.user_request_body || bodies.llm_request_body" title="Request Body" />
+    <SingleRequestBodyContent
+      v-else
+      :content="bodies.user_request_body || bodies.llm_request_body"
+      title="Request Body"
+    />
 
-    <!-- Response Section -->
-    <div v-if="bodies.user_response_body !== bodies.llm_response_body && bodies.user_response_body && bodies.llm_response_body" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <SingleResponseBodyContent :content="bodies.llm_response_body" title="LLM Response Body" :status="status" />
-      <SingleResponseBodyContent :content="bodies.user_response_body" title="User Response Body" :status="status" />
+    <div
+      v-if="
+        bodies.user_response_body !== bodies.llm_response_body &&
+        bodies.user_response_body &&
+        bodies.llm_response_body
+      "
+      class="grid grid-cols-1 gap-4 md:grid-cols-2"
+    >
+      <SingleResponseBodyContent
+        :content="bodies.llm_response_body"
+        title="LLM Response Body"
+        :status="status"
+      />
+      <SingleResponseBodyContent
+        :content="bodies.user_response_body"
+        title="User Response Body"
+        :status="status"
+      />
     </div>
-    <SingleResponseBodyContent v-else :content="bodies.user_response_body || bodies.llm_response_body" title="Response Body" :status="status" />
+    <SingleResponseBodyContent
+      v-else
+      :content="bodies.user_response_body || bodies.llm_response_body"
+      title="Response Body"
+      :status="status"
+    />
   </div>
 </template>
 

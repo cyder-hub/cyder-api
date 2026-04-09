@@ -29,12 +29,12 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 <template>
   <DialogPortal>
     <DialogOverlay
-      class="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
+      class="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/80 px-2 py-2 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 sm:px-4 sm:py-6"
     >
       <DialogContent
         :class="
           cn(
-            'relative z-50 grid w-full max-w-lg my-8 gap-4 border border-border bg-background p-6 shadow-lg duration-200 sm:rounded-lg md:w-full',
+            'relative z-50 flex w-full max-w-[calc(100%-1rem)] flex-col gap-4 overflow-y-auto rounded-xl border border-border bg-background p-4 shadow-lg duration-200 [max-height:calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1rem)] [padding-bottom:calc(env(safe-area-inset-bottom)+1rem)] sm:my-8 sm:max-w-lg sm:gap-5 sm:rounded-lg sm:p-6 sm:[max-height:min(90dvh,48rem)] sm:[padding-bottom:1.5rem] [&>[data-slot=dialog-header]]:shrink-0 [&>[data-slot=dialog-header]]:pr-10 [&>[data-slot=dialog-footer]]:shrink-0',
             props.class,
           )
         "
@@ -55,7 +55,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
         <slot />
 
         <DialogClose
-          class="absolute top-4 right-4 p-0.5 transition-colors rounded-md hover:bg-secondary"
+          class="absolute top-3 right-3 rounded-md p-2 transition-colors hover:bg-secondary sm:top-4 sm:right-4 sm:p-1"
         >
           <X class="w-4 h-4" />
           <span class="sr-only">Close</span>

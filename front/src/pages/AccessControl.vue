@@ -45,7 +45,63 @@
       </div>
     </template>
 
-    <div class="border border-gray-200 rounded-lg overflow-hidden">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:hidden">
+      <MobileCrudCard
+        v-for="policy in store.policies"
+        :key="policy.id"
+        :title="policy.name"
+        :description="policy.description || '/'"
+      >
+        <template #header>
+          <Badge variant="secondary" class="font-mono text-[11px]">
+            {{ $t(`accessControlPage.modal.option${policy.default_action}`) }}
+          </Badge>
+        </template>
+
+        <div class="grid grid-cols-1 gap-2 text-xs text-gray-500">
+          <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("accessControlPage.table.defaultAction") }}</span>
+            <Badge variant="secondary" class="font-mono text-[11px]">
+              {{ $t(`accessControlPage.modal.option${policy.default_action}`) }}
+            </Badge>
+          </div>
+          <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("accessControlPage.table.rules") }}</span>
+            <span class="text-gray-700">
+              {{
+                $t("accessControlPage.table.rulesCount", {
+                  count: policy.rules?.length || 0,
+                })
+              }}
+            </span>
+          </div>
+        </div>
+
+        <template #actions>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center"
+            @click="handleOpenEditModal(policy.id)"
+            :disabled="providersLoading || storeLoading"
+          >
+            <Edit2 class="h-3.5 w-3.5 mr-1" />
+            {{ $t("common.edit") }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center text-gray-400 hover:text-red-600"
+            @click="handleDeletePolicy(policy.id, policy.name)"
+          >
+            <Trash2 class="h-3.5 w-3.5 mr-1" />
+            {{ $t("common.delete") }}
+          </Button>
+        </template>
+      </MobileCrudCard>
+    </div>
+
+    <div class="hidden border border-gray-200 rounded-lg overflow-hidden md:block">
       <Table>
         <TableHeader>
           <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
@@ -118,9 +174,9 @@
       <!-- Edit/Add Modal -->
       <Dialog :open="showEditModal" @update:open="setShowEditModal">
         <DialogContent
-          class="max-w-4xl max-h-[90vh] flex flex-col p-6 overflow-hidden"
+          class="flex max-h-[92dvh] flex-col overflow-hidden p-0 sm:max-w-4xl"
         >
-          <DialogHeader>
+          <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
             <DialogTitle class="text-lg font-semibold text-gray-900">{{
               editingPolicy.id
                 ? $t("accessControlPage.modal.titleEdit")
@@ -128,7 +184,7 @@
             }}</DialogTitle>
           </DialogHeader>
 
-          <div class="space-y-4 overflow-y-auto flex-1 pr-2">
+          <div class="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
           <!-- Policy Fields -->
           <div class="space-y-4">
             <div>
@@ -139,7 +195,7 @@
               <Input class="mt-1.5" v-model="editingPolicy.name" />
             </div>
 
-            <div class="grid grid-cols-2 gap-4">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <Label class="text-gray-700">{{
                   $t("accessControlPage.modal.labelDefaultAction")
@@ -181,7 +237,7 @@
               <h4 class="text-sm font-medium text-gray-900">
                 {{ $t("accessControlPage.rules.title") }}
               </h4>
-              <Button @click="addRule" variant="outline" size="sm">
+              <Button @click="addRule" variant="outline" size="sm" class="w-auto">
                 <Plus class="h-3.5 w-3.5 mr-1" />
                 {{ $t("accessControlPage.rules.addRule") }}
               </Button>
@@ -351,14 +407,14 @@
           </div>
         </div>
 
-          <DialogFooter class="border-t border-gray-100 pt-4 mt-2">
+          <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
             <Button
               @click="handleCloseModal"
               variant="ghost"
-              class="text-gray-600"
+              class="w-full text-gray-600 sm:w-auto"
               >{{ $t("common.cancel") }}</Button
             >
-            <Button @click="handleSavePolicy" variant="default">{{
+            <Button @click="handleSavePolicy" variant="default" class="w-full sm:w-auto">{{
               $t("common.save")
             }}</Button>
           </DialogFooter>
@@ -403,6 +459,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { Plus, Edit2, Trash2, ShieldAlert, Loader2 } from "lucide-vue-next";
 import { confirm } from "@/lib/confirmController";
 import { toastController } from "@/lib/toastController";

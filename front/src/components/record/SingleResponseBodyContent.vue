@@ -1,6 +1,9 @@
 <template>
-  <div v-if="contentToDisplay.type !== 'empty'">
-    <div class="mb-1 flex items-center justify-between gap-2">
+  <div
+    v-if="contentToDisplay.type !== 'empty'"
+    class="rounded-xl border border-gray-200 bg-white p-3 sm:p-4"
+  >
+    <div class="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <h4 class="text-sm font-medium text-gray-700">{{ title }}</h4>
       <Button
         type="button"
@@ -14,11 +17,20 @@
         {{ isCopied ? $t("recordPage.copy.copied") : $t("recordPage.copy.action") }}
       </Button>
     </div>
-    <div class="mt-1 overflow-auto rounded-md border bg-gray-50 p-2 text-[10px] max-h-[30rem]">
+    <div
+      class="mt-1 max-h-[26rem] overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px] sm:max-h-[30rem]"
+    >
       <template v-if="contentToDisplay.type === 'sse'">
-        <SseEventViewer v-for="(ev, idx) in contentToDisplay.content" :key="idx" :event="ev" />
+        <SseEventViewer
+          v-for="(ev, idx) in contentToDisplay.content"
+          :key="idx"
+          :event="ev"
+        />
       </template>
-      <pre v-else class="whitespace-pre font-mono">{{ contentToDisplay.content }}</pre>
+      <pre
+        v-else
+        class="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-gray-700"
+      >{{ contentToDisplay.content }}</pre>
     </div>
   </div>
 </template>

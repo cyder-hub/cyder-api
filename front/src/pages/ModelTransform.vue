@@ -46,7 +46,66 @@
       </div>
     </template>
 
-    <div class="border border-gray-200 rounded-lg overflow-hidden bg-white">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:hidden">
+      <MobileCrudCard
+        v-for="transform in transforms"
+        :key="transform.id"
+        :title="transform.alias_name"
+        :description="`${transform.provider_key}/${transform.model_name}`"
+      >
+        <template #header>
+          <Badge
+            :variant="transform.is_enabled ? 'secondary' : 'outline'"
+            class="font-mono text-[11px]"
+          >
+            {{ transform.is_enabled ? $t("common.yes") : $t("common.no") }}
+          </Badge>
+        </template>
+
+        <div class="grid grid-cols-1 gap-2 text-xs text-gray-500">
+          <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("modelAliasPage.table.targetModelName") }}</span>
+            <span class="max-w-[13rem] truncate text-right text-gray-700">
+              {{ transform.provider_key }}/{{ transform.model_name }}
+            </span>
+          </div>
+          <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("modelAliasPage.table.enabled") }}</span>
+            <Checkbox
+              :checked="transform.is_enabled"
+              @update:checked="
+                (val: boolean) => handleToggleEnable(transform, val)
+              "
+            />
+          </div>
+        </div>
+
+        <template #actions>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center"
+            @click="handleOpenEditModal(transform.id)"
+          >
+            <Pencil class="h-3.5 w-3.5 mr-1" />
+            {{ $t("common.edit") }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center text-gray-400 hover:text-red-600"
+            @click="
+              handleDeleteTransform(transform.id, transform.alias_name)
+            "
+          >
+            <Trash2 class="h-3.5 w-3.5 mr-1" />
+            {{ $t("common.delete") }}
+          </Button>
+        </template>
+      </MobileCrudCard>
+    </div>
+
+    <div class="hidden border border-gray-200 rounded-lg overflow-hidden bg-white md:block">
       <Table>
         <TableHeader>
           <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
@@ -113,8 +172,8 @@
     <template #modals>
       <!-- Edit/Add Modal -->
       <Dialog :open="showEditModal" @update:open="setShowEditModal">
-        <DialogContent class="max-w-lg">
-          <DialogHeader>
+        <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-lg">
+          <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
             <DialogTitle class="text-lg font-semibold text-gray-900">
               {{
                 editingTransform.id
@@ -123,7 +182,7 @@
               }}
             </DialogTitle>
           </DialogHeader>
-          <div class="space-y-4">
+          <div class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
           <div class="space-y-1.5">
             <Label class="text-gray-700">
               {{ $t("modelAliasPage.modal.labelAliasName")
@@ -206,14 +265,14 @@
             />
           </div>
         </div>
-          <DialogFooter class="border-t border-gray-100 pt-4 mt-2">
+          <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
             <Button
               @click="handleCloseModal"
               variant="ghost"
-              class="text-gray-600"
+              class="w-full text-gray-600 sm:w-auto"
               >{{ $t("common.cancel") }}</Button
             >
-            <Button @click="handleSaveTransform" variant="default">{{
+            <Button @click="handleSaveTransform" variant="default" class="w-full sm:w-auto">{{
               $t("common.save")
             }}</Button>
           </DialogFooter>
@@ -254,6 +313,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
@@ -265,6 +325,7 @@ import {
   Inbox,
   AlertCircle,
 } from "lucide-vue-next";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { confirm } from "@/lib/confirmController";
 import { toastController } from "@/lib/toastController";
 

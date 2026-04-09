@@ -118,8 +118,8 @@ watch(
 
 <template>
   <Dialog :open="props.isOpen" @update:open="handleOpenChange">
-    <DialogContent>
-      <DialogHeader>
+    <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-lg">
+      <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
         <DialogTitle>{{ t("issueTokenModal.title") }}</DialogTitle>
         <DialogDescription>
           {{
@@ -128,7 +128,7 @@ watch(
         </DialogDescription>
       </DialogHeader>
 
-      <div v-if="!generatedToken" class="space-y-4 py-4">
+      <div v-if="!generatedToken" class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
         <div class="space-y-2">
           <Label for="uid">{{ t("issueTokenModal.uidLabel") }}</Label>
           <Input
@@ -168,7 +168,7 @@ watch(
         <p v-if="error" class="text-sm text-red-600">{{ error }}</p>
       </div>
 
-      <div v-if="generatedToken" class="space-y-4 py-4">
+      <div v-if="generatedToken" class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
         <p>{{ t("issueTokenModal.tokenGenerated") }}</p>
         <Input
           type="textarea"
@@ -179,11 +179,11 @@ watch(
         />
       </div>
 
-      <DialogFooter>
-        <Button variant="outline" @click="handleOpenChange(false)">{{
+      <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
+        <Button variant="outline" class="w-full sm:w-auto" @click="handleOpenChange(false)">{{
           t("common.cancel")
         }}</Button>
-        <Button v-if="!generatedToken" @click="handleSubmit">{{
+        <Button v-if="!generatedToken" class="w-full sm:w-auto" @click="handleSubmit">{{
           t("issueTokenModal.issueButton")
         }}</Button>
       </DialogFooter>

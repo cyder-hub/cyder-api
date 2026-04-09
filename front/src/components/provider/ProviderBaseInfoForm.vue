@@ -1,6 +1,15 @@
 <template>
-  <div class="space-y-4">
-    <div class="grid grid-cols-2 gap-4">
+  <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+    <div class="space-y-1">
+      <h2 class="text-base font-semibold text-gray-900">
+        {{ $t("common.basicInfo") }}
+      </h2>
+      <p class="text-sm text-gray-500">
+        {{ editingData.id ? $t("providerEditPage.buttonUpdateBaseInfo") : $t("providerEditPage.buttonCreateBaseInfo") }}
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div class="space-y-1.5">
         <Label class="text-gray-700"
           >{{ $t("providerEditPage.labelName") }}
@@ -48,7 +57,8 @@
         <Input v-model="editingData.endpoint" class="font-mono text-sm" />
       </div>
     </div>
-    <div class="flex items-center justify-between p-3.5 border border-gray-200 rounded-lg">
+
+    <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5">
       <Label for="use_proxy_checkbox" class="cursor-pointer text-gray-700"
         >{{ $t("providerEditPage.labelUseProxy") }}</Label
       >
@@ -59,9 +69,8 @@
       />
     </div>
 
-    <!-- Update Base Info Button -->
-    <div class="mt-4">
-      <Button variant="default" @click="handleUpdateProviderBaseInfo">
+    <div class="mt-2 flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row sm:justify-end">
+      <Button variant="default" class="w-full sm:w-auto" @click="handleUpdateProviderBaseInfo">
         {{
           editingData.id
             ? $t("providerEditPage.buttonUpdateBaseInfo")
@@ -69,7 +78,7 @@
         }}
       </Button>
     </div>
-  </div>
+  </section>
 </template>
 
 <script setup lang="ts">

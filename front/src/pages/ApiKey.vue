@@ -42,7 +42,102 @@
       </div>
     </template>
 
-    <div class="border border-gray-200 rounded-lg overflow-hidden">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:hidden">
+      <MobileCrudCard
+        v-for="key in apiKeyStore.apiKeys"
+        :key="key.id"
+        :title="key.name"
+        :description="key.description || '/'"
+      >
+        <template #header>
+          <Badge variant="secondary" class="font-mono text-[11px]">
+            {{ key.is_enabled ? $t("common.yes") : $t("common.no") }}
+          </Badge>
+        </template>
+
+        <div class="space-y-2 text-sm">
+          <div class="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2.5">
+            <span class="text-xs text-gray-500">{{ $t("apiKeyPage.table.apiKeyPartial") }}</span>
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-xs text-gray-700">{{
+                key.api_key
+                  ? `${key.api_key.substring(0, 3)}...${key.api_key.substring(key.api_key.length - 4)}`
+                  : "N/A"
+              }}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-8 w-8 p-0 text-gray-400 hover:text-gray-900"
+                @click="copyApiKeyToClipboard(key.api_key, key.id)"
+                :title="$t('apiKeyPage.copy')"
+              >
+                <Check
+                  v-if="copiedKeyId === key.id"
+                  class="h-3.5 w-3.5 text-green-600"
+                />
+                <Copy v-else class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 gap-2 text-xs text-gray-500">
+            <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+              <span>{{ $t("apiKeyPage.table.enabled") }}</span>
+              <Checkbox
+                :checked="key.is_enabled"
+                @update:checked="(val: boolean) => handleToggleEnable(key, val)"
+              />
+            </div>
+            <div class="flex items-center justify-between gap-3 rounded-lg border border-gray-100 px-3 py-2.5">
+              <span>{{ $t("apiKeyPage.table.accessControlPolicy") }}</span>
+              <Badge
+                v-if="key.access_control_policy_name"
+                variant="secondary"
+                class="max-w-[12rem] truncate font-mono text-[11px]"
+              >
+                {{ key.access_control_policy_name }}
+              </Badge>
+              <span v-else class="text-gray-400">-</span>
+            </div>
+            <div class="flex items-start justify-between gap-3 rounded-lg border border-gray-100 px-3 py-2.5">
+              <span>{{ $t("apiKeyPage.table.createdAt") }}</span>
+              <span class="text-right text-gray-700">
+                {{ key.created_at_formatted || key.created_at }}
+              </span>
+            </div>
+            <div class="flex items-start justify-between gap-3 rounded-lg border border-gray-100 px-3 py-2.5">
+              <span>{{ $t("apiKeyPage.table.updatedAt") }}</span>
+              <span class="text-right text-gray-700">
+                {{ key.updated_at_formatted || key.updated_at }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <template #actions>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center text-gray-500 hover:text-gray-900"
+            @click="handleStartEditing(key)"
+          >
+            <Pencil class="h-3.5 w-3.5 mr-1" />
+            {{ $t("common.edit") }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center text-gray-400 hover:text-red-600"
+            @click="handleDeleteApiKey(key)"
+          >
+            <Trash class="h-3.5 w-3.5 mr-1" />
+            {{ $t("common.delete") }}
+          </Button>
+        </template>
+      </MobileCrudCard>
+    </div>
+
+    <div class="hidden border border-gray-200 rounded-lg overflow-hidden md:block">
       <Table>
         <TableHeader class="bg-gray-50/80 hover:bg-gray-50/80">
           <TableRow>
@@ -86,7 +181,7 @@
               key.name
             }}</TableCell>
             <TableCell>
-              <div class="flex items-center space-x-2">
+              <div class="flex items-center gap-2">
                 <span class="font-mono text-xs text-gray-600">{{
                   key.api_key
                     ? `${key.api_key.substring(0, 3)}...${key.api_key.substring(key.api_key.length - 4)}`
@@ -196,6 +291,7 @@ import {
 } from "lucide-vue-next";
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
 import ApiKeyEditModal from "@/components/ApiKeyEditModal.vue";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { useApiKeyStore } from "@/store/apiKeyStore";
 import { useAccessControlStore } from "@/store/accessControlStore";
 import type { ApiKeyItem } from "@/store/types";

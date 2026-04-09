@@ -1206,6 +1206,8 @@ pub(super) struct OpenAiChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiChunkToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     refusal: Option<String>,
@@ -1282,6 +1284,7 @@ impl From<UnifiedChunkResponse> for OpenAiChunkResponse {
                     } else {
                         Some(content)
                     },
+                    reasoning_content: None,
                     tool_calls: if tool_calls.is_empty() {
                         None
                     } else {
@@ -1339,6 +1342,12 @@ impl From<OpenAiChunkResponse> for UnifiedChunkResponse {
                     }
                 }
 
+                if let Some(text) = choice.delta.reasoning_content {
+                    if !text.is_empty() {
+                        content.push(UnifiedContentPartDelta::TextDelta { index: 0, text });
+                    }
+                }
+
                 if let Some(tool_calls) = choice.delta.tool_calls {
                     for tc in tool_calls {
                         content.push(UnifiedContentPartDelta::ToolCallDelta(
@@ -1375,8 +1384,9 @@ impl From<OpenAiChunkResponse> for UnifiedChunkResponse {
     }
 }
 
-pub(super) fn openai_chunk_to_unified_stream_events(
+pub(super) fn openai_chunk_to_unified_stream_events_with_state(
     openai_chunk: OpenAiChunkResponse,
+    transformer: &mut StreamTransformer,
 ) -> Vec<UnifiedStreamEvent> {
     let OpenAiChunkResponse {
         id,
@@ -1387,6 +1397,11 @@ pub(super) fn openai_chunk_to_unified_stream_events(
     } = openai_chunk;
 
     let mut events = Vec::with_capacity(choices.len() * 4 + usize::from(usage.is_some()));
+
+    let mut reasoning_open = transformer.session.current_reasoning_block_index.is_some();
+    let mut text_block_index = transformer.session.current_content_block_index;
+    let mut reasoning_seen = transformer.session.openai_reasoning_seen;
+    let mut active_tool_calls = transformer.session.openai_active_tool_calls.clone();
 
     for choice in choices {
         if let Some(role) = choice.delta.role {
@@ -1403,10 +1418,49 @@ pub(super) fn openai_chunk_to_unified_stream_events(
             });
         }
 
+        if let Some(reasoning_text) = choice.delta.reasoning_content {
+            if !reasoning_text.is_empty() {
+                if text_block_index.is_some() {
+                    apply_transform_policy(
+                        TransformProtocol::Api(LlmApiType::Openai),
+                        TransformProtocol::Unified,
+                        TransformValueKind::ReasoningDelta,
+                        "Dropping OpenAI reasoning delta that arrived after the text block started.",
+                    );
+                } else {
+                    if !reasoning_open {
+                        events.push(UnifiedStreamEvent::ReasoningStart { index: 0 });
+                        reasoning_open = true;
+                        reasoning_seen = true;
+                    }
+                    events.push(UnifiedStreamEvent::ReasoningDelta {
+                        index: 0,
+                        item_index: None,
+                        item_id: None,
+                        part_index: None,
+                        text: reasoning_text,
+                    });
+                }
+            }
+        }
+
         if let Some(text) = choice.delta.content {
             if !text.is_empty() {
+                if reasoning_open {
+                    events.push(UnifiedStreamEvent::ReasoningStop { index: 0 });
+                    reasoning_open = false;
+                }
+
+                let index = if reasoning_seen { 1 } else { 0 };
+                if text_block_index != Some(index) {
+                    events.push(UnifiedStreamEvent::ContentBlockStart {
+                        index,
+                        kind: UnifiedBlockKind::Text,
+                    });
+                    text_block_index = Some(index);
+                }
                 events.push(UnifiedStreamEvent::ContentBlockDelta {
-                    index: 0,
+                    index,
                     item_index: None,
                     item_id: None,
                     part_index: None,
@@ -1426,10 +1480,14 @@ pub(super) fn openai_chunk_to_unified_stream_events(
                 let OpenAiChunkFunction { name, arguments } = function;
 
                 if let (Some(id), Some(name)) = (id.clone(), name.clone()) {
+                    active_tool_calls.insert(index, id.clone());
                     events.push(UnifiedStreamEvent::ToolCallStart { index, id, name });
                 }
 
                 if let Some(arguments) = arguments {
+                    if let Some(id) = id.clone() {
+                        active_tool_calls.insert(index, id);
+                    }
                     events.push(UnifiedStreamEvent::ToolCallArgumentsDelta {
                         index,
                         item_index: None,
@@ -1443,6 +1501,24 @@ pub(super) fn openai_chunk_to_unified_stream_events(
         }
 
         if choice.finish_reason.is_some() {
+            if reasoning_open {
+                events.push(UnifiedStreamEvent::ReasoningStop { index: 0 });
+                reasoning_open = false;
+            }
+            if let Some(index) = text_block_index.take() {
+                events.push(UnifiedStreamEvent::ContentBlockStop { index });
+            }
+            if choice.finish_reason.as_deref() == Some("tool_calls") {
+                let mut tool_call_indices: Vec<u32> = active_tool_calls.keys().copied().collect();
+                tool_call_indices.sort_unstable();
+                for tool_call_index in tool_call_indices {
+                    let tool_call_id = active_tool_calls.remove(&tool_call_index);
+                    events.push(UnifiedStreamEvent::ToolCallStop {
+                        index: tool_call_index,
+                        id: tool_call_id,
+                    });
+                }
+            }
             events.push(UnifiedStreamEvent::MessageDelta {
                 finish_reason: choice.finish_reason,
             });
@@ -1506,6 +1582,7 @@ pub(super) fn transform_unified_stream_event_to_openai_event(
                             .to_string(),
                         ),
                         content: None,
+                        reasoning_content: None,
                         tool_calls: None,
                         refusal: None,
                         name: None,
@@ -1533,6 +1610,7 @@ pub(super) fn transform_unified_stream_event_to_openai_event(
                     delta: OpenAiChunkDelta {
                         role: None,
                         content: Some(text),
+                        reasoning_content: None,
                         tool_calls: None,
                         refusal: None,
                         name: None,
@@ -1563,6 +1641,7 @@ pub(super) fn transform_unified_stream_event_to_openai_event(
                 delta: OpenAiChunkDelta {
                     role: None,
                     content: None,
+                    reasoning_content: None,
                     tool_calls: Some(vec![OpenAiChunkToolCall {
                         index,
                         id: Some(tool_id),
@@ -1603,6 +1682,7 @@ pub(super) fn transform_unified_stream_event_to_openai_event(
                 delta: OpenAiChunkDelta {
                     role: None,
                     content: None,
+                    reasoning_content: None,
                     tool_calls: Some(vec![OpenAiChunkToolCall {
                         index,
                         id: tool_id,
@@ -1637,6 +1717,7 @@ pub(super) fn transform_unified_stream_event_to_openai_event(
                     delta: OpenAiChunkDelta {
                         role: None,
                         content: None,
+                        reasoning_content: None,
                         tool_calls: None,
                         refusal: None,
                         name: None,
@@ -1663,6 +1744,7 @@ pub(super) fn transform_unified_stream_event_to_openai_event(
                 delta: OpenAiChunkDelta {
                     role: None,
                     content: None,
+                    reasoning_content: None,
                     tool_calls: None,
                     refusal: None,
                     name: None,
@@ -2174,6 +2256,7 @@ mod tests {
                 delta: OpenAiChunkDelta {
                     role: Some("assistant".to_string()),
                     content: Some("Hello".to_string()),
+                    reasoning_content: None,
                     tool_calls: None,
                     refusal: None,
                     name: None,
@@ -2197,6 +2280,269 @@ mod tests {
             }]
         );
         assert!(choice.finish_reason.is_none());
+    }
+
+    #[test]
+    fn test_openai_chunk_to_unified_stream_events_with_reasoning_and_text() {
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+
+        let reasoning_events = openai_chunk_to_unified_stream_events_with_state(
+            OpenAiChunkResponse {
+                id: "chatcmpl-123".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 12345,
+                model: "gpt-4".to_string(),
+                system_fingerprint: None,
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: Some("assistant".to_string()),
+                        content: Some(String::new()),
+                        reasoning_content: Some("step one".to_string()),
+                        tool_calls: None,
+                        refusal: None,
+                        name: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+            },
+            &mut transformer,
+        );
+
+        assert_eq!(
+            reasoning_events,
+            vec![
+                UnifiedStreamEvent::MessageStart {
+                    id: Some("chatcmpl-123".to_string()),
+                    model: Some("gpt-4".to_string()),
+                    role: UnifiedRole::Assistant,
+                },
+                UnifiedStreamEvent::ReasoningStart { index: 0 },
+                UnifiedStreamEvent::ReasoningDelta {
+                    index: 0,
+                    item_index: None,
+                    item_id: None,
+                    part_index: None,
+                    text: "step one".to_string(),
+                },
+            ]
+        );
+        transformer.update_session_from_stream_events(&reasoning_events);
+
+        let text_events = openai_chunk_to_unified_stream_events_with_state(
+            OpenAiChunkResponse {
+                id: "chatcmpl-123".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 12346,
+                model: "gpt-4".to_string(),
+                system_fingerprint: None,
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: None,
+                        content: Some("Hello".to_string()),
+                        reasoning_content: None,
+                        tool_calls: None,
+                        refusal: None,
+                        name: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+            },
+            &mut transformer,
+        );
+
+        assert_eq!(
+            text_events,
+            vec![
+                UnifiedStreamEvent::ReasoningStop { index: 0 },
+                UnifiedStreamEvent::ContentBlockStart {
+                    index: 1,
+                    kind: UnifiedBlockKind::Text,
+                },
+                UnifiedStreamEvent::ContentBlockDelta {
+                    index: 1,
+                    item_index: None,
+                    item_id: None,
+                    part_index: None,
+                    text: "Hello".to_string(),
+                },
+            ]
+        );
+        transformer.update_session_from_stream_events(&text_events);
+
+        let finish_events = openai_chunk_to_unified_stream_events_with_state(
+            OpenAiChunkResponse {
+                id: "chatcmpl-123".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 12347,
+                model: "gpt-4".to_string(),
+                system_fingerprint: None,
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: None,
+                        content: Some(String::new()),
+                        reasoning_content: None,
+                        tool_calls: None,
+                        refusal: None,
+                        name: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                    logprobs: None,
+                }],
+                usage: None,
+            },
+            &mut transformer,
+        );
+
+        assert_eq!(
+            finish_events,
+            vec![
+                UnifiedStreamEvent::ContentBlockStop { index: 1 },
+                UnifiedStreamEvent::MessageDelta {
+                    finish_reason: Some("stop".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_openai_chunk_to_unified_stream_events_drops_late_reasoning_after_text_started() {
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+        transformer.session.current_content_block_index = Some(0);
+
+        let events = openai_chunk_to_unified_stream_events_with_state(
+            OpenAiChunkResponse {
+                id: "chatcmpl-123".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 12345,
+                model: "gpt-4".to_string(),
+                system_fingerprint: None,
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: None,
+                        content: None,
+                        reasoning_content: Some("too late".to_string()),
+                        tool_calls: None,
+                        refusal: None,
+                        name: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+            },
+            &mut transformer,
+        );
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_openai_chunk_to_unified_stream_events_emits_tool_call_stop_on_tool_calls_finish() {
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+
+        let start_events = openai_chunk_to_unified_stream_events_with_state(
+            OpenAiChunkResponse {
+                id: "chatcmpl-123".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 12345,
+                model: "gpt-4".to_string(),
+                system_fingerprint: None,
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: Some("assistant".to_string()),
+                        content: None,
+                        reasoning_content: None,
+                        tool_calls: Some(vec![OpenAiChunkToolCall {
+                            index: 0,
+                            id: Some("call_1".to_string()),
+                            type_: Some("function".to_string()),
+                            function: OpenAiChunkFunction {
+                                name: Some("search_web".to_string()),
+                                arguments: Some("{".to_string()),
+                            },
+                        }]),
+                        refusal: None,
+                        name: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+            },
+            &mut transformer,
+        );
+
+        assert_eq!(
+            start_events,
+            vec![
+                UnifiedStreamEvent::MessageStart {
+                    id: Some("chatcmpl-123".to_string()),
+                    model: Some("gpt-4".to_string()),
+                    role: UnifiedRole::Assistant,
+                },
+                UnifiedStreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "call_1".to_string(),
+                    name: "search_web".to_string(),
+                },
+                UnifiedStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    item_index: None,
+                    item_id: None,
+                    id: Some("call_1".to_string()),
+                    name: Some("search_web".to_string()),
+                    arguments: "{".to_string(),
+                },
+            ]
+        );
+        transformer.update_session_from_stream_events(&start_events);
+
+        let finish_events = openai_chunk_to_unified_stream_events_with_state(
+            OpenAiChunkResponse {
+                id: "chatcmpl-123".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 12346,
+                model: "gpt-4".to_string(),
+                system_fingerprint: None,
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: None,
+                        content: None,
+                        reasoning_content: None,
+                        tool_calls: None,
+                        refusal: None,
+                        name: None,
+                    },
+                    finish_reason: Some("tool_calls".to_string()),
+                    logprobs: None,
+                }],
+                usage: None,
+            },
+            &mut transformer,
+        );
+
+        assert_eq!(
+            finish_events,
+            vec![
+                UnifiedStreamEvent::ToolCallStop {
+                    index: 0,
+                    id: Some("call_1".to_string()),
+                },
+                UnifiedStreamEvent::MessageDelta {
+                    finish_reason: Some("tool_calls".to_string()),
+                },
+            ]
+        );
     }
 
     #[test]

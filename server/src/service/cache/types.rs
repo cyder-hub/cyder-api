@@ -35,6 +35,7 @@ pub struct CacheModel {
     pub model_name: String,
     pub real_model_name: Option<String>,
     pub billing_plan_id: Option<i64>,
+    pub is_enabled: bool,
 }
 
 /// Cached provider with only essential fields
@@ -47,6 +48,24 @@ pub struct CacheProvider {
     pub use_proxy: bool,
     pub provider_type: ProviderType,
     pub provider_api_key_mode: ProviderApiKeyMode,
+    pub is_enabled: bool,
+}
+
+/// Cached model alias with only fields needed for model resolution and listing
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CacheModelAlias {
+    pub id: i64,
+    pub alias_name: String,
+    pub target_model_id: i64,
+    pub is_enabled: bool,
+}
+
+/// Cached aggregate catalog used by `/models` style listing endpoints
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CacheModelsCatalog {
+    pub providers: Vec<CacheProvider>,
+    pub models: Vec<CacheModel>,
+    pub aliases: Vec<CacheModelAlias>,
 }
 
 /// Cached provider API key
@@ -135,6 +154,7 @@ impl From<crate::database::model::Model> for CacheModel {
             real_model_name: db.real_model_name,
             model_name,
             billing_plan_id: db.billing_plan_id,
+            is_enabled: db.is_enabled,
         }
     }
 }
@@ -149,6 +169,18 @@ impl From<crate::database::provider::Provider> for CacheProvider {
             use_proxy: db.use_proxy,
             provider_type: db.provider_type,
             provider_api_key_mode: db.provider_api_key_mode,
+            is_enabled: db.is_enabled,
+        }
+    }
+}
+
+impl From<crate::database::model_alias::ModelAlias> for CacheModelAlias {
+    fn from(db: crate::database::model_alias::ModelAlias) -> Self {
+        Self {
+            id: db.id,
+            alias_name: db.alias_name,
+            target_model_id: db.target_model_id,
+            is_enabled: db.is_enabled,
         }
     }
 }

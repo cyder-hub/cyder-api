@@ -2,9 +2,10 @@ use std::net::SocketAddr;
 
 use cyder_api::config::CONFIG;
 use cyder_api::controller::{create_manager_router, create_system_router, handle_404};
-use cyder_api::proxy::create_proxy_router;
+use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
+use cyder_api::proxy::{create_proxy_router, flush_proxy_logs};
 use cyder_api::service::app_state::{create_app_state, create_state_router};
-use cyder_tools::log::{LocalLogger, info};
+use cyder_tools::log::info;
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -33,8 +34,18 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() {
-    LocalLogger::init(&CONFIG.log_level);
+    logging::init(&CONFIG.log_level);
     let addr = format!("{}:{}", &CONFIG.host, CONFIG.port);
+    if matches!(
+        CONFIG.log_level.to_ascii_lowercase().as_str(),
+        "debug" | "trace"
+    ) && std::env::var(THIRD_PARTY_DEBUG_ENV).is_err()
+    {
+        info!(
+            "Third-party debug logs are muted; set {}=1 to enable dependency debug output.",
+            THIRD_PARTY_DEBUG_ENV
+        );
+    }
     info!("server start at {}", &addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     let app_state = create_app_state().await;
@@ -57,6 +68,7 @@ async fn main() {
     .expect("failed to start server");
 
     cyder_tools::log::info!("Server shut down. Waiting for background tasks to finish...");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    flush_proxy_logs().await;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     cyder_tools::log::info!("Shutdown complete.");
 }

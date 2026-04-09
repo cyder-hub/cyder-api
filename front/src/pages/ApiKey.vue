@@ -200,6 +200,7 @@ import { useApiKeyStore } from "@/store/apiKeyStore";
 import { useAccessControlStore } from "@/store/accessControlStore";
 import type { ApiKeyItem } from "@/store/types";
 import { normalizeError } from "@/lib/error";
+import { copyText } from "@/lib/clipboard";
 import { toastController } from "@/lib/toastController";
 import { confirm } from "@/lib/confirmController";
 
@@ -300,15 +301,15 @@ const handleDeleteApiKey = async (apiKey: ApiKeyItem) => {
 
 const copyApiKeyToClipboard = async (apiKeyString: string, keyId: number) => {
   if (!apiKeyString) return;
-  try {
-    await navigator.clipboard.writeText(apiKeyString);
-    copiedKeyId.value = keyId;
-    setTimeout(() => {
-      copiedKeyId.value = null;
-    }, 2000);
-  } catch (err) {
-    console.error("Failed to copy API key: ", err);
+  const copied = await copyText(apiKeyString);
+  if (!copied) {
     toastController.error($t("apiKeyPage.copyFailed"));
+    return;
   }
+
+  copiedKeyId.value = keyId;
+  setTimeout(() => {
+    copiedKeyId.value = null;
+  }, 2000);
 };
 </script>

@@ -2,7 +2,7 @@ use axum::{
     Json,
     response::{IntoResponse, Response},
 };
-use reqwest::StatusCode;
+use reqwest::{Error as ReqwestError, StatusCode};
 use serde::Serialize;
 use std::fmt;
 
@@ -20,10 +20,26 @@ pub enum ProxyError {
     BadRequest(String),
     /// 403 — Access control policy denied the request.
     Forbidden(String),
+    /// 413 — Request body exceeds configured size or upstream rejects payload size.
+    PayloadTooLarge(String),
+    /// 499 — Client disconnected before the request lifecycle completed.
+    ClientCancelled(String),
     /// 500 — Internal gateway error (cache failure, serialization, etc.).
     InternalError(String),
+    /// 500 — Request/response transform or serialization failed.
+    ProtocolTransformError(String),
+    /// 400 — Upstream rejected the request as invalid.
+    UpstreamBadRequest(String),
+    /// 429 — Upstream rate limited the request.
+    UpstreamRateLimited(String),
+    /// 502 — Upstream authentication/authorization failed.
+    UpstreamAuthentication(String),
     /// 502 — Upstream LLM service unreachable or returned a connection error.
     BadGateway(String),
+    /// 503 — Upstream service returned a server-side failure.
+    UpstreamService(String),
+    /// 504 — Upstream request or body read timed out.
+    UpstreamTimeout(String),
 }
 
 impl ProxyError {
@@ -32,8 +48,18 @@ impl ProxyError {
             ProxyError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ProxyError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ProxyError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ProxyError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ProxyError::ClientCancelled(_) => {
+                StatusCode::from_u16(499).expect("499 should be a valid status code")
+            }
             ProxyError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ProxyError::ProtocolTransformError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ProxyError::UpstreamBadRequest(_) => StatusCode::BAD_REQUEST,
+            ProxyError::UpstreamRateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+            ProxyError::UpstreamAuthentication(_) => StatusCode::BAD_GATEWAY,
             ProxyError::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            ProxyError::UpstreamService(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ProxyError::UpstreamTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
         }
     }
 
@@ -42,8 +68,16 @@ impl ProxyError {
             ProxyError::Unauthorized(_) => "authentication_error",
             ProxyError::BadRequest(_) => "invalid_request_error",
             ProxyError::Forbidden(_) => "permission_error",
+            ProxyError::PayloadTooLarge(_) => "body_too_large_error",
+            ProxyError::ClientCancelled(_) => "client_cancelled_error",
             ProxyError::InternalError(_) => "server_error",
+            ProxyError::ProtocolTransformError(_) => "protocol_transform_error",
+            ProxyError::UpstreamBadRequest(_) => "upstream_invalid_request_error",
+            ProxyError::UpstreamRateLimited(_) => "upstream_rate_limit_error",
+            ProxyError::UpstreamAuthentication(_) => "upstream_authentication_error",
             ProxyError::BadGateway(_) => "upstream_error",
+            ProxyError::UpstreamService(_) => "upstream_service_error",
+            ProxyError::UpstreamTimeout(_) => "upstream_timeout_error",
         }
     }
 
@@ -52,10 +86,119 @@ impl ProxyError {
             ProxyError::Unauthorized(msg)
             | ProxyError::BadRequest(msg)
             | ProxyError::Forbidden(msg)
+            | ProxyError::PayloadTooLarge(msg)
+            | ProxyError::ClientCancelled(msg)
             | ProxyError::InternalError(msg)
-            | ProxyError::BadGateway(msg) => msg,
+            | ProxyError::ProtocolTransformError(msg)
+            | ProxyError::UpstreamBadRequest(msg)
+            | ProxyError::UpstreamRateLimited(msg)
+            | ProxyError::UpstreamAuthentication(msg)
+            | ProxyError::BadGateway(msg)
+            | ProxyError::UpstreamService(msg)
+            | ProxyError::UpstreamTimeout(msg) => msg,
         }
     }
+}
+
+pub(super) fn classify_request_body_error(message: impl Into<String>) -> ProxyError {
+    let message = message.into();
+    if is_body_too_large_message(&message) {
+        ProxyError::PayloadTooLarge(format!(
+            "Request body exceeds configured size limit: {message}"
+        ))
+    } else {
+        ProxyError::BadRequest(format!("Failed to read request body: {message}"))
+    }
+}
+
+pub(super) fn protocol_transform_error(operation: &str, err: impl fmt::Display) -> ProxyError {
+    ProxyError::ProtocolTransformError(format!("{operation}: {err}"))
+}
+
+pub(super) fn classify_reqwest_error(context: &str, err: &ReqwestError) -> ProxyError {
+    if err.is_timeout() {
+        return ProxyError::UpstreamTimeout(format!("{context} timed out: {err}"));
+    }
+
+    if let Some(status) = err.status() {
+        return classify_upstream_status(status, err.to_string().as_bytes());
+    }
+
+    if err.is_connect() {
+        return ProxyError::BadGateway(format!("{context} could not connect to upstream: {err}"));
+    }
+
+    if err.is_body() || err.is_decode() {
+        return ProxyError::BadGateway(format!(
+            "{context} failed while reading upstream body: {err}"
+        ));
+    }
+
+    if err.is_request() {
+        return ProxyError::BadGateway(format!("{context} could not be sent to upstream: {err}"));
+    }
+
+    ProxyError::BadGateway(format!("{context} failed: {err}"))
+}
+
+pub(super) fn classify_upstream_status(status: StatusCode, body: &[u8]) -> ProxyError {
+    let body_message = extract_upstream_error_message(body);
+    let message = format!("Upstream returned {}: {}", status.as_u16(), body_message);
+
+    match status {
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
+            ProxyError::UpstreamTimeout(message)
+        }
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            ProxyError::UpstreamAuthentication(message)
+        }
+        StatusCode::PAYLOAD_TOO_LARGE => ProxyError::PayloadTooLarge(message),
+        StatusCode::TOO_MANY_REQUESTS => ProxyError::UpstreamRateLimited(message),
+        status if status.is_client_error() => ProxyError::UpstreamBadRequest(message),
+        status if status.is_server_error() => ProxyError::UpstreamService(message),
+        _ => ProxyError::BadGateway(message),
+    }
+}
+
+fn extract_upstream_error_message(body: &[u8]) -> String {
+    if body.is_empty() {
+        return "empty upstream error body".to_string();
+    }
+
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(message) = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str)
+        {
+            return truncate_message(message);
+        }
+
+        if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+            return truncate_message(message);
+        }
+
+        return truncate_message(&value.to_string());
+    }
+
+    truncate_message(&String::from_utf8_lossy(body))
+}
+
+fn truncate_message(message: &str) -> String {
+    const MAX_LEN: usize = 512;
+    if message.chars().count() <= MAX_LEN {
+        return message.to_string();
+    }
+
+    let truncated = message.chars().take(MAX_LEN).collect::<String>();
+    format!("{truncated}...")
+}
+
+fn is_body_too_large_message(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("length limit exceeded")
+        || normalized.contains("body too large")
+        || normalized.contains("payload too large")
 }
 
 impl fmt::Display for ProxyError {
@@ -78,5 +221,44 @@ impl IntoResponse for ProxyError {
             message: self.message().to_string(),
         };
         (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ProxyError, classify_request_body_error, classify_upstream_status, protocol_transform_error,
+    };
+    use axum::response::IntoResponse;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn classify_request_body_error_maps_length_limit_to_payload_too_large() {
+        assert!(matches!(
+            classify_request_body_error("length limit exceeded"),
+            ProxyError::PayloadTooLarge(_)
+        ));
+    }
+
+    #[test]
+    fn classify_upstream_status_extracts_json_message() {
+        let err = classify_upstream_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            br#"{"error":{"message":"quota exceeded"}}"#,
+        );
+
+        match err {
+            ProxyError::UpstreamRateLimited(message) => {
+                assert!(message.contains("quota exceeded"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn protocol_transform_error_uses_dedicated_code() {
+        let response =
+            protocol_transform_error("serialize final request body", "boom").into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

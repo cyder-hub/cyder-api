@@ -219,16 +219,15 @@ onMounted(() => {
 });
 
 const handleDeleteProvider = async (provider: ProviderBase) => {
-  if (await confirm($t("providerPage.confirmDelete", { name: provider.name }))) {
-    try {
-      await Api.deleteProvider(provider.id);
-      toastController.success($t("deleteSuccess", "Deleted successfully"));
-      await loadData();
-    } catch (err: any) {
-      console.error("Failed to delete provider:", err);
-      const errorMessage = err.message || $t("common.unknownError", "Unknown Error");
-      toastController.error($t("providerPage.deleteFailed", { error: errorMessage }));
-    }
-  }
+  await confirm($t("providerPage.confirmDelete", { name: provider.name }))
+  try {
+    await Api.deleteProvider(provider.id);
+    toastController.success($t("deleteSuccess", "Deleted successfully"));
+    await loadData();
+  } catch (err: any) {
+    console.error("Failed to delete provider:", err);
+    const errorMessage = err.message || $t("common.unknownError", "Unknown Error");
+    toastController.error($t("providerPage.deleteFailed", { error: errorMessage }));
+  } 
 };
 </script>

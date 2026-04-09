@@ -312,6 +312,8 @@ export interface RecordDetail extends RecordListItem {
   response_headers: string | null;
   storage_type: string | null;
   error_message: string | null;
+  user_api_type?: string | null;
+  llm_api_type?: string | null;
   response_sent_to_client_at: number | null;
   input_image_tokens?: number | null;
   output_image_tokens?: number | null;

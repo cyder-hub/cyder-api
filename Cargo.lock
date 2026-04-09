@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "cyder-api"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -919,6 +919,7 @@ dependencies = [
  "json-patch",
  "jsonwebtoken 10.3.0",
  "libsqlite3-sys",
+ "log",
  "openssl",
  "paste",
  "pq-sys",
@@ -938,6 +939,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "tower",
  "tower-http",
  "uuid",
 ]

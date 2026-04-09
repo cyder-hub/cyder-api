@@ -162,6 +162,11 @@ export const zhDict = {
       general: "通用信息",
       timings: "时间信息 (UTC)",
     },
+    copy: {
+      action: "复制",
+      copied: "已复制",
+      failed: "复制文本失败。",
+    },
     pagination: {
       previousPage: "上一页",
       nextPage: "下一页",

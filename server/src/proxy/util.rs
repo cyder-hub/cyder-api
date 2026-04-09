@@ -4,7 +4,7 @@ use axum::{body::Body, extract::Request};
 use cyder_tools::log::debug;
 use serde_json::Value;
 
-use super::ProxyError;
+use super::{ProxyError, protocol_transform_error};
 use crate::{
     config::CONFIG,
     schema::enum_def::LlmApiType,
@@ -149,9 +149,10 @@ pub(super) fn calculate_llm_request_body_for_log(
             // that is identical to the user request body, allowing for hash optimization.
             Ok(None)
         } else {
-            let patch_bytes = Bytes::from(serde_json::to_vec(&patch).map_err(|e| {
-                ProxyError::InternalError(format!("Failed to serialize json-patch: {}", e))
-            })?);
+            let patch_bytes = Bytes::from(
+                serde_json::to_vec(&patch)
+                    .map_err(|e| protocol_transform_error("Failed to serialize json-patch", e))?,
+            );
             Ok(Some(patch_bytes))
         }
     } else {
@@ -175,6 +176,7 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::GeminiOpenai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
+            is_enabled: true,
         };
 
         assert_eq!(

@@ -30,7 +30,10 @@ struct UpdateAliasRequest {
     is_enabled: Option<bool>,
 }
 
-async fn create_alias(Json(payload): Json<CreateAliasRequest>) -> DbResult<HttpResult<ModelAlias>> {
+async fn create_alias(
+    State(app_state): State<Arc<AppState>>,
+    Json(payload): Json<CreateAliasRequest>,
+) -> DbResult<HttpResult<ModelAlias>> {
     let created_alias_from_db = ModelAlias::create(
         &payload.alias_name,
         payload.target_model_id,
@@ -38,6 +41,13 @@ async fn create_alias(Json(payload): Json<CreateAliasRequest>) -> DbResult<HttpR
         payload.priority,
         payload.is_enabled,
     )?;
+
+    if let Err(e) = app_state.invalidate_models_catalog().await {
+        warn!(
+            "Failed to invalidate models catalog after model alias create {}: {:?}",
+            created_alias_from_db.id, e
+        );
+    }
 
     Ok(HttpResult::new(created_alias_from_db))
 }

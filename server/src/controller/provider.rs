@@ -57,7 +57,10 @@ struct InserPayload {
     pub provider_api_key_mode: Option<ProviderApiKeyMode>,
 }
 
-async fn insert(Json(payload): Json<InserPayload>) -> DbResult<HttpResult<Provider>> {
+async fn insert(
+    State(app_state): State<Arc<AppState>>,
+    Json(payload): Json<InserPayload>,
+) -> DbResult<HttpResult<Provider>> {
     let current_time = Utc::now().timestamp_millis();
     let new_provider_data = NewProvider {
         id: ID_GENERATOR.generate_id(),
@@ -77,8 +80,12 @@ async fn insert(Json(payload): Json<InserPayload>) -> DbResult<HttpResult<Provid
     };
     let created_provider = Provider::create(&new_provider_data)?;
 
-    // No need to manually update cache - it will be loaded on first read
-    // Cache follows Cache-Aside pattern now
+    if let Err(e) = app_state.invalidate_models_catalog().await {
+        warn!(
+            "Failed to invalidate models catalog after provider create {}: {:?}",
+            created_provider.id, e
+        );
+    }
 
     Ok(HttpResult::new(created_provider))
 }

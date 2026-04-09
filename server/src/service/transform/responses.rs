@@ -278,6 +278,22 @@ pub enum MessageStatus {
     Incomplete,
 }
 
+fn default_message_id() -> String {
+    format!("msg_{}", crate::utils::ID_GENERATOR.generate_id())
+}
+
+fn default_function_call_id() -> String {
+    format!("fc_{}", crate::utils::ID_GENERATOR.generate_id())
+}
+
+fn default_function_call_output_id() -> String {
+    format!("fco_{}", crate::utils::ID_GENERATOR.generate_id())
+}
+
+fn default_completed_status() -> MessageStatus {
+    MessageStatus::Completed
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct IncompleteDetails {
     pub reason: String,
@@ -530,7 +546,9 @@ fn try_deserialize_shorthand_message(value: &Value) -> Option<Message> {
 pub struct Message {
     #[serde(rename = "type")]
     pub _type: String,
+    #[serde(default = "default_message_id")]
     pub id: String,
+    #[serde(default = "default_completed_status")]
     pub status: MessageStatus,
     pub role: MessageRole,
     pub content: Vec<ItemContentPart>,
@@ -605,10 +623,12 @@ pub struct TopLogProb {
 pub struct FunctionCall {
     #[serde(rename = "type")]
     pub _type: String,
+    #[serde(default = "default_function_call_id")]
     pub id: String,
     pub call_id: String,
     pub name: String,
     pub arguments: String,
+    #[serde(default = "default_completed_status")]
     pub status: MessageStatus,
 }
 
@@ -616,9 +636,11 @@ pub struct FunctionCall {
 pub struct FunctionCallOutput {
     #[serde(rename = "type")]
     pub _type: String,
+    #[serde(default = "default_function_call_output_id")]
     pub id: String,
     pub call_id: String,
     pub output: FunctionCallOutputPayload,
+    #[serde(default = "default_completed_status")]
     pub status: MessageStatus,
 }
 
@@ -2425,6 +2447,13 @@ pub enum ResponsesStreamEvent {
         name: Option<String>,
         arguments: String,
     },
+    ToolCallArgumentsDone {
+        index: u32,
+        item_index: Option<u32>,
+        item_id: Option<String>,
+        id: Option<String>,
+        arguments: String,
+    },
     ToolCallStop {
         index: u32,
         id: Option<String>,
@@ -2546,6 +2575,14 @@ enum TypedResponsesStreamEvent {
         name: Option<String>,
         delta: String,
     },
+    #[serde(rename = "response.function_call_arguments.done")]
+    FunctionCallArgumentsDone {
+        item_id: String,
+        output_index: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        arguments: String,
+    },
     #[serde(rename = "response.reasoning_summary_part.added")]
     ReasoningSummaryPartAdded { item_id: String, summary_index: u32 },
     #[serde(rename = "response.reasoning_summary_part.done")]
@@ -2647,6 +2684,19 @@ impl ResponsesStreamEvent {
                 "name": name,
                 "delta": arguments
             }),
+            Self::ToolCallArgumentsDone {
+                item_index: Some(output_index),
+                item_id: Some(item_id),
+                id,
+                arguments,
+                ..
+            } => json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": item_id,
+                "output_index": output_index,
+                "call_id": id,
+                "arguments": arguments
+            }),
             Self::ReasoningDelta {
                 item_id: Some(item_id),
                 part_index: Some(summary_index),
@@ -2704,6 +2754,18 @@ impl ResponsesStreamEvent {
                     id: Some(item_id),
                     name,
                     arguments: delta,
+                },
+                TypedResponsesStreamEvent::FunctionCallArgumentsDone {
+                    item_id,
+                    output_index,
+                    call_id,
+                    arguments,
+                } => Self::ToolCallArgumentsDone {
+                    index: output_index,
+                    item_index: Some(output_index),
+                    item_id: Some(item_id),
+                    id: call_id,
+                    arguments,
                 },
                 TypedResponsesStreamEvent::ReasoningSummaryPartAdded {
                     item_id,
@@ -2912,6 +2974,21 @@ impl ResponsesStreamEvent {
                 index: *index,
                 id: id.clone(),
                 name: name.clone(),
+                arguments: arguments.clone(),
+            },
+            Self::ToolCallArgumentsDone {
+                index,
+                item_index,
+                item_id,
+                id,
+                arguments,
+            } => TypedResponsesStreamEvent::FunctionCallArgumentsDone {
+                item_id: item_id
+                    .clone()
+                    .or_else(|| id.clone())
+                    .unwrap_or_default(),
+                output_index: item_index.unwrap_or(*index),
+                call_id: id.clone(),
                 arguments: arguments.clone(),
             },
             Self::ToolCallStop { index, id } => TypedResponsesStreamEvent::ToolCallStop {
@@ -3267,6 +3344,9 @@ pub fn responses_chunk_to_unified_stream_events(
                 name,
                 arguments,
             }];
+        }
+        ResponsesStreamEvent::ToolCallArgumentsDone { .. } => {
+            return Vec::new();
         }
         ResponsesStreamEvent::ToolCallStop { index, id } => {
             return vec![UnifiedStreamEvent::ToolCallStop { index, id }];
@@ -3638,6 +3718,7 @@ pub(super) fn transform_responses_chunk_to_openai_events(
         | ResponsesStreamEvent::ContentBlockDelta { .. }
         | ResponsesStreamEvent::ToolCallStart { .. }
         | ResponsesStreamEvent::ToolCallArgumentsDelta { .. }
+        | ResponsesStreamEvent::ToolCallArgumentsDone { .. }
         | ResponsesStreamEvent::ReasoningStart { .. }
         | ResponsesStreamEvent::ReasoningDelta { .. }
         | ResponsesStreamEvent::ReasoningStop { .. }
@@ -3824,6 +3905,7 @@ pub(super) fn transform_responses_chunk_to_openai_events(
                 arguments,
             });
         }
+        ResponsesStreamEvent::ToolCallArgumentsDone { .. } => {}
         ResponsesStreamEvent::ToolCallStop { .. } => {}
         ResponsesStreamEvent::ReasoningStart { index } => {
             push_event(UnifiedStreamEvent::ReasoningStart { index });
@@ -4658,6 +4740,15 @@ fn encode_formal_responses_stream_event(
                     .responses
                     .completed_output
                     .insert(index, item.clone());
+                if let ItemField::FunctionCall(function_call) = &item {
+                    frames.push(json!({
+                        "type": "response.function_call_arguments.done",
+                        "item_id": function_call.id,
+                        "output_index": index,
+                        "call_id": function_call.call_id,
+                        "arguments": function_call.arguments
+                    }));
+                }
                 frames.push(json!({
                     "type": "response.output_item.done",
                     "output_index": index,
@@ -6264,6 +6355,34 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_chunk_response_serializes_tool_arguments_done_as_standard_event() {
+        let chunk = ResponsesChunkResponse {
+            id: "resp_1".to_string(),
+            model: "gpt-4.1".to_string(),
+            event: ResponsesStreamEvent::ToolCallArgumentsDone {
+                index: 0,
+                item_index: Some(0),
+                item_id: Some("fc_1".to_string()),
+                id: Some("call_1".to_string()),
+                arguments: "{\"city\":\"Boston\"}".to_string(),
+            },
+        };
+
+        let value = serde_json::to_value(chunk).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_1",
+                "output_index": 0,
+                "call_id": "call_1",
+                "arguments": "{\"city\":\"Boston\"}"
+            })
+        );
+    }
+
+    #[test]
     fn test_responses_chunk_response_serializes_reasoning_delta_as_standard_event() {
         let chunk = ResponsesChunkResponse {
             id: "resp_1".to_string(),
@@ -7244,6 +7363,52 @@ mod tests {
                 && value["summary"][0]["type"] == json!("summary_text")
                 && value["summary"][0]["text"] == json!("checked policy")
         ));
+    }
+
+    #[test]
+    fn test_unified_stream_events_to_responses_emit_function_call_arguments_done() {
+        let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+        let sse = transform_unified_stream_events_to_responses_events(
+            vec![
+                UnifiedStreamEvent::MessageStart {
+                    id: Some("resp_tool".to_string()),
+                    model: Some("gpt-4.1".to_string()),
+                    role: UnifiedRole::Assistant,
+                },
+                UnifiedStreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "call_1".to_string(),
+                    name: "lookup_weather".to_string(),
+                },
+                UnifiedStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    item_index: Some(0),
+                    item_id: Some("fc_1".to_string()),
+                    id: Some("call_1".to_string()),
+                    name: Some("lookup_weather".to_string()),
+                    arguments: "{\"city\":\"Boston\"}".to_string(),
+                },
+                UnifiedStreamEvent::ToolCallStop {
+                    index: 0,
+                    id: Some("call_1".to_string()),
+                },
+            ],
+            &mut state,
+        )
+        .unwrap();
+
+        let frames: Vec<Value> = sse
+            .iter()
+            .map(|event| serde_json::from_str(&event.data).unwrap())
+            .collect();
+
+        assert!(frames.iter().any(|frame| {
+            frame["type"] == json!("response.function_call_arguments.done")
+                && frame["item_id"] == json!("fc_1")
+                && frame["output_index"] == json!(0)
+                && frame["call_id"] == json!("call_1")
+                && frame["arguments"] == json!("{\"city\":\"Boston\"}")
+        }));
     }
 
     #[test]

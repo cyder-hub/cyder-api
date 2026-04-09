@@ -22,8 +22,8 @@ use crate::schema::enum_def::ProviderApiKeyMode;
 
 use super::cache::repository::{CacheRepository, DynCacheRepo};
 use super::cache::types::{
-    CacheAccessControl, CacheBillingPlan, CacheCustomField, CacheEntry, CacheModel, CacheProvider,
-    CacheProviderKey, CacheSystemApiKey,
+    CacheAccessControl, CacheBillingPlan, CacheCustomField, CacheEntry, CacheModel,
+    CacheModelAlias, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheSystemApiKey,
 };
 use super::cache::{CacheError, memory::MemoryCacheBackend};
 
@@ -54,6 +54,7 @@ type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
 enum CacheKey<'a> {
     SystemApiKey(&'a str),
     ModelAlias(&'a str),
+    ModelsCatalog,
     ProviderById(i64),
     ProviderByKey(&'a str),
     ModelById(i64),
@@ -72,6 +73,7 @@ impl<'a> std::fmt::Display for CacheKey<'a> {
         match self {
             CacheKey::SystemApiKey(key) => write!(f, "sys_api_key:key:{}", key),
             CacheKey::ModelAlias(alias) => write!(f, "alias:{}", alias),
+            CacheKey::ModelsCatalog => write!(f, "models:catalog"),
             CacheKey::ProviderById(id) => write!(f, "provider:id:{}", id),
             CacheKey::ProviderByKey(key) => write!(f, "provider:key:{}", key),
             CacheKey::ModelById(id) => write!(f, "model:id:{}", id),
@@ -92,6 +94,7 @@ impl<'a> CacheKey<'a> {
         match self {
             CacheKey::SystemApiKey(key) => format_compact!("sys_api_key:key:{}", key),
             CacheKey::ModelAlias(alias) => format_compact!("alias:{}", alias),
+            CacheKey::ModelsCatalog => format_compact!("models:catalog"),
             CacheKey::ProviderById(id) => format_compact!("provider:id:{}", id),
             CacheKey::ProviderByKey(key) => format_compact!("provider:key:{}", key),
             CacheKey::ModelById(id) => format_compact!("model:id:{}", id),
@@ -109,6 +112,121 @@ impl<'a> CacheKey<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderHealthStatus {
+    Healthy,
+    Open,
+    HalfOpen,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderHealthSnapshot {
+    pub status: ProviderHealthStatus,
+    pub consecutive_failures: u32,
+    pub half_open_probe_in_flight: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ProviderHealthState {
+    status: ProviderHealthStatus,
+    consecutive_failures: u32,
+    opened_at: Option<std::time::Instant>,
+    half_open_probe_in_flight: bool,
+    last_error: Option<String>,
+}
+
+impl Default for ProviderHealthState {
+    fn default() -> Self {
+        Self {
+            status: ProviderHealthStatus::Healthy,
+            consecutive_failures: 0,
+            opened_at: None,
+            half_open_probe_in_flight: false,
+            last_error: None,
+        }
+    }
+}
+
+impl ProviderHealthState {
+    fn snapshot(&self) -> ProviderHealthSnapshot {
+        ProviderHealthSnapshot {
+            status: self.status,
+            consecutive_failures: self.consecutive_failures,
+            half_open_probe_in_flight: self.half_open_probe_in_flight,
+            last_error: self.last_error.clone(),
+        }
+    }
+
+    fn allow_request(
+        &mut self,
+        config: &crate::config::ProviderGovernanceConfig,
+        now: std::time::Instant,
+    ) -> Result<(), Option<Duration>> {
+        if !config.is_enabled() {
+            return Ok(());
+        }
+
+        match self.status {
+            ProviderHealthStatus::Healthy => Ok(()),
+            ProviderHealthStatus::Open => {
+                let Some(opened_at) = self.opened_at else {
+                    return Err(Some(config.open_cooldown()));
+                };
+                let elapsed = now.saturating_duration_since(opened_at);
+                if elapsed < config.open_cooldown() {
+                    return Err(Some(config.open_cooldown() - elapsed));
+                }
+
+                self.status = ProviderHealthStatus::HalfOpen;
+                self.half_open_probe_in_flight = true;
+                Ok(())
+            }
+            ProviderHealthStatus::HalfOpen => {
+                if self.half_open_probe_in_flight {
+                    Err(None)
+                } else {
+                    self.half_open_probe_in_flight = true;
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.status = ProviderHealthStatus::Healthy;
+        self.consecutive_failures = 0;
+        self.opened_at = None;
+        self.half_open_probe_in_flight = false;
+        self.last_error = None;
+    }
+
+    fn record_failure(
+        &mut self,
+        config: &crate::config::ProviderGovernanceConfig,
+        now: std::time::Instant,
+        error_message: String,
+    ) {
+        self.last_error = Some(error_message);
+        self.half_open_probe_in_flight = false;
+
+        if !config.is_enabled() {
+            self.status = ProviderHealthStatus::Healthy;
+            self.consecutive_failures = 0;
+            self.opened_at = None;
+            return;
+        }
+
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.status == ProviderHealthStatus::HalfOpen
+            || self.consecutive_failures >= config.consecutive_failure_threshold
+        {
+            self.status = ProviderHealthStatus::Open;
+            self.opened_at = Some(now);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     // 1. api_key(key) -> CacheSystemApiKey
@@ -116,6 +234,9 @@ pub struct AppState {
 
     // 2. alias_name(key) -> model_id (i64)
     alias_to_model_id_cache: CacheRepo<i64>,
+
+    // 2b. aggregate listing snapshot for `/models`
+    models_catalog_cache: CacheRepo<CacheModelsCatalog>,
 
     // 3, 4. provider_id(id)/provider_key(key) -> CacheProvider
     provider_cache: CacheRepo<CacheProvider>,
@@ -147,6 +268,9 @@ pub struct AppState {
 
     // In-process selection cursor for provider API key queue mode.
     provider_key_queue_state: Arc<tokio::sync::Mutex<HashMap<i64, usize>>>,
+
+    // In-process provider governance state for circuit-open / half-open decisions.
+    provider_health_state: Arc<tokio::sync::Mutex<HashMap<i64, ProviderHealthState>>>,
 }
 
 impl AppState {
@@ -178,6 +302,7 @@ impl AppState {
         Self {
             system_api_key_cache: Self::create_repo(ttl, pool),
             alias_to_model_id_cache: Self::create_repo(ttl, pool),
+            models_catalog_cache: Self::create_repo(ttl, pool),
             provider_cache: Self::create_repo(ttl, pool),
             model_cache: Self::create_repo(ttl, pool),
             access_control_policy_cache: Self::create_repo(ttl, pool),
@@ -189,17 +314,18 @@ impl AppState {
             proxy_client,
             negative_cache_ttl,
             provider_key_queue_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            provider_health_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
     fn build_http_client(use_proxy: bool) -> Client {
         let proxy_request_config = &CONFIG.proxy_request;
         let connect_timeout = proxy_request_config.connect_timeout();
-        let request_timeout = proxy_request_config.request_timeout();
+        let total_timeout = proxy_request_config.total_timeout();
 
         let mut builder = Client::builder().connect_timeout(connect_timeout);
 
-        if let Some(timeout) = request_timeout {
+        if let Some(timeout) = total_timeout {
             builder = builder.timeout(timeout);
         }
 
@@ -211,8 +337,11 @@ impl AppState {
         }
 
         info!(
-            "Building reqwest client (use_proxy: {}, connect_timeout: {:?}, overall_timeout: {:?})",
-            use_proxy, connect_timeout, request_timeout
+            "Building reqwest client (use_proxy: {}, connect_timeout: {:?}, first_byte_timeout: {:?}, total_timeout: {:?})",
+            use_proxy,
+            connect_timeout,
+            proxy_request_config.first_byte_timeout(),
+            total_timeout
         );
 
         builder.build().unwrap_or_else(|err| {
@@ -261,6 +390,9 @@ impl AppState {
     pub async fn reload(&self) {
         info!("Reloading AppState: Starting cache refresh...");
         let mut stats: HashMap<&'static str, usize> = HashMap::new();
+        let mut catalog_providers = Vec::new();
+        let mut catalog_models = Vec::new();
+        let mut catalog_aliases = Vec::new();
 
         // 1. SystemApiKeys
         if let Ok(keys) = SystemApiKey::list_all() {
@@ -285,6 +417,7 @@ impl AppState {
             for provider in providers {
                 provider_id_to_key.insert(provider.id, provider.provider_key.clone());
                 let cache_item = CacheProvider::from(provider);
+                catalog_providers.push(cache_item.clone());
                 let _ = self
                     .provider_cache
                     .set_positive(
@@ -307,6 +440,7 @@ impl AppState {
             stats.insert("Models", models.len());
             for model in models {
                 let cache_item = CacheModel::from(model);
+                catalog_models.push(cache_item.clone());
                 let _ = self
                     .model_cache
                     .set_positive(
@@ -331,6 +465,7 @@ impl AppState {
         if let Ok(aliases) = ModelAlias::list_all() {
             stats.insert("Model Aliases", aliases.len());
             for alias in aliases {
+                catalog_aliases.push(CacheModelAlias::from(alias.clone()));
                 let _ = self
                     .alias_to_model_id_cache
                     .set_positive(
@@ -340,6 +475,19 @@ impl AppState {
                     .await;
             }
         }
+
+        let models_catalog = CacheModelsCatalog {
+            providers: catalog_providers,
+            models: catalog_models,
+            aliases: catalog_aliases,
+        };
+        let _ = self
+            .models_catalog_cache
+            .set_positive(
+                &CacheKey::ModelsCatalog.to_compact_string(),
+                &models_catalog,
+            )
+            .await;
 
         // 6. Access Control Policies
         if let Ok(policies) = DbAccessControlPolicy::list_all() {
@@ -471,6 +619,9 @@ impl AppState {
         if let Err(e) = self.alias_to_model_id_cache.clear().await {
             cyder_tools::log::error!("Failed to clear alias_to_model_id_cache: {}", e);
         }
+        if let Err(e) = self.models_catalog_cache.clear().await {
+            cyder_tools::log::error!("Failed to clear models_catalog_cache: {}", e);
+        }
         if let Err(e) = self.provider_cache.clear().await {
             cyder_tools::log::error!("Failed to clear provider_cache: {}", e);
         }
@@ -591,7 +742,26 @@ impl AppState {
     pub async fn invalidate_model_alias(&self, alias: &str) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ModelAlias(alias).to_compact_string();
         debug!("invalidate: {}", &cache_key);
+        self.invalidate_models_catalog().await?;
         Ok(self.alias_to_model_id_cache.delete(&cache_key).await?)
+    }
+
+    pub async fn get_models_catalog(&self) -> Result<Arc<CacheModelsCatalog>, AppStoreError> {
+        let cache_key = CacheKey::ModelsCatalog.to_compact_string();
+
+        let catalog = self
+            .get_or_load(&self.models_catalog_cache, &cache_key, || async {
+                Ok(Some(Self::load_models_catalog()?))
+            })
+            .await?;
+
+        Ok(catalog.expect("models catalog loader always returns a value"))
+    }
+
+    pub async fn invalidate_models_catalog(&self) -> Result<(), AppStoreError> {
+        let cache_key = CacheKey::ModelsCatalog.to_compact_string();
+        debug!("invalidate: {}", &cache_key);
+        Ok(self.models_catalog_cache.delete(&cache_key).await?)
     }
 
     // ============================================================================================
@@ -669,6 +839,7 @@ impl AppState {
         key: Option<&str>,
     ) -> Result<(), AppStoreError> {
         debug!("invalidate provider: id={}, key={:?}", id, key);
+        self.invalidate_models_catalog().await?;
         if let Some(k) = key {
             let _ = self.invalidate_provider_by_key(k).await;
         } else if let Some(p) = self.get_provider_by_id(id).await? {
@@ -743,6 +914,7 @@ impl AppState {
 
     pub async fn invalidate_model(&self, id: i64, name: Option<&str>) -> Result<(), AppStoreError> {
         debug!("invalidate model: id={}, name={:?}", id, name);
+        self.invalidate_models_catalog().await?;
         if let Some(n) = name {
             let parts: Vec<&str> = n.splitn(2, '/').collect();
             if parts.len() == 2 {
@@ -869,6 +1041,46 @@ impl AppState {
 
     fn random_index(key_count: usize) -> usize {
         rng().random_range(0..key_count)
+    }
+
+    pub async fn allow_provider_request(
+        &self,
+        provider_id: i64,
+    ) -> Result<ProviderHealthSnapshot, Option<Duration>> {
+        let now = std::time::Instant::now();
+        let mut state = self.provider_health_state.lock().await;
+        let provider_state = state.entry(provider_id).or_default();
+        provider_state
+            .allow_request(&CONFIG.provider_governance, now)
+            .map(|_| provider_state.snapshot())
+    }
+
+    pub async fn record_provider_success(&self, provider_id: i64) -> ProviderHealthSnapshot {
+        let mut state = self.provider_health_state.lock().await;
+        let provider_state = state.entry(provider_id).or_default();
+        provider_state.record_success();
+        provider_state.snapshot()
+    }
+
+    pub async fn record_provider_failure(
+        &self,
+        provider_id: i64,
+        error_message: String,
+    ) -> ProviderHealthSnapshot {
+        let now = std::time::Instant::now();
+        let mut state = self.provider_health_state.lock().await;
+        let provider_state = state.entry(provider_id).or_default();
+        provider_state.record_failure(&CONFIG.provider_governance, now, error_message);
+        provider_state.snapshot()
+    }
+
+    pub async fn get_provider_health_snapshot(&self, provider_id: i64) -> ProviderHealthSnapshot {
+        let state = self.provider_health_state.lock().await;
+        state
+            .get(&provider_id)
+            .cloned()
+            .unwrap_or_default()
+            .snapshot()
     }
 
     // ============================================================================================
@@ -1045,6 +1257,32 @@ impl AppState {
         debug!("invalidate: {}", &cache_key);
         Ok(self.billing_plan_cache.delete(&cache_key).await?)
     }
+
+    fn load_models_catalog() -> Result<CacheModelsCatalog, AppStoreError> {
+        let providers = Provider::list_all()
+            .map_err(|e| AppStoreError::DatabaseError(format!("failed to list providers: {e:?}")))?
+            .into_iter()
+            .map(CacheProvider::from)
+            .collect();
+        let models = Model::list_all()
+            .map_err(|e| AppStoreError::DatabaseError(format!("failed to list models: {e:?}")))?
+            .into_iter()
+            .map(CacheModel::from)
+            .collect();
+        let aliases = ModelAlias::list_all()
+            .map_err(|e| {
+                AppStoreError::DatabaseError(format!("failed to list model aliases: {e:?}"))
+            })?
+            .into_iter()
+            .map(CacheModelAlias::from)
+            .collect();
+
+        Ok(CacheModelsCatalog {
+            providers,
+            models,
+            aliases,
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1090,9 +1328,11 @@ pub fn create_state_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, GroupItemSelectionStrategy};
+    use super::{AppState, GroupItemSelectionStrategy, ProviderHealthState, ProviderHealthStatus};
+    use crate::config::ProviderGovernanceConfig;
     use crate::schema::enum_def::ProviderApiKeyMode;
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn queue_strategy_advances_and_wraps() {
@@ -1124,5 +1364,96 @@ mod tests {
             GroupItemSelectionStrategy::from(ProviderApiKeyMode::Random),
             GroupItemSelectionStrategy::Random
         );
+    }
+
+    #[test]
+    fn provider_health_opens_after_threshold_failures() {
+        let config = ProviderGovernanceConfig {
+            enabled: true,
+            consecutive_failure_threshold: 2,
+            open_cooldown_seconds: 30,
+        };
+        let now = Instant::now();
+        let mut state = ProviderHealthState::default();
+
+        state.record_failure(&config, now, "timeout".to_string());
+        assert_eq!(state.status, ProviderHealthStatus::Healthy);
+        assert_eq!(state.consecutive_failures, 1);
+
+        state.record_failure(&config, now, "another timeout".to_string());
+        assert_eq!(state.status, ProviderHealthStatus::Open);
+        assert_eq!(state.consecutive_failures, 2);
+        assert!(state.opened_at.is_some());
+    }
+
+    #[test]
+    fn provider_health_transitions_to_half_open_after_cooldown() {
+        let config = ProviderGovernanceConfig {
+            enabled: true,
+            consecutive_failure_threshold: 1,
+            open_cooldown_seconds: 30,
+        };
+        let now = Instant::now();
+        let mut state = ProviderHealthState::default();
+        state.record_failure(&config, now, "timeout".to_string());
+
+        assert_eq!(
+            state.allow_request(&config, now + Duration::from_secs(10)),
+            Err(Some(Duration::from_secs(20)))
+        );
+        assert_eq!(state.status, ProviderHealthStatus::Open);
+
+        assert_eq!(
+            state.allow_request(&config, now + Duration::from_secs(31)),
+            Ok(())
+        );
+        assert_eq!(state.status, ProviderHealthStatus::HalfOpen);
+        assert!(state.half_open_probe_in_flight);
+    }
+
+    #[test]
+    fn provider_health_half_open_success_closes_circuit() {
+        let config = ProviderGovernanceConfig {
+            enabled: true,
+            consecutive_failure_threshold: 1,
+            open_cooldown_seconds: 30,
+        };
+        let now = Instant::now();
+        let mut state = ProviderHealthState::default();
+        state.record_failure(&config, now, "timeout".to_string());
+        state
+            .allow_request(&config, now + Duration::from_secs(31))
+            .expect("half-open probe should be allowed");
+
+        state.record_success();
+        assert_eq!(state.status, ProviderHealthStatus::Healthy);
+        assert_eq!(state.consecutive_failures, 0);
+        assert!(!state.half_open_probe_in_flight);
+        assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn provider_health_half_open_failure_reopens_circuit() {
+        let config = ProviderGovernanceConfig {
+            enabled: true,
+            consecutive_failure_threshold: 3,
+            open_cooldown_seconds: 30,
+        };
+        let now = Instant::now();
+        let mut state = ProviderHealthState::default();
+        state.record_failure(&config, now, "timeout".to_string());
+        state.record_failure(&config, now, "timeout".to_string());
+        state.record_failure(&config, now, "timeout".to_string());
+        state
+            .allow_request(&config, now + Duration::from_secs(31))
+            .expect("half-open probe should be allowed");
+
+        state.record_failure(
+            &config,
+            now + Duration::from_secs(31),
+            "half-open timeout".to_string(),
+        );
+        assert_eq!(state.status, ProviderHealthStatus::Open);
+        assert!(!state.half_open_probe_in_flight);
     }
 }

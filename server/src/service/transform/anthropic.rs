@@ -1365,19 +1365,6 @@ pub fn anthropic_event_to_unified_stream_events_with_state(
     anthropic_event_to_unified_stream_events_inner(event, session)
 }
 
-fn anthropic_usage_event(usage: AnthropicUsage) -> SseEvent {
-    let event = json!({
-        "type": "message_delta",
-        "delta": {},
-        "usage": usage,
-    });
-    SseEvent {
-        event: Some("message_delta".to_string()),
-        data: serde_json::to_string(&event).unwrap(),
-        ..Default::default()
-    }
-}
-
 fn anthropic_start_block_event(index: u32, content_block: AnthropicContentBlock) -> SseEvent {
     let event = json!({
         "type": "content_block_start",
@@ -1413,6 +1400,29 @@ fn anthropic_block_stop_event(index: u32) -> SseEvent {
         event: Some("content_block_stop".to_string()),
         data: serde_json::to_string(&event).unwrap(),
         ..Default::default()
+    }
+}
+
+fn close_active_anthropic_blocks(transformer: &mut StreamTransformer, events: &mut Vec<SseEvent>) {
+    let mut active_indices = transformer
+        .session
+        .anthropic
+        .active_blocks
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    active_indices.sort_unstable();
+
+    for index in active_indices {
+        if transformer
+            .session
+            .anthropic
+            .active_blocks
+            .remove(&index)
+            .is_some()
+        {
+            events.push(anthropic_block_stop_event(index));
+        }
     }
 }
 
@@ -1471,7 +1481,7 @@ pub(super) fn transform_unified_stream_events_to_anthropic_events(
                         index,
                         AnthropicContentBlock::Thinking {
                             thinking: String::new(),
-                            signature: None,
+                            signature: Some(String::new()),
                         },
                     ));
                 }
@@ -1613,7 +1623,7 @@ pub(super) fn transform_unified_stream_events_to_anthropic_events(
                     index,
                     AnthropicContentBlock::Thinking {
                         thinking: String::new(),
-                        signature: None,
+                        signature: Some(String::new()),
                     },
                 ));
             }
@@ -1638,7 +1648,7 @@ pub(super) fn transform_unified_stream_events_to_anthropic_events(
                         index,
                         AnthropicContentBlock::Thinking {
                             thinking: String::new(),
-                            signature: None,
+                            signature: Some(String::new()),
                         },
                     ));
                 }
@@ -1677,13 +1687,11 @@ pub(super) fn transform_unified_stream_events_to_anthropic_events(
                 }
             }
             UnifiedStreamEvent::Usage { usage } => {
-                events.push(anthropic_usage_event(AnthropicUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                }));
+                transformer.session.usage_cache = Some(usage.into());
             }
             UnifiedStreamEvent::MessageDelta { finish_reason } => {
                 if let Some(finish_reason) = finish_reason {
+                    close_active_anthropic_blocks(transformer, &mut events);
                     let event = json!({
                         "type": "message_delta",
                         "delta": {
@@ -1706,6 +1714,7 @@ pub(super) fn transform_unified_stream_events_to_anthropic_events(
                 }
             }
             UnifiedStreamEvent::MessageStop => {
+                close_active_anthropic_blocks(transformer, &mut events);
                 events.push(SseEvent {
                     event: Some("message_stop".to_string()),
                     data: "{\"type\":\"message_stop\"}".to_string(),
@@ -2585,6 +2594,220 @@ mod tests {
         assert_eq!(events[6].event.as_deref(), Some("content_block_delta"));
         assert!(events[6].data.contains("\"type\":\"signature_delta\""));
         assert_eq!(events[7].event.as_deref(), Some("content_block_stop"));
+    }
+
+    #[test]
+    fn test_transform_unified_stream_events_to_anthropic_events_delays_usage_until_terminal_message_delta()
+     {
+        let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+        let events = transform_unified_stream_events_to_anthropic_events(
+            vec![
+                UnifiedStreamEvent::MessageStart {
+                    id: Some("msg_123".to_string()),
+                    model: Some("gemini-2.5-flash-lite".to_string()),
+                    role: UnifiedRole::Assistant,
+                },
+                UnifiedStreamEvent::ContentBlockDelta {
+                    index: 0,
+                    item_index: None,
+                    item_id: None,
+                    part_index: None,
+                    text: "I am Claude Code, Anth".to_string(),
+                },
+                UnifiedStreamEvent::Usage {
+                    usage: UnifiedUsage {
+                        input_tokens: 26,
+                        output_tokens: 6,
+                        total_tokens: 32,
+                        ..Default::default()
+                    },
+                },
+                UnifiedStreamEvent::ContentBlockDelta {
+                    index: 0,
+                    item_index: None,
+                    item_id: None,
+                    part_index: None,
+                    text: "ropic's official CLI for Claude.".to_string(),
+                },
+                UnifiedStreamEvent::Usage {
+                    usage: UnifiedUsage {
+                        input_tokens: 26,
+                        output_tokens: 22,
+                        total_tokens: 48,
+                        ..Default::default()
+                    },
+                },
+                UnifiedStreamEvent::MessageDelta {
+                    finish_reason: Some("stop".to_string()),
+                },
+                UnifiedStreamEvent::MessageStop,
+            ],
+            &mut state,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 7);
+        assert_eq!(events[0].event.as_deref(), Some("message_start"));
+        assert_eq!(events[1].event.as_deref(), Some("content_block_start"));
+        assert_eq!(events[2].event.as_deref(), Some("content_block_delta"));
+        assert_eq!(events[3].event.as_deref(), Some("content_block_delta"));
+        assert_eq!(events[4].event.as_deref(), Some("content_block_stop"));
+        assert_eq!(events[5].event.as_deref(), Some("message_delta"));
+        assert_eq!(events[6].event.as_deref(), Some("message_stop"));
+        assert!(
+            events[5]
+                .data
+                .contains("\"usage\":{\"input_tokens\":26,\"output_tokens\":22}")
+        );
+        assert!(state.session.anthropic.active_blocks.is_empty());
+    }
+
+    #[test]
+    fn test_openai_reasoning_stream_transforms_to_anthropic_thinking_then_text_blocks() {
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+
+        let frames = vec![
+            SseEvent {
+                data: serde_json::to_string(&json!({
+                    "id": "019d716629d1f4eb9470f60bc35eb311",
+                    "object": "chat.completion.chunk",
+                    "created": 1775724014_i64,
+                    "model": "deepseek-ai/DeepSeek-V3.2",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "content": "",
+                            "reasoning_content": null,
+                            "role": "assistant",
+                        },
+                        "finish_reason": null
+                    }],
+                    "usage": {
+                        "prompt_tokens": 98,
+                        "completion_tokens": 0,
+                        "total_tokens": 98,
+                        "completion_tokens_details": {
+                            "reasoning_tokens": 0
+                        }
+                    }
+                }))
+                .unwrap(),
+                ..Default::default()
+            },
+            SseEvent {
+                data: serde_json::to_string(&json!({
+                    "id": "019d716629d1f4eb9470f60bc35eb311",
+                    "object": "chat.completion.chunk",
+                    "created": 1775724014_i64,
+                    "model": "deepseek-ai/DeepSeek-V3.2",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "content": "",
+                            "reasoning_content": "嗯",
+                        },
+                        "finish_reason": null
+                    }]
+                }))
+                .unwrap(),
+                ..Default::default()
+            },
+            SseEvent {
+                data: serde_json::to_string(&json!({
+                    "id": "019d716629d1f4eb9470f60bc35eb311",
+                    "object": "chat.completion.chunk",
+                    "created": 1775724014_i64,
+                    "model": "deepseek-ai/DeepSeek-V3.2",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "content": "你好",
+                            "reasoning_content": null,
+                        },
+                        "finish_reason": null
+                    }]
+                }))
+                .unwrap(),
+                ..Default::default()
+            },
+            SseEvent {
+                data: serde_json::to_string(&json!({
+                    "id": "019d716629d1f4eb9470f60bc35eb311",
+                    "object": "chat.completion.chunk",
+                    "created": 1775724014_i64,
+                    "model": "deepseek-ai/DeepSeek-V3.2",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "content": "！",
+                            "reasoning_content": null,
+                        },
+                        "finish_reason": null
+                    }]
+                }))
+                .unwrap(),
+                ..Default::default()
+            },
+            SseEvent {
+                data: serde_json::to_string(&json!({
+                    "id": "019d716629d1f4eb9470f60bc35eb311",
+                    "object": "chat.completion.chunk",
+                    "created": 1775724014_i64,
+                    "model": "deepseek-ai/DeepSeek-V3.2",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "content": "",
+                            "reasoning_content": null,
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 98,
+                        "completion_tokens": 134,
+                        "total_tokens": 232,
+                        "completion_tokens_details": {
+                            "reasoning_tokens": 98
+                        }
+                    }
+                }))
+                .unwrap(),
+                ..Default::default()
+            },
+            SseEvent {
+                data: "[DONE]".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let events: Vec<SseEvent> = frames
+            .into_iter()
+            .flat_map(|event| transformer.transform_event(event).unwrap_or_default())
+            .collect();
+
+        assert_eq!(events[0].event.as_deref(), Some("message_start"));
+        assert_eq!(events[1].event.as_deref(), Some("content_block_start"));
+        assert!(events[1].data.contains("\"type\":\"thinking\""));
+        assert!(events[1].data.contains("\"signature\":\"\""));
+        assert_eq!(events[2].event.as_deref(), Some("content_block_delta"));
+        assert!(events[2].data.contains("\"type\":\"thinking_delta\""));
+        assert!(events[2].data.contains("\"thinking\":\"嗯\""));
+        assert_eq!(events[3].event.as_deref(), Some("content_block_stop"));
+        assert_eq!(events[4].event.as_deref(), Some("content_block_start"));
+        assert!(events[4].data.contains("\"index\":1"));
+        assert!(events[4].data.contains("\"type\":\"text\""));
+        assert_eq!(events[5].event.as_deref(), Some("content_block_delta"));
+        assert!(events[5].data.contains("\"text\":\"你好\""));
+        assert_eq!(events[6].event.as_deref(), Some("content_block_delta"));
+        assert!(events[6].data.contains("\"text\":\"！\""));
+        assert_eq!(events[7].event.as_deref(), Some("content_block_stop"));
+        assert_eq!(events[8].event.as_deref(), Some("message_delta"));
+        assert!(
+            events[8]
+                .data
+                .contains("\"usage\":{\"input_tokens\":98,\"output_tokens\":134}")
+        );
+        assert_eq!(events[9].event.as_deref(), Some("message_stop"));
     }
 
     #[test]

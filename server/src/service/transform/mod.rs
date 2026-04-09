@@ -465,10 +465,10 @@ fn encode_responses_response(unified: UnifiedResponse) -> Result<Value, serde_js
 
 fn decode_openai_stream_frame(
     raw: &str,
-    _transformer: &mut StreamTransformer,
+    transformer: &mut StreamTransformer,
 ) -> Result<DecodedSourceStreamFrame, serde_json::Error> {
     serde_json::from_str::<openai::OpenAiChunkResponse>(raw)
-        .map(openai::openai_chunk_to_unified_stream_events)
+        .map(|chunk| openai::openai_chunk_to_unified_stream_events_with_state(chunk, transformer))
         .map(DecodedSourceStreamFrame::Events)
 }
 
@@ -710,6 +710,8 @@ pub(crate) enum UsageMergeStrategy {
 pub struct SessionContext {
     pub stream_id: Option<String>,
     pub stream_model: Option<String>,
+    pub openai_reasoning_seen: bool,
+    pub openai_active_tool_calls: HashMap<u32, String>,
     pub tool_call_id_map: HashMap<String, String>,
     pub current_item_index: Option<u32>,
     pub current_content_block_index: Option<u32>,
@@ -1691,6 +1693,91 @@ mod tests {
     }
 
     #[test]
+    fn test_openai_compatible_deepseek_tool_stream_to_responses_emits_arguments_done() {
+        let fixture = load_sse_fixture(include_str!(
+            "testdata/openai_compatible_deepseek_tool_stream.json"
+        ));
+
+        let transformed =
+            replay_fixture_through_transformer(LlmApiType::Openai, LlmApiType::Responses, &fixture);
+
+        let arguments_done = transformed.iter().find_map(|event| {
+            let value: serde_json::Value =
+                serde_json::from_str(&event.data).expect("valid responses event");
+            (value["type"] == serde_json::json!("response.function_call_arguments.done"))
+                .then_some(value)
+        });
+
+        let arguments_done = arguments_done.expect("expected arguments.done event");
+
+        assert_eq!(arguments_done["item_id"], serde_json::json!("call_compat_1"));
+        assert_eq!(arguments_done["output_index"], serde_json::json!(0));
+        assert_eq!(arguments_done["call_id"], serde_json::json!("call_compat_1"));
+        assert_eq!(
+            arguments_done["arguments"],
+            serde_json::json!("{\"city\":\"Boston\"}")
+        );
+    }
+
+    #[test]
+    fn test_replay_gemini_openai_text_stream_to_anthropic_emits_terminal_lifecycle() {
+        let fixture = load_sse_fixture(include_str!(
+            "testdata/gemini_openai_text_stream_with_done.json"
+        ));
+
+        let transformed = replay_fixture_through_transformer(
+            LlmApiType::GeminiOpenai,
+            LlmApiType::Anthropic,
+            &fixture,
+        );
+
+        assert_eq!(transformed[0].event.as_deref(), Some("message_start"));
+        assert_eq!(transformed[1].event.as_deref(), Some("content_block_start"));
+
+        let content_delta_events = transformed
+            .iter()
+            .filter(|event| event.event.as_deref() == Some("content_block_delta"))
+            .collect::<Vec<_>>();
+        assert_eq!(content_delta_events.len(), 3);
+
+        let message_delta_positions = transformed
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                (event.event.as_deref() == Some("message_delta")).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(message_delta_positions.len(), 1);
+
+        let content_block_stop_index = transformed
+            .iter()
+            .position(|event| event.event.as_deref() == Some("content_block_stop"))
+            .expect("content_block_stop");
+        let message_delta_index = message_delta_positions[0];
+        let message_stop_index = transformed
+            .iter()
+            .position(|event| event.event.as_deref() == Some("message_stop"))
+            .expect("message_stop");
+
+        assert!(content_block_stop_index < message_delta_index);
+        assert!(message_delta_index < message_stop_index);
+        assert!(
+            transformed[message_delta_index]
+                .data
+                .contains("\"usage\":{\"input_tokens\":26,\"output_tokens\":34}")
+        );
+        assert!(
+            transformed[message_delta_index]
+                .data
+                .contains("\"stop_reason\":\"end_turn\"")
+        );
+        assert_eq!(
+            transformed[message_stop_index].data,
+            "{\"type\":\"message_stop\"}"
+        );
+    }
+
+    #[test]
     fn test_semantic_replay_gemini_multimodal_tool_stream_to_responses_preserves_binary_payloads() {
         let fixture = load_sse_fixture(include_str!("testdata/gemini_multimodal_tool_stream.json"));
 
@@ -2424,6 +2511,44 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_done_chunk_gemini_openai_to_anthropic_emits_message_stop() {
+        let mut transformer =
+            StreamTransformer::new(LlmApiType::GeminiOpenai, LlmApiType::Anthropic);
+
+        let content_event = SseEvent {
+            data: "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gemini-2.5-flash-lite\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"}}]}".to_string(),
+            ..Default::default()
+        };
+        let transformed_content = transformer.transform_event(content_event).unwrap();
+        assert_eq!(transformed_content.len(), 3);
+        assert_eq!(
+            transformed_content[0].event.as_deref(),
+            Some("message_start")
+        );
+        assert_eq!(
+            transformed_content[1].event.as_deref(),
+            Some("content_block_start")
+        );
+        assert_eq!(
+            transformed_content[2].event.as_deref(),
+            Some("content_block_delta")
+        );
+
+        let done_event = SseEvent {
+            data: "[DONE]".to_string(),
+            ..Default::default()
+        };
+        let transformed_done = transformer.transform_event(done_event).unwrap();
+        assert_eq!(transformed_done.len(), 2);
+        assert_eq!(
+            transformed_done[0].event.as_deref(),
+            Some("content_block_stop")
+        );
+        assert_eq!(transformed_done[1].event.as_deref(), Some("message_stop"));
+        assert_eq!(transformed_done[1].data, "{\"type\":\"message_stop\"}");
+    }
+
+    #[test]
     fn test_transform_result_chunk_gemini_to_openai() {
         let mut transformer = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::Openai);
 
@@ -3016,6 +3141,72 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_request_data_responses_to_openai_with_function_call_output() {
+        let responses_request = json!({
+            "model": "deepseek-ai/DeepSeek-V3.2",
+            "input": [
+                {
+                    "role": "user",
+                    "content": "搜索一下boardmix"
+                },
+                {
+                    "role": "assistant",
+                    "content": "我来帮您搜索关于boardmix的信息。\n\n"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "search_web",
+                    "arguments": ""
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "{\"error\":\"query is required\"}"
+                }
+            ],
+            "stream": true
+        });
+
+        let transformed = transform_request_data(
+            responses_request,
+            LlmApiType::Responses,
+            LlmApiType::Openai,
+            true,
+        );
+
+        assert!(transformed.get("input").is_none());
+        assert_eq!(transformed["messages"][0]["role"], json!("user"));
+        assert_eq!(
+            transformed["messages"][0]["content"],
+            json!("搜索一下boardmix")
+        );
+        assert_eq!(transformed["messages"][1]["role"], json!("assistant"));
+        assert_eq!(
+            transformed["messages"][1]["content"],
+            json!("我来帮您搜索关于boardmix的信息。\n\n")
+        );
+        assert_eq!(transformed["messages"][2]["role"], json!("assistant"));
+        assert_eq!(
+            transformed["messages"][2]["tool_calls"][0]["id"],
+            json!("call_123")
+        );
+        assert_eq!(
+            transformed["messages"][2]["tool_calls"][0]["function"]["name"],
+            json!("search_web")
+        );
+        assert_eq!(transformed["messages"][3]["role"], json!("tool"));
+        assert_eq!(
+            transformed["messages"][3]["tool_call_id"],
+            json!("call_123")
+        );
+        assert_eq!(
+            transformed["messages"][3]["content"],
+            json!("{\"error\":\"query is required\"}")
+        );
+    }
+
+    #[test]
     fn test_transform_request_data_responses_to_gemini_preserves_shorthand_input_message() {
         let responses_request = json!({
             "model": "gemini/gemini-2.5-flash-lite",
@@ -3554,6 +3745,121 @@ mod tests {
     }
 
     #[test]
+    fn test_openai_stream_to_responses_emits_completed_function_call_item() {
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+        let source_events = vec![
+            json!({
+                "id": "chatcmpl-src",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "deepseek-ai/DeepSeek-V3.2",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": "我来帮您搜索一下BoardMix的相关信息。\n\n"
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-src",
+                "object": "chat.completion.chunk",
+                "created": 2,
+                "model": "deepseek-ai/DeepSeek-V3.2",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "search_web",
+                                "arguments": ""
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-src",
+                "object": "chat.completion.chunk",
+                "created": 3,
+                "model": "deepseek-ai/DeepSeek-V3.2",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": null,
+                            "type": null,
+                            "function": {
+                                "arguments": "{\"query\":\"BoardMix\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-src",
+                "object": "chat.completion.chunk",
+                "created": 4,
+                "model": "deepseek-ai/DeepSeek-V3.2",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            json!({
+                "id": "chatcmpl-src",
+                "object": "chat.completion.chunk",
+                "created": 5,
+                "model": "deepseek-ai/DeepSeek-V3.2",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "total_tokens": 30
+                }
+            }),
+        ];
+
+        let transformed_frames = source_events
+            .into_iter()
+            .flat_map(|value| {
+                transformer
+                    .transform_event(SseEvent {
+                        data: value.to_string(),
+                        ..Default::default()
+                    })
+                    .unwrap_or_default()
+            })
+            .map(|event| serde_json::from_str::<Value>(&event.data).unwrap())
+            .collect::<Vec<_>>();
+
+        let function_call_done = transformed_frames
+            .iter()
+            .find(|frame| {
+                frame["type"] == json!("response.output_item.done")
+                    && frame["item"]["type"] == json!("function_call")
+            })
+            .expect("expected completed function_call output item");
+
+        assert_eq!(function_call_done["item"]["id"], json!("call_123"));
+        assert_eq!(function_call_done["item"]["call_id"], json!("call_123"));
+        assert_eq!(function_call_done["item"]["name"], json!("search_web"));
+        assert_eq!(
+            function_call_done["item"]["arguments"],
+            json!("{\"query\":\"BoardMix\"}")
+        );
+        assert_eq!(function_call_done["item"]["status"], json!("completed"));
+    }
+
+    #[test]
     fn test_openai_source_stream_native_path_matches_legacy_chunk_path_for_gemini_target() {
         let raw = json!({
             "id": "chatcmpl-src",
@@ -4037,7 +4343,11 @@ impl StreamTransformer {
                 self.session.current_content_part_index = Some(*part_index);
             }
             UnifiedStreamEvent::ReasoningStart { index } => {
+                self.session.openai_reasoning_seen = true;
                 self.session.current_reasoning_block_index = Some(*index);
+            }
+            UnifiedStreamEvent::ReasoningDelta { .. } => {
+                self.session.openai_reasoning_seen = true;
             }
             UnifiedStreamEvent::ReasoningStop { index } => {
                 if self.session.current_reasoning_block_index == Some(*index) {
@@ -4066,13 +4376,29 @@ impl StreamTransformer {
                     self.session.finish_reason_cache = Some(finish_reason.clone());
                 }
             }
-            UnifiedStreamEvent::ToolCallStart { id, .. } => {
+            UnifiedStreamEvent::ToolCallStart { index, id, .. } => {
+                self.session
+                    .openai_active_tool_calls
+                    .insert(*index, id.clone());
                 self.session.tool_call_id_map.insert(id.clone(), id.clone());
             }
-            UnifiedStreamEvent::ToolCallArgumentsDelta { id: Some(id), .. }
-            | UnifiedStreamEvent::ToolCallStop { id: Some(id), .. } => {
+            UnifiedStreamEvent::ToolCallArgumentsDelta {
+                index,
+                id: Some(id),
+                ..
+            } => {
+                self.session
+                    .openai_active_tool_calls
+                    .insert(*index, id.clone());
                 self.session.tool_call_id_map.insert(id.clone(), id.clone());
             }
+            UnifiedStreamEvent::ToolCallStop { index, id } => {
+                self.session.openai_active_tool_calls.remove(index);
+                if let Some(id) = id {
+                    self.session.tool_call_id_map.insert(id.clone(), id.clone());
+                }
+            }
+            UnifiedStreamEvent::ToolCallArgumentsDelta { id: None, .. } => {}
             UnifiedStreamEvent::Error { error } => {
                 self.session.last_error = Some(error.clone());
                 if let Ok(diagnostic) =
@@ -4085,7 +4411,6 @@ impl StreamTransformer {
             | UnifiedStreamEvent::ContentBlockDelta { .. }
             | UnifiedStreamEvent::ToolCallArgumentsDelta { .. }
             | UnifiedStreamEvent::ToolCallStop { .. }
-            | UnifiedStreamEvent::ReasoningDelta { .. }
             | UnifiedStreamEvent::BlobDelta { .. } => {}
         }
     }
@@ -4393,17 +4718,21 @@ impl StreamTransformer {
             return Some(vec![event]);
         }
 
-        // Handle OpenAI's stream termination marker
-        if self.api_type == LlmApiType::Openai && event.data == "[DONE]" {
-            // Gemini, Ollama, and Anthropic streams just end, so we return None to not send anything.
-            return if self.target_api_type == LlmApiType::Gemini
-                || self.target_api_type == LlmApiType::Ollama
-                || self.target_api_type == LlmApiType::Anthropic
-            {
-                None
-            } else {
-                // Pass through for other potential targets
-                Some(vec![event])
+        // Handle OpenAI-compatible stream termination marker.
+        if (self.api_type == LlmApiType::Openai || self.api_type == LlmApiType::GeminiOpenai)
+            && event.data == "[DONE]"
+        {
+            return match self.target_api_type {
+                LlmApiType::Anthropic => {
+                    let transformed =
+                        self.stream_events_to_target_events(vec![UnifiedStreamEvent::MessageStop]);
+                    if let Some(events) = &transformed {
+                        self.record_transformed_events(events);
+                    }
+                    transformed
+                }
+                LlmApiType::Gemini | LlmApiType::Ollama => None,
+                _ => Some(vec![event]),
             };
         }
 

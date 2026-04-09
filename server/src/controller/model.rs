@@ -5,10 +5,10 @@ use crate::{
     utils::HttpResult, // Import HttpResult
 };
 use axum::{
-    extract::{Path, State}, // Added State
-    response::Json,
+    extract::{Json, Path, State}, // Added State
     routing::{delete, get, post, put},
 };
+use cyder_tools::log::warn;
 use serde::Deserialize;
 use std::sync::Arc; // Added Arc
 
@@ -26,6 +26,7 @@ pub struct InsertModelRequest {
 }
 
 async fn insert_model(
+    State(app_state): State<Arc<AppState>>,
     Json(request): Json<InsertModelRequest>,
 ) -> Result<HttpResult<Model>, BaseError> {
     let created_model = Model::create(
@@ -34,6 +35,13 @@ async fn insert_model(
         request.real_model_name.as_deref(),
         request.is_enabled,
     )?;
+
+    if let Err(store_err) = app_state.invalidate_models_catalog().await {
+        warn!(
+            "Failed to invalidate models catalog after model create {}: {:?}",
+            created_model.id, store_err
+        );
+    }
 
     Ok(HttpResult::new(created_model))
 }

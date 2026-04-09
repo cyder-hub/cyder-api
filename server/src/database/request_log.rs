@@ -98,34 +98,6 @@ impl RequestLog {
         })
     }
 
-    pub fn find_by_hash(storage_type: StorageType, hash: &str) -> DbResult<RequestLog> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let log_db = request_log::table
-                .filter(request_log::dsl::storage_type.eq(storage_type))
-                .filter(
-                    request_log::dsl::user_request_body
-                        .eq(hash)
-                        .or(request_log::dsl::llm_request_body.eq(hash))
-                        .or(request_log::dsl::llm_response_body.eq(hash))
-                        .or(request_log::dsl::user_response_body.eq(hash)),
-                )
-                .select(RequestLogDb::as_select())
-                .first::<RequestLogDb>(conn)
-                .map_err(|e| match e {
-                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
-                        "Request log with hash {} not found",
-                        hash
-                    ))),
-                    _ => BaseError::DatabaseFatal(Some(format!(
-                        "Error fetching request log with hash {}: {}",
-                        hash, e
-                    ))),
-                })?;
-            Ok(log_db.from_db())
-        })
-    }
-
     /// Lists request logs with filtering and pagination.
     pub fn list(payload: RequestLogQueryPayload) -> DbResult<ListResult<RequestLog>> {
         let conn = &mut get_connection()?;

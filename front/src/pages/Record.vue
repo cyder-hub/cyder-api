@@ -379,6 +379,12 @@
                 <DetailItem label="Real Model Name">{{
                   detailedRecord.real_model_name
                 }}</DetailItem>
+                <DetailItem label="User API Type">{{
+                  detailedRecord.user_api_type || $t("common.notAvailable")
+                }}</DetailItem>
+                <DetailItem label="LLM API Type">{{
+                  detailedRecord.llm_api_type || $t("common.notAvailable")
+                }}</DetailItem>
                 <DetailItem label="Stream">{{
                   detailedRecord.is_stream ? $t("common.yes") : $t("common.no")
                 }}</DetailItem>

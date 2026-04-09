@@ -164,6 +164,11 @@ export const enDict = {
       general: "General",
       timings: "Timings (UTC)",
     },
+    copy: {
+      action: "Copy",
+      copied: "Copied",
+      failed: "Failed to copy text.",
+    },
     pagination: {
       previousPage: "Previous Page",
       nextPage: "Next Page",

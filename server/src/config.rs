@@ -96,6 +96,10 @@ pub struct ProxyRequestConfig {
     #[serde(default = "default_proxy_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
     #[serde(default)]
+    pub first_byte_timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub total_timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing)]
     pub timeout_seconds: Option<u64>,
 }
 
@@ -103,6 +107,8 @@ impl Default for ProxyRequestConfig {
     fn default() -> Self {
         Self {
             connect_timeout_seconds: default_proxy_connect_timeout_seconds(),
+            first_byte_timeout_seconds: default_proxy_first_byte_timeout_seconds(),
+            total_timeout_seconds: None,
             timeout_seconds: None,
         }
     }
@@ -113,8 +119,45 @@ impl ProxyRequestConfig {
         Duration::from_secs(self.connect_timeout_seconds)
     }
 
-    pub fn request_timeout(&self) -> Option<Duration> {
-        self.timeout_seconds.map(Duration::from_secs)
+    pub fn first_byte_timeout(&self) -> Option<Duration> {
+        self.first_byte_timeout_seconds.map(Duration::from_secs)
+    }
+
+    pub fn total_timeout(&self) -> Option<Duration> {
+        self.total_timeout_seconds
+            .or(self.timeout_seconds)
+            .map(Duration::from_secs)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderGovernanceConfig {
+    #[serde(default = "default_provider_governance_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_provider_governance_consecutive_failure_threshold")]
+    pub consecutive_failure_threshold: u32,
+    #[serde(default = "default_provider_governance_open_cooldown_seconds")]
+    pub open_cooldown_seconds: u64,
+}
+
+impl Default for ProviderGovernanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_provider_governance_enabled(),
+            consecutive_failure_threshold:
+                default_provider_governance_consecutive_failure_threshold(),
+            open_cooldown_seconds: default_provider_governance_open_cooldown_seconds(),
+        }
+    }
+}
+
+impl ProviderGovernanceConfig {
+    pub fn open_cooldown(&self) -> Duration {
+        Duration::from_secs(self.open_cooldown_seconds)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled && self.consecutive_failure_threshold > 0
     }
 }
 
@@ -211,6 +254,22 @@ fn default_proxy_connect_timeout_seconds() -> u64 {
     10
 }
 
+fn default_proxy_first_byte_timeout_seconds() -> Option<u64> {
+    Some(60)
+}
+
+fn default_provider_governance_enabled() -> bool {
+    true
+}
+
+fn default_provider_governance_consecutive_failure_threshold() -> u32 {
+    5
+}
+
+fn default_provider_governance_open_cooldown_seconds() -> u64 {
+    30
+}
+
 fn default_pool_size() -> usize {
     10
 }
@@ -251,6 +310,8 @@ pub struct FinalConfig {
     pub redis: Option<RedisConfig>,
     #[serde(default)]
     pub proxy_request: ProxyRequestConfig,
+    #[serde(default)]
+    pub provider_governance: ProviderGovernanceConfig,
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
@@ -303,6 +364,7 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
         db_pool_size: 5,
         redis: None,
         proxy_request: ProxyRequestConfig::default(),
+        provider_governance: ProviderGovernanceConfig::default(),
         cache: CacheConfig::default(),
         storage: StorageConfig::default(),
     };
@@ -366,14 +428,27 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
 
 #[cfg(test)]
 mod tests {
-    use super::{FinalConfig, ProxyRequestConfig};
+    use super::{FinalConfig, ProviderGovernanceConfig, ProxyRequestConfig};
 
     #[test]
     fn proxy_request_config_defaults_keep_overall_timeout_disabled() {
         let config = ProxyRequestConfig::default();
         assert_eq!(config.connect_timeout_seconds, 10);
         assert_eq!(config.connect_timeout().as_secs(), 10);
-        assert_eq!(config.request_timeout(), None);
+        assert_eq!(
+            config.first_byte_timeout().map(|value| value.as_secs()),
+            Some(60)
+        );
+        assert_eq!(config.total_timeout(), None);
+    }
+
+    #[test]
+    fn provider_governance_defaults_are_conservative() {
+        let config = ProviderGovernanceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.consecutive_failure_threshold, 5);
+        assert_eq!(config.open_cooldown().as_secs(), 30);
+        assert!(config.is_enabled());
     }
 
     #[test]
@@ -394,18 +469,59 @@ max_body_size: 104857600
 db_pool_size: 5
 proxy_request:
   connect_timeout_seconds: 3
-  timeout_seconds: 600
+  first_byte_timeout_seconds: 15
+  total_timeout_seconds: 600
+provider_governance:
+  enabled: true
+  consecutive_failure_threshold: 7
+  open_cooldown_seconds: 45
 "#;
 
         let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
         assert_eq!(config.proxy_request.connect_timeout_seconds, 3);
-        assert_eq!(config.proxy_request.timeout_seconds, Some(600));
+        assert_eq!(config.proxy_request.first_byte_timeout_seconds, Some(15));
+        assert_eq!(config.proxy_request.total_timeout_seconds, Some(600));
+        assert!(config.provider_governance.enabled);
+        assert_eq!(config.provider_governance.consecutive_failure_threshold, 7);
+        assert_eq!(config.provider_governance.open_cooldown_seconds, 45);
         assert_eq!(
             config
                 .proxy_request
-                .request_timeout()
+                .total_timeout()
                 .map(|value| value.as_secs()),
             Some(600)
+        );
+    }
+
+    #[test]
+    fn final_config_deserializes_legacy_timeout_field_as_total_timeout() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+proxy_request:
+  timeout_seconds: 123
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        assert_eq!(config.proxy_request.timeout_seconds, Some(123));
+        assert_eq!(config.proxy_request.total_timeout_seconds, None);
+        assert_eq!(
+            config
+                .proxy_request
+                .total_timeout()
+                .map(|value| value.as_secs()),
+            Some(123)
         );
     }
 }

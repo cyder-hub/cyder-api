@@ -1,0 +1,14 @@
+[
+  {
+    "data": "{\"choices\":[{\"delta\":{\"content\":\"I am Claude Code, Anth\",\"role\":\"assistant\"},\"index\":0}],\"created\":1775720967,\"id\":\"B1rXafaED5uVmtkPkLfXyAU\",\"model\":\"gemini-2.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":6,\"prompt_tokens\":26,\"total_tokens\":32}}"
+  },
+  {
+    "data": "{\"choices\":[{\"delta\":{\"content\":\"ropic's official CLI for Claude. I'm an interactive CLI tool designed\",\"role\":\"assistant\"},\"index\":0}],\"created\":1775720967,\"id\":\"B1rXafaED5uVmtkPkLfXyAU\",\"model\":\"gemini-2.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":22,\"prompt_tokens\":26,\"total_tokens\":48}}"
+  },
+  {
+    "data": "{\"choices\":[{\"delta\":{\"content\":\" to help you work with Claude models directly from your terminal.\",\"role\":\"assistant\"},\"finish_reason\":\"stop\",\"index\":0}],\"created\":1775720967,\"id\":\"B1rXafaED5uVmtkPkLfXyAU\",\"model\":\"gemini-2.5-flash-lite\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":34,\"prompt_tokens\":26,\"total_tokens\":60}}"
+  },
+  {
+    "data": "[DONE]"
+  }
+]

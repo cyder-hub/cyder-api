@@ -319,7 +319,7 @@ impl TestFixture {
 
     async fn list_logs(&self) -> Vec<RequestLog> {
         flush_proxy_logs().await;
-        RequestLog::list(RequestLogQueryPayload {
+        RequestLog::list_full(RequestLogQueryPayload {
             provider_id: Some(self.provider.id),
             model_id: Some(self.model.id),
             page: Some(1),
@@ -567,8 +567,8 @@ fn gemini_generation_routes_to_native_endpoint_and_logs_success() {
         let log = fixture.latest_log().await;
         assert_eq!(log.status, Some(RequestStatus::Success));
         assert_eq!(log.llm_response_status, Some(200));
-        assert_eq!(log.input_tokens, Some(4));
-        assert_eq!(log.output_tokens, Some(2));
+        assert_eq!(log.total_input_tokens, Some(4));
+        assert_eq!(log.total_output_tokens, Some(2));
         assert_eq!(log.total_tokens, Some(6));
         assert!(log.llm_response_body.is_none());
         assert!(log.user_response_body.is_none());
@@ -639,8 +639,8 @@ fn utility_requests_share_proxy_lifecycle_and_write_logs() {
         let log = fixture.latest_log().await;
         assert_eq!(log.status, Some(RequestStatus::Success));
         assert_eq!(log.llm_response_status, Some(200));
-        assert_eq!(log.input_tokens, Some(4));
-        assert_eq!(log.output_tokens, Some(0));
+        assert_eq!(log.total_input_tokens, Some(4));
+        assert_eq!(log.total_output_tokens, Some(0));
         assert_eq!(log.total_tokens, Some(4));
         assert!(log.user_request_body.is_none());
         assert!(log.user_response_body.is_none());

@@ -1,6 +1,6 @@
 <template>
-  <div class="app-page">
-    <div class="app-page-shell">
+  <div class="app-page flex h-full min-h-0 flex-col overflow-hidden">
+    <div class="app-page-shell flex min-h-0 flex-1 flex-col">
       <div class="flex min-h-0 flex-1 flex-col gap-4 sm:gap-6">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div class="min-w-0">
@@ -23,30 +23,40 @@
                 {{ mobileFilterSummary }}
               </p>
             </div>
-            <Button
-              variant="outline"
-              class="w-full justify-between md:hidden"
-              @click="toggleFilterPanel"
-            >
-              <span class="flex items-center gap-2">
-                <SlidersHorizontal class="h-4 w-4" />
-                {{ isFilterPanelOpen ? "Hide filters" : "Show filters" }}
-              </span>
-              <ChevronDown
-                class="h-4 w-4 transition-transform"
-                :class="{ 'rotate-180': isFilterPanelOpen }"
-              />
-            </Button>
+            <div class="flex w-full flex-col gap-2 sm:flex-row md:w-auto md:items-center">
+              <Button
+                variant="outline"
+                class="w-full justify-between md:hidden"
+                @click="toggleFilterPanel"
+              >
+                <span class="flex items-center gap-2">
+                  <SlidersHorizontal class="h-4 w-4" />
+                  {{ isFilterPanelOpen ? "Hide filters" : "Show filters" }}
+                </span>
+                <ChevronDown
+                  class="h-4 w-4 transition-transform"
+                  :class="{ 'rotate-180': isFilterPanelOpen }"
+                />
+              </Button>
+              <Button
+                v-if="hasActiveFilters"
+                variant="outline"
+                class="hidden md:inline-flex"
+                @click="handleResetFilter"
+              >
+                {{ $t("recordPage.filter.resetButton") }}
+              </Button>
+            </div>
           </div>
 
           <div
             :class="[
-              'mt-4 flex-col gap-3 md:mt-0 md:flex',
+              'mt-4 flex-col gap-4 md:mt-4 md:flex',
               isFilterPanelOpen ? 'flex' : 'hidden md:flex',
             ]"
           >
-            <div class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,180px)]">
-              <div class="flex flex-col gap-1.5">
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-12">
+              <div class="flex flex-col gap-1.5 xl:col-span-3">
                 <span class="text-xs font-medium uppercase tracking-wide text-gray-500">
                   {{ $t("recordPage.table.apiKey") }}
                 </span>
@@ -57,7 +67,7 @@
                   <SelectTrigger class="w-full">
                     <SelectValue :placeholder="$t('recordPage.filter.allApiKeys')" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent :body-lock="false">
                     <SelectItem
                       v-for="opt in apiKeyOptions"
                       :key="opt.value"
@@ -69,7 +79,7 @@
                 </Select>
               </div>
 
-              <div class="flex flex-col gap-1.5">
+              <div class="flex flex-col gap-1.5 xl:col-span-3">
                 <span class="text-xs font-medium uppercase tracking-wide text-gray-500">
                   {{ $t("recordPage.table.provider") }}
                 </span>
@@ -80,7 +90,7 @@
                   <SelectTrigger class="w-full">
                     <SelectValue :placeholder="$t('recordPage.filter.allProviders')" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent :body-lock="false">
                     <SelectItem
                       v-for="opt in providerOptions"
                       :key="opt.value"
@@ -92,7 +102,7 @@
                 </Select>
               </div>
 
-              <div class="flex flex-col gap-1.5">
+              <div class="flex flex-col gap-1.5 xl:col-span-2">
                 <span class="text-xs font-medium uppercase tracking-wide text-gray-500">
                   {{ $t("recordPage.table.status") }}
                 </span>
@@ -103,7 +113,7 @@
                   <SelectTrigger class="w-full">
                     <SelectValue :placeholder="$t('recordPage.filter.allStatuses')" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent :body-lock="false">
                     <SelectItem
                       v-for="opt in statusOptions"
                       :key="opt.value"
@@ -114,35 +124,47 @@
                   </SelectContent>
                 </Select>
               </div>
+
+              <div class="flex flex-col gap-1.5 xl:col-span-4">
+                <span class="text-xs font-medium uppercase tracking-wide text-gray-500">
+                  {{ $t("recordPage.filter.searchPlaceholder", "Search") }}
+                </span>
+                <div class="relative">
+                  <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                  <Input
+                    v-model="searchInput"
+                    :placeholder="$t('recordPage.filter.searchPlaceholder')"
+                    class="w-full pl-9 pr-9"
+                    @keydown.enter="handleApplyFilter"
+                  />
+                  <button
+                    v-if="searchInput"
+                    type="button"
+                    class="absolute inset-y-0 right-0 flex w-9 items-center justify-center text-gray-400 transition-colors hover:text-gray-600"
+                    @click="handleClearSearch"
+                  >
+                    <X class="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-end">
-              <div class="relative flex-1">
-                <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-                <Input
-                  v-model="searchInput"
-                  :placeholder="$t('recordPage.filter.searchPlaceholder')"
-                  class="w-full pl-9 pr-9"
-                  @keydown.enter="handleApplyFilter"
-                />
-                <button
-                  v-if="searchInput"
-                  type="button"
-                  class="absolute inset-y-0 right-0 flex w-9 items-center justify-center text-gray-400 transition-colors hover:text-gray-600"
-                  @click="handleClearSearch"
-                >
-                  <X class="h-4 w-4" />
-                </button>
-              </div>
-
-              <div class="flex flex-col gap-2 sm:flex-row lg:shrink-0">
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p class="text-xs text-gray-500">
+                {{
+                  hasActiveFilters
+                    ? mobileFilterSummary
+                    : "Choose filters or search terms to narrow the records list."
+                }}
+              </p>
+              <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
                 <Button class="w-full sm:w-auto" @click="handleApplyFilter">
                   {{ $t("recordPage.filter.applyButton") }}
                 </Button>
                 <Button
                   v-if="hasActiveFilters"
                   variant="outline"
-                  class="w-full sm:w-auto"
+                  class="w-full md:hidden sm:w-auto"
                   @click="handleResetFilter"
                 >
                   {{ $t("recordPage.filter.resetButton") }}
@@ -272,32 +294,17 @@
                   <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
                     {{ $t("recordPage.table.apiKey") }}
                   </TableHead>
-                  <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
+                  <TableHead class="w-14 text-center text-xs font-medium uppercase tracking-wider text-gray-500">
                     {{ $t("recordPage.table.status") }}
                   </TableHead>
-                  <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
-                    {{ $t("recordPage.table.promptTokens") }}
-                  </TableHead>
-                  <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
-                    {{ $t("recordPage.table.completionTokens") }}
-                  </TableHead>
-                  <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
-                    {{ $t("recordPage.table.reasoningTokens") }}
-                  </TableHead>
-                  <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
-                    {{ $t("recordPage.table.totalTokens") }}
+                  <TableHead class="min-w-[220px] text-xs font-medium uppercase tracking-wider text-gray-500">
+                    Tokens
                   </TableHead>
                   <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
                     {{ $t("recordPage.table.stream") }}
                   </TableHead>
-                  <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
-                    {{ $t("recordPage.table.firstResp") }}
-                  </TableHead>
-                  <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
-                    {{ $t("recordPage.table.totalResp") }}
-                  </TableHead>
-                  <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
-                    {{ $t("recordPage.table.tps") }}
+                  <TableHead class="min-w-[200px] text-xs font-medium uppercase tracking-wider text-gray-500">
+                    Performance
                   </TableHead>
                   <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
                     {{ $t("recordPage.table.cost") }}
@@ -319,19 +326,42 @@
                   <TableCell class="font-medium">{{ record.model_name || "/" }}</TableCell>
                   <TableCell>{{ record.providerName }}</TableCell>
                   <TableCell>{{ record.apiKeyName }}</TableCell>
-                  <TableCell>
-                    <Badge :variant="getStatusBadgeVariant(record.status)">
-                      {{ record.status || $t("common.notAvailable") }}
-                    </Badge>
+                  <TableCell class="w-14 text-center">
+                    <div
+                      class="flex justify-center"
+                      :title="getStatusMeta(record.status).label"
+                      :aria-label="getStatusMeta(record.status).label"
+                    >
+                      <component
+                        :is="getStatusMeta(record.status).icon"
+                        class="h-4 w-4"
+                        :class="getStatusMeta(record.status).className"
+                      />
+                      <span class="sr-only">{{ getStatusMeta(record.status).label }}</span>
+                    </div>
                   </TableCell>
-                  <TableCell class="text-right">{{ record.input_tokens ?? "/" }}</TableCell>
-                  <TableCell class="text-right">{{ record.output_tokens ?? "/" }}</TableCell>
-                  <TableCell class="text-right">{{ record.reasoning_tokens ?? "/" }}</TableCell>
-                  <TableCell class="text-right font-semibold">{{ record.total_tokens ?? "/" }}</TableCell>
+                  <TableCell
+                    class="font-mono text-xs text-gray-700"
+                    :title="`${$t('recordPage.table.promptTokens')} / ${$t('recordPage.table.completionTokens')} / ${$t('recordPage.table.reasoningTokens')} / ${$t('recordPage.table.totalTokens')}`"
+                  >
+                    {{ formatCompactMetrics([
+                      record.total_input_tokens,
+                      record.total_output_tokens,
+                      record.reasoning_tokens,
+                      record.total_tokens,
+                    ]) }}
+                  </TableCell>
                   <TableCell>{{ record.isStreamDisplay }}</TableCell>
-                  <TableCell class="text-right">{{ record.firstRespTimeDisplay }}</TableCell>
-                  <TableCell class="text-right">{{ record.totalRespTimeDisplay }}</TableCell>
-                  <TableCell class="text-right text-gray-500">{{ record.tpsDisplay }}</TableCell>
+                  <TableCell
+                    class="font-mono text-xs text-gray-700"
+                    :title="`${$t('recordPage.table.firstResp')} / ${$t('recordPage.table.totalResp')} / ${$t('recordPage.table.tps')}`"
+                  >
+                    {{ formatCompactMetrics([
+                      record.firstRespTimeDisplay,
+                      record.totalRespTimeDisplay,
+                      record.tpsDisplay,
+                    ]) }}
+                  </TableCell>
                   <TableCell class="text-right font-mono text-gray-600">{{ record.costDisplay }}</TableCell>
                   <TableCell class="whitespace-nowrap text-sm text-gray-500">
                     {{ record.request_at_formatted }}
@@ -443,119 +473,264 @@
             ></div>
             <div>{{ $t("recordPage.loading") }}</div>
           </div>
-          <div v-else-if="detailedRecord" class="space-y-5 text-sm sm:space-y-6">
-            <section class="rounded-xl border border-gray-200 bg-white p-4">
-              <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
-                {{ $t("recordPage.detailModal.general") }}
-              </h3>
-              <dl class="divide-y divide-gray-100">
-                <DetailItem label="ID">{{ detailedRecord.id }}</DetailItem>
-                <DetailItem label="Status">
-                  <Badge :variant="getStatusBadgeVariant(detailedRecord.status)">
-                    {{ detailedRecord.status || $t("common.notAvailable") }}
-                  </Badge>
-                </DetailItem>
-                <DetailItem label="Provider">
-                  {{ getProviderName(detailedRecord.provider_id) }}
-                </DetailItem>
-                <DetailItem label="API Key">
-                  {{ getApiKeyName(detailedRecord.system_api_key_id) }}
-                </DetailItem>
-                <DetailItem label="Model Name">
-                  {{ detailedRecord.model_name }}
-                </DetailItem>
-                <DetailItem label="Real Model Name">
-                  {{ detailedRecord.real_model_name }}
-                </DetailItem>
-                <DetailItem label="User API Type">
-                  {{ detailedRecord.user_api_type || $t("common.notAvailable") }}
-                </DetailItem>
-                <DetailItem label="LLM API Type">
-                  {{ detailedRecord.llm_api_type || $t("common.notAvailable") }}
-                </DetailItem>
-                <DetailItem label="Stream">
-                  {{ detailedRecord.is_stream ? $t("common.yes") : $t("common.no") }}
-                </DetailItem>
+          <div v-else-if="detailedRecord" class="space-y-4 text-sm sm:space-y-5">
+            <section class="border-b border-gray-100 pb-1">
+              <dl class="grid grid-cols-1 divide-y divide-gray-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4">
+                <div class="flex items-center justify-between gap-3 px-4 py-3">
+                  <dt class="text-xs uppercase tracking-wide text-gray-500">Status</dt>
+                  <dd>
+                    <Badge :variant="getStatusBadgeVariant(detailedRecord.status)">
+                      {{ detailedRecord.status || $t("common.notAvailable") }}
+                    </Badge>
+                  </dd>
+                </div>
+                <div class="flex items-center justify-between gap-3 px-4 py-3">
+                  <dt class="text-xs uppercase tracking-wide text-gray-500">Provider</dt>
+                  <dd class="truncate text-right text-sm font-medium text-gray-900">
+                    {{ getProviderName(detailedRecord.provider_id) }}
+                  </dd>
+                </div>
+                <div class="flex items-center justify-between gap-3 px-4 py-3">
+                  <dt class="text-xs uppercase tracking-wide text-gray-500">Model</dt>
+                  <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">
+                    {{ detailedRecord.model_name || "/" }}
+                  </dd>
+                </div>
+                <div class="flex items-center justify-between gap-3 px-4 py-3">
+                  <dt class="text-xs uppercase tracking-wide text-gray-500">
+                    {{ $t("recordPage.detailModal.totalTokens") }}
+                  </dt>
+                  <dd class="text-right text-sm font-semibold text-gray-900 sm:text-base">
+                    {{ detailedRecord.total_tokens ?? "/" }}
+                  </dd>
+                </div>
               </dl>
             </section>
 
-            <section class="rounded-xl border border-gray-200 bg-white p-4">
-              <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
-                {{ $t("recordPage.detailModal.timings") }}
-              </h3>
-              <dl class="divide-y divide-gray-100">
-                <DetailItem label="Request Received">
-                  {{ formatDate(detailedRecord.request_received_at) }}
-                </DetailItem>
-                <DetailItem label="LLM Request Sent">
-                  {{ formatDate(detailedRecord.llm_request_sent_at) }}
-                </DetailItem>
-                <DetailItem label="LLM First Chunk">
-                  {{ formatDate(detailedRecord.llm_response_first_chunk_at) }}
-                </DetailItem>
-                <DetailItem label="LLM Completed">
-                  {{ formatDate(detailedRecord.llm_response_completed_at) }}
-                </DetailItem>
-                <DetailItem label="Response to Client">
-                  {{ formatDate(detailedRecord.response_sent_to_client_at) }}
-                </DetailItem>
-              </dl>
-            </section>
+            <div class="space-y-4">
+              <section class="pt-1">
+                  <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
+                    {{ $t("recordPage.detailModal.general") }}
+                  </h3>
+                  <dl class="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">ID</dt>
+                      <dd class="font-mono text-xs text-gray-900 sm:text-sm">{{ detailedRecord.id }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">API Key</dt>
+                      <dd class="truncate text-right text-sm text-gray-900">{{ getApiKeyName(detailedRecord.system_api_key_id) }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Real Model</dt>
+                      <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">{{ detailedRecord.real_model_name || "/" }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Stream</dt>
+                      <dd class="text-right text-sm text-gray-900">{{ detailedRecord.is_stream ? $t("common.yes") : $t("common.no") }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">User API Type</dt>
+                      <dd class="truncate text-right text-sm text-gray-900">{{ detailedRecord.user_api_type || $t("common.notAvailable") }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">LLM API Type</dt>
+                      <dd class="truncate text-right text-sm text-gray-900">{{ detailedRecord.llm_api_type || $t("common.notAvailable") }}</dd>
+                    </div>
+                  </dl>
+              </section>
 
-            <section class="rounded-xl border border-gray-200 bg-white p-4">
-              <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
-                Usage & Cost
-              </h3>
-              <dl class="divide-y divide-gray-100">
-                <DetailItem label="Prompt Tokens">
-                  {{ detailedRecord.input_tokens }}
-                </DetailItem>
-                <DetailItem label="Completion Tokens">
-                  {{ detailedRecord.output_tokens }}
-                </DetailItem>
-                <DetailItem
-                  v-if="detailedRecord.input_image_tokens"
-                  label="Input Image Tokens"
-                >
-                  {{ detailedRecord.input_image_tokens }}
-                </DetailItem>
-                <DetailItem
-                  v-if="detailedRecord.output_image_tokens"
-                  label="Output Image Tokens"
-                >
-                  {{ detailedRecord.output_image_tokens }}
-                </DetailItem>
-                <DetailItem
-                  v-if="detailedRecord.cached_tokens"
-                  label="Cached Tokens"
-                >
-                  {{ detailedRecord.cached_tokens }}
-                </DetailItem>
-                <DetailItem
-                  v-if="detailedRecord.reasoning_tokens"
-                  label="Reasoning Tokens"
-                >
-                  {{ detailedRecord.reasoning_tokens }}
-                </DetailItem>
-                <DetailItem label="Total Tokens">
-                  <span class="font-semibold text-gray-900">
-                    {{ detailedRecord.total_tokens }}
-                  </span>
-                </DetailItem>
-                <DetailItem label="Calculated Cost">
-                  {{
-                    detailedRecord.calculated_cost != null
-                      ? `${detailedRecord.cost_currency || ""} ${(detailedRecord.calculated_cost / 1000000000).toFixed(6)}`
-                      : "/"
-                  }}
-                </DetailItem>
-                <DetailItem label="Storage Type">
-                  {{ detailedRecord.storage_type }}
-                </DetailItem>
-              </dl>
-            </section>
+              <section class="border-t border-gray-100 pt-4">
+                  <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
+                    {{ $t("recordPage.detailModal.usageSummary") }}
+                  </h3>
+                  <dl class="grid grid-cols-1 gap-x-6 sm:grid-cols-2 xl:grid-cols-4">
+                    <div
+                      v-for="item in visibleUsageSummaryItems"
+                      :key="item.label"
+                      class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5 last:border-b-0"
+                    >
+                      <dt class="text-xs text-gray-500">{{ item.label }}</dt>
+                      <dd class="font-semibold text-gray-900">{{ item.value }}</dd>
+                    </div>
+                  </dl>
+              </section>
 
-            <section class="rounded-xl border border-gray-200 bg-white p-4">
+              <section class="border-t border-gray-100 pt-4">
+                  <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
+                    {{ $t("recordPage.detailModal.timings") }}
+                  </h3>
+                  <dl class="grid grid-cols-1 gap-x-6 md:grid-cols-2">
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Request Received</dt>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.request_received_at) }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">LLM Request Sent</dt>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.llm_request_sent_at) }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">LLM First Chunk</dt>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.llm_response_first_chunk_at) }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">LLM Completed</dt>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.llm_response_completed_at) }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Response to Client</dt>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.response_sent_to_client_at) }}</dd>
+                    </div>
+                  </dl>
+              </section>
+
+              <section class="border-t border-gray-100 pt-4">
+              <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
+                {{ $t("recordPage.detailModal.costSnapshot") }}
+              </h3>
+              <div v-if="parsedCostSnapshot" class="space-y-4">
+                <div class="flex items-center justify-between py-1">
+                  <div>
+                    <div class="text-xs text-gray-500">
+                      {{ $t("recordPage.detailModal.totalCost") }}
+                    </div>
+                    <div class="mt-1 text-lg font-semibold text-gray-900">
+                      {{ formatPriceFromNanos(parsedCostSnapshot.total_cost_nanos, parsedCostSnapshot.currency, "/") }}
+                    </div>
+                  </div>
+                  <Popover v-if="costSnapshotIssues.length > 0">
+                    <PopoverTrigger as-child>
+                      <button
+                        type="button"
+                        class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-amber-200 bg-amber-50 text-amber-700 transition hover:bg-amber-100"
+                      >
+                        <CircleAlert class="h-4 w-4" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      align="end"
+                      class="w-80 border-amber-200 bg-white p-3 text-sm text-gray-700"
+                    >
+                      <div class="mb-2 font-medium text-amber-900">
+                        {{ $t("recordPage.detailModal.warnings") }}
+                      </div>
+                      <ul class="space-y-2">
+                        <li
+                          v-for="(issue, issueIndex) in costSnapshotIssues"
+                          :key="`${issue.label}-${issue.value}-${issueIndex}`"
+                          class="rounded-md bg-amber-50 px-3 py-2 text-amber-900"
+                        >
+                          <span class="font-medium">{{ issue.label }}:</span>
+                          {{ issue.value }}
+                        </li>
+                      </ul>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+
+                <div class="space-y-2">
+                  <h4 class="text-sm font-semibold text-gray-900">
+                    {{ $t("recordPage.detailModal.detailLines") }}
+                  </h4>
+                  <div
+                    v-if="parsedCostSnapshot.detail_lines.length === 0"
+                    class="px-1 py-4 text-sm text-gray-500"
+                  >
+                    {{ $t("recordPage.detailModal.noDetailLines") }}
+                  </div>
+                  <div v-else class="overflow-hidden border-t border-b border-gray-100">
+                    <div
+                      class="hidden grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 border-b border-gray-100 bg-gray-50 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-gray-500 md:grid"
+                    >
+                      <div>{{ $t("recordPage.detailModal.billingItem") }}</div>
+                      <div>{{ $t("recordPage.detailModal.quantity") }}</div>
+                      <div>{{ $t("recordPage.detailModal.unitPrice") }}</div>
+                      <div class="text-right">{{ $t("recordPage.detailModal.finalPrice") }}</div>
+                    </div>
+                    <div
+                      v-for="(line, index) in displayedCostDetailLines"
+                      :key="`${line.component_id ?? 'none'}-${index}`"
+                      class="grid grid-cols-1 gap-2 border-t border-gray-100 px-4 py-3 first:border-t-0 md:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
+                    >
+                      <div class="flex min-w-0 items-center gap-2">
+                        <Badge variant="outline" class="max-w-full font-mono text-[11px]">
+                          {{ line.meter_key }}
+                        </Badge>
+                        <Popover v-if="line.extraInfoLines.length > 0">
+                          <PopoverTrigger as-child>
+                            <button
+                              type="button"
+                              class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-gray-400 transition hover:bg-gray-100 hover:text-gray-700"
+                            >
+                              <CircleHelp class="h-4 w-4" />
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent
+                            align="start"
+                            class="w-80 border-gray-200 bg-white p-3 text-sm text-gray-700"
+                          >
+                            <div class="space-y-2">
+                              <div
+                                v-for="(info, infoIndex) in line.extraInfoLines"
+                                :key="`${line.meter_key}-${infoIndex}`"
+                                class="rounded-md bg-gray-50 px-3 py-2"
+                              >
+                                {{ info }}
+                              </div>
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
+                      <div class="text-sm text-gray-700">
+                        <span class="mr-2 text-[11px] uppercase tracking-wide text-gray-400 md:hidden">
+                          {{ $t("recordPage.detailModal.quantity") }}
+                        </span>
+                        {{ line.quantity }} {{ line.unit }}
+                      </div>
+                      <div class="text-sm text-gray-700">
+                        <span class="mr-2 text-[11px] uppercase tracking-wide text-gray-400 md:hidden">
+                          {{ $t("recordPage.detailModal.unitPrice") }}
+                        </span>
+                        <span v-if="line.unit_price_nanos !== null">
+                          {{
+                            formatSnapshotUnitPrice(
+                              line.meter_key,
+                              line.unit_price_nanos,
+                              parsedCostSnapshot.currency,
+                            )
+                          }}
+                        </span>
+                        <span v-else>/</span>
+                      </div>
+                      <div class="text-sm font-semibold text-gray-900 md:text-right">
+                        <span class="mr-2 text-[11px] uppercase tracking-wide text-gray-400 md:hidden">
+                          {{ $t("recordPage.detailModal.finalPrice") }}
+                        </span>
+                        {{ formatPriceFromNanos(line.amount_nanos, parsedCostSnapshot.currency, "/") }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div
+                v-else-if="detailedRecord.cost_snapshot_json"
+                class="space-y-2"
+              >
+                <p class="text-sm text-amber-700">
+                  {{ $t("recordPage.detailModal.invalidCostSnapshot") }}
+                </p>
+                <pre class="overflow-x-auto rounded-lg bg-gray-950 px-3 py-3 text-xs text-gray-100">{{ detailedRecord.cost_snapshot_json }}</pre>
+              </div>
+              <div
+                v-else
+                class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
+              >
+                {{ $t("recordPage.detailModal.noCostSnapshot") }}
+              </div>
+              </section>
+            </div>
+
+            <section class="border-t border-gray-100 pt-4">
               <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
                 Payloads
               </h3>
@@ -623,14 +798,17 @@ import {
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter, type LocationQuery } from "vue-router";
 import {
+  CircleAlert,
+  CircleCheckBig,
+  CircleHelp,
   ChevronDown,
+  Clock3,
   Search,
   SlidersHorizontal,
   X,
 } from "lucide-vue-next";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import BodyViewer from "@/components/record/BodyViewer.vue";
-import DetailItem from "@/components/record/DetailItem.vue";
 import SingleRequestBodyContent from "@/components/record/SingleRequestBodyContent.vue";
 import SingleResponseBodyContent from "@/components/record/SingleResponseBodyContent.vue";
 import { Badge } from "@/components/ui/badge";
@@ -643,6 +821,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Pagination,
   PaginationContent,
@@ -670,11 +853,20 @@ import {
 } from "@/components/ui/table";
 import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
-import { formatTimestamp } from "@/lib/utils";
+import {
+  formatCostRateFromNanos,
+  formatPriceFromNanos,
+  formatTimestamp,
+} from "@/lib/utils";
 import { Api } from "@/services/request";
 import { useApiKeyStore } from "@/store/apiKeyStore";
 import { useProviderStore } from "@/store/providerStore";
-import type { RecordDetail, RecordListItem } from "@/store/types";
+import type {
+  CostDetailLine,
+  CostSnapshot,
+  RecordDetail,
+  RecordListItem,
+} from "@/store/types";
 
 const { t: $t } = useI18n();
 const route = useRoute();
@@ -734,6 +926,100 @@ const isDetailModalOpen = ref(false);
 const isDetailLoading = ref(false);
 const detailedRecord = ref<RecordDetail | null>(null);
 const showPayloads = ref(false);
+
+const parsedCostSnapshot = computed<CostSnapshot | null>(() => {
+  const raw = detailedRecord.value?.cost_snapshot_json;
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as CostSnapshot;
+  } catch {
+    return null;
+  }
+});
+
+type DisplayCostDetailLine = CostDetailLine & {
+  extraInfoLines: string[];
+};
+
+const displayedCostDetailLines = computed<DisplayCostDetailLine[]>(() => {
+  return (parsedCostSnapshot.value?.detail_lines ?? []).map((line) => {
+    const attributes = { ...(line.attributes ?? {}) };
+    const fallbackMeterKey = attributes.fallback_meter_key ?? null;
+    delete attributes.fallback_meter_key;
+    const extraInfo = [
+      line.description
+        ? `${$t("recordPage.detailModal.noDescription")}: ${line.description}`
+        : null,
+      line.component_id !== null
+        ? `${$t("recordPage.detailModal.componentId")}: ${line.component_id}`
+        : null,
+      line.catalog_version_id !== null
+        ? `${$t("recordPage.detailModal.versionId")}: ${line.catalog_version_id}`
+        : null,
+      fallbackMeterKey
+        ? `${$t("recordPage.detailModal.fallbackPricingApplied")}: ${fallbackMeterKey}`
+        : null,
+      ...Object.entries(attributes).map(
+        ([attributeKey, attributeValue]) => `${attributeKey}: ${attributeValue}`,
+      ),
+    ].filter((value): value is string => value !== null);
+
+    return {
+      ...line,
+      extraInfoLines: extraInfo,
+    };
+  });
+});
+
+const visibleUsageSummaryItems = computed(() => {
+  const record = detailedRecord.value;
+  if (!record) {
+    return [];
+  }
+
+  return [
+    { label: $t("recordPage.detailModal.totalInputTokens"), value: record.total_input_tokens },
+    { label: $t("recordPage.detailModal.totalOutputTokens"), value: record.total_output_tokens },
+    { label: $t("recordPage.detailModal.totalTokens"), value: record.total_tokens },
+    { label: $t("recordPage.detailModal.inputTextTokens"), value: record.input_text_tokens },
+    { label: $t("recordPage.detailModal.outputTextTokens"), value: record.output_text_tokens },
+    { label: $t("recordPage.detailModal.reasoningTokens"), value: record.reasoning_tokens },
+    { label: $t("recordPage.detailModal.inputImageTokens"), value: record.input_image_tokens },
+    { label: $t("recordPage.detailModal.outputImageTokens"), value: record.output_image_tokens },
+    { label: $t("recordPage.detailModal.cacheReadTokens"), value: record.cache_read_tokens },
+    { label: $t("recordPage.detailModal.cacheWriteTokens"), value: record.cache_write_tokens },
+  ].filter((item) => item.value != null);
+});
+
+const costSnapshotIssues = computed(() => {
+  return [
+    ...(parsedCostSnapshot.value?.warnings ?? []).map(
+      (warning) => ({
+        label: $t("recordPage.detailModal.warnings"),
+        value: warning,
+      }),
+    ),
+    ...(parsedCostSnapshot.value?.unmatched_items ?? []).map(
+      (item) => ({
+        label: $t("recordPage.detailModal.unmatchedItems"),
+        value: item,
+      }),
+    ),
+  ];
+});
+
+const formatSnapshotUnitPrice = (
+  meterKey: string,
+  unitPriceNanos: number | null,
+  currency?: string | null,
+) => {
+  const mode = meterKey.startsWith("llm.") ? "per_million_units" : "money";
+  const base = formatCostRateFromNanos(unitPriceNanos, mode, currency, "/");
+  return meterKey.startsWith("llm.") ? `${base} tokens` : `${base}/unit`;
+};
 
 const totalPages = computed(() =>
   Math.ceil(totalRecords.value / pageSize.value),
@@ -948,7 +1234,7 @@ const fetchRecords = async () => {
           : "/";
 
       let tpsDisplay = "/";
-      if (r.output_tokens != null && r.llm_response_completed_at != null) {
+      if (r.total_output_tokens != null && r.llm_response_completed_at != null) {
         let durationMs;
         if (r.is_stream) {
           if (r.llm_response_first_chunk_at != null) {
@@ -960,14 +1246,15 @@ const fetchRecords = async () => {
         }
 
         if (durationMs != null && durationMs > 0) {
-          tpsDisplay = (r.output_tokens / (durationMs / 1000)).toFixed(2);
+          tpsDisplay = (r.total_output_tokens / (durationMs / 1000)).toFixed(2);
         }
       }
 
-      const costDisplay =
-        r.calculated_cost != null
-          ? `${r.cost_currency || ""} ${(r.calculated_cost / 1000000000).toFixed(6)}`
-          : "/";
+      const costDisplay = formatPriceFromNanos(
+        r.estimated_cost_nanos,
+        r.estimated_cost_currency,
+        "/",
+      );
 
       return {
         ...r,
@@ -1134,6 +1421,19 @@ const formatDate = (timestamp: number | null | undefined) => {
   return formatTimestamp(timestamp) || "/";
 };
 
+const formatCompactMetric = (value: number | string | null | undefined) => {
+  if (value == null || value === "" || value === "/") {
+    return "-";
+  }
+  return String(value);
+};
+
+const formatCompactMetrics = (
+  values: Array<number | string | null | undefined>,
+) => {
+  return values.map(formatCompactMetric).join(" / ");
+};
+
 const getStatusBadgeVariant = (status: string | null) => {
   switch (status) {
     case "SUCCESS":
@@ -1144,6 +1444,35 @@ const getStatusBadgeVariant = (status: string | null) => {
       return "outline";
     default:
       return "secondary";
+  }
+};
+
+const getStatusMeta = (status: string | null) => {
+  switch (status) {
+    case "SUCCESS":
+      return {
+        icon: CircleCheckBig,
+        className: "text-emerald-600",
+        label: $t("recordPage.filter.status.SUCCESS"),
+      };
+    case "ERROR":
+      return {
+        icon: CircleAlert,
+        className: "text-red-600",
+        label: $t("recordPage.filter.status.ERROR"),
+      };
+    case "PENDING":
+      return {
+        icon: Clock3,
+        className: "text-amber-600",
+        label: $t("recordPage.filter.status.PENDING"),
+      };
+    default:
+      return {
+        icon: CircleHelp,
+        className: "text-gray-400",
+        label: status || $t("common.notAvailable"),
+      };
   }
 };
 

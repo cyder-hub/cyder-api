@@ -45,6 +45,11 @@ description: Design and implement Vue admin dashboard UI in this repository with
 - `Popover`
 - `Toast`
 
+补充规则：
+
+- 对附加说明、warning 详情、fallback 信息、帮助提示等次级信息，优先使用 `Popover`，不要默认直接展开。
+- 不要优先依赖浏览器原生 `title` 承载主要交互信息，除非只是极轻量的临时提示。
+
 ## 3. 视觉系统
 
 ### 3.1 色彩
@@ -73,6 +78,8 @@ description: Design and implement Vue admin dashboard UI in this repository with
 - 卡片、表格、表单区、弹窗优先用边框，不用阴影。
 - 常用外框：`border border-gray-200 rounded-lg`
 - 弱分隔：`border-t border-gray-100`
+- 避免把信息页拆成大量小卡片，这会削弱阅读连续性和聚焦。连续信息优先使用分组列表、`dl`、带分隔线的网格或表格行；只有需要强调单个核心指标时才使用卡片。
+- 避免反复使用 `border border-gray-200` 包裹每个信息块，这会快速把页面做成一堆伪卡片。信息页优先依靠留白、对齐、`border-b` / `divide-*` 分隔，而不是给每个区块单独画边框。
 
 ### 3.3 排版
 

@@ -26,15 +26,21 @@ db_object! {
         pub llm_response_status: Option<i32>,
         pub status: Option<RequestStatus>,
         pub is_stream: bool,
-        pub calculated_cost: Option<i64>,
-        pub cost_currency: Option<String>,
+        pub estimated_cost_nanos: Option<i64>,
+        pub estimated_cost_currency: Option<String>,
+        pub cost_catalog_id: Option<i64>,
+        pub cost_catalog_version_id: Option<i64>,
+        pub cost_snapshot_json: Option<String>,
         pub created_at: i64,
         pub updated_at: i64,
-        pub input_tokens: Option<i32>,
-        pub output_tokens: Option<i32>,
+        pub total_input_tokens: Option<i32>,
+        pub total_output_tokens: Option<i32>,
+        pub input_text_tokens: Option<i32>,
+        pub output_text_tokens: Option<i32>,
         pub input_image_tokens: Option<i32>,
         pub output_image_tokens: Option<i32>,
-        pub cached_tokens: Option<i32>,
+        pub cache_read_tokens: Option<i32>,
+        pub cache_write_tokens: Option<i32>,
         pub reasoning_tokens: Option<i32>,
         pub total_tokens: Option<i32>,
         pub storage_type: Option<StorageType>,
@@ -44,6 +50,27 @@ db_object! {
         pub user_response_body: Option<String>,
         pub user_api_type: LlmApiType,
         pub llm_api_type: LlmApiType,
+    }
+
+    #[derive(Queryable, Selectable, Serialize, Debug, Clone)]
+    #[diesel(table_name = request_log)]
+    pub struct RequestLogListItem {
+        pub id: i64,
+        pub system_api_key_id: i64,
+        pub provider_id: i64,
+        pub model_name: String,
+        pub request_received_at: i64,
+        pub llm_request_sent_at: i64,
+        pub llm_response_first_chunk_at: Option<i64>,
+        pub llm_response_completed_at: Option<i64>,
+        pub status: Option<RequestStatus>,
+        pub is_stream: bool,
+        pub estimated_cost_nanos: Option<i64>,
+        pub estimated_cost_currency: Option<String>,
+        pub total_input_tokens: Option<i32>,
+        pub total_output_tokens: Option<i32>,
+        pub reasoning_tokens: Option<i32>,
+        pub total_tokens: Option<i32>,
     }
 }
 
@@ -99,7 +126,89 @@ impl RequestLog {
     }
 
     /// Lists request logs with filtering and pagination.
-    pub fn list(payload: RequestLogQueryPayload) -> DbResult<ListResult<RequestLog>> {
+    pub fn list(payload: RequestLogQueryPayload) -> DbResult<ListResult<RequestLogListItem>> {
+        let conn = &mut get_connection()?;
+        let page_size = payload.page_size.unwrap_or(20); // Default page size
+        let page = payload.page.unwrap_or(1);
+        let offset = (page - 1) * page_size;
+
+        db_execute!(conn, {
+            let mut query = request_log::table.into_boxed();
+            let mut count_query = request_log::table.into_boxed();
+
+            if let Some(val) = payload.system_api_key_id {
+                query = query.filter(request_log::dsl::system_api_key_id.eq(val));
+                count_query = count_query.filter(request_log::dsl::system_api_key_id.eq(val));
+            }
+            if let Some(val) = payload.provider_id {
+                query = query.filter(request_log::dsl::provider_id.eq(val));
+                count_query = count_query.filter(request_log::dsl::provider_id.eq(val));
+            }
+            if let Some(val) = payload.model_id {
+                query = query.filter(request_log::dsl::model_id.eq(val));
+                count_query = count_query.filter(request_log::dsl::model_id.eq(val));
+            }
+            if let Some(val) = payload.status {
+                query = query.filter(request_log::dsl::status.eq(val.clone()));
+                count_query = count_query.filter(request_log::dsl::status.eq(val));
+            }
+            if let Some(search_term) = payload.search.as_ref() {
+                if !search_term.is_empty() {
+                    let pattern = format!("%{}%", search_term);
+                    if let Ok(id_search) = search_term.parse::<i64>() {
+                        let search_filter = request_log::dsl::id
+                            .eq(id_search)
+                            .or(request_log::dsl::model_name.like(pattern.clone()));
+                        query = query.filter(search_filter.clone());
+                        count_query = count_query.filter(search_filter);
+                    } else {
+                        let search_filter = request_log::dsl::model_name.like(pattern);
+                        query = query.filter(search_filter.clone());
+                        count_query = count_query.filter(search_filter);
+                    }
+                }
+            }
+            if let Some(st_time) = payload.start_time {
+                query = query.filter(request_log::dsl::request_received_at.ge(st_time));
+                count_query = count_query.filter(request_log::dsl::request_received_at.ge(st_time));
+            }
+            if let Some(et_time) = payload.end_time {
+                query = query.filter(request_log::dsl::request_received_at.le(et_time));
+                count_query = count_query.filter(request_log::dsl::request_received_at.le(et_time));
+            }
+
+            let total = count_query
+                .select(diesel::dsl::count_star())
+                .first::<i64>(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!("Failed to count request logs: {}", e)))
+                })?;
+
+            let results_db = query
+                .order(request_log::dsl::request_received_at.desc())
+                .limit(page_size)
+                .offset(offset)
+                .select(RequestLogListItemDb::as_select())
+                .load::<RequestLogListItemDb>(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!("Failed to list request logs: {}", e)))
+                })?;
+
+            let list = results_db
+                .into_iter()
+                .map(|db_log| db_log.from_db())
+                .collect();
+
+            Ok(ListResult {
+                total,
+                page,
+                page_size,
+                list,
+            })
+        })
+    }
+
+    pub fn list_full(payload: RequestLogQueryPayload) -> DbResult<ListResult<RequestLog>> {
         let conn = &mut get_connection()?;
         let page_size = payload.page_size.unwrap_or(20); // Default page size
         let page = payload.page.unwrap_or(1);

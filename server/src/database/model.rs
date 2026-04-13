@@ -20,7 +20,7 @@ db_object! {
         pub provider_id: i64,
         pub model_name: String,
         pub real_model_name: Option<String>,
-        pub billing_plan_id: Option<i64>,
+        pub cost_catalog_id: Option<i64>,
         pub deleted_at: Option<i64>,
         pub is_enabled: bool,
         pub created_at: i64,
@@ -45,7 +45,7 @@ pub struct UpdateModelData {
     pub model_name: Option<String>,
     pub real_model_name: Option<Option<String>>, // Allow setting to NULL
     pub is_enabled: Option<bool>,
-    pub billing_plan_id: Option<Option<i64>>,
+    pub cost_catalog_id: Option<Option<i64>>,
 }
 
 }
@@ -301,7 +301,7 @@ impl Model {
                         real_model_name: Some(real_model_name_val.map(|s| s.to_string())),
                         is_enabled: Some(true), // Ensure it's enabled
                         model_name: None,       // Not changing model_name itself here
-                        billing_plan_id: None,  // Do not update billing_plan_id during upsert
+                        cost_catalog_id: None,  // Do not update cost_catalog_id during upsert
                     };
 
                     // Also ensure it's not deleted

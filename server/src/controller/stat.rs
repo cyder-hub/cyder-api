@@ -72,9 +72,9 @@ pub struct UsageStatItem {
     provider_key: String,
     model_name: String,
     real_model_name: Option<String>,
-    input_tokens: i64,
-    output_tokens: i64,
-    reasoning_tokens: i64,
+    total_input_tokens: i64,
+    total_output_tokens: i64,
+    total_reasoning_tokens: i64,
     total_tokens: i64,
     request_count: i64,
     total_cost: HashMap<String, i64>,
@@ -209,12 +209,15 @@ async fn system_usage_stats(
                 ..Default::default()
             });
 
-        stat_item.input_tokens += log_entry.input_tokens.unwrap_or(0) as i64;
-        stat_item.output_tokens += log_entry.output_tokens.unwrap_or(0) as i64;
-        stat_item.reasoning_tokens += log_entry.reasoning_tokens.unwrap_or(0) as i64;
+        stat_item.total_input_tokens += log_entry.total_input_tokens.unwrap_or(0) as i64;
+        stat_item.total_output_tokens += log_entry.total_output_tokens.unwrap_or(0) as i64;
+        stat_item.total_reasoning_tokens += log_entry.reasoning_tokens.unwrap_or(0) as i64;
         stat_item.total_tokens += log_entry.total_tokens.unwrap_or(0) as i64;
         stat_item.request_count += 1;
-        if let (Some(cost), Some(currency)) = (log_entry.calculated_cost, log_entry.cost_currency) {
+        if let (Some(cost), Some(currency)) = (
+            log_entry.estimated_cost_nanos,
+            log_entry.estimated_cost_currency,
+        ) {
             if cost > 0 {
                 *stat_item.total_cost.entry(currency).or_insert(0) += cost;
             }

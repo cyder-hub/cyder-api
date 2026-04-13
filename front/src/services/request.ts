@@ -19,10 +19,20 @@ import type {
   PaginatedResponse,
   CustomFieldDefinition,
   CustomFieldPayload,
-  BillingPlan,
-  BillingPlanPayload,
-  PriceRule,
-  PriceRulePayload,
+  CostCatalog,
+  CostCatalogListItem,
+  CostCatalogPayload,
+  CostCatalogVersion,
+  CostCatalogVersionDetail,
+  CostCatalogVersionPayload,
+  CostComponent,
+  CostComponentPayload,
+  CostComponentUpdatePayload,
+  CostTemplateSummary,
+  CostPreviewPayload,
+  CostPreviewResponse,
+  ImportCostTemplatePayload,
+  ImportCostTemplateResponse,
   RecordListItem,
   RecordDetail,
   RecordListParams,
@@ -153,32 +163,59 @@ export const Api = {
     return request.delete(`/ai/manager/api/custom_field_definition/${id}`);
   },
 
-  // ========== Price / Billing Plan ==========
-  getBillingPlanList(): Promise<BillingPlan[]> {
-    return request("/ai/manager/api/price/plan/list");
+  // ========== Cost ==========
+  getCostTemplateList(): Promise<CostTemplateSummary[]> {
+    return request.get("/ai/manager/api/cost/template/list");
   },
-  updateBillingPlan(id: number, payload: BillingPlanPayload): Promise<void> {
-    return request.put(`/ai/manager/api/price/plan/${id}`, payload);
+  importCostTemplate(
+    payload: ImportCostTemplatePayload,
+  ): Promise<ImportCostTemplateResponse> {
+    return request.post("/ai/manager/api/cost/template/import", payload);
   },
-  createBillingPlan(payload: BillingPlanPayload): Promise<void> {
-    return request.post("/ai/manager/api/price/plan", payload);
+  getCostCatalogList(): Promise<CostCatalogListItem[]> {
+    return request.get("/ai/manager/api/cost/catalog/list");
   },
-  deleteBillingPlan(id: number): Promise<void> {
-    return request.delete(`/ai/manager/api/price/plan/${id}`);
+  createCostCatalog(payload: CostCatalogPayload): Promise<CostCatalog> {
+    return request.post("/ai/manager/api/cost/catalog", payload);
   },
-
-  // ========== Price Rule ==========
-  getPriceRuleListByPlan(planId: number): Promise<PriceRule[]> {
-    return request(`/ai/manager/api/price/rule/list_by_plan?plan_id=${planId}`);
+  updateCostCatalog(
+    id: number,
+    payload: CostCatalogPayload,
+  ): Promise<CostCatalog> {
+    return request.put(`/ai/manager/api/cost/catalog/${id}`, payload);
   },
-  updatePriceRule(id: number, payload: PriceRulePayload): Promise<void> {
-    return request.put(`/ai/manager/api/price/rule/${id}`, payload);
+  deleteCostCatalog(id: number): Promise<void> {
+    return request.delete(`/ai/manager/api/cost/catalog/${id}`);
   },
-  createPriceRule(payload: PriceRulePayload): Promise<void> {
-    return request.post("/ai/manager/api/price/rule", payload);
+  createCostCatalogVersion(
+    catalogId: number,
+    payload: CostCatalogVersionPayload,
+  ): Promise<CostCatalogVersion> {
+    return request.post(`/ai/manager/api/cost/catalog/${catalogId}/version`, payload);
   },
-  deletePriceRule(id: number): Promise<void> {
-    return request.delete(`/ai/manager/api/price/rule/${id}`);
+  updateCostCatalogVersion(
+    id: number,
+    payload: Partial<CostCatalogVersionPayload>,
+  ): Promise<CostCatalogVersion> {
+    return request.put(`/ai/manager/api/cost/version/${id}`, payload);
+  },
+  getCostCatalogVersion(id: number): Promise<CostCatalogVersionDetail> {
+    return request.get(`/ai/manager/api/cost/version/${id}`);
+  },
+  createCostComponent(payload: CostComponentPayload): Promise<CostComponent> {
+    return request.post("/ai/manager/api/cost/component", payload);
+  },
+  updateCostComponent(
+    id: number,
+    payload: CostComponentUpdatePayload,
+  ): Promise<CostComponent> {
+    return request.put(`/ai/manager/api/cost/component/${id}`, payload);
+  },
+  deleteCostComponent(id: number): Promise<void> {
+    return request.delete(`/ai/manager/api/cost/component/${id}`);
+  },
+  previewCost(payload: CostPreviewPayload): Promise<CostPreviewResponse> {
+    return request.post("/ai/manager/api/cost/preview", payload);
   },
 
   // ========== Request Log ==========

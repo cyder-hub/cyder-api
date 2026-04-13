@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
+import { formatPriceFromNanos, nanosToMajorUnit } from "@/lib/utils";
 import { Api } from "@/services/request";
 import type { UsageStatsPeriod } from "@/store/types";
 import ECharts from "./ECharts.vue";
@@ -44,9 +45,9 @@ type TimeRange =
   | "this_year"
   | "last_1_year";
 type UsageMetric =
-  | "input_tokens"
-  | "output_tokens"
-  | "reasoning_tokens"
+  | "total_input_tokens"
+  | "total_output_tokens"
+  | "total_reasoning_tokens"
   | "total_tokens"
   | "request_count"
   | "total_cost";
@@ -223,16 +224,16 @@ const metricOptions = computed(() => [
     label: t("dashboard.usageStats.metrics.total_tokens"),
   },
   {
-    value: "input_tokens",
-    label: t("dashboard.usageStats.metrics.input_tokens"),
+    value: "total_input_tokens",
+    label: t("dashboard.usageStats.metrics.total_input_tokens"),
   },
   {
-    value: "output_tokens",
-    label: t("dashboard.usageStats.metrics.output_tokens"),
+    value: "total_output_tokens",
+    label: t("dashboard.usageStats.metrics.total_output_tokens"),
   },
   {
-    value: "reasoning_tokens",
-    label: t("dashboard.usageStats.metrics.reasoning_tokens"),
+    value: "total_reasoning_tokens",
+    label: t("dashboard.usageStats.metrics.total_reasoning_tokens"),
   },
   {
     value: "request_count",
@@ -299,21 +300,17 @@ const formatMetric = (
   currency?: string,
 ) => {
   if (metric === "total_cost") {
-    const amount = value / 1_000_000_000;
-    if (currency === "CNY") return `¥${amount.toFixed(6)}`;
-    try {
-      return new Intl.NumberFormat(undefined, {
-        style: "currency",
-        currency: currency || "USD",
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6,
-      }).format(amount);
-    } catch (e) {
-      return `${currency || "$"} ${amount.toFixed(6)}`;
-    }
+    return formatPriceFromNanos(value, currency, "-");
   }
   return value.toLocaleString();
 };
+
+const formatCostAxisLabel = (value: number) =>
+  new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 6,
+    notation: Math.abs(nanosToMajorUnit(value)) >= 100000 ? "compact" : "standard",
+  }).format(nanosToMajorUnit(value));
 
 type TooltipAxisParam = CallbackDataParams & {
   axisValue: string | number;
@@ -495,7 +492,7 @@ const chartOptions = computed<EChartsOption>(() => {
               baseName,
           );
           if (item && currency && item.total_cost[currency]) {
-            value = item.total_cost[currency] / 1_000_000_000;
+            value = item.total_cost[currency];
           }
         } else {
           const item = periodData.find(
@@ -528,7 +525,19 @@ const chartOptions = computed<EChartsOption>(() => {
   return {
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "cross" },
+      axisPointer: {
+        type: "cross",
+        ...(metric === "total_cost"
+          ? {
+              label: {
+                formatter: (params: any) =>
+                  params?.axisDimension === "y" && typeof params?.value === "number"
+                    ? formatCostAxisLabel(params.value)
+                    : String(params?.value ?? ""),
+              },
+            }
+          : {}),
+      },
       formatter: (rawParams: TopLevelFormatterParams) => {
         const params = Array.isArray(rawParams) ? rawParams : [rawParams];
         const rows = params.filter(isTooltipAxisParam);
@@ -579,7 +588,17 @@ const chartOptions = computed<EChartsOption>(() => {
               : "{HH}:{mm}",
       },
     },
-    yAxis: { type: "value", name: t(`dashboard.usageStats.metrics.${metric}`) },
+    yAxis: {
+      type: "value",
+      name: t(`dashboard.usageStats.metrics.${metric}`),
+      ...(metric === "total_cost"
+        ? {
+            axisLabel: {
+              formatter: (value: number) => formatCostAxisLabel(value),
+            },
+          }
+        : {}),
+    },
     series: finalSeries.map((s) => ({ ...s, smooth: type === "line" })),
     dataZoom: [
       { type: "slider", start: 0, end: 100, height: 20, bottom: 16 },

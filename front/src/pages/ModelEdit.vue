@@ -9,8 +9,7 @@ import { useProviderStore } from "@/store/providerStore";
 import type {
   CustomFieldType,
   CustomFieldItem,
-  BillingPlan,
-  PriceRule,
+  CostCatalogVersion,
   CustomFieldDefinition,
   ModelDetailResponse,
 } from "@/store/types";
@@ -38,12 +37,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Loader2, Trash2 } from "lucide-vue-next";
+import { Copy, Loader2, Plus, Settings2, Trash2 } from "lucide-vue-next";
+import CostCatalogDialog from "./cost/CostCatalogDialog.vue";
+import CostComponentDialog from "./cost/CostComponentDialog.vue";
+import CostEditorDialog from "./cost/CostEditorDialog.vue";
+import CostTemplateDialog from "./cost/CostTemplateDialog.vue";
+import CostVersionDialog from "./cost/CostVersionDialog.vue";
+import { useCostPage } from "./cost/useCostPage";
 
 interface EditingModelData {
   id: number;
   provider_id: number;
-  billing_plan_id: number | null;
+  cost_catalog_id: number | null;
   model_name: string;
   real_model_name: string;
   is_enabled: boolean;
@@ -59,12 +64,11 @@ const modelId = parseInt(route.params.id as string);
 const isLoading = ref(true);
 const modelDetail = ref<ModelDetailResponse | null>(null);
 const allCustomFields = ref<CustomFieldItem[]>([]);
-const billingPlans = ref<BillingPlan[]>([]);
-const priceRules = ref<PriceRule[]>([]);
-const isLoadingPriceRules = ref(false);
+const costManager = useCostPage();
 
 const editingData = ref<EditingModelData | null>(null);
 const selectedCustomFieldId = ref<string | null>(null);
+const shouldBindCreatedCatalog = ref(false);
 
 const toEditableCustomField = (
   field: Pick<
@@ -104,14 +108,13 @@ const fetchData = async () => {
 
   try {
     isLoading.value = true;
-    const [detail, customFieldsRes, plans] = await Promise.all([
+    const [detail, customFieldsRes] = await Promise.all([
       Api.getModelDetail(modelId),
       Api.getCustomFieldList(),
-      Api.getBillingPlanList(),
+      costManager.refreshCostData(),
     ]);
 
     modelDetail.value = detail;
-    billingPlans.value = plans;
 
     if (customFieldsRes && customFieldsRes.list) {
       allCustomFields.value = customFieldsRes.list.map(toEditableCustomField);
@@ -121,7 +124,7 @@ const fetchData = async () => {
       editingData.value = {
         id: detail.model.id,
         provider_id: detail.model.provider_id,
-        billing_plan_id: detail.model.billing_plan_id ?? null,
+        cost_catalog_id: detail.model.cost_catalog_id ?? null,
         model_name: detail.model.model_name,
         real_model_name: detail.model.real_model_name ?? "",
         is_enabled: detail.model.is_enabled,
@@ -139,38 +142,14 @@ const fetchData = async () => {
   }
 };
 
-const fetchPriceRules = async (planId: number | null) => {
-  if (!planId) {
-    priceRules.value = [];
-    return;
-  }
-  try {
-    isLoadingPriceRules.value = true;
-    priceRules.value = await Api.getPriceRuleListByPlan(planId);
-  } catch (error: unknown) {
-    const normalizedError = normalizeError(error, t("common.unknownError"));
-    toastController.error(
-      t("modelEditPage.priceSection.loadingRules"),
-      normalizedError.message,
-    );
-    priceRules.value = [];
-  } finally {
-    isLoadingPriceRules.value = false;
-  }
-};
-
-watch(
-  () => editingData.value?.billing_plan_id,
-  (newPlanId) => {
-    if (newPlanId !== undefined) {
-      fetchPriceRules(newPlanId);
-    }
-  },
-  { immediate: true },
+const selectedCatalog = computed(() =>
+  costManager.costStore.catalogs.find(
+    (item) => item.catalog.id === editingData.value?.cost_catalog_id,
+  ) ?? null,
 );
 
-const selectedPlan = computed(() =>
-  billingPlans.value.find((p) => p.id === editingData.value?.billing_plan_id),
+const selectedCatalogVersions = computed<CostCatalogVersion[]>(() =>
+  selectedCatalog.value?.versions ?? [],
 );
 
 const availableCustomFields = computed(() => {
@@ -193,7 +172,7 @@ const handleSaveModel = async () => {
     model_name: editingData.value.model_name,
     real_model_name: editingData.value.real_model_name || null,
     is_enabled: editingData.value.is_enabled,
-    billing_plan_id: editingData.value.billing_plan_id,
+    cost_catalog_id: editingData.value.cost_catalog_id,
   };
 
   try {
@@ -275,6 +254,48 @@ const handleNavigateBack = () => {
   router.push("/provider");
 };
 
+const handleOpenSelectedCostCatalog = () => {
+  if (!editingData.value?.cost_catalog_id) {
+    toastController.warn(t("costPage.alert.selectCatalogFirst"));
+    return;
+  }
+  costManager.openCatalogWorkspace(editingData.value.cost_catalog_id);
+};
+
+const handleCreateCostCatalog = () => {
+  shouldBindCreatedCatalog.value = true;
+  costManager.openCreateCatalogDialog(true);
+};
+
+const handleDuplicateSelectedCostCatalog = async () => {
+  if (!selectedCatalog.value || !editingData.value) {
+    toastController.warn(t("costPage.alert.selectCatalogFirst"));
+    return;
+  }
+
+  const duplicatedCatalogId = await costManager.duplicateCatalog(selectedCatalog.value);
+  if (duplicatedCatalogId !== null) {
+    editingData.value.cost_catalog_id = duplicatedCatalogId;
+  }
+};
+
+const handleCostCatalogDialogOpenChange = (open: boolean) => {
+  costManager.isCatalogDialogOpen.value = open;
+  if (!open) {
+    shouldBindCreatedCatalog.value = false;
+  }
+};
+
+watch(
+  () => costManager.costStore.selectedCatalogId,
+  (catalogId) => {
+    if (shouldBindCreatedCatalog.value && catalogId !== null && editingData.value) {
+      editingData.value.cost_catalog_id = catalogId;
+      shouldBindCreatedCatalog.value = false;
+    }
+  },
+);
+
 onMounted(() => {
   fetchData();
 });
@@ -354,96 +375,122 @@ onMounted(() => {
         </CardContent>
       </Card>
 
-      <!-- Price Management Section -->
+      <!-- Cost Catalog Section -->
       <Card>
         <CardHeader>
           <CardTitle>{{ t("modelEditPage.priceSection.title") }}</CardTitle>
         </CardHeader>
         <CardContent class="space-y-6">
           <div class="grid gap-1.5">
-            <Label class="text-gray-700">{{
-              t("modelEditPage.priceSection.labelBillingPlan")
-            }}</Label>
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div class="grid gap-1.5">
+                <Label class="text-gray-700">{{
+                  t("modelEditPage.priceSection.labelCatalog")
+                }}</Label>
+              </div>
+              <div class="flex flex-col gap-2 sm:w-auto sm:flex-row">
+                <Button variant="outline" @click="handleCreateCostCatalog">
+                  <Plus class="mr-1.5 h-4 w-4" />
+                  {{ t("costPage.catalogs.add") }}
+                </Button>
+                <Button
+                  variant="outline"
+                  :disabled="!selectedCatalog"
+                  @click="handleDuplicateSelectedCostCatalog"
+                >
+                  <Copy class="mr-1.5 h-4 w-4" />
+                  {{ t("costPage.catalogs.duplicate") }}
+                </Button>
+                <Button
+                  variant="outline"
+                  :disabled="!editingData.cost_catalog_id"
+                  @click="handleOpenSelectedCostCatalog"
+                >
+                  <Settings2 class="mr-1.5 h-4 w-4" />
+                  {{ t("costPage.catalogs.openEditor") }}
+                </Button>
+              </div>
+            </div>
             <Select
-              :model-value="editingData.billing_plan_id?.toString() || 'none'"
+              :model-value="editingData.cost_catalog_id?.toString() || 'none'"
               @update:model-value="
                 (val: any) =>
-                  (editingData!.billing_plan_id =
+                  (editingData!.cost_catalog_id =
                     val === 'none' ? null : parseInt(val as string))
               "
             >
               <SelectTrigger class="w-full">
                 <SelectValue
                   :placeholder="
-                    t('modelEditPage.priceSection.placeholderBillingPlan')
+                    t('modelEditPage.priceSection.placeholderCatalog')
                   "
                 />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">{{
-                  t("modelEditPage.priceSection.noPlan")
+                  t("modelEditPage.priceSection.noCatalog")
                 }}</SelectItem>
                 <SelectItem
-                  v-for="plan in billingPlans"
-                  :key="plan.id"
-                  :value="plan.id.toString()"
+                  v-for="catalog in costManager.costStore.catalogs"
+                  :key="catalog.catalog.id"
+                  :value="catalog.catalog.id.toString()"
                 >
-                  {{ plan.name }}
+                  {{ catalog.catalog.name }}
                 </SelectItem>
               </SelectContent>
             </Select>
           </div>
 
-          <div v-if="editingData.billing_plan_id" class="space-y-4">
-            <div
-              v-if="isLoadingPriceRules"
-              class="flex items-center justify-center py-8"
-            >
-              <Loader2 class="h-5 w-5 animate-spin mr-2 text-gray-500" />
-              <p class="text-sm text-gray-500">
-                {{ t("modelEditPage.priceSection.loadingRules") }}
-              </p>
-            </div>
-            <div v-else-if="priceRules.length > 0" class="space-y-3">
+          <div
+            v-if="!editingData.cost_catalog_id"
+            class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
+          >
+            {{ t("modelEditPage.priceSection.unboundHint") }}
+          </div>
+
+          <div v-if="editingData.cost_catalog_id" class="space-y-4">
+            <div v-if="selectedCatalogVersions.length > 0" class="space-y-3">
               <h4 class="text-sm font-semibold text-gray-700">
-                {{ t("modelEditPage.priceSection.rulesTitle") }}
+                {{ t("modelEditPage.priceSection.versionTitle") }}
               </h4>
               <div class="space-y-3 md:hidden">
                 <MobileCrudCard
-                  v-for="rule in priceRules"
-                  :key="rule.id"
-                  :title="rule.description || '-'"
-                  :description="formatTimestamp(rule.effective_from)"
+                  v-for="version in selectedCatalogVersions"
+                  :key="version.id"
+                  :title="version.version"
+                  :description="version.source || version.currency"
                 >
                   <div class="grid grid-cols-1 gap-3 text-sm min-[360px]:grid-cols-2">
                     <div class="space-y-1">
                       <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                        {{ t("pricePage.rules.table.enabled") }}
+                        {{ t("modelEditPage.priceSection.enabled") }}
                       </p>
                       <div>
                         <Badge variant="secondary" class="font-mono text-xs">
-                          {{ rule.is_enabled ? t("common.yes") : t("common.no") }}
+                          {{ version.is_enabled ? t("common.yes") : t("common.no") }}
                         </Badge>
                       </div>
                     </div>
                     <div class="space-y-1">
                       <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                        {{ t("pricePage.rules.table.usageType") }}
+                        {{ t("costPage.versions.currency") }}
                       </p>
-                      <p class="text-sm text-gray-900">{{ rule.usage_type }}</p>
+                      <p class="text-sm text-gray-900">{{ version.currency }}</p>
                     </div>
                     <div class="space-y-1">
                       <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                        {{ t("pricePage.rules.table.mediaType") }}
+                        {{ t("modelEditPage.priceSection.effectiveFrom") }}
                       </p>
-                      <p class="text-sm text-gray-900">{{ rule.media_type || "-" }}</p>
+                      <p class="text-sm text-gray-900">
+                        {{ formatTimestamp(version.effective_from) }}
+                      </p>
                     </div>
                     <div class="space-y-1">
                       <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                        {{ t("pricePage.rules.table.price") }}
+                        {{ t("modelEditPage.priceSection.effectiveUntil") }}
                       </p>
                       <p class="break-all font-mono text-sm text-gray-700">
-                        {{ rule.price_in_micro_units / 1000 }} {{ selectedPlan?.currency }}
+                        {{ version.effective_until ? formatTimestamp(version.effective_until) : "-" }}
                       </p>
                     </div>
                   </div>
@@ -456,63 +503,61 @@ onMounted(() => {
                     <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
                       <TableHead
                         class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                        >{{ t("pricePage.rules.table.description") }}</TableHead
+                        >{{ t("modelEditPage.priceSection.version") }}</TableHead
                       >
                       <TableHead
                         class="w-[80px] text-center text-xs font-medium text-gray-500 uppercase tracking-wider"
-                        >{{ t("pricePage.rules.table.enabled") }}</TableHead
+                        >{{ t("modelEditPage.priceSection.enabled") }}</TableHead
                       >
                       <TableHead
                         class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                        >{{ t("pricePage.rules.table.usageType") }}</TableHead
+                        >{{ t("costPage.versions.currency") }}</TableHead
                       >
                       <TableHead
                         class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                        >{{ t("pricePage.rules.table.mediaType") }}</TableHead
-                      >
-                      <TableHead
-                        class="text-right text-xs font-medium text-gray-500 uppercase tracking-wider"
-                        >{{ t("pricePage.rules.table.price") }}</TableHead
+                        >{{ t("modelEditPage.priceSection.effectiveFrom") }}</TableHead
                       >
                       <TableHead
                         class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                        >{{
-                          t("pricePage.rules.table.effectiveFrom")
-                        }}</TableHead
+                        >{{ t("modelEditPage.priceSection.effectiveUntil") }}</TableHead
                       >
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    <TableRow v-for="rule in priceRules" :key="rule.id">
+                    <TableRow v-for="version in selectedCatalogVersions" :key="version.id">
                       <TableCell class="text-sm text-gray-900">{{
-                        rule.description || "-"
+                        version.version
                       }}</TableCell>
                       <TableCell class="text-center">
                         <Badge variant="secondary" class="font-mono text-xs">
                           {{
-                            rule.is_enabled ? t("common.yes") : t("common.no")
+                            version.is_enabled ? t("common.yes") : t("common.no")
                           }}
                         </Badge>
                       </TableCell>
                       <TableCell class="text-sm">{{
-                        rule.usage_type
+                        version.currency
                       }}</TableCell>
                       <TableCell class="text-sm">{{
-                        rule.media_type || "-"
+                        formatTimestamp(version.effective_from)
                       }}</TableCell>
-                      <TableCell
-                        class="text-right text-sm font-mono text-gray-600"
-                      >
-                        {{ rule.price_in_micro_units / 1000 }}
-                        {{ selectedPlan?.currency }}
-                      </TableCell>
                       <TableCell class="text-xs text-gray-500">
-                        {{ formatTimestamp(rule.effective_from) }}
+                        {{
+                          version.effective_until
+                            ? formatTimestamp(version.effective_until)
+                            : "-"
+                        }}
                       </TableCell>
                     </TableRow>
                   </TableBody>
                 </Table>
               </div>
+            </div>
+            <div
+              v-else
+              class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
+            >
+              {{ t("costPage.versions.empty") }}
             </div>
           </div>
         </CardContent>
@@ -678,4 +723,79 @@ onMounted(() => {
       </div>
     </div>
   </div>
+
+  <CostEditorDialog
+    :open="costManager.isEditorDialogOpen.value"
+    :selected-catalog="costManager.selectedCatalog.value"
+    :selected-catalog-versions="costManager.selectedCatalogVersions.value"
+    :selected-version-id="costManager.costStore.selectedVersionId"
+    :selected-version-summary="costManager.selectedVersionSummary.value"
+    :components="costManager.components.value"
+    :is-loading-version-detail="costManager.costStore.isLoadingVersionDetail"
+    :toggling-version-id="costManager.togglingVersionId.value"
+    :duplicating-catalog-id="costManager.duplicatingCatalogId.value"
+    :preview-draft="costManager.previewDraft"
+    :preview-response="costManager.previewResponse.value"
+    :can-preview="costManager.canPreview.value"
+    :is-running-preview="costManager.isRunningPreview.value"
+    :meter-label="costManager.meterLabel"
+    :charge-kind-label="costManager.chargeKindLabel"
+    :tier-basis-label="costManager.tierBasisLabel"
+    :format-rate-display="costManager.formatRateDisplay"
+    :try-format-rate-input-display="costManager.tryFormatRateInputDisplay"
+    :format-number="costManager.formatNumber"
+    :pretty-json="costManager.prettyJson"
+    @update:open="(open) => (costManager.isEditorDialogOpen.value = open)"
+    @refresh="costManager.refreshCostData"
+    @open-template="costManager.openTemplateDialog"
+    @edit-catalog="costManager.openEditCatalogDialog"
+    @duplicate-catalog="costManager.duplicateCatalog"
+    @create-version="costManager.openCreateVersionDialog"
+    @select-version="costManager.handleSelectVersion"
+    @toggle-version-enabled="costManager.handleToggleVersionEnabled"
+    @create-component="costManager.openCreateComponentDialog"
+    @edit-component="costManager.openEditComponentDialog"
+    @delete-component="costManager.handleDeleteComponent"
+    @apply-sample="costManager.applyPreviewSample"
+    @run-preview="costManager.runPreview"
+  />
+
+  <CostTemplateDialog
+    :open="costManager.isTemplateDialogOpen.value"
+    :templates="costManager.templates.value"
+    :is-loading-templates="costManager.isLoadingTemplates.value"
+    :importing-template-key="costManager.importingTemplateKey.value"
+    @update:open="(open) => (costManager.isTemplateDialogOpen.value = open)"
+    @refresh="costManager.refreshTemplates"
+    @import-template="costManager.importTemplate"
+  />
+
+  <CostCatalogDialog
+    :open="costManager.isCatalogDialogOpen.value"
+    :draft="costManager.catalogDraft"
+    :is-saving="costManager.isSavingCatalog.value"
+    @update:open="handleCostCatalogDialogOpenChange"
+    @save="costManager.saveCatalog"
+  />
+
+  <CostVersionDialog
+    :open="costManager.isVersionDialogOpen.value"
+    :draft="costManager.versionDraft"
+    :is-saving="costManager.isSavingVersion.value"
+    @update:open="(open) => (costManager.isVersionDialogOpen.value = open)"
+    @save="costManager.saveVersion"
+  />
+
+  <CostComponentDialog
+    :open="costManager.isComponentDialogOpen.value"
+    :draft="costManager.componentDraft"
+    :is-saving="costManager.isSavingComponent.value"
+    :selected-currency="costManager.selectedVersionSummary.value?.currency"
+    :meter-label="costManager.meterLabel"
+    :charge-kind-label="costManager.chargeKindLabel"
+    @update:open="(open) => (costManager.isComponentDialogOpen.value = open)"
+    @save="costManager.saveComponent"
+    @add-tier="costManager.addTier"
+    @remove-tier="costManager.removeTier"
+  />
 </template>

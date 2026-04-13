@@ -13,13 +13,14 @@ use super::{
 };
 
 use crate::config::CONFIG;
+use crate::cost::UsageNormalization;
 use crate::schema::enum_def::{LlmApiType, RequestStatus};
 use crate::service::app_state::AppState;
-use crate::service::cache::types::CacheBillingPlan;
-use crate::service::transform::{StreamTransformer, transform_result};
-use crate::utils::billing::UsageInfo;
+use crate::service::cache::types::CacheCostCatalogVersion;
+use crate::service::transform::{StreamTransformer, transform_result_with_cost};
 use crate::utils::sse::SseParser;
 use crate::utils::storage::LogBodyCaptureState;
+use crate::utils::usage::UsageInfo;
 
 use axum::{
     body::{Body, Bytes},
@@ -84,7 +85,7 @@ struct ResponseStreamCancellationGuard {
     context: Arc<TokioMutex<RequestLogContext>>,
     url: String,
     status_code: StatusCode,
-    billing_plan: Option<CacheBillingPlan>,
+    cost_catalog_version: Option<CacheCostCatalogVersion>,
     reason: String,
     armed: bool,
 }
@@ -95,7 +96,7 @@ impl ResponseStreamCancellationGuard {
         context: Arc<TokioMutex<RequestLogContext>>,
         url: impl Into<String>,
         status_code: StatusCode,
-        billing_plan: Option<CacheBillingPlan>,
+        cost_catalog_version: Option<CacheCostCatalogVersion>,
         reason: impl Into<String>,
     ) -> Self {
         Self {
@@ -103,7 +104,7 @@ impl ResponseStreamCancellationGuard {
             context,
             url: url.into(),
             status_code,
-            billing_plan,
+            cost_catalog_version,
             reason: reason.into(),
             armed: true,
         }
@@ -121,13 +122,13 @@ impl Drop for ResponseStreamCancellationGuard {
             let context = Arc::clone(&self.context);
             let url = self.url.clone();
             let status_code = self.status_code;
-            let billing_plan = self.billing_plan.clone();
+            let cost_catalog_version = self.cost_catalog_version.clone();
             tokio::spawn(async move {
                 finalize_cancelled_log_context(
                     &context,
                     &url,
                     Some(status_code),
-                    billing_plan.as_ref(),
+                    cost_catalog_version.as_ref(),
                     None,
                     None,
                 )
@@ -178,11 +179,11 @@ fn process_success_response_body(
     decompressed_body: &Bytes,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-) -> (Bytes, Option<UsageInfo>) {
+) -> (Bytes, Option<UsageInfo>, Option<UsageNormalization>) {
     match serde_json::from_slice::<Value>(decompressed_body) {
         Ok(original_value) => {
-            let (transformed_value, usage_info) =
-                transform_result(original_value, target_api_type, api_type);
+            let (transformed_value, usage_info, usage_normalization) =
+                transform_result_with_cost(original_value, target_api_type, api_type);
 
             let body_bytes = if api_type == target_api_type {
                 decompressed_body.clone()
@@ -198,7 +199,7 @@ fn process_success_response_body(
                     }
                 }
             };
-            (body_bytes, usage_info)
+            (body_bytes, usage_info, usage_normalization)
         }
         Err(e) => {
             debug!(
@@ -206,7 +207,7 @@ fn process_success_response_body(
                 e,
                 String::from_utf8_lossy(decompressed_body)
             );
-            (decompressed_body.clone(), None)
+            (decompressed_body.clone(), None, None)
         }
     }
 }
@@ -216,9 +217,10 @@ pub(super) fn finalize_non_streaming_log_context(
     url: &str,
     status_code: StatusCode,
     completion_ts: i64,
-    billing_plan: Option<&CacheBillingPlan>,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
     overall_status: RequestStatus,
     usage: Option<UsageInfo>,
+    usage_normalization: Option<UsageNormalization>,
     llm_response_body: Bytes,
     user_response_body: Bytes,
 ) {
@@ -226,7 +228,8 @@ pub(super) fn finalize_non_streaming_log_context(
     context.llm_status = Some(status_code);
     context.completion_ts = Some(completion_ts);
     context.usage = usage;
-    context.billing_plan = billing_plan.cloned();
+    context.usage_normalization = usage_normalization;
+    context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = overall_status;
     context.llm_response_body = Some(LoggedBody::from_bytes(llm_response_body));
     context.user_response_body = Some(LoggedBody::from_bytes(user_response_body));
@@ -280,7 +283,7 @@ async fn finalize_cancelled_log_context(
     log_context: &Arc<TokioMutex<RequestLogContext>>,
     url: &str,
     status_code: Option<StatusCode>,
-    billing_plan: Option<&CacheBillingPlan>,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
     llm_response_body: Option<LoggedBody>,
     user_response_body: Option<LoggedBody>,
 ) {
@@ -288,7 +291,7 @@ async fn finalize_cancelled_log_context(
     context.request_url = Some(url.to_string());
     context.llm_status = status_code;
     context.completion_ts = Some(Utc::now().timestamp_millis());
-    context.billing_plan = billing_plan.cloned();
+    context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = RequestStatus::Cancelled;
     context.llm_response_body = llm_response_body;
     context.user_response_body = user_response_body;
@@ -388,7 +391,7 @@ pub(super) async fn proxy_request(
     headers: HeaderMap,
     model_str: String,
     use_proxy: bool,
-    billing_plan: Option<CacheBillingPlan>,
+    cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
@@ -441,7 +444,7 @@ pub(super) async fn proxy_request(
             let mut context = log_context.lock().await;
             context.request_url = Some(url.clone());
             context.completion_ts = Some(completed_at);
-            context.billing_plan = billing_plan.clone();
+            context.cost_catalog_version = cost_catalog_version.clone();
             context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
                 RequestStatus::Cancelled
             } else {
@@ -473,7 +476,7 @@ pub(super) async fn proxy_request(
             model_str,
             response,
             &url,
-            billing_plan,
+            cost_catalog_version,
             api_type,
             target_api_type,
         )
@@ -487,7 +490,7 @@ pub(super) async fn proxy_request(
             model_str,
             response,
             &url,
-            billing_plan.as_ref(),
+            cost_catalog_version.as_ref(),
             api_type,
             target_api_type,
         )
@@ -507,7 +510,7 @@ async fn handle_non_streaming_response(
     model_str: String,
     response: reqwest::Response,
     url: &str,
-    billing_plan: Option<&CacheBillingPlan>,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
@@ -542,7 +545,7 @@ async fn handle_non_streaming_response(
             context.request_url = Some(url.to_string());
             context.llm_status = Some(status_code);
             context.completion_ts = Some(completed_at);
-            context.billing_plan = billing_plan.cloned();
+            context.cost_catalog_version = cost_catalog_version.cloned();
             context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
                 RequestStatus::Cancelled
             } else {
@@ -560,7 +563,7 @@ async fn handle_non_streaming_response(
     let llm_response_completed_at = Utc::now().timestamp_millis();
 
     if status_code.is_success() {
-        let (final_body, parsed_usage_info) =
+        let (final_body, parsed_usage_info, parsed_usage_normalization) =
             process_success_response_body(&decompressed_body, api_type, target_api_type);
 
         let mut context = log_context.lock().await;
@@ -569,9 +572,10 @@ async fn handle_non_streaming_response(
             url,
             status_code,
             llm_response_completed_at,
-            billing_plan,
+            cost_catalog_version,
             RequestStatus::Success,
             parsed_usage_info,
+            parsed_usage_normalization,
             decompressed_body.clone(),
             final_body.clone(),
         );
@@ -597,8 +601,9 @@ async fn handle_non_streaming_response(
             url,
             status_code,
             llm_response_completed_at,
-            billing_plan,
+            cost_catalog_version,
             RequestStatus::Error,
+            None,
             None,
             decompressed_body.clone(),
             decompressed_body.clone(),
@@ -619,7 +624,7 @@ async fn handle_streaming_response(
     model_str: String,
     response: reqwest::Response,
     url: &str,
-    billing_plan: Option<CacheBillingPlan>,
+    cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
@@ -637,7 +642,7 @@ async fn handle_streaming_response(
     let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
 
     let url_owned = url.to_string();
-    let billing_plan_clone = billing_plan.clone();
+    let cost_catalog_version_clone = cost_catalog_version.clone();
     let app_state_clone = Arc::clone(app_state);
 
     let cancellation_for_reader = cancellation.clone();
@@ -678,7 +683,7 @@ async fn handle_streaming_response(
             log_context_clone.clone(),
             url_owned.clone(),
             status_code,
-            billing_plan_clone.clone(),
+            cost_catalog_version_clone.clone(),
             format!("Client disconnected while receiving streaming response for log_id {}.", log_id),
         );
         let mut first_chunk_received_at_proxy: i64 = 0;
@@ -703,7 +708,7 @@ async fn handle_streaming_response(
                             &log_context_clone,
                             &url_owned,
                             Some(status_code),
-                            billing_plan_clone.as_ref(),
+                            cost_catalog_version_clone.as_ref(),
                             None,
                             None,
                         ).await;
@@ -725,7 +730,7 @@ async fn handle_streaming_response(
                         context.request_url = Some(url_owned.clone());
                         context.llm_status = Some(status_code);
                         context.completion_ts = Some(completed_at);
-                        context.billing_plan = billing_plan_clone.clone();
+                        context.cost_catalog_version = cost_catalog_version_clone.clone();
                         context.overall_status = RequestStatus::Error;
                         context.llm_response_body = match llm_body_writer.take() {
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
@@ -763,7 +768,7 @@ async fn handle_streaming_response(
                                 &log_context_clone,
                                 &url_owned,
                                 Some(status_code),
-                                billing_plan_clone.as_ref(),
+                                cost_catalog_version_clone.as_ref(),
                                 None,
                                 None,
                             ).await;
@@ -791,7 +796,7 @@ async fn handle_streaming_response(
                         context.request_url = Some(url_owned.clone());
                         context.llm_status = Some(status_code);
                         context.completion_ts = Some(completed_at);
-                        context.billing_plan = billing_plan_clone.clone();
+                        context.cost_catalog_version = cost_catalog_version_clone.clone();
                         context.overall_status = RequestStatus::Error;
                         context.llm_response_body = match llm_body_writer.take() {
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
@@ -857,7 +862,7 @@ async fn handle_streaming_response(
                         context.request_url = Some(url_owned.clone());
                         context.llm_status = Some(status_code);
                         context.completion_ts = Some(completed_at);
-                        context.billing_plan = billing_plan_clone.clone();
+                        context.cost_catalog_version = cost_catalog_version_clone.clone();
                         context.overall_status = RequestStatus::Error;
                         context.llm_response_body = match llm_body_writer.take() {
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
@@ -901,7 +906,7 @@ async fn handle_streaming_response(
                     context.request_url = Some(url_owned.clone());
                     context.llm_status = Some(status_code);
                     context.completion_ts = Some(completed_at);
-                    context.billing_plan = billing_plan_clone.clone();
+                    context.cost_catalog_version = cost_catalog_version_clone.clone();
                     context.overall_status = RequestStatus::Error;
                     context.llm_response_body = match llm_body_writer.take() {
                         Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
@@ -940,7 +945,7 @@ async fn handle_streaming_response(
                 context.request_url = Some(url_owned.clone());
                 context.llm_status = Some(status_code);
                 context.completion_ts = Some(completed_at);
-                context.billing_plan = billing_plan_clone.clone();
+                context.cost_catalog_version = cost_catalog_version_clone.clone();
                 context.overall_status = RequestStatus::Error;
                 context.llm_response_body = match llm_body_writer.take() {
                     Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
@@ -978,7 +983,7 @@ async fn handle_streaming_response(
             context.request_url = Some(url_owned.clone());
             context.llm_status = Some(status_code);
             context.completion_ts = Some(llm_response_completed_at);
-            context.billing_plan = billing_plan_clone.clone();
+            context.cost_catalog_version = cost_catalog_version_clone.clone();
             context.overall_status = RequestStatus::Success;
             context.llm_response_body = match llm_body_writer.take() {
                 Some(writer) => writer.finish(LogBodyCaptureState::Complete).await.ok(),
@@ -990,6 +995,7 @@ async fn handle_streaming_response(
             };
 
             context.usage = transformer.parse_usage_info();
+            context.usage_normalization = transformer.parse_usage_normalization();
             if context.usage.is_none() {
                 info!("{}: SSE stream completed without usage info.", model_str);
             }
@@ -1003,7 +1009,7 @@ async fn handle_streaming_response(
             context.request_url = Some(url_owned.clone());
             context.llm_status = Some(status_code);
             context.completion_ts = Some(llm_response_completed_at);
-            context.billing_plan = billing_plan_clone.clone();
+            context.cost_catalog_version = cost_catalog_version_clone.clone();
             context.overall_status = RequestStatus::Error;
             context.llm_response_body = match llm_body_writer.take() {
                 Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
@@ -1042,11 +1048,14 @@ mod tests {
         send_with_first_byte_timeout, should_forward_response_header,
     };
     use crate::{
+        cost::UsageNormalization,
         proxy::logging::{LoggedBody, RequestLogContext},
         proxy::{ProxyError, cancellation::ProxyCancellationContext},
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus},
-        service::cache::types::{CacheBillingPlan, CacheModel, CacheProvider, CacheSystemApiKey},
-        utils::billing::UsageInfo,
+        service::cache::types::{
+            CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
+        },
+        utils::usage::UsageInfo,
     };
     use axum::body::{Body, to_bytes};
     use flate2::{Compression, write::GzEncoder};
@@ -1087,7 +1096,7 @@ mod tests {
             provider_id: 2,
             model_name: "gpt-test".to_string(),
             real_model_name: None,
-            billing_plan_id: None,
+            cost_catalog_id: None,
             is_enabled: true,
         };
 
@@ -1179,7 +1188,7 @@ mod tests {
             .to_string(),
         );
 
-        let (final_body, usage) =
+        let (final_body, usage, normalization) =
             process_success_response_body(&gemini_result, LlmApiType::Openai, LlmApiType::Gemini);
         let final_value: Value = serde_json::from_slice(&final_body).unwrap();
 
@@ -1196,6 +1205,16 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 8,
                 total_tokens: 18,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            normalization,
+            Some(UsageNormalization {
+                total_input_tokens: 10,
+                total_output_tokens: 8,
+                input_text_tokens: 10,
+                output_text_tokens: 8,
                 ..Default::default()
             })
         );
@@ -1227,21 +1246,27 @@ mod tests {
     fn process_success_response_body_passes_through_non_json() {
         let body = bytes::Bytes::from_static(b"plain text response");
 
-        let (final_body, usage) =
+        let (final_body, usage, normalization) =
             process_success_response_body(&body, LlmApiType::Openai, LlmApiType::Gemini);
 
         assert_eq!(final_body, body);
         assert!(usage.is_none());
+        assert!(normalization.is_none());
     }
 
     #[tokio::test]
     async fn finalize_non_streaming_log_context_records_error_response() {
         let mut context = make_log_context();
-        let billing_plan = CacheBillingPlan {
+        let cost_catalog_version = CacheCostCatalogVersion {
             id: 5,
-            name: "standard".to_string(),
+            catalog_id: 4,
+            version: "v1".to_string(),
             currency: "USD".to_string(),
-            price_rules: vec![],
+            source: None,
+            effective_from: 0,
+            effective_until: None,
+            is_enabled: true,
+            components: vec![],
         };
         let body = bytes::Bytes::from_static(br#"{"error":"upstream failed"}"#);
 
@@ -1250,8 +1275,9 @@ mod tests {
             "https://example.com/v1/chat",
             StatusCode::BAD_GATEWAY,
             5678,
-            Some(&billing_plan),
+            Some(&cost_catalog_version),
             RequestStatus::Error,
+            None,
             None,
             body.clone(),
             body.clone(),
@@ -1264,7 +1290,7 @@ mod tests {
         assert_eq!(context.llm_status, Some(StatusCode::BAD_GATEWAY));
         assert_eq!(context.completion_ts, Some(5678));
         assert_eq!(context.overall_status, RequestStatus::Error);
-        assert_eq!(context.billing_plan.as_ref().map(|v| v.id), Some(5));
+        assert_eq!(context.cost_catalog_version.as_ref().map(|v| v.id), Some(5));
         match context.llm_response_body.as_ref() {
             Some(LoggedBody::InMemory { bytes, .. }) => assert_eq!(bytes, &body),
             other => panic!("unexpected llm_response_body: {other:?}"),

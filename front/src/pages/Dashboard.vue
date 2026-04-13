@@ -112,8 +112,7 @@
                       :key="currency"
                       class="text-base font-medium text-gray-900 font-mono sm:text-sm"
                     >
-                      {{ cost / 1000000000 }}
-                      <span class="ml-1 font-sans text-xs text-gray-500">{{ $t(`currencies.${currency}`, {}, currency) }}</span>
+                      {{ formatDashboardCost(cost, currency) }}
                     </div>
                     <div v-if="Object.keys(todayStats.total_cost || {}).length === 0" class="text-base font-medium text-gray-900 font-mono sm:text-sm">
                       0
@@ -141,6 +140,7 @@ import { Api } from "@/services/request";
 import type { SystemOverviewStats, TodayRequestLogStats } from "@/store/types";
 import UsageChart from "@/components/UsageChart.vue";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { formatPriceFromNanos } from "@/lib/utils";
 
 const { t: $t } = useI18n();
 
@@ -163,6 +163,9 @@ const todayStats = ref<TodayRequestLogStats>({
 
 const isLoading = ref(true);
 const error = ref<string | null>(null);
+
+const formatDashboardCost = (nanos: number, currency: string) =>
+  formatPriceFromNanos(nanos, currency, "0");
 
 const fetchData = async () => {
   isLoading.value = true;

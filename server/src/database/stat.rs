@@ -22,12 +22,12 @@ pub struct RequestLogEntryForStats {
     pub created_at: i64,
     pub provider_id: i64,
     pub model_id: i64,
-    pub input_tokens: Option<i32>,
-    pub output_tokens: Option<i32>,
+    pub total_input_tokens: Option<i32>,
+    pub total_output_tokens: Option<i32>,
     pub reasoning_tokens: Option<i32>,
     pub total_tokens: Option<i32>,
-    pub calculated_cost: Option<i64>,
-    pub cost_currency: Option<String>,
+    pub estimated_cost_nanos: Option<i64>,
+    pub estimated_cost_currency: Option<String>,
     // from joined tables
     pub provider_key: Option<String>,
     pub model_name: Option<String>,
@@ -114,12 +114,12 @@ pub fn get_request_logs_in_range(
                 request_log::dsl::created_at,
                 request_log::dsl::provider_id,
                 request_log::dsl::model_id,
-                request_log::dsl::input_tokens,
-                request_log::dsl::output_tokens,
+                request_log::dsl::total_input_tokens,
+                request_log::dsl::total_output_tokens,
                 request_log::dsl::reasoning_tokens,
                 request_log::dsl::total_tokens,
-                request_log::dsl::calculated_cost,
-                request_log::dsl::cost_currency.nullable(),
+                request_log::dsl::estimated_cost_nanos,
+                request_log::dsl::estimated_cost_currency.nullable(),
                 provider::dsl::provider_key.nullable(),
                 model::dsl::model_name.nullable(),
                 model::dsl::real_model_name.nullable(),
@@ -157,7 +157,7 @@ pub fn get_today_request_log_stats() -> DbResult<TodayRequestLogStats> {
     let prompt_tokens_sum: Option<i64> = db_execute!(conn, {
         request_log::table
             .filter(request_log::dsl::created_at.ge(start_of_today))
-            .select(sum(request_log::dsl::input_tokens))
+            .select(sum(request_log::dsl::total_input_tokens))
             .first(conn)
     })?;
     stats.total_input_tokens = prompt_tokens_sum.unwrap_or(0);
@@ -165,7 +165,7 @@ pub fn get_today_request_log_stats() -> DbResult<TodayRequestLogStats> {
     let completion_tokens_sum: Option<i64> = db_execute!(conn, {
         request_log::table
             .filter(request_log::dsl::created_at.ge(start_of_today))
-            .select(sum(request_log::dsl::output_tokens))
+            .select(sum(request_log::dsl::total_output_tokens))
             .first(conn)
     })?;
     stats.total_output_tokens = completion_tokens_sum.unwrap_or(0);
@@ -186,7 +186,7 @@ pub fn get_today_request_log_stats() -> DbResult<TodayRequestLogStats> {
     })?;
     stats.total_tokens = total_tokens_sum.unwrap_or(0);
 
-    // Note: The sum of `calculated_cost` (a BigInt) is not portable across database backends in Diesel.
+    // Note: The sum of `estimated_cost_nanos` (a BigInt) is not portable across database backends in Diesel.
     // PostgreSQL returns a `Numeric` type, while SQLite returns a `Float`.
     // To ensure compatibility, we fetch the individual costs and sum them in the application.
     // This is less efficient than a database-level SUM, but it is portable.
@@ -195,16 +195,16 @@ pub fn get_today_request_log_stats() -> DbResult<TodayRequestLogStats> {
         request_log::table
             .filter(request_log::dsl::created_at.ge(start_of_today))
             .select((
-                request_log::dsl::calculated_cost,
-                request_log::dsl::cost_currency,
+                request_log::dsl::estimated_cost_nanos,
+                request_log::dsl::estimated_cost_currency,
             ))
             .load(conn)
     })?;
 
     let mut total_cost_by_currency: HashMap<String, i64> = HashMap::new();
-    for (cost_micros_opt, currency_opt) in costs_with_currency {
-        if let (Some(cost_micros), Some(currency)) = (cost_micros_opt, currency_opt) {
-            *total_cost_by_currency.entry(currency).or_insert(0) += cost_micros;
+    for (cost_nanos_opt, currency_opt) in costs_with_currency {
+        if let (Some(cost_nanos), Some(currency)) = (cost_nanos_opt, currency_opt) {
+            *total_cost_by_currency.entry(currency).or_insert(0) += cost_nanos;
         }
     }
 

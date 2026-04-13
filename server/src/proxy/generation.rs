@@ -16,14 +16,14 @@ use super::{
     request::ParsedProxyRequest,
     util::{
         calculate_llm_request_body_for_log, determine_target_api_type, format_model_str,
-        get_pricing_info,
+        get_cost_catalog_version,
     },
 };
 use crate::{
     schema::enum_def::LlmApiType,
     service::{
         app_state::AppState,
-        cache::types::{CacheBillingPlan, CacheModel, CacheProvider, CacheSystemApiKey},
+        cache::types::{CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey},
         transform::transform_request_data,
     },
 };
@@ -32,7 +32,7 @@ pub(super) struct ResolvedProxyTarget {
     pub provider: Arc<CacheProvider>,
     pub model: Arc<CacheModel>,
     pub target_api_type: LlmApiType,
-    pub billing_plan: Option<CacheBillingPlan>,
+    pub cost_catalog_version: Option<CacheCostCatalogVersion>,
 }
 
 pub(super) struct PreparedLogSeed {
@@ -67,13 +67,13 @@ pub(super) async fn resolve_proxy_target(
         .await
         .map_err(ProxyError::BadRequest)?;
     let target_api_type = determine_target_api_type(&provider);
-    let billing_plan = get_pricing_info(&model, app_state).await;
+    let cost_catalog_version = get_cost_catalog_version(&model, app_state).await;
 
     Ok(ResolvedProxyTarget {
         provider,
         model,
         target_api_type,
-        billing_plan,
+        cost_catalog_version,
     })
 }
 
@@ -211,7 +211,7 @@ pub(super) async fn execute_generation_proxy(
         prepared_request.final_headers,
         log_seed.model_str,
         resolved_target.provider.use_proxy,
-        resolved_target.billing_plan,
+        resolved_target.cost_catalog_version,
         api_type,
         target_api_type,
     )
@@ -228,7 +228,9 @@ mod tests {
     use crate::{
         proxy::ProxyError,
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType},
-        service::cache::types::{CacheBillingPlan, CacheModel, CacheProvider, CacheSystemApiKey},
+        service::cache::types::{
+            CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
+        },
     };
     use bytes::Bytes;
     use serde_json::json;
@@ -251,15 +253,20 @@ mod tests {
                 provider_id: 1,
                 model_name: "gpt-test".to_string(),
                 real_model_name: Some("real-gpt-test".to_string()),
-                billing_plan_id: Some(3),
+                cost_catalog_id: Some(3),
                 is_enabled: true,
             }),
             target_api_type,
-            billing_plan: Some(CacheBillingPlan {
+            cost_catalog_version: Some(CacheCostCatalogVersion {
                 id: 3,
-                name: "default".to_string(),
+                catalog_id: 3,
+                version: "v1".to_string(),
                 currency: "USD".to_string(),
-                price_rules: vec![],
+                source: None,
+                effective_from: 0,
+                effective_until: None,
+                is_enabled: true,
+                components: vec![],
             }),
         }
     }

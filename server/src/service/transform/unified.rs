@@ -1,4 +1,4 @@
-use crate::utils::billing::UsageInfo;
+use crate::utils::usage::UsageInfo;
 use cyder_tools::log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

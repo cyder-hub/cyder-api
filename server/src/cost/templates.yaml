@@ -1,0 +1,235 @@
+templates:
+  - key: google.gemini-3.1-pro.text
+    title: Google Gemini 3.1 Pro
+    catalog_name: Google / Gemini 3.1 Pro
+    description: Built-in text model template for Gemini 3.1 Pro request cost estimation.
+    currency: USD
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    tags: [text, google]
+    components:
+      - input_text:
+          charge_kind: tiered_per_unit
+          tier_config:
+            basis: total_input_tokens
+            tiers:
+              - up_to: 200000
+                unit_price_nanos: 2000000
+              - unit_price_nanos: 4000000
+      - output_text:
+          charge_kind: tiered_per_unit
+          tier_config:
+            basis: total_input_tokens
+            tiers:
+              - up_to: 200000
+                unit_price_nanos: 12000000
+              - unit_price_nanos: 18000000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: google.gemini-3.1-flash-lite.text
+    title: Google Gemini 3.1 Flash Lite
+    catalog_name: Google / Gemini 3.1 Flash Lite
+    description: Built-in text model template for Gemini 3.1 Flash Lite request cost estimation.
+    currency: USD
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    tags: [text, google]
+    components:
+      - input_text: 250000
+      - output_text: 1500000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: google.gemini-3-flash.text
+    title: Google Gemini 3 Flash
+    catalog_name: Google / Gemini 3 Flash
+    description: Built-in text model template for Gemini 3 Flash request cost estimation.
+    currency: USD
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    tags: [text, google]
+    components:
+      - input_text: 500000
+      - output_text: 3000000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: google.gemini-2.5-pro.text
+    title: Google Gemini 2.5 Pro
+    catalog_name: Google / Gemini 2.5 Pro
+    description: Built-in text model template for Gemini 2.5 Pro request cost estimation.
+    currency: USD
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    tags: [text, google]
+    components:
+      - input_text:
+          charge_kind: tiered_per_unit
+          tier_config:
+            basis: total_input_tokens
+            tiers:
+              - up_to: 200000
+                unit_price_nanos: 1250000
+              - unit_price_nanos: 2500000
+      - output_text:
+          charge_kind: tiered_per_unit
+          tier_config:
+            basis: total_input_tokens
+            tiers:
+              - up_to: 200000
+                unit_price_nanos: 10000000
+              - unit_price_nanos: 15000000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: google.gemini-2.5-flash.text
+    title: Google Gemini 2.5 Flash
+    catalog_name: Google / Gemini 2.5 Flash
+    description: Built-in text model template for Gemini 2.5 Flash request cost estimation.
+    currency: USD
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    tags: [text, google]
+    components:
+      - input_text: 300000
+      - output_text: 2500000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: google.gemini-2.5-flash-lite.text
+    title: Google Gemini 2.5 Flash Lite
+    catalog_name: Google / Gemini 2.5 Flash Lite
+    description: Built-in text model template for Gemini 2.5 Flash Lite request cost estimation.
+    currency: USD
+    source: https://ai.google.dev/gemini-api/docs/pricing
+    tags: [text, google]
+    components:
+      - input_text: 100000
+      - output_text: 400000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: deepseek.v3.2.text
+    title: DeepSeek V3.2
+    catalog_name: DeepSeek / V3.2
+    description: Built-in text model template for DeepSeek V3.2 request cost estimation.
+    currency: CNY
+    source: https://www.deepseek.com/
+    tags: [text, deepseek]
+    components:
+      - input_text: 2000000
+      - output_text: 3000000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: deepseek.v3.1-terminus.text
+    title: DeepSeek V3.1 Terminus
+    catalog_name: DeepSeek / V3.1 Terminus
+    description: Built-in text model template for DeepSeek V3.1 Terminus request cost estimation.
+    currency: CNY
+    source: https://www.deepseek.com/
+    tags: [text, deepseek]
+    components:
+      - input_text: 4000000
+      - output_text: 12000000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: deepseek.v3.text
+    title: DeepSeek V3
+    catalog_name: DeepSeek / V3
+    description: Built-in text model template for DeepSeek V3 request cost estimation.
+    currency: CNY
+    source: https://www.deepseek.com/
+    tags: [text, deepseek]
+    components:
+      - input_text: 2000000
+      - output_text: 8000000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: deepseek.r1.text
+    title: DeepSeek R1
+    catalog_name: DeepSeek / R1
+    description: Built-in text model template for DeepSeek R1 request cost estimation.
+    currency: CNY
+    source: https://www.deepseek.com/
+    tags: [text, reasoning, deepseek]
+    components:
+      - input_text: 4000000
+      - output_text: 16000000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: zhipu.glm-5.1.text
+    title: Zhipu GLM 5.1
+    catalog_name: Zhipu / GLM 5.1
+    description: Built-in text model template for Zhipu GLM 5.1 request cost estimation with 32k input tiers.
+    currency: CNY
+    source: https://open.bigmodel.cn/
+    tags: [text, zhipu, glm]
+    components:
+      - input_text:
+          charge_kind: tiered_per_unit
+          tier_config:
+            basis: total_input_tokens
+            tiers:
+              - up_to: 32000
+                unit_price_nanos: 6000000
+              - unit_price_nanos: 8000000
+      - output_text:
+          charge_kind: tiered_per_unit
+          tier_config:
+            basis: total_input_tokens
+            tiers:
+              - up_to: 32000
+                unit_price_nanos: 24000000
+              - unit_price_nanos: 28000000
+      - cache_read:
+          charge_kind: tiered_per_unit
+          tier_config:
+            basis: total_input_tokens
+            tiers:
+              - up_to: 32000
+                unit_price_nanos: 1300000
+              - unit_price_nanos: 2000000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: anthropic.claude-opus-4.6.text
+    title: Claude Opus 4.6
+    catalog_name: Anthropic / Claude Opus 4.6
+    description: Built-in text model template for Claude Opus 4.6 request cost estimation.
+    currency: USD
+    source: https://www.anthropic.com/pricing
+    tags: [text, anthropic, claude]
+    components:
+      - input_text: 5000000
+      - output_text: 25000000
+      - cache_read: 500000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: anthropic.claude-sonnet-4.6.text
+    title: Claude Sonnet 4.6
+    catalog_name: Anthropic / Claude Sonnet 4.6
+    description: Built-in text model template for Claude Sonnet 4.6 request cost estimation.
+    currency: USD
+    source: https://www.anthropic.com/pricing
+    tags: [text, anthropic, claude]
+    components:
+      - input_text: 3000000
+      - output_text: 15000000
+      - cache_read: 300000
+      - request:
+          flat_fee_nanos: 0
+
+  - key: anthropic.claude-haiku-4.5.text
+    title: Claude Haiku 4.5
+    catalog_name: Anthropic / Claude Haiku 4.5
+    description: Built-in text model template for Claude Haiku 4.5 request cost estimation.
+    currency: USD
+    source: https://www.anthropic.com/pricing
+    tags: [text, anthropic, claude]
+    components:
+      - input_text: 1000000
+      - output_text: 5000000
+      - cache_read: 1000000
+      - request:
+          flat_fee_nanos: 0

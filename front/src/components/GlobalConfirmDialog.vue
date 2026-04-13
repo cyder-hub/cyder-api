@@ -9,13 +9,18 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { useConfirmState, handleConfirm, handleCancel } from '@/lib/confirmController'
+import {
+  handleOpenChange,
+  markCancelIntent,
+  markConfirmIntent,
+  useConfirmState,
+} from '@/lib/confirmController'
 
 const state = useConfirmState()
 </script>
 
 <template>
-  <AlertDialog :open="state.isOpen" @update:open="(val) => !val && handleCancel()">
+  <AlertDialog :open="state.isOpen" @update:open="handleOpenChange">
     <AlertDialogContent>
       <AlertDialogHeader>
         <AlertDialogTitle>{{ state.options.title || $t('common.confirm') }}</AlertDialogTitle>
@@ -24,8 +29,8 @@ const state = useConfirmState()
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>
-        <AlertDialogCancel class="w-full sm:w-auto" @click="handleCancel">{{ state.options.cancelText || $t('common.cancel') }}</AlertDialogCancel>
-        <AlertDialogAction class="w-full sm:w-auto" @click="handleConfirm">{{ state.options.confirmText || $t('common.confirm') }}</AlertDialogAction>
+        <AlertDialogCancel class="w-full sm:w-auto" @click.capture="markCancelIntent">{{ state.options.cancelText || $t('common.cancel') }}</AlertDialogCancel>
+        <AlertDialogAction class="w-full sm:w-auto" @click.capture="markConfirmIntent">{{ state.options.confirmText || $t('common.confirm') }}</AlertDialogAction>
       </AlertDialogFooter>
     </AlertDialogContent>
   </AlertDialog>

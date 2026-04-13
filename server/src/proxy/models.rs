@@ -299,7 +299,7 @@ mod tests {
             provider_id,
             model_name: model_name.to_string(),
             real_model_name: None,
-            billing_plan_id: None,
+            cost_catalog_id: None,
             is_enabled,
         }
     }

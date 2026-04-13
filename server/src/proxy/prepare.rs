@@ -693,7 +693,7 @@ mod tests {
             provider_id: 2,
             model_name: model_name.to_string(),
             real_model_name: real_model_name.map(str::to_string),
-            billing_plan_id: None,
+            cost_catalog_id: None,
             is_enabled: true,
         }
     }

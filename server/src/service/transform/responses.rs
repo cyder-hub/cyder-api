@@ -2983,10 +2983,7 @@ impl ResponsesStreamEvent {
                 id,
                 arguments,
             } => TypedResponsesStreamEvent::FunctionCallArgumentsDone {
-                item_id: item_id
-                    .clone()
-                    .or_else(|| id.clone())
-                    .unwrap_or_default(),
+                item_id: item_id.clone().or_else(|| id.clone()).unwrap_or_default(),
                 output_index: item_index.unwrap_or(*index),
                 call_id: id.clone(),
                 arguments: arguments.clone(),
@@ -4483,7 +4480,7 @@ fn encode_formal_responses_stream_event(
         UnifiedStreamEvent::Usage { usage } => {
             state
                 .session
-                .merge_usage(usage.clone().into(), state.usage_merge_strategy());
+                .merge_usage(usage.clone(), state.usage_merge_strategy());
 
             if state.session.responses.completion_pending {
                 let finish_reason = state.session.finish_reason_cache.as_deref();

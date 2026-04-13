@@ -26,8 +26,8 @@ use super::{
     protocol_transform_error,
     request::ParsedProxyRequest,
     util::{
-        determine_target_api_type, format_model_str, get_pricing_info, parse_utility_usage_info,
-        serialize_reqwest_headers,
+        determine_target_api_type, format_model_str, get_cost_catalog_version,
+        parse_utility_usage_normalization, serialize_reqwest_headers,
     },
 };
 use crate::{
@@ -120,7 +120,7 @@ pub(super) async fn execute_utility_proxy(
         })?;
     let target_api_type = determine_target_api_type(&provider);
     validate_utility_target(&operation, target_api_type)?;
-    let billing_plan = get_pricing_info(&model, &app_state).await;
+    let cost_catalog_version = get_cost_catalog_version(&model, &app_state).await;
 
     check_access_control(&system_api_key, &provider, &model, &app_state)
         .await
@@ -229,7 +229,7 @@ pub(super) async fn execute_utility_proxy(
             }
             log_context.request_url = Some(final_url.clone());
             log_context.completion_ts = Some(Utc::now().timestamp_millis());
-            log_context.billing_plan = billing_plan.clone();
+            log_context.cost_catalog_version = cost_catalog_version.clone();
             log_context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
                 RequestStatus::Cancelled
             } else {
@@ -264,7 +264,7 @@ pub(super) async fn execute_utility_proxy(
             log_context.request_url = Some(final_url);
             log_context.llm_status = Some(status_code);
             log_context.completion_ts = Some(Utc::now().timestamp_millis());
-            log_context.billing_plan = billing_plan;
+            log_context.cost_catalog_version = cost_catalog_version;
             log_context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
                 RequestStatus::Cancelled
             } else {
@@ -279,9 +279,10 @@ pub(super) async fn execute_utility_proxy(
 
     let decompressed_body = decode_response_body(body_bytes, is_gzip);
     let completion_ts = Utc::now().timestamp_millis();
-    let parsed_usage_info = serde_json::from_slice::<serde_json::Value>(&decompressed_body)
-        .ok()
-        .and_then(|val| parse_utility_usage_info(&val));
+    let parsed_usage_normalization =
+        serde_json::from_slice::<serde_json::Value>(&decompressed_body)
+            .ok()
+            .and_then(|val| parse_utility_usage_normalization(&val));
 
     let overall_status = if status_code.is_success() {
         RequestStatus::Success
@@ -293,9 +294,10 @@ pub(super) async fn execute_utility_proxy(
         &final_url,
         status_code,
         completion_ts,
-        billing_plan.as_ref(),
+        cost_catalog_version.as_ref(),
         overall_status,
-        parsed_usage_info,
+        None,
+        parsed_usage_normalization,
         decompressed_body.clone(),
         decompressed_body.clone(),
     );

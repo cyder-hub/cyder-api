@@ -70,7 +70,7 @@ pub struct UpdateModelRequest {
     pub model_name: String,
     pub real_model_name: Option<String>,
     pub is_enabled: bool,
-    pub billing_plan_id: Option<i64>,
+    pub cost_catalog_id: Option<i64>,
 }
 
 async fn update_model(
@@ -82,7 +82,7 @@ async fn update_model(
         model_name: Some(request.model_name),
         real_model_name: Some(request.real_model_name),
         is_enabled: Some(request.is_enabled),
-        billing_plan_id: Some(request.billing_plan_id),
+        cost_catalog_id: Some(request.cost_catalog_id),
     };
     let updated_model = Model::update(id, &update_data)?;
 

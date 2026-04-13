@@ -2,9 +2,10 @@ use cyder_tools::log::{debug, error, warn};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+use crate::cost::UsageNormalization;
 use crate::schema::enum_def::{LlmApiType, ProviderType};
-use crate::utils::billing::{self, UsageInfo};
 use crate::utils::sse::SseEvent;
+use crate::utils::usage::{self, UsageInfo};
 
 pub mod anthropic;
 pub mod gemini;
@@ -719,6 +720,7 @@ pub struct SessionContext {
     pub current_reasoning_block_index: Option<u32>,
     pub current_reasoning_part_index: Option<u32>,
     pub usage_cache: Option<UsageInfo>,
+    pub usage_normalization_cache: Option<UsageNormalization>,
     pub finish_reason_cache: Option<String>,
     pub last_error: Option<Value>,
     pub diagnostics: VecDeque<UnifiedTransformDiagnostic>,
@@ -752,9 +754,10 @@ impl SessionContext {
         queue.push_back(event);
     }
 
-    fn merge_usage(&mut self, usage: UsageInfo, strategy: UsageMergeStrategy) {
+    fn merge_usage(&mut self, usage: UnifiedUsage, strategy: UsageMergeStrategy) {
         let _ = strategy;
-        self.usage_cache = Some(usage);
+        self.usage_normalization_cache = Some(UsageNormalization::from(&usage));
+        self.usage_cache = Some(usage.into());
     }
 
     fn gemini_message_index(&self, provider_order: u32) -> u32 {
@@ -1710,9 +1713,15 @@ mod tests {
 
         let arguments_done = arguments_done.expect("expected arguments.done event");
 
-        assert_eq!(arguments_done["item_id"], serde_json::json!("call_compat_1"));
+        assert_eq!(
+            arguments_done["item_id"],
+            serde_json::json!("call_compat_1")
+        );
         assert_eq!(arguments_done["output_index"], serde_json::json!(0));
-        assert_eq!(arguments_done["call_id"], serde_json::json!("call_compat_1"));
+        assert_eq!(
+            arguments_done["call_id"],
+            serde_json::json!("call_compat_1")
+        );
         assert_eq!(
             arguments_done["arguments"],
             serde_json::json!("{\"city\":\"Boston\"}")
@@ -4020,6 +4029,15 @@ pub fn transform_result(
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> (Value, Option<UsageInfo>) {
+    let (value, usage_info, _) = transform_result_with_cost(data, api_type, target_api_type);
+    (value, usage_info)
+}
+
+pub fn transform_result_with_cost(
+    data: Value,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+) -> (Value, Option<UsageInfo>, Option<UsageNormalization>) {
     // Step 1: Deserialize to UnifiedResponse. This is now UNCONDITIONAL.
     // This allows us to get usage info from a typed struct.
     let source_adapter = adapter_for(api_type);
@@ -4033,15 +4051,17 @@ pub fn transform_result(
                 "[transform_result] Failed to deserialize to UnifiedResponse from {:?}: {}. Returning original data.",
                 source_adapter.api_type, e
             );
-            return (data, None);
+            return (data, None, None);
         }
     };
 
     let usage_info: Option<UsageInfo> = unified_response.usage.clone().map(Into::into);
+    let usage_normalization: Option<UsageNormalization> =
+        unified_response.usage.as_ref().map(Into::into);
 
     if api_type == target_api_type {
         // No transformation needed, return original data and parsed usage.
-        return (data, usage_info);
+        return (data, usage_info, usage_normalization);
     }
 
     debug!(
@@ -4058,14 +4078,14 @@ pub fn transform_result(
                 "[transform_result] Transformation complete. Result: {}",
                 serde_json::to_string(&value).unwrap_or_default()
             );
-            (value, usage_info)
+            (value, usage_info, usage_normalization)
         }
         Err(e) => {
             error!(
                 "[transform_result] Failed to serialize to target response format: {}. Returning original data.",
                 e
             );
-            (data, usage_info)
+            (data, usage_info, usage_normalization)
         }
     }
 }
@@ -4155,14 +4175,14 @@ impl StreamTransformer {
                     }
                     serde_json::from_str::<Value>(&e.data)
                         .ok()
-                        .and_then(|v| billing::parse_usage_info(&v, self.api_type))
+                        .and_then(|v| usage::parse_usage_info(&v, self.api_type))
                 })
             }
             LlmApiType::Gemini | LlmApiType::Ollama | LlmApiType::Responses => {
                 self.session.original_events.iter().rev().find_map(|e| {
                     serde_json::from_str::<Value>(&e.data)
                         .ok()
-                        .and_then(|v| billing::parse_usage_info(&v, self.api_type))
+                        .and_then(|v| usage::parse_usage_info(&v, self.api_type))
                 })
             }
             LlmApiType::Anthropic => self
@@ -4180,7 +4200,7 @@ impl StreamTransformer {
                 .and_then(|e| {
                     serde_json::from_str::<Value>(&e.data)
                         .ok()
-                        .and_then(|v| billing::parse_usage_info(&v, self.api_type))
+                        .and_then(|v| usage::parse_usage_info(&v, self.api_type))
                 }),
         };
 
@@ -4215,6 +4235,10 @@ impl StreamTransformer {
         }
 
         parsed
+    }
+
+    pub fn parse_usage_normalization(&mut self) -> Option<UsageNormalization> {
+        self.session.usage_normalization_cache.clone()
     }
 
     pub(crate) fn get_or_generate_stream_id(&mut self) -> String {
@@ -4269,8 +4293,7 @@ impl StreamTransformer {
         }
 
         if let Some(usage) = chunk_core.usage {
-            self.session
-                .merge_usage(usage.into(), self.usage_merge_strategy());
+            self.session.merge_usage(usage, self.usage_merge_strategy());
         }
         if let Some(finish_reason) = unified_chunk
             .choices
@@ -4369,7 +4392,7 @@ impl StreamTransformer {
             }
             UnifiedStreamEvent::Usage { usage } => {
                 self.session
-                    .merge_usage(usage.clone().into(), self.usage_merge_strategy());
+                    .merge_usage(usage.clone(), self.usage_merge_strategy());
             }
             UnifiedStreamEvent::MessageDelta { finish_reason } => {
                 if let Some(finish_reason) = finish_reason {

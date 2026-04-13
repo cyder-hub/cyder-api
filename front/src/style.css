@@ -107,7 +107,6 @@
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     background-color: var(--background);
-    scrollbar-gutter: stable;
   }
 
   * {

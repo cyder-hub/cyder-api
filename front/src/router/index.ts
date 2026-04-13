@@ -46,9 +46,9 @@ const router = createRouter({
           component: () => import("@/pages/ModelTransform.vue"),
         },
         {
-          path: "price",
-          name: "Price",
-          component: () => import("@/pages/Price.vue"),
+          path: "cost",
+          name: "Cost",
+          component: () => import("@/pages/Cost.vue"),
         },
         {
           path: "provider",

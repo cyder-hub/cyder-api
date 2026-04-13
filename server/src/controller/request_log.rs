@@ -9,7 +9,7 @@ use cyder_tools::log::debug;
 use crate::{
     database::{
         ListResult,
-        request_log::{RequestLog, RequestLogQueryPayload},
+        request_log::{RequestLog, RequestLogListItem, RequestLogQueryPayload},
     },
     schema::enum_def::StorageType,
     service::{
@@ -23,7 +23,7 @@ use super::error::BaseError;
 
 async fn list_request_log(
     Query(payload): Query<RequestLogQueryPayload>,
-) -> Result<HttpResult<ListResult<RequestLog>>, BaseError> {
+) -> Result<HttpResult<ListResult<RequestLogListItem>>, BaseError> {
     match RequestLog::list(payload) {
         Ok(result) => Ok(HttpResult::new(result)),
         Err(e) => Err(e),

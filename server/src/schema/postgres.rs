@@ -37,14 +37,49 @@ diesel::table! {
 }
 
 diesel::table! {
-    billing_plans (id) {
+    cost_catalogs (id) {
         id -> Int8,
         name -> Text,
         description -> Nullable<Text>,
-        currency -> Text,
         created_at -> Int8,
         updated_at -> Int8,
         deleted_at -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int8, Bool, Text, Nullable};
+
+    cost_catalog_versions (id) {
+        id -> Int8,
+        catalog_id -> Int8,
+        version -> Text,
+        currency -> Text,
+        source -> Nullable<Text>,
+        effective_from -> Int8,
+        effective_until -> Nullable<Int8>,
+        is_enabled -> Bool,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int4, Int8, Text, Nullable};
+
+    cost_components (id) {
+        id -> Int8,
+        catalog_version_id -> Int8,
+        meter_key -> Text,
+        charge_kind -> Text,
+        unit_price_nanos -> Nullable<Int8>,
+        flat_fee_nanos -> Nullable<Int8>,
+        tier_config_json -> Nullable<Text>,
+        match_attributes_json -> Nullable<Text>,
+        priority -> Int4,
+        description -> Nullable<Text>,
+        created_at -> Int8,
+        updated_at -> Int8,
     }
 }
 
@@ -75,7 +110,7 @@ diesel::table! {
     model (id) {
         id -> Int8,
         provider_id -> Int8,
-        billing_plan_id -> Nullable<Int8>,
+        cost_catalog_id -> Nullable<Int8>,
         model_name -> Text,
         real_model_name -> Nullable<Text>,
         is_enabled -> Bool,
@@ -104,27 +139,6 @@ diesel::table! {
         model_id -> Int8,
         custom_field_definition_id -> Int8,
         is_enabled -> Bool,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    price_rules (id) {
-        id -> Int8,
-        plan_id -> Int8,
-        description -> Nullable<Text>,
-        is_enabled -> Bool,
-        effective_from -> Int8,
-        effective_until -> Nullable<Int8>,
-        period_start_seconds_utc -> Nullable<Int4>,
-        period_end_seconds_utc -> Nullable<Int4>,
-        usage_type -> Text,
-        media_type -> Nullable<Text>,
-        condition_had_reasoning -> Nullable<Int4>,
-        tier_from_tokens -> Nullable<Int4>,
-        tier_to_tokens -> Nullable<Int4>,
-        price_in_micro_units -> Int8,
         created_at -> Int8,
         updated_at -> Int8,
     }
@@ -196,15 +210,21 @@ diesel::table! {
         llm_response_status -> Nullable<Int4>,
         status -> Nullable<RequestStatusMapping>,
         is_stream -> Bool,
-        calculated_cost -> Nullable<Int8>,
-        cost_currency -> Nullable<Text>,
+        estimated_cost_nanos -> Nullable<Int8>,
+        estimated_cost_currency -> Nullable<Text>,
+        cost_catalog_id -> Nullable<Int8>,
+        cost_catalog_version_id -> Nullable<Int8>,
+        cost_snapshot_json -> Nullable<Text>,
         created_at -> Int8,
         updated_at -> Int8,
-        input_tokens -> Nullable<Int4>,
-        output_tokens -> Nullable<Int4>,
+        total_input_tokens -> Nullable<Int4>,
+        total_output_tokens -> Nullable<Int4>,
+        input_text_tokens -> Nullable<Int4>,
+        output_text_tokens -> Nullable<Int4>,
         input_image_tokens -> Nullable<Int4>,
         output_image_tokens -> Nullable<Int4>,
-        cached_tokens -> Nullable<Int4>,
+        cache_read_tokens -> Nullable<Int4>,
+        cache_write_tokens -> Nullable<Int4>,
         reasoning_tokens -> Nullable<Int4>,
         total_tokens -> Nullable<Int4>,
         storage_type -> Nullable<StorageTypeMapping>,
@@ -234,15 +254,18 @@ diesel::table! {
 diesel::joinable!(access_control_rule -> access_control_policy (policy_id));
 diesel::joinable!(access_control_rule -> model (model_id));
 diesel::joinable!(access_control_rule -> provider (provider_id));
-diesel::joinable!(model -> billing_plans (billing_plan_id));
+diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
+diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
+diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
 diesel::joinable!(model_alias -> model (target_model_id));
 diesel::joinable!(model_custom_field_assignment -> custom_field_definition (custom_field_definition_id));
 diesel::joinable!(model_custom_field_assignment -> model (model_id));
-diesel::joinable!(price_rules -> billing_plans (plan_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
 diesel::joinable!(provider_custom_field_assignment -> custom_field_definition (custom_field_definition_id));
 diesel::joinable!(provider_custom_field_assignment -> provider (provider_id));
+diesel::joinable!(request_log -> cost_catalog_versions (cost_catalog_version_id));
+diesel::joinable!(request_log -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(request_log -> model (model_id));
 diesel::joinable!(request_log -> provider (provider_id));
 diesel::joinable!(request_log -> provider_api_key (provider_api_key_id));
@@ -252,12 +275,13 @@ diesel::joinable!(system_api_key -> access_control_policy (access_control_policy
 diesel::allow_tables_to_appear_in_same_query!(
     access_control_policy,
     access_control_rule,
-    billing_plans,
+    cost_catalogs,
+    cost_catalog_versions,
+    cost_components,
     custom_field_definition,
     model,
     model_alias,
     model_custom_field_assignment,
-    price_rules,
     provider,
     provider_api_key,
     provider_custom_field_assignment,

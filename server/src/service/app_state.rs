@@ -12,17 +12,17 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::database::access_control::AccessControlPolicy as DbAccessControlPolicy;
+use crate::database::cost::{CostCatalogVersion, CostComponent};
 use crate::database::custom_field::CustomFieldDefinition;
 use crate::database::model::Model;
 use crate::database::model_alias::ModelAlias;
-use crate::database::price::{BillingPlan, PriceRule};
 use crate::database::provider::{Provider, ProviderApiKey};
 use crate::database::system_api_key::SystemApiKey;
 use crate::schema::enum_def::ProviderApiKeyMode;
 
 use super::cache::repository::{CacheRepository, DynCacheRepo};
 use super::cache::types::{
-    CacheAccessControl, CacheBillingPlan, CacheCustomField, CacheEntry, CacheModel,
+    CacheAccessControl, CacheCostCatalogVersion, CacheCustomField, CacheEntry, CacheModel,
     CacheModelAlias, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheSystemApiKey,
 };
 use super::cache::{CacheError, memory::MemoryCacheBackend};
@@ -44,6 +44,7 @@ impl From<ProviderApiKeyMode> for GroupItemSelectionStrategy {
 
 use super::cache::redis::RedisCacheBackend;
 use crate::config::{CONFIG, CacheBackendType};
+use crate::controller::BaseError;
 use crate::service::redis::{self, RedisPool};
 
 /// Type-erased cache repository, dispatching to the concrete backend
@@ -63,7 +64,7 @@ enum CacheKey<'a> {
     ProviderApiKeys(i64),
     CustomFieldsAssignment(i64),
     CustomField(i64),
-    BillingPlan(i64),
+    CostCatalogVersion(i64),
 }
 
 use compact_str::{CompactString, format_compact};
@@ -84,7 +85,7 @@ impl<'a> std::fmt::Display for CacheKey<'a> {
             CacheKey::ProviderApiKeys(provider_id) => write!(f, "provider_keys:{}", provider_id),
             CacheKey::CustomFieldsAssignment(id) => write!(f, "cfa:{}", id),
             CacheKey::CustomField(id) => write!(f, "custom_field:id:{}", id),
-            CacheKey::BillingPlan(id) => write!(f, "billing_plan:id:{}", id),
+            CacheKey::CostCatalogVersion(id) => write!(f, "cost_catalog_version:id:{}", id),
         }
     }
 }
@@ -107,7 +108,7 @@ impl<'a> CacheKey<'a> {
             }
             CacheKey::CustomFieldsAssignment(id) => format_compact!("cfa:{}", id),
             CacheKey::CustomField(id) => format_compact!("custom_field:id:{}", id),
-            CacheKey::BillingPlan(id) => format_compact!("billing_plan:id:{}", id),
+            CacheKey::CostCatalogVersion(id) => format_compact!("cost_catalog_version:id:{}", id),
         }
     }
 }
@@ -256,8 +257,8 @@ pub struct AppState {
     // 9. custom_field_definition_id(id) Set -> CacheCustomField[]
     custom_field_cache: CacheRepo<CacheCustomField>,
 
-    // 10. billing_plan_id(id) -> CacheBillingPlan
-    billing_plan_cache: CacheRepo<CacheBillingPlan>,
+    // 10. cost_catalog_version_id(id) -> CacheCostCatalogVersion
+    cost_catalog_version_cache: CacheRepo<CacheCostCatalogVersion>,
 
     // HTTP clients
     pub client: Client,
@@ -309,7 +310,7 @@ impl AppState {
             provider_api_keys_cache: Self::create_repo(ttl, pool),
             custom_fields_assignment_cache: Self::create_repo(ttl, pool),
             custom_field_cache: Self::create_repo(ttl, pool),
-            billing_plan_cache: Self::create_repo(ttl, pool),
+            cost_catalog_version_cache: Self::create_repo(ttl, pool),
             client,
             proxy_client,
             negative_cache_ttl,
@@ -581,22 +582,27 @@ impl AppState {
             }
         }
 
-        // 10. Billing Plans
-        if let Ok(plans) = BillingPlan::list_all() {
-            stats.insert("Billing Plans", plans.len());
-            let all_rules = PriceRule::list_all().unwrap_or_default();
-            let mut rules_by_plan: HashMap<i64, Vec<PriceRule>> = HashMap::new();
-            for rule in all_rules {
-                rules_by_plan.entry(rule.plan_id).or_default().push(rule);
+        // 10. Cost Catalog Versions
+        if let Ok(versions) = CostCatalogVersion::list_all() {
+            stats.insert("Cost Catalog Versions", versions.len());
+            let mut components_by_version: HashMap<i64, Vec<CostComponent>> = HashMap::new();
+            for component in CostComponent::list_all().unwrap_or_default() {
+                components_by_version
+                    .entry(component.catalog_version_id)
+                    .or_default()
+                    .push(component);
             }
 
-            for plan in plans {
-                let rules = rules_by_plan.remove(&plan.id).unwrap_or_default();
-                let cache_item = CacheBillingPlan::from_db_with_rules(plan, rules);
+            for version in versions {
+                let components = components_by_version
+                    .remove(&version.id)
+                    .unwrap_or_default();
+                let cache_item =
+                    CacheCostCatalogVersion::from_db_with_components(version, components);
                 let _ = self
-                    .billing_plan_cache
+                    .cost_catalog_version_cache
                     .set_positive(
-                        &CacheKey::BillingPlan(cache_item.id).to_compact_string(),
+                        &CacheKey::CostCatalogVersion(cache_item.id).to_compact_string(),
                         &cache_item,
                     )
                     .await;
@@ -640,8 +646,8 @@ impl AppState {
         if let Err(e) = self.custom_field_cache.clear().await {
             cyder_tools::log::error!("Failed to clear custom_field_cache: {}", e);
         }
-        if let Err(e) = self.billing_plan_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear billing_plan_cache: {}", e);
+        if let Err(e) = self.cost_catalog_version_cache.clear().await {
+            cyder_tools::log::error!("Failed to clear cost_catalog_version_cache: {}", e);
         }
         info!("App cache cleared.");
     }
@@ -1229,33 +1235,70 @@ impl AppState {
     }
 
     // ============================================================================================
-    // 10. billing_plan_id(id) -> CacheBillingPlan
+    // 10. cost_catalog_version_id(id) -> CacheCostCatalogVersion
     // ============================================================================================
-    pub async fn get_billing_plan_by_id(
+    pub async fn get_cost_catalog_version_by_id(
         &self,
         id: i64,
-    ) -> Result<Option<Arc<CacheBillingPlan>>, AppStoreError> {
-        let cache_key = CacheKey::BillingPlan(id).to_compact_string();
+    ) -> Result<Option<Arc<CacheCostCatalogVersion>>, AppStoreError> {
+        let cache_key = CacheKey::CostCatalogVersion(id).to_compact_string();
 
-        self.get_or_load(&self.billing_plan_cache, &cache_key, || async {
-            match BillingPlan::get_by_id(id) {
-                Ok(plan) => {
-                    let rules = PriceRule::list_by_plan_id(id).unwrap_or_else(|_| {
-                        cyder_tools::log::warn!("Failed to load price rules for plan_id: {}", id);
-                        Vec::new()
-                    });
-                    Ok(Some(CacheBillingPlan::from_db_with_rules(plan, rules)))
+        self.get_or_load(&self.cost_catalog_version_cache, &cache_key, || async {
+            match CostCatalogVersion::get_by_id(id) {
+                Ok(version) => {
+                    let components =
+                        CostComponent::list_by_catalog_version_id(id).map_err(|e| {
+                            AppStoreError::DatabaseError(format!(
+                                "failed to list cost components for version {}: {:?}",
+                                id, e
+                            ))
+                        })?;
+                    Ok(Some(CacheCostCatalogVersion::from_db_with_components(
+                        version, components,
+                    )))
                 }
-                Err(_) => Ok(None),
+                Err(BaseError::ParamInvalid(_)) => Ok(None),
+                Err(err) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to get cost catalog version {}: {:?}",
+                    id, err
+                ))),
             }
         })
         .await
     }
 
-    pub async fn invalidate_billing_plan(&self, id: i64) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::BillingPlan(id).to_compact_string();
+    pub async fn get_cost_catalog_version_by_model(
+        &self,
+        model_id: i64,
+        at_time_ms: i64,
+    ) -> Result<Option<Arc<CacheCostCatalogVersion>>, AppStoreError> {
+        let Some(model) = self.get_model_by_id(model_id).await? else {
+            return Ok(None);
+        };
+        let Some(cost_catalog_id) = model.cost_catalog_id else {
+            return Ok(None);
+        };
+
+        let active_version =
+            CostCatalogVersion::get_active_by_catalog_id(cost_catalog_id, at_time_ms).map_err(
+                |e| {
+                    AppStoreError::DatabaseError(format!(
+                        "failed to resolve active cost catalog version for catalog {} at {}: {:?}",
+                        cost_catalog_id, at_time_ms, e
+                    ))
+                },
+            )?;
+
+        match active_version {
+            Some(version) => self.get_cost_catalog_version_by_id(version.id).await,
+            None => Ok(None),
+        }
+    }
+
+    pub async fn invalidate_cost_catalog_version(&self, id: i64) -> Result<(), AppStoreError> {
+        let cache_key = CacheKey::CostCatalogVersion(id).to_compact_string();
         debug!("invalidate: {}", &cache_key);
-        Ok(self.billing_plan_cache.delete(&cache_key).await?)
+        Ok(self.cost_catalog_version_cache.delete(&cache_key).await?)
     }
 
     fn load_models_catalog() -> Result<CacheModelsCatalog, AppStoreError> {
@@ -1328,9 +1371,12 @@ pub fn create_state_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, GroupItemSelectionStrategy, ProviderHealthState, ProviderHealthStatus};
+    use super::{
+        AppState, CacheKey, GroupItemSelectionStrategy, ProviderHealthState, ProviderHealthStatus,
+    };
     use crate::config::ProviderGovernanceConfig;
     use crate::schema::enum_def::ProviderApiKeyMode;
+    use crate::service::cache::types::{CacheCostCatalogVersion, CacheEntry};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -1455,5 +1501,47 @@ mod tests {
         );
         assert_eq!(state.status, ProviderHealthStatus::Open);
         assert!(!state.half_open_probe_in_flight);
+    }
+
+    #[tokio::test]
+    async fn invalidate_cost_catalog_version_removes_cached_snapshot() {
+        let app_state = AppState::new().await;
+        let cache_key = CacheKey::CostCatalogVersion(88).to_compact_string();
+        let cached_version = CacheCostCatalogVersion {
+            id: 88,
+            catalog_id: 7,
+            version: "v1".to_string(),
+            currency: "USD".to_string(),
+            source: Some("test".to_string()),
+            effective_from: 100,
+            effective_until: None,
+            is_enabled: true,
+            components: Vec::new(),
+        };
+
+        app_state
+            .cost_catalog_version_cache
+            .set_positive(&cache_key, &cached_version)
+            .await
+            .expect("seed cache");
+
+        let cached = app_state
+            .cost_catalog_version_cache
+            .get_entry(&cache_key)
+            .await
+            .expect("read cache before invalidate");
+        assert!(matches!(cached.as_deref(), Some(CacheEntry::Positive(_))));
+
+        app_state
+            .invalidate_cost_catalog_version(88)
+            .await
+            .expect("invalidate version");
+
+        let cached_after = app_state
+            .cost_catalog_version_cache
+            .get_entry(&cache_key)
+            .await
+            .expect("read cache after invalidate");
+        assert!(cached_after.is_none());
     }
 }

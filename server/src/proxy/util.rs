@@ -7,11 +7,11 @@ use serde_json::Value;
 use super::{ProxyError, protocol_transform_error};
 use crate::{
     config::CONFIG,
+    cost::UsageNormalization,
     schema::enum_def::LlmApiType,
     schema::enum_def::ProviderType,
     service::app_state::AppState,
-    service::cache::types::{CacheBillingPlan, CacheModel, CacheProvider},
-    utils::billing::UsageInfo,
+    service::cache::types::{CacheCostCatalogVersion, CacheModel, CacheProvider},
 };
 use bytes::Bytes;
 
@@ -46,22 +46,21 @@ pub(super) fn _serialize_axum_headers(headers: &axum::http::HeaderMap) -> Option
     serde_json::to_string(&header_map_simplified).ok()
 }
 
-// Retrieves pricing rules and currency for a given model.
-pub(super) async fn get_pricing_info(
+pub(super) async fn get_cost_catalog_version(
     model: &CacheModel,
     app_state: &Arc<AppState>,
-) -> Option<CacheBillingPlan> {
+) -> Option<CacheCostCatalogVersion> {
     debug!(
-        "Fetching pricing info for model: {}, plan_id: {:?}",
-        model.model_name, model.billing_plan_id
+        "Fetching active cost catalog version for model: {}, cost_catalog_id: {:?}",
+        model.model_name, model.cost_catalog_id
     );
-    if let Some(billing_plan_id) = model.billing_plan_id {
+    if model.cost_catalog_id.is_some() {
         app_state
-            .get_billing_plan_by_id(billing_plan_id)
+            .get_cost_catalog_version_by_model(model.id, chrono::Utc::now().timestamp_millis())
             .await
             .ok()
             .flatten()
-            .map(|bp| (*bp).clone())
+            .map(|version| (*version).clone())
     } else {
         None
     }
@@ -81,7 +80,9 @@ pub(super) async fn parse_request_body(request: Request<Body>) -> Result<Value, 
         .map_err(|e| ProxyError::BadRequest(format!("Failed to parse JSON body: {}", e)))
 }
 
-pub(super) fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInfo> {
+pub(super) fn parse_utility_usage_normalization(
+    response_body: &Value,
+) -> Option<UsageNormalization> {
     let tokens = response_body
         .get("usage")
         .and_then(|u| u.get("total_tokens"))
@@ -94,14 +95,20 @@ pub(super) fn parse_utility_usage_info(response_body: &Value) -> Option<UsageInf
                 .and_then(|it| it.as_i64())
         });
 
-    tokens.map(|t| UsageInfo {
-        input_tokens: t as i32,
-        output_tokens: 0,
-        total_tokens: t as i32,
-        reasoning_tokens: 0,
+    tokens.map(|t| UsageNormalization {
+        total_input_tokens: t,
+        total_output_tokens: 0,
+        input_text_tokens: t,
+        output_text_tokens: 0,
         input_image_tokens: 0,
         output_image_tokens: 0,
-        cached_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+        warnings: vec![
+            "utility usage only reported aggregate token totals; normalized as input_text_tokens"
+                .to_string(),
+        ],
     })
 }
 

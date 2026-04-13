@@ -53,8 +53,8 @@ export const navItems: NavItem[] = [
     icon: Type,
   },
   {
-    path: "/price",
-    i18nKey: "sidebar.price",
+    path: "/cost",
+    i18nKey: "sidebar.cost",
     icon: DollarSign,
   },
 ];

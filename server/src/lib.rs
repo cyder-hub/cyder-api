@@ -1,5 +1,6 @@
 pub mod config;
 pub mod controller;
+pub mod cost;
 pub mod database;
 pub mod logging;
 pub mod proxy;

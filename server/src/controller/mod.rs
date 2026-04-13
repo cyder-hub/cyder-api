@@ -7,10 +7,10 @@ use axum::{
     middleware,
     response::IntoResponse,
 };
+use cost::create_cost_router;
 use custom_field::create_custom_field_router;
 use model::create_model_router;
 use model_alias::create_model_alias_router;
-use price::create_price_router;
 use provider::create_provider_router;
 use request_log::create_record_router;
 use stat::routes as create_stat_router;
@@ -22,13 +22,13 @@ use tower_http::{
 };
 
 mod auth;
+mod cost;
 mod custom_field;
 mod error;
 
 mod access_control;
 mod model;
 mod model_alias;
-mod price;
 mod provider;
 mod request_log;
 mod stat;
@@ -60,7 +60,7 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_model_alias_router())
             .merge(create_access_control_policy_router())
             .merge(create_custom_field_router())
-            .merge(create_price_router())
+            .merge(create_cost_router())
             .merge(create_stat_router())
             .layer(middleware::from_fn(authorization_access_middleware))
             .merge(create_auth_router()),

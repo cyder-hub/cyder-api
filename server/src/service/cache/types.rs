@@ -34,7 +34,7 @@ pub struct CacheModel {
     pub provider_id: i64,
     pub model_name: String,
     pub real_model_name: Option<String>,
-    pub billing_plan_id: Option<i64>,
+    pub cost_catalog_id: Option<i64>,
     pub is_enabled: bool,
 }
 
@@ -109,28 +109,31 @@ pub struct CacheCustomField {
     pub boolean_value: Option<bool>,
 }
 
-/// Cached price rule (part of CacheBillingPlan)
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CachePriceRule {
-    pub effective_from: i64,
-    pub effective_until: Option<i64>,
-    pub period_start_seconds_utc: Option<i32>,
-    pub period_end_seconds_utc: Option<i32>,
-    pub usage_type: String,
-    pub media_type: String,
-    pub condition_had_reasoning: Option<i32>,
-    pub tier_from_tokens: Option<i32>,
-    pub tier_to_tokens: Option<i32>,
-    pub price_in_micro_units: Option<i64>,
+pub struct CacheCostComponent {
+    pub id: i64,
+    pub catalog_version_id: i64,
+    pub meter_key: String,
+    pub charge_kind: String,
+    pub unit_price_nanos: Option<i64>,
+    pub flat_fee_nanos: Option<i64>,
+    pub tier_config_json: Option<String>,
+    pub match_attributes_json: Option<String>,
+    pub priority: i32,
+    pub description: Option<String>,
 }
 
-/// Cached billing plan with embedded price rules
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheBillingPlan {
+pub struct CacheCostCatalogVersion {
     pub id: i64,
-    pub name: String,
+    pub catalog_id: i64,
+    pub version: String,
     pub currency: String,
-    pub price_rules: Vec<CachePriceRule>,
+    pub source: Option<String>,
+    pub effective_from: i64,
+    pub effective_until: Option<i64>,
+    pub is_enabled: bool,
+    pub components: Vec<CacheCostComponent>,
 }
 
 // Conversion implementations from database types to cache types
@@ -153,7 +156,7 @@ impl From<crate::database::model::Model> for CacheModel {
             provider_id: db.provider_id,
             real_model_name: db.real_model_name,
             model_name,
-            billing_plan_id: db.billing_plan_id,
+            cost_catalog_id: db.cost_catalog_id,
             is_enabled: db.is_enabled,
         }
     }
@@ -234,36 +237,38 @@ impl From<crate::database::custom_field::CustomFieldDefinition> for CacheCustomF
     }
 }
 
-impl From<crate::database::price::PriceRule> for CachePriceRule {
-    fn from(db: crate::database::price::PriceRule) -> Self {
+impl From<crate::database::cost::CostComponent> for CacheCostComponent {
+    fn from(db: crate::database::cost::CostComponent) -> Self {
         Self {
-            effective_from: db.effective_from,
-            effective_until: db.effective_until,
-            period_start_seconds_utc: db.period_start_seconds_utc,
-            period_end_seconds_utc: db.period_end_seconds_utc,
-            usage_type: db.usage_type,
-            media_type: db.media_type.unwrap_or_default(),
-            condition_had_reasoning: db.condition_had_reasoning,
-            tier_from_tokens: db.tier_from_tokens,
-            tier_to_tokens: db.tier_to_tokens,
-            price_in_micro_units: Some(db.price_in_micro_units),
+            id: db.id,
+            catalog_version_id: db.catalog_version_id,
+            meter_key: db.meter_key,
+            charge_kind: db.charge_kind,
+            unit_price_nanos: db.unit_price_nanos,
+            flat_fee_nanos: db.flat_fee_nanos,
+            tier_config_json: db.tier_config_json,
+            match_attributes_json: db.match_attributes_json,
+            priority: db.priority,
+            description: db.description,
         }
     }
 }
 
-// Note: CacheBillingPlan conversion requires both BillingPlan and its PriceRules
-// This will be handled by a dedicated function in the cache layer
-impl CacheBillingPlan {
-    /// Create a CacheBillingPlan from database BillingPlan and PriceRules
-    pub fn from_db_with_rules(
-        plan: crate::database::price::BillingPlan,
-        rules: Vec<crate::database::price::PriceRule>,
+impl CacheCostCatalogVersion {
+    pub fn from_db_with_components(
+        version: crate::database::cost::CostCatalogVersion,
+        components: Vec<crate::database::cost::CostComponent>,
     ) -> Self {
         Self {
-            id: plan.id,
-            name: plan.name,
-            currency: plan.currency,
-            price_rules: rules.into_iter().map(Into::into).collect(),
+            id: version.id,
+            catalog_id: version.catalog_id,
+            version: version.version,
+            currency: version.currency,
+            source: version.source,
+            effective_from: version.effective_from,
+            effective_until: version.effective_until,
+            is_enabled: version.is_enabled,
+            components: components.into_iter().map(Into::into).collect(),
         }
     }
 }

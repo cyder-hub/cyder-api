@@ -77,9 +77,9 @@ watch(isMobileNavOpen, (open) => {
 </script>
 
 <template>
-  <div class="flex min-h-dvh bg-gray-50 font-sans">
+  <div class="flex h-dvh overflow-hidden bg-gray-50 font-sans">
     <aside
-      class="hidden md:flex bg-white text-gray-700 flex-col flex-shrink-0 border-r border-gray-200 transition-all duration-300 ease-in-out z-20"
+      class="hidden md:flex h-full overflow-hidden bg-white text-gray-700 flex-col flex-shrink-0 border-r border-gray-200 transition-all duration-300 ease-in-out z-20"
       :class="isCollapsed ? 'w-16' : 'w-56'"
     >
       <div
@@ -156,7 +156,7 @@ watch(isMobileNavOpen, (open) => {
       <LanguageSwitcher :is-collapsed="isCollapsed" />
     </aside>
 
-    <div class="min-w-0 flex-1 flex flex-col">
+    <div class="min-w-0 flex-1 flex h-full flex-col overflow-hidden">
       <header
         class="md:hidden sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-gray-200 bg-white/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-white/80"
       >
@@ -254,7 +254,7 @@ watch(isMobileNavOpen, (open) => {
         </aside>
       </Transition>
 
-      <main class="min-h-0 flex-1 overflow-y-auto">
+      <main class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         <RouterView />
       </main>
     </div>

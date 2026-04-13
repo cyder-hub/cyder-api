@@ -1,15 +1,15 @@
-use crate::service::cache::types::{
-    CacheBillingPlan, CacheModel, CacheProvider, CacheSystemApiKey,
-};
-use crate::utils::billing::calculate_cost;
 use crate::{
+    cost::{CostLedger, CostRatingContext, CostSnapshot, UsageNormalization, rate_cost},
     database::request_log::RequestLog,
     schema::enum_def::{LlmApiType, RequestStatus, StorageType},
+    service::cache::types::{
+        CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
+    },
     service::storage::{Storage, get_storage, types::PutObjectOptions},
     utils::{
         ID_GENERATOR,
-        billing::UsageInfo,
         storage::{LogBodyCaptureState, LogBundle, generate_storage_path_from_id},
+        usage::UsageInfo,
     },
 };
 use bytes::Bytes;
@@ -193,7 +193,9 @@ pub struct RequestLogContext {
     pub first_chunk_ts: Option<i64>,
     pub completion_ts: Option<i64>,
     pub usage: Option<UsageInfo>,
-    pub billing_plan: Option<CacheBillingPlan>,
+    pub usage_normalization: Option<UsageNormalization>,
+    pub cost_catalog_id: Option<i64>,
+    pub cost_catalog_version: Option<CacheCostCatalogVersion>,
     pub overall_status: RequestStatus,
     pub user_request_body: Option<LoggedBody>,
     pub llm_request_body: Option<LoggedBody>,
@@ -237,7 +239,9 @@ impl RequestLogContext {
             first_chunk_ts: None,
             completion_ts: None,
             usage: None,
-            billing_plan: None,
+            usage_normalization: None,
+            cost_catalog_id: model.cost_catalog_id,
+            cost_catalog_version: None,
             overall_status: RequestStatus::Pending,
             user_request_body: None,
             llm_request_body: None,
@@ -836,6 +840,8 @@ impl LogManager {
         final_storage_type: Option<StorageType>,
         now: i64,
     ) -> RequestLog {
+        let cost_outcome = Self::build_cost_outcome(context);
+
         RequestLog {
             id: context.id,
             system_api_key_id: context.system_api_key_id,
@@ -853,23 +859,60 @@ impl LogManager {
             llm_response_status: context.llm_status.map(|s| s.as_u16() as i32),
             status: Some(context.overall_status.clone()),
             is_stream: context.is_stream,
-            calculated_cost: match (&context.usage, &context.billing_plan) {
-                (Some(usage), Some(plan)) => Some(calculate_cost(usage, &plan.price_rules)),
-                _ => None,
-            },
-            cost_currency: context
-                .billing_plan
-                .as_ref()
-                .map(|plan| plan.currency.clone()),
+            estimated_cost_nanos: cost_outcome.estimated_cost_nanos,
+            estimated_cost_currency: cost_outcome.estimated_cost_currency,
+            cost_catalog_id: context.cost_catalog_id,
+            cost_catalog_version_id: cost_outcome.cost_catalog_version_id,
+            cost_snapshot_json: cost_outcome.cost_snapshot_json,
             created_at: context.request_received_at,
             updated_at: now,
-            input_tokens: context.usage.as_ref().map(|u| u.input_tokens),
-            output_tokens: context.usage.as_ref().map(|u| u.output_tokens),
-            input_image_tokens: context.usage.as_ref().map(|u| u.input_image_tokens),
-            output_image_tokens: context.usage.as_ref().map(|u| u.output_image_tokens),
-            cached_tokens: context.usage.as_ref().map(|u| u.cached_tokens),
-            reasoning_tokens: context.usage.as_ref().map(|u| u.reasoning_tokens),
-            total_tokens: context.usage.as_ref().map(|u| u.total_tokens),
+            total_input_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.total_input_tokens as i32)
+                .or_else(|| context.usage.as_ref().map(|u| u.input_tokens)),
+            total_output_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.total_output_tokens as i32)
+                .or_else(|| context.usage.as_ref().map(|u| u.output_tokens)),
+            input_text_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.input_text_tokens as i32),
+            output_text_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.output_text_tokens as i32),
+            input_image_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.input_image_tokens as i32)
+                .or_else(|| context.usage.as_ref().map(|u| u.input_image_tokens)),
+            output_image_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.output_image_tokens as i32)
+                .or_else(|| context.usage.as_ref().map(|u| u.output_image_tokens)),
+            cache_read_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.cache_read_tokens as i32)
+                .or_else(|| context.usage.as_ref().map(|u| u.cached_tokens)),
+            cache_write_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.cache_write_tokens as i32),
+            reasoning_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.reasoning_tokens as i32)
+                .or_else(|| context.usage.as_ref().map(|u| u.reasoning_tokens)),
+            total_tokens: context
+                .usage_normalization
+                .as_ref()
+                .map(|u| (u.total_input_tokens + u.total_output_tokens) as i32)
+                .or_else(|| context.usage.as_ref().map(|u| u.total_tokens)),
             storage_type: final_storage_type,
             user_request_body: None,
             llm_request_body: None,
@@ -877,6 +920,75 @@ impl LogManager {
             user_response_body: None,
             user_api_type: context.user_api_type,
             llm_api_type: context.llm_api_type,
+        }
+    }
+
+    fn build_cost_outcome(context: &RequestLogContext) -> CostOutcome {
+        let Some(normalization) = context.usage_normalization.as_ref() else {
+            return CostOutcome::default();
+        };
+
+        let Some(version) = context.cost_catalog_version.as_ref() else {
+            return CostOutcome::default();
+        };
+
+        let ledger = CostLedger::from(normalization);
+        let rating = match rate_cost(
+            &ledger,
+            &CostRatingContext {
+                total_input_tokens: normalization.total_input_tokens,
+            },
+            version,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                return CostOutcome::from_snapshot(CostSnapshot {
+                    schema_version: crate::cost::COST_SNAPSHOT_SCHEMA_VERSION_V1,
+                    cost_catalog_id: version.catalog_id,
+                    cost_catalog_version_id: version.id,
+                    total_cost_nanos: 0,
+                    currency: version.currency.clone(),
+                    detail_lines: vec![],
+                    unmatched_items: vec![],
+                    warnings: vec![format!("cost rating failed: {:?}", err)],
+                });
+            }
+        };
+
+        let mut warnings = normalization.warnings.clone();
+        warnings.extend(rating.warnings.clone());
+        let snapshot = CostSnapshot {
+            schema_version: crate::cost::COST_SNAPSHOT_SCHEMA_VERSION_V1,
+            cost_catalog_id: version.catalog_id,
+            cost_catalog_version_id: version.id,
+            total_cost_nanos: rating.total_cost_nanos,
+            currency: rating.currency.clone(),
+            detail_lines: rating.detail_lines,
+            unmatched_items: rating.unmatched_items,
+            warnings,
+        };
+
+        CostOutcome::from_snapshot(snapshot)
+    }
+}
+
+#[derive(Default)]
+struct CostOutcome {
+    estimated_cost_nanos: Option<i64>,
+    estimated_cost_currency: Option<String>,
+    cost_catalog_version_id: Option<i64>,
+    cost_snapshot_json: Option<String>,
+}
+
+impl CostOutcome {
+    fn from_snapshot(snapshot: CostSnapshot) -> Self {
+        let snapshot_json = serde_json::to_string(&snapshot).ok();
+        let estimated_cost_nanos = snapshot_json.as_ref().map(|_| snapshot.total_cost_nanos);
+        Self {
+            estimated_cost_nanos,
+            estimated_cost_currency: Some(snapshot.currency.clone()),
+            cost_catalog_version_id: Some(snapshot.cost_catalog_version_id),
+            cost_snapshot_json: snapshot_json,
         }
     }
 }
@@ -897,14 +1009,15 @@ mod tests {
         LogBodyKind, LogManager, LogManagerMetrics, RequestLogContext, StreamingBodyWriter,
         should_persist_response_bodies,
     };
+    use crate::cost::UsageNormalization;
     use crate::schema::enum_def::{
         LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus, StorageType,
     };
     use crate::service::cache::types::{
-        CacheBillingPlan, CacheModel, CacheProvider, CacheSystemApiKey,
+        CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
     };
-    use crate::utils::billing::UsageInfo;
     use crate::utils::storage::{LogBodyCaptureState, LogBundle};
+    use crate::utils::usage::UsageInfo;
     use bytes::Bytes;
 
     fn make_log_context() -> RequestLogContext {
@@ -928,7 +1041,7 @@ mod tests {
             provider_id: 2,
             model_name: "gpt-test".to_string(),
             real_model_name: Some("real-gpt-test".to_string()),
-            billing_plan_id: None,
+            cost_catalog_id: None,
             is_enabled: true,
         };
 
@@ -990,11 +1103,28 @@ mod tests {
             output_image_tokens: 2,
             cached_tokens: 3,
         });
-        context.billing_plan = Some(CacheBillingPlan {
+        context.usage_normalization = Some(UsageNormalization {
+            total_input_tokens: 10,
+            total_output_tokens: 20,
+            input_text_tokens: 6,
+            output_text_tokens: 13,
+            input_image_tokens: 1,
+            output_image_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 0,
+            reasoning_tokens: 5,
+            warnings: vec![],
+        });
+        context.cost_catalog_version = Some(CacheCostCatalogVersion {
             id: 9,
-            name: "default".to_string(),
+            catalog_id: 7,
+            version: "v1".to_string(),
             currency: "USD".to_string(),
-            price_rules: vec![],
+            source: None,
+            effective_from: 0,
+            effective_until: None,
+            is_enabled: true,
+            components: vec![],
         });
 
         let request_log =
@@ -1006,10 +1136,15 @@ mod tests {
             request_log.llm_request_uri.as_deref(),
             Some("https://example.com/v1/chat/completions")
         );
+        assert_eq!(request_log.total_input_tokens, Some(10));
+        assert_eq!(request_log.total_output_tokens, Some(20));
+        assert_eq!(request_log.input_text_tokens, Some(6));
+        assert_eq!(request_log.output_text_tokens, Some(13));
         assert_eq!(request_log.input_image_tokens, Some(1));
         assert_eq!(request_log.output_image_tokens, Some(2));
-        assert_eq!(request_log.cached_tokens, Some(3));
-        assert_eq!(request_log.cost_currency.as_deref(), Some("USD"));
+        assert_eq!(request_log.cache_read_tokens, Some(3));
+        assert_eq!(request_log.estimated_cost_currency.as_deref(), Some("USD"));
+        assert_eq!(request_log.cost_catalog_version_id, Some(9));
     }
 
     #[tokio::test]

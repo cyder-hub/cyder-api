@@ -1687,6 +1687,7 @@ pub(super) fn transform_unified_stream_events_to_anthropic_events(
                 }
             }
             UnifiedStreamEvent::Usage { usage } => {
+                transformer.session.usage_normalization_cache = Some((&usage).into());
                 transformer.session.usage_cache = Some(usage.into());
             }
             UnifiedStreamEvent::MessageDelta { finish_reason } => {
@@ -1760,6 +1761,7 @@ pub fn transform_unified_chunk_to_anthropic_events(
     let mut diagnostics = Vec::new();
 
     if let Some(usage) = unified_chunk.usage.clone() {
+        state.session.usage_normalization_cache = Some((&usage).into());
         state.session.usage_cache = Some(usage.clone().into());
     }
 

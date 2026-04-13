@@ -1,121 +1,133 @@
 <template>
-  <div class="p-6 space-y-6 bg-gray-50 min-h-screen">
-    <!-- 页面头部 -->
-    <div class="flex justify-between items-start">
-      <div>
-        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ $t("sidebar.dashboard") }}
-        </h1>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("dashboard.description") }}
+  <div class="app-page">
+    <div class="app-page-shell">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0">
+          <h1 class="text-lg font-semibold text-gray-900 tracking-tight sm:text-xl">
+            {{ $t("sidebar.dashboard") }}
+          </h1>
+          <p class="mt-1 text-sm text-gray-500">
+            {{ $t("dashboard.description") }}
+          </p>
+        </div>
+      </div>
+
+      <div v-if="isLoading" class="flex items-center justify-center py-16">
+        <Loader2 class="mr-2 h-5 w-5 animate-spin text-gray-400" />
+        <span class="text-sm font-medium text-gray-500">{{ $t("common.loading") }}</span>
+      </div>
+      <div v-else-if="error" class="flex flex-col items-center justify-center py-20">
+        <AlertCircle class="mb-4 h-10 w-10 stroke-1 text-red-500" />
+        <p class="text-sm font-medium text-red-500">
+          {{ $t("dashboard.errorLoading", { error: error }) }}
         </p>
       </div>
-    </div>
-
-    <div v-if="isLoading" class="flex items-center justify-center py-16">
-      <Loader2 class="h-5 w-5 animate-spin mr-2 text-gray-400" />
-      <span class="text-sm font-medium text-gray-500">{{ $t("common.loading") }}</span>
-    </div>
-    <div v-else-if="error" class="flex flex-col items-center justify-center py-20">
-      <AlertCircle class="h-10 w-10 text-red-500 mb-4 stroke-1" />
-      <p class="text-sm font-medium text-red-500">
-        {{ $t("dashboard.errorLoading", { error: error }) }}
-      </p>
-    </div>
-    <div v-else class="space-y-6">
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <!-- System Overview Card -->
-        <Card class="shadow-none border border-gray-200">
-          <CardHeader>
-            <CardTitle class="text-base">{{ $t("dashboard.systemOverview.title") }}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ul class="space-y-4">
-              <li class="flex justify-between items-center pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500">{{ $t("dashboard.systemOverview.providers") }}</span>
-                <span class="text-sm font-medium text-gray-900 font-mono">{{
-                  overview.providers_count
-                }}</span>
-              </li>
-              <li class="flex justify-between items-center pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500">{{ $t("dashboard.systemOverview.models") }}</span>
-                <span class="text-sm font-medium text-gray-900 font-mono">{{ overview.models_count }}</span>
-              </li>
-              <li class="flex justify-between items-center pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500">{{ $t("dashboard.systemOverview.providerKeys") }}</span>
-                <span class="text-sm font-medium text-gray-900 font-mono">{{
-                  overview.provider_keys_count
-                }}</span>
-              </li>
-            </ul>
-          </CardContent>
-        </Card>
-
-        <!-- Today's Log Stats Card -->
-        <Card class="shadow-none border border-gray-200">
-          <CardHeader>
-            <CardTitle class="text-base">{{ $t("dashboard.todayLogStats.title") }}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ul class="space-y-4">
-              <li class="flex justify-between items-center pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500">{{ $t("dashboard.todayLogStats.requests") }}</span>
-                <span class="text-sm font-medium text-gray-900 font-mono">{{
-                  todayStats.requests_count
-                }}</span>
-              </li>
-              <li class="flex justify-between items-center pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500">{{ $t("dashboard.todayLogStats.promptTokens") }}</span>
-                <span class="text-sm font-medium text-gray-900 font-mono">{{
-                  todayStats.total_input_tokens?.toLocaleString()
-                }}</span>
-              </li>
-              <li class="flex justify-between items-center pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500"
-                  >{{ $t("dashboard.todayLogStats.completionTokens") }}</span
+      <div v-else class="app-section">
+        <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card class="border border-gray-200 shadow-none">
+            <CardHeader class="px-4 pb-4 sm:px-6">
+              <CardTitle class="text-base">{{ $t("dashboard.systemOverview.title") }}</CardTitle>
+            </CardHeader>
+            <CardContent class="px-4 sm:px-6">
+              <ul class="grid grid-cols-1 gap-3 sm:gap-4">
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:items-center sm:px-4"
                 >
-                <span class="text-sm font-medium text-gray-900 font-mono">{{
-                  todayStats.total_output_tokens?.toLocaleString()
-                }}</span>
-              </li>
-              <li class="flex justify-between items-center pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500"
-                  >{{ $t("dashboard.todayLogStats.reasoningTokens") }}</span
+                  <span class="text-sm text-gray-500">{{ $t("dashboard.systemOverview.providers") }}</span>
+                  <span class="text-base font-medium text-gray-900 font-mono sm:text-sm">{{
+                    overview.providers_count
+                  }}</span>
+                </li>
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:items-center sm:px-4"
                 >
-                <span class="text-sm font-medium text-gray-900 font-mono">{{
-                  todayStats.total_reasoning_tokens?.toLocaleString()
-                }}</span>
-              </li>
-              <li class="flex justify-between items-center pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500">{{ $t("dashboard.todayLogStats.totalTokens") }}</span>
-                <span class="text-sm font-medium text-gray-900 font-mono">{{
-                  todayStats.total_tokens?.toLocaleString()
-                }}</span>
-              </li>
-              <li class="flex justify-between items-start pb-4 border-b border-gray-100 last:border-0 last:pb-0">
-                <span class="text-sm text-gray-500 mt-0.5">{{ $t("dashboard.todayLogStats.totalCost") }}</span>
-                <div class="text-right">
-                  <div
-                    v-for="(cost, currency) in todayStats.total_cost"
-                    :key="currency"
-                    class="text-sm font-medium text-gray-900 font-mono"
-                  >
-                    {{ cost / 1000000000 }}
-                    <span class="text-xs text-gray-500 font-sans ml-1">{{ $t(`currencies.${currency}`, {}, currency) }}</span>
-                  </div>
-                  <div v-if="Object.keys(todayStats.total_cost || {}).length === 0" class="text-sm font-medium text-gray-900 font-mono">
-                    0
-                  </div>
-                </div>
-              </li>
-            </ul>
-          </CardContent>
-        </Card>
-      </div>
+                  <span class="text-sm text-gray-500">{{ $t("dashboard.systemOverview.models") }}</span>
+                  <span class="text-base font-medium text-gray-900 font-mono sm:text-sm">{{ overview.models_count }}</span>
+                </li>
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:items-center sm:px-4"
+                >
+                  <span class="text-sm text-gray-500">{{ $t("dashboard.systemOverview.providerKeys") }}</span>
+                  <span class="text-base font-medium text-gray-900 font-mono sm:text-sm">{{
+                    overview.provider_keys_count
+                  }}</span>
+                </li>
+              </ul>
+            </CardContent>
+          </Card>
 
-      <!-- Usage Stats Chart Card (ensure proper styling without shadow) -->
-      <div class="border border-gray-200 rounded-lg bg-white overflow-hidden">
-        <UsageChart />
+          <Card class="border border-gray-200 shadow-none">
+            <CardHeader class="px-4 pb-4 sm:px-6">
+              <CardTitle class="text-base">{{ $t("dashboard.todayLogStats.title") }}</CardTitle>
+            </CardHeader>
+            <CardContent class="px-4 sm:px-6">
+              <ul class="grid grid-cols-1 gap-3 sm:gap-4">
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:items-center sm:px-4"
+                >
+                  <span class="text-sm text-gray-500">{{ $t("dashboard.todayLogStats.requests") }}</span>
+                  <span class="text-base font-medium text-gray-900 font-mono sm:text-sm">{{
+                    todayStats.requests_count
+                  }}</span>
+                </li>
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:items-center sm:px-4"
+                >
+                  <span class="text-sm text-gray-500">{{ $t("dashboard.todayLogStats.promptTokens") }}</span>
+                  <span class="text-base font-medium text-gray-900 font-mono sm:text-sm">{{
+                    todayStats.total_input_tokens?.toLocaleString()
+                  }}</span>
+                </li>
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:items-center sm:px-4"
+                >
+                  <span class="text-sm text-gray-500">{{ $t("dashboard.todayLogStats.completionTokens") }}</span>
+                  <span class="text-base font-medium text-gray-900 font-mono sm:text-sm">{{
+                    todayStats.total_output_tokens?.toLocaleString()
+                  }}</span>
+                </li>
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:items-center sm:px-4"
+                >
+                  <span class="text-sm text-gray-500">{{ $t("dashboard.todayLogStats.reasoningTokens") }}</span>
+                  <span class="text-base font-medium text-gray-900 font-mono sm:text-sm">{{
+                    todayStats.total_reasoning_tokens?.toLocaleString()
+                  }}</span>
+                </li>
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:items-center sm:px-4"
+                >
+                  <span class="text-sm text-gray-500">{{ $t("dashboard.todayLogStats.totalTokens") }}</span>
+                  <span class="text-base font-medium text-gray-900 font-mono sm:text-sm">{{
+                    todayStats.total_tokens?.toLocaleString()
+                  }}</span>
+                </li>
+                <li
+                  class="flex items-start justify-between gap-4 rounded-lg border border-gray-100 px-3 py-3 sm:px-4"
+                >
+                  <span class="mt-0.5 text-sm text-gray-500">{{ $t("dashboard.todayLogStats.totalCost") }}</span>
+                  <div class="min-w-0 text-right">
+                    <div
+                      v-for="(cost, currency) in todayStats.total_cost"
+                      :key="currency"
+                      class="text-base font-medium text-gray-900 font-mono sm:text-sm"
+                    >
+                      {{ cost / 1000000000 }}
+                      <span class="ml-1 font-sans text-xs text-gray-500">{{ $t(`currencies.${currency}`, {}, currency) }}</span>
+                    </div>
+                    <div v-if="Object.keys(todayStats.total_cost || {}).length === 0" class="text-base font-medium text-gray-900 font-mono sm:text-sm">
+                      0
+                    </div>
+                  </div>
+                </li>
+              </ul>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div class="overflow-hidden rounded-xl border border-gray-200 bg-white">
+          <UsageChart />
+        </div>
       </div>
     </div>
   </div>

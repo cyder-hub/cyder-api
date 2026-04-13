@@ -39,7 +39,65 @@
       </div>
     </template>
 
-    <div class="border border-gray-200 rounded-lg overflow-hidden">
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:hidden">
+      <MobileCrudCard
+        v-for="field in store.customFields"
+        :key="field.id"
+        :title="field.name || field.field_name"
+        :description="field.description || field.field_name"
+      >
+        <template #header>
+          <Badge variant="secondary" class="font-mono text-[11px]">
+            {{ field.field_type }}
+          </Badge>
+        </template>
+
+        <div class="grid grid-cols-1 gap-2 text-xs text-gray-500">
+          <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("customFieldsPage.table.fieldName") }}</span>
+            <span class="max-w-[12rem] truncate font-mono text-gray-700">
+              {{ field.field_name }}
+            </span>
+          </div>
+          <div class="flex items-center justify-between gap-3 rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("customFieldsPage.table.placement") }}</span>
+            <Badge variant="outline" class="text-[11px]">
+              {{ field.field_placement }}
+            </Badge>
+          </div>
+          <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("customFieldsPage.table.enabled") }}</span>
+            <Checkbox
+              :checked="field.is_enabled"
+              @update:checked="() => handleToggleEnable(field)"
+            />
+          </div>
+        </div>
+
+        <template #actions>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center text-gray-600 hover:text-gray-900"
+            @click="handleOpenEditModal(field)"
+          >
+            <Pencil class="h-3.5 w-3.5 mr-1" />
+            {{ $t("common.edit") }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center text-gray-400 hover:text-red-600"
+            @click="handleDelete(field.id, field.name || field.field_name)"
+          >
+            <Trash2 class="h-3.5 w-3.5 mr-1" />
+            {{ $t("common.delete") }}
+          </Button>
+        </template>
+      </MobileCrudCard>
+    </div>
+
+    <div class="hidden border border-gray-200 rounded-lg overflow-hidden md:block">
       <Table>
         <TableHeader>
           <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
@@ -121,8 +179,8 @@
     <template #modals>
       <!-- Edit/Add Modal -->
       <Dialog :open="showEditModal" @update:open="setShowEditModal">
-        <DialogContent class="max-w-lg max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
+        <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-lg">
+          <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
             <DialogTitle class="text-lg font-semibold text-gray-900">
               {{
                 editingField.id
@@ -132,8 +190,8 @@
             </DialogTitle>
           </DialogHeader>
 
-          <div class="space-y-4 pt-2">
-          <div class="grid grid-cols-2 gap-4">
+          <div class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <!-- Field Name (Required) -->
             <div class="space-y-1.5">
               <Label class="text-gray-700">
@@ -171,7 +229,7 @@
           </div>
 
           <!-- Placement & Type row -->
-          <div class="grid grid-cols-2 gap-4">
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div class="space-y-1.5">
               <Label class="text-gray-700">
                 {{ $t("customFieldsPage.modal.labelPlacement") }}
@@ -324,14 +382,14 @@
           </div>
         </div>
 
-          <DialogFooter class="pt-4 mt-2 border-t border-gray-100">
+          <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
             <Button
               @click="handleCloseModal"
               variant="ghost"
-              class="text-gray-600"
+              class="w-full text-gray-600 sm:w-auto"
               >{{ $t("common.cancel") }}</Button
             >
-            <Button @click="handleSave" variant="default">{{
+            <Button @click="handleSave" variant="default" class="w-full sm:w-auto">{{
               $t("common.save")
             }}</Button>
           </DialogFooter>
@@ -377,6 +435,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { confirm } from "@/lib/confirmController";
 import { toastController } from "@/lib/toastController";
 

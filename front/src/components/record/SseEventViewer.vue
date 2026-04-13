@@ -1,7 +1,12 @@
 <template>
   <div class="mb-2 border-b border-gray-200 pb-2 last:border-b-0 last:pb-0">
-    <p class="font-semibold text-gray-600">event: {{ event.event }}</p>
-    <pre v-if="eventData.type !== 'empty'" class="mt-1 whitespace-pre text-[10px] font-mono">{{ eventData.content }}</pre>
+    <p class="break-all text-xs font-semibold text-gray-600">
+      event: {{ event.event }}
+    </p>
+    <pre
+      v-if="eventData.type !== 'empty'"
+      class="mt-1 whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-gray-700"
+    >{{ eventData.content }}</pre>
   </div>
 </template>
 

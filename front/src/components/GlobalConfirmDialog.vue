@@ -24,8 +24,8 @@ const state = useConfirmState()
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>
-        <AlertDialogCancel @click="handleCancel">{{ state.options.cancelText || $t('common.cancel') }}</AlertDialogCancel>
-        <AlertDialogAction @click="handleConfirm">{{ state.options.confirmText || $t('common.confirm') }}</AlertDialogAction>
+        <AlertDialogCancel class="w-full sm:w-auto" @click="handleCancel">{{ state.options.cancelText || $t('common.cancel') }}</AlertDialogCancel>
+        <AlertDialogAction class="w-full sm:w-auto" @click="handleConfirm">{{ state.options.confirmText || $t('common.confirm') }}</AlertDialogAction>
       </AlertDialogFooter>
     </AlertDialogContent>
   </AlertDialog>

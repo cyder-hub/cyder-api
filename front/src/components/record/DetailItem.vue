@@ -1,9 +1,9 @@
 <template>
-  <div class="py-2 sm:grid sm:grid-cols-3 sm:gap-4">
-    <dt class="text-sm font-medium text-gray-500">
+  <div class="py-3 sm:grid sm:grid-cols-3 sm:gap-4">
+    <dt class="text-xs font-medium uppercase tracking-wide text-gray-500 sm:text-sm sm:normal-case sm:tracking-normal">
       {{ label }}
     </dt>
-    <dd class="mt-1 text-sm text-gray-900 sm:mt-0 sm:col-span-2">
+    <dd class="mt-1 break-words text-sm text-gray-900 sm:col-span-2 sm:mt-0">
       <slot></slot>
       <template v-if="!$slots.default">/</template>
     </dd>

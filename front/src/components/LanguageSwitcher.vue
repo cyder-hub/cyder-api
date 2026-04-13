@@ -1,4 +1,8 @@
 <script setup lang="ts">
+defineOptions({
+  inheritAttrs: false,
+});
+
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -11,10 +15,14 @@ import { Globe } from "lucide-vue-next";
 import { LANG_STORAGE_KEY } from "@/i18n";
 
 interface LanguageSwitcherProps {
-  isCollapsed: boolean;
+  isCollapsed?: boolean;
+  compact?: boolean;
 }
 
-const props = defineProps<LanguageSwitcherProps>();
+const props = withDefaults(defineProps<LanguageSwitcherProps>(), {
+  isCollapsed: false,
+  compact: false,
+});
 
 const { locale } = useI18n();
 const languages = [
@@ -35,13 +43,19 @@ const currentLanguageName = () => {
 </script>
 
 <template>
-  <div class="mt-auto p-2 border-t border-gray-100">
+  <div
+    v-bind="$attrs"
+    class="mt-auto border-gray-100"
+    :class="props.compact ? 'p-0 border-t-0' : 'p-2 border-t'"
+  >
     <Popover v-model:open="isOpen">
       <PopoverTrigger as-child>
         <Button
           variant="ghost"
-          class="w-full flex items-center py-1.5 px-2.5 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors h-auto border-0 text-sm"
+          class="flex items-center rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors h-auto border-0 text-sm"
           :class="{
+            'w-full py-1.5 px-2.5': !props.compact,
+            'h-9 min-w-9 px-2.5': props.compact,
             'justify-center': props.isCollapsed,
             'justify-start': !props.isCollapsed,
           }"
@@ -49,7 +63,7 @@ const currentLanguageName = () => {
         >
           <Globe class="h-4 w-4 flex-shrink-0" />
           <span
-            v-if="!props.isCollapsed"
+            v-if="!props.isCollapsed && !props.compact"
             class="ml-2 font-medium whitespace-nowrap overflow-hidden"
           >
             {{ currentLanguageName() }}

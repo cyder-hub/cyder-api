@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watchEffect } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
 import type { UsageStatsPeriod } from "@/store/types";
@@ -21,6 +21,10 @@ import {
   TableRow,
 } from "./ui/table";
 import type { EChartsOption } from "echarts";
+import type {
+  DefaultLabelFormatterCallbackParams as CallbackDataParams,
+  TooltipComponentFormatterCallbackParams as TopLevelFormatterParams,
+} from "echarts/types/dist/option";
 
 // Type definitions from the original component
 type TimeRange =
@@ -62,6 +66,24 @@ const chartType = ref<"line" | "bar">("line");
 const usageData = ref<UsageStatsResponse | null>(null);
 const isLoading = ref(false);
 const error = ref<string | null>(null);
+const chartHeight = ref(320);
+const updateChartHeight = () => {
+  if (typeof window === "undefined") return;
+  chartHeight.value = window.innerWidth < 640 ? 320 : 400;
+};
+
+onMounted(() => {
+  updateChartHeight();
+  window.addEventListener("resize", updateChartHeight, { passive: true });
+  window.addEventListener("orientationchange", updateChartHeight, {
+    passive: true,
+  });
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", updateChartHeight);
+  window.removeEventListener("orientationchange", updateChartHeight);
+});
 
 // Helper function (mostly unchanged)
 const getTimeRangeDetails = (timeRange: TimeRange) => {
@@ -293,6 +315,27 @@ const formatMetric = (
   return value.toLocaleString();
 };
 
+type TooltipAxisParam = CallbackDataParams & {
+  axisValue: string | number;
+  marker: string;
+  seriesName: string;
+  value: [number, number];
+};
+
+const isTooltipAxisParam = (
+  param: CallbackDataParams,
+): param is TooltipAxisParam =>
+  "axisValue" in param &&
+  Array.isArray(param.value) &&
+  typeof param.marker === "string" &&
+  typeof param.seriesName === "string";
+
+const getTooltipRows = (params: TooltipAxisParam[]) =>
+  params
+    .filter((param) => Number(param.value?.[1] ?? 0) !== 0)
+    .sort((a, b) => Number(b.value?.[1] ?? 0) - Number(a.value?.[1] ?? 0))
+    .slice(0, 10);
+
 const totalMetricSumText = computed(() => {
   if (!usageData.value?.stats) return "";
   const metric = selectedMetric.value;
@@ -486,12 +529,20 @@ const chartOptions = computed<EChartsOption>(() => {
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "cross" },
-      formatter: (params: any) => {
-        const date = new Date(params[0].axisValue);
+      formatter: (rawParams: TopLevelFormatterParams) => {
+        const params = Array.isArray(rawParams) ? rawParams : [rawParams];
+        const rows = params.filter(isTooltipAxisParam);
+        if (rows.length === 0) return "";
+
+        const date = new Date(rows[0].axisValue);
+
+        const filteredRows = getTooltipRows(rows);
+        if (filteredRows.length === 0) return "";
+
         return (
           `${date.toLocaleString()}<br/>` +
-          params
-            .map((p: any) => {
+          filteredRows
+            .map((p) => {
               const currency =
                 metric === "total_cost"
                   ? p.seriesName.match(/ \((.*)\)$/)?.[1]
@@ -503,20 +554,23 @@ const chartOptions = computed<EChartsOption>(() => {
       },
     },
     legend: {
-      orient: "vertical",
-      right: 10,
-      top: "center",
+      orient: "horizontal",
+      left: 0,
+      right: 0,
+      top: 0,
       data: legendData,
       type: "scroll",
       formatter: (name) =>
         metric === "total_cost" ? name.replace(/ \((.*)\)$/, "") : name,
-      textStyle: { width: 180, overflow: "truncate" },
+      textStyle: { width: 120, overflow: "truncate" },
       tooltip: { show: true },
     },
-    grid: { left: "3%", right: 230, bottom: "10%", containLabel: true },
+    grid: { left: "4%", right: "4%", top: 72, bottom: 72, containLabel: true },
     xAxis: {
       type: "time",
       axisLabel: {
+        hideOverlap: true,
+        rotate: interval === "hour" || interval === "minute" ? 30 : 0,
         formatter:
           interval === "month"
             ? "{yyyy}-{MM}"
@@ -528,7 +582,7 @@ const chartOptions = computed<EChartsOption>(() => {
     yAxis: { type: "value", name: t(`dashboard.usageStats.metrics.${metric}`) },
     series: finalSeries.map((s) => ({ ...s, smooth: type === "line" })),
     dataZoom: [
-      { type: "slider", start: 0, end: 100 },
+      { type: "slider", start: 0, end: 100, height: 20, bottom: 16 },
       { type: "inside", start: 0, end: 100 },
     ],
     toolbox: { feature: { saveAsImage: {} } },
@@ -537,22 +591,25 @@ const chartOptions = computed<EChartsOption>(() => {
 </script>
 
 <template>
-  <div class="mt-6 bg-white border border-gray-200 p-6 rounded-lg">
-    <div class="flex flex-wrap justify-between items-center gap-4 mb-4">
-      <div class="flex items-baseline space-x-4">
-        <h2 class="text-lg font-semibold text-gray-900">
-          {{ t("dashboard.usageStats.title") }}
-        </h2>
-        <span
-          v-if="totalMetricSumText"
-          class="text-lg font-medium text-gray-600"
-        >
-          {{ t("dashboard.usageStats.total") }}: {{ totalMetricSumText }}
-        </span>
+  <div class="app-stack-md rounded-xl bg-white p-4 sm:p-6">
+    <div class="flex flex-col gap-3 sm:gap-4">
+      <div class="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+        <div class="min-w-0">
+          <h2 class="text-lg font-semibold text-gray-900">
+            {{ t("dashboard.usageStats.title") }}
+          </h2>
+          <p
+            v-if="totalMetricSumText"
+            class="mt-1 text-sm leading-6 text-gray-500"
+          >
+            {{ t("dashboard.usageStats.total") }}: {{ totalMetricSumText }}
+          </p>
+        </div>
       </div>
-      <div class="flex items-center space-x-2">
+
+      <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,9rem)_minmax(0,13rem)_minmax(0,13rem)_auto] xl:items-end">
         <Select v-model="chartType">
-          <SelectTrigger class="w-32">
+          <SelectTrigger class="w-full">
             <SelectValue placeholder="Chart Type" />
           </SelectTrigger>
           <SelectContent>
@@ -565,7 +622,7 @@ const chartOptions = computed<EChartsOption>(() => {
           </SelectContent>
         </Select>
         <Select v-model="selectedMetric">
-          <SelectTrigger class="w-48">
+          <SelectTrigger class="w-full">
             <SelectValue placeholder="Metric" />
           </SelectTrigger>
           <SelectContent>
@@ -578,7 +635,7 @@ const chartOptions = computed<EChartsOption>(() => {
           </SelectContent>
         </Select>
         <Select v-model="timeRange">
-          <SelectTrigger class="w-48">
+          <SelectTrigger class="w-full">
             <SelectValue placeholder="Time Range" />
           </SelectTrigger>
           <SelectContent>
@@ -594,6 +651,7 @@ const chartOptions = computed<EChartsOption>(() => {
           @click="fetchUsageStats"
           variant="outline"
           size="sm"
+          class="w-full sm:w-auto xl:min-w-28"
           :disabled="isLoading"
         >
           {{ t("common.refresh") }}
@@ -601,19 +659,21 @@ const chartOptions = computed<EChartsOption>(() => {
       </div>
     </div>
 
-    <div v-if="isLoading" class="flex justify-center items-center h-[400px]">
-      <p>{{ t("loading") }}</p>
+    <div v-if="isLoading" class="flex items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50/70" :style="{ height: `${chartHeight}px` }">
+      <p class="text-sm text-gray-500">{{ t("loading") }}</p>
     </div>
-    <div v-else-if="error" class="text-red-500">
+    <div v-else-if="error" class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-500">
       <p>{{ t("dashboard.errorLoading", { error: error }) }}</p>
     </div>
-    <div v-else-if="usageData">
-      <ECharts :option="chartOptions" style="height: 400px" />
-      <div v-if="sortedModelSum.length > 0" class="mt-4">
-        <h3 class="text-lg font-semibold text-gray-700 mb-2">
+    <div v-else-if="usageData" class="app-stack-md">
+      <div class="rounded-lg border border-gray-200 bg-gray-50/30 p-2 sm:p-3">
+        <ECharts :option="chartOptions" :style="{ height: `${chartHeight}px` }" />
+      </div>
+      <div v-if="sortedModelSum.length > 0" class="app-stack-sm">
+        <h3 class="text-base font-semibold text-gray-900 sm:text-lg">
           {{ t("dashboard.usageStats.summary.title") }}
         </h3>
-        <div class="max-h-60 overflow-y-auto border border-gray-200 rounded-md">
+        <div class="max-h-72 overflow-y-auto rounded-lg border border-gray-200">
           <Table>
             <TableHeader class="bg-gray-50 sticky top-0 z-10">
               <TableRow>

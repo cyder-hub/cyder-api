@@ -1,8 +1,8 @@
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-1">
-      <h4 class="text-sm font-medium text-gray-700 py-1">{{ title }}</h4>
-      <div class="flex items-center gap-2">
+  <div class="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
+    <div class="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <h4 class="py-1 text-sm font-medium text-gray-700">{{ title }}</h4>
+      <div class="flex flex-wrap items-center gap-2">
         <slot name="action"></slot>
         <Button
           v-if="displayContent.type !== 'empty'"
@@ -18,8 +18,11 @@
         </Button>
       </div>
     </div>
-    <div v-if="displayContent.type !== 'empty'" class="mt-1 overflow-auto rounded-md border bg-gray-50 p-2 text-[10px] max-h-[30rem]">
-      <pre class="whitespace-pre font-mono">{{ displayContent.content }}</pre>
+    <div
+      v-if="displayContent.type !== 'empty'"
+      class="mt-1 max-h-[26rem] overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3 text-[11px] sm:max-h-[30rem]"
+    >
+      <pre class="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-gray-700">{{ displayContent.content }}</pre>
     </div>
   </div>
 </template>

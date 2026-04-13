@@ -7,44 +7,57 @@ withDefaults(
     error?: string | null;
     empty?: boolean;
     headerClass?: string;
+    pageClass?: string;
+    shellClass?: string;
+    contentClass?: string;
   }>(),
   {
     description: "",
     loading: false,
     error: null,
     empty: false,
-    headerClass: "flex justify-between items-start gap-4",
+    headerClass:
+      "flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between",
+    pageClass: "",
+    shellClass: "",
+    contentClass: "",
   },
 );
 </script>
 
 <template>
-  <div class="p-6 space-y-6">
-    <div :class="headerClass">
-      <div>
-        <h1 class="text-lg font-semibold text-gray-900 tracking-tight">
-          {{ title }}
-        </h1>
-        <p v-if="description" class="mt-1 text-sm text-gray-500">
-          {{ description }}
-        </p>
+  <div class="app-page" :class="pageClass">
+    <div class="app-page-shell" :class="shellClass">
+      <div :class="headerClass">
+        <div class="min-w-0">
+          <h1 class="text-lg font-semibold text-gray-900 tracking-tight sm:text-xl">
+            {{ title }}
+          </h1>
+          <p v-if="description" class="mt-1 text-sm text-gray-500">
+            {{ description }}
+          </p>
+        </div>
+        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <slot name="actions" />
+        </div>
       </div>
-      <slot name="actions" />
+
+      <div class="app-section" :class="contentClass">
+        <template v-if="loading">
+          <slot name="loading" />
+        </template>
+        <template v-else-if="error">
+          <slot name="error" :error="error" />
+        </template>
+        <template v-else-if="empty">
+          <slot name="empty" />
+        </template>
+        <template v-else>
+          <slot />
+        </template>
+      </div>
+
+      <slot name="modals" />
     </div>
-
-    <template v-if="loading">
-      <slot name="loading" />
-    </template>
-    <template v-else-if="error">
-      <slot name="error" :error="error" />
-    </template>
-    <template v-else-if="empty">
-      <slot name="empty" />
-    </template>
-    <template v-else>
-      <slot />
-    </template>
-
-    <slot name="modals" />
   </div>
 </template>

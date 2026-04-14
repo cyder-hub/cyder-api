@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { Copy, Edit, RefreshCw, Sparkles } from "lucide-vue-next";
-import { Badge } from "@/components/ui/badge";
+import { Copy, Edit, Plus, RefreshCw, Sparkles } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,7 +13,6 @@ import type {
   CostComponent,
   CostPreviewResponse,
 } from "@/store/types";
-import CostPreviewSection from "./CostPreviewSection.vue";
 import CostVersionSection from "./CostVersionSection.vue";
 import type { PreviewDraft } from "./types";
 
@@ -27,7 +25,10 @@ defineProps<{
   components: CostComponent[];
   isLoadingVersionDetail: boolean;
   togglingVersionId: number | null;
+  managingVersionId: number | null;
+  duplicatingVersionId: number | null;
   duplicatingCatalogId: number | null;
+  showArchivedVersions: boolean;
   previewDraft: PreviewDraft;
   previewResponse: CostPreviewResponse | null;
   canPreview: boolean;
@@ -55,19 +56,28 @@ const emit = defineEmits<{
   (e: "create-version"): void;
   (e: "select-version", versionId: number): void;
   (e: "toggle-version-enabled", version: CostCatalogVersion): void;
+  (e: "archive-version", version: CostCatalogVersion): void;
+  (e: "unarchive-version", version: CostCatalogVersion): void;
+  (e: "delete-version", version: CostCatalogVersion): void;
+  (e: "toggle-archived-visibility"): void;
+  (e: "duplicate-version", version: CostCatalogVersion): void;
   (e: "create-component"): void;
   (e: "edit-component", component: CostComponent): void;
   (e: "delete-component", component: CostComponent): void;
   (e: "apply-sample"): void;
+  (e: "reset-preview"): void;
   (e: "run-preview"): void;
 }>();
+
 </script>
 
 <template>
   <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-6xl">
+    <DialogContent
+      class="flex max-h-[94dvh] w-[calc(100vw-1.5rem)] max-w-[96vw] flex-col overflow-hidden p-0 xl:max-w-7xl"
+    >
       <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
-        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div class="min-w-0">
             <DialogTitle class="text-lg font-semibold text-gray-900">
               {{ selectedCatalog?.catalog.name || $t("costPage.editor.title") }}
@@ -79,7 +89,7 @@ const emit = defineEmits<{
               }}
             </p>
           </div>
-          <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap">
+          <div class="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 xl:w-auto xl:grid-cols-4">
             <Button variant="outline" @click="emit('open-template')">
               <Sparkles class="mr-1.5 h-4 w-4" />
               {{ $t("costPage.templates.title") }}
@@ -109,46 +119,16 @@ const emit = defineEmits<{
                   : $t("costPage.catalogs.duplicate")
               }}
             </Button>
+            <Button v-if="selectedCatalog" @click="emit('create-version')">
+              <Plus class="mr-1.5 h-4 w-4" />
+              {{ $t("costPage.versions.add") }}
+            </Button>
           </div>
         </div>
       </DialogHeader>
 
-      <div class="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-        <div v-if="selectedCatalog" class="space-y-6">
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div class="rounded-xl border border-gray-200 bg-gray-50/60 px-4 py-3">
-              <div class="text-xs text-gray-500">{{ $t("costPage.catalogs.versionCount") }}</div>
-              <div class="mt-1 text-lg font-semibold text-gray-900">
-                {{ selectedCatalogVersions.length }}
-              </div>
-            </div>
-            <div class="rounded-xl border border-gray-200 bg-gray-50/60 px-4 py-3">
-              <div class="text-xs text-gray-500">{{ $t("costPage.catalogs.latestVersion") }}</div>
-              <div class="mt-1 text-lg font-semibold text-gray-900">
-                {{ selectedCatalogVersions[0]?.version || "-" }}
-              </div>
-            </div>
-            <div class="rounded-xl border border-gray-200 bg-gray-50/60 px-4 py-3">
-              <div class="text-xs text-gray-500">{{ $t("costPage.editor.currentVersion") }}</div>
-              <div class="mt-1 flex items-center gap-2">
-                <span class="text-lg font-semibold text-gray-900">
-                  {{ selectedVersionSummary?.version || "-" }}
-                </span>
-                <Badge
-                  v-if="selectedVersionSummary"
-                  :variant="selectedVersionSummary.is_enabled ? 'secondary' : 'outline'"
-                  class="text-[11px]"
-                >
-                  {{
-                    selectedVersionSummary.is_enabled
-                      ? $t("costPage.state.enabled")
-                      : $t("costPage.state.disabled")
-                  }}
-                </Badge>
-              </div>
-            </div>
-          </div>
-
+      <div class="flex min-h-0 flex-1 flex-col px-4 py-4 sm:px-6">
+        <div v-if="selectedCatalog" class="flex min-h-0 flex-1 flex-col">
           <CostVersionSection
             embedded
             :selected-catalog="selectedCatalog"
@@ -158,32 +138,33 @@ const emit = defineEmits<{
             :components="components"
             :is-loading-version-detail="isLoadingVersionDetail"
             :toggling-version-id="togglingVersionId"
+            :managing-version-id="managingVersionId"
+            :duplicating-version-id="duplicatingVersionId"
+            :show-archived-versions="showArchivedVersions"
             :meter-label="meterLabel"
             :charge-kind-label="chargeKindLabel"
             :tier-basis-label="tierBasisLabel"
             :format-rate-display="formatRateDisplay"
             :try-format-rate-input-display="tryFormatRateInputDisplay"
-            :pretty-json="prettyJson"
-            @create-version="emit('create-version')"
-            @select-version="(versionId) => emit('select-version', versionId)"
-            @toggle-version-enabled="(version) => emit('toggle-version-enabled', version)"
-            @create-component="emit('create-component')"
-            @edit-component="(component) => emit('edit-component', component)"
-            @delete-component="(component) => emit('delete-component', component)"
-          />
-
-          <CostPreviewSection
-            embedded
-            :selected-version-summary="selectedVersionSummary"
             :preview-draft="previewDraft"
             :preview-response="previewResponse"
             :can-preview="canPreview"
             :is-running-preview="isRunningPreview"
-            :meter-label="meterLabel"
-            :charge-kind-label="chargeKindLabel"
-            :format-rate-display="formatRateDisplay"
             :format-number="formatNumber"
+            :pretty-json="prettyJson"
+            @create-version="emit('create-version')"
+            @select-version="(versionId) => emit('select-version', versionId)"
+            @toggle-version-enabled="(version) => emit('toggle-version-enabled', version)"
+            @archive-version="(version) => emit('archive-version', version)"
+            @unarchive-version="(version) => emit('unarchive-version', version)"
+            @delete-version="(version) => emit('delete-version', version)"
+            @toggle-archived-visibility="emit('toggle-archived-visibility')"
+            @duplicate-version="(version) => emit('duplicate-version', version)"
+            @create-component="emit('create-component')"
+            @edit-component="(component) => emit('edit-component', component)"
+            @delete-component="(component) => emit('delete-component', component)"
             @apply-sample="emit('apply-sample')"
+            @reset-preview="emit('reset-preview')"
             @run-preview="emit('run-preview')"
           />
         </div>

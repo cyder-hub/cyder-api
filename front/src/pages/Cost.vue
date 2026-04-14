@@ -27,7 +27,10 @@ const {
   isLoadingTemplates,
   importingTemplateKey,
   togglingVersionId,
+  managingVersionId,
+  duplicatingVersionId,
   duplicatingCatalogId,
+  showArchivedVersions,
   catalogDraft,
   versionDraft,
   componentDraft,
@@ -46,8 +49,13 @@ const {
   saveCatalog,
   handleDeleteCatalog,
   openCreateVersionDialog,
+  duplicateVersion,
   saveVersion,
   handleToggleVersionEnabled,
+  handleArchiveVersion,
+  handleUnarchiveVersion,
+  handleDeleteVersion,
+  toggleArchivedVersions,
   openCreateComponentDialog,
   openEditComponentDialog,
   addTier,
@@ -55,6 +63,7 @@ const {
   saveComponent,
   handleDeleteComponent,
   applyPreviewSample,
+  resetPreview,
   runPreview,
   meterLabel,
   chargeKindLabel,
@@ -82,7 +91,6 @@ const {
         @create-catalog="openCreateCatalogDialog(true)"
         @open-catalog="openCatalogWorkspace"
         @duplicate-catalog="duplicateCatalog"
-        @edit-catalog="openEditCatalogDialog"
         @delete-catalog="handleDeleteCatalog"
       />
     </div>
@@ -97,7 +105,10 @@ const {
     :components="components"
     :is-loading-version-detail="costStore.isLoadingVersionDetail"
     :toggling-version-id="togglingVersionId"
+    :managing-version-id="managingVersionId"
+    :duplicating-version-id="duplicatingVersionId"
     :duplicating-catalog-id="duplicatingCatalogId"
+    :show-archived-versions="showArchivedVersions"
     :preview-draft="previewDraft"
     :preview-response="previewResponse"
     :can-preview="canPreview"
@@ -117,10 +128,16 @@ const {
     @create-version="openCreateVersionDialog"
     @select-version="handleSelectVersion"
     @toggle-version-enabled="handleToggleVersionEnabled"
+    @archive-version="handleArchiveVersion"
+    @unarchive-version="handleUnarchiveVersion"
+    @delete-version="handleDeleteVersion"
+    @toggle-archived-visibility="toggleArchivedVersions"
+    @duplicate-version="duplicateVersion"
     @create-component="openCreateComponentDialog"
     @edit-component="openEditComponentDialog"
     @delete-component="handleDeleteComponent"
     @apply-sample="applyPreviewSample"
+    @reset-preview="resetPreview"
     @run-preview="runPreview"
   />
 

@@ -18,10 +18,10 @@ use crate::{
     database::{
         DbResult,
         cost::{
-            CostCatalog, CostCatalogVersion, CostComponent, ImportedCostCatalogTemplate,
-            NewCostCatalogPayload, NewCostCatalogVersionPayload, NewCostComponentPayload,
-            UpdateCostCatalogData, UpdateCostCatalogVersionData, UpdateCostComponentData,
-            EnabledVersionResolution, import_cost_catalog_template,
+            CostCatalog, CostCatalogVersion, CostComponent, EnabledVersionResolution,
+            ImportedCostCatalogTemplate, NewCostCatalogPayload, NewCostCatalogVersionPayload,
+            NewCostComponentPayload, UpdateCostCatalogData, UpdateCostCatalogVersionData,
+            UpdateCostComponentData, import_cost_catalog_template,
             reconcile_enabled_version_conflicts,
         },
     },
@@ -43,15 +43,6 @@ struct CreateCostCatalogVersionRequest {
     effective_from: i64,
     effective_until: Option<i64>,
     is_enabled: bool,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct UpdateCostCatalogVersionRequest {
-    currency: Option<String>,
-    source: Option<Option<String>>,
-    effective_from: Option<i64>,
-    effective_until: Option<Option<i64>>,
-    is_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -78,6 +69,11 @@ struct CostPreviewRequest {
 struct ImportCostTemplateRequest {
     template_key: String,
     catalog_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DuplicateCostCatalogVersionRequest {
+    version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,37 +192,29 @@ async fn get_version(Path(id): Path<i64>) -> DbResult<HttpResult<CostCatalogVers
     }))
 }
 
-async fn update_version(
+async fn delete_version(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-    Json(payload): Json<UpdateCostCatalogVersionRequest>,
+) -> DbResult<HttpResult<()>> {
+    let version = CostCatalogVersion::get_by_id(id)?;
+    validate_version_can_delete(&version)?;
+
+    CostCatalogVersion::delete(id)?;
+    invalidate_cost_catalog_version_cache(&app_state, id).await;
+    Ok(HttpResult::new(()))
+}
+
+async fn enable_version(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
 ) -> DbResult<HttpResult<CostCatalogVersion>> {
     let original = CostCatalogVersion::get_by_id(id)?;
-    let next_payload = CreateCostCatalogVersionRequest {
-        version: original.version.clone(),
-        currency: payload
-            .currency
-            .clone()
-            .unwrap_or_else(|| original.currency.clone()),
-        source: payload
-            .source
-            .clone()
-            .unwrap_or_else(|| original.source.clone()),
-        effective_from: payload.effective_from.unwrap_or(original.effective_from),
-        effective_until: payload.effective_until.unwrap_or(original.effective_until),
-        is_enabled: payload.is_enabled.unwrap_or(original.is_enabled),
-    };
-
-    validate_catalog_version_request_fields(&next_payload)?;
-
+    validate_version_can_enable(&original)?;
     let updated = CostCatalogVersion::update(
         id,
         &UpdateCostCatalogVersionData {
-            currency: payload.currency,
-            source: payload.source,
-            effective_from: payload.effective_from,
-            effective_until: payload.effective_until,
-            is_enabled: payload.is_enabled,
+            is_enabled: Some(true),
+            ..Default::default()
         },
     )?;
 
@@ -240,6 +228,84 @@ async fn update_version(
     }
     invalidate_cost_catalog_version_cache(&app_state, id).await;
     Ok(HttpResult::new(updated))
+}
+
+async fn disable_version(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> DbResult<HttpResult<CostCatalogVersion>> {
+    let original = CostCatalogVersion::get_by_id(id)?;
+    validate_version_can_disable(&original)?;
+
+    let updated = CostCatalogVersion::update(
+        id,
+        &UpdateCostCatalogVersionData {
+            is_enabled: Some(false),
+            ..Default::default()
+        },
+    )?;
+
+    invalidate_cost_catalog_version_cache(&app_state, id).await;
+    Ok(HttpResult::new(updated))
+}
+
+async fn archive_version(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> DbResult<HttpResult<CostCatalogVersion>> {
+    let original = CostCatalogVersion::get_by_id(id)?;
+    validate_version_can_archive(&original)?;
+
+    let updated = CostCatalogVersion::update(
+        id,
+        &UpdateCostCatalogVersionData {
+            is_archived: Some(true),
+            ..Default::default()
+        },
+    )?;
+
+    invalidate_cost_catalog_version_cache(&app_state, id).await;
+    Ok(HttpResult::new(updated))
+}
+
+async fn unarchive_version(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> DbResult<HttpResult<CostCatalogVersion>> {
+    let original = CostCatalogVersion::get_by_id(id)?;
+    validate_version_can_unarchive(&original)?;
+
+    let updated = CostCatalogVersion::update(
+        id,
+        &UpdateCostCatalogVersionData {
+            is_archived: Some(false),
+            is_enabled: Some(false),
+            ..Default::default()
+        },
+    )?;
+
+    invalidate_cost_catalog_version_cache(&app_state, id).await;
+    Ok(HttpResult::new(updated))
+}
+
+async fn duplicate_version(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<DuplicateCostCatalogVersionRequest>,
+) -> DbResult<HttpResult<CostCatalogVersion>> {
+    let requested_version = payload.version.as_deref().map(str::trim);
+
+    if let Some(version) = requested_version
+        && version.trim().is_empty()
+    {
+        return Err(BaseError::ParamInvalid(Some(
+            "version cannot be empty when provided".to_string(),
+        )));
+    }
+
+    let duplicated = CostCatalogVersion::duplicate_as_draft(id, requested_version)?;
+    invalidate_cost_catalog_version_cache(&app_state, duplicated.id).await;
+    Ok(HttpResult::new(duplicated))
 }
 
 async fn create_component(
@@ -561,13 +627,104 @@ fn disable_other_enabled_versions(
 
 fn ensure_mutable_version(catalog_version_id: i64) -> Result<CostCatalogVersion, BaseError> {
     let version = CostCatalogVersion::get_by_id(catalog_version_id)?;
-    if version.is_enabled {
+    validate_version_is_mutable(&version)?;
+    Ok(version)
+}
+
+fn validate_version_is_mutable(version: &CostCatalogVersion) -> Result<(), BaseError> {
+    if version.is_archived {
         return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is already enabled and cannot be modified",
-            catalog_version_id
+            "Cost catalog version {} is archived and cannot be modified",
+            version.id
         ))));
     }
-    Ok(version)
+    if version.is_frozen() {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} has already been used by request logs and is read-only",
+            version.id
+        ))));
+    }
+    Ok(())
+}
+
+fn validate_version_can_enable(version: &CostCatalogVersion) -> Result<(), BaseError> {
+    if version.is_archived {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} is archived and cannot be enabled",
+            version.id
+        ))));
+    }
+    if version.is_enabled {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} is already enabled",
+            version.id
+        ))));
+    }
+    Ok(())
+}
+
+fn validate_version_can_disable(version: &CostCatalogVersion) -> Result<(), BaseError> {
+    if version.is_archived {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} is archived and cannot be disabled",
+            version.id
+        ))));
+    }
+    if !version.is_enabled {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} is already disabled",
+            version.id
+        ))));
+    }
+    Ok(())
+}
+
+fn validate_version_can_archive(version: &CostCatalogVersion) -> Result<(), BaseError> {
+    if !version.can_be_archived() {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} can only be archived after it is frozen and disabled",
+            version.id
+        ))));
+    }
+    Ok(())
+}
+
+fn validate_version_can_unarchive(version: &CostCatalogVersion) -> Result<(), BaseError> {
+    if !version.is_archived {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} is not archived",
+            version.id
+        ))));
+    }
+    if !version.is_frozen() {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} must remain frozen when unarchived",
+            version.id
+        ))));
+    }
+    Ok(())
+}
+
+fn validate_version_can_delete(version: &CostCatalogVersion) -> Result<(), BaseError> {
+    if version.is_archived {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} is archived and cannot be deleted",
+            version.id
+        ))));
+    }
+    if version.is_enabled {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} is enabled and cannot be deleted",
+            version.id
+        ))));
+    }
+    if version.is_frozen() {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Cost catalog version {} has already been used by request logs and cannot be deleted",
+            version.id
+        ))));
+    }
+    Ok(())
 }
 
 fn validate_component_payload(
@@ -618,7 +775,12 @@ pub fn create_cost_router() -> StateRouter {
             .route("/catalog/list", get(list_catalogs))
             .route("/catalog/{id}", put(update_catalog).delete(delete_catalog))
             .route("/catalog/{id}/version", post(create_catalog_version))
-            .route("/version/{id}", get(get_version).put(update_version))
+            .route("/version/{id}", get(get_version).delete(delete_version))
+            .route("/version/{id}/enable", post(enable_version))
+            .route("/version/{id}/disable", post(disable_version))
+            .route("/version/{id}/archive", post(archive_version))
+            .route("/version/{id}/unarchive", post(unarchive_version))
+            .route("/version/{id}/duplicate", post(duplicate_version))
             .route("/component", post(create_component))
             .route(
                 "/component/{id}",
@@ -631,9 +793,33 @@ pub fn create_cost_router() -> StateRouter {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateCostCatalogVersionRequest, create_cost_router, intervals_overlap,
-        validate_new_catalog_version,
+        CreateCostCatalogVersionRequest, DuplicateCostCatalogVersionRequest, create_cost_router,
+        intervals_overlap, validate_new_catalog_version, validate_version_can_archive,
+        validate_version_can_delete, validate_version_can_disable, validate_version_can_enable,
+        validate_version_can_unarchive, validate_version_is_mutable,
     };
+    use crate::database::cost::CostCatalogVersion;
+
+    fn version_for_mutability_tests(
+        id: i64,
+        first_used_at: Option<i64>,
+        is_archived: bool,
+    ) -> CostCatalogVersion {
+        CostCatalogVersion {
+            id,
+            catalog_id: 1,
+            version: format!("v{}", id),
+            currency: "USD".to_string(),
+            source: None,
+            effective_from: 0,
+            effective_until: None,
+            first_used_at,
+            is_archived,
+            is_enabled: false,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
 
     #[test]
     fn create_cost_router_registers_routes() {
@@ -665,6 +851,156 @@ mod tests {
             err,
             crate::controller::BaseError::ParamInvalid(Some(message))
                 if message.contains("version cannot be empty")
+        ));
+    }
+
+    #[test]
+    fn mutable_version_validation_rejects_frozen_versions() {
+        let err = validate_version_is_mutable(&version_for_mutability_tests(1, Some(100), false))
+            .expect_err("frozen version should be read-only");
+
+        assert!(matches!(
+            err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("read-only")
+        ));
+    }
+
+    #[test]
+    fn mutable_version_validation_rejects_archived_versions() {
+        let err = validate_version_is_mutable(&version_for_mutability_tests(1, None, true))
+            .expect_err("archived version should be read-only");
+
+        assert!(matches!(
+            err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("archived")
+        ));
+    }
+
+    #[test]
+    fn enable_validation_rejects_archived_versions() {
+        let mut version = version_for_mutability_tests(1, None, true);
+        version.is_enabled = false;
+        let err =
+            validate_version_can_enable(&version).expect_err("archived version cannot be enabled");
+
+        assert!(matches!(
+            err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("archived")
+        ));
+    }
+
+    #[test]
+    fn disable_validation_rejects_disabled_versions() {
+        let version = version_for_mutability_tests(1, None, false);
+        let err =
+            validate_version_can_disable(&version).expect_err("disabled version cannot disable");
+
+        assert!(matches!(
+            err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("already disabled")
+        ));
+    }
+
+    #[test]
+    fn archive_validation_requires_frozen_disabled_version() {
+        let err = validate_version_can_archive(&version_for_mutability_tests(1, Some(100), false))
+            .expect("frozen disabled version should archive");
+        assert_eq!(err, ());
+
+        let mut enabled_version = version_for_mutability_tests(2, Some(100), false);
+        enabled_version.is_enabled = true;
+        let archive_err = validate_version_can_archive(&enabled_version)
+            .expect_err("enabled version cannot archive");
+
+        assert!(matches!(
+            archive_err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("frozen and disabled")
+        ));
+    }
+
+    #[test]
+    fn unarchive_validation_requires_archived_frozen_version() {
+        let err = validate_version_can_unarchive(&version_for_mutability_tests(1, Some(100), true))
+            .expect("archived frozen version should unarchive");
+        assert_eq!(err, ());
+
+        let not_archived = version_for_mutability_tests(2, Some(100), false);
+        let unarchive_err = validate_version_can_unarchive(&not_archived)
+            .expect_err("non-archived version cannot unarchive");
+
+        assert!(matches!(
+            unarchive_err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("not archived")
+        ));
+    }
+
+    #[test]
+    fn delete_validation_allows_only_draft_versions() {
+        validate_version_can_delete(&version_for_mutability_tests(1, None, false))
+            .expect("draft version should be deletable");
+
+        let mut enabled = version_for_mutability_tests(2, None, false);
+        enabled.is_enabled = true;
+        let enabled_err =
+            validate_version_can_delete(&enabled).expect_err("enabled version cannot be deleted");
+        assert!(matches!(
+            enabled_err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("enabled")
+        ));
+
+        let frozen = version_for_mutability_tests(3, Some(100), false);
+        let frozen_err =
+            validate_version_can_delete(&frozen).expect_err("frozen version cannot be deleted");
+        assert!(matches!(
+            frozen_err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("request logs")
+        ));
+
+        let archived = version_for_mutability_tests(4, Some(100), true);
+        let archived_err =
+            validate_version_can_delete(&archived).expect_err("archived version cannot be deleted");
+        assert!(matches!(
+            archived_err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("archived")
+        ));
+    }
+
+    #[test]
+    fn duplicate_version_request_allows_missing_name_override() {
+        let payload = DuplicateCostCatalogVersionRequest::default();
+        assert!(payload.version.is_none());
+    }
+
+    #[test]
+    fn duplicate_version_request_rejects_blank_name_override() {
+        let payload = DuplicateCostCatalogVersionRequest {
+            version: Some("   ".to_string()),
+        };
+
+        let err = if let Some(version) = payload.version.as_deref()
+            && version.trim().is_empty()
+        {
+            Err(crate::controller::BaseError::ParamInvalid(Some(
+                "version cannot be empty when provided".to_string(),
+            )))
+        } else {
+            Ok(())
+        }
+        .expect_err("blank override should fail");
+
+        assert!(matches!(
+            err,
+            crate::controller::BaseError::ParamInvalid(Some(message))
+                if message.contains("cannot be empty")
         ));
     }
 }

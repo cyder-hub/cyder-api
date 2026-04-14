@@ -193,11 +193,26 @@ export const Api = {
   ): Promise<CostCatalogVersion> {
     return request.post(`/ai/manager/api/cost/catalog/${catalogId}/version`, payload);
   },
-  updateCostCatalogVersion(
+  enableCostCatalogVersion(id: number): Promise<CostCatalogVersion> {
+    return request.post(`/ai/manager/api/cost/version/${id}/enable`, {});
+  },
+  disableCostCatalogVersion(id: number): Promise<CostCatalogVersion> {
+    return request.post(`/ai/manager/api/cost/version/${id}/disable`, {});
+  },
+  archiveCostCatalogVersion(id: number): Promise<CostCatalogVersion> {
+    return request.post(`/ai/manager/api/cost/version/${id}/archive`, {});
+  },
+  unarchiveCostCatalogVersion(id: number): Promise<CostCatalogVersion> {
+    return request.post(`/ai/manager/api/cost/version/${id}/unarchive`, {});
+  },
+  duplicateCostCatalogVersion(
     id: number,
-    payload: Partial<CostCatalogVersionPayload>,
+    payload?: { version?: string | null },
   ): Promise<CostCatalogVersion> {
-    return request.put(`/ai/manager/api/cost/version/${id}`, payload);
+    return request.post(`/ai/manager/api/cost/version/${id}/duplicate`, payload ?? {});
+  },
+  deleteCostCatalogVersion(id: number): Promise<void> {
+    return request.delete(`/ai/manager/api/cost/version/${id}`);
   },
   getCostCatalogVersion(id: number): Promise<CostCatalogVersionDetail> {
     return request.get(`/ai/manager/api/cost/version/${id}`);

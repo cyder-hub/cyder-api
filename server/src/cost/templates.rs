@@ -80,8 +80,8 @@ enum YamlTemplateComponentEntry {
 struct YamlTemplateComponentDefinition {
     meter_key: String,
     charge_kind: Option<String>,
-    unit_price_nanos: Option<i64>,
-    flat_fee_nanos: Option<i64>,
+    unit_price_nanos: Option<YamlValue>,
+    flat_fee_nanos: Option<YamlValue>,
     #[serde(default, alias = "tier_config_json")]
     tier_config: Option<YamlValue>,
     #[serde(default, alias = "match_attributes_json")]
@@ -98,11 +98,10 @@ struct ShortYamlTemplateComponentDefinition(
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum YamlTemplateComponentShortValue {
-    UnitPrice(i64),
     Detailed {
         charge_kind: Option<String>,
-        unit_price_nanos: Option<i64>,
-        flat_fee_nanos: Option<i64>,
+        unit_price_nanos: Option<YamlValue>,
+        flat_fee_nanos: Option<YamlValue>,
         #[serde(default, alias = "tier_config_json")]
         tier_config: Option<YamlValue>,
         #[serde(default, alias = "match_attributes_json")]
@@ -110,6 +109,7 @@ enum YamlTemplateComponentShortValue {
         priority: Option<i32>,
         description: Option<String>,
     },
+    UnitPrice(YamlValue),
 }
 
 #[derive(Debug, Clone)]
@@ -231,8 +231,8 @@ fn resolve_template_metadata(now: DateTime<Utc>) -> ResolvedTemplateMetadata {
 fn infer_charge_kind(component: &YamlTemplateComponentDefinition) -> Result<String, String> {
     match (
         component.charge_kind.as_deref(),
-        component.unit_price_nanos,
-        component.flat_fee_nanos,
+        component.unit_price_nanos.as_ref(),
+        component.flat_fee_nanos.as_ref(),
     ) {
         (Some(charge_kind), _, _) => Ok(charge_kind.to_string()),
         (None, Some(_), None) => Ok("per_unit".to_string()),
@@ -288,17 +288,172 @@ fn yaml_value_to_json_string(
         .map(|value| value.flatten())
 }
 
+fn currency_minor_unit_digits(currency: &str) -> u32 {
+    match currency.to_uppercase().as_str() {
+        "BHD" | "JOD" | "KWD" | "OMR" | "TND" => 3,
+        "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW" | "PYG" | "RWF" | "UGX" | "VND"
+        | "VUV" | "XAF" | "XOF" | "XPF" => 0,
+        _ => 2,
+    }
+}
+
+fn is_per_million_meter(meter_key: &str) -> bool {
+    meter_key.starts_with("llm.")
+}
+
+fn price_scale_digits(currency: &str) -> u32 {
+    currency_minor_unit_digits(currency) + 9
+}
+
+fn rate_scale_digits(currency: &str) -> u32 {
+    currency_minor_unit_digits(currency) + 3
+}
+
+fn yaml_scalar_to_string(field_name: &str, value: &YamlValue) -> Result<String, String> {
+    match value {
+        YamlValue::Number(number) => Ok(number.to_string()),
+        YamlValue::String(raw) => Ok(raw.trim().to_string()),
+        YamlValue::Null => Err(format!("{} cannot be null", field_name)),
+        _ => Err(format!(
+            "{} must be a numeric scalar or stringified decimal",
+            field_name
+        )),
+    }
+}
+
+fn parse_decimal_to_scaled_i64(
+    field_name: &str,
+    raw: &str,
+    scale_digits: u32,
+) -> Result<i64, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{} cannot be empty", field_name));
+    }
+
+    if trimmed.starts_with('-') {
+        return Err(format!("{} cannot be negative", field_name));
+    }
+
+    let (integer_part, fraction_part) = trimmed
+        .split_once('.')
+        .map_or((trimmed, ""), |(left, right)| (left, right));
+
+    if integer_part.is_empty() || !integer_part.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(format!("{} must be a decimal number", field_name));
+    }
+
+    if !fraction_part.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(format!("{} must be a decimal number", field_name));
+    }
+
+    if fraction_part.len() > scale_digits as usize {
+        return Err(format!(
+            "{} supports at most {} decimal places",
+            field_name, scale_digits
+        ));
+    }
+
+    let scale = 10_i64.pow(scale_digits);
+    let integer = integer_part
+        .parse::<i64>()
+        .map_err(|_| format!("{} is too large", field_name))?;
+    let fraction = if fraction_part.is_empty() {
+        0
+    } else {
+        fraction_part
+            .parse::<i64>()
+            .map_err(|_| format!("{} is too large", field_name))?
+            * 10_i64.pow(scale_digits - fraction_part.len() as u32)
+    };
+
+    integer
+        .checked_mul(scale)
+        .and_then(|value| value.checked_add(fraction))
+        .ok_or_else(|| format!("{} is too large", field_name))
+}
+
+fn convert_amount_to_nanos(
+    field_name: &str,
+    value: &YamlValue,
+    scale_digits: u32,
+) -> Result<i64, String> {
+    let raw = yaml_scalar_to_string(field_name, value)?;
+    parse_decimal_to_scaled_i64(field_name, &raw, scale_digits)
+}
+
+fn convert_unit_price_to_nanos(
+    field_name: &str,
+    value: &YamlValue,
+    meter_key: &str,
+    currency: &str,
+) -> Result<i64, String> {
+    let scale_digits = if is_per_million_meter(meter_key) {
+        rate_scale_digits(currency)
+    } else {
+        price_scale_digits(currency)
+    };
+    convert_amount_to_nanos(field_name, value, scale_digits)
+}
+
+fn convert_flat_fee_to_nanos(
+    field_name: &str,
+    value: &YamlValue,
+    currency: &str,
+) -> Result<i64, String> {
+    convert_amount_to_nanos(field_name, value, price_scale_digits(currency))
+}
+
+fn normalize_tier_config_prices(
+    value: YamlValue,
+    meter_key: &str,
+    currency: &str,
+) -> Result<YamlValue, String> {
+    match value {
+        YamlValue::Mapping(mapping) => {
+            let normalized = mapping
+                .into_iter()
+                .map(|(key, nested_value)| {
+                    let normalized_value = if matches!(&key, YamlValue::String(name) if name == "unit_price_nanos")
+                    {
+                        let nanos = convert_unit_price_to_nanos(
+                            "tier_config.unit_price_nanos",
+                            &nested_value,
+                            meter_key,
+                            currency,
+                        )?;
+                        Ok(YamlValue::Number(serde_yaml::Number::from(nanos)))
+                    } else {
+                        normalize_tier_config_prices(nested_value, meter_key, currency)
+                    }?;
+
+                    Ok((key, normalized_value))
+                })
+                .collect::<Result<serde_yaml::Mapping, String>>()?;
+            Ok(YamlValue::Mapping(normalized))
+        }
+        YamlValue::Sequence(sequence) => Ok(YamlValue::Sequence(
+            sequence
+                .into_iter()
+                .map(|item| normalize_tier_config_prices(item, meter_key, currency))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        other => Ok(other),
+    }
+}
+
 impl TryFrom<YamlCostTemplateDefinition> for CostTemplateDefinition {
     type Error = String;
 
     fn try_from(value: YamlCostTemplateDefinition) -> Result<Self, Self::Error> {
+        let currency = value.currency.clone();
         let components = value
             .components
             .into_iter()
             .enumerate()
             .map(|(index, component)| {
                 let component = normalize_component_entry(component)?;
-                TemplateComponentDefinition::try_from((index, component))
+                TemplateComponentDefinition::try_from((index, component, currency.as_str()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -399,11 +554,13 @@ fn resolve_meter_key_alias(value: &str) -> Result<String, String> {
     Ok(resolved.to_string())
 }
 
-impl TryFrom<(usize, YamlTemplateComponentDefinition)> for TemplateComponentDefinition {
+impl TryFrom<(usize, YamlTemplateComponentDefinition, &str)> for TemplateComponentDefinition {
     type Error = String;
 
-    fn try_from(value: (usize, YamlTemplateComponentDefinition)) -> Result<Self, Self::Error> {
-        let (index, component) = value;
+    fn try_from(
+        value: (usize, YamlTemplateComponentDefinition, &str),
+    ) -> Result<Self, Self::Error> {
+        let (index, component, currency) = value;
         let charge_kind = infer_charge_kind(&component)?;
         let priority = component
             .priority
@@ -413,11 +570,27 @@ impl TryFrom<(usize, YamlTemplateComponentDefinition)> for TemplateComponentDefi
             .clone()
             .unwrap_or_else(|| default_component_description(&component));
         let meter_key = component.meter_key.clone();
+        let unit_price_nanos = component
+            .unit_price_nanos
+            .as_ref()
+            .map(|value| {
+                convert_unit_price_to_nanos("unit_price_nanos", value, meter_key.as_str(), currency)
+            })
+            .transpose()?;
+        let flat_fee_nanos = component
+            .flat_fee_nanos
+            .as_ref()
+            .map(|value| convert_flat_fee_to_nanos("flat_fee_nanos", value, currency))
+            .transpose()?;
+        let tier_config = component
+            .tier_config
+            .map(|value| normalize_tier_config_prices(value, meter_key.as_str(), currency))
+            .transpose()?;
         Ok(Self {
             charge_kind,
-            unit_price_nanos: component.unit_price_nanos,
-            flat_fee_nanos: component.flat_fee_nanos,
-            tier_config_json: yaml_value_to_json_string("tier_config", component.tier_config)?,
+            unit_price_nanos,
+            flat_fee_nanos,
+            tier_config_json: yaml_value_to_json_string("tier_config", tier_config)?,
             match_attributes_json: yaml_value_to_json_string(
                 "match_attributes",
                 component.match_attributes,
@@ -444,11 +617,7 @@ mod tests {
                 .iter()
                 .any(|template| template.tags.iter().any(|tag| tag == "text"))
         );
-        assert!(
-            templates
-                .iter()
-                .all(|template| !template.tags.is_empty())
-        );
+        assert!(templates.iter().all(|template| !template.tags.is_empty()));
         assert!(
             templates
                 .iter()
@@ -497,15 +666,15 @@ templates:
     currency: USD
     source: https://example.com/pricing
     components:
-      - input_text: 42
+      - input_text: 2.5
       - request:
-          flat_fee_nanos: 0
+          flat_fee_nanos: 1.25
       - output_text:
           charge_kind: tiered_per_unit
           tier_config:
             tiers:
               - up_to: 1000
-                unit_price_nanos: 100
+                unit_price_nanos: 0.75
           match_attributes:
             model_family: demo
 "#,
@@ -516,15 +685,17 @@ templates:
         assert_eq!(components[0].charge_kind, "per_unit");
         assert_eq!(components[0].priority, 100);
         assert_eq!(components[0].meter_key, "llm.input_text_tokens");
+        assert_eq!(components[0].unit_price_nanos, Some(250000));
         assert_eq!(components[0].description, "Input text tokens");
         assert_eq!(components[1].charge_kind, "flat");
         assert_eq!(components[1].priority, 900);
         assert_eq!(components[1].meter_key, "invoke.request_calls");
+        assert_eq!(components[1].flat_fee_nanos, Some(125000000000));
         assert_eq!(components[1].description, "Per-request invocation baseline");
         assert_eq!(components[2].meter_key, "llm.output_text_tokens");
         assert_eq!(
             components[2].tier_config_json.as_deref(),
-            Some(r#"{"tiers":[{"up_to":1000,"unit_price_nanos":100}]}"#)
+            Some(r#"{"tiers":[{"up_to":1000,"unit_price_nanos":75000}]}"#)
         );
         assert_eq!(
             components[2].match_attributes_json.as_deref(),
@@ -550,5 +721,37 @@ templates:
         );
 
         assert_eq!(templates[0].components[0].meter_key, "llm.reasoning_tokens");
+        assert_eq!(templates[0].components[0].unit_price_nanos, Some(700000));
+    }
+
+    #[test]
+    fn tier_config_prices_are_converted_from_major_unit_decimals() {
+        let templates = parse_templates_document(
+            r#"
+templates:
+  - key: demo.template
+    title: Demo Template
+    catalog_name: Demo / Template
+    description: Demo template.
+    currency: CNY
+    source: https://example.com/pricing
+    components:
+      - meter_key: llm.cache_read_tokens
+        charge_kind: tiered_per_unit
+        tier_config:
+          basis: total_input_tokens
+          tiers:
+            - up_to: 32000
+              unit_price_nanos: 1.3
+            - unit_price_nanos: "2"
+"#,
+        );
+
+        assert_eq!(
+            templates[0].components[0].tier_config_json.as_deref(),
+            Some(
+                r#"{"basis":"total_input_tokens","tiers":[{"up_to":32000,"unit_price_nanos":130000},{"unit_price_nanos":200000}]}"#
+            )
+        );
     }
 }

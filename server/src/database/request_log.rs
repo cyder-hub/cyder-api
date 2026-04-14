@@ -92,14 +92,42 @@ impl RequestLog {
     pub fn insert(new_log_data: &RequestLog) -> DbResult<RequestLog> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
-            let inserted_log_db = diesel::insert_into(request_log::table)
-                .values(RequestLogDb::to_db(new_log_data))
-                .returning(RequestLogDb::as_returning())
-                .get_result::<RequestLogDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!("Failed to insert request log: {}", e)))
-                })?;
-            Ok(inserted_log_db.from_db())
+            conn.transaction::<RequestLog, BaseError, _>(|conn| {
+                let inserted_log_db = diesel::insert_into(request_log::table)
+                    .values(RequestLogDb::to_db(new_log_data))
+                    .returning(RequestLogDb::as_returning())
+                    .get_result::<RequestLogDb>(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to insert request log: {}",
+                            e
+                        )))
+                    })?;
+
+                if let Some(cost_catalog_version_id) = new_log_data.cost_catalog_version_id {
+                    diesel::update(
+                        cost_catalog_versions::table.filter(
+                            cost_catalog_versions::dsl::id
+                                .eq(cost_catalog_version_id)
+                                .and(cost_catalog_versions::dsl::first_used_at.is_null()),
+                        ),
+                    )
+                    .set((
+                        cost_catalog_versions::dsl::first_used_at
+                            .eq(Some(new_log_data.request_received_at)),
+                        cost_catalog_versions::dsl::updated_at.eq(new_log_data.updated_at),
+                    ))
+                    .execute(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to freeze cost catalog version {} after request log insert: {}",
+                            cost_catalog_version_id, e
+                        )))
+                    })?;
+                }
+
+                Ok(inserted_log_db.from_db())
+            })
         })
     }
 

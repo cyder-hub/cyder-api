@@ -269,6 +269,8 @@ export interface CostCatalogVersion {
   source: string | null;
   effective_from: number;
   effective_until: number | null;
+  first_used_at: number | null;
+  is_archived: boolean;
   is_enabled: boolean;
   created_at: number;
   updated_at: number;

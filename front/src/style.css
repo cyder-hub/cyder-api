@@ -47,7 +47,7 @@
   --app-page-x: 1rem;
   --app-page-y: 1rem;
   --app-section-gap: 1rem;
-  --app-content-max-width: 80rem;
+  --app-content-max-width: 112rem;
   --app-safe-top: env(safe-area-inset-top, 0px);
   --app-safe-right: env(safe-area-inset-right, 0px);
   --app-safe-bottom: env(safe-area-inset-bottom, 0px);

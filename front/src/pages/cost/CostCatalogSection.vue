@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Copy, Edit, Plus, Sparkles, Trash2 } from "lucide-vue-next";
+import { Copy, Plus, Sparkles, Trash2 } from "lucide-vue-next";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,10 +27,6 @@ const emit = defineEmits<{
   (e: "create-catalog"): void;
   (e: "open-catalog", catalogId: number): void;
   (e: "duplicate-catalog", catalog: CostCatalogListItem): void;
-  (
-    e: "edit-catalog",
-    catalog: { id: number; name: string; description: string | null },
-  ): void;
   (e: "delete-catalog", catalogId: number, name: string): void;
 }>();
 </script>
@@ -127,15 +123,6 @@ const emit = defineEmits<{
             <Button
               variant="ghost"
               size="sm"
-              class="w-full"
-              @click="emit('edit-catalog', item.catalog)"
-            >
-              <Edit class="mr-1 h-3.5 w-3.5" />
-              {{ $t("common.edit") }}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
               class="w-full text-gray-500 hover:text-red-600"
               @click="emit('delete-catalog', item.catalog.id, item.catalog.name)"
             >
@@ -168,18 +155,25 @@ const emit = defineEmits<{
               }"
               @click="emit('open-catalog', item.catalog.id)"
             >
-              <TableCell>{{ item.catalog.name }}</TableCell>
-              <TableCell>
-                {{ item.catalog.description || $t("costPage.catalogs.emptyDescription") }}
+              <TableCell class="align-top">
+                <div class="font-medium text-gray-900">
+                  {{ item.catalog.name }}
+                </div>
               </TableCell>
-              <TableCell>{{ item.versions.length }}</TableCell>
-              <TableCell class="font-mono text-sm">
+              <TableCell class="align-top">
+                <div class="max-w-[28rem] whitespace-normal break-words text-sm leading-6 text-gray-600">
+                  {{ item.catalog.description || $t("costPage.catalogs.emptyDescription") }}
+                </div>
+              </TableCell>
+              <TableCell class="w-20 align-top">{{ item.versions.length }}</TableCell>
+              <TableCell class="w-32 align-top font-mono text-sm">
                 {{ item.versions[0]?.version || "-" }}
               </TableCell>
-              <TableCell>
+              <TableCell class="w-40 align-top">
                 {{ formatTimestamp(item.versions[0]?.created_at) || "-" }}
               </TableCell>
-              <TableCell class="text-right">
+              <TableCell class="w-56 text-right align-top">
+                <div class="flex justify-end gap-1 whitespace-nowrap">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -196,10 +190,6 @@ const emit = defineEmits<{
                   <Copy class="mr-1 h-3.5 w-3.5" />
                   {{ $t("costPage.catalogs.duplicate") }}
                 </Button>
-                <Button variant="ghost" size="sm" @click.stop="emit('edit-catalog', item.catalog)">
-                  <Edit class="mr-1 h-3.5 w-3.5" />
-                  {{ $t("common.edit") }}
-                </Button>
                 <Button
                   variant="ghost"
                   size="sm"
@@ -209,6 +199,7 @@ const emit = defineEmits<{
                   <Trash2 class="mr-1 h-3.5 w-3.5" />
                   {{ $t("common.delete") }}
                 </Button>
+                </div>
               </TableCell>
             </TableRow>
             <TableRow v-if="catalogs.length === 0">

@@ -571,6 +571,15 @@ export const enDict = {
     confirmDisableVersion: "Disable catalog version '{version}'?",
     confirmDisableVersionDescription:
       "This is a dangerous operation. New requests will no longer match this catalog version.",
+    confirmArchiveVersion: "Archive catalog version '{version}'?",
+    confirmArchiveVersionDescription:
+      "Archived versions are hidden from the default list and cannot be enabled or edited directly.",
+    confirmUnarchiveVersion: "Restore archived version '{version}'?",
+    confirmUnarchiveVersionDescription:
+      "This returns the version to the frozen state and shows it in the main list again.",
+    confirmDeleteVersion: "Delete draft version '{version}'?",
+    confirmDeleteVersionDescription:
+      "Only unused disabled drafts can be deleted, and the action cannot be undone.",
     confirmDeleteComponent: "Delete component '{meter}'?",
     confirmDeleteComponentDescription:
       "This removes the component from the current catalog version immediately.",
@@ -594,9 +603,19 @@ export const enDict = {
       invalidDateTime: "Please enter a valid date and time.",
       invalidEffectiveRange: "Effective until must be later than effective from.",
       versionCreateSuccess: "Catalog version created successfully.",
+      versionDuplicateSuccess: "Catalog version '{version}' copied as a new draft.",
       versionEnableSuccess: "Catalog version enabled successfully.",
       versionDisableSuccess: "Catalog version disabled successfully.",
+      versionArchiveSuccess: "Catalog version archived successfully.",
+      versionUnarchiveSuccess:
+        "Catalog version restored to the frozen state.",
+      versionDeleteSuccess: "Draft version deleted successfully.",
       versionToggleFailed: "Failed to toggle catalog version status.",
+      versionArchiveFailed: "Failed to archive catalog version.",
+      versionUnarchiveFailed:
+        "Failed to restore the archived catalog version.",
+      versionDuplicateFailed: "Failed to copy catalog version.",
+      versionDeleteFailed: "Failed to delete draft version.",
       versionSaveFailed: "Failed to create catalog version.",
       invalidMatchAttributes:
         "Match attributes must be a valid JSON object.",
@@ -618,13 +637,23 @@ export const enDict = {
       previewFailed: "Failed to run cost preview.",
     },
     state: {
+      draft: "Draft",
+      active: "Active",
       enabled: "Enabled",
       disabled: "Disabled",
+      frozen: "Frozen",
+      archived: "Archived",
     },
     actions: {
       viewDetail: "View detail",
       enableVersion: "Enable version",
       disableVersion: "Disable version",
+      copyVersion: "Copy version",
+      archiveVersion: "Archive version",
+      unarchiveVersion: "Restore version",
+      deleteDraftVersion: "Delete draft",
+      showArchivedVersions: "Show archived ({count})",
+      hideArchivedVersions: "Hide archived",
     },
     templates: {
       title: "Built-in Templates",
@@ -682,6 +711,8 @@ export const enDict = {
       title: "Catalog Versions",
       add: "Publish Version",
       empty: "The selected cost catalog has no published versions yet.",
+      hiddenArchivedOnly:
+        "This catalog only has archived versions. Use the toggle above to inspect them.",
       publishedAt: "Published at",
       effectiveFrom: "Effective from",
       effectiveUntil: "Effective until",
@@ -707,6 +738,14 @@ export const enDict = {
       componentsTitle: "Cost Components",
       componentsDescription:
         "Components are matched by meter key and rated by charge kind.",
+      draftDescription:
+        "Draft versions remain editable and can still be deleted.",
+      activeDescription:
+        "Active versions are used for request matching; if still unused, they remain editable.",
+      frozenDescription:
+        "Frozen versions are read-only because request logs already reference them. Copy to a new draft to change pricing.",
+      archivedDescription:
+        "Archived versions are hidden by default and cannot be enabled or edited directly. Restore them to return to the frozen state.",
       addComponent: "Add Component",
       chargeKind: "Charge kind",
       unitPrice: "Unit price",

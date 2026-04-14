@@ -387,6 +387,146 @@ mod tests {
         count: i64,
     }
 
+    #[derive(QueryableByName)]
+    struct CostCatalogVersionFreezeRow {
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+        first_used_at: Option<i64>,
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        is_archived: bool,
+    }
+
+    #[test]
+    fn sqlite_cost_catalog_version_freeze_migration_backfills_first_used_at() {
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let db_path = temp_dir.path().join("cost-version-freeze.sqlite");
+        let db_url = db_path.to_string_lossy().into_owned();
+        let mut connection =
+            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
+
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!(
+                "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
+            ),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2026-04-10-120000_cost_schema_foundation/up.sql"),
+        );
+
+        for version in [
+            "20250320062357",
+            "20250702140210",
+            "20260128233111",
+            "20260203230221",
+            "20260408090000",
+            "20260410120000",
+        ] {
+            mark_sqlite_migration_applied(&mut connection, version);
+        }
+
+        apply_sql(
+            &mut connection,
+            "INSERT INTO provider (
+                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
+                updated_at, provider_type, provider_api_key_mode
+            ) VALUES (
+                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO provider_api_key (
+                id, provider_id, api_key, description, deleted_at, is_enabled, created_at, updated_at
+            ) VALUES (
+                2, 1, 'secret', NULL, NULL, 1, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO system_api_key (
+                id, api_key, name, description, access_control_policy_id, usage_limit_policy_id,
+                is_enabled, deleted_at, created_at, updated_at
+            ) VALUES (
+                3, 'system-secret', 'demo', NULL, NULL, NULL, 1, NULL, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO cost_catalogs (
+                id, name, description, created_at, updated_at, deleted_at
+            ) VALUES (
+                100, 'demo-catalog', NULL, 1, 1, NULL
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name, is_enabled,
+                deleted_at, created_at, updated_at
+            ) VALUES (
+                10, 1, 100, 'demo-model', NULL, 1, NULL, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO cost_catalog_versions (
+                id, catalog_id, version, currency, source, effective_from, effective_until,
+                is_enabled, created_at, updated_at
+            ) VALUES (
+                101, 100, 'v1', 'USD', NULL, 1, NULL, 1, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO request_log (
+                id, system_api_key_id, provider_id, model_id, provider_api_key_id, model_name,
+                real_model_name, request_received_at, llm_request_sent_at,
+                llm_response_first_chunk_at, llm_response_completed_at, client_ip,
+                llm_request_uri, llm_response_status, status, is_stream, estimated_cost_nanos,
+                estimated_cost_currency, cost_catalog_id, cost_catalog_version_id,
+                cost_snapshot_json, created_at, updated_at, total_input_tokens,
+                total_output_tokens, input_text_tokens, output_text_tokens, input_image_tokens,
+                output_image_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                total_tokens, storage_type, user_request_body, llm_request_body,
+                llm_response_body, user_response_body, user_api_type, llm_api_type
+            ) VALUES (
+                200, 3, 1, 10, 2, 'demo-model', 'demo-model', 123456, 123456, NULL, NULL, NULL,
+                NULL, 200, 'SUCCESS', 0, 10, 'USD', 100, 101, NULL, 123456, 123456, 1, 1, NULL,
+                NULL, NULL, NULL, 0, NULL, 0, 2, NULL, NULL, NULL, NULL, NULL, 'OPENAI', 'OPENAI'
+            );",
+        );
+
+        connection
+            .run_pending_migrations(SQLITE_MIGRATIONS)
+            .expect("remaining migrations should succeed");
+
+        let row = diesel::sql_query(
+            "SELECT first_used_at, is_archived FROM cost_catalog_versions WHERE id = 101",
+        )
+        .get_result::<CostCatalogVersionFreezeRow>(&mut connection)
+        .expect("cost catalog version should be readable after migration");
+
+        assert_eq!(row.first_used_at, Some(123456));
+        assert!(!row.is_archived);
+    }
+
     #[test]
     fn sqlite_cost_foundation_migration_filters_request_logs_with_orphan_foreign_keys() {
         let temp_dir = tempdir().expect("temp dir should be created");

@@ -47,6 +47,8 @@ db_object! {
         pub source: Option<String>,
         pub effective_from: i64,
         pub effective_until: Option<i64>,
+        pub first_used_at: Option<i64>,
+        pub is_archived: bool,
         pub is_enabled: bool,
         pub created_at: i64,
         pub updated_at: i64,
@@ -62,6 +64,8 @@ db_object! {
         pub source: Option<String>,
         pub effective_from: i64,
         pub effective_until: Option<i64>,
+        pub first_used_at: Option<i64>,
+        pub is_archived: bool,
         pub is_enabled: bool,
         pub created_at: i64,
         pub updated_at: i64,
@@ -74,6 +78,8 @@ db_object! {
         pub source: Option<Option<String>>,
         pub effective_from: Option<i64>,
         pub effective_until: Option<Option<i64>>,
+        pub first_used_at: Option<Option<i64>>,
+        pub is_archived: Option<bool>,
         pub is_enabled: Option<bool>,
     }
 
@@ -327,6 +333,8 @@ impl CostCatalogVersion {
             source: data.source.clone(),
             effective_from: data.effective_from,
             effective_until: data.effective_until,
+            first_used_at: None,
+            is_archived: false,
             is_enabled: data.is_enabled,
             created_at: now,
             updated_at: now,
@@ -442,6 +450,127 @@ impl CostCatalogVersion {
         })
     }
 
+    pub fn duplicate_as_draft(
+        source_version_id: i64,
+        new_version_name: Option<&str>,
+    ) -> DbResult<CostCatalogVersion> {
+        let conn = &mut get_connection()?;
+        let now = Utc::now().timestamp_millis();
+
+        db_execute!(conn, {
+            conn.transaction::<CostCatalogVersion, BaseError, _>(|conn| {
+                let source_version = cost_catalog_versions::table
+                    .find(source_version_id)
+                    .select(CostCatalogVersionDb::as_select())
+                    .first::<CostCatalogVersionDb>(conn)
+                    .map_err(|e| match e {
+                        diesel::result::Error::NotFound => BaseError::ParamInvalid(Some(
+                            format!("Cost catalog version with id {} not found", source_version_id),
+                        )),
+                        _ => BaseError::DatabaseFatal(Some(format!(
+                            "Failed to get source cost catalog version {} for duplication: {}",
+                            source_version_id, e
+                        ))),
+                    })?
+                    .from_db();
+
+                let existing_versions = cost_catalog_versions::table
+                    .filter(cost_catalog_versions::dsl::catalog_id.eq(source_version.catalog_id))
+                    .select(CostCatalogVersionDb::as_select())
+                    .load::<CostCatalogVersionDb>(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to list cost catalog versions for catalog {} during duplication: {}",
+                            source_version.catalog_id, e
+                        )))
+                    })?
+                    .into_iter()
+                    .map(CostCatalogVersionDb::from_db)
+                    .collect::<Vec<_>>();
+
+                let version_name = match new_version_name {
+                    Some(name) => name.to_string(),
+                    None => build_duplicate_version_name(&source_version.version, &existing_versions),
+                };
+
+                if existing_versions.iter().any(|version| version.version == version_name) {
+                    return Err(BaseError::DatabaseDup(Some(format!(
+                        "Cost catalog '{}' already has version '{}'",
+                        source_version.catalog_id, version_name
+                    ))));
+                }
+
+                let new_version = NewCostCatalogVersion {
+                    id: ID_GENERATOR.generate_id(),
+                    catalog_id: source_version.catalog_id,
+                    version: version_name,
+                    currency: source_version.currency.clone(),
+                    source: source_version.source.clone(),
+                    effective_from: source_version.effective_from,
+                    effective_until: source_version.effective_until,
+                    first_used_at: None,
+                    is_archived: false,
+                    is_enabled: false,
+                    created_at: now,
+                    updated_at: now,
+                };
+
+                let inserted_version = diesel::insert_into(cost_catalog_versions::table)
+                    .values(NewCostCatalogVersionDb::to_db(&new_version))
+                    .returning(CostCatalogVersionDb::as_returning())
+                    .get_result::<CostCatalogVersionDb>(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to duplicate cost catalog version {}: {}",
+                            source_version_id, e
+                        )))
+                    })?
+                    .from_db();
+
+                let source_components = cost_components::table
+                    .filter(cost_components::dsl::catalog_version_id.eq(source_version_id))
+                    .select(CostComponentDb::as_select())
+                    .load::<CostComponentDb>(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to load source cost components for version {}: {}",
+                            source_version_id, e
+                        )))
+                    })?;
+
+                for component in source_components {
+                    let component = component.from_db();
+                    let new_component = NewCostComponent {
+                        id: ID_GENERATOR.generate_id(),
+                        catalog_version_id: inserted_version.id,
+                        meter_key: component.meter_key,
+                        charge_kind: component.charge_kind,
+                        unit_price_nanos: component.unit_price_nanos,
+                        flat_fee_nanos: component.flat_fee_nanos,
+                        tier_config_json: component.tier_config_json,
+                        match_attributes_json: component.match_attributes_json,
+                        priority: component.priority,
+                        description: component.description,
+                        created_at: now,
+                        updated_at: now,
+                    };
+
+                    diesel::insert_into(cost_components::table)
+                        .values(NewCostComponentDb::to_db(&new_component))
+                        .execute(conn)
+                        .map_err(|e| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to duplicate cost component for new version {}: {}",
+                                inserted_version.id, e
+                            )))
+                        })?;
+                }
+
+                Ok(inserted_version)
+            })
+        })
+    }
+
     pub fn get_active_by_catalog_id(
         catalog_id_value: i64,
         at_time_ms: i64,
@@ -455,7 +584,7 @@ pub fn enabled_version_conflicts(
     versions: &[CostCatalogVersion],
     candidate: &CostCatalogVersion,
 ) -> Vec<CostCatalogVersion> {
-    if !candidate.is_enabled {
+    if !candidate.is_enabled || candidate.is_archived {
         return Vec::new();
     }
 
@@ -464,6 +593,7 @@ pub fn enabled_version_conflicts(
         .filter(|version| {
             version.id != candidate.id
                 && version.is_enabled
+                && !version.is_archived
                 && intervals_overlap(
                     version.effective_from,
                     version.effective_until,
@@ -477,8 +607,13 @@ pub fn enabled_version_conflicts(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnabledVersionResolution {
-    Disable { version_id: i64 },
-    Truncate { version_id: i64, effective_until: i64 },
+    Disable {
+        version_id: i64,
+    },
+    Truncate {
+        version_id: i64,
+        effective_until: i64,
+    },
 }
 
 pub fn reconcile_enabled_version_conflicts(
@@ -713,6 +848,8 @@ pub fn import_cost_catalog_template(
                 source: data.source.clone(),
                 effective_from: data.effective_from,
                 effective_until: data.effective_until,
+                first_used_at: None,
+                is_archived: false,
                 is_enabled: data.is_enabled,
                 created_at: now,
                 updated_at: now,
@@ -829,11 +966,51 @@ pub fn import_cost_catalog_template(
 
 fn version_is_active(version: &CostCatalogVersion, at_time_ms: i64) -> bool {
     version.is_enabled
+        && !version.is_archived
         && version.effective_from <= at_time_ms
         && version
             .effective_until
             .map(|until| at_time_ms < until)
             .unwrap_or(true)
+}
+
+fn build_duplicate_version_name(
+    source_version_name: &str,
+    existing_versions: &[CostCatalogVersion],
+) -> String {
+    let base = format!("{} Copy", source_version_name);
+    if existing_versions
+        .iter()
+        .all(|version| version.version != base)
+    {
+        return base;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{} {}", base, counter);
+        if existing_versions
+            .iter()
+            .all(|version| version.version != candidate)
+        {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+impl CostCatalogVersion {
+    pub fn is_frozen(&self) -> bool {
+        self.first_used_at.is_some()
+    }
+
+    pub fn is_editable(&self) -> bool {
+        !self.is_frozen() && !self.is_archived
+    }
+
+    pub fn can_be_archived(&self) -> bool {
+        self.is_frozen() && !self.is_enabled && !self.is_archived
+    }
 }
 
 fn intervals_overlap(
@@ -869,8 +1046,9 @@ fn select_active_cost_catalog_version(
 #[cfg(test)]
 mod tests {
     use super::{
-        CostCatalogVersion, EnabledVersionResolution, enabled_version_conflicts,
-        reconcile_enabled_version_conflicts, select_active_cost_catalog_version,
+        CostCatalogVersion, EnabledVersionResolution, build_duplicate_version_name,
+        enabled_version_conflicts, reconcile_enabled_version_conflicts,
+        select_active_cost_catalog_version,
     };
 
     fn version(
@@ -887,6 +1065,8 @@ mod tests {
             source: None,
             effective_from,
             effective_until,
+            first_used_at: None,
+            is_archived: false,
             is_enabled,
             created_at: 0,
             updated_at: 0,
@@ -905,6 +1085,19 @@ mod tests {
         )
         .unwrap()
         .expect("version should match");
+
+        assert_eq!(selected.id, 2);
+    }
+
+    #[test]
+    fn active_version_selector_ignores_archived_versions() {
+        let mut archived = version(1, 0, None, true);
+        archived.is_archived = true;
+
+        let selected =
+            select_active_cost_catalog_version(vec![archived, version(2, 0, None, true)], 500)
+                .unwrap()
+                .expect("non-archived version should match");
 
         assert_eq!(selected.id, 2);
     }
@@ -948,7 +1141,13 @@ mod tests {
             &version(2, 500, Some(900), true),
         );
 
-        assert_eq!(conflicts.into_iter().map(|version| version.id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            conflicts
+                .into_iter()
+                .map(|version| version.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
@@ -988,5 +1187,41 @@ mod tests {
                 EnabledVersionResolution::Disable { version_id: 3 },
             ]
         );
+    }
+
+    #[test]
+    fn cost_catalog_version_mutability_flags_follow_freeze_rules() {
+        let editable = version(1, 0, None, false);
+        assert!(editable.is_editable());
+        assert!(!editable.can_be_archived());
+
+        let mut frozen = version(2, 0, None, false);
+        frozen.first_used_at = Some(123);
+        assert!(!frozen.is_editable());
+        assert!(frozen.can_be_archived());
+
+        let mut archived = frozen.clone();
+        archived.is_archived = true;
+        assert!(!archived.is_editable());
+        assert!(!archived.can_be_archived());
+    }
+
+    #[test]
+    fn duplicate_version_name_uses_copy_suffix_and_increments() {
+        let source_name = "2026-04";
+        let existing = vec![
+            version(1, 0, None, false),
+            CostCatalogVersion {
+                version: "2026-04 Copy".to_string(),
+                ..version(2, 0, None, false)
+            },
+            CostCatalogVersion {
+                version: "2026-04 Copy 2".to_string(),
+                ..version(3, 0, None, false)
+            },
+        ];
+
+        let candidate = build_duplicate_version_name(source_name, &existing);
+        assert_eq!(candidate, "2026-04 Copy 3");
     }
 }

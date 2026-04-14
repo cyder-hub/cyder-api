@@ -8,6 +8,7 @@ import { Api } from "@/services/request";
 import { useCostStore } from "@/store/costStore";
 import type {
   CostCatalogListItem,
+  CostCatalogVersion,
   CostComponent,
   CostCatalogVersionDetail,
   CostTemplateSummary,
@@ -47,7 +48,12 @@ export const useCostPage = () => {
 
   const selectedCatalog = computed(() => costStore.selectedCatalog);
   const selectedVersion = computed(() => costStore.selectedVersion);
-  const selectedCatalogVersions = computed(() => costStore.selectedCatalogVersions);
+  const showArchivedVersions = ref(false);
+  const selectedCatalogVersions = computed(() =>
+    costStore.selectedCatalogVersions.filter(
+      (version) => showArchivedVersions.value || !version.is_archived,
+    ),
+  );
   const components = computed(() => costStore.versionDetail?.components ?? []);
   const selectedVersionSummary = computed(
     () => costStore.versionDetail?.version ?? selectedVersion.value,
@@ -65,6 +71,8 @@ export const useCostPage = () => {
   const isLoadingTemplates = ref(false);
   const importingTemplateKey = ref<string | null>(null);
   const togglingVersionId = ref<number | null>(null);
+  const managingVersionId = ref<number | null>(null);
+  const duplicatingVersionId = ref<number | null>(null);
   const duplicatingCatalogId = ref<number | null>(null);
   const shouldOpenEditorAfterCatalogSave = ref(false);
 
@@ -100,6 +108,53 @@ export const useCostPage = () => {
       previewResponse.value = null;
     },
   );
+
+  watch(showArchivedVersions, (showArchived) => {
+    if (showArchived) {
+      return;
+    }
+
+    const currentVersion = selectedVersionSummary.value;
+    if (currentVersion?.is_archived) {
+      costStore.setSelectedVersionId(
+        resolvePreferredVersionId(currentVersion.catalog_id, null),
+      );
+    }
+  });
+
+  watch(
+    [selectedCatalog, selectedVersionSummary, showArchivedVersions],
+    ([catalog, currentVersion, showArchived]) => {
+      if (showArchived || !catalog || !currentVersion?.is_archived) {
+        return;
+      }
+
+      const replacementVersionId = resolvePreferredVersionId(catalog.catalog.id, null);
+      if (replacementVersionId !== null && replacementVersionId !== currentVersion.id) {
+        costStore.setSelectedVersionId(replacementVersionId);
+      }
+    },
+  );
+
+  const resolvePreferredVersionId = (
+    catalogId: number,
+    preferredVersionId: number | null,
+  ) => {
+    const catalog = costStore.catalogs.find((item) => item.catalog.id === catalogId);
+    const versions = catalog?.versions ?? [];
+    const visibleVersions = showArchivedVersions.value
+      ? versions
+      : versions.filter((version) => !version.is_archived);
+
+    if (
+      preferredVersionId !== null &&
+      visibleVersions.some((version) => version.id === preferredVersionId)
+    ) {
+      return preferredVersionId;
+    }
+
+    return visibleVersions[0]?.id ?? null;
+  };
 
   const refreshCostData = async () => {
     try {
@@ -341,6 +396,33 @@ export const useCostPage = () => {
     isVersionDialogOpen.value = true;
   };
 
+  const duplicateVersion = async (sourceVersion: {
+    id: number;
+    catalog_id: number;
+    version: string;
+  }) => {
+    duplicatingVersionId.value = sourceVersion.id;
+    try {
+      const duplicated = await Api.duplicateCostCatalogVersion(sourceVersion.id);
+      await costStore.fetchCatalogs();
+      costStore.setSelectedCatalogId(duplicated.catalog_id);
+      costStore.setSelectedVersionId(duplicated.id);
+      toastController.success(
+        t("costPage.alert.versionDuplicateSuccess", {
+          version: sourceVersion.version,
+        }),
+      );
+    } catch (error: unknown) {
+      const normalizedError = normalizeError(error, t("common.unknownError"));
+      toastController.error(
+        t("costPage.alert.versionDuplicateFailed"),
+        normalizedError.message,
+      );
+    } finally {
+      duplicatingVersionId.value = null;
+    }
+  };
+
   const saveVersion = async () => {
     if (!selectedCatalog.value) {
       toastController.warn(t("costPage.alert.selectCatalogFirst"));
@@ -406,7 +488,7 @@ export const useCostPage = () => {
   };
 
   const handleToggleVersionEnabled = async (
-    version: { id: number; catalog_id: number; version: string; is_enabled: boolean },
+    version: Pick<CostCatalogVersion, "id" | "catalog_id" | "version" | "is_enabled">,
   ) => {
     const enabling = !version.is_enabled;
     const confirmed = await confirm({
@@ -423,9 +505,9 @@ export const useCostPage = () => {
 
     togglingVersionId.value = version.id;
     try {
-      const updated = await Api.updateCostCatalogVersion(version.id, {
-        is_enabled: enabling,
-      });
+      const updated = enabling
+        ? await Api.enableCostCatalogVersion(version.id)
+        : await Api.disableCostCatalogVersion(version.id);
       await costStore.fetchCatalogs();
       costStore.setSelectedCatalogId(updated.catalog_id);
       costStore.setSelectedVersionId(updated.id);
@@ -443,6 +525,97 @@ export const useCostPage = () => {
     } finally {
       togglingVersionId.value = null;
     }
+  };
+
+  const handleArchiveVersion = async (
+    version: Pick<CostCatalogVersion, "id" | "catalog_id" | "version">,
+  ) => {
+    const confirmed = await confirm({
+      title: t("costPage.confirmArchiveVersion", { version: version.version }),
+      description: t("costPage.confirmArchiveVersionDescription"),
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    managingVersionId.value = version.id;
+    try {
+      await Api.archiveCostCatalogVersion(version.id);
+      await costStore.fetchCatalogs();
+      costStore.setSelectedCatalogId(version.catalog_id);
+      costStore.setSelectedVersionId(resolvePreferredVersionId(version.catalog_id, null));
+      toastController.success(t("costPage.alert.versionArchiveSuccess"));
+    } catch (error: unknown) {
+      const normalizedError = normalizeError(error, t("common.unknownError"));
+      toastController.error(
+        t("costPage.alert.versionArchiveFailed"),
+        normalizedError.message,
+      );
+    } finally {
+      managingVersionId.value = null;
+    }
+  };
+
+  const handleUnarchiveVersion = async (
+    version: Pick<CostCatalogVersion, "id" | "catalog_id" | "version">,
+  ) => {
+    const confirmed = await confirm({
+      title: t("costPage.confirmUnarchiveVersion", { version: version.version }),
+      description: t("costPage.confirmUnarchiveVersionDescription"),
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    managingVersionId.value = version.id;
+    try {
+      const updated = await Api.unarchiveCostCatalogVersion(version.id);
+      await costStore.fetchCatalogs();
+      costStore.setSelectedCatalogId(updated.catalog_id);
+      costStore.setSelectedVersionId(updated.id);
+      toastController.success(t("costPage.alert.versionUnarchiveSuccess"));
+    } catch (error: unknown) {
+      const normalizedError = normalizeError(error, t("common.unknownError"));
+      toastController.error(
+        t("costPage.alert.versionUnarchiveFailed"),
+        normalizedError.message,
+      );
+    } finally {
+      managingVersionId.value = null;
+    }
+  };
+
+  const handleDeleteVersion = async (
+    version: Pick<CostCatalogVersion, "id" | "catalog_id" | "version">,
+  ) => {
+    const confirmed = await confirm({
+      title: t("costPage.confirmDeleteVersion", { version: version.version }),
+      description: t("costPage.confirmDeleteVersionDescription"),
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    managingVersionId.value = version.id;
+    try {
+      await Api.deleteCostCatalogVersion(version.id);
+      await costStore.fetchCatalogs();
+      costStore.setSelectedCatalogId(version.catalog_id);
+      costStore.setSelectedVersionId(resolvePreferredVersionId(version.catalog_id, null));
+      toastController.success(t("costPage.alert.versionDeleteSuccess"));
+    } catch (error: unknown) {
+      const normalizedError = normalizeError(error, t("common.unknownError"));
+      toastController.error(
+        t("costPage.alert.versionDeleteFailed"),
+        normalizedError.message,
+      );
+    } finally {
+      managingVersionId.value = null;
+    }
+  };
+
+  const toggleArchivedVersions = () => {
+    showArchivedVersions.value = !showArchivedVersions.value;
   };
 
   const openCreateComponentDialog = () => {
@@ -657,6 +830,11 @@ export const useCostPage = () => {
     Object.assign(previewDraft, createPreviewSample());
   };
 
+  const resetPreview = () => {
+    Object.assign(previewDraft, createPreviewSample());
+    previewResponse.value = null;
+  };
+
   const buildPreviewNormalization = (): UsageNormalization => ({
     total_input_tokens: parseRequiredNonNegativeInteger(
       previewDraft.total_input_tokens,
@@ -790,7 +968,10 @@ export const useCostPage = () => {
     isLoadingTemplates,
     importingTemplateKey,
     togglingVersionId,
+    managingVersionId,
+    duplicatingVersionId,
     duplicatingCatalogId,
+    showArchivedVersions,
     catalogDraft,
     versionDraft,
     componentDraft,
@@ -811,8 +992,13 @@ export const useCostPage = () => {
     saveCatalog,
     handleDeleteCatalog,
     openCreateVersionDialog,
+    duplicateVersion,
     saveVersion,
     handleToggleVersionEnabled,
+    handleArchiveVersion,
+    handleUnarchiveVersion,
+    handleDeleteVersion,
+    toggleArchivedVersions,
     openCreateComponentDialog,
     openEditComponentDialog,
     addTier,
@@ -820,6 +1006,7 @@ export const useCostPage = () => {
     saveComponent,
     handleDeleteComponent,
     applyPreviewSample,
+    resetPreview,
     runPreview,
     meterLabel,
     chargeKindLabel,

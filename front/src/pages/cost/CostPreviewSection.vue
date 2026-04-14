@@ -44,7 +44,10 @@ const emit = defineEmits<{
     v-if="selectedVersionSummary"
     :class="embedded ? '' : 'border-t border-gray-100 pt-6'"
   >
-    <Card class="rounded-2xl border-gray-200">
+    <Card
+      class="rounded-2xl border-gray-200"
+      :class="embedded ? 'rounded-none border-0' : ''"
+    >
       <CardHeader>
         <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>

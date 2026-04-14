@@ -58,6 +58,8 @@ diesel::table! {
         source -> Nullable<Text>,
         effective_from -> Int8,
         effective_until -> Nullable<Int8>,
+        first_used_at -> Nullable<Int8>,
+        is_archived -> Bool,
         is_enabled -> Bool,
         created_at -> Int8,
         updated_at -> Int8,

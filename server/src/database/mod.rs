@@ -18,6 +18,7 @@ pub mod custom_field;
 pub mod model;
 pub mod model_alias;
 pub mod provider;
+pub mod provider_runtime;
 pub mod request_log;
 pub mod stat;
 pub mod system_api_key;

@@ -8,6 +8,7 @@ import {
   DollarSign,
   ClipboardList,
   Server,
+  Activity,
 } from "lucide-vue-next";
 
 type NavItem = {
@@ -31,6 +32,11 @@ export const navItems: NavItem[] = [
     path: "/provider",
     i18nKey: "sidebar.provider",
     icon: Server,
+  },
+  {
+    path: "/provider/runtime",
+    i18nKey: "sidebar.providerRuntime",
+    icon: Activity,
   },
   {
     path: "/api_key",

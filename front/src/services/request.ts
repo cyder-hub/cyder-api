@@ -2,6 +2,10 @@ import { request } from "./api";
 import type {
   SystemOverviewStats,
   TodayRequestLogStats,
+  DashboardResponse,
+  DashboardKpiSection,
+  DashboardResourcesSection,
+  DashboardAlertsSection,
   UsageStatsPeriod,
   ApiKeyItem,
   ApiKeyUpdatePayload,
@@ -70,6 +74,18 @@ export const Api = {
   },
   getTodayLogStats(): Promise<TodayRequestLogStats> {
     return request.get("/ai/manager/api/system/today_log_stats");
+  },
+  getSystemDashboard(): Promise<DashboardResponse> {
+    return request.get("/ai/manager/api/system/dashboard");
+  },
+  getSystemDashboardKpi(): Promise<DashboardKpiSection> {
+    return request.get("/ai/manager/api/system/dashboard/kpi");
+  },
+  getSystemDashboardResources(): Promise<DashboardResourcesSection> {
+    return request.get("/ai/manager/api/system/dashboard/resources");
+  },
+  getSystemDashboardAlerts(): Promise<DashboardAlertsSection> {
+    return request.get("/ai/manager/api/system/dashboard/alerts");
   },
   getUsageStats(params: URLSearchParams): Promise<UsageStatsPeriod[]> {
     return request(`/ai/manager/api/system/usage_stats?${params.toString()}`);

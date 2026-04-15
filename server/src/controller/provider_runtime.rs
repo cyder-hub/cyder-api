@@ -327,7 +327,7 @@ fn search_matches(provider_name: &str, provider_key: &str, search: &str) -> bool
         || provider_key.to_ascii_lowercase().contains(&needle)
 }
 
-async fn build_provider_runtime_items(
+pub(crate) async fn build_provider_runtime_items(
     app_state: &Arc<AppState>,
     window: ProviderRuntimeWindow,
     only_enabled: bool,
@@ -371,22 +371,23 @@ async fn build_provider_runtime_items(
     let mut items = Vec::with_capacity(providers.len());
     for provider in providers {
         let health_snapshot = app_state.get_provider_health_snapshot(provider.id).await;
-        let runtime_aggregate = aggregate_map
-            .get(&provider.id)
-            .cloned()
-            .unwrap_or(ProviderRuntimeAggregate {
-                provider_id: provider.id,
-                request_count: 0,
-                success_count: 0,
-                error_count: 0,
-                avg_first_byte_ms: None,
-                avg_total_latency_ms: None,
-                last_request_at: None,
-                last_success_at: None,
-                last_error_at: None,
-                status_code_breakdown: Vec::new(),
-                total_cost: Vec::new(),
-            });
+        let runtime_aggregate =
+            aggregate_map
+                .get(&provider.id)
+                .cloned()
+                .unwrap_or(ProviderRuntimeAggregate {
+                    provider_id: provider.id,
+                    request_count: 0,
+                    success_count: 0,
+                    error_count: 0,
+                    avg_first_byte_ms: None,
+                    avg_total_latency_ms: None,
+                    last_request_at: None,
+                    last_success_at: None,
+                    last_error_at: None,
+                    status_code_breakdown: Vec::new(),
+                    total_cost: Vec::new(),
+                });
 
         let runtime_level = compute_runtime_level(
             health_snapshot.status,
@@ -472,20 +473,21 @@ fn sort_provider_runtime_items(
                 calculate_error_rate(right.request_count, right.error_count),
             )
             .then_with(|| health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))),
-            ProviderRuntimeSortField::Latency => compare_f64_option(
-                left.avg_total_latency_ms,
-                right.avg_total_latency_ms,
-            )
-            .then_with(|| health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))),
+            ProviderRuntimeSortField::Latency => {
+                compare_f64_option(left.avg_total_latency_ms, right.avg_total_latency_ms).then_with(
+                    || health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level)),
+                )
+            }
             ProviderRuntimeSortField::LastErrorAt => {
                 compare_i64_option(left.last_error_at, right.last_error_at).then_with(|| {
                     health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))
                 })
             }
-            ProviderRuntimeSortField::RequestCount => left
-                .request_count
-                .cmp(&right.request_count)
-                .then_with(|| health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))),
+            ProviderRuntimeSortField::RequestCount => {
+                left.request_count.cmp(&right.request_count).then_with(|| {
+                    health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))
+                })
+            }
         };
 
         let with_tiebreaker = ordering
@@ -503,7 +505,8 @@ async fn list_provider_runtime(
     State(app_state): State<Arc<AppState>>,
     Query(params): Query<ProviderRuntimeListParams>,
 ) -> Result<HttpResult<Vec<ProviderRuntimeItem>>, BaseError> {
-    let mut items = build_provider_runtime_items(&app_state, params.window, params.only_enabled).await?;
+    let mut items =
+        build_provider_runtime_items(&app_state, params.window, params.only_enabled).await?;
 
     if let Some(search) = params.search.as_ref().map(|value| value.trim()) {
         if !search.is_empty() {
@@ -521,7 +524,8 @@ async fn summary_provider_runtime(
     State(app_state): State<Arc<AppState>>,
     Query(params): Query<ProviderRuntimeSummaryParams>,
 ) -> Result<HttpResult<ProviderRuntimeSummary>, BaseError> {
-    let items = build_provider_runtime_items(&app_state, params.window, params.only_enabled).await?;
+    let items =
+        build_provider_runtime_items(&app_state, params.window, params.only_enabled).await?;
     let mut summary = ProviderRuntimeSummary {
         total_provider_count: items.len() as i64,
         healthy_count: 0,
@@ -561,7 +565,8 @@ mod tests {
         ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeItem,
         ProviderRuntimeLevel, ProviderRuntimeSortField, ProviderRuntimeStatusCodeStat,
         ProviderRuntimeStatusFilter, ProviderRuntimeSummaryParams, ProviderRuntimeWindow,
-        SortDirection, build_last_error_summary, compute_runtime_level, sort_provider_runtime_items,
+        SortDirection, build_last_error_summary, compute_runtime_level,
+        sort_provider_runtime_items,
     };
     use crate::database::provider_runtime::{
         ProviderRuntimeAggregate, ProviderRuntimeStatusCodeCount,
@@ -590,7 +595,10 @@ mod tests {
             serde_json::to_string(&ProviderRuntimeSortField::LastErrorAt).unwrap(),
             "\"last_error_at\""
         );
-        assert_eq!(serde_json::to_string(&SortDirection::Desc).unwrap(), "\"desc\"");
+        assert_eq!(
+            serde_json::to_string(&SortDirection::Desc).unwrap(),
+            "\"desc\""
+        );
     }
 
     #[test]
@@ -628,8 +636,24 @@ mod tests {
     #[test]
     fn health_sort_prioritizes_open_then_half_open() {
         let mut items = vec![
-            sample_item(1, "healthy", ProviderRuntimeLevel::Healthy, 100, 0, Some(100.0), None),
-            sample_item(2, "open", ProviderRuntimeLevel::Open, 10, 10, Some(500.0), Some(2_000)),
+            sample_item(
+                1,
+                "healthy",
+                ProviderRuntimeLevel::Healthy,
+                100,
+                0,
+                Some(100.0),
+                None,
+            ),
+            sample_item(
+                2,
+                "open",
+                ProviderRuntimeLevel::Open,
+                10,
+                10,
+                Some(500.0),
+                Some(2_000),
+            ),
             sample_item(
                 3,
                 "half-open",
@@ -647,7 +671,10 @@ mod tests {
             SortDirection::Desc,
         );
 
-        let ordered_ids = items.iter().map(|item| item.provider_id).collect::<Vec<_>>();
+        let ordered_ids = items
+            .iter()
+            .map(|item| item.provider_id)
+            .collect::<Vec<_>>();
         assert_eq!(ordered_ids, vec![2, 3, 1]);
     }
 

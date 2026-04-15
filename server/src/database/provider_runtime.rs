@@ -120,7 +120,10 @@ fn is_success_status(status: Option<&RequestStatus>) -> bool {
 }
 
 fn is_error_status(status: Option<&RequestStatus>) -> bool {
-    matches!(status, Some(RequestStatus::Error) | Some(RequestStatus::Cancelled))
+    matches!(
+        status,
+        Some(RequestStatus::Error) | Some(RequestStatus::Cancelled)
+    )
 }
 
 fn positive_duration_ms(start_ms: i64, end_ms: Option<i64>) -> Option<i64> {

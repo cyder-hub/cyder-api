@@ -23,6 +23,86 @@ export const enDict = {
   dashboard: {
     description:
       "View overall system status, resource statistics, and daily consumption metrics.",
+    sections: {
+      resources: {
+        title: "Resources",
+      },
+      runtime: {
+        title: "Runtime Health",
+      },
+      trends: {
+        title: "Trends",
+      },
+      alerts: {
+        title: "Alerts and Actions",
+      },
+      topProviders: {
+        title: "Top Providers",
+      },
+      topModels: {
+        title: "Top Models",
+      },
+    },
+    actions: {
+      viewRuntime: "View Runtime",
+      viewRecords: "View Records",
+    },
+    kpi: {
+      requests: "Requests Today",
+      success: "Success",
+      errors: "Errors",
+      successRate: "Success Rate",
+      totalTokens: "Total Tokens",
+      inputTokens: "Input",
+      totalCost: "Total Cost",
+      avgLatency: "Average Latency",
+      firstByte: "First Byte",
+      runtimeIssues: "Runtime Issues",
+      runtimeWindow: "Window",
+      windowToday: "Window: today",
+      multiCurrencyHint: "Multiple currencies shown side by side",
+    },
+    resources: {
+      providers: "Providers",
+      models: "Models",
+      providerKeys: "Provider Keys",
+      systemApiKeys: "System API Keys",
+      enabledTotal: "Enabled / Total",
+      activeToday: "Active today",
+    },
+    runtime: {
+      windowDetail: "Window: {window}",
+      degradedHint: "Observed latency or error-rate degradation",
+      halfOpenHint: "In half-open recovery probing",
+      openHint: "Currently circuit-open",
+      noTrafficHint: "No traffic in this window",
+      activeProviders: "Active Providers Today",
+      activeModels: "Active Models",
+    },
+    alertGroups: {
+      unstable: "Unstable Providers",
+      topErrors: "Top Error Providers",
+      costHotspots: "Cost Hotspots",
+      costProviders: "Costliest Providers",
+      costModels: "Costliest Models",
+    },
+    metrics: {
+      requests: "Requests",
+      successRate: "Success rate",
+      totalTokens: "Total tokens",
+      errors: "Errors",
+      lastError: "Last error",
+    },
+    empty: {
+      noUnstableProviders: "No providers are currently in open or half-open state.",
+      noErrors: "No providers are currently surfacing error hotspots.",
+      noCostHotspots: "No clear cost hotspots were found.",
+      noCostProviders: "No provider cost hotspots were found.",
+      noCostModels: "No model cost hotspots were found.",
+      noTopProviders: "No provider ranking data yet.",
+      noTopModels: "No model ranking data yet.",
+      noLatency: "N/A",
+    },
     systemOverview: {
       title: "System Overview",
       providers: "Total Providers",
@@ -42,9 +122,22 @@ export const enDict = {
       title: "Usage Statistics",
       noData: "No data available for this period",
       total: "Total",
+      others: "Others",
+      chartTypeLabel: "Chart Type",
+      metricLabel: "Metric",
+      groupByLabel: "Dimension",
+      topNLabel: "Series Count",
+      timeRangeLabel: "Time Range",
+      topNHint: "Shows the top {topN} series by default and merges the rest into Others.",
       summary: {
-        title: "Summary by Model",
-        model: "Model",
+        title: "Ranking Summary",
+        entity: "Entity",
+        detail: "Detail",
+      },
+      groupBy: {
+        provider: "By Provider",
+        model: "By Model",
+        system_api_key: "By System API Key",
       },
       intervals: {
         hour: "Hourly",
@@ -75,6 +168,9 @@ export const enDict = {
         total_tokens: "Total Tokens",
         request_count: "Request Count",
         total_cost: "Total Cost",
+        success_rate: "Success Rate",
+        avg_latency: "Average Latency",
+        error_count: "Error Count",
       },
       chartTypes: {
         line: "Line",

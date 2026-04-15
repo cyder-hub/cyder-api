@@ -12,6 +12,7 @@ use custom_field::create_custom_field_router;
 use model::create_model_router;
 use model_alias::create_model_alias_router;
 use provider::create_provider_router;
+use provider_runtime::create_provider_runtime_router;
 use request_log::create_record_router;
 use stat::routes as create_stat_router;
 use system_api_key::create_api_key_router;
@@ -30,6 +31,7 @@ mod access_control;
 mod model;
 mod model_alias;
 mod provider;
+mod provider_runtime;
 mod request_log;
 mod stat;
 mod system;
@@ -55,6 +57,7 @@ pub fn create_manager_router() -> StateRouter {
         create_state_router()
             .merge(create_record_router())
             .merge(create_provider_router())
+            .merge(create_provider_runtime_router())
             .merge(create_api_key_router())
             .merge(create_model_router())
             .merge(create_model_alias_router())

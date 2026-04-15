@@ -12,6 +12,14 @@
         </div>
         <div class="flex w-full flex-col gap-2 sm:w-auto">
           <Button
+            @click="router.push('/provider/runtime')"
+            variant="ghost"
+            class="w-full sm:w-auto"
+          >
+            <Activity class="h-4 w-4 mr-1.5" />
+            {{ $t("providerPage.viewRuntime") }}
+          </Button>
+          <Button
             @click="router.push('/provider/new')"
             variant="outline"
             class="w-full sm:w-auto"
@@ -67,6 +75,12 @@
                 <h3 class="min-w-0 text-base font-semibold text-gray-900">
                   {{ item.provider.name }}
                 </h3>
+                <Badge
+                  v-if="providerRuntimeLevelMap[item.provider.id]"
+                  :class="runtimeBadgeClass(providerRuntimeLevelMap[item.provider.id])"
+                >
+                  {{ runtimeLevelLabel(providerRuntimeLevelMap[item.provider.id]) }}
+                </Badge>
                 <Badge
                   variant="secondary"
                   class="max-w-full font-mono text-[10px] px-1.5 py-0"
@@ -166,6 +180,15 @@
               variant="ghost"
               size="sm"
               class="w-full justify-center sm:w-auto"
+              @click="router.push({ path: '/provider/runtime', query: { search: item.provider.provider_key } })"
+            >
+              <Activity class="w-3.5 h-3.5 mr-1.5 text-gray-500" />
+              {{ $t("providerPage.viewRuntime") }}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="w-full justify-center sm:w-auto"
               @click="router.push(`/provider/edit/${item.provider.id}`)"
             >
               <Pencil class="w-3.5 h-3.5 mr-1.5 text-gray-500" />
@@ -192,7 +215,7 @@ import { ref, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { useProviderStore } from "@/store/providerStore";
-import type { ProviderBase } from "@/store/types";
+import type { ProviderBase, ProviderRuntimeLevel } from "@/store/types";
 import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
 import { confirm } from "@/lib/confirmController";
@@ -211,6 +234,7 @@ import {
   XCircle,
   Pencil,
   Trash2,
+  Activity,
 } from "lucide-vue-next";
 
 const { t: $t } = useI18n();
@@ -219,12 +243,47 @@ const store = useProviderStore();
 
 const isLoading = ref(true);
 const error = ref<string | null>(null);
+const providerRuntimeLevelMap = ref<Record<number, ProviderRuntimeLevel>>({});
+
+const runtimeLevelLabel = (level: ProviderRuntimeLevel) =>
+  $t(`providerRuntimePage.status.${level}`);
+
+const runtimeBadgeClass = (level: ProviderRuntimeLevel) => {
+  switch (level) {
+    case "open":
+      return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
+    case "half_open":
+      return "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-50";
+    case "degraded":
+      return "border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-50";
+    case "healthy":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-50";
+    case "no_traffic":
+      return "border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-100";
+  }
+};
+
+const loadRuntimeLevels = async () => {
+  try {
+    const runtimeItems = await Api.getProviderRuntimeList({
+      window: "1h",
+      only_enabled: false,
+    });
+    providerRuntimeLevelMap.value = Object.fromEntries(
+      runtimeItems.map((item) => [item.provider_id, item.runtime_level]),
+    );
+  } catch (err) {
+    console.error("Failed to fetch provider runtime levels:", err);
+    providerRuntimeLevelMap.value = {};
+  }
+};
 
 const loadData = async () => {
   isLoading.value = true;
   error.value = null;
   try {
     await store.fetchProviders();
+    await loadRuntimeLevels();
   } catch (err: unknown) {
     error.value = normalizeError(
       err,

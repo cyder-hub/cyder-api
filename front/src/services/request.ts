@@ -11,6 +11,9 @@ import type {
   ProviderApiKeyItem,
   ModelItem,
   ProviderListItem,
+  ProviderRuntimeItem,
+  ProviderRuntimeListParams,
+  ProviderRuntimeSummary,
   AccessControlPolicyFromAPI,
   AccessControlPayload,
   ModelAliasListItem,
@@ -100,6 +103,30 @@ export const Api = {
   // ========== Provider ==========
   getProviderDetailList(): Promise<ProviderListItem[]> {
     return request("/ai/manager/api/provider/detail/list");
+  },
+  getProviderRuntimeList(
+    params: ProviderRuntimeListParams = {},
+  ): Promise<ProviderRuntimeItem[]> {
+    const validParams: Record<string, string> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        validParams[key] = String(value);
+      }
+    }
+    const qs = new URLSearchParams(validParams).toString();
+    return request.get(`/ai/manager/api/provider/runtime/list?${qs}`);
+  },
+  getProviderRuntimeSummary(
+    window?: ProviderRuntimeListParams["window"],
+  ): Promise<ProviderRuntimeSummary> {
+    const qs = new URLSearchParams();
+    if (window) {
+      qs.set("window", window);
+    }
+    const suffix = qs.toString();
+    return request.get(
+      `/ai/manager/api/provider/runtime/summary${suffix ? `?${suffix}` : ""}`,
+    );
   },
 
   // ========== Access Control ==========

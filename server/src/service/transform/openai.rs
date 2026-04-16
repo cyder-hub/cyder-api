@@ -70,6 +70,7 @@ const GEMINI_COMPAT_ALLOWED_FIELDS: &[&str] = &[
     "seed",
     "stop",
     "stream",
+    "stream_options",
     "temperature",
     "top_p",
     "tools",
@@ -78,11 +79,6 @@ const GEMINI_COMPAT_ALLOWED_FIELDS: &[&str] = &[
     "function_call",
     "functions",
 ];
-
-const GEMINI_COMPAT_REWRITE_RULES: &[FieldRewriteRule] = &[FieldRewriteRule {
-    field: "stream_options",
-    action: RewriteAction::Remove,
-}];
 
 const EMPTY_FIELDS: &[&str] = &[];
 const EMPTY_REWRITE_RULES: &[FieldRewriteRule] = &[];
@@ -102,7 +98,7 @@ impl ChannelSchemaPolicy {
         Self {
             allowed_top_level_fields: GEMINI_COMPAT_ALLOWED_FIELDS,
             forbidden_top_level_fields: EMPTY_FIELDS,
-            rewrite_rules: GEMINI_COMPAT_REWRITE_RULES,
+            rewrite_rules: EMPTY_REWRITE_RULES,
             default_injections: EMPTY_DEFAULT_INJECTIONS,
         }
     }
@@ -2655,7 +2651,8 @@ mod tests {
                 "messages": [{"role": "user", "content": "hello"}],
                 "temperature": 0.2,
                 "tools": [],
-                "stream": true
+                "stream": true,
+                "stream_options": {"include_usage": true}
             })
         );
         assert_eq!(
@@ -2663,7 +2660,6 @@ mod tests {
             vec![
                 "logprobs".to_string(),
                 "parallel_tool_calls".to_string(),
-                "stream_options".to_string(),
                 "user".to_string()
             ]
         );
@@ -2722,16 +2718,14 @@ mod tests {
         let compat_report = compat.sanitize_request_payload(&mut compat_payload);
         assert_eq!(
             compat_report.removed_fields,
-            vec![
-                "parallel_tool_calls".to_string(),
-                "stream_options".to_string()
-            ]
+            vec!["parallel_tool_calls".to_string()]
         );
         assert_eq!(
             compat_payload,
             json!({
                 "model": "gemini-2.5-pro",
-                "messages": [{"role": "user", "content": "hello"}]
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream_options": {"include_usage": true}
             })
         );
     }
@@ -2752,15 +2746,13 @@ mod tests {
         );
 
         assert_eq!(variant, OpenAiVariant::GeminiCompat);
-        assert_eq!(
-            report.removed_fields,
-            vec!["stream_options".to_string(), "user".to_string()]
-        );
+        assert_eq!(report.removed_fields, vec!["user".to_string()]);
         assert_eq!(
             payload,
             json!({
                 "model": "gemini-2.5-pro",
-                "messages": [{"role": "user", "content": "hello"}]
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream_options": {"include_usage": true}
             })
         );
     }

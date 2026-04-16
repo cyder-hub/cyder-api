@@ -3270,7 +3270,8 @@ mod tests {
             json!({
                 "model": "gemini-2.5-pro",
                 "messages": [{"role": "user", "content": "hello"}],
-                "stream": true
+                "stream": true,
+                "stream_options": {"include_usage": true}
             })
         );
     }
@@ -3294,6 +3295,33 @@ mod tests {
             finalized,
             json!({
                 "model": "gpt-4.1",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true,
+                "stream_options": {"include_usage": true}
+            })
+        );
+    }
+
+    #[test]
+    fn test_finalize_request_data_for_gemini_openai_forces_include_usage() {
+        let data = json!({
+            "model": "gemini-2.5-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "parallel_tool_calls": true
+        });
+
+        let finalized = finalize_request_data(
+            data,
+            LlmApiType::Openai,
+            &ProviderType::GeminiOpenai,
+            "chat/completions",
+        );
+
+        assert_eq!(
+            finalized,
+            json!({
+                "model": "gemini-2.5-flash",
                 "messages": [{"role": "user", "content": "hello"}],
                 "stream": true,
                 "stream_options": {"include_usage": true}

@@ -675,7 +675,9 @@ async fn system_dashboard_alerts(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardAlertsSection>, BaseError> {
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
-    Ok(HttpResult::new(build_dashboard_alerts_section(&runtime_items)?))
+    Ok(HttpResult::new(build_dashboard_alerts_section(
+        &runtime_items,
+    )?))
 }
 
 async fn system_usage_stats(
@@ -815,7 +817,10 @@ pub fn routes() -> StateRouter {
     create_state_router()
         .route("/system/dashboard", get(system_dashboard))
         .route("/system/dashboard/kpi", get(system_dashboard_kpi))
-        .route("/system/dashboard/resources", get(system_dashboard_resources))
+        .route(
+            "/system/dashboard/resources",
+            get(system_dashboard_resources),
+        )
         .route("/system/dashboard/alerts", get(system_dashboard_alerts))
         .route("/system/overview", get(system_overview_stats))
         .route("/system/today_log_stats", get(today_request_log_stats))

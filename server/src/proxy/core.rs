@@ -298,6 +298,22 @@ async fn finalize_cancelled_log_context(
     get_log_manager().log(context.clone()).await;
 }
 
+async fn sync_stream_usage_to_log_context(
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    transformer: &mut StreamTransformer,
+) {
+    let usage = transformer.parse_usage_info();
+    let usage_normalization = transformer.parse_usage_normalization();
+
+    if usage.is_none() && usage_normalization.is_none() {
+        return;
+    }
+
+    let mut context = log_context.lock().await;
+    context.usage = usage;
+    context.usage_normalization = usage_normalization;
+}
+
 fn next_stream_chunk_timeout_duration(first_chunk_received_at_proxy: i64) -> Option<Duration> {
     if first_chunk_received_at_proxy == 0 {
         CONFIG.proxy_request.first_byte_timeout()
@@ -838,6 +854,7 @@ async fn handle_streaming_response(
                     }
 
                     let transformed_events = transformer.transform_events(events);
+                    sync_stream_usage_to_log_context(&log_context_clone, &mut transformer).await;
                     let mut transformed_chunk_bytes: Vec<u8> = Vec::new();
 
                     for transformed_event in transformed_events {
@@ -1043,18 +1060,22 @@ async fn handle_streaming_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_response_builder, decode_response_body, finalize_non_streaming_log_context,
-        next_stream_chunk_timeout_duration, process_success_response_body,
-        send_with_first_byte_timeout, should_forward_response_header,
+        build_response_builder, decode_response_body, finalize_cancelled_log_context,
+        finalize_non_streaming_log_context, next_stream_chunk_timeout_duration,
+        process_success_response_body, send_with_first_byte_timeout,
+        should_forward_response_header, sync_stream_usage_to_log_context,
     };
     use crate::{
         cost::UsageNormalization,
+        proxy::logging::get_log_manager,
         proxy::logging::{LoggedBody, RequestLogContext},
         proxy::{ProxyError, cancellation::ProxyCancellationContext},
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus},
         service::cache::types::{
             CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
         },
+        service::transform::StreamTransformer,
+        utils::sse::SseParser,
         utils::usage::UsageInfo,
     };
     use axum::body::{Body, to_bytes};
@@ -1307,5 +1328,149 @@ mod tests {
             .unwrap();
         let returned_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(returned_body, body);
+    }
+
+    #[tokio::test]
+    async fn finalize_cancelled_log_context_preserves_existing_usage_and_cost_fields() {
+        let log_context = std::sync::Arc::new(tokio::sync::Mutex::new(make_log_context()));
+        let cost_catalog_version = CacheCostCatalogVersion {
+            id: 5,
+            catalog_id: 4,
+            version: "v1".to_string(),
+            currency: "USD".to_string(),
+            source: None,
+            effective_from: 0,
+            effective_until: None,
+            is_enabled: true,
+            components: vec![],
+        };
+
+        {
+            let mut context = log_context.lock().await;
+            context.usage = Some(UsageInfo {
+                input_tokens: 7,
+                output_tokens: 16,
+                total_tokens: 23,
+                reasoning_tokens: 16,
+                ..Default::default()
+            });
+            context.usage_normalization = Some(UsageNormalization {
+                total_input_tokens: 7,
+                total_output_tokens: 16,
+                input_text_tokens: 7,
+                output_text_tokens: 16,
+                reasoning_tokens: 16,
+                ..Default::default()
+            });
+        }
+
+        finalize_cancelled_log_context(
+            &log_context,
+            "https://example.com/v1/chat",
+            Some(StatusCode::OK),
+            Some(&cost_catalog_version),
+            None,
+            None,
+        )
+        .await;
+
+        get_log_manager().flush().await;
+
+        let context = log_context.lock().await;
+        assert_eq!(context.overall_status, RequestStatus::Cancelled);
+        assert_eq!(context.llm_status, Some(StatusCode::OK));
+        assert_eq!(context.cost_catalog_version.as_ref().map(|v| v.id), Some(5));
+        assert_eq!(context.usage.as_ref().map(|u| u.input_tokens), Some(7));
+        assert_eq!(context.usage.as_ref().map(|u| u.output_tokens), Some(16));
+        assert_eq!(
+            context
+                .usage_normalization
+                .as_ref()
+                .map(|u| u.total_output_tokens),
+            Some(16)
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_usage_survives_cancellation_after_sse_usage_chunk() {
+        let log_context = std::sync::Arc::new(tokio::sync::Mutex::new(make_log_context()));
+        let cost_catalog_version = CacheCostCatalogVersion {
+            id: 5,
+            catalog_id: 4,
+            version: "v1".to_string(),
+            currency: "USD".to_string(),
+            source: None,
+            effective_from: 0,
+            effective_until: None,
+            is_enabled: true,
+            components: vec![],
+        };
+        let mut parser = SseParser::new();
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Openai);
+        let sse_chunk = concat!(
+            "data: {",
+            "\"id\":\"chatcmpl-test\",",
+            "\"object\":\"chat.completion.chunk\",",
+            "\"created\":1776310010,",
+            "\"model\":\"deepseek-ai/DeepSeek-V3.2\",",
+            "\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"reasoning_content\":\"分类\",\"role\":\"assistant\"},\"finish_reason\":null}],",
+            "\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":16,\"total_tokens\":23,",
+            "\"completion_tokens_details\":{\"reasoning_tokens\":16},",
+            "\"prompt_tokens_details\":{\"cached_tokens\":0},",
+            "\"prompt_cache_hit_tokens\":0,",
+            "\"prompt_cache_miss_tokens\":7}",
+            "}\n\n"
+        );
+
+        let events = parser.process(sse_chunk.as_bytes());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, None);
+
+        let transformed_events = transformer.transform_events(events);
+        assert_eq!(transformed_events.len(), 1);
+
+        sync_stream_usage_to_log_context(&log_context, &mut transformer).await;
+
+        finalize_cancelled_log_context(
+            &log_context,
+            "https://example.com/v1/chat/completions",
+            Some(StatusCode::OK),
+            Some(&cost_catalog_version),
+            None,
+            None,
+        )
+        .await;
+
+        get_log_manager().flush().await;
+
+        let context = log_context.lock().await;
+        assert_eq!(context.overall_status, RequestStatus::Cancelled);
+        assert_eq!(context.llm_status, Some(StatusCode::OK));
+        assert_eq!(
+            context.request_url.as_deref(),
+            Some("https://example.com/v1/chat/completions")
+        );
+        assert_eq!(context.cost_catalog_version.as_ref().map(|v| v.id), Some(5));
+        assert_eq!(
+            context.usage,
+            Some(UsageInfo {
+                input_tokens: 7,
+                output_tokens: 16,
+                total_tokens: 23,
+                reasoning_tokens: 16,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            context.usage_normalization,
+            Some(UsageNormalization {
+                total_input_tokens: 7,
+                total_output_tokens: 16,
+                input_text_tokens: 7,
+                output_text_tokens: 0,
+                reasoning_tokens: 16,
+                ..Default::default()
+            })
+        );
     }
 }

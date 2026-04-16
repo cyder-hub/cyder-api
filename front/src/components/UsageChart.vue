@@ -537,7 +537,7 @@ const chartOptions = computed<EChartsOption>(() => {
     return { title: { text: t("common.loading"), left: "center", top: "center" } };
   }
 
-  const { stats, interval, startTime, endTime } = usageData.value;
+  const { stats, interval } = usageData.value;
   if (!stats.length) {
     return {
       title: {
@@ -548,24 +548,9 @@ const chartOptions = computed<EChartsOption>(() => {
     };
   }
 
-  const timeBuckets: number[] = [];
-  let cursor = new Date(startTime);
-
-  if (interval === "minute") cursor.setSeconds(0, 0);
-  else if (interval === "hour") cursor.setMinutes(0, 0, 0);
-  else if (interval === "day") cursor.setHours(0, 0, 0, 0);
-  else {
-    cursor.setDate(1);
-    cursor.setHours(0, 0, 0, 0);
-  }
-
-  while (cursor <= endTime) {
-    timeBuckets.push(cursor.getTime());
-    if (interval === "minute") cursor.setMinutes(cursor.getMinutes() + 1);
-    else if (interval === "hour") cursor.setHours(cursor.getHours() + 1);
-    else if (interval === "day") cursor.setDate(cursor.getDate() + 1);
-    else cursor.setMonth(cursor.getMonth() + 1);
-  }
+  const timeBuckets = Array.from(new Set(stats.map((period) => period.time))).sort(
+    (a, b) => a - b,
+  );
 
   const statsByTime = new Map(
     stats.map((period) => [

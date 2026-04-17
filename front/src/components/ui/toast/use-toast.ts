@@ -1,8 +1,8 @@
-import { reactive } from "vue";
-import type { Component, VNode } from "vue";
+import { computed, ref } from "vue";
+import type { Component, VNode, ComputedRef } from "vue";
 import type { ToastProps } from "./types";
 
-const TOAST_REMOVE_DELAY = 1000000;
+const TOAST_REMOVE_DELAY = 5000;
 
 let count = 0;
 
@@ -25,21 +25,23 @@ interface Toast {
 
 interface ToasterToast extends Toast {
   id: string;
+  open: boolean;
 }
 
-const state = reactive<{
-  toasts: ToasterToast[];
-}>({
-  toasts: [],
-});
+const toastsState = ref<ToasterToast[]>([]);
 
 function toast(toast: Toast) {
   const id = genId();
-  const newToast = { ...toast, id };
-  state.toasts.push(newToast);
+  const newToast: ToasterToast = {
+    ...toast,
+    id,
+    open: true,
+  };
+
+  toastsState.value = [...toastsState.value, newToast];
 
   setTimeout(() => {
-    state.toasts = state.toasts.filter((t) => t.id !== id);
+    dismiss(id);
   }, TOAST_REMOVE_DELAY);
 
   return {
@@ -49,12 +51,12 @@ function toast(toast: Toast) {
 }
 
 function dismiss(id: string) {
-  state.toasts = state.toasts.filter((t) => t.id !== id);
+  toastsState.value = toastsState.value.filter((toast) => toast.id !== id);
 }
 
 function useToast() {
   return {
-    toasts: state.toasts,
+    toasts: computed(() => toastsState.value) as ComputedRef<ToasterToast[]>,
     toast,
     dismiss,
   };

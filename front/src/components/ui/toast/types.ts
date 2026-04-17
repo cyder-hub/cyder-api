@@ -4,6 +4,7 @@ import { buttonVariants } from "@/components/ui/button";
 export interface ToastProps {
   class?: string;
   variant?: VariantProps<typeof buttonVariants>["variant"];
+  open?: boolean;
   onOpenChange?: (open: boolean) => void;
   defaultOpen?: boolean;
   forceMount?: boolean;

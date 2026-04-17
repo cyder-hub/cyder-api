@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::{
     ProxyError,
-    auth::check_access_control,
+    auth::{admit_api_key_request, check_access_control},
     cancellation::ProxyCancellationContext,
     core::proxy_request,
     logging::{LoggedBody, RequestLogContext},
@@ -202,6 +202,13 @@ pub(super) async fn execute_generation_proxy(
         &final_body,
     )?;
 
+    let api_key_concurrency_guard = admit_api_key_request(&app_state, &system_api_key)
+        .await
+        .map_err(|e| {
+            warn!("API key request admission failed: {:?}", e);
+            e
+        })?;
+
     proxy_request(
         app_state,
         cancellation,
@@ -212,6 +219,7 @@ pub(super) async fn execute_generation_proxy(
         log_seed.model_str,
         resolved_target.provider.use_proxy,
         resolved_target.cost_catalog_version,
+        api_key_concurrency_guard,
         api_type,
         target_api_type,
     )
@@ -294,8 +302,24 @@ mod tests {
     fn prepare_generation_log_seed_initializes_log_context() {
         let system_api_key = CacheSystemApiKey {
             id: 10,
+            api_key_hash: "hash".to_string(),
+            key_prefix: "cyder-prefix".to_string(),
+            key_last4: "1234".to_string(),
             name: "system".to_string(),
-            access_control_policy_id: None,
+            description: None,
+            default_action: crate::schema::enum_def::Action::Allow,
+            is_enabled: true,
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: vec![],
         };
         let resolved_target = resolved_target(LlmApiType::Gemini);
         let original_request_value = json!({"model":"provider/gpt-test","messages":[]});

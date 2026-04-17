@@ -1,21 +1,21 @@
 use super::logging::{
-    LogBodyKind, LoggedBody, RequestLogContext, StreamingBodyWriter, get_log_manager,
+    LogBodyKind, LoggedBody, RequestLogContext, StreamingBodyWriter,
+    record_request_completion_and_log,
 };
 use super::util::serialize_reqwest_headers;
 use super::{
     ProxyError,
     cancellation::{CancellationDropGuard, ProxyCancellationContext},
-    classify_reqwest_error, classify_upstream_status,
-    governance::{
+    classify_reqwest_error, classify_upstream_status, protocol_transform_error,
+    provider_governance::{
         ensure_provider_request_allowed, record_provider_failure, record_provider_success,
     },
-    protocol_transform_error,
 };
 
 use crate::config::CONFIG;
 use crate::cost::UsageNormalization;
 use crate::schema::enum_def::{LlmApiType, RequestStatus};
-use crate::service::app_state::AppState;
+use crate::service::app_state::{ApiKeyConcurrencyGuard, AppState};
 use crate::service::cache::types::CacheCostCatalogVersion;
 use crate::service::transform::{StreamTransformer, transform_result_with_cost};
 use crate::utils::sse::SseParser;
@@ -45,13 +45,15 @@ use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tokio::time::timeout;
 
 struct RequestLogContextGuard {
+    app_state: Arc<AppState>,
     context: Arc<TokioMutex<RequestLogContext>>,
     is_armed: bool,
 }
 
 impl RequestLogContextGuard {
-    fn new(context: Arc<TokioMutex<RequestLogContext>>) -> Self {
+    fn new(app_state: Arc<AppState>, context: Arc<TokioMutex<RequestLogContext>>) -> Self {
         Self {
+            app_state,
             context,
             is_armed: true,
         }
@@ -65,6 +67,7 @@ impl RequestLogContextGuard {
 impl Drop for RequestLogContextGuard {
     fn drop(&mut self) {
         if self.is_armed {
+            let app_state = Arc::clone(&self.app_state);
             let context_clone = Arc::clone(&self.context);
             tokio::spawn(async move {
                 let mut context = context_clone.lock().await;
@@ -74,13 +77,14 @@ impl Drop for RequestLogContextGuard {
                 );
                 context.overall_status = RequestStatus::Cancelled;
                 context.completion_ts = Some(Utc::now().timestamp_millis());
-                get_log_manager().log(context.clone()).await;
+                record_request_completion_and_log(&app_state, context.clone()).await;
             });
         }
     }
 }
 
 struct ResponseStreamCancellationGuard {
+    app_state: Arc<AppState>,
     cancellation: ProxyCancellationContext,
     context: Arc<TokioMutex<RequestLogContext>>,
     url: String,
@@ -92,6 +96,7 @@ struct ResponseStreamCancellationGuard {
 
 impl ResponseStreamCancellationGuard {
     fn new(
+        app_state: Arc<AppState>,
         cancellation: ProxyCancellationContext,
         context: Arc<TokioMutex<RequestLogContext>>,
         url: impl Into<String>,
@@ -100,6 +105,7 @@ impl ResponseStreamCancellationGuard {
         reason: impl Into<String>,
     ) -> Self {
         Self {
+            app_state,
             cancellation,
             context,
             url: url.into(),
@@ -118,6 +124,7 @@ impl ResponseStreamCancellationGuard {
 impl Drop for ResponseStreamCancellationGuard {
     fn drop(&mut self) {
         if self.armed {
+            let app_state = Arc::clone(&self.app_state);
             self.cancellation.cancel_now(self.reason.clone());
             let context = Arc::clone(&self.context);
             let url = self.url.clone();
@@ -125,6 +132,7 @@ impl Drop for ResponseStreamCancellationGuard {
             let cost_catalog_version = self.cost_catalog_version.clone();
             tokio::spawn(async move {
                 finalize_cancelled_log_context(
+                    &app_state,
                     &context,
                     &url,
                     Some(status_code),
@@ -280,6 +288,7 @@ pub(super) async fn read_response_bytes_with_cancellation(
 }
 
 async fn finalize_cancelled_log_context(
+    app_state: &Arc<AppState>,
     log_context: &Arc<TokioMutex<RequestLogContext>>,
     url: &str,
     status_code: Option<StatusCode>,
@@ -295,7 +304,7 @@ async fn finalize_cancelled_log_context(
     context.overall_status = RequestStatus::Cancelled;
     context.llm_response_body = llm_response_body;
     context.user_response_body = user_response_body;
-    get_log_manager().log(context.clone()).await;
+    record_request_completion_and_log(app_state, context.clone()).await;
 }
 
 async fn sync_stream_usage_to_log_context(
@@ -408,6 +417,7 @@ pub(super) async fn proxy_request(
     model_str: String,
     use_proxy: bool,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
+    api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
@@ -426,7 +436,8 @@ pub(super) async fn proxy_request(
         &app_state.client
     };
 
-    let mut cancellation_guard = RequestLogContextGuard::new(log_context.clone());
+    let mut cancellation_guard =
+        RequestLogContextGuard::new(Arc::clone(&app_state), log_context.clone());
     let mut drop_cancellation_guard = CancellationDropGuard::new(
         cancellation.clone(),
         format!(
@@ -466,7 +477,7 @@ pub(super) async fn proxy_request(
             } else {
                 RequestStatus::Error
             };
-            get_log_manager().log(context.clone()).await;
+            record_request_completion_and_log(&app_state, context.clone()).await;
 
             return Err(proxy_error);
         }
@@ -493,6 +504,7 @@ pub(super) async fn proxy_request(
             response,
             &url,
             cost_catalog_version,
+            api_key_concurrency_guard,
             api_type,
             target_api_type,
         )
@@ -507,6 +519,7 @@ pub(super) async fn proxy_request(
             response,
             &url,
             cost_catalog_version.as_ref(),
+            api_key_concurrency_guard,
             api_type,
             target_api_type,
         )
@@ -527,6 +540,7 @@ async fn handle_non_streaming_response(
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    _api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
@@ -569,7 +583,7 @@ async fn handle_non_streaming_response(
             };
             context.llm_response_body =
                 Some(LoggedBody::from_bytes(Bytes::from(proxy_error.to_string())));
-            get_log_manager().log(context.clone()).await;
+            record_request_completion_and_log(app_state, context.clone()).await;
 
             return Err(proxy_error);
         }
@@ -595,7 +609,7 @@ async fn handle_non_streaming_response(
             decompressed_body.clone(),
             final_body.clone(),
         );
-        get_log_manager().log(context.clone()).await;
+        record_request_completion_and_log(app_state, context.clone()).await;
         record_provider_success(app_state, provider_id, &model_str).await;
 
         info!(
@@ -624,7 +638,7 @@ async fn handle_non_streaming_response(
             decompressed_body.clone(),
             decompressed_body.clone(),
         );
-        get_log_manager().log(context.clone()).await;
+        record_request_completion_and_log(app_state, context.clone()).await;
         let proxy_error = classify_upstream_status(status_code, &decompressed_body);
         record_provider_failure(app_state, provider_id, &model_str, &proxy_error).await;
         Err(proxy_error)
@@ -641,6 +655,7 @@ async fn handle_streaming_response(
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
+    api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
@@ -694,7 +709,9 @@ async fn handle_streaming_response(
         })?;
 
     let monitored_stream = async_stream::stream! {
+        let _api_key_concurrency_guard = api_key_concurrency_guard;
         let mut response_drop_guard = ResponseStreamCancellationGuard::new(
+            Arc::clone(&app_state_clone),
             cancellation.clone(),
             log_context_clone.clone(),
             url_owned.clone(),
@@ -721,6 +738,7 @@ async fn handle_streaming_response(
                             let _ = writer.abort().await;
                         }
                         finalize_cancelled_log_context(
+                            &app_state_clone,
                             &log_context_clone,
                             &url_owned,
                             Some(status_code),
@@ -756,7 +774,7 @@ async fn handle_streaming_response(
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                             None => None,
                         };
-                        get_log_manager().log(context.clone()).await;
+                        record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         let proxy_error = ProxyError::UpstreamTimeout(stream_error_message.clone());
                         record_provider_failure(
                             &app_state_clone,
@@ -781,6 +799,7 @@ async fn handle_streaming_response(
                                 let _ = writer.abort().await;
                             }
                             finalize_cancelled_log_context(
+                                &app_state_clone,
                                 &log_context_clone,
                                 &url_owned,
                                 Some(status_code),
@@ -822,7 +841,7 @@ async fn handle_streaming_response(
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                             None => None,
                         };
-                        get_log_manager().log(context.clone()).await;
+                        record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         let proxy_error = ProxyError::InternalError(stream_error_message.clone());
                         record_provider_failure(
                             &app_state_clone,
@@ -889,7 +908,7 @@ async fn handle_streaming_response(
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                             None => None,
                         };
-                        get_log_manager().log(context.clone()).await;
+                        record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         let proxy_error = ProxyError::InternalError(stream_error_message.clone());
                         record_provider_failure(
                             &app_state_clone,
@@ -933,7 +952,7 @@ async fn handle_streaming_response(
                         Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                         None => None,
                     };
-                    get_log_manager().log(context.clone()).await;
+                    record_request_completion_and_log(&app_state_clone, context.clone()).await;
                     let proxy_error = ProxyError::BadGateway(stream_error_message.clone());
                     record_provider_failure(
                         &app_state_clone,
@@ -972,7 +991,7 @@ async fn handle_streaming_response(
                     Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                     None => None,
                 };
-                get_log_manager().log(context.clone()).await;
+                record_request_completion_and_log(&app_state_clone, context.clone()).await;
                 let proxy_error = ProxyError::InternalError(stream_error_message.clone());
                 record_provider_failure(
                     &app_state_clone,
@@ -1017,7 +1036,7 @@ async fn handle_streaming_response(
                 info!("{}: SSE stream completed without usage info.", model_str);
             }
 
-            get_log_manager().log(context.clone()).await;
+            record_request_completion_and_log(&app_state_clone, context.clone()).await;
             record_provider_success(&app_state_clone, provider_id, &model_str).await;
             info!("{}: SSE stream completed.", model_str);
             response_drop_guard.disarm();
@@ -1036,7 +1055,7 @@ async fn handle_streaming_response(
                 Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                 None => None,
             };
-            get_log_manager().log(context.clone()).await;
+            record_request_completion_and_log(&app_state_clone, context.clone()).await;
             let proxy_error = classify_upstream_status(status_code, &[]);
             record_provider_failure(&app_state_clone, provider_id, &model_str, &proxy_error).await;
             response_drop_guard.disarm();
@@ -1071,6 +1090,7 @@ mod tests {
         proxy::logging::{LoggedBody, RequestLogContext},
         proxy::{ProxyError, cancellation::ProxyCancellationContext},
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus},
+        service::app_state::AppState,
         service::cache::types::{
             CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
         },
@@ -1099,8 +1119,24 @@ mod tests {
     fn make_log_context() -> RequestLogContext {
         let system_api_key = CacheSystemApiKey {
             id: 1,
+            api_key_hash: "hash".to_string(),
+            key_prefix: "cyder-prefix".to_string(),
+            key_last4: "1234".to_string(),
             name: "system".to_string(),
-            access_control_policy_id: None,
+            description: None,
+            default_action: crate::schema::enum_def::Action::Allow,
+            is_enabled: true,
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: vec![],
         };
         let provider = CacheProvider {
             id: 2,
@@ -1332,6 +1368,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_cancelled_log_context_preserves_existing_usage_and_cost_fields() {
+        let app_state = std::sync::Arc::new(AppState::new().await);
         let log_context = std::sync::Arc::new(tokio::sync::Mutex::new(make_log_context()));
         let cost_catalog_version = CacheCostCatalogVersion {
             id: 5,
@@ -1365,6 +1402,7 @@ mod tests {
         }
 
         finalize_cancelled_log_context(
+            &app_state,
             &log_context,
             "https://example.com/v1/chat",
             Some(StatusCode::OK),
@@ -1393,6 +1431,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_usage_survives_cancellation_after_sse_usage_chunk() {
+        let app_state = std::sync::Arc::new(AppState::new().await);
         let log_context = std::sync::Arc::new(tokio::sync::Mutex::new(make_log_context()));
         let cost_catalog_version = CacheCostCatalogVersion {
             id: 5,
@@ -1432,6 +1471,7 @@ mod tests {
         sync_stream_usage_to_log_context(&log_context, &mut transformer).await;
 
         finalize_cancelled_log_context(
+            &app_state,
             &log_context,
             "https://example.com/v1/chat/completions",
             Some(StatusCode::OK),

@@ -3,6 +3,7 @@ use bincode::{Decode, Encode};
 // These structures contain only the fields needed for cache operations,
 // reducing memory footprint and improving cache performance.
 
+use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::schema::enum_def::{
     Action, FieldPlacement, FieldType, ProviderApiKeyMode, ProviderType, RuleScope,
 };
@@ -19,13 +20,31 @@ pub enum CacheEntry<T: Clone + Serialize + de::DeserializeOwned> {
     Negative,
 }
 
-/// Cached system API key with only essential fields
+/// Unified API key cache snapshot used by request admission.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheSystemApiKey {
+pub struct CacheApiKey {
     pub id: i64,
+    pub api_key_hash: String,
+    pub key_prefix: String,
+    pub key_last4: String,
     pub name: String,
-    pub access_control_policy_id: Option<i64>,
+    pub description: Option<String>,
+    pub default_action: Action,
+    pub is_enabled: bool,
+    pub expires_at: Option<i64>,
+    pub rate_limit_rpm: Option<i32>,
+    pub max_concurrent_requests: Option<i32>,
+    pub quota_daily_requests: Option<i64>,
+    pub quota_daily_tokens: Option<i64>,
+    pub quota_monthly_tokens: Option<i64>,
+    pub budget_daily_nanos: Option<i64>,
+    pub budget_daily_currency: Option<String>,
+    pub budget_monthly_nanos: Option<i64>,
+    pub budget_monthly_currency: Option<String>,
+    pub acl_rules: Vec<CacheApiKeyAclRule>,
 }
+
+pub type CacheSystemApiKey = CacheApiKey;
 
 /// Cached model with only essential fields
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -76,24 +95,17 @@ pub struct CacheProviderKey {
     pub api_key: String,
 }
 
-/// Cached access control rule (part of CacheAccessControl)
+/// Embedded ACL rule carried by `CacheApiKey`.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheAccessControlRule {
+pub struct CacheApiKeyAclRule {
     pub id: i64,
-    pub rule_type: Action,
+    pub effect: Action,
     pub priority: i32,
     pub scope: RuleScope,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
-}
-
-/// Cached access control policy with embedded rules
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheAccessControl {
-    pub id: i64,
-    pub name: String,
-    pub default_action: Action,
-    pub rules: Vec<CacheAccessControlRule>,
+    pub is_enabled: bool,
+    pub description: Option<String>,
 }
 
 /// Cached custom field definition
@@ -138,40 +150,46 @@ pub struct CacheCostCatalogVersion {
 
 // Conversion implementations from database types to cache types
 
-impl From<crate::database::system_api_key::SystemApiKey> for CacheSystemApiKey {
-    fn from(db: crate::database::system_api_key::SystemApiKey) -> Self {
+impl CacheApiKey {
+    pub fn from_db(row: ApiKey, acl_rules: Vec<ApiKeyAclRule>) -> Self {
         Self {
-            id: db.id,
-            name: db.name,
-            access_control_policy_id: db.access_control_policy_id,
+            id: row.id,
+            api_key_hash: row
+                .api_key_hash
+                .unwrap_or_else(|| crate::database::api_key::hash_api_key(&row.api_key)),
+            key_prefix: row.key_prefix,
+            key_last4: row.key_last4,
+            name: row.name,
+            description: row.description,
+            default_action: row.default_action,
+            is_enabled: row.is_enabled,
+            expires_at: row.expires_at,
+            rate_limit_rpm: row.rate_limit_rpm,
+            max_concurrent_requests: row.max_concurrent_requests,
+            quota_daily_requests: row.quota_daily_requests,
+            quota_daily_tokens: row.quota_daily_tokens,
+            quota_monthly_tokens: row.quota_monthly_tokens,
+            budget_daily_nanos: row.budget_daily_nanos,
+            budget_daily_currency: row.budget_daily_currency,
+            budget_monthly_nanos: row.budget_monthly_nanos,
+            budget_monthly_currency: row.budget_monthly_currency,
+            acl_rules: acl_rules.into_iter().map(Into::into).collect(),
         }
+    }
+
+    pub fn is_active_at(&self, now_ms: i64) -> bool {
+        self.is_enabled && self.expires_at.is_none_or(|expires_at| expires_at > now_ms)
     }
 }
 
 impl From<crate::database::model::Model> for CacheModel {
     fn from(db: crate::database::model::Model) -> Self {
-        let model_name = db.model_name.clone();
         Self {
             id: db.id,
             provider_id: db.provider_id,
             real_model_name: db.real_model_name,
-            model_name,
+            model_name: db.model_name,
             cost_catalog_id: db.cost_catalog_id,
-            is_enabled: db.is_enabled,
-        }
-    }
-}
-
-impl From<crate::database::provider::Provider> for CacheProvider {
-    fn from(db: crate::database::provider::Provider) -> Self {
-        Self {
-            id: db.id,
-            provider_key: db.provider_key,
-            name: db.name,
-            endpoint: db.endpoint,
-            use_proxy: db.use_proxy,
-            provider_type: db.provider_type,
-            provider_api_key_mode: db.provider_api_key_mode,
             is_enabled: db.is_enabled,
         }
     }
@@ -198,26 +216,32 @@ impl From<crate::database::provider::ProviderApiKey> for CacheProviderKey {
     }
 }
 
-impl From<crate::database::access_control::AccessControlRule> for CacheAccessControlRule {
-    fn from(db: crate::database::access_control::AccessControlRule) -> Self {
+impl From<crate::database::provider::Provider> for CacheProvider {
+    fn from(db: crate::database::provider::Provider) -> Self {
         Self {
             id: db.id,
-            rule_type: db.rule_type,
-            priority: db.priority,
-            scope: db.scope,
-            provider_id: db.provider_id,
-            model_id: db.model_id,
+            provider_key: db.provider_key,
+            name: db.name,
+            endpoint: db.endpoint,
+            use_proxy: db.use_proxy,
+            provider_type: db.provider_type,
+            provider_api_key_mode: db.provider_api_key_mode,
+            is_enabled: db.is_enabled,
         }
     }
 }
 
-impl From<crate::database::access_control::ApiAccessControlPolicy> for CacheAccessControl {
-    fn from(db: crate::database::access_control::ApiAccessControlPolicy) -> Self {
+impl From<ApiKeyAclRule> for CacheApiKeyAclRule {
+    fn from(db: ApiKeyAclRule) -> Self {
         Self {
             id: db.id,
-            name: db.name,
-            default_action: db.default_action,
-            rules: db.rules.into_iter().map(Into::into).collect(),
+            effect: db.effect,
+            priority: db.priority,
+            scope: db.scope,
+            provider_id: db.provider_id,
+            model_id: db.model_id,
+            is_enabled: db.is_enabled,
+            description: db.description,
         }
     }
 }

@@ -26,11 +26,6 @@ const router = createRouter({
           component: () => import("@/pages/Dashboard.vue"),
         },
         {
-          path: "access_control",
-          name: "AccessControl",
-          component: () => import("@/pages/AccessControl.vue"),
-        },
-        {
           path: "api_key",
           name: "ApiKey",
           component: () => import("@/pages/ApiKey.vue"),

@@ -2,27 +2,28 @@ use rand::{Rng, rng};
 use reqwest::{Client, Proxy};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
+use chrono::{Datelike, TimeZone, Utc};
 use cyder_tools::log::{debug, error, info};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::database::access_control::AccessControlPolicy as DbAccessControlPolicy;
+use crate::database::api_key::ApiKey;
+use crate::database::api_key_rollup::{ApiKeyRollupDaily, ApiKeyRollupMonthly};
 use crate::database::cost::{CostCatalogVersion, CostComponent};
 use crate::database::custom_field::CustomFieldDefinition;
 use crate::database::model::Model;
 use crate::database::model_alias::ModelAlias;
 use crate::database::provider::{Provider, ProviderApiKey};
-use crate::database::system_api_key::SystemApiKey;
 use crate::schema::enum_def::ProviderApiKeyMode;
 
 use super::cache::repository::{CacheRepository, DynCacheRepo};
 use super::cache::types::{
-    CacheAccessControl, CacheCostCatalogVersion, CacheCustomField, CacheEntry, CacheModel,
+    CacheApiKey, CacheCostCatalogVersion, CacheCustomField, CacheEntry, CacheModel,
     CacheModelAlias, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheSystemApiKey,
 };
 use super::cache::{CacheError, memory::MemoryCacheBackend};
@@ -53,14 +54,13 @@ use crate::service::redis::{self, RedisPool};
 type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
 
 enum CacheKey<'a> {
-    SystemApiKey(&'a str),
+    ApiKeyHash(&'a str),
     ModelAlias(&'a str),
     ModelsCatalog,
     ProviderById(i64),
     ProviderByKey(&'a str),
     ModelById(i64),
     ModelByName(&'a str, &'a str),
-    AccessControlPolicy(i64),
     ProviderApiKeys(i64),
     CustomFieldsAssignment(i64),
     CustomField(i64),
@@ -72,7 +72,7 @@ use compact_str::{CompactString, format_compact};
 impl<'a> std::fmt::Display for CacheKey<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CacheKey::SystemApiKey(key) => write!(f, "sys_api_key:key:{}", key),
+            CacheKey::ApiKeyHash(key) => write!(f, "api_key:hash:{}", key),
             CacheKey::ModelAlias(alias) => write!(f, "alias:{}", alias),
             CacheKey::ModelsCatalog => write!(f, "models:catalog"),
             CacheKey::ProviderById(id) => write!(f, "provider:id:{}", id),
@@ -81,7 +81,6 @@ impl<'a> std::fmt::Display for CacheKey<'a> {
             CacheKey::ModelByName(provider_key, model_name) => {
                 write!(f, "model:name:{}/{}", provider_key, model_name)
             }
-            CacheKey::AccessControlPolicy(id) => write!(f, "acp:id:{}", id),
             CacheKey::ProviderApiKeys(provider_id) => write!(f, "provider_keys:{}", provider_id),
             CacheKey::CustomFieldsAssignment(id) => write!(f, "cfa:{}", id),
             CacheKey::CustomField(id) => write!(f, "custom_field:id:{}", id),
@@ -93,7 +92,7 @@ impl<'a> std::fmt::Display for CacheKey<'a> {
 impl<'a> CacheKey<'a> {
     fn to_compact_string(&self) -> CompactString {
         match self {
-            CacheKey::SystemApiKey(key) => format_compact!("sys_api_key:key:{}", key),
+            CacheKey::ApiKeyHash(key) => format_compact!("api_key:hash:{}", key),
             CacheKey::ModelAlias(alias) => format_compact!("alias:{}", alias),
             CacheKey::ModelsCatalog => format_compact!("models:catalog"),
             CacheKey::ProviderById(id) => format_compact!("provider:id:{}", id),
@@ -102,7 +101,6 @@ impl<'a> CacheKey<'a> {
             CacheKey::ModelByName(provider_key, model_name) => {
                 format_compact!("model:name:{}/{}", provider_key, model_name)
             }
-            CacheKey::AccessControlPolicy(id) => format_compact!("acp:id:{}", id),
             CacheKey::ProviderApiKeys(provider_id) => {
                 format_compact!("provider_keys:{}", provider_id)
             }
@@ -129,6 +127,411 @@ pub struct ProviderHealthSnapshot {
     pub last_failure_at: Option<i64>,
     pub last_recovered_at: Option<i64>,
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiKeyGovernanceSnapshot {
+    pub api_key_id: i64,
+    pub current_concurrency: u32,
+    pub current_minute_bucket: Option<i64>,
+    pub current_minute_request_count: u32,
+    pub day_bucket: Option<i64>,
+    pub daily_request_count: i64,
+    pub daily_token_count: i64,
+    pub month_bucket: Option<i64>,
+    pub monthly_token_count: i64,
+    pub daily_billed_amounts: Vec<ApiKeyBilledAmountSnapshot>,
+    pub monthly_billed_amounts: Vec<ApiKeyBilledAmountSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiKeyBilledAmountSnapshot {
+    pub currency: String,
+    pub amount_nanos: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ApiKeyCompletionDelta {
+    pub api_key_id: i64,
+    pub occurred_at: i64,
+    pub total_tokens: i64,
+    pub billed_amount_nanos: i64,
+    pub billed_currency: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApiKeyGovernanceAdmissionError {
+    Internal(String),
+    RateLimited {
+        limit: i32,
+        current: u32,
+    },
+    ConcurrencyLimited {
+        limit: i32,
+        current: u32,
+    },
+    DailyRequestQuotaExceeded {
+        limit: i64,
+        current: i64,
+    },
+    DailyTokenQuotaExceeded {
+        limit: i64,
+        current: i64,
+    },
+    MonthlyTokenQuotaExceeded {
+        limit: i64,
+        current: i64,
+    },
+    DailyBudgetExceeded {
+        currency: String,
+        limit_nanos: i64,
+        current_nanos: i64,
+    },
+    MonthlyBudgetExceeded {
+        currency: String,
+        limit_nanos: i64,
+        current_nanos: i64,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+struct ApiKeyRuntimeState {
+    current_concurrency: u32,
+    current_minute_bucket: Option<i64>,
+    current_minute_request_count: u32,
+    day_bucket: Option<i64>,
+    daily_request_count: i64,
+    daily_token_count: i64,
+    daily_billed_amounts: HashMap<String, i64>,
+    month_bucket: Option<i64>,
+    monthly_token_count: i64,
+    monthly_billed_amounts: HashMap<String, i64>,
+}
+
+#[derive(Clone, Default)]
+struct ApiKeyGovernanceStore {
+    inner: Arc<Mutex<HashMap<i64, ApiKeyRuntimeState>>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ApiKeyRollupBaseline {
+    day_bucket: i64,
+    daily_request_count: i64,
+    daily_token_count: i64,
+    daily_billed_amounts: HashMap<String, i64>,
+    month_bucket: i64,
+    monthly_token_count: i64,
+    monthly_billed_amounts: HashMap<String, i64>,
+}
+
+impl ApiKeyGovernanceStore {
+    fn try_begin_request(
+        &self,
+        api_key: &CacheApiKey,
+        now_ms: i64,
+    ) -> Result<Option<ApiKeyConcurrencyGuard>, ApiKeyGovernanceAdmissionError> {
+        let mut guard = self.inner.lock().map_err(|e| {
+            ApiKeyGovernanceAdmissionError::Internal(format!(
+                "api key governance lock poisoned: {e}"
+            ))
+        })?;
+        let state = guard.entry(api_key.id).or_default();
+        state.check_admission_limits(api_key, now_ms)?;
+
+        let concurrency_guard = match api_key.max_concurrent_requests {
+            Some(limit) => {
+                let limit = u32::try_from(limit).unwrap_or(0);
+                if state.current_concurrency >= limit {
+                    return Err(ApiKeyGovernanceAdmissionError::ConcurrencyLimited {
+                        limit: api_key.max_concurrent_requests.unwrap_or_default(),
+                        current: state.current_concurrency,
+                    });
+                }
+                state.current_concurrency = state.current_concurrency.saturating_add(1);
+                Some(ApiKeyConcurrencyGuard {
+                    api_key_id: api_key.id,
+                    store: Arc::clone(&self.inner),
+                })
+            }
+            None => None,
+        };
+
+        state.record_request_admission();
+        drop(guard);
+
+        Ok(concurrency_guard)
+    }
+
+    fn try_acquire_concurrency(
+        &self,
+        api_key_id: i64,
+        max_concurrent_requests: Option<i32>,
+    ) -> Result<Option<ApiKeyConcurrencyGuard>, AppStoreError> {
+        let Some(max_concurrent_requests) = max_concurrent_requests else {
+            return Ok(None);
+        };
+
+        let max_concurrent_requests = u32::try_from(max_concurrent_requests).unwrap_or(0);
+        let mut guard = self.inner.lock().map_err(|e| {
+            AppStoreError::LockError(format!("api key governance lock poisoned: {e}"))
+        })?;
+        let state = guard.entry(api_key_id).or_default();
+
+        if state.current_concurrency >= max_concurrent_requests {
+            return Ok(None);
+        }
+
+        state.current_concurrency = state.current_concurrency.saturating_add(1);
+        drop(guard);
+
+        Ok(Some(ApiKeyConcurrencyGuard {
+            api_key_id,
+            store: Arc::clone(&self.inner),
+        }))
+    }
+
+    fn snapshot(&self, api_key_id: i64) -> Result<ApiKeyGovernanceSnapshot, AppStoreError> {
+        let guard = self.inner.lock().map_err(|e| {
+            AppStoreError::LockError(format!("api key governance lock poisoned: {e}"))
+        })?;
+        Ok(match guard.get(&api_key_id) {
+            Some(state) => state.snapshot(api_key_id),
+            None => ApiKeyGovernanceSnapshot {
+                api_key_id,
+                current_concurrency: 0,
+                current_minute_bucket: None,
+                current_minute_request_count: 0,
+                day_bucket: None,
+                daily_request_count: 0,
+                daily_token_count: 0,
+                month_bucket: None,
+                monthly_token_count: 0,
+                daily_billed_amounts: vec![],
+                monthly_billed_amounts: vec![],
+            },
+        })
+    }
+
+    fn snapshots(&self) -> Result<Vec<ApiKeyGovernanceSnapshot>, AppStoreError> {
+        let guard = self.inner.lock().map_err(|e| {
+            AppStoreError::LockError(format!("api key governance lock poisoned: {e}"))
+        })?;
+        let mut snapshots = guard
+            .iter()
+            .filter(|(_, state)| state.is_active())
+            .map(|(api_key_id, state)| state.snapshot(*api_key_id))
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|snapshot| snapshot.api_key_id);
+        Ok(snapshots)
+    }
+}
+
+impl ApiKeyRuntimeState {
+    fn billed_amount_snapshots(amounts: &HashMap<String, i64>) -> Vec<ApiKeyBilledAmountSnapshot> {
+        let mut snapshots = amounts
+            .iter()
+            .map(|(currency, amount_nanos)| ApiKeyBilledAmountSnapshot {
+                currency: currency.clone(),
+                amount_nanos: *amount_nanos,
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|a, b| a.currency.cmp(&b.currency));
+        snapshots
+    }
+
+    fn snapshot(&self, api_key_id: i64) -> ApiKeyGovernanceSnapshot {
+        ApiKeyGovernanceSnapshot {
+            api_key_id,
+            current_concurrency: self.current_concurrency,
+            current_minute_bucket: self.current_minute_bucket,
+            current_minute_request_count: self.current_minute_request_count,
+            day_bucket: self.day_bucket,
+            daily_request_count: self.daily_request_count,
+            daily_token_count: self.daily_token_count,
+            month_bucket: self.month_bucket,
+            monthly_token_count: self.monthly_token_count,
+            daily_billed_amounts: Self::billed_amount_snapshots(&self.daily_billed_amounts),
+            monthly_billed_amounts: Self::billed_amount_snapshots(&self.monthly_billed_amounts),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.current_concurrency > 0
+            || self.current_minute_request_count > 0
+            || self.daily_request_count > 0
+            || self.daily_token_count > 0
+            || self.monthly_token_count > 0
+            || self.daily_billed_amounts.values().any(|value| *value > 0)
+            || self.monthly_billed_amounts.values().any(|value| *value > 0)
+    }
+
+    fn apply_rollup_baseline(&mut self, baseline: &ApiKeyRollupBaseline) {
+        if self.day_bucket != Some(baseline.day_bucket) {
+            self.day_bucket = Some(baseline.day_bucket);
+            self.daily_request_count = baseline.daily_request_count;
+            self.daily_token_count = baseline.daily_token_count;
+            self.daily_billed_amounts = baseline.daily_billed_amounts.clone();
+        }
+
+        if self.month_bucket != Some(baseline.month_bucket) {
+            self.month_bucket = Some(baseline.month_bucket);
+            self.monthly_token_count = baseline.monthly_token_count;
+            self.monthly_billed_amounts = baseline.monthly_billed_amounts.clone();
+        }
+    }
+
+    fn refresh_minute_bucket(&mut self, minute_bucket: i64) {
+        if self.current_minute_bucket != Some(minute_bucket) {
+            self.current_minute_bucket = Some(minute_bucket);
+            self.current_minute_request_count = 0;
+        }
+    }
+
+    fn try_admit(
+        &mut self,
+        api_key: &CacheApiKey,
+        now_ms: i64,
+    ) -> Result<(), ApiKeyGovernanceAdmissionError> {
+        self.check_admission_limits(api_key, now_ms)?;
+        self.record_request_admission();
+        Ok(())
+    }
+
+    fn check_admission_limits(
+        &mut self,
+        api_key: &CacheApiKey,
+        now_ms: i64,
+    ) -> Result<(), ApiKeyGovernanceAdmissionError> {
+        let minute_bucket = AppState::minute_bucket_start(now_ms);
+        self.refresh_minute_bucket(minute_bucket);
+
+        if let Some(limit) = api_key.rate_limit_rpm {
+            let limit = u32::try_from(limit).unwrap_or(0);
+            if self.current_minute_request_count >= limit {
+                return Err(ApiKeyGovernanceAdmissionError::RateLimited {
+                    limit: api_key.rate_limit_rpm.unwrap_or_default(),
+                    current: self.current_minute_request_count,
+                });
+            }
+        }
+
+        if let Some(limit) = api_key.quota_daily_requests {
+            if self.daily_request_count >= limit {
+                return Err(ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded {
+                    limit,
+                    current: self.daily_request_count,
+                });
+            }
+        }
+
+        if let Some(limit) = api_key.quota_daily_tokens {
+            if self.daily_token_count >= limit {
+                return Err(ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded {
+                    limit,
+                    current: self.daily_token_count,
+                });
+            }
+        }
+
+        if let Some(limit) = api_key.quota_monthly_tokens {
+            if self.monthly_token_count >= limit {
+                return Err(ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded {
+                    limit,
+                    current: self.monthly_token_count,
+                });
+            }
+        }
+
+        if let (Some(limit_nanos), Some(currency)) = (
+            api_key.budget_daily_nanos,
+            api_key.budget_daily_currency.as_deref(),
+        ) {
+            let normalized_currency = AppState::normalize_currency_code(currency);
+            let current_nanos = self
+                .daily_billed_amounts
+                .get(&normalized_currency)
+                .copied()
+                .unwrap_or_default();
+            if current_nanos >= limit_nanos {
+                return Err(ApiKeyGovernanceAdmissionError::DailyBudgetExceeded {
+                    currency: normalized_currency,
+                    limit_nanos,
+                    current_nanos,
+                });
+            }
+        }
+
+        if let (Some(limit_nanos), Some(currency)) = (
+            api_key.budget_monthly_nanos,
+            api_key.budget_monthly_currency.as_deref(),
+        ) {
+            let normalized_currency = AppState::normalize_currency_code(currency);
+            let current_nanos = self
+                .monthly_billed_amounts
+                .get(&normalized_currency)
+                .copied()
+                .unwrap_or_default();
+            if current_nanos >= limit_nanos {
+                return Err(ApiKeyGovernanceAdmissionError::MonthlyBudgetExceeded {
+                    currency: normalized_currency,
+                    limit_nanos,
+                    current_nanos,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn record_request_admission(&mut self) {
+        self.current_minute_request_count = self.current_minute_request_count.saturating_add(1);
+        self.daily_request_count = self.daily_request_count.saturating_add(1);
+    }
+
+    fn apply_completion(&mut self, delta: &ApiKeyCompletionDelta) {
+        self.daily_token_count = self.daily_token_count.saturating_add(delta.total_tokens);
+        self.monthly_token_count = self.monthly_token_count.saturating_add(delta.total_tokens);
+
+        if let Some(currency) = delta.billed_currency.as_deref() {
+            let normalized_currency = AppState::normalize_currency_code(currency);
+            let daily_amount = self
+                .daily_billed_amounts
+                .entry(normalized_currency.clone())
+                .or_default();
+            *daily_amount = daily_amount.saturating_add(delta.billed_amount_nanos);
+
+            let monthly_amount = self
+                .monthly_billed_amounts
+                .entry(normalized_currency)
+                .or_default();
+            *monthly_amount = monthly_amount.saturating_add(delta.billed_amount_nanos);
+        }
+    }
+}
+
+pub struct ApiKeyConcurrencyGuard {
+    api_key_id: i64,
+    store: Arc<Mutex<HashMap<i64, ApiKeyRuntimeState>>>,
+}
+
+impl Drop for ApiKeyConcurrencyGuard {
+    fn drop(&mut self) {
+        let Ok(mut guard) = self.store.lock() else {
+            return;
+        };
+
+        let remove_entry = match guard.get_mut(&self.api_key_id) {
+            Some(state) => {
+                state.current_concurrency = state.current_concurrency.saturating_sub(1);
+                !state.is_active()
+            }
+            None => false,
+        };
+
+        if remove_entry {
+            guard.remove(&self.api_key_id);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -251,8 +654,8 @@ impl ProviderHealthState {
 
 #[derive(Clone)]
 pub struct AppState {
-    // 1. api_key(key) -> CacheSystemApiKey
-    system_api_key_cache: CacheRepo<CacheSystemApiKey>,
+    // 1. api_key(hash) -> CacheApiKey
+    api_key_cache: CacheRepo<CacheApiKey>,
 
     // 2. alias_name(key) -> model_id (i64)
     alias_to_model_id_cache: CacheRepo<i64>,
@@ -266,19 +669,16 @@ pub struct AppState {
     // 5. model_name(key) -> CacheModel (Also keyed by ID for internal resolution)
     model_cache: CacheRepo<CacheModel>,
 
-    // 6. access_control_policy_id(id) -> CacheAccessControl
-    access_control_policy_cache: CacheRepo<CacheAccessControl>,
-
-    // 7. provider_id(id) -> CacheProviderKey[]
+    // 6. provider_id(id) -> CacheProviderKey[]
     provider_api_keys_cache: CacheRepo<Vec<CacheProviderKey>>,
 
-    // 8. entity_id(id) -> custom_field_definition_id Set
+    // 7. entity_id(id) -> custom_field_definition_id Set
     custom_fields_assignment_cache: CacheRepo<HashSet<i64>>,
 
-    // 9. custom_field_definition_id(id) Set -> CacheCustomField[]
+    // 8. custom_field_definition_id(id) Set -> CacheCustomField[]
     custom_field_cache: CacheRepo<CacheCustomField>,
 
-    // 10. cost_catalog_version_id(id) -> CacheCostCatalogVersion
+    // 9. cost_catalog_version_id(id) -> CacheCostCatalogVersion
     cost_catalog_version_cache: CacheRepo<CacheCostCatalogVersion>,
 
     // HTTP clients
@@ -290,6 +690,9 @@ pub struct AppState {
 
     // In-process selection cursor for provider API key queue mode.
     provider_key_queue_state: Arc<tokio::sync::Mutex<HashMap<i64, usize>>>,
+
+    // In-process API key governance runtime state (admission counters, etc.).
+    api_key_governance_store: ApiKeyGovernanceStore,
 
     // In-process provider governance state for circuit-open / half-open decisions.
     provider_health_state: Arc<tokio::sync::Mutex<HashMap<i64, ProviderHealthState>>>,
@@ -322,12 +725,11 @@ impl AppState {
         let proxy_client = Self::build_http_client(true);
 
         Self {
-            system_api_key_cache: Self::create_repo(ttl, pool),
+            api_key_cache: Self::create_repo(ttl, pool),
             alias_to_model_id_cache: Self::create_repo(ttl, pool),
             models_catalog_cache: Self::create_repo(ttl, pool),
             provider_cache: Self::create_repo(ttl, pool),
             model_cache: Self::create_repo(ttl, pool),
-            access_control_policy_cache: Self::create_repo(ttl, pool),
             provider_api_keys_cache: Self::create_repo(ttl, pool),
             custom_fields_assignment_cache: Self::create_repo(ttl, pool),
             custom_field_cache: Self::create_repo(ttl, pool),
@@ -336,6 +738,7 @@ impl AppState {
             proxy_client,
             negative_cache_ttl,
             provider_key_queue_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            api_key_governance_store: ApiKeyGovernanceStore::default(),
             provider_health_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -409,6 +812,17 @@ impl AppState {
         format!("{:x}", hasher.finalize())
     }
 
+    fn load_cache_api_key(row: ApiKey) -> Result<CacheApiKey, AppStoreError> {
+        let acl_rules = ApiKey::load_acl_rules(row.id).map_err(|err| {
+            AppStoreError::DatabaseError(format!(
+                "failed to load api key ACL rules for {}: {:?}",
+                row.id, err
+            ))
+        })?;
+
+        Ok(CacheApiKey::from_db(row, acl_rules))
+    }
+
     pub async fn reload(&self) {
         info!("Reloading AppState: Starting cache refresh...");
         let mut stats: HashMap<&'static str, usize> = HashMap::new();
@@ -416,19 +830,25 @@ impl AppState {
         let mut catalog_models = Vec::new();
         let mut catalog_aliases = Vec::new();
 
-        // 1. SystemApiKeys
-        if let Ok(keys) = SystemApiKey::list_all() {
-            stats.insert("System API Keys", keys.len());
+        // 1. API keys with embedded ACL snapshots
+        if let Ok(keys) = ApiKey::list_all_active() {
+            stats.insert("API Keys", keys.len());
+            let now = chrono::Utc::now().timestamp_millis();
             for key in keys {
-                let cache_item = CacheSystemApiKey::from(key.clone());
-
-                // Cache by api_key hash
-                let hashed_api_key = Self::hash_api_key(&key.api_key);
-                let api_key_cache_key = CacheKey::SystemApiKey(&hashed_api_key).to_compact_string();
-                let _ = self
-                    .system_api_key_cache
-                    .set_positive(&api_key_cache_key, &cache_item)
-                    .await;
+                match Self::load_cache_api_key(key) {
+                    Ok(cache_item) if cache_item.is_active_at(now) => {
+                        let api_key_cache_key =
+                            CacheKey::ApiKeyHash(&cache_item.api_key_hash).to_compact_string();
+                        let _ = self
+                            .api_key_cache
+                            .set_positive(&api_key_cache_key, &cache_item)
+                            .await;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        error!("Failed to preload api key cache snapshot: {}", err);
+                    }
+                }
             }
         }
 
@@ -511,22 +931,7 @@ impl AppState {
             )
             .await;
 
-        // 6. Access Control Policies
-        if let Ok(policies) = DbAccessControlPolicy::list_all() {
-            stats.insert("Access Control Policies", policies.len());
-            for policy in policies {
-                let cache_item = CacheAccessControl::from(policy);
-                let _ = self
-                    .access_control_policy_cache
-                    .set_positive(
-                        &CacheKey::AccessControlPolicy(cache_item.id).to_compact_string(),
-                        &cache_item,
-                    )
-                    .await;
-            }
-        }
-
-        // 7. Provider API Keys
+        // 6. Provider API Keys
         if let Ok(keys) = ProviderApiKey::list_all() {
             stats.insert("Provider API Keys", keys.len());
             let mut by_provider: HashMap<i64, Vec<CacheProviderKey>> = HashMap::new();
@@ -548,7 +953,7 @@ impl AppState {
             }
         }
 
-        // 9. Custom Fields Definitions
+        // 8. Custom Fields Definitions
         if let Ok(defs) = CustomFieldDefinition::list_all_active() {
             stats.insert("Custom Field Definitions", defs.len());
             for def in defs {
@@ -563,7 +968,7 @@ impl AppState {
             }
         }
 
-        // 8. Custom Field Assignments
+        // 7. Custom Field Assignments
         if let Ok(assignments) = CustomFieldDefinition::list_all_enabled_model_assignments() {
             let mut by_model: HashMap<i64, HashSet<i64>> = HashMap::new();
             for a in assignments {
@@ -603,7 +1008,7 @@ impl AppState {
             }
         }
 
-        // 10. Cost Catalog Versions
+        // 9. Cost Catalog Versions
         if let Ok(versions) = CostCatalogVersion::list_all() {
             stats.insert("Cost Catalog Versions", versions.len());
             let mut components_by_version: HashMap<i64, Vec<CostComponent>> = HashMap::new();
@@ -640,8 +1045,8 @@ impl AppState {
         info!("Clearing app cache...");
         // Since all redis keys share the same prefix, we only need to clear one of the repos
         // to clear all of them. For memory cache, each repo is a separate instance.
-        if let Err(e) = self.system_api_key_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear system_api_key_cache: {}", e);
+        if let Err(e) = self.api_key_cache.clear().await {
+            cyder_tools::log::error!("Failed to clear api_key_cache: {}", e);
         }
         if let Err(e) = self.alias_to_model_id_cache.clear().await {
             cyder_tools::log::error!("Failed to clear alias_to_model_id_cache: {}", e);
@@ -654,9 +1059,6 @@ impl AppState {
         }
         if let Err(e) = self.model_cache.clear().await {
             cyder_tools::log::error!("Failed to clear model_cache: {}", e);
-        }
-        if let Err(e) = self.access_control_policy_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear access_control_policy_cache: {}", e);
         }
         if let Err(e) = self.provider_api_keys_cache.clear().await {
             cyder_tools::log::error!("Failed to clear provider_api_keys_cache: {}", e);
@@ -713,31 +1115,99 @@ impl AppState {
     }
 
     // ============================================================================================
-    // 1. api_key(key) -> CacheSystemApiKey
+    // 1. api_key(hash) -> CacheApiKey
     // ============================================================================================
     pub async fn get_system_api_key(
         &self,
         key: &str,
     ) -> Result<Option<Arc<CacheSystemApiKey>>, AppStoreError> {
         let hashed_key = Self::hash_api_key(key);
-        let cache_key = CacheKey::SystemApiKey(&hashed_key).to_compact_string();
+        let cache_key = CacheKey::ApiKeyHash(&hashed_key).to_compact_string();
+        let now = chrono::Utc::now().timestamp_millis();
 
-        self.get_or_load(&self.system_api_key_cache, &cache_key, || async {
-            if let Ok(db_key) = SystemApiKey::get_by_key(key) {
-                Ok(Some(CacheSystemApiKey::from(db_key)))
-            } else {
-                Ok(None)
+        let result = self
+            .get_or_load(&self.api_key_cache, &cache_key, || async {
+                match ApiKey::get_active_by_hash(&hashed_key) {
+                    Ok(db_key) => Ok(Some(Self::load_cache_api_key(db_key)?)),
+                    Err(crate::controller::BaseError::NotFound(_)) => Ok(None),
+                    Err(err) => Err(AppStoreError::DatabaseError(format!(
+                        "failed to load api key by hash: {:?}",
+                        err
+                    ))),
+                }
+            })
+            .await?;
+
+        if let Some(api_key) = result {
+            if api_key.is_active_at(now) {
+                return Ok(Some(api_key));
             }
-        })
-        .await
+
+            debug!("api key cache entry expired in memory: {}", cache_key);
+            self.api_key_cache.delete(&cache_key).await?;
+            return Ok(None);
+        }
+
+        Ok(None)
+    }
+
+    pub async fn get_api_key_by_hash(
+        &self,
+        api_key_hash: &str,
+    ) -> Result<Option<Arc<CacheApiKey>>, AppStoreError> {
+        let cache_key = CacheKey::ApiKeyHash(api_key_hash).to_compact_string();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let result = self
+            .get_or_load(&self.api_key_cache, &cache_key, || async {
+                match ApiKey::get_active_by_hash(api_key_hash) {
+                    Ok(db_key) => Ok(Some(Self::load_cache_api_key(db_key)?)),
+                    Err(crate::controller::BaseError::NotFound(_)) => Ok(None),
+                    Err(err) => Err(AppStoreError::DatabaseError(format!(
+                        "failed to load api key by hash: {:?}",
+                        err
+                    ))),
+                }
+            })
+            .await?;
+
+        if let Some(api_key) = result {
+            if api_key.is_active_at(now) {
+                return Ok(Some(api_key));
+            }
+
+            debug!("api key cache entry expired in memory: {}", cache_key);
+            self.api_key_cache.delete(&cache_key).await?;
+            return Ok(None);
+        }
+
+        Ok(None)
+    }
+
+    pub async fn invalidate_api_key_hash(&self, api_key_hash: &str) -> Result<(), AppStoreError> {
+        let cache_key_to_find = CacheKey::ApiKeyHash(api_key_hash).to_compact_string();
+        debug!("invalidate: {}", &cache_key_to_find);
+        self.api_key_cache.delete(&cache_key_to_find).await?;
+        Ok(())
+    }
+
+    pub async fn invalidate_api_key_id(&self, id: i64) -> Result<(), AppStoreError> {
+        if let Ok(row) = ApiKey::get_by_id(id) {
+            let api_key_hash = row
+                .api_key_hash
+                .unwrap_or_else(|| crate::database::api_key::hash_api_key(&row.api_key));
+            self.invalidate_api_key_hash(&api_key_hash).await?;
+        }
+
+        Ok(())
     }
 
     pub async fn invalidate_system_api_key(&self, key: &str) -> Result<(), AppStoreError> {
-        let hashed_key_to_find = Self::hash_api_key(key);
-        let cache_key_to_find = CacheKey::SystemApiKey(&hashed_key_to_find).to_compact_string();
-        debug!("invalidate: {}", &cache_key_to_find);
-        self.system_api_key_cache.delete(&cache_key_to_find).await?;
+        self.invalidate_api_key_hash(&Self::hash_api_key(key)).await
+    }
 
+    // Legacy compatibility shim. Task 4 no longer keeps standalone ACL cache.
+    pub async fn invalidate_access_control_policy(&self, _id: i64) -> Result<(), AppStoreError> {
         Ok(())
     }
 
@@ -961,32 +1431,7 @@ impl AppState {
     }
 
     // ============================================================================================
-    // 6. access_control_policy_id(id) -> CacheAccessControl
-    // ============================================================================================
-    pub async fn get_access_control_policy(
-        &self,
-        id: i64,
-    ) -> Result<Option<Arc<CacheAccessControl>>, AppStoreError> {
-        let cache_key = CacheKey::AccessControlPolicy(id).to_compact_string();
-
-        self.get_or_load(&self.access_control_policy_cache, &cache_key, || async {
-            if let Ok(db_policy) = DbAccessControlPolicy::get_by_id(id) {
-                Ok(Some(CacheAccessControl::from(db_policy)))
-            } else {
-                Ok(None)
-            }
-        })
-        .await
-    }
-
-    pub async fn invalidate_access_control_policy(&self, id: i64) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::AccessControlPolicy(id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
-        Ok(self.access_control_policy_cache.delete(&cache_key).await?)
-    }
-
-    // ============================================================================================
-    // 7. provider_id(id) -> CacheProviderKey[]
+    // 6. provider_id(id) -> CacheProviderKey[]
     // ============================================================================================
     pub async fn get_provider_api_keys(
         &self,
@@ -1070,6 +1515,181 @@ impl AppState {
         rng().random_range(0..key_count)
     }
 
+    fn minute_bucket_start(timestamp_ms: i64) -> i64 {
+        timestamp_ms.div_euclid(60_000) * 60_000
+    }
+
+    fn day_bucket_start(timestamp_ms: i64) -> i64 {
+        timestamp_ms.div_euclid(86_400_000) * 86_400_000
+    }
+
+    fn month_bucket_start(timestamp_ms: i64) -> i64 {
+        let timestamp = Utc
+            .timestamp_millis_opt(timestamp_ms)
+            .single()
+            .unwrap_or_else(Utc::now);
+        Utc.with_ymd_and_hms(timestamp.year(), timestamp.month(), 1, 0, 0, 0)
+            .single()
+            .expect("month bucket should be valid")
+            .timestamp_millis()
+    }
+
+    fn normalize_currency_code(currency: &str) -> String {
+        currency.trim().to_ascii_uppercase()
+    }
+
+    async fn load_api_key_rollup_baseline(
+        &self,
+        api_key_id: i64,
+        timestamp_ms: i64,
+    ) -> Result<ApiKeyRollupBaseline, AppStoreError> {
+        let day_bucket = Self::day_bucket_start(timestamp_ms);
+        let month_bucket = Self::month_bucket_start(timestamp_ms);
+        let daily_rows =
+            ApiKeyRollupDaily::list_by_bucket(api_key_id, day_bucket).map_err(|err| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to load api key daily rollup baseline for {}: {:?}",
+                    api_key_id, err
+                ))
+            })?;
+        let monthly_rows =
+            ApiKeyRollupMonthly::list_by_bucket(api_key_id, month_bucket).map_err(|err| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to load api key monthly rollup baseline for {}: {:?}",
+                    api_key_id, err
+                ))
+            })?;
+
+        let mut baseline = ApiKeyRollupBaseline {
+            day_bucket,
+            month_bucket,
+            ..ApiKeyRollupBaseline::default()
+        };
+
+        for row in daily_rows {
+            baseline.daily_request_count = baseline
+                .daily_request_count
+                .saturating_add(row.request_count);
+            baseline.daily_token_count =
+                baseline.daily_token_count.saturating_add(row.total_tokens);
+            let currency = Self::normalize_currency_code(&row.currency);
+            let amount = baseline.daily_billed_amounts.entry(currency).or_default();
+            *amount = amount.saturating_add(row.billed_amount_nanos);
+        }
+
+        for row in monthly_rows {
+            baseline.monthly_token_count = baseline
+                .monthly_token_count
+                .saturating_add(row.total_tokens);
+            let currency = Self::normalize_currency_code(&row.currency);
+            let amount = baseline.monthly_billed_amounts.entry(currency).or_default();
+            *amount = amount.saturating_add(row.billed_amount_nanos);
+        }
+
+        Ok(baseline)
+    }
+
+    async fn ensure_api_key_governance_usage_state(
+        &self,
+        api_key_id: i64,
+        timestamp_ms: i64,
+    ) -> Result<(), AppStoreError> {
+        let day_bucket = Self::day_bucket_start(timestamp_ms);
+        let month_bucket = Self::month_bucket_start(timestamp_ms);
+        let needs_reload = {
+            let guard = self.api_key_governance_store.inner.lock().map_err(|e| {
+                AppStoreError::LockError(format!("api key governance lock poisoned: {e}"))
+            })?;
+            match guard.get(&api_key_id) {
+                Some(state) => {
+                    state.day_bucket != Some(day_bucket) || state.month_bucket != Some(month_bucket)
+                }
+                None => true,
+            }
+        };
+
+        if !needs_reload {
+            return Ok(());
+        }
+
+        let baseline = self
+            .load_api_key_rollup_baseline(api_key_id, timestamp_ms)
+            .await?;
+        let mut guard = self.api_key_governance_store.inner.lock().map_err(|e| {
+            AppStoreError::LockError(format!("api key governance lock poisoned: {e}"))
+        })?;
+        let state = guard.entry(api_key_id).or_default();
+        state.apply_rollup_baseline(&baseline);
+        Ok(())
+    }
+
+    pub fn try_acquire_api_key_concurrency(
+        &self,
+        api_key_id: i64,
+        max_concurrent_requests: Option<i32>,
+    ) -> Result<Option<ApiKeyConcurrencyGuard>, AppStoreError> {
+        self.api_key_governance_store
+            .try_acquire_concurrency(api_key_id, max_concurrent_requests)
+    }
+
+    pub fn get_api_key_governance_snapshot(
+        &self,
+        api_key_id: i64,
+    ) -> Result<ApiKeyGovernanceSnapshot, AppStoreError> {
+        self.api_key_governance_store.snapshot(api_key_id)
+    }
+
+    pub fn list_api_key_governance_snapshots(
+        &self,
+    ) -> Result<Vec<ApiKeyGovernanceSnapshot>, AppStoreError> {
+        self.api_key_governance_store.snapshots()
+    }
+
+    pub async fn try_admit_api_key_governance(
+        &self,
+        api_key: &CacheApiKey,
+    ) -> Result<(), ApiKeyGovernanceAdmissionError> {
+        let now_ms = Utc::now().timestamp_millis();
+        self.ensure_api_key_governance_usage_state(api_key.id, now_ms)
+            .await
+            .map_err(|err| ApiKeyGovernanceAdmissionError::Internal(err.to_string()))?;
+
+        let mut guard = self.api_key_governance_store.inner.lock().map_err(|e| {
+            ApiKeyGovernanceAdmissionError::Internal(format!(
+                "api key governance lock poisoned: {e}"
+            ))
+        })?;
+        let state = guard.entry(api_key.id).or_default();
+        state.try_admit(api_key, now_ms)
+    }
+
+    pub async fn try_begin_api_key_request(
+        &self,
+        api_key: &CacheApiKey,
+    ) -> Result<Option<ApiKeyConcurrencyGuard>, ApiKeyGovernanceAdmissionError> {
+        let now_ms = Utc::now().timestamp_millis();
+        self.ensure_api_key_governance_usage_state(api_key.id, now_ms)
+            .await
+            .map_err(|err| ApiKeyGovernanceAdmissionError::Internal(err.to_string()))?;
+        self.api_key_governance_store
+            .try_begin_request(api_key, now_ms)
+    }
+
+    pub async fn record_api_key_completion(
+        &self,
+        delta: &ApiKeyCompletionDelta,
+    ) -> Result<(), AppStoreError> {
+        self.ensure_api_key_governance_usage_state(delta.api_key_id, delta.occurred_at)
+            .await?;
+
+        let mut guard = self.api_key_governance_store.inner.lock().map_err(|e| {
+            AppStoreError::LockError(format!("api key governance lock poisoned: {e}"))
+        })?;
+        let state = guard.entry(delta.api_key_id).or_default();
+        state.apply_completion(delta);
+        Ok(())
+    }
+
     pub async fn allow_provider_request(
         &self,
         provider_id: i64,
@@ -1113,7 +1733,7 @@ impl AppState {
     }
 
     // ============================================================================================
-    // 8. entity_id(id) -> custom_field_definition_id Set
+    // 7. entity_id(id) -> custom_field_definition_id Set
     // ============================================================================================
     pub async fn get_model_custom_field_ids(
         &self,
@@ -1201,7 +1821,7 @@ impl AppState {
     }
 
     // ============================================================================================
-    // 9. custom_field_definition_id(id) Set -> CacheCustomField[]
+    // 8. custom_field_definition_id(id) Set -> CacheCustomField[]
     // ============================================================================================
     pub async fn get_custom_fields(
         &self,
@@ -1258,7 +1878,7 @@ impl AppState {
     }
 
     // ============================================================================================
-    // 10. cost_catalog_version_id(id) -> CacheCostCatalogVersion
+    // 9. cost_catalog_version_id(id) -> CacheCostCatalogVersion
     // ============================================================================================
     pub async fn get_cost_catalog_version_by_id(
         &self,
@@ -1395,13 +2015,56 @@ pub fn create_state_router() -> StateRouter {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, CacheKey, GroupItemSelectionStrategy, ProviderHealthState, ProviderHealthStatus,
+        ApiKeyBilledAmountSnapshot, ApiKeyCompletionDelta, ApiKeyGovernanceAdmissionError,
+        ApiKeyGovernanceSnapshot, ApiKeyRollupBaseline, ApiKeyRuntimeState, AppState, CacheKey,
+        GroupItemSelectionStrategy, ProviderHealthState, ProviderHealthStatus,
     };
     use crate::config::ProviderGovernanceConfig;
-    use crate::schema::enum_def::ProviderApiKeyMode;
-    use crate::service::cache::types::{CacheCostCatalogVersion, CacheEntry};
+    use crate::schema::enum_def::{Action, ProviderApiKeyMode};
+    use crate::service::cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheEntry};
+    use chrono::Utc;
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
+
+    fn governance_snapshot(api_key_id: i64, current_concurrency: u32) -> ApiKeyGovernanceSnapshot {
+        ApiKeyGovernanceSnapshot {
+            api_key_id,
+            current_concurrency,
+            current_minute_bucket: None,
+            current_minute_request_count: 0,
+            day_bucket: None,
+            daily_request_count: 0,
+            daily_token_count: 0,
+            month_bucket: None,
+            monthly_token_count: 0,
+            daily_billed_amounts: vec![],
+            monthly_billed_amounts: vec![],
+        }
+    }
+
+    fn cache_api_key() -> CacheApiKey {
+        CacheApiKey {
+            id: 42,
+            api_key_hash: "hash".to_string(),
+            key_prefix: "cyder-prefix".to_string(),
+            key_last4: "1234".to_string(),
+            name: "runtime".to_string(),
+            description: None,
+            default_action: Action::Allow,
+            is_enabled: true,
+            expires_at: None,
+            rate_limit_rpm: Some(2),
+            max_concurrent_requests: Some(2),
+            quota_daily_requests: Some(3),
+            quota_daily_tokens: Some(100),
+            quota_monthly_tokens: Some(200),
+            budget_daily_nanos: Some(50),
+            budget_daily_currency: Some("usd".to_string()),
+            budget_monthly_nanos: Some(80),
+            budget_monthly_currency: Some("usd".to_string()),
+            acl_rules: vec![],
+        }
+    }
 
     #[test]
     fn queue_strategy_advances_and_wraps() {
@@ -1624,5 +2287,319 @@ mod tests {
             .await
             .expect("read cache after invalidate");
         assert!(cached_after.is_none());
+    }
+
+    #[test]
+    fn api_key_concurrency_guard_releases_slots_on_drop() {
+        let store = super::ApiKeyGovernanceStore::default();
+
+        let first_guard = store
+            .try_acquire_concurrency(42, Some(2))
+            .expect("acquire first slot")
+            .expect("limit should create guard");
+        let second_guard = store
+            .try_acquire_concurrency(42, Some(2))
+            .expect("acquire second slot")
+            .expect("limit should create guard");
+
+        let snapshot = store.snapshot(42).expect("snapshot");
+        assert_eq!(snapshot, governance_snapshot(42, 2));
+
+        assert!(
+            store
+                .try_acquire_concurrency(42, Some(2))
+                .expect("third acquire should not error")
+                .is_none()
+        );
+
+        drop(first_guard);
+        assert_eq!(
+            store.snapshot(42).expect("snapshot after drop"),
+            governance_snapshot(42, 1)
+        );
+
+        drop(second_guard);
+        assert_eq!(
+            store.snapshot(42).expect("final snapshot"),
+            governance_snapshot(42, 0)
+        );
+    }
+
+    #[test]
+    fn api_key_governance_snapshots_are_sorted_and_only_include_active_entries() {
+        let store = super::ApiKeyGovernanceStore::default();
+        let _guard_b = store
+            .try_acquire_concurrency(9, Some(1))
+            .expect("acquire tracked slot")
+            .expect("guard");
+        let guard_a = store
+            .try_acquire_concurrency(3, Some(1))
+            .expect("acquire tracked slot")
+            .expect("guard");
+
+        let snapshots = store.snapshots().expect("snapshots");
+        assert_eq!(
+            snapshots,
+            vec![governance_snapshot(3, 1), governance_snapshot(9, 1),]
+        );
+
+        drop(guard_a);
+        assert_eq!(
+            store.snapshots().expect("snapshots after release"),
+            vec![governance_snapshot(9, 1)]
+        );
+    }
+
+    #[test]
+    fn begin_request_keeps_usage_counters_when_concurrency_guard_drops() {
+        let store = super::ApiKeyGovernanceStore::default();
+        let api_key = cache_api_key();
+        let now_ms = 1_744_000_000_000;
+
+        let guard = store
+            .try_begin_request(&api_key, now_ms)
+            .expect("begin request")
+            .expect("concurrency limit should create guard");
+
+        let snapshot = store.snapshot(api_key.id).expect("snapshot after begin");
+        assert_eq!(snapshot.current_concurrency, 1);
+        assert_eq!(snapshot.current_minute_request_count, 1);
+        assert_eq!(snapshot.daily_request_count, 1);
+
+        drop(guard);
+
+        let snapshot = store
+            .snapshot(api_key.id)
+            .expect("snapshot after concurrency release");
+        assert_eq!(snapshot.current_concurrency, 0);
+        assert_eq!(snapshot.current_minute_request_count, 1);
+        assert_eq!(snapshot.daily_request_count, 1);
+    }
+
+    #[test]
+    fn api_key_runtime_state_blocks_rate_quota_and_budget_limits() {
+        let api_key = cache_api_key();
+        let now_ms = 1_744_000_000_000;
+        let minute_bucket = AppState::minute_bucket_start(now_ms);
+        let day_bucket = AppState::day_bucket_start(now_ms);
+        let month_bucket = AppState::month_bucket_start(now_ms);
+
+        let mut state = ApiKeyRuntimeState {
+            current_minute_bucket: Some(minute_bucket),
+            current_minute_request_count: 2,
+            day_bucket: Some(day_bucket),
+            daily_request_count: 3,
+            daily_token_count: 100,
+            month_bucket: Some(month_bucket),
+            monthly_token_count: 200,
+            daily_billed_amounts: HashMap::from([(String::from("USD"), 50)]),
+            monthly_billed_amounts: HashMap::from([(String::from("USD"), 80)]),
+            ..ApiKeyRuntimeState::default()
+        };
+
+        assert!(matches!(
+            state.try_admit(&api_key, now_ms),
+            Err(ApiKeyGovernanceAdmissionError::RateLimited { .. })
+        ));
+
+        state.current_minute_request_count = 0;
+        assert!(matches!(
+            state.try_admit(&api_key, now_ms),
+            Err(ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded { .. })
+        ));
+
+        state.daily_request_count = 0;
+        assert!(matches!(
+            state.try_admit(&api_key, now_ms),
+            Err(ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded { .. })
+        ));
+
+        state.daily_token_count = 0;
+        assert!(matches!(
+            state.try_admit(&api_key, now_ms),
+            Err(ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded { .. })
+        ));
+
+        state.monthly_token_count = 0;
+        assert!(matches!(
+            state.try_admit(&api_key, now_ms),
+            Err(ApiKeyGovernanceAdmissionError::DailyBudgetExceeded { .. })
+        ));
+
+        state.daily_billed_amounts.clear();
+        assert!(matches!(
+            state.try_admit(&api_key, now_ms),
+            Err(ApiKeyGovernanceAdmissionError::MonthlyBudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn api_key_runtime_state_records_completion_usage_and_normalizes_currency() {
+        let mut state = ApiKeyRuntimeState::default();
+        state.apply_completion(&ApiKeyCompletionDelta {
+            api_key_id: 42,
+            occurred_at: 1_744_000_000_000,
+            total_tokens: 33,
+            billed_amount_nanos: 21,
+            billed_currency: Some("usd".to_string()),
+        });
+
+        assert_eq!(state.daily_token_count, 33);
+        assert_eq!(state.monthly_token_count, 33);
+        assert_eq!(state.daily_billed_amounts.get("USD"), Some(&21));
+        assert_eq!(state.monthly_billed_amounts.get("USD"), Some(&21));
+    }
+
+    #[test]
+    fn api_key_runtime_state_restores_rollup_baseline_with_multi_currency_amounts() {
+        let mut state = ApiKeyRuntimeState::default();
+        let baseline = ApiKeyRollupBaseline {
+            day_bucket: 1_744_000_000_000,
+            daily_request_count: 5,
+            daily_token_count: 144,
+            daily_billed_amounts: HashMap::from([
+                (String::from("USD"), 21),
+                (String::from("EUR"), 34),
+            ]),
+            month_bucket: 1_743_984_000_000,
+            monthly_token_count: 233,
+            monthly_billed_amounts: HashMap::from([
+                (String::from("USD"), 55),
+                (String::from("JPY"), 89),
+            ]),
+        };
+
+        state.apply_rollup_baseline(&baseline);
+
+        let snapshot = state.snapshot(42);
+        assert_eq!(snapshot.day_bucket, Some(baseline.day_bucket));
+        assert_eq!(snapshot.daily_request_count, 5);
+        assert_eq!(snapshot.daily_token_count, 144);
+        assert_eq!(
+            snapshot.daily_billed_amounts,
+            vec![
+                ApiKeyBilledAmountSnapshot {
+                    currency: "EUR".to_string(),
+                    amount_nanos: 34,
+                },
+                ApiKeyBilledAmountSnapshot {
+                    currency: "USD".to_string(),
+                    amount_nanos: 21,
+                },
+            ]
+        );
+        assert_eq!(snapshot.month_bucket, Some(baseline.month_bucket));
+        assert_eq!(snapshot.monthly_token_count, 233);
+        assert_eq!(
+            snapshot.monthly_billed_amounts,
+            vec![
+                ApiKeyBilledAmountSnapshot {
+                    currency: "JPY".to_string(),
+                    amount_nanos: 89,
+                },
+                ApiKeyBilledAmountSnapshot {
+                    currency: "USD".to_string(),
+                    amount_nanos: 55,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn api_key_runtime_state_budget_checks_are_currency_specific() {
+        let api_key = CacheApiKey {
+            budget_daily_nanos: Some(10),
+            budget_daily_currency: Some("usd".to_string()),
+            budget_monthly_nanos: Some(20),
+            budget_monthly_currency: Some("usd".to_string()),
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            ..cache_api_key()
+        };
+        let now_ms = 1_744_000_000_000;
+        let mut state = ApiKeyRuntimeState {
+            current_minute_bucket: Some(AppState::minute_bucket_start(now_ms)),
+            day_bucket: Some(AppState::day_bucket_start(now_ms)),
+            month_bucket: Some(AppState::month_bucket_start(now_ms)),
+            daily_billed_amounts: HashMap::from([(String::from("EUR"), 999)]),
+            monthly_billed_amounts: HashMap::from([(String::from("JPY"), 999)]),
+            ..ApiKeyRuntimeState::default()
+        };
+
+        state
+            .try_admit(&api_key, now_ms)
+            .expect("non-matching currencies should not exhaust USD budgets");
+
+        assert_eq!(state.daily_request_count, 1);
+        assert_eq!(state.current_minute_request_count, 1);
+    }
+
+    #[tokio::test]
+    async fn expired_api_key_cache_hit_is_evicted() {
+        let app_state = AppState::new().await;
+        let expired_at = Utc::now().timestamp_millis() - 1;
+        let api_key_hash = "expired-hash".to_string();
+        let cache_key = CacheKey::ApiKeyHash(&api_key_hash).to_compact_string();
+        let cached_key = CacheApiKey {
+            api_key_hash: api_key_hash.clone(),
+            expires_at: Some(expired_at),
+            ..cache_api_key()
+        };
+
+        app_state
+            .api_key_cache
+            .set_positive(&cache_key, &cached_key)
+            .await
+            .expect("seed expired cache entry");
+
+        let result = app_state
+            .get_api_key_by_hash(&api_key_hash)
+            .await
+            .expect("expired cache hit should not error");
+        assert!(result.is_none());
+
+        let cached_after = app_state
+            .api_key_cache
+            .get_entry(&cache_key)
+            .await
+            .expect("read cache after eviction");
+        assert!(cached_after.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_or_load_rehydrates_after_cache_clear() {
+        let app_state = AppState::new().await;
+        let cache_key = CacheKey::ApiKeyHash("rehydrate").to_compact_string();
+        let cached_key = cache_api_key();
+
+        app_state
+            .api_key_cache
+            .set_positive(&cache_key, &cached_key)
+            .await
+            .expect("seed cache");
+        app_state.clear_cache().await;
+
+        let loaded = app_state
+            .get_or_load(&app_state.api_key_cache, &cache_key, || async {
+                Ok(Some(cached_key.clone()))
+            })
+            .await
+            .expect("reload after clear should succeed")
+            .expect("loader should repopulate cache");
+
+        assert_eq!(loaded.id, cached_key.id);
+
+        let cached_after = app_state
+            .api_key_cache
+            .get_entry(&cache_key)
+            .await
+            .expect("read cache after reload");
+        assert!(matches!(
+            cached_after.as_deref(),
+            Some(CacheEntry::Positive(_))
+        ));
     }
 }

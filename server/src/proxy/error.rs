@@ -16,10 +16,22 @@ use std::fmt;
 pub enum ProxyError {
     /// 401 — API key missing, invalid, or format error.
     Unauthorized(String),
+    /// 403 — API key exists but is disabled.
+    KeyDisabled(String),
+    /// 403 — API key exists but is expired.
+    KeyExpired(String),
     /// 400 — Malformed request body, missing fields, invalid model format.
     BadRequest(String),
     /// 403 — Access control policy denied the request.
     Forbidden(String),
+    /// 429 — API key local rate limit was exceeded.
+    RateLimited(String),
+    /// 429 — API key concurrent request limit was exceeded.
+    ConcurrencyLimited(String),
+    /// 429 — API key quota was exhausted.
+    QuotaExhausted(String),
+    /// 403 — API key budget was exhausted.
+    BudgetExhausted(String),
     /// 413 — Request body exceeds configured size or upstream rejects payload size.
     PayloadTooLarge(String),
     /// 499 — Client disconnected before the request lifecycle completed.
@@ -46,8 +58,14 @@ impl ProxyError {
     fn status_code(&self) -> StatusCode {
         match self {
             ProxyError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            ProxyError::KeyDisabled(_) => StatusCode::FORBIDDEN,
+            ProxyError::KeyExpired(_) => StatusCode::FORBIDDEN,
             ProxyError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ProxyError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ProxyError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+            ProxyError::ConcurrencyLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+            ProxyError::QuotaExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
+            ProxyError::BudgetExhausted(_) => StatusCode::FORBIDDEN,
             ProxyError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ProxyError::ClientCancelled(_) => {
                 StatusCode::from_u16(499).expect("499 should be a valid status code")
@@ -66,8 +84,14 @@ impl ProxyError {
     fn error_code(&self) -> &'static str {
         match self {
             ProxyError::Unauthorized(_) => "authentication_error",
+            ProxyError::KeyDisabled(_) => "api_key_disabled_error",
+            ProxyError::KeyExpired(_) => "api_key_expired_error",
             ProxyError::BadRequest(_) => "invalid_request_error",
             ProxyError::Forbidden(_) => "permission_error",
+            ProxyError::RateLimited(_) => "rate_limit_error",
+            ProxyError::ConcurrencyLimited(_) => "concurrency_limit_error",
+            ProxyError::QuotaExhausted(_) => "quota_exhausted_error",
+            ProxyError::BudgetExhausted(_) => "budget_exhausted_error",
             ProxyError::PayloadTooLarge(_) => "body_too_large_error",
             ProxyError::ClientCancelled(_) => "client_cancelled_error",
             ProxyError::InternalError(_) => "server_error",
@@ -84,8 +108,14 @@ impl ProxyError {
     fn message(&self) -> &str {
         match self {
             ProxyError::Unauthorized(msg)
+            | ProxyError::KeyDisabled(msg)
+            | ProxyError::KeyExpired(msg)
             | ProxyError::BadRequest(msg)
             | ProxyError::Forbidden(msg)
+            | ProxyError::RateLimited(msg)
+            | ProxyError::ConcurrencyLimited(msg)
+            | ProxyError::QuotaExhausted(msg)
+            | ProxyError::BudgetExhausted(msg)
             | ProxyError::PayloadTooLarge(msg)
             | ProxyError::ClientCancelled(msg)
             | ProxyError::InternalError(msg)
@@ -260,5 +290,23 @@ mod tests {
         let response =
             protocol_transform_error("serialize final request body", "boom").into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn key_lifecycle_errors_use_dedicated_status_and_codes() {
+        let disabled = ProxyError::KeyDisabled("disabled".to_string()).into_response();
+        assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
+
+        let expired = ProxyError::KeyExpired("expired".to_string()).into_response();
+        assert_eq!(expired.status(), StatusCode::FORBIDDEN);
+
+        assert_eq!(
+            ProxyError::KeyDisabled("disabled".to_string()).to_string(),
+            "[api_key_disabled_error] disabled"
+        );
+        assert_eq!(
+            ProxyError::KeyExpired("expired".to_string()).to_string(),
+            "[api_key_expired_error] expired"
+        );
     }
 }

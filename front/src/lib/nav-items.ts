@@ -3,7 +3,6 @@ import {
   LayoutDashboard,
   KeyRound,
   ArrowRightLeft,
-  Shield,
   Type,
   DollarSign,
   ClipboardList,
@@ -47,11 +46,6 @@ export const navItems: NavItem[] = [
     path: "/model_transform",
     i18nKey: "sidebar.modelTransform",
     icon: ArrowRightLeft,
-  },
-  {
-    path: "/access_control",
-    i18nKey: "sidebar.accessControlPolicy",
-    icon: Shield,
   },
   {
     path: "/custom_fields",

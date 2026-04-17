@@ -37,6 +37,96 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::ActionMapping;
+    use diesel::sql_types::{Int4, Int8, Bool, Text, Nullable};
+
+    api_key (id) {
+        id -> Int8,
+        #[sql_name = "api_key"]
+        api_key_value -> Text,
+        api_key_hash -> Nullable<Text>,
+        key_prefix -> Text,
+        key_last4 -> Text,
+        name -> Text,
+        description -> Nullable<Text>,
+        default_action -> ActionMapping,
+        is_enabled -> Bool,
+        expires_at -> Nullable<Int8>,
+        rate_limit_rpm -> Nullable<Int4>,
+        max_concurrent_requests -> Nullable<Int4>,
+        quota_daily_requests -> Nullable<Int8>,
+        quota_daily_tokens -> Nullable<Int8>,
+        quota_monthly_tokens -> Nullable<Int8>,
+        budget_daily_nanos -> Nullable<Int8>,
+        budget_daily_currency -> Nullable<Text>,
+        budget_monthly_nanos -> Nullable<Int8>,
+        budget_monthly_currency -> Nullable<Text>,
+        deleted_at -> Nullable<Int8>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use crate::schema::enum_def::ActionMapping;
+    use crate::schema::enum_def::RuleScopeMapping;
+    use diesel::sql_types::{Int4, Int8, Bool, Text, Nullable};
+
+    api_key_acl_rule (id) {
+        id -> Int8,
+        api_key_id -> Int8,
+        effect -> ActionMapping,
+        scope -> RuleScopeMapping,
+        provider_id -> Nullable<Int8>,
+        model_id -> Nullable<Int8>,
+        priority -> Int4,
+        is_enabled -> Bool,
+        description -> Nullable<Text>,
+        created_at -> Int8,
+        updated_at -> Int8,
+        deleted_at -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int8, Text, Nullable};
+
+    api_key_rollup_daily (api_key_id, day_bucket, currency) {
+        api_key_id -> Int8,
+        day_bucket -> Int8,
+        currency -> Text,
+        request_count -> Int8,
+        total_input_tokens -> Int8,
+        total_output_tokens -> Int8,
+        total_reasoning_tokens -> Int8,
+        total_tokens -> Int8,
+        billed_amount_nanos -> Int8,
+        last_request_at -> Nullable<Int8>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int8, Text, Nullable};
+
+    api_key_rollup_monthly (api_key_id, month_bucket, currency) {
+        api_key_id -> Int8,
+        month_bucket -> Int8,
+        currency -> Text,
+        request_count -> Int8,
+        total_input_tokens -> Int8,
+        total_output_tokens -> Int8,
+        total_reasoning_tokens -> Int8,
+        total_tokens -> Int8,
+        billed_amount_nanos -> Int8,
+        last_request_at -> Nullable<Int8>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
     cost_catalogs (id) {
         id -> Int8,
         name -> Text,
@@ -256,6 +346,11 @@ diesel::table! {
 diesel::joinable!(access_control_rule -> access_control_policy (policy_id));
 diesel::joinable!(access_control_rule -> model (model_id));
 diesel::joinable!(access_control_rule -> provider (provider_id));
+diesel::joinable!(api_key_acl_rule -> api_key (api_key_id));
+diesel::joinable!(api_key_acl_rule -> model (model_id));
+diesel::joinable!(api_key_acl_rule -> provider (provider_id));
+diesel::joinable!(api_key_rollup_daily -> api_key (api_key_id));
+diesel::joinable!(api_key_rollup_monthly -> api_key (api_key_id));
 diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
 diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
@@ -277,6 +372,10 @@ diesel::joinable!(system_api_key -> access_control_policy (access_control_policy
 diesel::allow_tables_to_appear_in_same_query!(
     access_control_policy,
     access_control_rule,
+    api_key,
+    api_key_acl_rule,
+    api_key_rollup_daily,
+    api_key_rollup_monthly,
     cost_catalogs,
     cost_catalog_versions,
     cost_components,

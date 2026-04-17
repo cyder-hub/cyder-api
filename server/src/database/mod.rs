@@ -5,6 +5,7 @@ use diesel::{
     sql_types::Text,
 };
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -13,6 +14,9 @@ use crate::{config::CONFIG, controller::BaseError};
 use serde::Serialize;
 
 pub mod access_control;
+pub mod api_key;
+pub mod api_key_acl_rule;
+pub mod api_key_rollup;
 pub mod cost;
 pub mod custom_field;
 pub mod model;
@@ -175,6 +179,14 @@ struct SqliteTableInfoRow {
     name: String,
 }
 
+#[derive(QueryableByName)]
+struct ApiKeyBackfillRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    id: i64,
+    #[diesel(sql_type = Text)]
+    api_key: String,
+}
+
 fn sqlite_table_has_column(
     connection: &mut SqliteConnection,
     table_name: &str,
@@ -198,6 +210,81 @@ fn repair_legacy_sqlite_schema(
             connection.batch_execute("ALTER TABLE model ADD COLUMN cost_catalog_id BIGINT;")
         }
     }
+}
+
+fn compute_api_key_hash(api_key: &str) -> String {
+    format!("{:x}", Sha256::digest(api_key.as_bytes()))
+}
+
+fn compute_key_prefix(api_key: &str) -> String {
+    api_key.chars().take(12).collect()
+}
+
+fn compute_key_last4(api_key: &str) -> String {
+    let last4: String = api_key.chars().rev().take(4).collect();
+    last4.chars().rev().collect()
+}
+
+fn backfill_api_key_shadow_sqlite(
+    connection: &mut SqliteConnection,
+) -> Result<(), diesel::result::Error> {
+    let rows = diesel::sql_query(
+        "SELECT id, api_key
+         FROM api_key
+         WHERE api_key_hash IS NULL
+            OR api_key_hash = ''
+            OR key_prefix = ''
+            OR key_last4 = ''",
+    )
+    .load::<ApiKeyBackfillRow>(connection)?;
+
+    for row in rows {
+        diesel::sql_query(
+            "UPDATE api_key
+             SET api_key_hash = ?,
+                 key_prefix = ?,
+                 key_last4 = ?
+             WHERE id = ?",
+        )
+        .bind::<diesel::sql_types::Text, _>(compute_api_key_hash(&row.api_key))
+        .bind::<diesel::sql_types::Text, _>(compute_key_prefix(&row.api_key))
+        .bind::<diesel::sql_types::Text, _>(compute_key_last4(&row.api_key))
+        .bind::<diesel::sql_types::BigInt, _>(row.id)
+        .execute(connection)?;
+    }
+
+    Ok(())
+}
+
+fn backfill_api_key_shadow_postgres(
+    connection: &mut PgConnection,
+) -> Result<(), diesel::result::Error> {
+    let rows = diesel::sql_query(
+        "SELECT id, api_key
+         FROM api_key
+         WHERE api_key_hash IS NULL
+            OR api_key_hash = ''
+            OR key_prefix = ''
+            OR key_last4 = ''",
+    )
+    .load::<ApiKeyBackfillRow>(connection)?;
+
+    for row in rows {
+        diesel::sql_query(
+            "UPDATE api_key
+             SET api_key_hash = $1,
+                 key_prefix = $2,
+                 key_last4 = $3
+             WHERE id = $4",
+        )
+        .bind::<diesel::sql_types::Text, _>(compute_api_key_hash(&row.api_key))
+        .bind::<diesel::sql_types::Text, _>(compute_key_prefix(&row.api_key))
+        .bind::<diesel::sql_types::Text, _>(compute_key_last4(&row.api_key))
+        .bind::<diesel::sql_types::BigInt, _>(row.id)
+        .execute(connection)?;
+    }
+
+    Ok(())
 }
 
 fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
@@ -233,6 +320,8 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
     connection
         .run_pending_migrations(SQLITE_MIGRATIONS)
         .expect("failed to run migrations");
+    backfill_api_key_shadow_sqlite(&mut connection)
+        .expect("failed to backfill api_key shadow table");
 
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);
     Pool::builder()
@@ -249,6 +338,8 @@ fn init_pg_pool(db_url: &str) -> Pool<ConnectionManager<PgConnection>> {
     connection
         .run_pending_migrations(POSTGRES_MIGRATIONS)
         .expect("failed to run migrations");
+    backfill_api_key_shadow_postgres(&mut connection)
+        .expect("failed to backfill api_key shadow table");
 
     let manager = ConnectionManager::<PgConnection>::new(db_url);
     Pool::builder()
@@ -273,9 +364,9 @@ mod tests {
     use tempfile::tempdir;
 
     fn apply_sql(connection: &mut SqliteConnection, sql_text: &str) {
-        connection
-            .batch_execute(sql_text)
-            .expect("sql should execute successfully");
+        if let Err(err) = connection.batch_execute(sql_text) {
+            panic!("sql should execute successfully: {err}\n{sql_text}");
+        }
     }
 
     fn mark_sqlite_migration_applied(connection: &mut SqliteConnection, version: &str) {
@@ -389,11 +480,199 @@ mod tests {
     }
 
     #[derive(QueryableByName)]
+    struct ApiKeyMigrationRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        id: i64,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        api_key_hash: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        key_prefix: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        key_last4: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        default_action: String,
+    }
+
+    #[derive(QueryableByName)]
     struct CostCatalogVersionFreezeRow {
         #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
         first_used_at: Option<i64>,
         #[diesel(sql_type = diesel::sql_types::Bool)]
         is_archived: bool,
+    }
+
+    #[test]
+    fn sqlite_api_key_governance_migration_preserves_ids_and_request_log_links() {
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let db_path = temp_dir.path().join("api-key-governance.sqlite");
+        let db_url = db_path.to_string_lossy().into_owned();
+        let mut connection =
+            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
+
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!(
+                "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
+            ),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!("../../migrations/sqlite/2026-04-10-120000_cost_schema_foundation/up.sql"),
+        );
+        apply_sql(
+            &mut connection,
+            include_str!(
+                "../../migrations/sqlite/2026-04-14-090000_cost_catalog_version_freeze_flags/up.sql"
+            ),
+        );
+
+        for version in [
+            "20250320062357",
+            "20250702140210",
+            "20260128233111",
+            "20260203230221",
+            "20260408090000",
+            "20260410120000",
+            "20260414090000",
+        ] {
+            mark_sqlite_migration_applied(&mut connection, version);
+        }
+
+        apply_sql(
+            &mut connection,
+            "INSERT INTO provider (
+                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
+                updated_at, provider_type, provider_api_key_mode
+            ) VALUES (
+                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO provider_api_key (
+                id, provider_id, api_key, description, deleted_at, is_enabled, created_at, updated_at
+            ) VALUES (
+                2, 1, 'provider-secret', NULL, NULL, 1, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name, is_enabled,
+                deleted_at, created_at, updated_at
+            ) VALUES (
+                10, 1, NULL, 'demo-model', 'demo-model', 1, NULL, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO access_control_policy (
+                id, name, description, default_action, created_at, updated_at, deleted_at
+            ) VALUES (
+                30, 'policy', NULL, 'ALLOW', 1, 1, NULL
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO access_control_rule (
+                id, policy_id, rule_type, priority, scope, provider_id, model_id, is_enabled,
+                description, created_at, updated_at, deleted_at
+            ) VALUES (
+                31, 30, 'DENY', 5, 'MODEL', 1, 10, 1, 'deny demo model', 1, 1, NULL
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO system_api_key (
+                id, api_key, name, description, access_control_policy_id, is_enabled, deleted_at,
+                created_at, updated_at
+            ) VALUES (
+                3, 'cyder-abcdefghijklmnopqrstuvwxyz', 'demo', NULL, 30, 1, NULL, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO request_log (
+                id, system_api_key_id, provider_id, model_id, provider_api_key_id, model_name,
+                real_model_name, request_received_at, llm_request_sent_at,
+                llm_response_first_chunk_at, llm_response_completed_at, client_ip,
+                llm_request_uri, llm_response_status, status, is_stream, estimated_cost_nanos,
+                estimated_cost_currency, cost_catalog_id, cost_catalog_version_id,
+                cost_snapshot_json, created_at, updated_at, total_input_tokens,
+                total_output_tokens, input_text_tokens, output_text_tokens, input_image_tokens,
+                output_image_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                total_tokens, storage_type, user_request_body, llm_request_body,
+                llm_response_body, user_response_body, user_api_type, llm_api_type
+            ) VALUES (
+                20, 3, 1, 10, 2, 'demo-model', 'demo-model', 123456, 123456, NULL, NULL, NULL,
+                NULL, 200, 'SUCCESS', 0, 10, 'USD', NULL, NULL, NULL, 123456, 123456, 1, 1,
+                NULL, NULL, 0, 0, 0, 0, 0, 2, NULL, NULL, NULL, NULL, NULL, 'OPENAI', 'OPENAI'
+            );",
+        );
+
+        connection
+            .run_pending_migrations(SQLITE_MIGRATIONS)
+            .expect("remaining migrations should succeed");
+        backfill_api_key_shadow_sqlite(&mut connection)
+            .expect("api_key shadow backfill should succeed");
+
+        let migrated_key = diesel::sql_query(
+            "SELECT id, api_key_hash, key_prefix, key_last4, default_action
+             FROM api_key
+             WHERE id = 3",
+        )
+        .get_result::<ApiKeyMigrationRow>(&mut connection)
+        .expect("migrated api_key row should be readable");
+
+        assert_eq!(migrated_key.id, 3);
+        assert_eq!(
+            migrated_key.api_key_hash,
+            compute_api_key_hash("cyder-abcdefghijklmnopqrstuvwxyz")
+        );
+        assert_eq!(migrated_key.key_prefix, "cyder-abcdef");
+        assert_eq!(migrated_key.key_last4, "wxyz");
+        assert_eq!(migrated_key.default_action, "ALLOW");
+
+        let acl_rule_count = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM api_key_acl_rule
+             WHERE api_key_id = 3
+               AND scope = 'MODEL'
+               AND model_id = 10",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("api_key_acl_rule count should be readable")
+        .count;
+        assert_eq!(acl_rule_count, 1);
+
+        let join_count = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM request_log AS rl
+             JOIN api_key AS ak
+               ON rl.system_api_key_id = ak.id
+             WHERE rl.id = 20
+               AND ak.id = 3",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("request_log/api_key join count should be readable")
+        .count;
+        assert_eq!(join_count, 1);
     }
 
     #[test]
@@ -462,10 +741,10 @@ mod tests {
         apply_sql(
             &mut connection,
             "INSERT INTO system_api_key (
-                id, api_key, name, description, access_control_policy_id, usage_limit_policy_id,
-                is_enabled, deleted_at, created_at, updated_at
+                id, api_key, name, description, access_control_policy_id, is_enabled, deleted_at,
+                created_at, updated_at
             ) VALUES (
-                3, 'system-secret', 'demo', NULL, NULL, NULL, 1, NULL, 1, 1
+                3, 'system-secret', 'demo', NULL, NULL, 1, NULL, 1, 1
             );",
         );
         apply_sql(
@@ -589,10 +868,10 @@ mod tests {
         apply_sql(
             &mut connection,
             "INSERT INTO system_api_key (
-                id, api_key, name, description, access_control_policy_id, usage_limit_policy_id,
-                is_enabled, deleted_at, created_at, updated_at
+                id, api_key, name, description, access_control_policy_id, is_enabled, deleted_at,
+                created_at, updated_at
             ) VALUES (
-                3, 'system-secret', 'demo', NULL, NULL, NULL, 1, NULL, 1, 1
+                3, 'system-secret', 'demo', NULL, NULL, 1, NULL, 1, 1
             );",
         );
         apply_sql(

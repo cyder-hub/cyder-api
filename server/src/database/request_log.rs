@@ -11,6 +11,9 @@ db_object! {
     #[diesel(table_name = request_log)]
     pub struct RequestLog {
         pub id: i64,
+        // This legacy column name is intentionally kept during the first
+        // `api_key` migration stage. Its values must stay stable so historical
+        // request-to-key linkage remains joinable after the table rewrite.
         pub system_api_key_id: i64,
         pub provider_id: i64,
         pub model_id: i64,
@@ -56,6 +59,7 @@ db_object! {
     #[diesel(table_name = request_log)]
     pub struct RequestLogListItem {
         pub id: i64,
+        // Keep the same semantics as `RequestLog.system_api_key_id`.
         pub system_api_key_id: i64,
         pub provider_id: i64,
         pub model_name: String,

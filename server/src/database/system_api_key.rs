@@ -8,8 +8,10 @@ use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
-// Define the main SystemApiKey struct using db_object!
-// This struct is primarily for querying and returning data.
+// Legacy source model for the future `api_key` aggregate.
+// Migration must preserve existing IDs because `request_log.system_api_key_id`
+// relies on them as historical fact. New governance capabilities should not
+// keep expanding this split `system_api_key + access_control_policy` shape.
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug)]
     #[diesel(table_name = system_api_key)] // Refers to table from schema in db_execute!

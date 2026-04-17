@@ -37,6 +37,96 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::ActionMapping;
+    use diesel::sql_types::{Integer, BigInt, Bool, Text, Nullable};
+
+    api_key (id) {
+        id -> BigInt,
+        #[sql_name = "api_key"]
+        api_key_value -> Text,
+        api_key_hash -> Nullable<Text>,
+        key_prefix -> Text,
+        key_last4 -> Text,
+        name -> Text,
+        description -> Nullable<Text>,
+        default_action -> ActionMapping,
+        is_enabled -> Bool,
+        expires_at -> Nullable<BigInt>,
+        rate_limit_rpm -> Nullable<Integer>,
+        max_concurrent_requests -> Nullable<Integer>,
+        quota_daily_requests -> Nullable<BigInt>,
+        quota_daily_tokens -> Nullable<BigInt>,
+        quota_monthly_tokens -> Nullable<BigInt>,
+        budget_daily_nanos -> Nullable<BigInt>,
+        budget_daily_currency -> Nullable<Text>,
+        budget_monthly_nanos -> Nullable<BigInt>,
+        budget_monthly_currency -> Nullable<Text>,
+        deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use crate::schema::enum_def::ActionMapping;
+    use crate::schema::enum_def::RuleScopeMapping;
+    use diesel::sql_types::{Integer, BigInt, Bool, Text, Nullable};
+
+    api_key_acl_rule (id) {
+        id -> BigInt,
+        api_key_id -> BigInt,
+        effect -> ActionMapping,
+        scope -> RuleScopeMapping,
+        provider_id -> Nullable<BigInt>,
+        model_id -> Nullable<BigInt>,
+        priority -> Integer,
+        is_enabled -> Bool,
+        description -> Nullable<Text>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+        deleted_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Text, Nullable};
+
+    api_key_rollup_daily (api_key_id, day_bucket, currency) {
+        api_key_id -> BigInt,
+        day_bucket -> BigInt,
+        currency -> Text,
+        request_count -> BigInt,
+        total_input_tokens -> BigInt,
+        total_output_tokens -> BigInt,
+        total_reasoning_tokens -> BigInt,
+        total_tokens -> BigInt,
+        billed_amount_nanos -> BigInt,
+        last_request_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Text, Nullable};
+
+    api_key_rollup_monthly (api_key_id, month_bucket, currency) {
+        api_key_id -> BigInt,
+        month_bucket -> BigInt,
+        currency -> Text,
+        request_count -> BigInt,
+        total_input_tokens -> BigInt,
+        total_output_tokens -> BigInt,
+        total_reasoning_tokens -> BigInt,
+        total_tokens -> BigInt,
+        billed_amount_nanos -> BigInt,
+        last_request_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     cost_catalogs (id) {
         id -> BigInt,
         name -> Text,
@@ -257,6 +347,11 @@ diesel::table! {
 diesel::joinable!(access_control_rule -> access_control_policy (policy_id));
 diesel::joinable!(access_control_rule -> model (model_id));
 diesel::joinable!(access_control_rule -> provider (provider_id));
+diesel::joinable!(api_key_acl_rule -> api_key (api_key_id));
+diesel::joinable!(api_key_acl_rule -> model (model_id));
+diesel::joinable!(api_key_acl_rule -> provider (provider_id));
+diesel::joinable!(api_key_rollup_daily -> api_key (api_key_id));
+diesel::joinable!(api_key_rollup_monthly -> api_key (api_key_id));
 diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
 diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
@@ -278,6 +373,10 @@ diesel::joinable!(system_api_key -> access_control_policy (access_control_policy
 diesel::allow_tables_to_appear_in_same_query!(
     access_control_policy,
     access_control_rule,
+    api_key,
+    api_key_acl_rule,
+    api_key_rollup_daily,
+    api_key_rollup_monthly,
     cost_catalogs,
     cost_catalog_versions,
     cost_components,

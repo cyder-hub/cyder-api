@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ToastProvider } from "radix-vue";
+import { ToastProvider } from "reka-ui";
 import type { ToastProps } from "./types";
 
 const props = defineProps<ToastProps>();

@@ -11,19 +11,19 @@ use reqwest::{Method, header::CONTENT_ENCODING};
 
 use super::{
     ProxyError,
-    auth::check_access_control,
+    auth::{admit_api_key_request, check_access_control},
     cancellation::{CancellationDropGuard, ProxyCancellationContext},
     classify_reqwest_error, classify_upstream_status,
     core::{
         build_response_builder, decode_response_body, finalize_non_streaming_log_context,
         read_response_bytes_with_cancellation, send_with_first_byte_timeout,
     },
-    governance::{
-        ensure_provider_request_allowed, record_provider_failure, record_provider_success,
-    },
-    logging::{LoggedBody, RequestLogContext, get_log_manager},
+    logging::{LoggedBody, RequestLogContext, record_request_completion_and_log},
     prepare::{get_provider_and_model, prepare_llm_request, prepare_simple_gemini_request},
     protocol_transform_error,
+    provider_governance::{
+        ensure_provider_request_allowed, record_provider_failure, record_provider_success,
+    },
     request::ParsedProxyRequest,
     util::{
         determine_target_api_type, format_model_str, get_cost_catalog_version,
@@ -190,6 +190,13 @@ pub(super) async fn execute_utility_proxy(
     log_context.user_request_body = Some(LoggedBody::from_bytes(original_request_body));
     log_context.llm_request_body = Some(LoggedBody::from_bytes(final_body.clone()));
 
+    let _api_key_concurrency_guard = admit_api_key_request(&app_state, &system_api_key)
+        .await
+        .map_err(|e| {
+            warn!("API key request admission failed: {:?}", e);
+            e
+        })?;
+
     let model_str = format_model_str(&provider, &model);
     let client = if provider.use_proxy {
         &app_state.proxy_client
@@ -235,7 +242,7 @@ pub(super) async fn execute_utility_proxy(
             } else {
                 RequestStatus::Error
             };
-            get_log_manager().log(log_context).await;
+            record_request_completion_and_log(&app_state, log_context).await;
             return Err(proxy_error);
         }
     };
@@ -272,7 +279,7 @@ pub(super) async fn execute_utility_proxy(
             };
             log_context.llm_response_body =
                 Some(LoggedBody::from_bytes(Bytes::from(proxy_error.to_string())));
-            get_log_manager().log(log_context).await;
+            record_request_completion_and_log(&app_state, log_context).await;
             return Err(proxy_error);
         }
     };
@@ -301,7 +308,7 @@ pub(super) async fn execute_utility_proxy(
         decompressed_body.clone(),
         decompressed_body.clone(),
     );
-    get_log_manager().log(log_context.clone()).await;
+    record_request_completion_and_log(&app_state, log_context.clone()).await;
     cancellation_guard.disarm();
 
     if status_code.is_success() {

@@ -8,9 +8,12 @@ import type {
   DashboardAlertsSection,
   UsageStatsPeriod,
   ApiKeyItem,
+  ApiKeyDetail,
+  ApiKeyReveal,
+  ApiKeyCreateResponse,
+  ApiKeyRuntimeSnapshot,
   ApiKeyUpdatePayload,
   ApiKeyCreatePayload,
-  IssueTokenPayload,
   ProviderBase,
   ProviderApiKeyItem,
   ModelItem,
@@ -18,8 +21,6 @@ import type {
   ProviderRuntimeItem,
   ProviderRuntimeListParams,
   ProviderRuntimeSummary,
-  AccessControlPolicyFromAPI,
-  AccessControlPayload,
   ModelAliasListItem,
   ModelAliasDetail,
   ModelAliasPayload,
@@ -91,29 +92,33 @@ export const Api = {
     return request(`/ai/manager/api/system/usage_stats?${params.toString()}`);
   },
 
-  // ========== System API Key ==========
+  // ========== API Key ==========
   getApiKeyList(): Promise<ApiKeyItem[]> {
-    return request("/ai/manager/api/system_api_key/list") as Promise<
-      ApiKeyItem[]
-    >;
+    return request.get("/ai/manager/api/api_key/list");
   },
-  updateApiKey(id: number, payload: ApiKeyUpdatePayload): Promise<void> {
-    return request.put(`/ai/manager/api/system_api_key/${id}`, payload);
+  getApiKeyDetail(id: number): Promise<ApiKeyDetail> {
+    return request.get(`/ai/manager/api/api_key/${id}`);
   },
-  createApiKey(payload: ApiKeyCreatePayload): Promise<void> {
-    return request.post("/ai/manager/api/system_api_key", payload);
+  getApiKeyRuntime(id: number): Promise<ApiKeyRuntimeSnapshot> {
+    return request.get(`/ai/manager/api/api_key/${id}/runtime`);
+  },
+  getApiKeyRuntimeList(): Promise<ApiKeyRuntimeSnapshot[]> {
+    return request.get("/ai/manager/api/api_key/runtime/list");
+  },
+  updateApiKey(id: number, payload: ApiKeyUpdatePayload): Promise<ApiKeyDetail> {
+    return request.put(`/ai/manager/api/api_key/${id}`, payload);
+  },
+  createApiKey(payload: ApiKeyCreatePayload): Promise<ApiKeyCreateResponse> {
+    return request.post("/ai/manager/api/api_key/", payload);
+  },
+  rotateApiKey(id: number): Promise<ApiKeyReveal> {
+    return request.post(`/ai/manager/api/api_key/${id}/rotate`, {});
+  },
+  revealApiKey(id: number): Promise<ApiKeyReveal> {
+    return request.get(`/ai/manager/api/api_key/${id}/reveal`);
   },
   deleteApiKey(id: number): Promise<void> {
-    return request.delete(`/ai/manager/api/system_api_key/${id}`);
-  },
-  issueApiKeyToken(
-    apiKeyId: number,
-    payload: IssueTokenPayload,
-  ): Promise<string> {
-    return request.post(
-      `/ai/manager/api/system_api_key/${apiKeyId}/issue`,
-      payload,
-    ) as Promise<string>;
+    return request.delete(`/ai/manager/api/api_key/${id}`);
   },
 
   // ========== Provider ==========
@@ -144,27 +149,6 @@ export const Api = {
       `/ai/manager/api/provider/runtime/summary${suffix ? `?${suffix}` : ""}`,
     );
   },
-
-  // ========== Access Control ==========
-  getAccessControlList(): Promise<AccessControlPolicyFromAPI[]> {
-    return request("/ai/manager/api/access_control/list");
-  },
-  getAccessControlDetail(id: number): Promise<AccessControlPolicyFromAPI> {
-    return request.get(`/ai/manager/api/access_control/${id}`);
-  },
-  updateAccessControl(
-    id: number,
-    payload: AccessControlPayload,
-  ): Promise<void> {
-    return request.put(`/ai/manager/api/access_control/${id}`, payload);
-  },
-  createAccessControl(payload: AccessControlPayload): Promise<void> {
-    return request.post("/ai/manager/api/access_control", payload);
-  },
-  deleteAccessControl(id: number): Promise<void> {
-    return request.delete(`/ai/manager/api/access_control/${id}`);
-  },
-
   // ========== Model Alias ==========
   getModelAliasList(): Promise<ModelAliasListItem[]> {
     return request.get("/ai/manager/api/model_alias/list");

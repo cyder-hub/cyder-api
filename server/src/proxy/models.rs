@@ -3,16 +3,14 @@ use std::sync::Arc;
 use axum::{body::Body, response::Response};
 use serde::Serialize;
 
-use super::ProxyError;
+use super::{ProxyError, auth::admit_api_key_request};
 use crate::{
     schema::enum_def::{LlmApiType, ProviderType},
     service::{
         app_state::AppState,
-        cache::types::{
-            CacheAccessControl, CacheModel, CacheModelsCatalog, CacheProvider, CacheSystemApiKey,
-        },
+        cache::types::{CacheModel, CacheModelsCatalog, CacheProvider, CacheSystemApiKey},
     },
-    utils::limit::LIMITER,
+    utils::acl::ACL_EVALUATOR,
 };
 use cyder_tools::log::{debug, error};
 
@@ -32,47 +30,12 @@ pub(super) async fn get_accessible_models(
         system_api_key.id
     );
 
-    // 1. Fetch Access Control Policy if ID is present
-    let access_control_policy_opt: Option<Arc<CacheAccessControl>> = if let Some(policy_id) =
-        system_api_key.access_control_policy_id
-    {
-        match app_state.get_access_control_policy(policy_id).await {
-            Ok(Some(policy)) => Some(policy),
-            Ok(None) => {
-                error!(
-                    "Access control policy with id {} not found in store (configured on SystemApiKey {}).",
-                    policy_id, system_api_key.id
-                );
-                return Err(ProxyError::InternalError(format!(
-                    "Access control policy id {} configured but not found in application cache.",
-                    policy_id
-                )));
-            }
-            Err(store_err) => {
-                error!(
-                    "Failed to fetch access control policy with id {} from store: {:?}",
-                    policy_id, store_err
-                );
-                return Err(ProxyError::InternalError(format!(
-                    "Error accessing application cache for access control policy id {}: {}",
-                    policy_id, store_err
-                )));
-            }
-        }
-    } else {
-        None
-    };
-
     let catalog = app_state.get_models_catalog().await.map_err(|store_err| {
         error!("Failed to fetch models catalog from cache: {:?}", store_err);
         ProxyError::InternalError("Failed to retrieve models catalog".to_string())
     })?;
 
-    let available_models = collect_accessible_models(
-        catalog.as_ref(),
-        access_control_policy_opt.as_deref(),
-        system_api_key.id,
-    );
+    let available_models = collect_accessible_models(catalog.as_ref(), system_api_key);
 
     debug!(
         "Total accessible models (including aliases): {}",
@@ -87,6 +50,12 @@ pub(super) async fn execute_models_listing(
     system_api_key: Arc<CacheSystemApiKey>,
     api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
+    let _api_key_concurrency_guard = admit_api_key_request(&app_state, &system_api_key)
+        .await
+        .map_err(|e| {
+            error!("API key request admission failed for /models: {:?}", e);
+            e
+        })?;
     let accessible_models = get_accessible_models(&app_state, &system_api_key).await?;
     let response_body = render_models_response(api_type, &accessible_models)?;
 
@@ -184,8 +153,7 @@ fn render_models_response(
 
 fn collect_accessible_models(
     catalog: &CacheModelsCatalog,
-    access_control_policy: Option<&CacheAccessControl>,
-    system_api_key_id: i64,
+    system_api_key: &CacheSystemApiKey,
 ) -> Vec<AccessibleModel> {
     let providers_by_id = catalog
         .providers
@@ -215,7 +183,7 @@ fn collect_accessible_models(
         provider_models.sort_by(|left, right| left.model_name.cmp(&right.model_name));
 
         for model in provider_models {
-            if is_model_allowed(access_control_policy, provider, model, system_api_key_id) {
+            if is_model_allowed(system_api_key, provider, model) {
                 available_models.push(AccessibleModel {
                     id: format!("{}/{}", provider.provider_key, model.model_name),
                     owned_by: provider.provider_key.clone(),
@@ -238,7 +206,7 @@ fn collect_accessible_models(
             continue;
         };
 
-        if is_model_allowed(access_control_policy, provider, model, system_api_key_id) {
+        if is_model_allowed(system_api_key, provider, model) {
             available_models.push(AccessibleModel {
                 id: alias.alias_name.clone(),
                 owned_by: "cyder-api".to_string(),
@@ -251,24 +219,25 @@ fn collect_accessible_models(
 }
 
 fn is_model_allowed(
-    access_control_policy: Option<&CacheAccessControl>,
+    system_api_key: &CacheSystemApiKey,
     provider: &CacheProvider,
     model: &CacheModel,
-    system_api_key_id: i64,
 ) -> bool {
-    if let Some(policy) = access_control_policy {
-        match LIMITER.check_limit_strategy(policy, provider.id, model.id) {
-            Ok(_) => true,
-            Err(reason) => {
-                debug!(
-                    "Model {}/{} denied by policy '{}' for SystemApiKey ID {}. Reason: {}",
-                    provider.provider_key, model.model_name, policy.name, system_api_key_id, reason
-                );
-                false
-            }
+    match ACL_EVALUATOR.authorize(
+        &system_api_key.name,
+        &system_api_key.default_action,
+        &system_api_key.acl_rules,
+        provider.id,
+        model.id,
+    ) {
+        Ok(_) => true,
+        Err(reason) => {
+            debug!(
+                "Model {}/{} denied for ApiKey ID {}. Reason: {}",
+                provider.provider_key, model.model_name, system_api_key.id, reason
+            );
+            false
         }
-    } else {
-        true
     }
 }
 
@@ -277,7 +246,8 @@ mod tests {
     use super::{collect_accessible_models, render_models_response};
     use crate::schema::enum_def::{Action, LlmApiType, ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::{
-        CacheAccessControl, CacheModel, CacheModelAlias, CacheModelsCatalog, CacheProvider,
+        CacheApiKeyAclRule, CacheModel, CacheModelAlias, CacheModelsCatalog, CacheProvider,
+        CacheSystemApiKey,
     };
 
     fn provider(id: i64, provider_key: &str, is_enabled: bool) -> CacheProvider {
@@ -301,6 +271,30 @@ mod tests {
             real_model_name: None,
             cost_catalog_id: None,
             is_enabled,
+        }
+    }
+
+    fn api_key(default_action: Action, acl_rules: Vec<CacheApiKeyAclRule>) -> CacheSystemApiKey {
+        CacheSystemApiKey {
+            id: 1,
+            api_key_hash: "hash".to_string(),
+            key_prefix: "cyder-prefix".to_string(),
+            key_last4: "1234".to_string(),
+            name: "test-key".to_string(),
+            description: None,
+            default_action,
+            is_enabled: true,
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules,
         }
     }
 
@@ -332,7 +326,7 @@ mod tests {
             ],
         };
 
-        let models = collect_accessible_models(&catalog, None, 1);
+        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
 
         let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
         assert_eq!(
@@ -377,7 +371,7 @@ mod tests {
             ],
         };
 
-        let models = collect_accessible_models(&catalog, None, 1);
+        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
         let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
         assert_eq!(
             ids,
@@ -400,21 +394,21 @@ mod tests {
                 is_enabled: true,
             }],
         };
-        let policy = CacheAccessControl {
-            id: 1,
-            name: "default-deny".to_string(),
-            default_action: Action::Deny,
-            rules: vec![crate::service::cache::types::CacheAccessControlRule {
+        let system_api_key = api_key(
+            Action::Deny,
+            vec![CacheApiKeyAclRule {
                 id: 1,
-                rule_type: Action::Allow,
+                effect: Action::Allow,
                 priority: 1,
                 scope: crate::schema::enum_def::RuleScope::Model,
                 provider_id: Some(1),
                 model_id: Some(11),
+                is_enabled: true,
+                description: None,
             }],
-        };
+        );
 
-        let models = collect_accessible_models(&catalog, Some(&policy), 1);
+        let models = collect_accessible_models(&catalog, &system_api_key);
         let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
         assert_eq!(ids, vec!["provider/allowed".to_string()]);
     }

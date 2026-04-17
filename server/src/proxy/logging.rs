@@ -1,7 +1,13 @@
 use crate::{
     cost::{CostLedger, CostRatingContext, CostSnapshot, UsageNormalization, rate_cost},
-    database::request_log::RequestLog,
+    database::{
+        api_key_rollup::{
+            ApiKeyRollupDaily, ApiKeyRollupMonthly, NewApiKeyRollupDaily, NewApiKeyRollupMonthly,
+        },
+        request_log::RequestLog,
+    },
     schema::enum_def::{LlmApiType, RequestStatus, StorageType},
+    service::app_state::{ApiKeyCompletionDelta, AppState},
     service::cache::types::{
         CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
     },
@@ -13,7 +19,7 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{Datelike, TimeZone, Utc};
 use cyder_tools::log::{debug, error};
 use flate2::{Compression, write::GzEncoder};
 use reqwest::StatusCode;
@@ -249,6 +255,60 @@ impl RequestLogContext {
             user_response_body: None,
         }
     }
+}
+
+const ROLLUP_UNSPECIFIED_CURRENCY: &str = "NUL";
+
+fn normalize_rollup_currency(currency: Option<&str>) -> String {
+    currency
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_uppercase)
+        .unwrap_or_else(|| ROLLUP_UNSPECIFIED_CURRENCY.to_string())
+}
+
+fn total_tokens_for_context(context: &RequestLogContext) -> i64 {
+    context
+        .usage_normalization
+        .as_ref()
+        .map(|usage| (usage.total_input_tokens + usage.total_output_tokens) as i64)
+        .or_else(|| {
+            context
+                .usage
+                .as_ref()
+                .map(|usage| i64::from(usage.total_tokens))
+        })
+        .unwrap_or_default()
+}
+
+pub(super) fn completion_delta_from_log_context(
+    context: &RequestLogContext,
+) -> ApiKeyCompletionDelta {
+    let cost_outcome = LogManager::build_cost_outcome(context);
+    ApiKeyCompletionDelta {
+        api_key_id: context.system_api_key_id,
+        occurred_at: context.completion_ts.unwrap_or(context.request_received_at),
+        total_tokens: total_tokens_for_context(context),
+        billed_amount_nanos: cost_outcome.estimated_cost_nanos.unwrap_or_default(),
+        billed_currency: cost_outcome.estimated_cost_currency,
+    }
+}
+
+pub(super) async fn record_request_completion_and_log(
+    app_state: &Arc<AppState>,
+    context: RequestLogContext,
+) {
+    if let Err(err) = app_state
+        .record_api_key_completion(&completion_delta_from_log_context(&context))
+        .await
+    {
+        error!(
+            "Failed to record api key completion delta for key {}: {}",
+            context.system_api_key_id, err
+        );
+    }
+
+    get_log_manager().log(context).await;
 }
 
 pub struct LogManager {
@@ -522,6 +582,84 @@ impl LogManager {
                         &format!(
                             "attempt={}/{} request_log_insert_failed error={:?}",
                             attempt, MAX_ATTEMPTS, e
+                        ),
+                    );
+                    if attempt < MAX_ATTEMPTS {
+                        metrics.record_retry();
+                        std::thread::sleep(Duration::from_millis(100 * attempt as u64));
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn add_api_key_rollup_delta_with_retry(
+        request_log: &RequestLog,
+        metrics: &LogManagerMetrics,
+        log_id: i64,
+    ) -> bool {
+        const MAX_ATTEMPTS: usize = 3;
+        let now = Utc::now().timestamp_millis();
+        let request_at = request_log.request_received_at;
+        let currency = normalize_rollup_currency(request_log.estimated_cost_currency.as_deref());
+        let daily_delta = NewApiKeyRollupDaily {
+            api_key_id: request_log.system_api_key_id,
+            day_bucket: request_at.div_euclid(86_400_000) * 86_400_000,
+            currency: currency.clone(),
+            request_count: 1,
+            total_input_tokens: i64::from(request_log.total_input_tokens.unwrap_or_default()),
+            total_output_tokens: i64::from(request_log.total_output_tokens.unwrap_or_default()),
+            total_reasoning_tokens: i64::from(request_log.reasoning_tokens.unwrap_or_default()),
+            total_tokens: i64::from(request_log.total_tokens.unwrap_or_default()),
+            billed_amount_nanos: request_log.estimated_cost_nanos.unwrap_or_default(),
+            last_request_at: Some(request_at),
+            created_at: now,
+            updated_at: now,
+        };
+        let monthly_delta = NewApiKeyRollupMonthly {
+            api_key_id: request_log.system_api_key_id,
+            month_bucket: {
+                let timestamp = chrono::Utc
+                    .timestamp_millis_opt(request_at)
+                    .single()
+                    .unwrap_or_else(chrono::Utc::now);
+                chrono::Utc
+                    .with_ymd_and_hms(timestamp.year(), timestamp.month(), 1, 0, 0, 0)
+                    .single()
+                    .expect("month bucket should be valid")
+                    .timestamp_millis()
+            },
+            currency,
+            request_count: 1,
+            total_input_tokens: i64::from(request_log.total_input_tokens.unwrap_or_default()),
+            total_output_tokens: i64::from(request_log.total_output_tokens.unwrap_or_default()),
+            total_reasoning_tokens: i64::from(request_log.reasoning_tokens.unwrap_or_default()),
+            total_tokens: i64::from(request_log.total_tokens.unwrap_or_default()),
+            billed_amount_nanos: request_log.estimated_cost_nanos.unwrap_or_default(),
+            last_request_at: Some(request_at),
+            created_at: now,
+            updated_at: now,
+        };
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let daily_result = ApiKeyRollupDaily::add_delta(&daily_delta);
+            let monthly_result = ApiKeyRollupMonthly::add_delta(&monthly_delta);
+            match (daily_result, monthly_result) {
+                (Ok(_), Ok(_)) => return true,
+                (daily_err, monthly_err) => {
+                    metrics.record_db_failure();
+                    Self::log_stage_event(
+                        metrics,
+                        log_id,
+                        LogProcessingStage::MetadataPersistFailed,
+                        &format!(
+                            "attempt={}/{} api_key_rollup_update_failed daily={:?} monthly={:?}",
+                            attempt,
+                            MAX_ATTEMPTS,
+                            daily_err.err(),
+                            monthly_err.err()
                         ),
                     );
                     if attempt < MAX_ATTEMPTS {
@@ -823,7 +961,17 @@ impl LogManager {
                 LogProcessingStage::MetadataPersisted,
                 "request_log_inserted",
             );
-            Self::log_stage_event(metrics, log_id, LogProcessingStage::Completed, "done");
+            if Self::add_api_key_rollup_delta_with_retry(&request_log, metrics, log_id) {
+                Self::log_stage_event(metrics, log_id, LogProcessingStage::Completed, "done");
+            } else {
+                metrics.record_compensation_needed();
+                Self::log_stage_event(
+                    metrics,
+                    log_id,
+                    LogProcessingStage::NeedsCompensation,
+                    "api_key_rollup_update_failed_after_retries",
+                );
+            }
         } else {
             metrics.record_compensation_needed();
             Self::log_stage_event(
@@ -1023,8 +1171,24 @@ mod tests {
     fn make_log_context() -> RequestLogContext {
         let system_api_key = CacheSystemApiKey {
             id: 1,
+            api_key_hash: "hash".to_string(),
+            key_prefix: "cyder-prefix".to_string(),
+            key_last4: "1234".to_string(),
             name: "system".to_string(),
-            access_control_policy_id: None,
+            description: None,
+            default_action: crate::schema::enum_def::Action::Allow,
+            is_enabled: true,
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: vec![],
         };
         let provider = CacheProvider {
             id: 2,

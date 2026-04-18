@@ -21,9 +21,10 @@ import type {
   ProviderRuntimeItem,
   ProviderRuntimeListParams,
   ProviderRuntimeSummary,
-  ModelAliasListItem,
-  ModelAliasDetail,
-  ModelAliasPayload,
+  ModelRouteListItem,
+  ModelRouteDetail,
+  ModelRoutePayload,
+  ModelRouteUpdatePayload,
   PaginatedResponse,
   CustomFieldDefinition,
   CustomFieldPayload,
@@ -149,21 +150,24 @@ export const Api = {
       `/ai/manager/api/provider/runtime/summary${suffix ? `?${suffix}` : ""}`,
     );
   },
-  // ========== Model Alias ==========
-  getModelAliasList(): Promise<ModelAliasListItem[]> {
-    return request.get("/ai/manager/api/model_alias/list");
+  // ========== Model Route ==========
+  getModelRouteList(): Promise<ModelRouteListItem[]> {
+    return request.get("/ai/manager/api/model_route/list");
   },
-  getModelAliasDetail(id: number): Promise<ModelAliasDetail> {
-    return request.get(`/ai/manager/api/model_alias/${id}`);
+  getModelRouteDetail(id: number): Promise<ModelRouteDetail> {
+    return request.get(`/ai/manager/api/model_route/${id}`);
   },
-  updateModelAlias(id: number, payload: ModelAliasPayload): Promise<void> {
-    return request.put(`/ai/manager/api/model_alias/${id}`, payload);
+  updateModelRoute(
+    id: number,
+    payload: ModelRouteUpdatePayload,
+  ): Promise<ModelRouteDetail> {
+    return request.put(`/ai/manager/api/model_route/${id}`, payload);
   },
-  createModelAlias(payload: ModelAliasPayload): Promise<void> {
-    return request.post("/ai/manager/api/model_alias", payload);
+  createModelRoute(payload: ModelRoutePayload): Promise<ModelRouteDetail> {
+    return request.post("/ai/manager/api/model_route", payload);
   },
-  deleteModelAlias(id: number): Promise<void> {
-    return request.delete(`/ai/manager/api/model_alias/${id}`);
+  deleteModelRoute(id: number): Promise<void> {
+    return request.delete(`/ai/manager/api/model_route/${id}`);
   },
 
   // ========== Custom Field Definition ==========

@@ -13,13 +13,19 @@ use super::{
     ProxyError,
     auth::{admit_api_key_request, check_access_control},
     cancellation::{CancellationDropGuard, ProxyCancellationContext},
-    classify_reqwest_error, classify_upstream_status,
+    classify_upstream_status,
     core::{
         build_response_builder, decode_response_body, finalize_non_streaming_log_context,
         read_response_bytes_with_cancellation, send_with_first_byte_timeout,
     },
-    logging::{LoggedBody, RequestLogContext, record_request_completion_and_log},
-    prepare::{get_provider_and_model, prepare_llm_request, prepare_simple_gemini_request},
+    logging::{
+        LoggedBody, RequestLogContext, build_initial_request_log_context,
+        record_request_completion_and_log,
+    },
+    prepare::{
+        prepare_llm_request, prepare_simple_gemini_request, resolve_provider_credentials,
+        resolve_requested_model,
+    },
     protocol_transform_error,
     provider_governance::{
         ensure_provider_request_allowed, record_provider_failure, record_provider_success,
@@ -79,6 +85,20 @@ fn validate_utility_target(
     }
 }
 
+async fn record_early_utility_failure(
+    app_state: &Arc<AppState>,
+    mut log_context: RequestLogContext,
+    proxy_error: &ProxyError,
+) {
+    log_context.completion_ts = Some(Utc::now().timestamp_millis());
+    log_context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+        RequestStatus::Cancelled
+    } else {
+        RequestStatus::Error
+    };
+    record_request_completion_and_log(app_state, log_context).await;
+}
+
 pub(super) async fn execute_utility_proxy(
     app_state: Arc<AppState>,
     input: UtilityExecutionInput,
@@ -112,64 +132,113 @@ pub(super) async fn execute_utility_proxy(
         ),
     );
 
-    let (provider, model) = get_provider_and_model(&app_state, &requested_model)
+    let resolved_target = resolve_requested_model(&app_state, system_api_key.id, &requested_model)
         .await
         .map_err(|e| {
             warn!("Failed to resolve model '{}': {}", requested_model, e);
             ProxyError::BadRequest(e)
         })?;
+    let requested_name = resolved_target.requested_name;
+    let resolved_name_scope = resolved_target.resolved_scope.as_str().to_string();
+    let resolved_route_id = resolved_target.resolved_route_id;
+    let resolved_route_name = resolved_target.resolved_route_name;
+    let provider = resolved_target.provider;
+    let model = resolved_target.model;
     let target_api_type = determine_target_api_type(&provider);
-    validate_utility_target(&operation, target_api_type)?;
-    let cost_catalog_version = get_cost_catalog_version(&model, &app_state).await;
-
-    check_access_control(&system_api_key, &provider, &model, &app_state)
+    let provider_credentials = resolve_provider_credentials(&provider, &app_state)
         .await
         .map_err(|e| {
-            warn!("Access control check failed: {:?}", e);
+            warn!(
+                "Failed to resolve provider credentials for provider {}: {:?}",
+                provider.id, e
+            );
             e
         })?;
+    let initial_log_context = build_initial_request_log_context(
+        &system_api_key,
+        &provider,
+        &model,
+        provider_credentials.key_id,
+        &requested_name,
+        &resolved_name_scope,
+        resolved_route_id,
+        resolved_route_name.as_deref(),
+        start_time,
+        &client_ip_addr,
+        operation.api_type,
+        target_api_type,
+        Some(original_request_body.clone()),
+    );
+    if let Err(e) = validate_utility_target(&operation, target_api_type) {
+        record_early_utility_failure(&app_state, initial_log_context.clone(), &e).await;
+        return Err(e);
+    }
+    let cost_catalog_version = get_cost_catalog_version(&model, &app_state).await;
+    info!(
+        "Resolved utility request model '{}' via {} to candidate {}",
+        requested_name, resolved_name_scope, model.id
+    );
+
+    if let Err(e) = check_access_control(&system_api_key, &provider, &model, &app_state).await {
+        warn!("Access control check failed: {:?}", e);
+        record_early_utility_failure(&app_state, initial_log_context.clone(), &e).await;
+        return Err(e);
+    }
 
     let (final_url, final_headers, final_body, provider_api_key_id) = match operation.protocol {
         UtilityProtocol::OpenaiCompatible => {
             let (final_url, final_headers, final_body_value, provider_api_key_id) =
-                prepare_llm_request(
+                match prepare_llm_request(
                     &provider,
                     &model,
                     data,
                     &original_headers,
                     &app_state,
+                    &provider_credentials,
                     &operation.downstream_path,
                 )
                 .await
-                .map_err(|e| {
-                    error!(
-                        "Failed to prepare utility request '{}': {:?}",
-                        operation.name, e
-                    );
-                    e
-                })?;
+                {
+                    Ok(prepared) => prepared,
+                    Err(e) => {
+                        error!(
+                            "Failed to prepare utility request '{}': {:?}",
+                            operation.name, e
+                        );
+                        record_early_utility_failure(&app_state, initial_log_context.clone(), &e)
+                            .await;
+                        return Err(e);
+                    }
+                };
             let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
                 protocol_transform_error("Failed to serialize final request body", e)
             })?);
             (final_url, final_headers, final_body, provider_api_key_id)
         }
         UtilityProtocol::GeminiCompatible => {
-            let (final_url, final_headers, provider_api_key_id) = prepare_simple_gemini_request(
-                &provider,
-                &model,
-                &original_headers,
-                &app_state,
-                &operation.downstream_path,
-                &query_params,
-            )
-            .await
-            .map_err(|e| {
-                error!(
-                    "Failed to prepare utility request '{}': {:?}",
-                    operation.name, e
-                );
-                e
-            })?;
+            let (final_url, final_headers, provider_api_key_id) =
+                match prepare_simple_gemini_request(
+                    &provider,
+                    &model,
+                    &original_headers,
+                    &app_state,
+                    &provider_credentials,
+                    &operation.downstream_path,
+                    &query_params,
+                )
+                .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(e) => {
+                        error!(
+                            "Failed to prepare utility request '{}': {:?}",
+                            operation.name, e
+                        );
+                        record_early_utility_failure(&app_state, initial_log_context.clone(), &e)
+                            .await;
+                        return Err(e);
+                    }
+                };
             let final_body = Bytes::from(serde_json::to_vec(&data).map_err(|e| {
                 protocol_transform_error("Failed to serialize final request body", e)
             })?);
@@ -177,25 +246,19 @@ pub(super) async fn execute_utility_proxy(
         }
     };
 
-    let mut log_context = RequestLogContext::new(
-        &system_api_key,
-        &provider,
-        &model,
-        provider_api_key_id,
-        start_time,
-        &client_ip_addr,
-        operation.api_type,
-        target_api_type,
-    );
-    log_context.user_request_body = Some(LoggedBody::from_bytes(original_request_body));
+    let mut log_context = initial_log_context;
+    debug_assert_eq!(provider_api_key_id, provider_credentials.key_id);
     log_context.llm_request_body = Some(LoggedBody::from_bytes(final_body.clone()));
 
-    let _api_key_concurrency_guard = admit_api_key_request(&app_state, &system_api_key)
-        .await
-        .map_err(|e| {
+    let _api_key_concurrency_guard = match admit_api_key_request(&app_state, &system_api_key).await
+    {
+        Ok(guard) => guard,
+        Err(e) => {
             warn!("API key request admission failed: {:?}", e);
-            e
-        })?;
+            record_early_utility_failure(&app_state, log_context, &e).await;
+            return Err(e);
+        }
+    };
 
     let model_str = format_model_str(&provider, &model);
     let client = if provider.use_proxy {
@@ -203,7 +266,10 @@ pub(super) async fn execute_utility_proxy(
     } else {
         &app_state.client
     };
-    ensure_provider_request_allowed(&app_state, provider.id, &model_str).await?;
+    if let Err(e) = ensure_provider_request_allowed(&app_state, provider.id, &model_str).await {
+        record_early_utility_failure(&app_state, log_context, &e).await;
+        return Err(e);
+    }
 
     debug!(
         "[utility:{}] proxy request header: {:?}",

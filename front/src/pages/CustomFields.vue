@@ -68,8 +68,8 @@
           <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
             <span>{{ $t("customFieldsPage.table.enabled") }}</span>
             <Checkbox
-              :checked="field.is_enabled"
-              @update:checked="() => handleToggleEnable(field)"
+              :model-value="field.is_enabled"
+              @update:model-value="() => handleToggleEnable(field)"
             />
           </div>
         </div>
@@ -147,8 +147,8 @@
             </TableCell>
             <TableCell>
               <Checkbox
-                :checked="field.is_enabled"
-                @update:checked="() => handleToggleEnable(field)"
+                :model-value="field.is_enabled"
+                @update:model-value="() => handleToggleEnable(field)"
               />
             </TableCell>
             <TableCell class="text-right">
@@ -351,10 +351,7 @@
               >
               <Checkbox
                 id="boolean_value_checkbox"
-                :checked="editingField.boolean_value"
-                @update:checked="
-                  (val: boolean) => (editingField.boolean_value = val)
-                "
+                v-model="editingField.boolean_value"
               />
             </div>
           </template>
@@ -374,10 +371,7 @@
             >
             <Checkbox
               id="is_enabled_checkbox"
-              :checked="editingField.is_enabled"
-              @update:checked="
-                (val: boolean) => (editingField.is_enabled = val)
-              "
+              v-model="editingField.is_enabled"
             />
           </div>
         </div>

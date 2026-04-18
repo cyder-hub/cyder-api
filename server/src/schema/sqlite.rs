@@ -89,6 +89,22 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::{BigInt, Bool, Text, Nullable};
+
+    api_key_model_override (id) {
+        id -> BigInt,
+        api_key_id -> BigInt,
+        source_name -> Text,
+        target_route_id -> BigInt,
+        description -> Nullable<Text>,
+        is_enabled -> Bool,
+        deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::{BigInt, Text, Nullable};
 
     api_key_rollup_daily (api_key_id, day_bucket, currency) {
@@ -227,6 +243,34 @@ diesel::table! {
 }
 
 diesel::table! {
+    model_route (id) {
+        id -> BigInt,
+        route_name -> Text,
+        description -> Nullable<Text>,
+        is_enabled -> Bool,
+        expose_in_models -> Bool,
+        deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Integer, BigInt, Bool, Nullable};
+
+    model_route_candidate (id) {
+        id -> BigInt,
+        route_id -> BigInt,
+        model_id -> BigInt,
+        priority -> Integer,
+        is_enabled -> Bool,
+        deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     model_custom_field_assignment (model_id, custom_field_definition_id) {
         model_id -> BigInt,
         custom_field_definition_id -> BigInt,
@@ -291,6 +335,10 @@ diesel::table! {
         provider_id -> BigInt,
         model_id -> BigInt,
         provider_api_key_id -> BigInt,
+        requested_model_name -> Nullable<Text>,
+        resolved_name_scope -> Nullable<Text>,
+        resolved_route_id -> Nullable<BigInt>,
+        resolved_route_name -> Nullable<Text>,
         model_name -> Text,
         real_model_name -> Text,
         request_received_at -> BigInt,
@@ -348,6 +396,8 @@ diesel::joinable!(access_control_rule -> access_control_policy (policy_id));
 diesel::joinable!(access_control_rule -> model (model_id));
 diesel::joinable!(access_control_rule -> provider (provider_id));
 diesel::joinable!(api_key_acl_rule -> api_key (api_key_id));
+diesel::joinable!(api_key_model_override -> api_key (api_key_id));
+diesel::joinable!(api_key_model_override -> model_route (target_route_id));
 diesel::joinable!(api_key_acl_rule -> model (model_id));
 diesel::joinable!(api_key_acl_rule -> provider (provider_id));
 diesel::joinable!(api_key_rollup_daily -> api_key (api_key_id));
@@ -357,6 +407,8 @@ diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id))
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
 diesel::joinable!(model_alias -> model (target_model_id));
+diesel::joinable!(model_route_candidate -> model (model_id));
+diesel::joinable!(model_route_candidate -> model_route (route_id));
 diesel::joinable!(model_custom_field_assignment -> custom_field_definition (custom_field_definition_id));
 diesel::joinable!(model_custom_field_assignment -> model (model_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
@@ -375,6 +427,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     access_control_rule,
     api_key,
     api_key_acl_rule,
+    api_key_model_override,
     api_key_rollup_daily,
     api_key_rollup_monthly,
     cost_catalogs,
@@ -383,6 +436,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     custom_field_definition,
     model,
     model_alias,
+    model_route,
+    model_route_candidate,
     model_custom_field_assignment,
     provider,
     provider_api_key,

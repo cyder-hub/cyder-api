@@ -32,8 +32,11 @@ import type {
   ApiKeyAclRuleScope,
   ApiKeyCreatePayload,
   ApiKeyDetail,
+  ApiKeyModelOverrideItem,
+  ApiKeyModelOverridePayload,
   ApiKeyReveal,
   ApiKeyUpdatePayload,
+  ModelRouteListItem,
   ProviderListItem,
 } from "@/store/types";
 
@@ -46,6 +49,14 @@ interface EditableRule {
   model_id: number | null;
   is_enabled: boolean;
   description: string;
+}
+
+interface EditableOverride {
+  local_id: number;
+  source_name: string;
+  target_route_id: number | null;
+  description: string;
+  is_enabled: boolean;
 }
 
 interface EditingApiKeyData {
@@ -64,6 +75,7 @@ interface EditingApiKeyData {
   budget_daily_currency: string;
   budget_monthly_nanos: string;
   budget_monthly_currency: string;
+  model_overrides: EditableOverride[];
   acl_rules: EditableRule[];
 }
 
@@ -75,6 +87,7 @@ interface SaveSuccessPayload {
 interface ApiKeyEditModalProps {
   isOpen: boolean;
   initialData: ApiKeyDetail | null;
+  modelRoutes: ModelRouteListItem[];
   providers: ProviderListItem[];
 }
 
@@ -88,6 +101,7 @@ const { t } = useI18n();
 
 const isSubmitting = ref(false);
 const COMMON_BUDGET_CURRENCIES = ["CNY", "USD"] as const;
+let nextOverrideDraftId = 1;
 
 const getEmptyRule = (): EditableRule => ({
   effect: "ALLOW",
@@ -97,6 +111,14 @@ const getEmptyRule = (): EditableRule => ({
   model_id: null,
   is_enabled: true,
   description: "",
+});
+
+const getEmptyOverride = (): EditableOverride => ({
+  local_id: nextOverrideDraftId++,
+  source_name: "",
+  target_route_id: null,
+  description: "",
+  is_enabled: true,
 });
 
 const getEmptyEditingData = (): EditingApiKeyData => ({
@@ -115,6 +137,7 @@ const getEmptyEditingData = (): EditingApiKeyData => ({
   budget_daily_currency: "",
   budget_monthly_nanos: "",
   budget_monthly_currency: "",
+  model_overrides: [],
   acl_rules: [],
 });
 
@@ -186,6 +209,13 @@ const budgetCurrencyOptions = computed(() => {
         : value,
   }));
 });
+
+const routeOptions = computed(() =>
+  props.modelRoutes.map((item) => ({
+    value: item.route.id,
+    label: item.route.route_name,
+  })),
+);
 
 function toInputNumber(value: number | null | undefined): string {
   return value === null || value === undefined ? "" : String(value);
@@ -321,6 +351,16 @@ function normalizeEditableRule(rule: ApiKeyAclRule): EditableRule {
   };
 }
 
+function normalizeEditableOverride(item: ApiKeyModelOverrideItem): EditableOverride {
+  return {
+    local_id: nextOverrideDraftId++,
+    source_name: item.source_name,
+    target_route_id: item.target_route_id,
+    description: item.description ?? "",
+    is_enabled: item.is_enabled,
+  };
+}
+
 function resetEditingData() {
   if (!props.initialData) {
     editingData.value = getEmptyEditingData();
@@ -349,6 +389,7 @@ function resetEditingData() {
       props.initialData.budget_monthly_currency,
     ),
     budget_monthly_currency: props.initialData.budget_monthly_currency ?? "",
+    model_overrides: props.initialData.model_overrides.map(normalizeEditableOverride),
     acl_rules: props.initialData.acl_rules.map(normalizeEditableRule),
   };
 }
@@ -363,6 +404,14 @@ function addRule() {
 
 function removeRule(index: number) {
   editingData.value.acl_rules.splice(index, 1);
+}
+
+function addOverride() {
+  editingData.value.model_overrides.push(getEmptyOverride());
+}
+
+function removeOverride(index: number) {
+  editingData.value.model_overrides.splice(index, 1);
 }
 
 function updateRuleScope(index: number, scope: string) {
@@ -395,6 +444,11 @@ function modelOptionsForRule(rule: EditableRule) {
   return provider?.models ?? [];
 }
 
+function updateOverrideTargetRoute(index: number, routeId: string) {
+  editingData.value.model_overrides[index].target_route_id =
+    routeId === "none" ? null : Number(routeId);
+}
+
 function buildRulePayloads(): ApiKeyAclRulePayload[] {
   return editingData.value.acl_rules.map((rule, index) => {
     const priority = numberOrNull(rule.priority);
@@ -425,6 +479,42 @@ function buildRulePayloads(): ApiKeyAclRulePayload[] {
       model_id: rule.scope === "MODEL" ? rule.model_id : null,
       is_enabled: rule.is_enabled,
       description: textOrNull(rule.description),
+    };
+  });
+}
+
+function buildModelOverridePayloads(): ApiKeyModelOverridePayload[] {
+  const seenNames = new Set<string>();
+
+  return editingData.value.model_overrides.map((item, index) => {
+    const sourceName = item.source_name.trim();
+    if (!sourceName) {
+      throw new Error(
+        t("apiKeyEditModal.alert.overrideSourceNameRequired", { index: index + 1 }),
+      );
+    }
+
+    const duplicateKey = sourceName.toLowerCase();
+    if (seenNames.has(duplicateKey)) {
+      throw new Error(
+        t("apiKeyEditModal.alert.duplicateOverrideSourceName", {
+          name: sourceName,
+        }),
+      );
+    }
+    seenNames.add(duplicateKey);
+
+    if (item.target_route_id == null) {
+      throw new Error(
+        t("apiKeyEditModal.alert.overrideTargetRouteRequired", { index: index + 1 }),
+      );
+    }
+
+    return {
+      source_name: sourceName,
+      target_route_id: item.target_route_id,
+      description: textOrNull(item.description),
+      is_enabled: item.is_enabled,
     };
   });
 }
@@ -462,6 +552,7 @@ async function handleCommit() {
       budget_daily_currency: dailyBudget.currency,
       budget_monthly_nanos: monthlyBudget.nanos,
       budget_monthly_currency: monthlyBudget.currency,
+      model_overrides: buildModelOverridePayloads(),
       acl_rules: buildRulePayloads(),
     };
 
@@ -590,10 +681,7 @@ watch(
                 <Label class="cursor-pointer text-sm font-medium leading-none">
                   {{ t("apiKeyEditModal.labelEnabled") }}
                 </Label>
-                <Checkbox
-                  :checked="editingData.is_enabled"
-                  @update:checked="(value: boolean) => (editingData.is_enabled = !!value)"
-                />
+                <Checkbox v-model="editingData.is_enabled" />
               </div>
             </div>
           </section>
@@ -823,17 +911,148 @@ watch(
             </div>
           </section>
 
-        <section class="space-y-4 border-t border-gray-100 pt-6">
-          <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <h3 class="text-base font-semibold text-gray-900">
+          <section class="space-y-4 border-t border-gray-100 pt-6">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h3 class="text-base font-semibold text-gray-900">
+                  {{ t("apiKeyEditModal.sections.overrides") }}
+                </h3>
+                <p class="mt-1 text-sm text-gray-500">
+                  {{ t("apiKeyEditModal.sections.overridesDescription") }}
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                class="w-full sm:w-auto"
+                :disabled="!routeOptions.length"
+                @click="addOverride"
+              >
+                <Plus class="mr-1.5 h-4 w-4" />
+                {{ t("apiKeyEditModal.addOverride") }}
+              </Button>
+            </div>
+
+            <div
+              v-if="!routeOptions.length"
+              class="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-sm text-gray-500"
+            >
+              {{ t("apiKeyEditModal.noRoutes") }}
+            </div>
+
+            <div
+              v-else-if="!editingData.model_overrides.length"
+              class="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-sm text-gray-500"
+            >
+              {{ t("apiKeyEditModal.noOverrides") }}
+            </div>
+
+            <div v-else class="space-y-4">
+              <div
+                v-for="(item, index) in editingData.model_overrides"
+                :key="item.local_id"
+                class="rounded-lg border border-gray-200 bg-gray-50/50 p-4"
+              >
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <h4 class="text-sm font-semibold text-gray-900">
+                      {{ t("apiKeyEditModal.overrideTitle", { index: index + 1 }) }}
+                    </h4>
+                    <p class="mt-1 text-xs text-gray-500">
+                      {{ t("apiKeyEditModal.overrideDescription") }}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    class="text-gray-400 hover:text-red-600"
+                    @click="removeOverride(index)"
+                  >
+                    <Trash2 class="mr-1 h-3.5 w-3.5" />
+                    {{ t("common.delete") }}
+                  </Button>
+                </div>
+
+                <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div class="space-y-1.5">
+                    <Label class="text-gray-700">
+                      {{ t("apiKeyEditModal.labelOverrideSourceName") }}
+                    </Label>
+                    <Input
+                      v-model="item.source_name"
+                      :placeholder="t('apiKeyEditModal.placeholderOverrideSourceName')"
+                    />
+                  </div>
+
+                  <div class="space-y-1.5">
+                    <Label class="text-gray-700">
+                      {{ t("apiKeyEditModal.labelOverrideTargetRoute") }}
+                    </Label>
+                    <Select
+                      :model-value="
+                        item.target_route_id == null ? 'none' : String(item.target_route_id)
+                      "
+                      @update:model-value="
+                        (value) => updateOverrideTargetRoute(index, String(value ?? 'none'))
+                      "
+                    >
+                      <SelectTrigger class="w-full">
+                        <SelectValue
+                          :placeholder="t('apiKeyEditModal.placeholderOverrideTargetRoute')"
+                        />
+                      </SelectTrigger>
+                      <SelectContent :body-lock="false">
+                        <SelectItem value="none">
+                          {{ t("apiKeyEditModal.placeholderOverrideTargetRoute") }}
+                        </SelectItem>
+                        <SelectItem
+                          v-for="route in routeOptions"
+                          :key="route.value"
+                          :value="String(route.value)"
+                        >
+                          {{ route.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div class="space-y-1.5 sm:col-span-2">
+                    <Label class="text-gray-700">
+                      {{ t("apiKeyEditModal.labelOverrideDescription") }}
+                    </Label>
+                    <Input v-model="item.description" />
+                  </div>
+                </div>
+
+                <div
+                  class="mt-4 flex items-center justify-between rounded-lg border border-gray-200 bg-white p-3.5"
+                >
+                  <Label class="cursor-pointer text-sm font-medium leading-none">
+                    {{ t("apiKeyEditModal.labelOverrideEnabled") }}
+                  </Label>
+                  <Checkbox v-model="item.is_enabled" />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="space-y-4 border-t border-gray-100 pt-6">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h3 class="text-base font-semibold text-gray-900">
                 {{ t("apiKeyEditModal.sections.acl") }}
               </h3>
               <p class="mt-1 text-sm text-gray-500">
                 {{ t("apiKeyEditModal.sections.aclDescription") }}
               </p>
             </div>
-            <Button variant="outline" class="w-full sm:w-auto" @click="addRule">
+            <Button
+              type="button"
+              variant="outline"
+              class="w-full sm:w-auto"
+              @click="addRule"
+            >
               <Plus class="mr-1.5 h-4 w-4" />
               {{ t("apiKeyEditModal.addRule") }}
             </Button>
@@ -859,6 +1078,7 @@ watch(
                   </p>
                 </div>
                 <Button
+                  type="button"
                   variant="ghost"
                   size="sm"
                   class="text-gray-400 hover:text-red-600"
@@ -987,10 +1207,7 @@ watch(
                 <Label class="cursor-pointer text-sm font-medium leading-none">
                   {{ t("apiKeyEditModal.labelRuleEnabled") }}
                 </Label>
-                <Checkbox
-                  :checked="rule.is_enabled"
-                  @update:checked="(value: boolean) => (rule.is_enabled = !!value)"
-                />
+                <Checkbox v-model="rule.is_enabled" />
               </div>
             </div>
           </div>

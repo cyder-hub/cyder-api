@@ -3,6 +3,9 @@ use diesel::prelude::*;
 use serde::Deserialize; // For API input deserialization and output serialization
 
 use super::{DbResult, get_connection, model::Model, provider::Provider};
+// Legacy helpers for the historical `model_alias` table.
+// New rename logic must use `model_route` and `api_key_model_override`.
+
 use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};

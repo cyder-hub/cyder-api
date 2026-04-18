@@ -204,7 +204,7 @@
             <MobileCrudCard
               v-for="record in records"
               :key="record.id"
-              :title="record.model_name || '/'"
+              :title="record.displayRequestedModelName"
               :description="record.request_at_formatted"
             >
               <div class="grid grid-cols-1 gap-3 text-sm min-[360px]:grid-cols-2">
@@ -323,7 +323,7 @@
                   :key="record.id"
                   class="hover:bg-gray-50"
                 >
-                  <TableCell class="font-medium">{{ record.model_name || "/" }}</TableCell>
+                  <TableCell class="font-medium">{{ record.displayRequestedModelName }}</TableCell>
                   <TableCell>{{ record.providerName }}</TableCell>
                   <TableCell>{{ record.apiKeyName }}</TableCell>
                   <TableCell class="w-14 text-center">
@@ -493,7 +493,7 @@
                 <div class="flex items-center justify-between gap-3 px-4 py-3">
                   <dt class="text-xs uppercase tracking-wide text-gray-500">Model</dt>
                   <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">
-                    {{ detailedRecord.model_name || "/" }}
+                    {{ detailedRecord.requested_model_name || detailedRecord.model_name || "/" }}
                   </dd>
                 </div>
                 <div class="flex items-center justify-between gap-3 px-4 py-3">
@@ -520,6 +520,30 @@
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">API Key</dt>
                       <dd class="truncate text-right text-sm text-gray-900">{{ getApiKeyName(detailedRecord.system_api_key_id) }}</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Requested Model</dt>
+                      <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">
+                        {{ detailedRecord.requested_model_name || detailedRecord.model_name || "/" }}
+                      </dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Resolved Scope</dt>
+                      <dd class="truncate text-right text-sm text-gray-900">
+                        {{ formatResolvedScope(detailedRecord.resolved_name_scope) }}
+                      </dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Resolved Route</dt>
+                      <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">
+                        {{ detailedRecord.resolved_route_name || "/" }}
+                      </dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Selected Model</dt>
+                      <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">
+                        {{ detailedRecord.model_name || "/" }}
+                      </dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">Real Model</dt>
@@ -899,6 +923,8 @@ const records = ref<
   (RecordListItem & {
     providerName: string;
     apiKeyName: string;
+    displayRequestedModelName: string;
+    resolvedScopeDisplay: string;
     isStreamDisplay: string;
     firstRespTimeDisplay: string;
     totalRespTimeDisplay: string;
@@ -1260,6 +1286,8 @@ const fetchRecords = async () => {
         ...r,
         providerName,
         apiKeyName,
+        displayRequestedModelName: r.requested_model_name || r.model_name || "/",
+        resolvedScopeDisplay: formatResolvedScope(r.resolved_name_scope),
         isStreamDisplay,
         firstRespTimeDisplay,
         totalRespTimeDisplay,
@@ -1419,6 +1447,19 @@ watch(isDetailModalOpen, (isOpen) => {
 
 const formatDate = (timestamp: number | null | undefined) => {
   return formatTimestamp(timestamp) || "/";
+};
+
+const formatResolvedScope = (scope: string | null | undefined) => {
+  switch (scope) {
+    case "direct":
+      return "Direct";
+    case "global_route":
+      return "Global Route";
+    case "api_key_override":
+      return "API Key Override";
+    default:
+      return "/";
+  }
 };
 
 const formatCompactMetric = (value: number | string | null | undefined) => {

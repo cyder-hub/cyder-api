@@ -17,14 +17,15 @@ use crate::database::api_key_rollup::{ApiKeyRollupDaily, ApiKeyRollupMonthly};
 use crate::database::cost::{CostCatalogVersion, CostComponent};
 use crate::database::custom_field::CustomFieldDefinition;
 use crate::database::model::Model;
-use crate::database::model_alias::ModelAlias;
+use crate::database::model_route::{ApiKeyModelOverride, ModelRoute};
 use crate::database::provider::{Provider, ProviderApiKey};
 use crate::schema::enum_def::ProviderApiKeyMode;
 
 use super::cache::repository::{CacheRepository, DynCacheRepo};
 use super::cache::types::{
-    CacheApiKey, CacheCostCatalogVersion, CacheCustomField, CacheEntry, CacheModel,
-    CacheModelAlias, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheSystemApiKey,
+    CacheApiKey, CacheApiKeyModelOverride, CacheCostCatalogVersion, CacheCustomField, CacheEntry,
+    CacheModel, CacheModelRoute, CacheModelsCatalog, CacheProvider, CacheProviderKey,
+    CacheSystemApiKey,
 };
 use super::cache::{CacheError, memory::MemoryCacheBackend};
 
@@ -55,7 +56,9 @@ type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
 
 enum CacheKey<'a> {
     ApiKeyHash(&'a str),
-    ModelAlias(&'a str),
+    ModelRouteById(i64),
+    ModelRouteByName(&'a str),
+    ApiKeyModelOverride(i64, &'a str),
     ModelsCatalog,
     ProviderById(i64),
     ProviderByKey(&'a str),
@@ -73,7 +76,11 @@ impl<'a> std::fmt::Display for CacheKey<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CacheKey::ApiKeyHash(key) => write!(f, "api_key:hash:{}", key),
-            CacheKey::ModelAlias(alias) => write!(f, "alias:{}", alias),
+            CacheKey::ModelRouteById(id) => write!(f, "route:id:{}", id),
+            CacheKey::ModelRouteByName(name) => write!(f, "route:name:{}", name),
+            CacheKey::ApiKeyModelOverride(api_key_id, source_name) => {
+                write!(f, "api_key_override:{}/{}", api_key_id, source_name)
+            }
             CacheKey::ModelsCatalog => write!(f, "models:catalog"),
             CacheKey::ProviderById(id) => write!(f, "provider:id:{}", id),
             CacheKey::ProviderByKey(key) => write!(f, "provider:key:{}", key),
@@ -93,7 +100,11 @@ impl<'a> CacheKey<'a> {
     fn to_compact_string(&self) -> CompactString {
         match self {
             CacheKey::ApiKeyHash(key) => format_compact!("api_key:hash:{}", key),
-            CacheKey::ModelAlias(alias) => format_compact!("alias:{}", alias),
+            CacheKey::ModelRouteById(id) => format_compact!("route:id:{}", id),
+            CacheKey::ModelRouteByName(name) => format_compact!("route:name:{}", name),
+            CacheKey::ApiKeyModelOverride(api_key_id, source_name) => {
+                format_compact!("api_key_override:{}/{}", api_key_id, source_name)
+            }
             CacheKey::ModelsCatalog => format_compact!("models:catalog"),
             CacheKey::ProviderById(id) => format_compact!("provider:id:{}", id),
             CacheKey::ProviderByKey(key) => format_compact!("provider:key:{}", key),
@@ -657,8 +668,11 @@ pub struct AppState {
     // 1. api_key(hash) -> CacheApiKey
     api_key_cache: CacheRepo<CacheApiKey>,
 
-    // 2. alias_name(key) -> model_id (i64)
-    alias_to_model_id_cache: CacheRepo<i64>,
+    // 2. route identity(key) -> route snapshot
+    model_route_cache: CacheRepo<CacheModelRoute>,
+
+    // 2a. api_key/source_name -> target route snapshot
+    api_key_override_route_cache: CacheRepo<CacheModelRoute>,
 
     // 2b. aggregate listing snapshot for `/models`
     models_catalog_cache: CacheRepo<CacheModelsCatalog>,
@@ -726,7 +740,8 @@ impl AppState {
 
         Self {
             api_key_cache: Self::create_repo(ttl, pool),
-            alias_to_model_id_cache: Self::create_repo(ttl, pool),
+            model_route_cache: Self::create_repo(ttl, pool),
+            api_key_override_route_cache: Self::create_repo(ttl, pool),
             models_catalog_cache: Self::create_repo(ttl, pool),
             provider_cache: Self::create_repo(ttl, pool),
             model_cache: Self::create_repo(ttl, pool),
@@ -828,7 +843,8 @@ impl AppState {
         let mut stats: HashMap<&'static str, usize> = HashMap::new();
         let mut catalog_providers = Vec::new();
         let mut catalog_models = Vec::new();
-        let mut catalog_aliases = Vec::new();
+        let mut catalog_routes = Vec::new();
+        let mut catalog_api_key_overrides = Vec::new();
 
         // 1. API keys with embedded ACL snapshots
         if let Ok(keys) = ApiKey::list_all_active() {
@@ -903,25 +919,80 @@ impl AppState {
             }
         }
 
-        // 2. Model Aliases
-        if let Ok(aliases) = ModelAlias::list_all() {
-            stats.insert("Model Aliases", aliases.len());
-            for alias in aliases {
-                catalog_aliases.push(CacheModelAlias::from(alias.clone()));
-                let _ = self
-                    .alias_to_model_id_cache
-                    .set_positive(
-                        &CacheKey::ModelAlias(&alias.alias_name).to_compact_string(),
-                        &alias.target_model_id,
-                    )
-                    .await;
+        // 2. Logical model routes
+        if let Ok(routes) = ModelRoute::list_summary() {
+            stats.insert("Model Routes", routes.len());
+            for route_item in routes {
+                match ModelRoute::get_detail(route_item.route.id) {
+                    Ok(route_detail) => {
+                        let cache_item = CacheModelRoute::from_detail(&route_detail);
+                        catalog_routes.push(cache_item.clone());
+                        let _ = self
+                            .model_route_cache
+                            .set_positive(
+                                &CacheKey::ModelRouteById(cache_item.id).to_compact_string(),
+                                &cache_item,
+                            )
+                            .await;
+                        let _ = self
+                            .model_route_cache
+                            .set_positive(
+                                &CacheKey::ModelRouteByName(&cache_item.route_name)
+                                    .to_compact_string(),
+                                &cache_item,
+                            )
+                            .await;
+                    }
+                    Err(err) => {
+                        error!(
+                            "Failed to preload model route {} into cache: {:?}",
+                            route_item.route.id, err
+                        );
+                    }
+                }
+            }
+        }
+
+        // 2a. API key scoped overrides
+        if let Ok(overrides) = ApiKeyModelOverride::list_all() {
+            stats.insert("API Key Model Overrides", overrides.len());
+            for override_row in overrides {
+                catalog_api_key_overrides.push(CacheApiKeyModelOverride::from(override_row.clone()));
+
+                if !override_row.is_enabled {
+                    continue;
+                }
+
+                match self.get_model_route_by_id(override_row.target_route_id).await {
+                    Ok(Some(route)) => {
+                        let _ = self
+                            .api_key_override_route_cache
+                            .set_positive(
+                                &CacheKey::ApiKeyModelOverride(
+                                    override_row.api_key_id,
+                                    &override_row.source_name,
+                                )
+                                .to_compact_string(),
+                                route.as_ref(),
+                            )
+                            .await;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        error!(
+                            "Failed to preload api key model override {} into cache: {}",
+                            override_row.id, err
+                        );
+                    }
+                }
             }
         }
 
         let models_catalog = CacheModelsCatalog {
             providers: catalog_providers,
             models: catalog_models,
-            aliases: catalog_aliases,
+            routes: catalog_routes,
+            api_key_overrides: catalog_api_key_overrides,
         };
         let _ = self
             .models_catalog_cache
@@ -1047,9 +1118,6 @@ impl AppState {
         // to clear all of them. For memory cache, each repo is a separate instance.
         if let Err(e) = self.api_key_cache.clear().await {
             cyder_tools::log::error!("Failed to clear api_key_cache: {}", e);
-        }
-        if let Err(e) = self.alias_to_model_id_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear alias_to_model_id_cache: {}", e);
         }
         if let Err(e) = self.models_catalog_cache.clear().await {
             cyder_tools::log::error!("Failed to clear models_catalog_cache: {}", e);
@@ -1211,36 +1279,185 @@ impl AppState {
         Ok(())
     }
 
-    // ============================================================================================
-    // 2. alias_name(key) -> CacheModel
-    // ============================================================================================
-    pub async fn get_model_by_alias(
+    pub async fn get_model_route_by_id(
         &self,
-        alias: &str,
-    ) -> Result<Option<Arc<CacheModel>>, AppStoreError> {
-        let alias_key = CacheKey::ModelAlias(alias).to_compact_string();
+        id: i64,
+    ) -> Result<Option<Arc<CacheModelRoute>>, AppStoreError> {
+        let cache_key = CacheKey::ModelRouteById(id).to_compact_string();
 
-        let model_id_arc = self
-            .get_or_load(&self.alias_to_model_id_cache, &alias_key, || async {
-                if let Ok(Some(db_alias)) = ModelAlias::get_by_alias_name(alias) {
-                    Ok(Some(db_alias.target_model_id))
-                } else {
-                    Ok(None)
+        self.get_or_load(&self.model_route_cache, &cache_key, || async {
+            match ModelRoute::get_detail(id) {
+                Ok(detail) => {
+                    let cache_item = CacheModelRoute::from_detail(&detail);
+                    self.model_route_cache
+                        .set_positive(
+                            &CacheKey::ModelRouteByName(&cache_item.route_name).to_compact_string(),
+                            &cache_item,
+                        )
+                        .await?;
+                    Ok(Some(cache_item))
                 }
-            })
-            .await?;
-
-        match model_id_arc {
-            Some(arc) => self.get_model_by_id(*arc).await,
-            None => Ok(None),
-        }
+                Err(BaseError::NotFound(_)) => Ok(None),
+                Err(err) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to load model route by id {}: {:?}",
+                    id, err
+                ))),
+            }
+        })
+        .await
     }
 
-    pub async fn invalidate_model_alias(&self, alias: &str) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::ModelAlias(alias).to_compact_string();
+    pub async fn get_model_route_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<Arc<CacheModelRoute>>, AppStoreError> {
+        let cache_key = CacheKey::ModelRouteByName(name).to_compact_string();
+
+        self.get_or_load(&self.model_route_cache, &cache_key, || async {
+            match ModelRoute::get_active_by_name(name) {
+                Ok(Some(route)) => {
+                    let detail = ModelRoute::get_detail(route.id).map_err(|err| {
+                        AppStoreError::DatabaseError(format!(
+                            "failed to load model route detail {}: {:?}",
+                            route.id, err
+                        ))
+                    })?;
+                    let cache_item = CacheModelRoute::from_detail(&detail);
+                    self.model_route_cache
+                        .set_positive(
+                            &CacheKey::ModelRouteById(cache_item.id).to_compact_string(),
+                            &cache_item,
+                        )
+                        .await?;
+                    Ok(Some(cache_item))
+                }
+                Ok(None) => Ok(None),
+                Err(err) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to load model route by name '{}': {:?}",
+                    name, err
+                ))),
+            }
+        })
+        .await
+    }
+
+    pub async fn get_api_key_override_route(
+        &self,
+        api_key_id: i64,
+        source_name: &str,
+    ) -> Result<Option<Arc<CacheModelRoute>>, AppStoreError> {
+        let cache_key = CacheKey::ApiKeyModelOverride(api_key_id, source_name).to_compact_string();
+
+        self.get_or_load(&self.api_key_override_route_cache, &cache_key, || async {
+            match ApiKeyModelOverride::get_active_by_source_name(api_key_id, source_name) {
+                Ok(Some(override_row)) => {
+                    if !override_row.is_enabled {
+                        return Ok(None);
+                    }
+                    let route = self
+                        .get_model_route_by_id(override_row.target_route_id)
+                        .await?
+                        .map(|route| route.as_ref().clone());
+                    Ok(route)
+                }
+                Ok(None) => Ok(None),
+                Err(err) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to load api key override {}:{}: {:?}",
+                    api_key_id, source_name, err
+                ))),
+            }
+        })
+        .await
+    }
+
+    pub async fn invalidate_model_route_by_name(&self, name: &str) -> Result<(), AppStoreError> {
+        let cache_key = CacheKey::ModelRouteByName(name).to_compact_string();
+        debug!("invalidate: {}", &cache_key);
+        Ok(self.model_route_cache.delete(&cache_key).await?)
+    }
+
+    pub async fn invalidate_api_key_model_override(
+        &self,
+        api_key_id: i64,
+        source_name: &str,
+    ) -> Result<(), AppStoreError> {
+        let cache_key = CacheKey::ApiKeyModelOverride(api_key_id, source_name).to_compact_string();
         debug!("invalidate: {}", &cache_key);
         self.invalidate_models_catalog().await?;
-        Ok(self.alias_to_model_id_cache.delete(&cache_key).await?)
+        Ok(self.api_key_override_route_cache.delete(&cache_key).await?)
+    }
+
+    pub async fn invalidate_api_key_model_overrides_by_route(
+        &self,
+        route_id: i64,
+    ) -> Result<(), AppStoreError> {
+        for override_row in ApiKeyModelOverride::list_by_target_route_id(route_id).map_err(|err| {
+            AppStoreError::DatabaseError(format!(
+                "failed to list api key overrides for route {}: {:?}",
+                route_id, err
+            ))
+        })? {
+            let _ = self
+                .invalidate_api_key_model_override(override_row.api_key_id, &override_row.source_name)
+                .await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn invalidate_model_route(
+        &self,
+        route_id: i64,
+        route_name: Option<&str>,
+    ) -> Result<(), AppStoreError> {
+        debug!("invalidate model route: id={}, name={:?}", route_id, route_name);
+        self.invalidate_models_catalog().await?;
+        if let Some(name) = route_name {
+            let _ = self.invalidate_model_route_by_name(name).await;
+        } else if let Some(route) = self.get_model_route_by_id(route_id).await? {
+            let _ = self.invalidate_model_route_by_name(&route.route_name).await;
+        }
+        self.invalidate_api_key_model_overrides_by_route(route_id).await?;
+        Ok(self
+            .model_route_cache
+            .delete(&CacheKey::ModelRouteById(route_id).to_compact_string())
+            .await?)
+    }
+
+    pub async fn invalidate_model_routes_for_model(
+        &self,
+        model_id: i64,
+    ) -> Result<(), AppStoreError> {
+        for route in ModelRoute::list_by_model_id(model_id).map_err(|err| {
+            AppStoreError::DatabaseError(format!(
+                "failed to list model routes for model {}: {:?}",
+                model_id, err
+            ))
+        })? {
+            let _ = self
+                .invalidate_model_route(route.id, Some(&route.route_name))
+                .await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn invalidate_model_routes_for_provider(
+        &self,
+        provider_id: i64,
+    ) -> Result<(), AppStoreError> {
+        for route in ModelRoute::list_by_provider_id(provider_id).map_err(|err| {
+            AppStoreError::DatabaseError(format!(
+                "failed to list model routes for provider {}: {:?}",
+                provider_id, err
+            ))
+        })? {
+            let _ = self
+                .invalidate_model_route(route.id, Some(&route.route_name))
+                .await;
+        }
+
+        Ok(())
     }
 
     pub async fn get_models_catalog(&self) -> Result<Arc<CacheModelsCatalog>, AppStoreError> {
@@ -1337,6 +1554,7 @@ impl AppState {
     ) -> Result<(), AppStoreError> {
         debug!("invalidate provider: id={}, key={:?}", id, key);
         self.invalidate_models_catalog().await?;
+        let _ = self.invalidate_model_routes_for_provider(id).await;
         if let Some(k) = key {
             let _ = self.invalidate_provider_by_key(k).await;
         } else if let Some(p) = self.get_provider_by_id(id).await? {
@@ -1375,7 +1593,7 @@ impl AppState {
         .await
     }
 
-    // Internal helper for alias resolution + Lazy load by ID
+    // Internal helper for route/direct resolution + lazy load by ID.
     pub async fn get_model_by_id(&self, id: i64) -> Result<Option<Arc<CacheModel>>, AppStoreError> {
         let cache_key = CacheKey::ModelById(id).to_compact_string();
 
@@ -1412,6 +1630,7 @@ impl AppState {
     pub async fn invalidate_model(&self, id: i64, name: Option<&str>) -> Result<(), AppStoreError> {
         debug!("invalidate model: id={}, name={:?}", id, name);
         self.invalidate_models_catalog().await?;
+        let _ = self.invalidate_model_routes_for_model(id).await;
         if let Some(n) = name {
             let parts: Vec<&str> = n.splitn(2, '/').collect();
             if parts.len() == 2 {
@@ -1955,18 +2174,33 @@ impl AppState {
             .into_iter()
             .map(CacheModel::from)
             .collect();
-        let aliases = ModelAlias::list_all()
+        let mut routes = Vec::new();
+        for route_item in ModelRoute::list_summary().map_err(|e| {
+            AppStoreError::DatabaseError(format!("failed to list model routes: {e:?}"))
+        })? {
+            let detail = ModelRoute::get_detail(route_item.route.id).map_err(|e| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to load model route detail {}: {e:?}",
+                    route_item.route.id
+                ))
+            })?;
+            routes.push(CacheModelRoute::from_detail(&detail));
+        }
+        let api_key_overrides = ApiKeyModelOverride::list_all()
             .map_err(|e| {
-                AppStoreError::DatabaseError(format!("failed to list model aliases: {e:?}"))
+                AppStoreError::DatabaseError(format!(
+                    "failed to list api key model overrides: {e:?}"
+                ))
             })?
             .into_iter()
-            .map(CacheModelAlias::from)
+            .map(CacheApiKeyModelOverride::from)
             .collect();
 
         Ok(CacheModelsCatalog {
             providers,
             models,
-            aliases,
+            routes,
+            api_key_overrides,
         })
     }
 }
@@ -2021,9 +2255,13 @@ mod tests {
     };
     use crate::config::ProviderGovernanceConfig;
     use crate::schema::enum_def::{Action, ProviderApiKeyMode};
-    use crate::service::cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheEntry};
+    use crate::service::cache::types::{
+        CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModelRoute,
+        CacheModelRouteCandidate,
+    };
     use chrono::Utc;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn governance_snapshot(api_key_id: i64, current_concurrency: u32) -> ApiKeyGovernanceSnapshot {
@@ -2063,6 +2301,29 @@ mod tests {
             budget_monthly_nanos: Some(80),
             budget_monthly_currency: Some("usd".to_string()),
             acl_rules: vec![],
+        }
+    }
+
+    fn test_app_state() -> AppState {
+        let ttl = Some(Duration::from_secs(60));
+
+        AppState {
+            api_key_cache: AppState::create_repo(ttl, None),
+            model_route_cache: AppState::create_repo(ttl, None),
+            api_key_override_route_cache: AppState::create_repo(ttl, None),
+            models_catalog_cache: AppState::create_repo(ttl, None),
+            provider_cache: AppState::create_repo(ttl, None),
+            model_cache: AppState::create_repo(ttl, None),
+            provider_api_keys_cache: AppState::create_repo(ttl, None),
+            custom_fields_assignment_cache: AppState::create_repo(ttl, None),
+            custom_field_cache: AppState::create_repo(ttl, None),
+            cost_catalog_version_cache: AppState::create_repo(ttl, None),
+            client: AppState::build_http_client(false),
+            proxy_client: AppState::build_http_client(true),
+            negative_cache_ttl: Duration::from_secs(1),
+            provider_key_queue_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            api_key_governance_store: super::ApiKeyGovernanceStore::default(),
+            provider_health_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -2249,7 +2510,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalidate_cost_catalog_version_removes_cached_snapshot() {
-        let app_state = AppState::new().await;
+        let app_state = test_app_state();
         let cache_key = CacheKey::CostCatalogVersion(88).to_compact_string();
         let cached_version = CacheCostCatalogVersion {
             id: 88,
@@ -2286,6 +2547,82 @@ mod tests {
             .get_entry(&cache_key)
             .await
             .expect("read cache after invalidate");
+        assert!(cached_after.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalidate_model_route_by_name_removes_cached_snapshot() {
+        let app_state = test_app_state();
+        let cache_key = CacheKey::ModelRouteByName("manual-smoke-route").to_compact_string();
+        let route = CacheModelRoute {
+            id: 88,
+            route_name: "manual-smoke-route".to_string(),
+            description: None,
+            is_enabled: true,
+            expose_in_models: true,
+            candidates: vec![CacheModelRouteCandidate {
+                route_id: 88,
+                model_id: 2,
+                provider_id: 1,
+                priority: 0,
+                is_enabled: true,
+            }],
+        };
+
+        app_state
+            .model_route_cache
+            .set_positive(&cache_key, &route)
+            .await
+            .expect("seed route cache");
+
+        app_state
+            .invalidate_model_route_by_name("manual-smoke-route")
+            .await
+            .expect("invalidate route");
+
+        let cached_after = app_state
+            .model_route_cache
+            .get_entry(&cache_key)
+            .await
+            .expect("read route cache after invalidate");
+        assert!(cached_after.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalidate_api_key_model_override_removes_cached_snapshot() {
+        let app_state = test_app_state();
+        let cache_key = CacheKey::ApiKeyModelOverride(7, "manual-cli-model").to_compact_string();
+        let route = CacheModelRoute {
+            id: 88,
+            route_name: "manual-smoke-route".to_string(),
+            description: None,
+            is_enabled: true,
+            expose_in_models: true,
+            candidates: vec![CacheModelRouteCandidate {
+                route_id: 88,
+                model_id: 2,
+                provider_id: 1,
+                priority: 0,
+                is_enabled: true,
+            }],
+        };
+
+        app_state
+            .api_key_override_route_cache
+            .set_positive(&cache_key, &route)
+            .await
+            .expect("seed override cache");
+
+        app_state
+            .invalidate_api_key_model_override(7, "manual-cli-model")
+            .await
+            .expect("invalidate override");
+
+        let cached_after = app_state
+            .api_key_override_route_cache
+            .get_entry(&cache_key)
+            .await
+            .expect("read override cache after invalidate");
         assert!(cached_after.is_none());
     }
 

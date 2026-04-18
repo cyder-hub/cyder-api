@@ -369,7 +369,7 @@ onMounted(() => {
             </Label>
             <Checkbox
               id="is_enabled"
-              v-model:checked="editingData.is_enabled"
+              v-model="editingData.is_enabled"
             />
           </div>
         </CardContent>

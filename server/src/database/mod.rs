@@ -20,14 +20,16 @@ pub mod api_key_rollup;
 pub mod cost;
 pub mod custom_field;
 pub mod model;
-pub mod model_alias;
+// Legacy data-access helper for the historical `model_alias` table.
+// Keep this private so new code uses `model_route` and `api_key_model_override`.
+mod model_alias;
+pub mod model_route;
 pub mod provider;
 pub mod provider_runtime;
 pub mod request_log;
 pub mod stat;
 pub mod system_api_key;
 //pub mod record; // Assuming this will be replaced or removed if request_log supersedes it
-//pub mod model_transform;
 
 pub enum DbType {
     Postgres,

@@ -58,10 +58,7 @@
             @check-batch="() => handleBatchCheck('api_keys')"
           />
 
-          <ProviderCustomFieldList 
-            v-model:editingData="editingData"
-            :all-custom-fields="allCustomFields"
-          />
+          <ProviderRequestPatchPanel v-model:editingData="editingData" />
 
           <div class="flex flex-col gap-2 rounded-xl border border-gray-200 bg-white p-4 sm:flex-row sm:justify-end">
             <Button variant="secondary" class="w-full sm:w-auto" @click="router.push('/provider')">{{
@@ -184,13 +181,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import type { Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { Api } from "@/services/request";
 import type {
-  CustomFieldType,
-  CustomFieldItem,
-  CustomFieldDefinition,
   ProviderListItem,
 } from "@/store/types";
 import { toastController } from "@/lib/toastController";
@@ -224,7 +219,7 @@ import { useProviderCheck } from "@/composables/useProviderCheck";
 import ProviderBaseInfoForm from "@/components/provider/ProviderBaseInfoForm.vue";
 import ProviderModelList from "@/components/provider/ProviderModelList.vue";
 import ProviderApiKeyList from "@/components/provider/ProviderApiKeyList.vue";
-import ProviderCustomFieldList from "@/components/provider/ProviderCustomFieldList.vue";
+import ProviderRequestPatchPanel from "@/components/provider/ProviderRequestPatchPanel.vue";
 
 const { t: $t } = useI18n();
 const route = useRoute();
@@ -242,7 +237,6 @@ const providerId = computed(() => {
 const isLoading = ref(true);
 const errorMsg = ref<string | null>(null);
 const editingData = ref<EditingProviderData | null>(null);
-const allCustomFields = ref<CustomFieldItem[]>([]);
 
 const pageTitle = computed(() =>
   providerId.value || editingData.value?.id
@@ -269,48 +263,7 @@ const {
   handleBatchCheck,
   handleConfirmModelSelection,
   handleConfirmApiKeySelection,
-} = useProviderCheck(editingData);
-
-const toEditableCustomField = (
-  field: Pick<
-    CustomFieldDefinition,
-    | "id"
-    | "name"
-    | "field_name"
-    | "string_value"
-    | "integer_value"
-    | "number_value"
-    | "boolean_value"
-    | "description"
-    | "field_type"
-  >,
-): CustomFieldItem => ({
-  id: field.id,
-  name: field.name,
-  field_name: field.field_name,
-  field_value:
-    (field.string_value ??
-      field.integer_value?.toString() ??
-      field.number_value?.toString() ??
-      field.boolean_value?.toString()) ||
-    "",
-  description: field.description,
-  field_type: (field.field_type?.toLowerCase() as CustomFieldType) || "unset",
-});
-
-const fetchAllCustomFields = async (): Promise<CustomFieldItem[]> => {
-  try {
-    const response = await Api.getCustomFieldList(1000);
-    if (response && response.list) {
-      return response.list.map(toEditableCustomField);
-    }
-    return [];
-  } catch (error) {
-    console.error("Failed to fetch all custom fields", error);
-    toastController.error("Failed to fetch all custom fields");
-    return [];
-  }
-};
+} = useProviderCheck(editingData as Ref<EditingProviderData | null>);
 
 const fetchProviderDetail = async (
   id: number,
@@ -338,9 +291,6 @@ onMounted(async () => {
   isLoading.value = true;
   errorMsg.value = null;
 
-  const fields = await fetchAllCustomFields();
-  allCustomFields.value = fields;
-
   if (providerId.value) {
       const detail = await fetchProviderDetail(providerId.value);
       if (detail) {
@@ -366,7 +316,7 @@ onMounted(async () => {
             isEditing: false,
             checkStatus: "unchecked" as const,
           })),
-          custom_fields: (detail.custom_fields || []).map(toEditableCustomField),
+          request_patches: detail.request_patches || [],
         };
       } else {
         errorMsg.value = $t("providerEditPage.alert.loadDataFailed", {

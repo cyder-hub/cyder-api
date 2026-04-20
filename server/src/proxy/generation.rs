@@ -10,6 +10,7 @@ use super::{
     auth::{admit_api_key_request, check_access_control},
     cancellation::ProxyCancellationContext,
     core::proxy_request,
+    load_runtime_request_patch_trace,
     logging::{
         LoggedBody, RequestLogContext, build_initial_request_log_context,
         record_request_completion_and_log,
@@ -174,7 +175,7 @@ pub(super) async fn execute_generation_proxy(
             );
             e
         })?;
-    let initial_log_context = build_initial_request_log_context(
+    let mut initial_log_context = build_initial_request_log_context(
         &system_api_key,
         &resolved_target.provider,
         &resolved_target.model,
@@ -211,12 +212,37 @@ pub(super) async fn execute_generation_proxy(
         return Err(e);
     }
 
+    let request_patch_trace = load_runtime_request_patch_trace(
+        &resolved_target.provider,
+        Some(&resolved_target.model),
+        &app_state,
+    )
+    .await
+    .map_err(|e| {
+        warn!(
+            "Failed to load request patch trace for model {}: {:?}",
+            resolved_target.model.id, e
+        );
+        e
+    })?;
+    initial_log_context.applied_request_patch_ids_json =
+        request_patch_trace.applied_request_patch_ids_json.clone();
+    initial_log_context.request_patch_summary_json =
+        request_patch_trace.request_patch_summary_json.clone();
+
+    if let Some(conflict_error) = request_patch_trace.conflict_error(&resolved_target.model.model_name)
+    {
+        record_early_generation_failure(&app_state, initial_log_context.clone(), &conflict_error)
+            .await;
+        return Err(conflict_error);
+    }
+
     let prepared_request = match prepare_generation_request(
         &resolved_target.provider,
         &resolved_target.model,
         data,
         &original_headers,
-        &app_state,
+        &request_patch_trace.applied_rules,
         &provider_credentials,
         target_api_type,
         is_stream,

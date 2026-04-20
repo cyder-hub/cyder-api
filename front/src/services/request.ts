@@ -28,8 +28,6 @@ import type {
   ModelRoutePayload,
   ModelRouteUpdatePayload,
   PaginatedResponse,
-  CustomFieldDefinition,
-  CustomFieldPayload,
   CostCatalog,
   CostCatalogListItem,
   CostCatalogPayload,
@@ -53,10 +51,14 @@ import type {
   ProviderKeyPayload,
   ModelPayload,
   ModelDetailResponse,
-  CustomFieldLinkPayload,
-  CustomFieldUnlinkPayload,
   ProviderRemoteModelsResponse,
   ProviderCheckPayload,
+  RequestPatchPayload,
+  RequestPatchRule,
+  RequestPatchUpdatePayload,
+  RequestPatchMutationOutcome,
+  ModelEffectiveRequestPatchResponse,
+  RequestPatchExplainResponse,
 } from "@/store/types";
 
 export const Api = {
@@ -177,30 +179,6 @@ export const Api = {
     return request.delete(`/ai/manager/api/model_route/${id}`);
   },
 
-  // ========== Custom Field Definition ==========
-  getCustomFieldList(
-    pageSize = 1000,
-  ): Promise<PaginatedResponse<CustomFieldDefinition>> {
-    return request(
-      `/ai/manager/api/custom_field_definition/list?page_size=${pageSize}`,
-    );
-  },
-  getCustomFieldDetail(id: number): Promise<CustomFieldDefinition> {
-    return request.get(`/ai/manager/api/custom_field_definition/${id}`);
-  },
-  updateCustomField(id: number, payload: CustomFieldPayload): Promise<void> {
-    return request.put(
-      `/ai/manager/api/custom_field_definition/${id}`,
-      payload,
-    );
-  },
-  createCustomField(payload: CustomFieldPayload): Promise<void> {
-    return request.post("/ai/manager/api/custom_field_definition", payload);
-  },
-  deleteCustomField(id: number): Promise<void> {
-    return request.delete(`/ai/manager/api/custom_field_definition/${id}`);
-  },
-
   // ========== Cost ==========
   getCostTemplateList(): Promise<CostTemplateSummary[]> {
     return request.get("/ai/manager/api/cost/template/list");
@@ -318,6 +296,28 @@ export const Api = {
   ): Promise<ProviderRemoteModelsResponse> {
     return request.get(`/ai/manager/api/provider/${id}/remote_models`);
   },
+  listProviderRequestPatches(id: number | string): Promise<RequestPatchRule[]> {
+    return request.get(`/ai/manager/api/provider/${id}/request_patch`);
+  },
+  createProviderRequestPatch(
+    id: number | string,
+    payload: RequestPatchPayload,
+  ): Promise<RequestPatchMutationOutcome> {
+    return request.post(`/ai/manager/api/provider/${id}/request_patch`, payload);
+  },
+  updateProviderRequestPatch(
+    id: number | string,
+    ruleId: number | string,
+    payload: RequestPatchUpdatePayload,
+  ): Promise<RequestPatchMutationOutcome> {
+    return request.put(`/ai/manager/api/provider/${id}/request_patch/${ruleId}`, payload);
+  },
+  deleteProviderRequestPatch(
+    id: number | string,
+    ruleId: number | string,
+  ): Promise<void> {
+    return request.delete(`/ai/manager/api/provider/${id}/request_patch/${ruleId}`);
+  },
   createProviderKey(
     id: number | string,
     payload: ProviderKeyPayload,
@@ -355,18 +355,36 @@ export const Api = {
   getModelDetail(id: number | string): Promise<ModelDetailResponse> {
     return request.get(`/ai/manager/api/model/${id}/detail`);
   },
-
-  // ========== Custom Field Link/Unlink ==========
-  linkCustomField(payload: CustomFieldLinkPayload): Promise<void> {
-    return request.post(
-      "/ai/manager/api/custom_field_definition/link",
-      payload,
-    );
+  listModelRequestPatches(id: number | string): Promise<RequestPatchRule[]> {
+    return request.get(`/ai/manager/api/model/${id}/request_patch`);
   },
-  unlinkCustomField(payload: CustomFieldUnlinkPayload): Promise<void> {
-    return request.post(
-      "/ai/manager/api/custom_field_definition/unlink",
-      payload,
-    );
+  createModelRequestPatch(
+    id: number | string,
+    payload: RequestPatchPayload,
+  ): Promise<RequestPatchMutationOutcome> {
+    return request.post(`/ai/manager/api/model/${id}/request_patch`, payload);
+  },
+  updateModelRequestPatch(
+    id: number | string,
+    ruleId: number | string,
+    payload: RequestPatchUpdatePayload,
+  ): Promise<RequestPatchMutationOutcome> {
+    return request.put(`/ai/manager/api/model/${id}/request_patch/${ruleId}`, payload);
+  },
+  deleteModelRequestPatch(
+    id: number | string,
+    ruleId: number | string,
+  ): Promise<void> {
+    return request.delete(`/ai/manager/api/model/${id}/request_patch/${ruleId}`);
+  },
+  getModelEffectiveRequestPatches(
+    id: number | string,
+  ): Promise<ModelEffectiveRequestPatchResponse> {
+    return request.get(`/ai/manager/api/model/${id}/request_patch/effective`);
+  },
+  getModelRequestPatchExplain(
+    id: number | string,
+  ): Promise<RequestPatchExplainResponse> {
+    return request.get(`/ai/manager/api/model/${id}/request_patch/explain`);
   },
 };

@@ -405,7 +405,9 @@ impl ModelRoute {
                     model_route_candidate::table
                         .on(model_route::dsl::id.eq(model_route_candidate::dsl::route_id)),
                 )
-                .inner_join(model::table.on(model_route_candidate::dsl::model_id.eq(model::dsl::id)))
+                .inner_join(
+                    model::table.on(model_route_candidate::dsl::model_id.eq(model::dsl::id)),
+                )
                 .filter(
                     model_route::dsl::deleted_at
                         .is_null()
@@ -1057,7 +1059,10 @@ mod tests {
 
         let value = serde_json::to_value(detail).expect("serialize route detail");
 
-        assert_eq!(value.pointer("/candidates/0/candidate/id"), Some(&json!(11)));
+        assert_eq!(
+            value.pointer("/candidates/0/candidate/id"),
+            Some(&json!(11))
+        );
         assert_eq!(
             value.pointer("/candidates/0/candidate/model_id"),
             Some(&json!(101))

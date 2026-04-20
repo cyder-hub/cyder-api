@@ -211,6 +211,8 @@ pub struct RequestLogContext {
     pub llm_request_body: Option<LoggedBody>,
     pub llm_response_body: Option<LoggedBody>,
     pub user_response_body: Option<LoggedBody>,
+    pub applied_request_patch_ids_json: Option<String>,
+    pub request_patch_summary_json: Option<String>,
 }
 
 impl RequestLogContext {
@@ -265,6 +267,8 @@ impl RequestLogContext {
             llm_request_body: None,
             llm_response_body: None,
             user_response_body: None,
+            applied_request_patch_ids_json: None,
+            request_patch_summary_json: None,
         }
     }
 }
@@ -1115,6 +1119,8 @@ impl LogManager {
             llm_request_body: None,
             llm_response_body: None,
             user_response_body: None,
+            applied_request_patch_ids_json: context.applied_request_patch_ids_json.clone(),
+            request_patch_summary_json: context.request_patch_summary_json.clone(),
             user_api_type: context.user_api_type,
             llm_api_type: context.llm_api_type,
         }
@@ -1343,6 +1349,11 @@ mod tests {
             is_enabled: true,
             components: vec![],
         });
+        context.applied_request_patch_ids_json = Some("[11,22]".to_string());
+        context.request_patch_summary_json = Some(
+            r#"{"provider_id":2,"model_id":3,"effective_rules":[],"explain":[],"conflicts":[],"has_conflicts":false}"#
+                .to_string(),
+        );
 
         let request_log =
             LogManager::build_request_log(&context, Some(StorageType::FileSystem), 2000);
@@ -1375,6 +1386,17 @@ mod tests {
         assert_eq!(request_log.cache_read_tokens, Some(3));
         assert_eq!(request_log.estimated_cost_currency.as_deref(), Some("USD"));
         assert_eq!(request_log.cost_catalog_version_id, Some(9));
+        assert_eq!(
+            request_log.applied_request_patch_ids_json.as_deref(),
+            Some("[11,22]")
+        );
+        assert!(
+            request_log
+                .request_patch_summary_json
+                .as_deref()
+                .unwrap_or_default()
+                .contains("\"provider_id\":2")
+        );
     }
 
     #[test]

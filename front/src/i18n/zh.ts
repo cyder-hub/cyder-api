@@ -2,7 +2,8 @@ export const zhDict = {
   providerPage: {
     editModel: "编辑模型: {model_name}",
     title: "渠道管理",
-    description: "这是默认起步页。先在这里完成渠道接入，再继续处理模型、密钥和高级配置。",
+    description:
+      "这是默认起步页。先在这里完成渠道接入，再继续处理模型、密钥和高级配置。",
     addProvider: "添加新渠道",
     viewModels: "打开模型库",
     viewRuntime: "查看 Runtime",
@@ -206,7 +207,6 @@ export const zhDict = {
     apiKey: "API密钥",
     modelRoute: "模型路由",
     accessControlPolicy: "访问控制",
-    customFields: "自定义字段",
     cost: "成本",
     sections: {
       start: "从这里开始",
@@ -352,6 +352,23 @@ export const zhDict = {
       general: "通用信息",
       timings: "时间信息 (UTC)",
       usageSummary: "Usage 摘要",
+      requestPatch: "Request Patch",
+      effectiveRules: "生效规则",
+      appliedRuleIds: "已应用规则 ID",
+      conflicts: "冲突",
+      conflictDetected: "当前请求存在 request patch 冲突，运行时未应用这些规则。",
+      sourceRule: "来源规则",
+      trace: "解析轨迹",
+      origin: "来源",
+      value: "值",
+      description: "说明",
+      noRuleDescription: "暂无说明",
+      noRequestPatchTrace: "当前请求没有记录 request patch 追踪摘要。",
+      noEffectiveRules: "当前请求没有记录生效的 request patch 规则。",
+      invalidRequestPatchTrace: "已存储的 request patch 追踪摘要不是合法 JSON。",
+      rawTraceSummary: "原始追踪摘要",
+      originProviderDirect: "Provider 直连规则",
+      originModelDirect: "Model 直连规则",
       costSnapshot: "成本快照",
       totalInputTokens: "总输入 Token",
       totalOutputTokens: "总输出 Token",
@@ -377,7 +394,8 @@ export const zhDict = {
       unmatchedItems: "未命中的账本项",
       warnings: "Warning",
       fallbackPricingApplied: "已使用回退计价",
-      fallbackPricingDescription: "该明细未命中专属价格，按以下 meter 的价格完成计费：",
+      fallbackPricingDescription:
+        "该明细未命中专属价格，按以下 meter 的价格完成计费：",
       noDescription: "暂无描述",
       noCostSnapshot: "当前请求未记录成本快照。",
       invalidCostSnapshot: "已存储的成本快照不是合法 JSON。",
@@ -400,6 +418,7 @@ export const zhDict = {
   common: {
     unknownError: "发生未知错误。",
     loading: "加载中...",
+    basicInfo: "基础信息",
     yes: "是",
     no: "否",
     edit: "编辑",
@@ -411,6 +430,7 @@ export const zhDict = {
     notAvailable: "无",
     noData: "暂无数据",
     refresh: "刷新",
+    retry: "重试",
     check: "检查",
     close: "关闭",
     confirm: "确认",
@@ -581,7 +601,8 @@ export const zhDict = {
     labelBudgetMonthly: "每月预算",
     labelBudgetAmount: "金额",
     labelBudgetCurrency: "币种",
-    budgetMajorUnitHint: "预算金额按主货币单位填写。CNY 按元填写，USD 按美元填写。",
+    budgetMajorUnitHint:
+      "预算金额按主货币单位填写。CNY 按元填写，USD 按美元填写。",
     placeholderBudgetAmount: "例如 25.5",
     placeholderCurrency: "选择币种",
     clearQuota: "清空配额",
@@ -592,7 +613,8 @@ export const zhDict = {
       quotaTitle: "请求与 Token 配额",
       quotaDescription: "用于限制每日请求量、每日 Token 和每月 Token 消耗。",
       budgetTitle: "预算限制",
-      budgetDescription: "预算会按元或美元展示与录入，避免直接编辑 nanos 原值。",
+      budgetDescription:
+        "预算会按元或美元展示与录入，避免直接编辑 nanos 原值。",
     },
     currency: {
       CNY: "人民币（元）",
@@ -602,11 +624,13 @@ export const zhDict = {
     addOverride: "添加重命名",
     noRules: "当前还没有 ACL 规则。",
     noOverrides: "当前还没有配置私有重命名。",
-    noRoutes: "当前还没有可用的逻辑模型路由。请先创建 route，再在这里绑定私有名称。",
+    noRoutes:
+      "当前还没有可用的逻辑模型路由。请先创建 route，再在这里绑定私有名称。",
     overrideTitle: "重命名 {index}",
     overrideDescription: "填写客户端侧名称，并将其指向一个逻辑模型路由。",
     ruleTitle: "规则 {index}",
-    ruleDescription: "设置 effect、scope 和目标对象。禁用规则会保留，但不会参与匹配。",
+    ruleDescription:
+      "设置 effect、scope 和目标对象。禁用规则会保留，但不会参与匹配。",
     labelOverrideSourceName: "来源名称",
     labelOverrideTargetRoute: "目标路由",
     labelOverrideDescription: "描述",
@@ -641,7 +665,8 @@ export const zhDict = {
   },
   modelRoutePage: {
     title: "逻辑模型路由",
-    description: "高级路由：管理共享逻辑模型名、主 candidate 顺序，以及是否暴露到 /models。",
+    description:
+      "高级路由：管理共享逻辑模型名、主 candidate 顺序，以及是否暴露到 /models。",
     addRoute: "添加路由",
     loading: "正在加载模型路由...",
     errorPrefix: "加载模型路由错误。",
@@ -741,8 +766,10 @@ export const zhDict = {
   providerEditPage: {
     titleEdit: "编辑渠道",
     titleAdd: "新增渠道",
-    descriptionEdit: "编辑已保存的渠道快速接入字段，然后继续处理下面的高级配置。",
-    descriptionAdd: "使用 Quick Start 一步完成新渠道初始化，然后继续管理模型、API Key 和自定义字段。",
+    descriptionEdit:
+      "编辑已保存的渠道快速接入字段，然后继续处理下面的高级配置。",
+    descriptionAdd:
+      "使用 Quick Start 一步完成新渠道初始化，然后继续管理模型、API Key 和 request patch。",
     loadingData: "正在加载渠道数据...",
     buttonSaveOnly: "仅保存",
     buttonSaveAndTest: "保存并测试",
@@ -784,17 +811,10 @@ export const zhDict = {
       noUncommittedToClear: "没有未提交的模型可清除。",
       noModels: "暂无模型",
       noApiKeys: "暂无 API Key",
-      noCustomFields: "暂无自定义字段",
       apiKeySaveSuccess: "API 密钥保存成功。",
       modelSaveSuccess: "模型保存成功。",
       modelDeleteSuccess: "模型删除成功。",
-      selectCustomField: "请选择要关联的自定义字段。",
-      saveProviderBeforeLink: "请在关联自定义字段前保存渠道。",
-      linkCustomFieldSuccess: "自定义字段关联成功。",
-      linkCustomFieldFailed: "关联自定义字段失败: {error}",
       providerIdNotFound: "未找到渠道ID。",
-      unlinkCustomFieldSuccess: "自定义字段取消关联成功。",
-      unlinkedCustomFieldFailed: "取消关联自定义字段失败: {error}",
       apiKeyDeleteSuccess: "API 密钥删除成功。",
       providerNotSavedForCheck: "必须先保存渠道，然后才能执行检查。",
       noApiKeyForCheck: "必须至少保存一个API密钥才能执行模型检查。",
@@ -819,13 +839,16 @@ export const zhDict = {
         description: "填写最小连接字段，一步完成渠道初始化。",
         editDescription: "更新最小连接字段，然后继续处理下面的高级管理区。",
         identityTitle: "渠道身份",
-        identityDescription: "bootstrap 之后，渠道名称和 Key 仍然可以继续调整。",
+        identityDescription:
+          "bootstrap 之后，渠道名称和 Key 仍然可以继续调整。",
       },
       advanced: {
         title: "高级",
-        description: "在这里管理额外 API Key、更多模型、自定义字段和远端模型同步。",
+        description:
+          "在这里管理额外 API Key、更多模型、request patch 和远端模型同步。",
       },
-      modelsDescription: "这里可直接编辑模型名称、映射模型名称和启用状态。完整配置仍然留在 ModelEdit。",
+      modelsDescription:
+        "这里可直接编辑模型名称、映射模型名称和启用状态。完整配置仍然留在 ModelEdit。",
     },
     preview: {
       title: "生成预览",
@@ -879,11 +902,6 @@ export const zhDict = {
     placeholderDescription: "可选描述",
     buttonSaveThisKey: "保存此Key",
     buttonAddApiKey: "添加API Key",
-    sectionCustomFields: "自定义字段",
-    tableHeaderFieldName: "字段名",
-    tableHeaderFieldValue: "字段值",
-    tableHeaderFieldType: "字段类型",
-    buttonAddCustomField: "添加自定义字段",
     buttonBackToList: "返回列表",
   },
   modelEditPage: {
@@ -897,7 +915,7 @@ export const zhDict = {
       enabled: "启用",
       disabled: "停用",
       description:
-        "这个模型属于上方渠道。这里仅保留最小模型字段编辑，路由、成本和自定义字段属于高级配置。",
+        "这个模型属于上方渠道。这里仅保留最小模型字段编辑，路由、成本和 request patch 属于高级配置。",
     },
     routeReferences: {
       title: "路由引用",
@@ -913,65 +931,175 @@ export const zhDict = {
     labelModelName: "模型名称",
     labelRealModelName: "真实模型名称",
     labelEnabled: "已启用",
-    sectionCustomFields: "自定义字段",
-    tableHeaderFieldName: "字段名",
-    tableHeaderFieldValue: "字段值",
-    tableHeaderDescription: "描述",
-    tableHeaderFieldType: "字段类型",
-    placeholderSelectCustomField: "选择要关联的自定义字段",
-    labelSelectCustomField: "选择自定义字段",
-    buttonAddCustomField: "关联自定义字段",
     alert: {
       missingId: "缺少模型ID，无法编辑。",
       loadDataFailed: "加载模型数据失败，ID: {modelId}。",
       nameRequired: "模型名称不能为空。",
       updateSuccess: "模型更新成功。",
       saveFailed: "保存模型失败: {error}",
-      selectFieldToLink: "请选择要关联的自定义字段。",
-      modelNotLoaded: "模型数据未加载，无法关联字段。",
-      linkSuccess: "自定义字段关联成功。",
-      linkFailed: "关联自定义字段失败: {error}",
-      modelIdNotFound: "未找到模型ID，无法取消关联字段。",
-      unlinkSuccess: "自定义字段取消关联成功。",
-      unlinkFailed: "取消关联自定义字段失败: {error}",
-      fetchCustomFieldsFailed: "获取自定义字段失败。",
     },
     priceSection: {
       title: "成本目录",
       labelCatalog: "成本目录",
       placeholderCatalog: "选择一个成本目录",
       noCatalog: "无 (未绑定目录)",
-      unboundHint: "当前模型未绑定成本目录。请求仍可正常处理，但不会生成成本快照。",
+      unboundHint:
+        "当前模型未绑定成本目录。请求仍可正常处理，但不会生成成本快照。",
       versionTitle: "已发布版本",
       version: "版本号",
       enabled: "启用",
       effectiveFrom: "生效开始",
       effectiveUntil: "生效结束",
     },
+    requestPatch: {
+      title: "请求改写",
+      description:
+        "在一个页面里直接编辑模型级规则，并同时查看渠道继承规则、最终生效结果和诊断信息。",
+      refresh: "刷新",
+      loading: "正在加载请求改写状态...",
+      providerFallback: "渠道",
+      directTitle: "模型直接规则",
+      directDescription:
+        "模型规则只会在完全相同的目标上覆盖渠道继承规则。",
+      addRule: "新增规则",
+      emptyDirect: "当前模型还没有配置直接请求改写规则。",
+      inheritedTitle: "继承的渠道规则",
+      inheritedDescription:
+        "这些是从 {provider} 继承到当前模型的渠道直接规则。即使被覆盖，也会保留显示。",
+      emptyInherited: "当前模型没有继承任何启用中的渠道请求改写规则。",
+      effectiveTitle: "运行时生效结果",
+      effectiveDescription:
+        "这里展示的是该模型当前会尝试应用到运行时请求上的最终规则集。",
+      emptyEffective: "当前模型没有任何有效的请求改写规则。",
+      explainTitle: "诊断与冲突",
+      explainDescription:
+        "查看每条启用规则的最终状态、覆盖关系，以及是否存在不安全的跨作用域冲突。",
+      emptyExplain: "当前模型还没有可展示的请求改写诊断信息。",
+      details: "详情",
+      noDescription: "无描述",
+      conflictBannerTitle: "当前请求改写配置不安全",
+      conflictBannerDescription:
+        "这个模型当前存在渠道/模型跨作用域冲突。处理完成前，不应认为该模型可以安全生效。",
+      conflictFields: {
+        providerTarget: "渠道目标",
+        modelTarget: "模型目标",
+      },
+      placements: {
+        HEADER: "请求头",
+        QUERY: "查询参数",
+        BODY: "请求体 JSON",
+      },
+      operations: {
+        SET: "设置",
+        REMOVE: "移除",
+      },
+      fields: {
+        value: "值",
+        description: "描述",
+        source: "来源",
+        trace: "说明",
+        enabled: "启用",
+        ruleId: "规则 ID",
+        sourceRule: "来源规则",
+        effectiveRule: "最终规则",
+        conflictsWith: "冲突对象",
+      },
+      states: {
+        effective: "生效中",
+        overridden: "已覆盖",
+        conflicted: "冲突中",
+        disabled: "已停用",
+        enabled: "已启用",
+      },
+      origin: {
+        ProviderDirect: "渠道直接规则",
+        ModelDirect: "模型直接规则",
+      },
+      messages: {
+        directEffective:
+          "这条模型直接规则已经进入当前运行时生效集合。",
+        disabledSkipped: "已停用规则会继续保留在模型上，但运行时会跳过。",
+        inheritedEffective: "这条规则来自渠道，并且当前仍对该模型生效。",
+        overriddenByRule: "已被模型规则 {id} 覆盖。",
+        conflictsWithRules: "与规则 {ids} 存在冲突。",
+        overridesProviderRules: "覆盖了渠道规则 {ids}。",
+        effectiveFromOrigin: "当前由 {origin} 规则 {id} 生效。",
+        noRuntimeTrace: "当前没有额外诊断信息。",
+      },
+      editor: {
+        addTitle: "新增模型请求改写",
+        editTitle: "编辑模型请求改写",
+        description:
+          "为请求头、查询参数或请求体 JSON Pointer 目标创建模型直接规则。",
+        placement: "位置",
+        operation: "操作",
+        selectPlacement: "选择位置",
+        selectOperation: "选择操作",
+        target: "目标",
+        targetPlaceholderHeader: "authorization",
+        targetPlaceholderQuery: "api-version",
+        targetPlaceholderBody: "/generationConfig/temperature",
+        valueJson: "JSON 值",
+        valueHelp:
+          "请求头和查询参数只接受 JSON 标量值；请求体可以使用任意 JSON 值。",
+        descriptionLabel: "描述",
+        descriptionPlaceholder: "给运维或后续排障留下可读备注。",
+        enabledTitle: "已启用",
+        enabledDescription: "关闭后规则仍保留，但运行时不会应用。",
+        targetHelpHeader:
+          "填写请求头名称。保留的传输层请求头会被后端直接拒绝。",
+        targetHelpQuery: "填写查询参数名，不要包含 ?, &, = 或空白字符。",
+        targetHelpBody:
+          "填写 JSON Pointer，例如 /model 或 /generationConfig/temperature。",
+        removeValuePlaceholder: "移除操作不接受 value_json。",
+        valuePlaceholder: '填写合法 JSON，例如: "Bearer token", true, 1, null',
+        create: "创建规则",
+        save: "保存修改",
+        dangerousTitle: "确认危险目标",
+        dangerousDescription:
+          "这条规则会操作上游敏感目标，必须再次确认后才能保存。",
+        saveAnyway: "仍然保存",
+      },
+      alert: {
+        loadFailed: "加载请求改写状态失败。",
+        saveBeforeEdit: "请先保存模型，再编辑请求改写规则。",
+        saveFailed: "保存请求改写规则失败。",
+        createSuccess: "模型请求改写已创建。",
+        updateSuccess: "模型请求改写已更新。",
+        deleteSuccess: "模型请求改写已删除。",
+        deleteFailed: "删除请求改写规则失败。",
+        toggleFailed: "更新请求改写启停状态失败。",
+        enableSuccess: "请求改写已启用。",
+        disableSuccess: "请求改写已停用。",
+        dangerousConfirmFailed: "确认危险请求改写目标失败。",
+        targetRequired: "目标不能为空。",
+        valueRequired: "设置规则必须填写 JSON 值。",
+      },
+    },
   },
   costPage: {
     title: "成本管理",
     description:
       "高级计费与价格控制。先查看成本目录列表，再通过弹窗进入方案编辑，维护版本、组件与成本试算。",
-    confirmDeleteCatalog: '确定删除成本目录“{name}”吗？',
+    confirmDeleteCatalog: "确定删除成本目录“{name}”吗？",
     confirmDeleteCatalogDescription:
       "后端只有在该目录不再包含任何版本时才允许删除。",
-    confirmEnableVersion: '确定启用目录版本“{version}”吗？',
+    confirmEnableVersion: "确定启用目录版本“{version}”吗？",
     confirmEnableVersionDescription:
       "这是危险操作。启用后，同一目录下其他已启用版本会被同时停用。",
-    confirmDisableVersion: '确定停用目录版本“{version}”吗？',
+    confirmDisableVersion: "确定停用目录版本“{version}”吗？",
     confirmDisableVersionDescription:
       "这是危险操作。停用后，新请求将不再匹配该目录版本。",
-    confirmArchiveVersion: '确定归档目录版本“{version}”吗？',
+    confirmArchiveVersion: "确定归档目录版本“{version}”吗？",
     confirmArchiveVersionDescription:
       "归档后该版本将默认从主列表隐藏，且不能直接启用或编辑。",
-    confirmUnarchiveVersion: '确定取消归档目录版本“{version}”吗？',
+    confirmUnarchiveVersion: "确定取消归档目录版本“{version}”吗？",
     confirmUnarchiveVersionDescription:
       "取消归档后，该版本会恢复为冻结状态并重新显示在主列表中。",
-    confirmDeleteVersion: '确定删除草稿版本“{version}”吗？',
+    confirmDeleteVersion: "确定删除草稿版本“{version}”吗？",
     confirmDeleteVersionDescription:
       "只有未启用且未冻结的草稿版本允许删除，删除后不能恢复。",
-    confirmDeleteComponent: '确定删除组件“{meter}”吗？',
+    confirmDeleteComponent: "确定删除组件“{meter}”吗？",
     confirmDeleteComponentDescription:
       "删除后会立即从当前目录版本中移除该计费组件。",
     alert: {
@@ -1040,7 +1168,8 @@ export const zhDict = {
     },
     templates: {
       title: "内置模板",
-      description: "直接导入常见文本模型和 token 型生图模型的成本目录初始配置。",
+      description:
+        "直接导入常见文本模型和 token 型生图模型的成本目录初始配置。",
       loading: "正在加载成本模板...",
       empty: "当前没有可用的内置成本模板。",
       import: "一键导入",
@@ -1053,7 +1182,8 @@ export const zhDict = {
     },
     catalogs: {
       title: "成本目录",
-      description: "目录用于承载一组可复用的成本策略，供模型绑定与请求计费复用。",
+      description:
+        "目录用于承载一组可复用的成本策略，供模型绑定与请求计费复用。",
       add: "新建目录",
       duplicate: "创建副本",
       editMeta: "编辑目录",
@@ -1084,7 +1214,8 @@ export const zhDict = {
       description: "在这里维护目录版本、计费组件，并直接进行成本试算。",
       currentVersion: "当前版本",
       emptyTitle: "尚未选择成本目录",
-      emptyDescription: "请先从列表中打开一个目录，或新建/导入一个方案后再进入编辑。",
+      emptyDescription:
+        "请先从列表中打开一个目录，或新建/导入一个方案后再进入编辑。",
     },
     versions: {
       title: "目录版本",
@@ -1094,6 +1225,7 @@ export const zhDict = {
       publishedAt: "发布时间",
       effectiveFrom: "生效开始",
       effectiveUntil: "生效结束",
+      currency: "币种",
       modal: {
         titleAdd: "新建目录版本",
         version: "版本号",
@@ -1112,11 +1244,15 @@ export const zhDict = {
       loading: "正在加载版本详情...",
       emptyComponents: "该版本还没有计费组件。",
       componentsTitle: "计费组件",
-      componentsDescription: "组件围绕 meter key 与 charge kind 建模，并按优先级进行匹配。",
+      componentsDescription:
+        "组件围绕 meter key 与 charge kind 建模，并按优先级进行匹配。",
       draftDescription: "草稿版本可以继续编辑组件，也可以直接删除。",
-      activeDescription: "生效中的版本会参与请求匹配；若尚未被请求使用，仍可继续编辑。",
-      frozenDescription: "冻结版本已被历史请求引用，当前只读；如需改价，请复制为新草稿。",
-      archivedDescription: "归档版本默认隐藏，不可直接启用或编辑；只能取消归档恢复为冻结版本。",
+      activeDescription:
+        "生效中的版本会参与请求匹配；若尚未被请求使用，仍可继续编辑。",
+      frozenDescription:
+        "冻结版本已被历史请求引用，当前只读；如需改价，请复制为新草稿。",
+      archivedDescription:
+        "归档版本默认隐藏，不可直接启用或编辑；只能取消归档恢复为冻结版本。",
       addComponent: "新增组件",
       chargeKind: "计费方式",
       unitPrice: "单价",
@@ -1138,12 +1274,12 @@ export const zhDict = {
         "按每百万 tokens 的 {currency} 价格输入，例如 3 表示 {currency} 3 / 1M tokens。",
       unitPriceHintPerUnit:
         "按每个计量单位的实际 {currency} 价格输入，支持小数。",
-      flatFeeHint:
-        "输入实际固定费用，单位为 {currency}，支持小数。",
+      flatFeeHint: "输入实际固定费用，单位为 {currency}，支持小数。",
       matchAttributes: "匹配属性 JSON",
       matchAttributesPlaceholder: '示例：{"spec_key":"1024x1024"}',
       previewConfig: "匹配预览",
-      previewConfigEmpty: "若不填写匹配属性，则该组件会匹配此 meter 下的所有账本项。",
+      previewConfigEmpty:
+        "若不填写匹配属性，则该组件会匹配此 meter 下的所有账本项。",
       meters: {
         inputText: "文本输入 Token",
         outputText: "文本输出 Token",
@@ -1163,7 +1299,8 @@ export const zhDict = {
       },
       tiers: {
         title: "阶梯价格",
-        description: "按递增阈值配置价格。最后一行若留空上界，则表示无限上界阶梯。",
+        description:
+          "按递增阈值配置价格。最后一行若留空上界，则表示无限上界阶梯。",
         add: "新增阶梯",
         basis: "阶梯依据",
         basisMeterQuantity: "当前 meter 数量",
@@ -1182,7 +1319,8 @@ export const zhDict = {
     },
     preview: {
       title: "成本试算",
-      description: "直接复用后端的 normalization -> ledger -> rating 主链路验证样例请求成本。",
+      description:
+        "直接复用后端的 normalization -> ledger -> rating 主链路验证样例请求成本。",
       applySample: "填充示例",
       run: "开始试算",
       running: "试算中...",
@@ -1206,48 +1344,6 @@ export const zhDict = {
         currency: "币种",
         detailLines: "明细行数",
       },
-    },
-  },
-  customFieldsPage: {
-    title: "自定义字段",
-    description: "高级元数据：在基础渠道可用后，再管理请求中自动注入的自定义字段。",
-    addCustomField: "添加自定义字段",
-    errorPrefix: "加载自定义字段错误:",
-    noData: "未找到自定义字段。",
-    table: {
-      name: "名称",
-      fieldName: "字段名",
-      fieldType: "字段类型",
-      placement: "位置",
-      enabled: "启用",
-    },
-    alert: {
-      loadDetailFailed: "加载自定义字段详情失败。",
-      nameAndTypeRequired: "字段名和字段类型不能为空。",
-      saveFailed: "保存自定义字段失败: {error}",
-      toggleFailed: "切换自定义字段状态失败: {error}",
-      deleteFailed: "删除自定义字段失败: {error}",
-    },
-    confirmDelete: '您确定要删除自定义字段"{name}"吗？',
-    modal: {
-      titleEdit: "编辑自定义字段",
-      titleAdd: "添加自定义字段",
-      labelName: "名称",
-      placeholderName: "可选的显示名称",
-      labelDescription: "描述",
-      placeholderDescription: "可选的描述",
-      labelFieldName: "字段名",
-      placeholderFieldName: "例如, x-request-id",
-      labelPlacement: "位置",
-      placeholderPlacement: "选择一个位置",
-      labelFieldType: "字段类型",
-      placeholderFieldType: "选择一个字段类型",
-      labelValue: "值",
-      placeholderStringValue: "输入字符串值",
-      placeholderJsonStringValue: "输入有效的JSON字符串",
-      placeholderIntegerValue: "输入整数值",
-      placeholderNumberValue: "输入数值",
-      labelEnabled: "启用",
     },
   },
   pricePage: {

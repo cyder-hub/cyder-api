@@ -55,6 +55,8 @@ db_object! {
         pub llm_request_body: Option<String>,
         pub llm_response_body: Option<String>,
         pub user_response_body: Option<String>,
+        pub applied_request_patch_ids_json: Option<String>,
+        pub request_patch_summary_json: Option<String>,
         pub user_api_type: LlmApiType,
         pub llm_api_type: LlmApiType,
     }
@@ -198,21 +200,17 @@ impl RequestLog {
                         let search_filter = request_log::dsl::id
                             .eq(id_search)
                             .or(request_log::dsl::model_name.like(pattern.clone()))
-                            .or(
-                                request_log::dsl::requested_model_name
-                                    .nullable()
-                                    .like(pattern.clone()),
-                            );
+                            .or(request_log::dsl::requested_model_name
+                                .nullable()
+                                .like(pattern.clone()));
                         query = query.filter(search_filter.clone());
                         count_query = count_query.filter(search_filter);
                     } else {
-                        let search_filter = request_log::dsl::model_name
-                            .like(pattern.clone())
-                            .or(
-                                request_log::dsl::requested_model_name
-                                    .nullable()
-                                    .like(pattern),
-                            );
+                        let search_filter = request_log::dsl::model_name.like(pattern.clone()).or(
+                            request_log::dsl::requested_model_name
+                                .nullable()
+                                .like(pattern),
+                        );
                         query = query.filter(search_filter.clone());
                         count_query = count_query.filter(search_filter);
                     }
@@ -291,21 +289,17 @@ impl RequestLog {
                         let search_filter = request_log::dsl::id
                             .eq(id_search)
                             .or(request_log::dsl::model_name.like(pattern.clone()))
-                            .or(
-                                request_log::dsl::requested_model_name
-                                    .nullable()
-                                    .like(pattern.clone()),
-                            );
+                            .or(request_log::dsl::requested_model_name
+                                .nullable()
+                                .like(pattern.clone()));
                         query = query.filter(search_filter.clone());
                         count_query = count_query.filter(search_filter);
                     } else {
-                        let search_filter = request_log::dsl::model_name
-                            .like(pattern.clone())
-                            .or(
-                                request_log::dsl::requested_model_name
-                                    .nullable()
-                                    .like(pattern),
-                            );
+                        let search_filter = request_log::dsl::model_name.like(pattern.clone()).or(
+                            request_log::dsl::requested_model_name
+                                .nullable()
+                                .like(pattern),
+                        );
                         query = query.filter(search_filter.clone());
                         count_query = count_query.filter(search_filter);
                     }

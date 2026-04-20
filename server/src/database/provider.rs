@@ -4,13 +4,13 @@ use diesel::prelude::*;
 use serde::Deserialize; // Serialize on Provider is via db_object!, Deserialize for helper structs
 use serde::Serialize;
 
-use crate::database::{DbConnection, DbResult, get_connection};
 use crate::database::model::{Model, NewModel};
+use crate::database::{DbConnection, DbResult, get_connection};
 use crate::{db_execute, db_object};
 // db_object! is exported at the crate root by `#[macro_export]` in `database/mod.rs`.
 // BaseError is assumed to be accessible, e.g., from `crate::controller::BaseError`.
 use crate::controller::BaseError;
-use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
+use crate::database::request_patch::{RequestPatchRule, RequestPatchRuleResponse};
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
 use crate::utils::ID_GENERATOR;
 
@@ -242,7 +242,7 @@ macro_rules! bootstrap_transaction {
 pub struct ProviderDetail {
     pub provider: Provider,
     pub api_keys: Vec<ProviderApiKey>,
-    pub custom_fields: Vec<ApiCustomFieldDefinition>,
+    pub request_patches: Vec<RequestPatchRuleResponse>,
 }
 impl Provider {
     /// Inserts a new provider record into the database.
@@ -294,16 +294,16 @@ impl Provider {
         let conn = &mut get_connection()?;
         match conn {
             DbConnection::Postgres(conn) => {
-                use crate::database::_postgres_schema::*;
                 use self::_postgres_model::*;
+                use crate::database::_postgres_schema::*;
                 use crate::database::model::_postgres_model::{
                     ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
                 };
                 bootstrap_transaction!(conn, BootstrapNewModelDb, BootstrapModelDb, input)
             }
             DbConnection::Sqlite(conn) => {
-                use crate::database::_sqlite_schema::*;
                 use self::_sqlite_model::*;
+                use crate::database::_sqlite_schema::*;
                 use crate::database::model::_sqlite_model::{
                     ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
                 };
@@ -469,21 +469,16 @@ impl Provider {
         })
     }
 
-    /// Retrieves a provider's details including API keys and custom fields by its ID.
+    /// Retrieves a provider's details including API keys and direct request patches by its ID.
     pub fn get_detail_by_id(provider_id_val: i64) -> DbResult<ProviderDetail> {
-        // Get the main provider data
         let provider = Provider::get_by_id(provider_id_val)?;
-
-        // Get associated API keys
         let api_keys = ProviderApiKey::list_by_provider_id(provider_id_val)?;
-
-        // Get associated custom fields
-        let custom_fields = CustomFieldDefinition::list_by_provider_id(provider_id_val)?;
+        let request_patches = RequestPatchRule::list_by_provider_id(provider_id_val)?;
 
         Ok(ProviderDetail {
             provider,
             api_keys,
-            custom_fields,
+            request_patches,
         })
     }
 }
@@ -628,6 +623,7 @@ mod tests {
     use super::*;
     use diesel::Connection;
     use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+    use serde_json::Value;
     use tempfile::tempdir;
 
     const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
@@ -641,8 +637,8 @@ mod tests {
         conn: &mut diesel::SqliteConnection,
         input: &BootstrapProviderInput,
     ) -> DbResult<BootstrapProviderResult> {
-        use crate::database::_sqlite_schema::*;
         use self::_sqlite_model::*;
+        use crate::database::_sqlite_schema::*;
         use crate::database::model::_sqlite_model::{
             ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
         };
@@ -786,5 +782,52 @@ mod tests {
         assert_eq!(row.provider_key, "openai-api-example-com");
         assert_eq!(row.name, "OpenAI api.example.com");
         assert!(row.is_enabled);
+    }
+
+    #[test]
+    fn provider_detail_contract_uses_request_patch_fields() {
+        use crate::database::request_patch::RequestPatchScopeKind;
+        use crate::schema::enum_def::{RequestPatchOperation, RequestPatchPlacement};
+
+        let detail = ProviderDetail {
+            provider: Provider {
+                id: 1,
+                provider_key: "openai".to_string(),
+                name: "OpenAI".to_string(),
+                endpoint: "https://api.example.com/v1".to_string(),
+                use_proxy: false,
+                is_enabled: true,
+                deleted_at: None,
+                created_at: 1,
+                updated_at: 1,
+                provider_type: ProviderType::Openai,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            api_keys: vec![],
+            request_patches: vec![RequestPatchRuleResponse {
+                id: 10,
+                provider_id: Some(1),
+                model_id: None,
+                scope: RequestPatchScopeKind::Provider,
+                placement: RequestPatchPlacement::Body,
+                target: "/generationConfig".to_string(),
+                operation: RequestPatchOperation::Set,
+                value_json: Some(serde_json::json!({ "temperature": 0.2 })),
+                description: Some("provider default".to_string()),
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+            }],
+        };
+
+        let value = serde_json::to_value(detail).expect("provider detail should serialize");
+        let object = value.as_object().expect("detail should serialize as object");
+        assert!(matches!(object.get("api_keys"), Some(Value::Array(_))));
+        assert!(matches!(object.get("request_patches"), Some(Value::Array(_))));
+        assert_eq!(
+            object["request_patches"][0]["value_json"],
+            serde_json::json!({ "temperature": 0.2 })
+        );
+        assert!(object.get("custom_fields").is_none());
     }
 }

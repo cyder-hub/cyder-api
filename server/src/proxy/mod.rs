@@ -19,11 +19,13 @@ mod utility;
 #[cfg(test)]
 mod integration;
 
+pub(crate) use error::ProxyError;
 use error::{
-    ProxyError, classify_request_body_error, classify_reqwest_error, classify_upstream_status,
+    classify_request_body_error, classify_reqwest_error, classify_upstream_status,
     protocol_transform_error,
 };
 pub use router::create_proxy_router;
+pub(crate) use prepare::{apply_request_patches, load_runtime_request_patch_trace};
 
 pub async fn flush_proxy_logs() {
     logging::get_log_manager().flush().await;

@@ -356,7 +356,7 @@ export interface ModelItem {
 
 export interface ModelDetail {
   model: ModelItem;
-  custom_fields: CustomFieldItem[];
+  request_patches: RequestPatchRule[];
 }
 
 export interface ModelSummaryItem {
@@ -373,7 +373,7 @@ export interface ProviderListItem {
   provider: ProviderBase;
   models: ModelDetail[];
   provider_keys: ProviderApiKeyItem[];
-  custom_fields: CustomFieldDefinition[];
+  request_patches: RequestPatchRule[];
 }
 
 export type ProviderRuntimeWindow = "15m" | "1h" | "6h" | "24h";
@@ -530,35 +530,69 @@ export interface ModelRouteUpdatePayload {
   candidates?: ModelRouteCandidatePayload[];
 }
 
-// ========== Custom Field Types ==========
-export type CustomFieldType =
-  | "unset"
-  | "text"
-  | "integer"
-  | "float"
-  | "boolean";
+// ========== Request Patch Types ==========
+export type RequestPatchPlacement = "HEADER" | "QUERY" | "BODY";
 
-export interface CustomFieldItem {
-  id?: number;
-  name?: string | null;
-  field_name: string;
-  field_value: string;
-  description?: string | null;
-  field_type: CustomFieldType;
+export type RequestPatchOperation = "SET" | "REMOVE";
+
+export type RequestPatchScopeKind = "PROVIDER" | "MODEL";
+
+export type RequestPatchRuleOrigin = "ProviderDirect" | "ModelDirect";
+
+export type RequestPatchExplainStatus =
+  | "Effective"
+  | "Overridden"
+  | "Conflicted";
+
+export interface RequestPatchRule {
+  id: number;
+  provider_id: number | null;
+  model_id: number | null;
+  scope?: RequestPatchScopeKind;
+  placement: RequestPatchPlacement;
+  target: string;
+  operation: RequestPatchOperation;
+  value_json: JsonValue | string | null;
+  description: string | null;
+  is_enabled: boolean;
+  created_at: number;
+  updated_at: number;
 }
 
-export interface CustomFieldDefinition {
-  id: number;
-  name: string | null;
+export interface InheritedRequestPatchRule {
+  rule: RequestPatchRule;
+  overridden_by_rule_id: number | null;
+  conflict_with_rule_ids: number[];
+  is_effective: boolean;
+}
+
+export interface ResolvedRequestPatchRule {
+  placement: RequestPatchPlacement;
+  target: string;
+  operation: RequestPatchOperation;
+  value_json: string | null;
+  source_rule_id: number;
+  source_origin: RequestPatchRuleOrigin;
+  overridden_rule_ids: number[];
   description: string | null;
-  field_name: string;
-  field_placement: string;
-  field_type: string;
-  string_value: string | null;
-  integer_value: number | null;
-  number_value: number | null;
-  boolean_value: boolean | null;
-  is_enabled: boolean;
+}
+
+export interface RequestPatchConflict {
+  provider_rule_id: number;
+  model_rule_id: number;
+  placement: RequestPatchPlacement;
+  provider_target: string;
+  model_target: string;
+  reason: string;
+}
+
+export interface RequestPatchExplainEntry {
+  rule: RequestPatchRule;
+  origin: RequestPatchRuleOrigin;
+  status: RequestPatchExplainStatus;
+  effective_rule_id: number | null;
+  conflict_with_rule_ids: number[];
+  message: string | null;
 }
 
 export interface ModelDetailModel {
@@ -583,21 +617,83 @@ export interface ModelRouteReferenceItem {
 
 export interface ModelDetailResponse {
   model: ModelDetailModel;
-  custom_fields: CustomFieldDefinition[];
+  request_patches: RequestPatchRule[];
+  inherited_request_patches: InheritedRequestPatchRule[];
+  effective_request_patches: ResolvedRequestPatchRule[];
+  request_patch_explain: RequestPatchExplainEntry[];
+  request_patch_conflicts: RequestPatchConflict[];
+  has_request_patch_conflicts: boolean;
   route_references: ModelRouteReferenceItem[];
 }
 
-export interface CustomFieldPayload {
-  name?: string | null;
+export interface RequestPatchPayload {
+  placement: RequestPatchPlacement;
+  target: string;
+  operation: RequestPatchOperation;
+  value_json?: JsonValue | null;
   description?: string | null;
-  field_name: string;
-  field_placement: string;
-  field_type: string;
-  string_value?: string | null;
-  integer_value?: number | null;
-  number_value?: number | null;
-  boolean_value?: boolean | null;
-  is_enabled: boolean;
+  is_enabled?: boolean;
+  confirm_dangerous_target?: boolean;
+}
+
+export interface DangerousRequestPatchSavePayload
+  extends RequestPatchPayload {
+  confirm_dangerous_target: true;
+}
+
+export interface RequestPatchUpdatePayload {
+  placement?: RequestPatchPlacement;
+  target?: string;
+  operation?: RequestPatchOperation;
+  value_json?: JsonValue | null;
+  description?: string | null;
+  is_enabled?: boolean;
+  confirm_dangerous_target?: boolean;
+}
+
+export interface RequestPatchDangerousTargetConfirmation {
+  placement: RequestPatchPlacement;
+  target: string;
+  reason: string;
+  confirm_field: string;
+}
+
+export type RequestPatchMutationOutcome =
+  | {
+      result: "saved";
+      rule: RequestPatchRule;
+    }
+  | {
+      result: "confirmation_required";
+      confirmation: RequestPatchDangerousTargetConfirmation;
+    };
+
+export interface ModelEffectiveRequestPatchResponse {
+  provider_id: number;
+  model_id: number;
+  effective_rules: ResolvedRequestPatchRule[];
+  conflicts: RequestPatchConflict[];
+  has_conflicts: boolean;
+}
+
+export interface RequestPatchExplainResponse {
+  provider_id: number;
+  model_id: number;
+  direct_rules: RequestPatchRule[];
+  inherited_rules: InheritedRequestPatchRule[];
+  effective_rules: ResolvedRequestPatchRule[];
+  explain: RequestPatchExplainEntry[];
+  conflicts: RequestPatchConflict[];
+  has_conflicts: boolean;
+}
+
+export interface RequestPatchTraceSummary {
+  provider_id: number;
+  model_id: number | null;
+  effective_rules: ResolvedRequestPatchRule[];
+  explain: RequestPatchExplainEntry[];
+  conflicts: RequestPatchConflict[];
+  has_conflicts: boolean;
 }
 
 // ========== Cost Types ==========
@@ -827,6 +923,8 @@ export interface RecordDetail extends RecordListItem {
   llm_api_type?: string | null;
   response_sent_to_client_at: number | null;
   cost_snapshot_json?: string | null;
+  applied_request_patch_ids_json?: string | null;
+  request_patch_summary_json?: string | null;
   user_request_body?: string | null;
   llm_request_body?: string | null;
   llm_response_body?: string | null;
@@ -915,20 +1013,6 @@ export interface ModelPayload {
   real_model_name?: string | null;
   is_enabled: boolean;
   cost_catalog_id?: number | null;
-}
-
-// ========== Custom Field Link Payloads ==========
-export interface CustomFieldLinkPayload {
-  custom_field_definition_id: number;
-  provider_id?: number;
-  model_id?: number;
-  is_enabled?: boolean;
-}
-
-export interface CustomFieldUnlinkPayload {
-  custom_field_definition_id: number;
-  provider_id?: number;
-  model_id?: number;
 }
 
 // ========== Paginated Response ==========

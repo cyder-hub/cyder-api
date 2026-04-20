@@ -13,9 +13,7 @@ use crate::{
         ApiKey, ApiKeyDetail, ApiKeyReveal, ApiKeySummary, CreateApiKeyPayload,
         UpdateApiKeyMetadataPayload, hash_api_key,
     },
-    database::model_route::{
-        ApiKeyModelOverride, CreateApiKeyModelOverridePayload, ModelRoute,
-    },
+    database::model_route::{ApiKeyModelOverride, CreateApiKeyModelOverridePayload, ModelRoute},
     service::app_state::{ApiKeyBilledAmountSnapshot, ApiKeyGovernanceSnapshot, AppState},
     service::app_state::{StateRouter, create_state_router},
     utils::HttpResult,
@@ -239,7 +237,8 @@ async fn update_api_key(
     Json(payload): Json<UpdateApiKeyRequest>,
 ) -> Result<HttpResult<ApiKeyDetailResponse>, BaseError> {
     let updated = ApiKey::update_metadata(id, &payload.detail)?;
-    let overrides = replace_api_key_model_overrides(&app_state, id, &payload.model_overrides).await?;
+    let overrides =
+        replace_api_key_model_overrides(&app_state, id, &payload.model_overrides).await?;
 
     if let Err(err) = app_state.invalidate_api_key_id(id).await {
         warn!(
@@ -366,7 +365,10 @@ pub fn create_api_key_management_router() -> StateRouter {
             )
             .route("/{id}/rotate", post(rotate_api_key))
             .route("/{id}/reveal", get(reveal_api_key))
-            .route("/{id}/model_override/list", get(list_api_key_model_overrides))
+            .route(
+                "/{id}/model_override/list",
+                get(list_api_key_model_overrides),
+            )
             .route(
                 "/{id}/model_override/replace",
                 put(replace_api_key_model_override_routes),

@@ -2,7 +2,8 @@ export const enDict = {
   providerPage: {
     editModel: "Edit model: {model_name}",
     title: "Providers Management",
-    description: "Default start page for provider onboarding. Manage AI model providers, API keys, and model lists from here.",
+    description:
+      "Default start page for provider onboarding. Manage AI model providers, API keys, and model lists from here.",
     addProvider: "Add New Provider",
     viewModels: "Open Model Library",
     viewRuntime: "View Runtime",
@@ -107,7 +108,8 @@ export const enDict = {
       lastError: "Last error",
     },
     empty: {
-      noUnstableProviders: "No providers are currently in open or half-open state.",
+      noUnstableProviders:
+        "No providers are currently in open or half-open state.",
       noErrors: "No providers are currently surfacing error hotspots.",
       noCostHotspots: "No clear cost hotspots were found.",
       noCostProviders: "No provider cost hotspots were found.",
@@ -141,7 +143,8 @@ export const enDict = {
       groupByLabel: "Dimension",
       topNLabel: "Series Count",
       timeRangeLabel: "Time Range",
-      topNHint: "Shows the top {topN} series by default and merges the rest into Others.",
+      topNHint:
+        "Shows the top {topN} series by default and merges the rest into Others.",
       summary: {
         title: "Ranking Summary",
         entity: "Entity",
@@ -208,7 +211,6 @@ export const enDict = {
     apiKey: "API Key",
     modelRoute: "Model Routes",
     accessControlPolicy: "Access Control",
-    customFields: "Custom Fields",
     cost: "Cost",
     sections: {
       start: "Start here",
@@ -219,7 +221,8 @@ export const enDict = {
   },
   providerRuntimePage: {
     title: "Provider Runtime",
-    description: "Inspect provider health, error trends, and latency by time window.",
+    description:
+      "Inspect provider health, error trends, and latency by time window.",
     loading: "Loading runtime data...",
     refresh: "Refresh",
     reset: "Reset filters",
@@ -354,6 +357,27 @@ export const enDict = {
       general: "General",
       timings: "Timings (UTC)",
       usageSummary: "Usage Summary",
+      requestPatch: "Request Patch",
+      effectiveRules: "Effective Rules",
+      appliedRuleIds: "Applied Rule IDs",
+      conflicts: "Conflicts",
+      conflictDetected:
+        "Conflicts prevented request patch application for this request.",
+      sourceRule: "Source Rule",
+      trace: "Trace",
+      origin: "Origin",
+      value: "Value",
+      description: "Description",
+      noRuleDescription: "No description",
+      noRequestPatchTrace:
+        "No request patch trace was recorded for this request.",
+      noEffectiveRules:
+        "No effective request patch rules were recorded for this request.",
+      invalidRequestPatchTrace:
+        "The stored request patch trace is not valid JSON.",
+      rawTraceSummary: "Raw Trace Summary",
+      originProviderDirect: "Provider direct",
+      originModelDirect: "Model direct",
       costSnapshot: "Cost Snapshot",
       totalInputTokens: "Total Input Tokens",
       totalOutputTokens: "Total Output Tokens",
@@ -379,7 +403,8 @@ export const enDict = {
       unmatchedItems: "Unmatched Items",
       warnings: "Warnings",
       fallbackPricingApplied: "Fallback pricing applied",
-      fallbackPricingDescription: "This line item was priced using the matched fallback meter:",
+      fallbackPricingDescription:
+        "This line item was priced using the matched fallback meter:",
       noDescription: "No description",
       noCostSnapshot: "No cost snapshot was recorded for this request.",
       invalidCostSnapshot: "The stored cost snapshot is not valid JSON.",
@@ -402,6 +427,7 @@ export const enDict = {
   common: {
     unknownError: "An unknown error occurred.",
     loading: "Loading...",
+    basicInfo: "Basic Information",
     yes: "Yes",
     no: "No",
     edit: "Edit",
@@ -413,6 +439,7 @@ export const enDict = {
     notAvailable: "N/A",
     noData: "No data",
     refresh: "Refresh",
+    retry: "Retry",
     check: "Check",
     close: "Close",
     confirm: "Confirm",
@@ -439,7 +466,8 @@ export const enDict = {
     noData: "No model summaries found yet.",
     noSearchResults: "No matching models found.",
     noMappedModel: "Unmapped model",
-    searchPlaceholder: "Search by provider, provider key, model name, or real model name",
+    searchPlaceholder:
+      "Search by provider, provider key, model name, or real model name",
     summary: {
       total: "Total Models",
       enabled: "Enabled",
@@ -455,12 +483,14 @@ export const enDict = {
   },
   apiKeyPage: {
     title: "API Key Management",
-    description: "Advanced key governance for identity, ACL, lifecycle, quotas, and runtime controls.",
+    description:
+      "Advanced key governance for identity, ACL, lifecycle, quotas, and runtime controls.",
     addApiKey: "Add API Key",
     loading: "Loading API keys...",
     loadingDetail: "Loading API key detail...",
     noData: "No API Key data available.",
-    noSelection: "Select an API key to inspect its governance and runtime state.",
+    noSelection:
+      "Select an API key to inspect its governance and runtime state.",
     unlimited: "Unlimited",
     neverExpires: "Never",
     summary: {
@@ -472,9 +502,11 @@ export const enDict = {
     },
     sections: {
       listTitle: "Key Catalog",
-      listDescription: "Select a key to inspect, reveal, rotate, or edit its governance settings.",
+      listDescription:
+        "Select a key to inspect, reveal, rotate, or edit its governance settings.",
       detailTitle: "Key Detail",
-      detailDescription: "The right panel shows lifecycle, ACL, and runtime usage for the selected key.",
+      detailDescription:
+        "The right panel shows lifecycle, ACL, and runtime usage for the selected key.",
       identityTitle: "Identity",
       governanceTitle: "Governance",
       aclTitle: "Access Rules",
@@ -533,7 +565,8 @@ export const enDict = {
     },
     secret: {
       title: "Current Secret",
-      description: "The full secret is only shown here. Copy it now if you need to distribute it.",
+      description:
+        "The full secret is only shown here. Copy it now if you need to distribute it.",
       copied: "API key secret copied.",
     },
     noRules: "No ACL rules configured. The key follows its default action.",
@@ -553,14 +586,17 @@ export const enDict = {
     titleAdd: "Add API Key",
     sections: {
       identity: "Identity & Lifecycle",
-      identityDescription: "Define how this key is named, whether it is enabled, and when it expires.",
+      identityDescription:
+        "Define how this key is named, whether it is enabled, and when it expires.",
       governance: "Governance Limits",
-      governanceDescription: "Optional limits for rate, concurrency, quota, and budget. Leave blank for unlimited.",
+      governanceDescription:
+        "Optional limits for rate, concurrency, quota, and budget. Leave blank for unlimited.",
       overrides: "Private Model Overrides",
       overridesDescription:
         "Map fixed client-facing names to logical model routes for this API key only.",
       acl: "ACL Rules",
-      aclDescription: "Rules are matched by priority. If no rule matches, the key falls back to its default action.",
+      aclDescription:
+        "Rules are matched by priority. If no rule matches, the key falls back to its default action.",
     },
     action: {
       ALLOW: "Allow",
@@ -584,18 +620,22 @@ export const enDict = {
     labelBudgetMonthly: "Monthly Budget",
     labelBudgetAmount: "Amount",
     labelBudgetCurrency: "Currency",
-    budgetMajorUnitHint: "Budget amounts are entered in major currency units. Use yuan for CNY and dollars for USD.",
+    budgetMajorUnitHint:
+      "Budget amounts are entered in major currency units. Use yuan for CNY and dollars for USD.",
     placeholderBudgetAmount: "e.g. 25.5",
     placeholderCurrency: "Select currency",
     clearQuota: "Clear Quotas",
     clearBudget: "Clear Budgets",
     groups: {
       throughputTitle: "Throughput Limits",
-      throughputDescription: "Control the request rate per minute and the maximum in-flight concurrency.",
+      throughputDescription:
+        "Control the request rate per minute and the maximum in-flight concurrency.",
       quotaTitle: "Request & Token Quotas",
-      quotaDescription: "Cap daily requests, daily tokens, and monthly token consumption.",
+      quotaDescription:
+        "Cap daily requests, daily tokens, and monthly token consumption.",
       budgetTitle: "Budget Limits",
-      budgetDescription: "Budgets are shown and edited in major currency units instead of raw nanos.",
+      budgetDescription:
+        "Budgets are shown and edited in major currency units instead of raw nanos.",
     },
     currency: {
       CNY: "Chinese Yuan (CNY)",
@@ -605,12 +645,14 @@ export const enDict = {
     addOverride: "Add Override",
     noRules: "No ACL rules configured yet.",
     noOverrides: "No private overrides configured yet.",
-    noRoutes: "No logical model routes are available yet. Create a route first, then assign overrides here.",
+    noRoutes:
+      "No logical model routes are available yet. Create a route first, then assign overrides here.",
     overrideTitle: "Override {index}",
     overrideDescription:
       "Use a client-facing source name and point it to one logical model route.",
     ruleTitle: "Rule {index}",
-    ruleDescription: "Configure effect, scope, and target. Disabled rules remain saved but do not match.",
+    ruleDescription:
+      "Configure effect, scope, and target. Disabled rules remain saved but do not match.",
     labelOverrideSourceName: "Source Name",
     labelOverrideTargetRoute: "Target Route",
     labelOverrideDescription: "Description",
@@ -747,8 +789,10 @@ export const enDict = {
   providerEditPage: {
     titleEdit: "Edit Provider",
     titleAdd: "Add New Provider",
-    descriptionEdit: "Edit the saved provider quick start fields, then continue with the advanced sections below.",
-    descriptionAdd: "Use Quick Start to bootstrap a new provider, then continue with models, API keys, and custom fields.",
+    descriptionEdit:
+      "Edit the saved provider quick start fields, then continue with the advanced sections below.",
+    descriptionAdd:
+      "Use Quick Start to bootstrap a new provider, then continue with models, API keys, and request patches.",
     loadingData: "Loading provider data...",
     buttonSaveOnly: "Save Only",
     buttonSaveAndTest: "Save & Test",
@@ -767,7 +811,8 @@ export const enDict = {
       baseInfoSaveFailed: "Failed to save provider base information: {error}",
       bootstrapSaveSuccess: "Provider saved successfully.",
       bootstrapSaveAndTestSuccess: "Provider saved and tested successfully.",
-      bootstrapSaveAndTestFailed: "Provider saved, but the bootstrap test failed: {error}",
+      bootstrapSaveAndTestFailed:
+        "Provider saved, but the bootstrap test failed: {error}",
       bootstrapFailed: "Failed to bootstrap provider: {error}",
       providerNotSavedForApiKey:
         "Provider must be saved before API Keys can be added.",
@@ -794,18 +839,10 @@ export const enDict = {
       noUncommittedToClear: "No uncommitted models to clear.",
       noModels: "No models available.",
       noApiKeys: "No API Keys available.",
-      noCustomFields: "No custom fields available.",
       apiKeySaveSuccess: "API Key saved successfully.",
       modelSaveSuccess: "Model saved successfully.",
       modelDeleteSuccess: "Model deleted successfully.",
-      selectCustomField: "Please select a custom field to link.",
-      saveProviderBeforeLink:
-        "Please save the provider before linking custom fields.",
-      linkCustomFieldSuccess: "Custom field linked successfully.",
-      linkCustomFieldFailed: "Failed to link custom field: {error}",
       providerIdNotFound: "Provider ID not found.",
-      unlinkCustomFieldSuccess: "Custom field unlinked successfully.",
-      unlinkedCustomFieldFailed: "Failed to unlink custom field: {error}",
       apiKeyDeleteSuccess: "API Key deleted successfully.",
       providerNotSavedForCheck:
         "Provider must be saved before a check can be performed.",
@@ -831,16 +868,21 @@ export const enDict = {
       quickStart: {
         title: "Quick Start",
         editTitle: "Quick Start",
-        description: "Fill the minimum connection fields to bootstrap a provider in one step.",
-        editDescription: "Update the minimum connection fields, then continue into advanced management below.",
+        description:
+          "Fill the minimum connection fields to bootstrap a provider in one step.",
+        editDescription:
+          "Update the minimum connection fields, then continue into advanced management below.",
         identityTitle: "Provider Identity",
-        identityDescription: "The provider name and key can still be adjusted after bootstrap.",
+        identityDescription:
+          "The provider name and key can still be adjusted after bootstrap.",
       },
       advanced: {
         title: "Advanced",
-        description: "Manage extra API keys, more models, custom fields, and remote model sync here.",
+        description:
+          "Manage extra API keys, more models, request patches, and remote model sync here.",
       },
-      modelsDescription: "Edit model name, mapped model name, and enabled state inline. Full configuration still lives in ModelEdit.",
+      modelsDescription:
+        "Edit model name, mapped model name, and enabled state inline. Full configuration still lives in ModelEdit.",
     },
     preview: {
       title: "Generated Preview",
@@ -853,7 +895,8 @@ export const enDict = {
       labelApiKey: "API Key",
       labelModelName: "Model Name",
       labelApiKeyDescription: "API Key Description",
-      placeholderApiKeyDescription: "Optional description for the first API key",
+      placeholderApiKeyDescription:
+        "Optional description for the first API key",
     },
     modalSelectModel: {
       title: "Select Model for Check",
@@ -896,11 +939,6 @@ export const enDict = {
     placeholderDescription: "Optional description",
     buttonSaveThisKey: "Save This Key",
     buttonAddApiKey: "Add API Key",
-    sectionCustomFields: "Custom Fields",
-    tableHeaderFieldName: "Field Name",
-    tableHeaderFieldValue: "Field Value",
-    tableHeaderFieldType: "Field Type",
-    buttonAddCustomField: "Add Custom Field",
     buttonBackToList: "Back to List",
   },
   modelEditPage: {
@@ -914,7 +952,7 @@ export const enDict = {
       enabled: "Enabled",
       disabled: "Disabled",
       description:
-        "This model belongs to the provider above. Basic model fields stay editable here; routing, cost, and custom fields are treated as advanced configuration.",
+        "This model belongs to the provider above. Basic model fields stay editable here; routing, cost, and request patches are treated as advanced configuration.",
     },
     routeReferences: {
       title: "Route References",
@@ -930,28 +968,12 @@ export const enDict = {
     labelModelName: "Model Name",
     labelRealModelName: "Real Model Name",
     labelEnabled: "Enabled",
-    sectionCustomFields: "Custom Fields",
-    tableHeaderFieldName: "Field Name",
-    tableHeaderFieldValue: "Field Value",
-    tableHeaderDescription: "Description",
-    tableHeaderFieldType: "Field Type",
-    placeholderSelectCustomField: "Select a custom field to link",
-    labelSelectCustomField: "Select Custom Field",
-    buttonAddCustomField: "Link Custom Field",
     alert: {
       missingId: "Model ID is missing. Cannot edit.",
       loadDataFailed: "Failed to load model data for ID: {modelId}.",
       nameRequired: "Model Name cannot be empty.",
       updateSuccess: "Model updated successfully.",
       saveFailed: "Failed to save model: {error}",
-      selectFieldToLink: "Please select a custom field to link.",
-      modelNotLoaded: "Model data not loaded, cannot link field.",
-      linkSuccess: "Custom field linked successfully.",
-      linkFailed: "Failed to link custom field: {error}",
-      modelIdNotFound: "Model ID not found, cannot unlink field.",
-      unlinkSuccess: "Custom field unlinked successfully.",
-      unlinkFailed: "Failed to unlink custom field: {error}",
-      fetchCustomFieldsFailed: "Failed to fetch custom fields.",
     },
     priceSection: {
       title: "Cost Catalog",
@@ -965,6 +987,140 @@ export const enDict = {
       enabled: "Enabled",
       effectiveFrom: "Effective from",
       effectiveUntil: "Effective until",
+    },
+    requestPatch: {
+      title: "Request Patches",
+      description:
+        "Edit direct model rules and review inherited provider rules, effective runtime output, and explain diagnostics from one place.",
+      refresh: "Refresh",
+      loading: "Loading request patch state...",
+      providerFallback: "Provider",
+      directTitle: "Direct Model Rules",
+      directDescription:
+        "Model rules can override inherited provider rules only on the exact same target.",
+      addRule: "Add Rule",
+      emptyDirect: "No direct request patches configured for this model yet.",
+      inheritedTitle: "Inherited Provider Rules",
+      inheritedDescription:
+        "Active provider direct rules inherited by this model from {provider}. Overridden rules stay visible.",
+      emptyInherited:
+        "This model is not inheriting any active provider request patches.",
+      effectiveTitle: "Effective Runtime Result",
+      effectiveDescription:
+        "This is the resolved rule set the runtime will try to apply for this model.",
+      emptyEffective: "No effective request patches are active for this model.",
+      explainTitle: "Explain and Conflict",
+      explainDescription:
+        "Review how each active rule resolves, which rules are overridden, and whether any unsafe cross-scope conflicts remain.",
+      emptyExplain:
+        "No active request patch diagnostics are available for this model.",
+      details: "Details",
+      noDescription: "No description",
+      conflictBannerTitle: "Unsafe request patch configuration",
+      conflictBannerDescription:
+        "This model currently has provider/model cross-scope conflicts. Resolve them before treating the model as safe to use.",
+      conflictFields: {
+        providerTarget: "Provider Target",
+        modelTarget: "Model Target",
+      },
+      placements: {
+        HEADER: "Header",
+        QUERY: "Query Parameter",
+        BODY: "Body JSON",
+      },
+      operations: {
+        SET: "Set",
+        REMOVE: "Remove",
+      },
+      fields: {
+        value: "Value",
+        description: "Description",
+        source: "Source",
+        trace: "Trace",
+        enabled: "Enabled",
+        ruleId: "Rule ID",
+        sourceRule: "Source Rule",
+        effectiveRule: "Effective Rule",
+        conflictsWith: "Conflicts With",
+      },
+      states: {
+        effective: "Effective",
+        overridden: "Overridden",
+        conflicted: "Conflicted",
+        disabled: "Disabled",
+        enabled: "Enabled",
+      },
+      origin: {
+        ProviderDirect: "Provider Direct",
+        ModelDirect: "Model Direct",
+      },
+      messages: {
+        directEffective:
+          "This direct model rule is part of the effective runtime set.",
+        disabledSkipped:
+          "Disabled rules stay stored on the model but are skipped at runtime.",
+        inheritedEffective:
+          "Inherited from the provider and currently effective for this model.",
+        overriddenByRule: "Overridden by model rule {id}.",
+        conflictsWithRules: "Conflicts with rule(s) {ids}.",
+        overridesProviderRules: "Overrides provider rule(s) {ids}.",
+        effectiveFromOrigin: "Applied from {origin} rule {id}.",
+        noRuntimeTrace: "No additional diagnostic message.",
+      },
+      editor: {
+        addTitle: "Add Model Request Patch",
+        editTitle: "Edit Model Request Patch",
+        description:
+          "Create direct model rules for headers, query parameters, or body JSON Pointer targets.",
+        placement: "Placement",
+        operation: "Operation",
+        selectPlacement: "Select placement",
+        selectOperation: "Select operation",
+        target: "Target",
+        targetPlaceholderHeader: "authorization",
+        targetPlaceholderQuery: "api-version",
+        targetPlaceholderBody: "/generationConfig/temperature",
+        valueJson: "Value JSON",
+        valueHelp:
+          "HEADER and QUERY rules only accept JSON scalar values. BODY rules can use any JSON value.",
+        descriptionLabel: "Description",
+        descriptionPlaceholder:
+          "Optional note for operators and future debugging.",
+        enabledTitle: "Enabled",
+        enabledDescription:
+          "Disabled rules stay on the model but are skipped at runtime.",
+        targetHelpHeader:
+          "Use a header name. Reserved transport headers are rejected by the backend.",
+        targetHelpQuery:
+          "Use a query parameter key without ?, &, =, or whitespace.",
+        targetHelpBody:
+          "Use a JSON Pointer target, for example /model or /generationConfig/temperature.",
+        removeValuePlaceholder: "REMOVE does not accept value_json.",
+        valuePlaceholder:
+          'Use valid JSON, for example: "Bearer token", true, 1, null',
+        create: "Create Rule",
+        save: "Save Changes",
+        dangerousTitle: "Confirm Dangerous Target",
+        dangerousDescription:
+          "This rule touches an upstream-sensitive target and needs an explicit confirmation.",
+        saveAnyway: "Save Anyway",
+      },
+      alert: {
+        loadFailed: "Failed to load request patch state.",
+        saveBeforeEdit: "Save the model before editing request patch rules.",
+        saveFailed: "Failed to save request patch rule.",
+        createSuccess: "Model request patch created.",
+        updateSuccess: "Model request patch updated.",
+        deleteSuccess: "Model request patch deleted.",
+        deleteFailed: "Failed to delete request patch rule.",
+        toggleFailed: "Failed to update request patch status.",
+        enableSuccess: "Request patch enabled.",
+        disableSuccess: "Request patch disabled.",
+        dangerousConfirmFailed:
+          "Failed to confirm dangerous request patch target.",
+        targetRequired: "Target is required.",
+        valueRequired: "Value JSON is required for SET rules.",
+      },
     },
   },
   costPage: {
@@ -1010,39 +1166,35 @@ export const enDict = {
       versionCurrencyRequired: "Currency is required.",
       versionEffectiveFromRequired: "Effective from time is required.",
       invalidDateTime: "Please enter a valid date and time.",
-      invalidEffectiveRange: "Effective until must be later than effective from.",
+      invalidEffectiveRange:
+        "Effective until must be later than effective from.",
       versionCreateSuccess: "Catalog version created successfully.",
-      versionDuplicateSuccess: "Catalog version '{version}' copied as a new draft.",
+      versionDuplicateSuccess:
+        "Catalog version '{version}' copied as a new draft.",
       versionEnableSuccess: "Catalog version enabled successfully.",
       versionDisableSuccess: "Catalog version disabled successfully.",
       versionArchiveSuccess: "Catalog version archived successfully.",
-      versionUnarchiveSuccess:
-        "Catalog version restored to the frozen state.",
+      versionUnarchiveSuccess: "Catalog version restored to the frozen state.",
       versionDeleteSuccess: "Draft version deleted successfully.",
       versionToggleFailed: "Failed to toggle catalog version status.",
       versionArchiveFailed: "Failed to archive catalog version.",
-      versionUnarchiveFailed:
-        "Failed to restore the archived catalog version.",
+      versionUnarchiveFailed: "Failed to restore the archived catalog version.",
       versionDuplicateFailed: "Failed to copy catalog version.",
       versionDeleteFailed: "Failed to delete draft version.",
       versionSaveFailed: "Failed to create catalog version.",
-      invalidMatchAttributes:
-        "Match attributes must be a valid JSON object.",
+      invalidMatchAttributes: "Match attributes must be a valid JSON object.",
       invalidComponentNumber:
         "Component fields must use valid non-negative numbers.",
       "tier.multiple_unbounded":
         "Tiered pricing can only define one unbounded tier.",
-      "tier.unbounded_not_last":
-        "The unbounded tier must be the final tier.",
-      "tier.not_increasing":
-        "Tier upper bounds must increase strictly.",
+      "tier.unbounded_not_last": "The unbounded tier must be the final tier.",
+      "tier.not_increasing": "Tier upper bounds must increase strictly.",
       componentCreateSuccess: "Cost component created successfully.",
       componentUpdateSuccess: "Cost component updated successfully.",
       componentSaveFailed: "Failed to save cost component.",
       componentDeleteSuccess: "Cost component deleted successfully.",
       componentDeleteFailed: "Failed to delete cost component.",
-      invalidPreviewNumber:
-        "Preview fields must use non-negative integers.",
+      invalidPreviewNumber: "Preview fields must use non-negative integers.",
       previewFailed: "Failed to run cost preview.",
     },
     state: {
@@ -1125,6 +1277,7 @@ export const enDict = {
       publishedAt: "Published at",
       effectiveFrom: "Effective from",
       effectiveUntil: "Effective until",
+      currency: "Currency",
       modal: {
         titleAdd: "Create Catalog Version",
         version: "Version",
@@ -1247,48 +1400,6 @@ export const enDict = {
         currency: "Currency",
         detailLines: "Detail lines",
       },
-    },
-  },
-  customFieldsPage: {
-    title: "Custom Fields",
-    description: "Advanced metadata: manage custom fields injected into requests automatically after the base provider is working.",
-    addCustomField: "Add Custom Field",
-    errorPrefix: "Error loading custom fields:",
-    noData: "No custom fields found.",
-    table: {
-      name: "Name",
-      fieldName: "Field Name",
-      fieldType: "Field Type",
-      placement: "Placement",
-      enabled: "Enabled",
-    },
-    alert: {
-      loadDetailFailed: "Failed to load custom field detail.",
-      nameAndTypeRequired: "Field Name and Field Type cannot be empty.",
-      saveFailed: "Failed to save custom field: {error}",
-      toggleFailed: "Failed to toggle custom field status: {error}",
-      deleteFailed: "Failed to delete custom field: {error}",
-    },
-    confirmDelete: "Are you sure you want to delete custom field '{name}'?",
-    modal: {
-      titleEdit: "Edit Custom Field",
-      titleAdd: "Add Custom Field",
-      labelName: "Name",
-      placeholderName: "Optional display name",
-      labelDescription: "Description",
-      placeholderDescription: "Optional description",
-      labelFieldName: "Field Name",
-      placeholderFieldName: "e.g., x-request-id",
-      labelPlacement: "Placement",
-      placeholderPlacement: "Select a placement",
-      labelFieldType: "Field Type",
-      placeholderFieldType: "Select a field type",
-      labelValue: "Value",
-      placeholderStringValue: "Enter string value",
-      placeholderJsonStringValue: "Enter a valid JSON string",
-      placeholderIntegerValue: "Enter integer value",
-      placeholderNumberValue: "Enter number value",
-      labelEnabled: "Enabled",
     },
   },
   pricePage: {

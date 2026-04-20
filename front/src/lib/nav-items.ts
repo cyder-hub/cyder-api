@@ -3,7 +3,6 @@ import {
   LayoutDashboard,
   KeyRound,
   ArrowRightLeft,
-  Type,
   DollarSign,
   ClipboardList,
   Server,
@@ -58,12 +57,6 @@ export const navItems: NavItem[] = [
     path: "/model_route",
     i18nKey: "sidebar.modelRoute",
     icon: ArrowRightLeft,
-    section: "advanced",
-  },
-  {
-    path: "/custom_fields",
-    i18nKey: "sidebar.customFields",
-    icon: Type,
     section: "advanced",
   },
   {

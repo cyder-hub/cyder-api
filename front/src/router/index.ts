@@ -31,11 +31,6 @@ const router = createRouter({
           component: () => import("@/pages/ApiKey.vue"),
         },
         {
-          path: "custom_fields",
-          name: "CustomFields",
-          component: () => import("@/pages/CustomFields.vue"),
-        },
-        {
           path: "model_route",
           name: "ModelRoute",
           component: () => import("@/pages/ModelRoute.vue"),

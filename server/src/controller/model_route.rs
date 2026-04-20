@@ -94,14 +94,14 @@ pub fn create_model_route_router() -> StateRouter {
         .route("/model_route", post(create_model_route))
         .nest(
             "/model_route",
-        create_state_router()
-            .route("/list", get(list_model_routes))
-            .route(
-                "/{id}",
-                get(get_model_route)
-                    .put(update_model_route)
-                    .delete(delete_model_route),
-            ),
+            create_state_router()
+                .route("/list", get(list_model_routes))
+                .route(
+                    "/{id}",
+                    get(get_model_route)
+                        .put(update_model_route)
+                        .delete(delete_model_route),
+                ),
         )
 }
 

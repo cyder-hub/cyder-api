@@ -2,12 +2,25 @@ export const enDict = {
   providerPage: {
     editModel: "Edit model: {model_name}",
     title: "Providers Management",
-    description: "Manage AI model providers, API keys, and model lists.",
+    description: "Default start page for provider onboarding. Manage AI model providers, API keys, and model lists from here.",
     addProvider: "Add New Provider",
+    viewModels: "Open Model Library",
     viewRuntime: "View Runtime",
     loading: "Loading providers...",
     error: "Error loading providers: {error}",
     noData: "No providers found. Click 'Add New Provider' to get started.",
+    subtitle: "Default start page for new integrations.",
+    deleteSuccess: "Deleted successfully",
+    summary: {
+      total: "Total Providers",
+      enabled: "Enabled",
+      disabled: "Disabled",
+      runtimeIssues: "Runtime Issues",
+    },
+    state: {
+      enabled: "Enabled",
+      disabled: "Disabled",
+    },
     table: {
       key: "Key",
       name: "Name",
@@ -188,6 +201,7 @@ export const enDict = {
 
   sidebar: {
     dashboard: "Dashboard",
+    model: "Model Library",
     record: "Record",
     provider: "Provider",
     providerRuntime: "Provider Runtime",
@@ -196,6 +210,12 @@ export const enDict = {
     accessControlPolicy: "Access Control",
     customFields: "Custom Fields",
     cost: "Cost",
+    sections: {
+      start: "Start here",
+      overview: "Overview",
+      core: "Core",
+      advanced: "Advanced",
+    },
   },
   providerRuntimePage: {
     title: "Provider Runtime",
@@ -408,9 +428,34 @@ export const enDict = {
     submitting: "Logging in...",
     loginFailed: "Login failed. Please check your password.",
   },
+  modelPage: {
+    title: "Model Library",
+    description:
+      "Browse model summaries across all providers. Use this page to inspect, edit, and jump into model details without opening provider detail views first.",
+    actions: {
+      backToProviders: "Back to Providers",
+    },
+    loading: "Loading model summaries...",
+    noData: "No model summaries found yet.",
+    noSearchResults: "No matching models found.",
+    noMappedModel: "Unmapped model",
+    searchPlaceholder: "Search by provider, provider key, model name, or real model name",
+    summary: {
+      total: "Total Models",
+      enabled: "Enabled",
+      providers: "Providers",
+      mapped: "Mapped",
+    },
+    table: {
+      provider: "Provider",
+      model: "Model",
+      realModel: "Real Model",
+      enabled: "Enabled",
+    },
+  },
   apiKeyPage: {
     title: "API Key Management",
-    description: "Manage identity, ACL, lifecycle, and runtime governance for each API key.",
+    description: "Advanced key governance for identity, ACL, lifecycle, quotas, and runtime controls.",
     addApiKey: "Add API Key",
     loading: "Loading API keys...",
     loadingDetail: "Loading API key detail...",
@@ -601,7 +646,7 @@ export const enDict = {
   modelRoutePage: {
     title: "Logical Model Routes",
     description:
-      "Manage shared logical model names, primary candidate order, and whether they are exposed to /models.",
+      "Advanced routing: manage shared logical model names, primary candidate order, and whether they are exposed to /models.",
     addRoute: "Add Route",
     loading: "Loading model routes...",
     errorPrefix: "Error loading model routes.",
@@ -702,17 +747,28 @@ export const enDict = {
   providerEditPage: {
     titleEdit: "Edit Provider",
     titleAdd: "Add New Provider",
+    descriptionEdit: "Edit the saved provider quick start fields, then continue with the advanced sections below.",
+    descriptionAdd: "Use Quick Start to bootstrap a new provider, then continue with models, API keys, and custom fields.",
     loadingData: "Loading provider data...",
+    buttonSaveOnly: "Save Only",
+    buttonSaveAndTest: "Save & Test",
     alert: {
       fetchDetailFailed: "Failed to fetch provider detail for ID {providerId}",
       loadDataFailed: "Failed to load provider data for ID: {providerId}.",
+      providerTypeRequired: "Provider Type cannot be empty.",
       nameRequired: "Name cannot be empty.",
       providerKeyRequired: "Provider Key cannot be empty.",
       endpointRequired: "Endpoint cannot be empty.",
+      apiKeyRequired: "API Key cannot be empty.",
+      modelNameRequired: "Model Name cannot be empty.",
       baseInfoUpdateSuccess: "Provider base information updated successfully.",
       createSuccess:
         "Provider created successfully. You can now add models and API Keys.",
       baseInfoSaveFailed: "Failed to save provider base information: {error}",
+      bootstrapSaveSuccess: "Provider saved successfully.",
+      bootstrapSaveAndTestSuccess: "Provider saved and tested successfully.",
+      bootstrapSaveAndTestFailed: "Provider saved, but the bootstrap test failed: {error}",
+      bootstrapFailed: "Failed to bootstrap provider: {error}",
       providerNotSavedForApiKey:
         "Provider must be saved before API Keys can be added.",
       apiKeyRequiredWithIndex: "API Key #{index} cannot be empty.",
@@ -725,6 +781,7 @@ export const enDict = {
         "Provider must be saved before models can be added or edited.",
       modelIdRequiredWithIndex: "Model ID for model #{index} cannot be empty.",
       saveModelFailed: "Failed to save model: {error}",
+      modelUpdateSuccess: "Model updated successfully.",
       providerNotSavedForModelDelete:
         "Provider not saved, cannot delete model from backend.",
       deleteModelFailed: "Failed to delete model: {error}",
@@ -770,16 +827,46 @@ export const enDict = {
       checkTypeModels: "Models",
       checkTypeApiKeys: "API Keys",
     },
+    sections: {
+      quickStart: {
+        title: "Quick Start",
+        editTitle: "Quick Start",
+        description: "Fill the minimum connection fields to bootstrap a provider in one step.",
+        editDescription: "Update the minimum connection fields, then continue into advanced management below.",
+        identityTitle: "Provider Identity",
+        identityDescription: "The provider name and key can still be adjusted after bootstrap.",
+      },
+      advanced: {
+        title: "Advanced",
+        description: "Manage extra API keys, more models, custom fields, and remote model sync here.",
+      },
+      modelsDescription: "Edit model name, mapped model name, and enabled state inline. Full configuration still lives in ModelEdit.",
+    },
+    preview: {
+      title: "Generated Preview",
+      description: "Auto-generated from the current Quick Start inputs.",
+      autoGenerated: "Auto generated",
+      providerName: "Provider Name",
+      providerKey: "Provider Key",
+    },
+    quickStart: {
+      labelApiKey: "API Key",
+      labelModelName: "Model Name",
+      labelApiKeyDescription: "API Key Description",
+      placeholderApiKeyDescription: "Optional description for the first API key",
+    },
     modalSelectModel: {
       title: "Select Model for Check",
       description:
         "Please select a model to perform the check with the selected API key.",
+      target: "Selected API key: {target}",
       selectPlaceholder: "Select a model",
     },
     modalSelectApiKey: {
       title: "Select API Key for Check",
       description:
         "Please select an API key to perform the check with the selected model.",
+      target: "Selected model: {target}",
       selectPlaceholder: "Select an API key",
     },
     labelName: "Name",
@@ -787,6 +874,7 @@ export const enDict = {
     labelProviderType: "Provider Type",
     labelEndpoint: "Endpoint",
     labelUseProxy: "Use Proxy",
+    labelEnabled: "Enabled",
     labelLimitModel: "Limit Model",
     placeholderProviderType: "Select Provider Type",
     buttonUpdateBaseInfo: "Update Provider Base Info",
@@ -818,6 +906,27 @@ export const enDict = {
   modelEditPage: {
     title: "Edit Model",
     loading: "Loading model data...",
+    buttonBackToModels: "Back to Model Library",
+    buttonBackToProviders: "View Providers",
+    providerSummary: {
+      title: "Provider Context",
+      unknown: "Unknown Provider",
+      enabled: "Enabled",
+      disabled: "Disabled",
+      description:
+        "This model belongs to the provider above. Basic model fields stay editable here; routing, cost, and custom fields are treated as advanced configuration.",
+    },
+    routeReferences: {
+      title: "Route References",
+      heading: "Direct route usage",
+      description:
+        "These logical routes currently reference this model directly. Review them before renaming or disabling the model.",
+      openRoutes: "Open Routes",
+      noRoutes:
+        "No logical routes reference this model directly yet. Direct provider/model addresses can still be used without a route.",
+      enabled: "Enabled",
+      disabled: "Disabled",
+    },
     labelModelName: "Model Name",
     labelRealModelName: "Real Model Name",
     labelEnabled: "Enabled",
@@ -861,7 +970,7 @@ export const enDict = {
   costPage: {
     title: "Cost Management",
     description:
-      "Review the catalog list first, then open a dialog workspace to manage versions, components, and preview runs.",
+      "Advanced billing and pricing controls. Review the catalog list first, then open a dialog workspace to manage versions, components, and preview runs.",
     confirmDeleteCatalog: "Delete cost catalog '{name}'?",
     confirmDeleteCatalogDescription:
       "Catalogs can only be removed after all versions are cleared on the backend.",
@@ -1142,7 +1251,7 @@ export const enDict = {
   },
   customFieldsPage: {
     title: "Custom Fields",
-    description: "Manage custom fields injected into requests automatically",
+    description: "Advanced metadata: manage custom fields injected into requests automatically after the base provider is working.",
     addCustomField: "Add Custom Field",
     errorPrefix: "Error loading custom fields:",
     noData: "No custom fields found.",

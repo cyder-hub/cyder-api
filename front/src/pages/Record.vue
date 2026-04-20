@@ -1072,8 +1072,8 @@ const apiKeyOptions = computed(() => {
 const providerOptions = computed(() => {
   const allProvider = { value: 0, label: $t("recordPage.filter.allProviders") };
   const providers = (providerStore.providers || []).map((p) => ({
-    value: p.provider.id,
-    label: p.provider.name,
+    value: p.id,
+    label: p.name,
   }));
   return [allProvider, ...providers];
 });
@@ -1134,7 +1134,7 @@ const parseSearchQuery = (value: LocationQuery[string]) => {
 };
 
 const hasProviderId = (id: number) => {
-  return providerStore.providers.some((item) => item.provider.id === id);
+  return providerStore.providers.some((item) => item.id === id);
 };
 
 const hasApiKeyId = (id: number) => {
@@ -1241,8 +1241,7 @@ const fetchRecords = async () => {
     records.value = (result.list || []).map((r: RecordListItem) => {
       const providerName =
         r.provider_id != null
-          ? providerStore.providers.find((p) => p.provider.id === r.provider_id)
-              ?.provider.name || "/"
+          ? providerStore.providers.find((p) => p.id === r.provider_id)?.name || "/"
           : "/";
       const apiKeyName =
         r.system_api_key_id != null
@@ -1520,7 +1519,7 @@ const getStatusMeta = (status: string | null) => {
 const getProviderName = (id: number | null) => {
   if (id == null) return "/";
   return (
-    providerStore.providers.find((p) => p.provider.id === id)?.provider.name || "/"
+    providerStore.providers.find((p) => p.id === id)?.name || "/"
   );
 };
 

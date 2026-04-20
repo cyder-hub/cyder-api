@@ -17,7 +17,7 @@ const router = createRouter({
           name: "Index",
           component: () => import("@/pages/Index.vue"),
           beforeEnter: (_to, _from, next) => {
-            next({ name: "Dashboard" });
+            next({ name: "Provider" });
           },
         },
         {
@@ -54,6 +54,11 @@ const router = createRouter({
           path: "provider",
           name: "Provider",
           component: () => import("@/pages/Provider.vue"),
+        },
+        {
+          path: "model",
+          name: "Model",
+          component: () => import("@/pages/Model.vue"),
         },
         {
           path: "provider/runtime",
@@ -124,7 +129,7 @@ router.beforeEach(async (to, _from, next) => {
       }
     }
   } else if (to.name === "Login" && isAuthenticated) {
-    next({ name: "Dashboard" });
+    next({ name: "Provider" });
   } else {
     next();
   }

@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use super::{DbResult, get_connection};
 use crate::controller::BaseError;
+use crate::database::model_route::ModelRoute;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
@@ -55,6 +56,18 @@ pub struct UpdateModelData {
 pub struct ModelDetail {
     pub model: Model,
     pub custom_fields: Vec<ApiCustomFieldDefinition>,
+    pub route_references: Vec<ModelRoute>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelSummaryItem {
+    pub id: i64,
+    pub provider_id: i64,
+    pub provider_key: String,
+    pub provider_name: String,
+    pub model_name: String,
+    pub real_model_name: Option<String>,
+    pub is_enabled: bool,
 }
 
 impl Model {
@@ -194,9 +207,11 @@ impl Model {
     pub fn get_detail_by_id(model_id_val: i64) -> DbResult<ModelDetail> {
         let model = Model::get_by_id(model_id_val)?;
         let custom_fields = CustomFieldDefinition::list_by_model_id(model_id_val)?;
+        let route_references = ModelRoute::list_by_model_id(model_id_val)?;
         Ok(ModelDetail {
             model,
             custom_fields,
+            route_references,
         })
     }
 
@@ -238,6 +253,59 @@ impl Model {
                     BaseError::DatabaseFatal(Some(format!("Failed to list all models: {}", e)))
                 })?;
             Ok(db_models.into_iter().map(|db_m| db_m.from_db()).collect())
+        })
+    }
+
+    /// Lists lightweight model summary rows for table views and selectors.
+    pub fn list_summary() -> DbResult<Vec<ModelSummaryItem>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let rows = model::table
+                .inner_join(provider::table.on(provider::dsl::id.eq(model::dsl::provider_id)))
+                .filter(provider::dsl::deleted_at.is_null())
+                .filter(model::dsl::deleted_at.is_null())
+                .order((provider::dsl::name.asc(), model::dsl::model_name.asc()))
+                .select((
+                    model::dsl::id,
+                    model::dsl::provider_id,
+                    provider::dsl::provider_key,
+                    provider::dsl::name,
+                    model::dsl::model_name,
+                    model::dsl::real_model_name,
+                    model::dsl::is_enabled,
+                ))
+                .load::<(i64, i64, String, String, String, Option<String>, bool)>(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list model summaries: {}",
+                        e
+                    )))
+                })?;
+
+            Ok(rows
+                .into_iter()
+                .map(
+                    |(
+                        id,
+                        provider_id,
+                        provider_key,
+                        provider_name,
+                        model_name,
+                        real_model_name,
+                        is_enabled,
+                    )| {
+                        ModelSummaryItem {
+                            id,
+                            provider_id,
+                            provider_key,
+                            provider_name,
+                            model_name,
+                            real_model_name,
+                            is_enabled,
+                        }
+                    },
+                )
+                .collect())
         })
     }
 
@@ -348,5 +416,236 @@ impl Model {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::_sqlite_schema::*;
+    use crate::database::model_route::{NewModelRoute, NewModelRouteCandidate};
+    use crate::database::provider::NewProvider;
+    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use diesel::Connection;
+    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+    use tempfile::tempdir;
+
+    const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+
+    struct TestSqliteDb {
+        _temp_dir: tempfile::TempDir,
+        conn: diesel::SqliteConnection,
+    }
+
+    fn sqlite_connection() -> TestSqliteDb {
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let db_path = temp_dir.path().join("model-summary.sqlite");
+        std::fs::File::create(&db_path).expect("db file should be created");
+        let db_url = db_path.to_string_lossy().into_owned();
+        let mut conn = diesel::SqliteConnection::establish(&db_url)
+            .expect("sqlite connection should be established");
+        conn.run_pending_migrations(SQLITE_MIGRATIONS)
+            .expect("migrations should run");
+        TestSqliteDb {
+            _temp_dir: temp_dir,
+            conn,
+        }
+    }
+
+    fn seed_provider(
+        conn: &mut diesel::SqliteConnection,
+        id: i64,
+        provider_key_val: &str,
+        name_val: &str,
+    ) {
+        use crate::database::provider::_sqlite_model::*;
+
+        let now = 1_000_000;
+        let data = NewProvider {
+            id,
+            provider_key: provider_key_val.to_string(),
+            name: name_val.to_string(),
+            endpoint: "https://example.com/v1".to_string(),
+            use_proxy: false,
+            is_enabled: true,
+            created_at: now,
+            updated_at: now,
+            provider_type: ProviderType::Openai,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        };
+
+        diesel::insert_into(provider::table)
+            .values(NewProviderDb::to_db(&data))
+            .execute(conn)
+            .expect("provider seed should succeed");
+    }
+
+    fn seed_model(
+        conn: &mut diesel::SqliteConnection,
+        id: i64,
+        provider_id_val: i64,
+        model_name_val: &str,
+        real_model_name_val: Option<&str>,
+        is_enabled_val: bool,
+    ) {
+        use crate::database::model::_sqlite_model::*;
+
+        let now = 1_000_000;
+        let data = NewModel {
+            id,
+            provider_id: provider_id_val,
+            model_name: model_name_val.to_string(),
+            real_model_name: real_model_name_val.map(ToString::to_string),
+            is_enabled: is_enabled_val,
+            created_at: now,
+            updated_at: now,
+        };
+
+        diesel::insert_into(model::table)
+            .values(NewModelDb::to_db(&data))
+            .execute(conn)
+            .expect("model seed should succeed");
+    }
+
+    fn model_summaries(conn: &mut diesel::SqliteConnection) -> Vec<ModelSummaryItem> {
+        let rows = model::table
+            .inner_join(provider::table.on(provider::dsl::id.eq(model::dsl::provider_id)))
+            .filter(provider::dsl::deleted_at.is_null())
+            .filter(model::dsl::deleted_at.is_null())
+            .order((provider::dsl::name.asc(), model::dsl::model_name.asc()))
+            .select((
+                model::dsl::id,
+                model::dsl::provider_id,
+                provider::dsl::provider_key,
+                provider::dsl::name,
+                model::dsl::model_name,
+                model::dsl::real_model_name,
+                model::dsl::is_enabled,
+            ))
+            .load::<(i64, i64, String, String, String, Option<String>, bool)>(conn)
+            .expect("model summary rows should load");
+
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    provider_id,
+                    provider_key,
+                    provider_name,
+                    model_name,
+                    real_model_name,
+                    is_enabled,
+                )| ModelSummaryItem {
+                    id,
+                    provider_id,
+                    provider_key,
+                    provider_name,
+                    model_name,
+                    real_model_name,
+                    is_enabled,
+                },
+            )
+            .collect()
+    }
+
+    fn seed_model_route(
+        conn: &mut diesel::SqliteConnection,
+        route_id: i64,
+        model_id_val: i64,
+        route_name_val: &str,
+    ) {
+        use crate::database::model_route::_sqlite_model::*;
+
+        let now = 1_000_000;
+        let route = NewModelRoute {
+            id: route_id,
+            route_name: route_name_val.to_string(),
+            description: Some("route description".to_string()),
+            is_enabled: true,
+            expose_in_models: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        diesel::insert_into(model_route::table)
+            .values(NewModelRouteDb::to_db(&route))
+            .execute(conn)
+            .expect("model route seed should succeed");
+
+        let candidate = NewModelRouteCandidate {
+            id: route_id + 1000,
+            route_id,
+            model_id: model_id_val,
+            priority: 0,
+            is_enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        diesel::insert_into(model_route_candidate::table)
+            .values(NewModelRouteCandidateDb::to_db(&candidate))
+            .execute(conn)
+            .expect("model route candidate seed should succeed");
+    }
+
+    #[test]
+    fn model_summary_list_returns_provider_context() {
+        let mut db = sqlite_connection();
+        seed_provider(&mut db.conn, 11, "alpha", "Alpha Provider");
+        seed_provider(&mut db.conn, 12, "beta", "Beta Provider");
+        seed_model(&mut db.conn, 21, 12, "zeta", Some("zeta-real"), true);
+        seed_model(&mut db.conn, 22, 11, "alpha-model", None, false);
+        seed_model(&mut db.conn, 23, 11, "beta-model", Some("beta-real"), true);
+
+        let rows = model_summaries(&mut db.conn);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].provider_name, "Alpha Provider");
+        assert_eq!(rows[0].model_name, "alpha-model");
+        assert_eq!(rows[0].provider_key, "alpha");
+        assert_eq!(rows[0].real_model_name, None);
+        assert!(!rows[0].is_enabled);
+
+        assert_eq!(rows[1].model_name, "beta-model");
+        assert_eq!(rows[1].provider_key, "alpha");
+        assert_eq!(rows[2].provider_name, "Beta Provider");
+        assert_eq!(rows[2].model_name, "zeta");
+        assert_eq!(rows[2].real_model_name.as_deref(), Some("zeta-real"));
+    }
+
+    #[test]
+    fn model_detail_can_carry_direct_route_references() {
+        let detail = ModelDetail {
+            model: Model {
+                id: 22,
+                provider_id: 11,
+                model_name: "alpha-model".to_string(),
+                real_model_name: None,
+                cost_catalog_id: None,
+                deleted_at: None,
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+            },
+            custom_fields: vec![],
+            route_references: vec![ModelRoute {
+                id: 31,
+                route_name: "alpha-route".to_string(),
+                description: Some("route description".to_string()),
+                is_enabled: true,
+                expose_in_models: true,
+                deleted_at: None,
+                created_at: 1,
+                updated_at: 1,
+            }],
+        };
+
+        assert_eq!(detail.route_references.len(), 1);
+        assert_eq!(detail.route_references[0].route_name, "alpha-route");
+        assert_eq!(
+            detail.route_references[0].description.as_deref(),
+            Some("route description")
+        );
+        assert!(detail.route_references[0].is_enabled);
+        assert!(detail.route_references[0].expose_in_models);
     }
 }

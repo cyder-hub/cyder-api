@@ -6,7 +6,7 @@
           {{ $t("providerEditPage.sectionModels") }}
         </h3>
         <p class="mt-1 text-sm text-gray-500">
-          {{ editingData.models.length }} items
+          {{ $t("providerEditPage.sections.modelsDescription") }}
         </p>
       </div>
       <div class="flex flex-col gap-2 sm:w-auto sm:flex-row">
@@ -33,9 +33,14 @@
       </div>
     </div>
 
-    <div v-if="editingData.models.length === 0" class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10">
+    <div
+      v-if="editingData.models.length === 0"
+      class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10"
+    >
       <Box class="mb-2 h-10 w-10 stroke-1 text-gray-400" />
-      <span class="text-sm font-medium text-gray-500">{{ $t('providerEditPage.alert.noModels') }}</span>
+      <span class="text-sm font-medium text-gray-500">
+        {{ $t("providerEditPage.alert.noModels") }}
+      </span>
     </div>
 
     <div v-else class="space-y-3 md:hidden">
@@ -52,7 +57,6 @@
             </Label>
             <Input
               v-model="model.model_name"
-              :disabled="!!model.id"
               :placeholder="$t('providerEditPage.placeholderModelId')"
               class="font-mono text-sm"
             />
@@ -64,11 +68,19 @@
             </Label>
             <Input
               :model-value="model.real_model_name ?? ''"
-              :disabled="!!model.id"
               :placeholder="$t('providerEditPage.placeholderMappedModelId')"
               class="font-mono text-sm"
-              @update:model-value="(v: string | number) => (model.real_model_name = String(v) || null)"
+              @update:model-value="
+                (v: string | number) => (model.real_model_name = String(v).trim() || null)
+              "
             />
+          </div>
+
+          <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5">
+            <Label class="cursor-pointer text-gray-700">
+              {{ $t("providerEditPage.labelEnabled") }}
+            </Label>
+            <Checkbox v-model="model.is_enabled" />
           </div>
         </div>
 
@@ -81,13 +93,16 @@
         <template #actions>
           <div class="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2">
             <Button
-              v-if="!model.id && editingData.id"
               variant="default"
               size="sm"
               class="w-full"
               @click="handleSaveSingleModel(index)"
             >
-              {{ $t("providerEditPage.buttonSaveModel") }}
+              {{
+                model.id
+                  ? $t("common.save")
+                  : $t("providerEditPage.buttonSaveModel")
+              }}
             </Button>
             <Button
               variant="outline"
@@ -96,9 +111,18 @@
               :title="model.checkMessage"
               @click="emit('checkSingle', index)"
             >
-              <Loader2 v-if="model.checkStatus === 'checking'" class="h-4 w-4 animate-spin text-blue-500" />
-              <AlertCircle v-else-if="model.checkStatus === 'error'" class="h-4 w-4 text-red-500" />
-              <Check v-else-if="model.checkStatus === 'success'" class="h-4 w-4 text-green-500" />
+              <Loader2
+                v-if="model.checkStatus === 'checking'"
+                class="h-4 w-4 animate-spin text-blue-500"
+              />
+              <AlertCircle
+                v-else-if="model.checkStatus === 'error'"
+                class="h-4 w-4 text-red-500"
+              />
+              <Check
+                v-else-if="model.checkStatus === 'success'"
+                class="h-4 w-4 text-green-500"
+              />
               <Check v-else class="h-4 w-4" />
             </Button>
             <Button
@@ -125,71 +149,83 @@
       </MobileCrudCard>
     </div>
 
-    <div class="hidden rounded-lg border border-gray-200 overflow-hidden md:block">
-      <div class="grid grid-cols-[1fr_1fr_auto] gap-4 items-center border-b border-gray-200 bg-gray-50/80 px-4 py-3">
-        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderModelId") }}</span>
-        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderMappedModelId") }}</span>
-        <span class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t('common.actions') }}</span>
+    <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
+      <div
+        class="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-4 border-b border-gray-200 bg-gray-50/80 px-4 py-3"
+      >
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("providerEditPage.tableHeaderModelId") }}
+        </span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("providerEditPage.tableHeaderMappedModelId") }}
+        </span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("providerEditPage.labelEnabled") }}
+        </span>
+        <span class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("common.actions") }}
+        </span>
       </div>
 
       <div
         v-for="(model, index) in editingData.models"
         :key="`desktop-${index}`"
-        class="grid grid-cols-[1fr_1fr_auto] gap-4 items-center border-b border-gray-100 px-4 py-3 last:border-0 hover:bg-gray-50/50 transition-colors"
+        class="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-4 border-b border-gray-100 px-4 py-3 last:border-0 transition-colors hover:bg-gray-50/50"
       >
         <Input
           v-model="model.model_name"
-          :disabled="!!model.id"
           :placeholder="$t('providerEditPage.placeholderModelId')"
           class="h-8 font-mono text-sm"
         />
         <Input
           :model-value="model.real_model_name ?? ''"
-          :disabled="!!model.id"
           :placeholder="$t('providerEditPage.placeholderMappedModelId')"
           class="h-8 font-mono text-sm"
-          @update:model-value="(v: string | number) => (model.real_model_name = String(v) || null)"
+          @update:model-value="
+            (v: string | number) => (model.real_model_name = String(v).trim() || null)
+          "
         />
+        <div class="flex items-center justify-start">
+          <Checkbox v-model="model.is_enabled" />
+        </div>
         <div class="flex items-center justify-end space-x-1">
-          <template v-if="!model.id && editingData.id">
-            <Button variant="default" size="sm" class="h-8" @click="handleSaveSingleModel(index)">
-              {{ $t("providerEditPage.buttonSaveModel") }}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-gray-600"
-              :title="model.checkMessage"
-              @click="emit('checkSingle', index)"
-            >
-              <Loader2 v-if="model.checkStatus === 'checking'" class="h-4 w-4 animate-spin text-blue-500" />
-              <AlertCircle v-else-if="model.checkStatus === 'error'" class="h-4 w-4 text-red-500" />
-              <Check v-else-if="model.checkStatus === 'success'" class="h-4 w-4 text-green-500" />
-              <Check v-else class="h-4 w-4" />
-            </Button>
-          </template>
-          <template v-if="model.id">
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-gray-600"
-              :title="model.checkMessage"
-              @click="emit('checkSingle', index)"
-            >
-              <Loader2 v-if="model.checkStatus === 'checking'" class="h-4 w-4 animate-spin text-blue-500" />
-              <AlertCircle v-else-if="model.checkStatus === 'error'" class="h-4 w-4 text-red-500" />
-              <Check v-else-if="model.checkStatus === 'success'" class="h-4 w-4 text-green-500" />
-              <Check v-else class="h-4 w-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-gray-600"
-              @click="router.push(`/model/edit/${model.id}`)"
-            >
-              <Edit2 class="h-4 w-4" />
-            </Button>
-          </template>
+          <Button variant="default" size="sm" class="h-8" @click="handleSaveSingleModel(index)">
+            {{
+              model.id
+                ? $t("common.save")
+                : $t("providerEditPage.buttonSaveModel")
+            }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-8 px-2 text-gray-600"
+            :title="model.checkMessage"
+            @click="emit('checkSingle', index)"
+          >
+            <Loader2
+              v-if="model.checkStatus === 'checking'"
+              class="h-4 w-4 animate-spin text-blue-500"
+            />
+            <AlertCircle
+              v-else-if="model.checkStatus === 'error'"
+              class="h-4 w-4 text-red-500"
+            />
+            <Check
+              v-else-if="model.checkStatus === 'success'"
+              class="h-4 w-4 text-green-500"
+            />
+            <Check v-else class="h-4 w-4" />
+          </Button>
+          <Button
+            v-if="model.id"
+            variant="ghost"
+            size="sm"
+            class="h-8 px-2 text-gray-600"
+            @click="router.push(`/model/edit/${model.id}`)"
+          >
+            <Edit2 class="h-4 w-4" />
+          </Button>
           <Button
             variant="ghost"
             size="sm"
@@ -237,11 +273,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Check, CloudDownload, Box, Loader2, AlertCircle, Edit2, Trash2, Plus } from "lucide-vue-next";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Check,
+  CloudDownload,
+  Box,
+  Loader2,
+  AlertCircle,
+  Edit2,
+  Trash2,
+  Plus,
+} from "lucide-vue-next";
 
 const { t: $t } = useI18n();
 const router = useRouter();
-
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
 
 const emit = defineEmits<{
@@ -259,6 +304,7 @@ const addModel = () => {
     id: null,
     model_name: "",
     real_model_name: null,
+    is_enabled: true,
     isEditing: false,
     checkStatus: "unchecked",
   });
@@ -281,18 +327,28 @@ const handleSaveSingleModel = async (index: number) => {
     return;
   }
 
+  const payload = {
+    model_name: modelItem.model_name.trim(),
+    real_model_name: modelItem.real_model_name?.trim() || null,
+    is_enabled: modelItem.is_enabled,
+  };
+
   try {
-    const savedModel = await Api.createModel({
-      provider_id: data.id,
-      model_name: modelItem.model_name,
-      real_model_name: modelItem.real_model_name || null,
-      is_enabled: true,
-    });
-    modelItem.id = savedModel.id;
-    modelItem.model_name = savedModel.model_name;
-    modelItem.real_model_name = savedModel.real_model_name ?? null;
+    if (modelItem.id) {
+      await Api.updateModel(modelItem.id, payload);
+      toastController.success($t("providerEditPage.alert.modelUpdateSuccess"));
+    } else {
+      const savedModel = await Api.createModel({
+        provider_id: data.id,
+        ...payload,
+      });
+      modelItem.id = savedModel.id;
+      modelItem.model_name = savedModel.model_name;
+      modelItem.real_model_name = savedModel.real_model_name ?? null;
+      modelItem.is_enabled = savedModel.is_enabled;
+      toastController.success($t("providerEditPage.alert.modelSaveSuccess"));
+    }
     modelItem.isEditing = false;
-    toastController.success($t("providerEditPage.alert.modelSaveSuccess"));
   } catch (error) {
     console.error("Failed to save model:", error);
     toastController.error(
@@ -314,6 +370,7 @@ const handleDeleteModel = async (index: number) => {
       );
       return;
     }
+
     try {
       await Api.deleteModel(modelItem.id);
       data.models.splice(index, 1);
@@ -390,6 +447,7 @@ const handleFetchRemoteModels = async () => {
           id: null,
           model_name,
           real_model_name: null,
+          is_enabled: true,
           isEditing: false,
           checkStatus: "unchecked",
         });

@@ -1,15 +1,18 @@
 use chrono::Utc;
+use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use serde::Deserialize; // Serialize on Provider is via db_object!, Deserialize for helper structs
 use serde::Serialize;
 
-use crate::database::{DbResult, get_connection};
+use crate::database::{DbConnection, DbResult, get_connection};
+use crate::database::model::{Model, NewModel};
 use crate::{db_execute, db_object};
 // db_object! is exported at the crate root by `#[macro_export]` in `database/mod.rs`.
 // BaseError is assumed to be accessible, e.g., from `crate::controller::BaseError`.
 use crate::controller::BaseError;
 use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+use crate::utils::ID_GENERATOR;
 
 // Define the main Provider struct and its DB representations using db_object!
 // The attributes like `#[derive(Queryable, ...)]` and `#[diesel(table_name = ...)]`
@@ -51,7 +54,7 @@ db_object! {
     }
 
 // Data structure for updating an existing provider.
-#[derive(AsChangeset, Deserialize, Debug)]
+#[derive(AsChangeset, Deserialize, Debug, Clone)]
 #[diesel(table_name = provider)]
     pub struct UpdateProviderData {
         pub provider_key: Option<String>,
@@ -98,6 +101,143 @@ db_object! {
         pub is_enabled: Option<bool>,
     }
 }
+#[derive(Clone, Debug)]
+pub struct BootstrapProviderInput {
+    pub provider_id: i64,
+    pub provider_key: String,
+    pub name: String,
+    pub endpoint: String,
+    pub use_proxy: bool,
+    pub provider_type: ProviderType,
+    pub provider_api_key_mode: ProviderApiKeyMode,
+    pub api_key: String,
+    pub api_key_description: Option<String>,
+    pub model_name: String,
+    pub real_model_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BootstrapProviderResult {
+    pub provider: Provider,
+    pub created_key: ProviderApiKey,
+    pub created_model: Model,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderSummaryItem {
+    pub id: i64,
+    pub provider_key: String,
+    pub name: String,
+    pub is_enabled: bool,
+}
+
+macro_rules! bootstrap_transaction {
+    ($conn:expr, $model_new_db:ident, $model_db:ident, $input:expr) => {{
+        let bootstrap_input = $input;
+        let current_time = Utc::now().timestamp_millis();
+
+        $conn.batch_execute("BEGIN").map_err(|e| {
+            BaseError::DatabaseFatal(Some(format!(
+                "Failed to start bootstrap transaction: {}",
+                e
+            )))
+        })?;
+
+        let transaction_result: DbResult<BootstrapProviderResult> = (|| {
+            let new_provider_data = NewProvider {
+                id: bootstrap_input.provider_id,
+                provider_key: bootstrap_input.provider_key.clone(),
+                name: bootstrap_input.name.clone(),
+                endpoint: bootstrap_input.endpoint.clone(),
+                use_proxy: bootstrap_input.use_proxy,
+                is_enabled: true,
+                created_at: current_time,
+                updated_at: current_time,
+                provider_type: bootstrap_input.provider_type.clone(),
+                provider_api_key_mode: bootstrap_input.provider_api_key_mode.clone(),
+            };
+
+            let provider_db = diesel::insert_into(provider::table)
+                .values(NewProviderDb::to_db(&new_provider_data))
+                .returning(ProviderDb::as_returning())
+                .get_result::<ProviderDb>($conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to insert bootstrap provider: {}",
+                        e
+                    )))
+                })?;
+            let provider = provider_db.from_db();
+
+            let new_provider_api_key_data = NewProviderApiKey {
+                id: ID_GENERATOR.generate_id(),
+                provider_id: provider.id,
+                api_key: bootstrap_input.api_key.clone(),
+                description: bootstrap_input.api_key_description.clone(),
+                is_enabled: true,
+                created_at: current_time,
+                updated_at: current_time,
+            };
+
+            let created_key_db = diesel::insert_into(provider_api_key::table)
+                .values(NewProviderApiKeyDb::to_db(&new_provider_api_key_data))
+                .returning(ProviderApiKeyDb::as_returning())
+                .get_result::<ProviderApiKeyDb>($conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to insert bootstrap provider API key: {}",
+                        e
+                    )))
+                })?;
+            let created_key = created_key_db.from_db();
+
+            let new_model_data = NewModel {
+                id: ID_GENERATOR.generate_id(),
+                provider_id: provider.id,
+                model_name: bootstrap_input.model_name.clone(),
+                real_model_name: bootstrap_input.real_model_name.clone(),
+                is_enabled: true,
+                created_at: current_time,
+                updated_at: current_time,
+            };
+
+            let created_model_db = diesel::insert_into(model::table)
+                .values($model_new_db::to_db(&new_model_data))
+                .returning($model_db::as_returning())
+                .get_result::<$model_db>($conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to insert bootstrap model: {}",
+                        e
+                    )))
+                })?;
+            let created_model = created_model_db.from_db();
+
+            Ok(BootstrapProviderResult {
+                provider,
+                created_key,
+                created_model,
+            })
+        })();
+
+        match transaction_result {
+            Ok(result) => {
+                $conn.batch_execute("COMMIT").map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to commit bootstrap transaction: {}",
+                        e
+                    )))
+                })?;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = $conn.batch_execute("ROLLBACK");
+                Err(err)
+            }
+        }
+    }};
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProviderDetail {
     pub provider: Provider,
@@ -128,12 +268,14 @@ impl Provider {
     pub fn update(id_value: i64, update_data: &UpdateProviderData) -> DbResult<Provider> {
         let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
+        let mut update_data = update_data.clone();
+        update_data.provider_key = None;
 
         db_execute!(conn, {
             // The `update_data` (UpdateProviderData struct) is AsChangeset for `crate::schema::postgres::provider::table`.
             let db_provider = diesel::update(provider::table.find(id_value))
                 .set((
-                    UpdateProviderDataDb::to_db(update_data),
+                    UpdateProviderDataDb::to_db(&update_data),
                     provider::dsl::updated_at.eq(current_time),
                 ))
                 .returning(ProviderDb::as_returning())
@@ -146,6 +288,28 @@ impl Provider {
                 })?;
             Ok(db_provider.from_db())
         })
+    }
+
+    pub fn bootstrap(input: &BootstrapProviderInput) -> DbResult<BootstrapProviderResult> {
+        let conn = &mut get_connection()?;
+        match conn {
+            DbConnection::Postgres(conn) => {
+                use crate::database::_postgres_schema::*;
+                use self::_postgres_model::*;
+                use crate::database::model::_postgres_model::{
+                    ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
+                };
+                bootstrap_transaction!(conn, BootstrapNewModelDb, BootstrapModelDb, input)
+            }
+            DbConnection::Sqlite(conn) => {
+                use crate::database::_sqlite_schema::*;
+                use self::_sqlite_model::*;
+                use crate::database::model::_sqlite_model::{
+                    ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
+                };
+                bootstrap_transaction!(conn, BootstrapNewModelDb, BootstrapModelDb, input)
+            }
+        }
     }
 
     /// Soft deletes a provider record by setting `deleted_at` to the current time and `is_enabled` to false.
@@ -241,6 +405,39 @@ impl Provider {
             Ok(db_providers
                 .into_iter()
                 .map(|db_p| db_p.from_db())
+                .collect())
+        })
+    }
+
+    /// Lists provider summary rows for lightweight dropdowns and maps.
+    pub fn list_summary() -> DbResult<Vec<ProviderSummaryItem>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let rows = provider::table
+                .filter(provider::dsl::deleted_at.is_null())
+                .order(provider::dsl::name.asc())
+                .select((
+                    provider::dsl::id,
+                    provider::dsl::provider_key,
+                    provider::dsl::name,
+                    provider::dsl::is_enabled,
+                ))
+                .load::<(i64, String, String, bool)>(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list provider summaries: {}",
+                        e
+                    )))
+                })?;
+
+            Ok(rows
+                .into_iter()
+                .map(|(id, provider_key, name, is_enabled)| ProviderSummaryItem {
+                    id,
+                    provider_key,
+                    name,
+                    is_enabled,
+                })
                 .collect())
         })
     }
@@ -423,5 +620,171 @@ impl ProviderApiKey {
 
             Ok(db_keys.into_iter().map(|db_k| db_k.from_db()).collect())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diesel::Connection;
+    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+    use tempfile::tempdir;
+
+    const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+
+    struct TestSqliteDb {
+        _temp_dir: tempfile::TempDir,
+        conn: diesel::SqliteConnection,
+    }
+
+    fn bootstrap_with_sqlite_connection(
+        conn: &mut diesel::SqliteConnection,
+        input: &BootstrapProviderInput,
+    ) -> DbResult<BootstrapProviderResult> {
+        use crate::database::_sqlite_schema::*;
+        use self::_sqlite_model::*;
+        use crate::database::model::_sqlite_model::{
+            ModelDb as BootstrapModelDb, NewModelDb as BootstrapNewModelDb,
+        };
+
+        bootstrap_transaction!(conn, BootstrapNewModelDb, BootstrapModelDb, input)
+    }
+
+    fn sqlite_connection() -> TestSqliteDb {
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let db_path = temp_dir.path().join("bootstrap.sqlite");
+        std::fs::File::create(&db_path).expect("db file should be created");
+        let db_url = db_path.to_string_lossy().into_owned();
+        let mut conn = diesel::SqliteConnection::establish(&db_url)
+            .expect("sqlite connection should be established");
+        conn.run_pending_migrations(SQLITE_MIGRATIONS)
+            .expect("migrations should run");
+        TestSqliteDb {
+            _temp_dir: temp_dir,
+            conn,
+        }
+    }
+
+    fn sample_input(real_model_name: Option<&str>) -> BootstrapProviderInput {
+        BootstrapProviderInput {
+            provider_id: 101,
+            provider_key: "openai-api-example-com".to_string(),
+            name: "OpenAI api.example.com".to_string(),
+            endpoint: "https://api.example.com/v1".to_string(),
+            use_proxy: false,
+            provider_type: ProviderType::Openai,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+            api_key: "sk-test".to_string(),
+            api_key_description: Some("bootstrap key".to_string()),
+            model_name: "gpt-4o-mini".to_string(),
+            real_model_name: real_model_name.map(ToString::to_string),
+        }
+    }
+
+    fn provider_count(conn: &mut diesel::SqliteConnection, provider_id: i64) -> i64 {
+        use crate::database::_sqlite_schema::*;
+
+        provider::table
+            .filter(provider::dsl::id.eq(provider_id))
+            .count()
+            .get_result(conn)
+            .expect("provider count should load")
+    }
+
+    fn provider_key_count(conn: &mut diesel::SqliteConnection, provider_id: i64) -> i64 {
+        use crate::database::_sqlite_schema::*;
+
+        provider_api_key::table
+            .filter(provider_api_key::dsl::provider_id.eq(provider_id))
+            .count()
+            .get_result(conn)
+            .expect("provider key count should load")
+    }
+
+    fn model_count(conn: &mut diesel::SqliteConnection, provider_id: i64) -> i64 {
+        use crate::database::_sqlite_schema::*;
+
+        model::table
+            .filter(model::dsl::provider_id.eq(provider_id))
+            .count()
+            .get_result(conn)
+            .expect("model count should load")
+    }
+
+    fn provider_summaries(conn: &mut diesel::SqliteConnection) -> Vec<ProviderSummaryItem> {
+        use crate::database::_sqlite_schema::*;
+
+        let rows = provider::table
+            .filter(provider::dsl::deleted_at.is_null())
+            .order(provider::dsl::name.asc())
+            .select((
+                provider::dsl::id,
+                provider::dsl::provider_key,
+                provider::dsl::name,
+                provider::dsl::is_enabled,
+            ))
+            .load::<(i64, String, String, bool)>(conn)
+            .expect("provider summary rows should load");
+
+        rows.into_iter()
+            .map(|(id, provider_key, name, is_enabled)| ProviderSummaryItem {
+                id,
+                provider_key,
+                name,
+                is_enabled,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bootstrap_provider_creates_provider_key_and_model_atomically() {
+        let mut db = sqlite_connection();
+        let result = bootstrap_with_sqlite_connection(&mut db.conn, &sample_input(Some("gpt-4o")))
+            .expect("bootstrap should succeed");
+
+        assert_eq!(result.provider.id, 101);
+        assert_eq!(result.provider.provider_key, "openai-api-example-com");
+        assert_eq!(result.provider.name, "OpenAI api.example.com");
+        assert_eq!(result.created_key.provider_id, result.provider.id);
+        assert_eq!(result.created_key.api_key, "sk-test");
+        assert_eq!(result.created_model.provider_id, result.provider.id);
+        assert_eq!(result.created_model.model_name, "gpt-4o-mini");
+
+        assert_eq!(provider_count(&mut db.conn, result.provider.id), 1);
+        assert_eq!(provider_key_count(&mut db.conn, result.provider.id), 1);
+        assert_eq!(model_count(&mut db.conn, result.provider.id), 1);
+    }
+
+    #[test]
+    fn bootstrap_provider_rolls_back_on_model_validation_failure() {
+        let mut db = sqlite_connection();
+        let result = bootstrap_with_sqlite_connection(&mut db.conn, &sample_input(Some("")))
+            .expect_err("bootstrap should fail");
+
+        let message = match result {
+            BaseError::DatabaseFatal(msg) => msg.unwrap_or_default(),
+            other => format!("{other:?}"),
+        };
+
+        assert!(message.contains("Failed to insert bootstrap model"));
+
+        assert_eq!(provider_count(&mut db.conn, 101), 0);
+        assert_eq!(provider_key_count(&mut db.conn, 101), 0);
+        assert_eq!(model_count(&mut db.conn, 101), 0);
+    }
+
+    #[test]
+    fn provider_summary_list_returns_lightweight_rows() {
+        let mut db = sqlite_connection();
+        bootstrap_with_sqlite_connection(&mut db.conn, &sample_input(Some("gpt-4o")))
+            .expect("bootstrap should succeed");
+
+        let rows = provider_summaries(&mut db.conn);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.id, 101);
+        assert_eq!(row.provider_key, "openai-api-example-com");
+        assert_eq!(row.name, "OpenAI api.example.com");
+        assert!(row.is_enabled);
     }
 }

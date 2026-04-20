@@ -5,6 +5,7 @@ import { Api } from "@/services/request";
 import { toastController } from "@/lib/toastController";
 import type { EditingProviderData } from "@/components/provider/types";
 import type { ProviderCheckPayload } from "@/store/types";
+import { buildCheckOptions } from "./providerCheckViewModel";
 
 export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
   const { t: $t } = useI18n();
@@ -21,23 +22,54 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
 
   // Computed options
   const modelOptionsForSelect = computed(() => {
-    if (!editingData.value?.models) return [];
-    return editingData.value.models.map((m, i) => ({
-      value: i,
-      label: m.model_name,
-    }));
+    if (!editingData.value?.models) {
+      return [];
+    }
+
+    return buildCheckOptions(editingData.value.models, (model, index) => {
+      return model.model_name || `${$t("providerEditPage.placeholderModelId")} #${index + 1}`;
+    }).options;
   });
 
   const apiKeyOptionsForSelect = computed(() => {
-    if (!editingData.value?.provider_keys) return [];
-    return editingData.value.provider_keys.map((k, i) => ({
-      value: i,
-      label:
-        k.description ||
+    if (!editingData.value?.provider_keys) {
+      return [];
+    }
+
+    return buildCheckOptions(editingData.value.provider_keys, (key, index) => {
+      return (
+        key.description ||
         $t("providerEditPage.alert.apiKeyNameFallback", {
-          lastKeyChars: k.api_key.slice(-4),
-        }),
-    }));
+          lastKeyChars: key.api_key.slice(-4),
+        }) ||
+        `${$t("common.selected")} #${index + 1}`
+      );
+    }).options;
+  });
+
+  const selectedModelCheckTargetLabel = computed(() => {
+    if (modelIndexToCheck.value === null) {
+      return "";
+    }
+
+    const model = editingData.value?.models?.[modelIndexToCheck.value];
+    if (!model) return "";
+    return model.model_name || $t("providerEditPage.placeholderModelId");
+  });
+
+  const selectedApiKeyCheckTargetLabel = computed(() => {
+    if (apiKeyIndexToCheck.value === null) {
+      return "";
+    }
+
+    const key = editingData.value?.provider_keys?.[apiKeyIndexToCheck.value];
+    if (!key) return "";
+    return (
+      key.description ||
+      $t("providerEditPage.alert.apiKeyNameFallback", {
+        lastKeyChars: key.api_key.slice(-4),
+      })
+    );
   });
 
   const performCheck = async (modelIndex: number, apiKeyIndex: number) => {
@@ -190,7 +222,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         await performCheck(index, 0);
       } else {
         modelIndexToCheck.value = index;
-        apiKeyIndexToUseStr.value = "0";
+        apiKeyIndexToUseStr.value = null;
         isApiKeySelectModalOpen.value = true;
       }
     } else {
@@ -207,7 +239,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         await performCheck(0, index);
       } else {
         apiKeyIndexToCheck.value = index;
-        modelIndexToUseStr.value = "0";
+        modelIndexToUseStr.value = null;
         isModelSelectModalOpen.value = true;
       }
     }
@@ -235,7 +267,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         await performBatchModelCheck(0);
       } else {
         isBatchCheckingModels.value = true;
-        apiKeyIndexToUseStr.value = "0";
+        apiKeyIndexToUseStr.value = null;
         isApiKeySelectModalOpen.value = true;
       }
     } else {
@@ -251,7 +283,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         await performBatchApiKeyCheck(0);
       } else {
         isBatchCheckingApiKeys.value = true;
-        modelIndexToUseStr.value = "0";
+        modelIndexToUseStr.value = null;
         isModelSelectModalOpen.value = true;
       }
     }
@@ -312,6 +344,8 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     isBatchCheckingModels,
     modelOptionsForSelect,
     apiKeyOptionsForSelect,
+    selectedModelCheckTargetLabel,
+    selectedApiKeyCheckTargetLabel,
     handleCheck,
     handleBatchCheck,
     handleConfirmModelSelection,

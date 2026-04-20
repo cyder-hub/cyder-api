@@ -13,6 +13,7 @@ export interface LocalEditableModelItem {
   id: number | null;
   model_name: string;
   real_model_name: string | null;
+  is_enabled: boolean;
   isEditing: boolean;
   checkStatus: "unchecked" | "checking" | "success" | "error";
   checkMessage?: string;

@@ -1,241 +1,28 @@
-<template>
-  <div class="app-page">
-    <div class="app-page-shell">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold text-gray-900 tracking-tight sm:text-xl">
-            {{ $t("providerPage.title") }}
-          </h1>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ $t("providerPage.description") }}
-          </p>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto">
-          <Button
-            @click="router.push('/provider/runtime')"
-            variant="ghost"
-            class="w-full sm:w-auto"
-          >
-            <Activity class="h-4 w-4 mr-1.5" />
-            {{ $t("providerPage.viewRuntime") }}
-          </Button>
-          <Button
-            @click="router.push('/provider/new')"
-            variant="outline"
-            class="w-full sm:w-auto"
-          >
-            <Plus class="h-4 w-4 mr-1.5" />
-            {{ $t("providerPage.addProvider") }}
-          </Button>
-        </div>
-      </div>
-
-      <div
-        v-if="isLoading"
-        class="flex items-center justify-center py-16 border border-gray-200 rounded-lg bg-white"
-      >
-        <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
-        <span class="text-sm text-gray-500">{{ $t("providerPage.loading") }}</span>
-      </div>
-
-      <div
-        v-else-if="error"
-        class="flex flex-col items-center justify-center py-20 border border-gray-200 rounded-lg bg-white"
-      >
-        <AlertCircle class="h-10 w-10 stroke-1 text-red-400 mb-4" />
-        <span class="text-sm font-medium text-red-500">{{
-          $t("providerPage.error", { error: error })
-        }}</span>
-      </div>
-
-      <div
-        v-else-if="store.providers.length === 0"
-        class="flex flex-col items-center justify-center py-20 border border-gray-200 rounded-lg bg-white"
-      >
-        <Inbox class="h-10 w-10 stroke-1 text-gray-400 mb-4" />
-        <span class="text-sm font-medium text-gray-500">{{
-          $t("providerPage.noData")
-        }}</span>
-      </div>
-
-      <div
-        v-else
-        class="grid grid-cols-1 gap-4 sm:gap-5 md:grid-cols-2 xl:grid-cols-3"
-      >
-        <div
-          v-for="item in store.providers"
-          :key="item.provider.id"
-          class="flex h-full flex-col rounded-xl border border-gray-200 bg-white transition-colors hover:border-gray-300"
-        >
-          <div
-            class="flex flex-col gap-3 border-b border-gray-100 px-4 py-4 sm:px-5"
-          >
-            <div class="min-w-0">
-              <div class="flex flex-wrap items-center gap-2">
-                <h3 class="min-w-0 text-base font-semibold text-gray-900">
-                  {{ item.provider.name }}
-                </h3>
-                <Badge
-                  v-if="providerRuntimeLevelMap[item.provider.id]"
-                  :class="runtimeBadgeClass(providerRuntimeLevelMap[item.provider.id])"
-                >
-                  {{ runtimeLevelLabel(providerRuntimeLevelMap[item.provider.id]) }}
-                </Badge>
-                <Badge
-                  variant="secondary"
-                  class="max-w-full font-mono text-[10px] px-1.5 py-0"
-                  >{{ item.provider.provider_type }}</Badge
-                >
-              </div>
-              <p
-                class="mt-1 truncate text-xs font-mono text-gray-400"
-                :title="item.provider.provider_key"
-              >
-                {{ item.provider.provider_key }}
-              </p>
-            </div>
-
-            <div class="flex flex-wrap gap-1.5">
-              <Badge variant="outline" class="bg-gray-50 text-[11px] text-gray-500">
-                {{ $t("providerPage.table.apiKeys") }}: {{ item.provider_keys.length }}
-              </Badge>
-              <Badge variant="outline" class="bg-gray-50 text-[11px] text-gray-500">
-                {{ $t("providerPage.table.models") }}: {{ item.models.length }}
-              </Badge>
-              <Badge variant="outline" class="bg-gray-50 text-[11px] text-gray-500">
-                {{ $t("providerPage.table.useProxy") }}:
-                {{ item.provider.use_proxy ? $t("common.yes") : $t("common.no") }}
-              </Badge>
-            </div>
-          </div>
-
-          <div class="flex-grow space-y-4 px-4 py-4 sm:px-5">
-            <div class="grid grid-cols-1 gap-2 text-xs sm:gap-3">
-              <div
-                class="flex items-center justify-between rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2.5 text-gray-500"
-              >
-                <span class="flex items-center">
-                  <Key class="w-3.5 h-3.5 mr-1.5 text-gray-400" />
-                  {{ $t("providerPage.table.apiKeys") }}
-                </span>
-                <span class="text-gray-900 font-medium">{{
-                  item.provider_keys.length
-                }}</span>
-              </div>
-              <div
-                class="flex items-center justify-between rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2.5 text-gray-500"
-              >
-                <span class="flex items-center">
-                  <Network class="w-3.5 h-3.5 mr-1.5 text-gray-400" />
-                  {{ $t("providerPage.table.useProxy") }}
-                </span>
-                <div class="flex items-center text-gray-700 font-medium">
-                  <CheckCircle2
-                    v-if="item.provider.use_proxy"
-                    class="w-3.5 h-3.5 mr-1 text-gray-600"
-                  />
-                  <XCircle v-else class="w-3.5 h-3.5 mr-1 text-gray-300" />
-                  {{
-                    item.provider.use_proxy ? $t("common.yes") : $t("common.no")
-                  }}
-                </div>
-              </div>
-            </div>
-
-            <div class="space-y-2.5">
-              <span class="text-gray-500 flex items-center text-xs">
-                <Box class="w-3.5 h-3.5 mr-1.5 text-gray-400" />
-                {{ $t("providerPage.table.models") }} ({{ item.models.length }})
-              </span>
-              <div class="flex flex-wrap gap-1.5">
-                <Badge
-                  v-for="modelDetail in item.models.slice(0, 6)"
-                  :key="modelDetail.model.id"
-                  variant="secondary"
-                  class="max-w-full truncate font-mono font-normal text-[11px] px-2 py-0.5 hover:bg-gray-200 hover:text-gray-900 cursor-pointer text-gray-500 transition-colors"
-                  :title="
-                    $t('providerPage.editModel', {
-                      model_name: modelDetail.model.model_name,
-                    })
-                  "
-                  @click="router.push(`/model/edit/${modelDetail.model.id}`)"
-                >
-                  {{ modelDetail.model.model_name }}
-                </Badge>
-                <Badge
-                  v-if="item.models.length > 6"
-                  variant="outline"
-                  class="text-[11px] px-2 py-0.5 text-gray-400 bg-gray-50 border-gray-100"
-                >
-                  +{{ item.models.length - 6 }}
-                </Badge>
-              </div>
-            </div>
-          </div>
-
-          <div
-            class="flex flex-col gap-2 border-t border-gray-100 px-4 py-3 sm:flex-row sm:justify-end sm:px-5"
-          >
-            <Button
-              variant="ghost"
-              size="sm"
-              class="w-full justify-center sm:w-auto"
-              @click="router.push({ path: '/provider/runtime', query: { search: item.provider.provider_key } })"
-            >
-              <Activity class="w-3.5 h-3.5 mr-1.5 text-gray-500" />
-              {{ $t("providerPage.viewRuntime") }}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="w-full justify-center sm:w-auto"
-              @click="router.push(`/provider/edit/${item.provider.id}`)"
-            >
-              <Pencil class="w-3.5 h-3.5 mr-1.5 text-gray-500" />
-              {{ $t("common.edit") }}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="w-full justify-center text-gray-400 hover:text-red-600 hover:bg-red-50 sm:w-auto"
-              @click="handleDeleteProvider(item.provider)"
-            >
-              <Trash2 class="w-3.5 h-3.5 mr-1.5" />
-              {{ $t("common.delete") }}
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
-import { useProviderStore } from "@/store/providerStore";
-import type { ProviderBase, ProviderRuntimeLevel } from "@/store/types";
+import {
+  Activity,
+  Inbox,
+  Loader2,
+  Plus,
+  RefreshCcw,
+  Trash2,
+  Server,
+  Layers3,
+} from "lucide-vue-next";
+
+import CrudPageLayout from "@/components/CrudPageLayout.vue";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { confirm } from "@/lib/confirmController";
 import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
-import { confirm } from "@/lib/confirmController";
 import { Api } from "@/services/request";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import {
-  Plus,
-  Loader2,
-  AlertCircle,
-  Inbox,
-  Key,
-  Network,
-  Box,
-  CheckCircle2,
-  XCircle,
-  Pencil,
-  Trash2,
-  Activity,
-} from "lucide-vue-next";
+import { useProviderStore } from "@/store/providerStore";
+import type { ProviderRuntimeLevel, ProviderSummaryItem } from "@/store/types";
 
 const { t: $t } = useI18n();
 const router = useRouter();
@@ -244,6 +31,22 @@ const store = useProviderStore();
 const isLoading = ref(true);
 const error = ref<string | null>(null);
 const providerRuntimeLevelMap = ref<Record<number, ProviderRuntimeLevel>>({});
+
+const summaryCards = computed(() => {
+  const total = store.providers.length;
+  const enabled = store.providers.filter((item) => item.is_enabled).length;
+  const disabled = total - enabled;
+  const runtimeIssues = Object.values(providerRuntimeLevelMap.value).filter(
+    (level) => level === "open" || level === "half_open" || level === "degraded",
+  ).length;
+
+  return [
+    { key: "total", label: $t("providerPage.summary.total"), value: total },
+    { key: "enabled", label: $t("providerPage.summary.enabled"), value: enabled },
+    { key: "disabled", label: $t("providerPage.summary.disabled"), value: disabled },
+    { key: "runtime", label: $t("providerPage.summary.runtimeIssues"), value: runtimeIssues },
+  ];
+});
 
 const runtimeLevelLabel = (level: ProviderRuntimeLevel) =>
   $t(`providerRuntimePage.status.${level}`);
@@ -262,6 +65,14 @@ const runtimeBadgeClass = (level: ProviderRuntimeLevel) => {
       return "border-gray-200 bg-gray-100 text-gray-600 hover:bg-gray-100";
   }
 };
+
+const providerStateLabel = (provider: ProviderSummaryItem) =>
+  provider.is_enabled ? $t("providerPage.state.enabled") : $t("providerPage.state.disabled");
+
+const providerStateClass = (provider: ProviderSummaryItem) =>
+  provider.is_enabled
+    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+    : "border-gray-200 bg-gray-100 text-gray-500";
 
 const loadRuntimeLevels = async () => {
   try {
@@ -285,29 +96,231 @@ const loadData = async () => {
     await store.fetchProviders();
     await loadRuntimeLevels();
   } catch (err: unknown) {
-    error.value = normalizeError(
-      err,
-      $t("common.unknownError", "Unknown Error"),
-    ).message;
+    error.value = normalizeError(err, $t("common.unknownError")).message;
   } finally {
     isLoading.value = false;
   }
 };
 
-onMounted(() => {
-  loadData();
-});
+const handleRefresh = async () => {
+  await loadData();
+};
 
-const handleDeleteProvider = async (provider: ProviderBase) => {
-  await confirm($t("providerPage.confirmDelete", { name: provider.name }))
+const handleDeleteProvider = async (provider: ProviderSummaryItem) => {
+  await confirm($t("providerPage.confirmDelete", { name: provider.name }));
   try {
     await Api.deleteProvider(provider.id);
-    toastController.success($t("deleteSuccess", "Deleted successfully"));
+    toastController.success($t("providerPage.deleteSuccess"));
     await loadData();
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Failed to delete provider:", err);
-    const errorMessage = err.message || $t("common.unknownError", "Unknown Error");
+    const errorMessage = normalizeError(err, $t("common.unknownError")).message;
     toastController.error($t("providerPage.deleteFailed", { error: errorMessage }));
-  } 
+  }
 };
+
+onMounted(() => {
+  void loadData();
+});
 </script>
+
+<template>
+  <CrudPageLayout
+    :title="$t('providerPage.title')"
+    :description="$t('providerPage.description')"
+    :loading="isLoading"
+    :error="error"
+    :empty="!store.providers.length"
+    content-class="space-y-4"
+  >
+    <template #actions>
+      <Button variant="outline" class="w-full sm:w-auto" @click="handleRefresh">
+        <RefreshCcw class="mr-1.5 h-4 w-4" />
+        {{ $t("common.refresh") }}
+      </Button>
+      <Button variant="outline" class="w-full sm:w-auto" @click="router.push('/model')">
+        <Layers3 class="mr-1.5 h-4 w-4" />
+        {{ $t("providerPage.viewModels") }}
+      </Button>
+      <Button variant="outline" class="w-full sm:w-auto" @click="router.push('/provider/runtime')">
+        <Activity class="mr-1.5 h-4 w-4" />
+        {{ $t("providerPage.viewRuntime") }}
+      </Button>
+      <Button variant="default" class="w-full sm:w-auto" @click="router.push('/provider/new')">
+        <Plus class="mr-1.5 h-4 w-4" />
+        {{ $t("providerPage.addProvider") }}
+      </Button>
+    </template>
+
+    <template #loading>
+      <div class="flex items-center justify-center py-16 text-gray-400">
+        <Loader2 class="mr-2 h-5 w-5 animate-spin" />
+        <span class="text-sm">{{ $t("providerPage.loading") }}</span>
+      </div>
+    </template>
+
+    <template #error="{ error: pageError }">
+      <div class="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-600">
+        {{ pageError }}
+      </div>
+    </template>
+
+    <template #empty>
+      <div class="flex flex-col items-center justify-center py-20 text-gray-500">
+        <Inbox class="mb-3 h-10 w-10 stroke-1 text-gray-400" />
+        <p class="text-sm font-medium">{{ $t("providerPage.noData") }}</p>
+      </div>
+    </template>
+
+    <div class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-100 sm:grid-cols-4">
+      <div v-for="card in summaryCards" :key="card.key" class="bg-white px-4 py-3">
+        <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+          {{ card.label }}
+        </p>
+        <p class="mt-1 text-lg font-semibold tracking-tight text-gray-900">
+          {{ card.value }}
+        </p>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 gap-3 md:hidden">
+      <MobileCrudCard
+        v-for="provider in store.providers"
+        :key="provider.id"
+        :title="provider.name"
+        :description="provider.provider_key"
+      >
+        <template #header>
+          <div class="flex items-center gap-2">
+            <Badge :class="providerStateClass(provider)" class="font-mono text-[11px]">
+              {{ providerStateLabel(provider) }}
+            </Badge>
+            <Badge
+              v-if="providerRuntimeLevelMap[provider.id]"
+              :class="runtimeBadgeClass(providerRuntimeLevelMap[provider.id])"
+              class="font-mono text-[11px]"
+            >
+              {{ runtimeLevelLabel(providerRuntimeLevelMap[provider.id]) }}
+            </Badge>
+          </div>
+        </template>
+
+        <div class="grid grid-cols-1 gap-2 text-xs text-gray-500">
+          <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("providerPage.table.name") }}</span>
+            <span class="max-w-[12rem] truncate font-mono text-gray-700">
+              {{ provider.name }}
+            </span>
+          </div>
+          <div class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+            <span>{{ $t("providerPage.table.key") }}</span>
+            <span class="max-w-[12rem] truncate font-mono text-gray-700">
+              {{ provider.provider_key }}
+            </span>
+          </div>
+        </div>
+
+        <template #actions>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center"
+            @click="router.push(`/provider/edit/${provider.id}`)"
+          >
+            <Server class="mr-1.5 h-3.5 w-3.5" />
+            {{ $t("common.edit") }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center text-gray-600 hover:text-gray-900"
+            @click="router.push({ path: '/provider/runtime', query: { search: provider.provider_key } })"
+          >
+            <Activity class="mr-1.5 h-3.5 w-3.5" />
+            {{ $t("providerPage.viewRuntime") }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center text-gray-400 hover:text-red-600"
+            @click="handleDeleteProvider(provider)"
+          >
+            <Trash2 class="mr-1.5 h-3.5 w-3.5" />
+            {{ $t("common.delete") }}
+          </Button>
+        </template>
+      </MobileCrudCard>
+    </div>
+
+    <div class="hidden overflow-hidden rounded-xl border border-gray-200 bg-white md:block">
+      <div
+        class="grid grid-cols-[1.3fr_1fr_1fr_auto] items-center gap-4 border-b border-gray-200 bg-gray-50/80 px-4 py-3"
+      >
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("providerPage.table.name") }}
+        </span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("providerPage.table.key") }}
+        </span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("providerPage.table.status") }}
+        </span>
+        <span class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("common.actions") }}
+        </span>
+      </div>
+
+      <div
+        v-for="provider in store.providers"
+        :key="provider.id"
+        class="grid grid-cols-[1.3fr_1fr_1fr_auto] items-center gap-4 border-b border-gray-100 px-4 py-3 last:border-0 transition-colors hover:bg-gray-50/50"
+      >
+        <div>
+          <div class="font-medium text-gray-900">{{ provider.name }}</div>
+          <div class="mt-0.5 text-xs text-gray-500">
+            {{ $t("providerPage.subtitle") }}
+          </div>
+        </div>
+        <div class="font-mono text-sm text-gray-700">{{ provider.provider_key }}</div>
+        <div class="flex flex-wrap items-center gap-2">
+          <Badge :class="providerStateClass(provider)" class="font-mono text-[11px]">
+            {{ providerStateLabel(provider) }}
+          </Badge>
+          <Badge
+            v-if="providerRuntimeLevelMap[provider.id]"
+            :class="runtimeBadgeClass(providerRuntimeLevelMap[provider.id])"
+            class="font-mono text-[11px]"
+          >
+            {{ runtimeLevelLabel(providerRuntimeLevelMap[provider.id]) }}
+          </Badge>
+        </div>
+        <div class="flex items-center justify-end gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-8 px-2 text-gray-600"
+            @click="router.push(`/provider/edit/${provider.id}`)"
+          >
+            <Server class="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-8 px-2 text-gray-600"
+            @click="router.push({ path: '/provider/runtime', query: { search: provider.provider_key } })"
+          >
+            <Activity class="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-8 px-2 text-gray-400 hover:text-red-600"
+            @click="handleDeleteProvider(provider)"
+          >
+            <Trash2 class="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  </CrudPageLayout>
+</template>

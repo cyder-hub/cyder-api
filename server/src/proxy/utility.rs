@@ -22,6 +22,7 @@ use super::{
         LoggedBody, RequestLogContext, build_initial_request_log_context,
         record_request_completion_and_log,
     },
+    load_runtime_request_patch_trace,
     prepare::{
         prepare_llm_request, prepare_simple_gemini_request, resolve_provider_credentials,
         resolve_requested_model,
@@ -154,7 +155,7 @@ pub(super) async fn execute_utility_proxy(
             );
             e
         })?;
-    let initial_log_context = build_initial_request_log_context(
+    let mut initial_log_context = build_initial_request_log_context(
         &system_api_key,
         &provider,
         &model,
@@ -172,6 +173,24 @@ pub(super) async fn execute_utility_proxy(
     if let Err(e) = validate_utility_target(&operation, target_api_type) {
         record_early_utility_failure(&app_state, initial_log_context.clone(), &e).await;
         return Err(e);
+    }
+
+    let request_patch_trace = load_runtime_request_patch_trace(&provider, Some(&model), &app_state)
+        .await
+        .map_err(|e| {
+            warn!(
+                "Failed to load request patch trace for utility model {}: {:?}",
+                model.id, e
+            );
+            e
+        })?;
+    initial_log_context.applied_request_patch_ids_json =
+        request_patch_trace.applied_request_patch_ids_json.clone();
+    initial_log_context.request_patch_summary_json =
+        request_patch_trace.request_patch_summary_json.clone();
+    if let Some(conflict_error) = request_patch_trace.conflict_error(&model.model_name) {
+        record_early_utility_failure(&app_state, initial_log_context.clone(), &conflict_error).await;
+        return Err(conflict_error);
     }
     let cost_catalog_version = get_cost_catalog_version(&model, &app_state).await;
     info!(
@@ -193,7 +212,7 @@ pub(super) async fn execute_utility_proxy(
                     &model,
                     data,
                     &original_headers,
-                    &app_state,
+                    &request_patch_trace.applied_rules,
                     &provider_credentials,
                     &operation.downstream_path,
                 )
@@ -216,12 +235,13 @@ pub(super) async fn execute_utility_proxy(
             (final_url, final_headers, final_body, provider_api_key_id)
         }
         UtilityProtocol::GeminiCompatible => {
-            let (final_url, final_headers, provider_api_key_id) =
+            let (final_url, final_headers, final_body_value, provider_api_key_id) =
                 match prepare_simple_gemini_request(
                     &provider,
                     &model,
+                    data,
                     &original_headers,
-                    &app_state,
+                    &request_patch_trace.applied_rules,
                     &provider_credentials,
                     &operation.downstream_path,
                     &query_params,
@@ -239,7 +259,7 @@ pub(super) async fn execute_utility_proxy(
                         return Err(e);
                     }
                 };
-            let final_body = Bytes::from(serde_json::to_vec(&data).map_err(|e| {
+            let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
                 protocol_transform_error("Failed to serialize final request body", e)
             })?);
             (final_url, final_headers, final_body, provider_api_key_id)

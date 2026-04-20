@@ -3,10 +3,11 @@ use bincode::{Decode, Encode};
 // These structures contain only the fields needed for cache operations,
 // reducing memory footprint and improving cache performance.
 
-use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::database::model_route::{ApiKeyModelOverride, ModelRouteDetail};
+use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::schema::enum_def::{
-    Action, FieldPlacement, FieldType, ProviderApiKeyMode, ProviderType, RuleScope,
+    Action, ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
+    RuleScope,
 };
 use serde::{Deserialize, Serialize, de};
 use serde_with::serde_as;
@@ -133,17 +134,84 @@ pub struct CacheApiKeyAclRule {
     pub description: Option<String>,
 }
 
-/// Cached custom field definition
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheCustomField {
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub enum RequestPatchRuleOrigin {
+    ProviderDirect,
+    ModelDirect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub enum RequestPatchExplainStatus {
+    Effective,
+    Overridden,
+    Conflicted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct CacheRequestPatchRule {
     pub id: i64,
-    pub field_name: String,
-    pub field_placement: FieldPlacement,
-    pub field_type: FieldType,
-    pub string_value: Option<String>,
-    pub integer_value: Option<i64>,
-    pub number_value: Option<f32>,
-    pub boolean_value: Option<bool>,
+    pub provider_id: Option<i64>,
+    pub model_id: Option<i64>,
+    pub placement: RequestPatchPlacement,
+    pub target: String,
+    pub operation: RequestPatchOperation,
+    pub value_json: Option<String>,
+    pub description: Option<String>,
+    pub is_enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct CacheInheritedRequestPatch {
+    pub rule: CacheRequestPatchRule,
+    pub overridden_by_rule_id: Option<i64>,
+    pub conflict_with_rule_ids: Vec<i64>,
+    pub is_effective: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct CacheResolvedRequestPatch {
+    pub placement: RequestPatchPlacement,
+    pub target: String,
+    pub operation: RequestPatchOperation,
+    pub value_json: Option<String>,
+    pub source_rule_id: i64,
+    pub source_origin: RequestPatchRuleOrigin,
+    pub overridden_rule_ids: Vec<i64>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct CacheRequestPatchConflict {
+    pub provider_rule_id: i64,
+    pub model_rule_id: i64,
+    pub placement: RequestPatchPlacement,
+    pub provider_target: String,
+    pub model_target: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct CacheRequestPatchExplainEntry {
+    pub rule: CacheRequestPatchRule,
+    pub origin: RequestPatchRuleOrigin,
+    pub status: RequestPatchExplainStatus,
+    pub effective_rule_id: Option<i64>,
+    pub conflict_with_rule_ids: Vec<i64>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct CacheResolvedModelRequestPatches {
+    pub provider_id: i64,
+    pub model_id: i64,
+    pub direct_rules: Vec<CacheRequestPatchRule>,
+    pub inherited_rules: Vec<CacheInheritedRequestPatch>,
+    pub effective_rules: Vec<CacheResolvedRequestPatch>,
+    pub explain: Vec<CacheRequestPatchExplainEntry>,
+    pub conflicts: Vec<CacheRequestPatchConflict>,
+    pub has_conflicts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -296,18 +364,29 @@ impl From<ApiKeyAclRule> for CacheApiKeyAclRule {
     }
 }
 
-impl From<crate::database::custom_field::CustomFieldDefinition> for CacheCustomField {
-    fn from(db: crate::database::custom_field::CustomFieldDefinition) -> Self {
-        Self {
+
+impl TryFrom<crate::database::request_patch::RequestPatchRuleResponse> for CacheRequestPatchRule {
+    type Error = serde_json::Error;
+
+    fn try_from(
+        db: crate::database::request_patch::RequestPatchRuleResponse,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: db.id,
-            field_name: db.field_name,
-            field_placement: db.field_placement,
-            field_type: db.field_type,
-            string_value: db.string_value,
-            integer_value: db.integer_value,
-            number_value: db.number_value,
-            boolean_value: db.boolean_value,
-        }
+            provider_id: db.provider_id,
+            model_id: db.model_id,
+            placement: db.placement,
+            target: db.target,
+            operation: db.operation,
+            value_json: db
+                .value_json
+                .map(|value| serde_json::to_string(&value))
+                .transpose()?,
+            description: db.description,
+            is_enabled: db.is_enabled,
+            created_at: db.created_at,
+            updated_at: db.updated_at,
+        })
     }
 }
 

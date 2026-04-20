@@ -5,10 +5,15 @@ use serde::Deserialize;
 use super::{DbResult, get_connection};
 use crate::controller::BaseError;
 use crate::database::model_route::ModelRoute;
+use crate::database::request_patch::{RequestPatchRule, RequestPatchRuleResponse};
+use crate::service::cache::types::{
+    CacheInheritedRequestPatch, CacheRequestPatchConflict, CacheRequestPatchExplainEntry,
+    CacheRequestPatchRule, CacheResolvedRequestPatch,
+};
+use crate::service::request_patch::resolve_effective_request_patches;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
-use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
 use serde::Serialize;
 
 // `Model` is the canonical provider-scoped candidate identity used at execution time.
@@ -55,7 +60,12 @@ pub struct UpdateModelData {
 #[derive(Debug, Serialize)]
 pub struct ModelDetail {
     pub model: Model,
-    pub custom_fields: Vec<ApiCustomFieldDefinition>,
+    pub request_patches: Vec<CacheRequestPatchRule>,
+    pub inherited_request_patches: Vec<CacheInheritedRequestPatch>,
+    pub effective_request_patches: Vec<CacheResolvedRequestPatch>,
+    pub request_patch_explain: Vec<CacheRequestPatchExplainEntry>,
+    pub request_patch_conflicts: Vec<CacheRequestPatchConflict>,
+    pub has_request_patch_conflicts: bool,
     pub route_references: Vec<ModelRoute>,
 }
 
@@ -71,6 +81,21 @@ pub struct ModelSummaryItem {
 }
 
 impl Model {
+    fn cache_request_patch_rules(
+        rows: Vec<RequestPatchRuleResponse>,
+    ) -> DbResult<Vec<CacheRequestPatchRule>> {
+        rows.into_iter()
+            .map(|row| {
+                CacheRequestPatchRule::try_from(row).map_err(|err| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to convert request patch rule into cache snapshot: {}",
+                        err
+                    )))
+                })
+            })
+            .collect()
+    }
+
     /// Creates a new model record.
     pub fn create(
         provider_id_val: i64,
@@ -206,11 +231,26 @@ impl Model {
 
     pub fn get_detail_by_id(model_id_val: i64) -> DbResult<ModelDetail> {
         let model = Model::get_by_id(model_id_val)?;
-        let custom_fields = CustomFieldDefinition::list_by_model_id(model_id_val)?;
+        let request_patches =
+            Self::cache_request_patch_rules(RequestPatchRule::list_by_model_id(model_id_val)?)?;
+        let provider_request_patches = Self::cache_request_patch_rules(
+            RequestPatchRule::list_by_provider_id(model.provider_id)?,
+        )?;
+        let resolved = resolve_effective_request_patches(
+            model.provider_id,
+            model_id_val,
+            &provider_request_patches,
+            &request_patches,
+        );
         let route_references = ModelRoute::list_by_model_id(model_id_val)?;
         Ok(ModelDetail {
             model,
-            custom_fields,
+            request_patches,
+            inherited_request_patches: resolved.inherited_rules,
+            effective_request_patches: resolved.effective_rules,
+            request_patch_explain: resolved.explain,
+            request_patch_conflicts: resolved.conflicts,
+            has_request_patch_conflicts: resolved.has_conflicts,
             route_references,
         })
     }
@@ -276,10 +316,7 @@ impl Model {
                 ))
                 .load::<(i64, i64, String, String, String, Option<String>, bool)>(conn)
                 .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list model summaries: {}",
-                        e
-                    )))
+                    BaseError::DatabaseFatal(Some(format!("Failed to list model summaries: {}", e)))
                 })?;
 
             Ok(rows
@@ -428,6 +465,7 @@ mod tests {
     use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
     use diesel::Connection;
     use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+    use serde_json::Value;
     use tempfile::tempdir;
 
     const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
@@ -626,7 +664,12 @@ mod tests {
                 created_at: 1,
                 updated_at: 1,
             },
-            custom_fields: vec![],
+            request_patches: vec![],
+            inherited_request_patches: vec![],
+            effective_request_patches: vec![],
+            request_patch_explain: vec![],
+            request_patch_conflicts: vec![],
+            has_request_patch_conflicts: false,
             route_references: vec![ModelRoute {
                 id: 31,
                 route_name: "alpha-route".to_string(),
@@ -647,5 +690,54 @@ mod tests {
         );
         assert!(detail.route_references[0].is_enabled);
         assert!(detail.route_references[0].expose_in_models);
+    }
+
+    #[test]
+    fn model_detail_contract_uses_request_patch_fields() {
+        let detail = ModelDetail {
+            model: Model {
+                id: 22,
+                provider_id: 11,
+                model_name: "alpha-model".to_string(),
+                real_model_name: None,
+                cost_catalog_id: None,
+                deleted_at: None,
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+            },
+            request_patches: vec![],
+            inherited_request_patches: vec![],
+            effective_request_patches: vec![],
+            request_patch_explain: vec![],
+            request_patch_conflicts: vec![],
+            has_request_patch_conflicts: false,
+            route_references: vec![],
+        };
+
+        let value = serde_json::to_value(detail).expect("model detail should serialize");
+        let object = value.as_object().expect("detail should serialize as object");
+        assert!(matches!(object.get("request_patches"), Some(Value::Array(_))));
+        assert!(matches!(
+            object.get("inherited_request_patches"),
+            Some(Value::Array(_))
+        ));
+        assert!(matches!(
+            object.get("effective_request_patches"),
+            Some(Value::Array(_))
+        ));
+        assert!(matches!(
+            object.get("request_patch_explain"),
+            Some(Value::Array(_))
+        ));
+        assert!(matches!(
+            object.get("request_patch_conflicts"),
+            Some(Value::Array(_))
+        ));
+        assert_eq!(
+            object.get("has_request_patch_conflicts"),
+            Some(&Value::Bool(false))
+        );
+        assert!(object.get("custom_fields").is_none());
     }
 }

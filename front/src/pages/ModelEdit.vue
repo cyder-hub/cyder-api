@@ -7,11 +7,9 @@ import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
 import { useProviderStore } from "@/store/providerStore";
 import type {
-  CustomFieldType,
-  CustomFieldItem,
   CostCatalogVersion,
-  CustomFieldDefinition,
   ModelDetailResponse,
+  RequestPatchRule,
 } from "@/store/types";
 
 import { Button } from "@/components/ui/button";
@@ -37,13 +35,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Copy, Loader2, Plus, Settings2, Trash2 } from "lucide-vue-next";
+import { Copy, Loader2, Plus, Settings2 } from "lucide-vue-next";
 import CostCatalogDialog from "./cost/CostCatalogDialog.vue";
 import CostComponentDialog from "./cost/CostComponentDialog.vue";
 import CostEditorDialog from "./cost/CostEditorDialog.vue";
 import CostTemplateDialog from "./cost/CostTemplateDialog.vue";
 import CostVersionDialog from "./cost/CostVersionDialog.vue";
 import { useCostPage } from "./cost/useCostPage";
+import ModelRequestPatchPanel from "@/components/model/ModelRequestPatchPanel.vue";
 
 interface EditingModelData {
   id: number;
@@ -52,7 +51,7 @@ interface EditingModelData {
   model_name: string;
   real_model_name: string;
   is_enabled: boolean;
-  custom_fields: CustomFieldItem[];
+  request_patches: RequestPatchRule[];
 }
 
 const { t } = useI18n();
@@ -63,42 +62,13 @@ const providerStore = useProviderStore();
 const modelId = parseInt(route.params.id as string);
 const isLoading = ref(true);
 const modelDetail = ref<ModelDetailResponse | null>(null);
-const allCustomFields = ref<CustomFieldItem[]>([]);
 const costManager = useCostPage();
 
 const editingData = ref<EditingModelData | null>(null);
-const selectedCustomFieldId = ref<string | null>(null);
 const shouldBindCreatedCatalog = ref(false);
 const currentProvider = computed(() =>
   providerStore.getProviderById(editingData.value?.provider_id),
 );
-
-const toEditableCustomField = (
-  field: Pick<
-    CustomFieldDefinition,
-    | "id"
-    | "name"
-    | "field_name"
-    | "string_value"
-    | "integer_value"
-    | "number_value"
-    | "boolean_value"
-    | "description"
-    | "field_type"
-  >,
-): CustomFieldItem => ({
-  id: field.id,
-  name: field.name,
-  field_name: field.field_name,
-  field_value:
-    (field.string_value ??
-      field.integer_value?.toString() ??
-      field.number_value?.toString() ??
-      field.boolean_value?.toString()) ||
-    "",
-  description: field.description,
-  field_type: (field.field_type?.toLowerCase() as CustomFieldType) || "unset",
-});
 
 const fetchData = async () => {
   if (isNaN(modelId)) {
@@ -111,18 +81,13 @@ const fetchData = async () => {
 
   try {
     isLoading.value = true;
-    const [detail, customFieldsRes] = await Promise.all([
+    const [detail] = await Promise.all([
       Api.getModelDetail(modelId),
-      Api.getCustomFieldList(),
       providerStore.fetchProviders(),
       costManager.refreshCostData(),
     ]);
 
     modelDetail.value = detail;
-
-    if (customFieldsRes && customFieldsRes.list) {
-      allCustomFields.value = customFieldsRes.list.map(toEditableCustomField);
-    }
 
     if (detail) {
       editingData.value = {
@@ -132,7 +97,7 @@ const fetchData = async () => {
         model_name: detail.model.model_name,
         real_model_name: detail.model.real_model_name ?? "",
         is_enabled: detail.model.is_enabled,
-        custom_fields: (detail.custom_fields || []).map(toEditableCustomField),
+        request_patches: detail.request_patches || [],
       };
     }
   } catch (error: unknown) {
@@ -155,14 +120,6 @@ const selectedCatalog = computed(() =>
 const selectedCatalogVersions = computed<CostCatalogVersion[]>(() =>
   selectedCatalog.value?.versions ?? [],
 );
-
-const availableCustomFields = computed(() => {
-  if (!editingData.value || !editingData.value.custom_fields) return [];
-  const linkedIds = new Set(editingData.value.custom_fields.map((f) => f.id));
-  return allCustomFields.value
-    .filter((f) => f.id && !linkedIds.has(f.id))
-    .map((f) => ({ ...f, displayName: f.name || f.field_name }));
-});
 
 const handleSaveModel = async () => {
   if (!editingData.value) return;
@@ -190,64 +147,6 @@ const handleSaveModel = async () => {
     const normalizedError = normalizeError(error, t("common.unknownError"));
     toastController.error(
       t("modelEditPage.alert.saveFailed", {
-        error: normalizedError.message,
-      }),
-    );
-  }
-};
-
-const handleLinkCustomField = async () => {
-  const fieldId = selectedCustomFieldId.value;
-  const modelIdVal = editingData.value?.id;
-
-  if (!fieldId) {
-    toastController.warn(t("modelEditPage.alert.selectFieldToLink"));
-    return;
-  }
-  if (!modelIdVal) {
-    toastController.warn(t("modelEditPage.alert.modelNotLoaded"));
-    return;
-  }
-
-  try {
-    await Api.linkCustomField({
-      custom_field_definition_id: parseInt(fieldId),
-      model_id: modelIdVal,
-      is_enabled: true,
-    });
-
-    selectedCustomFieldId.value = null;
-    toastController.success(t("modelEditPage.alert.linkSuccess"));
-    fetchData();
-  } catch (error: unknown) {
-    const normalizedError = normalizeError(error, t("common.unknownError"));
-    toastController.error(
-      t("modelEditPage.alert.linkFailed", {
-        error: normalizedError.message,
-      }),
-    );
-  }
-};
-
-const handleUnlinkCustomField = async (fieldId: number) => {
-  const modelIdVal = editingData.value?.id;
-  if (!modelIdVal) {
-    toastController.warn(t("modelEditPage.alert.modelIdNotFound"));
-    return;
-  }
-
-  try {
-    await Api.unlinkCustomField({
-      custom_field_definition_id: fieldId,
-      model_id: modelIdVal,
-    });
-
-    toastController.success(t("modelEditPage.alert.unlinkSuccess"));
-    fetchData();
-  } catch (error: unknown) {
-    const normalizedError = normalizeError(error, t("common.unknownError"));
-    toastController.error(
-      t("modelEditPage.alert.unlinkFailed", {
         error: normalizedError.message,
       }),
     );
@@ -668,151 +567,11 @@ onMounted(() => {
         </CardContent>
       </Card>
 
-      <!-- Custom Fields Section -->
-      <Card>
-        <CardHeader>
-          <CardTitle>{{ t("modelEditPage.sectionCustomFields") }}</CardTitle>
-        </CardHeader>
-        <CardContent class="space-y-4">
-          <div
-            v-if="
-              editingData.custom_fields && editingData.custom_fields.length > 0
-            "
-            class="space-y-3"
-          >
-            <div class="space-y-3 md:hidden">
-              <MobileCrudCard
-                v-for="field in editingData.custom_fields"
-                :key="field.id"
-                :title="field.field_name"
-                :description="field.description || '-'"
-              >
-                <div class="grid grid-cols-1 gap-3">
-                  <div class="space-y-1">
-                    <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                      {{ t("modelEditPage.tableHeaderFieldValue") }}
-                    </p>
-                    <p class="break-all font-mono text-sm text-gray-700">
-                      {{ field.field_value }}
-                    </p>
-                  </div>
-                  <div class="space-y-1">
-                    <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                      {{ t("modelEditPage.tableHeaderFieldType") }}
-                    </p>
-                    <div>
-                      <Badge variant="secondary" class="font-mono text-xs">
-                        {{ field.field_type }}
-                      </Badge>
-                    </div>
-                  </div>
-                </div>
-
-                <template #actions>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    class="w-full text-red-600 hover:bg-red-50 hover:text-red-700"
-                    @click="handleUnlinkCustomField(field.id!)"
-                  >
-                    <Trash2 class="mr-1.5 h-4 w-4" />
-                    {{ t("common.delete") }}
-                  </Button>
-                </template>
-              </MobileCrudCard>
-            </div>
-
-            <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
-              <Table>
-                <TableHeader>
-                  <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
-                    <TableHead
-                      class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                      >{{ t("modelEditPage.tableHeaderFieldName") }}</TableHead
-                    >
-                    <TableHead
-                      class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                      >{{ t("modelEditPage.tableHeaderFieldValue") }}</TableHead
-                    >
-                    <TableHead
-                      class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                      >{{ t("modelEditPage.tableHeaderDescription") }}</TableHead
-                    >
-                    <TableHead
-                      class="text-xs font-medium text-gray-500 uppercase tracking-wider"
-                      >{{ t("modelEditPage.tableHeaderFieldType") }}</TableHead
-                    >
-                    <TableHead class="w-[80px] text-right"></TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  <TableRow
-                    v-for="field in editingData.custom_fields"
-                    :key="field.id"
-                  >
-                    <TableCell class="text-sm font-medium text-gray-900">{{
-                      field.field_name
-                    }}</TableCell>
-                    <TableCell
-                      class="break-all text-sm font-mono text-gray-600"
-                      >{{ field.field_value }}</TableCell
-                    >
-                    <TableCell class="text-sm text-gray-500">{{
-                      field.description || "-"
-                    }}</TableCell>
-                    <TableCell>
-                      <Badge variant="secondary" class="font-mono text-xs">{{
-                        field.field_type
-                      }}</Badge>
-                    </TableCell>
-                    <TableCell class="text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class="text-gray-400 hover:text-red-600"
-                        @click="handleUnlinkCustomField(field.id!)"
-                      >
-                        <Trash2 class="h-3.5 w-3.5" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-
-          <div class="flex flex-col gap-3 border-t border-gray-100 pt-4 sm:flex-row sm:items-center">
-            <div class="w-full sm:max-w-sm">
-              <Select v-model="selectedCustomFieldId">
-                <SelectTrigger class="w-full">
-                  <SelectValue
-                    :placeholder="
-                      t('modelEditPage.placeholderSelectCustomField')
-                    "
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="field in availableCustomFields"
-                    :key="field.id"
-                    :value="field.id!.toString()"
-                  >
-                    {{ field.displayName }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <Button
-              variant="default"
-              class="w-full sm:w-auto"
-              @click="handleLinkCustomField"
-              :disabled="!selectedCustomFieldId"
-            >
-              {{ t("modelEditPage.buttonAddCustomField") }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        <ModelRequestPatchPanel
+          :model-id="editingData.id"
+          :provider-name="currentProvider?.name"
+          :provider-key="currentProvider?.provider_key"
+        />
 
         <div class="flex flex-col gap-2 border-t border-gray-100 pt-4 mt-2 sm:flex-row sm:justify-end">
           <Button

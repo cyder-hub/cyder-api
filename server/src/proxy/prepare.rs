@@ -3,16 +3,21 @@ use std::{collections::HashMap, sync::Arc};
 use axum::http::{HeaderMap, HeaderValue};
 use reqwest::{
     Url,
-    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST},
+    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue as ReqwestHeaderValue},
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+use serde::Serialize;
 
 use super::ProxyError;
 use crate::{
-    schema::enum_def::{FieldPlacement, FieldType, LlmApiType, ProviderType},
+    schema::enum_def::{LlmApiType, ProviderType, RequestPatchOperation, RequestPatchPlacement},
     service::{
         app_state::{AppState, GroupItemSelectionStrategy},
-        cache::types::{CacheCustomField, CacheModel, CacheModelRoute, CacheProvider},
+        cache::types::{
+            CacheModel, CacheModelRoute, CacheProvider, CacheRequestPatchConflict,
+            CacheRequestPatchExplainEntry, CacheResolvedRequestPatch,
+        },
+        request_patch::resolve_effective_request_patches,
         transform::finalize_request_data,
         vertex::get_vertex_token,
     },
@@ -25,6 +30,45 @@ pub struct PreparedGenerationRequest {
     pub final_headers: HeaderMap,
     pub final_body_value: Value,
     pub provider_api_key_id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeRequestPatchTrace {
+    pub applied_rules: Vec<CacheResolvedRequestPatch>,
+    pub conflicts: Vec<CacheRequestPatchConflict>,
+    pub has_conflicts: bool,
+    pub applied_request_patch_ids_json: Option<String>,
+    pub request_patch_summary_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestPatchTraceSummary {
+    provider_id: i64,
+    model_id: Option<i64>,
+    effective_rules: Vec<CacheResolvedRequestPatch>,
+    explain: Vec<CacheRequestPatchExplainEntry>,
+    conflicts: Vec<CacheRequestPatchConflict>,
+    has_conflicts: bool,
+}
+
+impl RuntimeRequestPatchTrace {
+    pub(crate) fn conflict_error(&self, model_name: &str) -> Option<ProxyError> {
+        if !self.has_conflicts {
+            return None;
+        }
+
+        let reasons = self
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.reason.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        Some(ProxyError::InternalError(format!(
+            "Request patch conflicts prevent model '{}' from being used: {}",
+            model_name, reasons
+        )))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,47 +179,408 @@ pub(super) async fn resolve_provider_credentials(
     })
 }
 
-/// Fetches custom fields for both the provider and model, merging them with
-/// model-level fields taking precedence over provider-level fields (by ID).
-async fn fetch_combined_custom_fields(
+fn describe_json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn parse_request_patch_value(rule: &CacheResolvedRequestPatch) -> Result<Value, ProxyError> {
+    let raw = rule.value_json.as_ref().ok_or_else(|| {
+        ProxyError::InternalError(format!(
+            "request patch rule {} is missing value_json for SET",
+            rule.source_rule_id
+        ))
+    })?;
+
+    serde_json::from_str(raw).map_err(|err| {
+        ProxyError::InternalError(format!(
+            "request patch rule {} has invalid value_json: {}",
+            rule.source_rule_id, err
+        ))
+    })
+}
+
+fn parse_json_pointer_segments(pointer: &str) -> Result<Vec<String>, ProxyError> {
+    if pointer.is_empty() || !pointer.starts_with('/') {
+        return Err(ProxyError::InternalError(format!(
+            "BODY request patch target '{}' is not a valid JSON Pointer",
+            pointer
+        )));
+    }
+
+    pointer
+        .split('/')
+        .skip(1)
+        .map(|segment| {
+            let mut decoded = String::with_capacity(segment.len());
+            let mut chars = segment.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '~' {
+                    match chars.next() {
+                        Some('0') => decoded.push('~'),
+                        Some('1') => decoded.push('/'),
+                        _ => {
+                            return Err(ProxyError::InternalError(format!(
+                                "BODY request patch target '{}' contains an invalid JSON Pointer escape",
+                                pointer
+                            )));
+                        }
+                    }
+                } else {
+                    decoded.push(ch);
+                }
+            }
+            Ok(decoded)
+        })
+        .collect()
+}
+
+fn parse_array_index(token: &str, pointer: &str) -> Result<usize, ProxyError> {
+    token.parse::<usize>().map_err(|_| {
+        ProxyError::InternalError(format!(
+            "BODY request patch target '{}' references invalid array index '{}'",
+            pointer, token
+        ))
+    })
+}
+
+fn set_body_pointer_value(
+    current: &mut Value,
+    segments: &[String],
+    pointer: &str,
+    value: &mut Option<Value>,
+) -> Result<(), ProxyError> {
+    let segment = &segments[0];
+
+    if segments.len() == 1 {
+        let final_value = value
+            .take()
+            .expect("request patch final value should only be consumed once");
+        match current {
+            Value::Object(map) => {
+                map.insert(segment.clone(), final_value);
+                Ok(())
+            }
+            Value::Array(items) => {
+                let index = parse_array_index(segment, pointer)?;
+                let len = items.len();
+                let slot = items.get_mut(index).ok_or_else(|| {
+                    ProxyError::InternalError(format!(
+                        "BODY request patch target '{}' is out of bounds for an array of length {}",
+                        pointer,
+                        len
+                    ))
+                })?;
+                *slot = final_value;
+                Ok(())
+            }
+            Value::Null => {
+                *current = Value::Object(Map::new());
+                if let Value::Object(map) = current {
+                    map.insert(segment.clone(), final_value);
+                }
+                Ok(())
+            }
+            other => Err(ProxyError::InternalError(format!(
+                "BODY request patch target '{}' cannot write through existing {}",
+                pointer,
+                describe_json_kind(other)
+            ))),
+        }
+    } else {
+        match current {
+            Value::Object(map) => {
+                let child = map.entry(segment.clone()).or_insert(Value::Null);
+                set_body_pointer_value(child, &segments[1..], pointer, value)
+            }
+            Value::Array(items) => {
+                let index = parse_array_index(segment, pointer)?;
+                let len = items.len();
+                let child = items.get_mut(index).ok_or_else(|| {
+                    ProxyError::InternalError(format!(
+                        "BODY request patch target '{}' is out of bounds for an array of length {}",
+                        pointer,
+                        len
+                    ))
+                })?;
+                set_body_pointer_value(child, &segments[1..], pointer, value)
+            }
+            Value::Null => {
+                *current = Value::Object(Map::new());
+                if let Value::Object(map) = current {
+                    let child = map.entry(segment.clone()).or_insert(Value::Null);
+                    return set_body_pointer_value(child, &segments[1..], pointer, value);
+                }
+                unreachable!("BODY request patch SET should have promoted null to object");
+            }
+            other => Err(ProxyError::InternalError(format!(
+                "BODY request patch target '{}' cannot create children under existing {}",
+                pointer,
+                describe_json_kind(other)
+            ))),
+        }
+    }
+}
+
+fn remove_body_pointer_value(
+    current: &mut Value,
+    segments: &[String],
+    pointer: &str,
+) -> Result<(), ProxyError> {
+    let segment = &segments[0];
+
+    if segments.len() == 1 {
+        match current {
+            Value::Object(map) => {
+                map.remove(segment);
+                Ok(())
+            }
+            Value::Array(items) => {
+                let index = parse_array_index(segment, pointer)?;
+                if index >= items.len() {
+                    return Ok(());
+                }
+                Err(ProxyError::InternalError(format!(
+                    "BODY request patch target '{}' cannot remove array elements because that rewrites message structure",
+                    pointer
+                )))
+            }
+            _ => Ok(()),
+        }
+    } else {
+        match current {
+            Value::Object(map) => match map.get_mut(segment) {
+                Some(child) => remove_body_pointer_value(child, &segments[1..], pointer),
+                None => Ok(()),
+            },
+            Value::Array(items) => {
+                let index = parse_array_index(segment, pointer)?;
+                match items.get_mut(index) {
+                    Some(child) => remove_body_pointer_value(child, &segments[1..], pointer),
+                    None => Ok(()),
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+fn scalar_request_patch_value(rule: &CacheResolvedRequestPatch) -> Result<String, ProxyError> {
+    let value = parse_request_patch_value(rule)?;
+    match value {
+        Value::String(text) => Ok(text),
+        Value::Number(number) => Ok(number.to_string()),
+        Value::Bool(boolean) => Ok(boolean.to_string()),
+        Value::Null => Ok("null".to_string()),
+        other => Err(ProxyError::InternalError(format!(
+            "{:?} request patch target '{}' requires a scalar JSON value, got {}",
+            rule.placement,
+            rule.target,
+            describe_json_kind(&other)
+        ))),
+    }
+}
+
+fn apply_query_request_patch(url: &mut Url, rule: &CacheResolvedRequestPatch) -> Result<(), ProxyError> {
+    let mut existing_pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .filter(|(key, _)| key != &rule.target)
+        .collect();
+
+    if rule.operation == RequestPatchOperation::Set {
+        existing_pairs.push((rule.target.clone(), scalar_request_patch_value(rule)?));
+    }
+
+    let mut query_pairs = url.query_pairs_mut();
+    query_pairs.clear();
+    for (key, value) in existing_pairs {
+        query_pairs.append_pair(&key, &value);
+    }
+
+    Ok(())
+}
+
+fn apply_header_request_patch(
+    headers: &mut HeaderMap,
+    rule: &CacheResolvedRequestPatch,
+) -> Result<(), ProxyError> {
+    let header_name = HeaderName::from_bytes(rule.target.as_bytes()).map_err(|err| {
+        ProxyError::InternalError(format!(
+            "request patch rule {} has invalid header target '{}': {}",
+            rule.source_rule_id, rule.target, err
+        ))
+    })?;
+
+    match rule.operation {
+        RequestPatchOperation::Remove => {
+            headers.remove(&header_name);
+            Ok(())
+        }
+        RequestPatchOperation::Set => {
+            let header_value =
+                ReqwestHeaderValue::from_str(&scalar_request_patch_value(rule)?).map_err(|err| {
+                    ProxyError::InternalError(format!(
+                        "request patch rule {} has invalid header value for '{}': {}",
+                        rule.source_rule_id, rule.target, err
+                    ))
+                })?;
+            headers.insert(header_name, header_value);
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn apply_request_patches(
+    data: &mut Value,
+    url: &mut Url,
+    headers: &mut HeaderMap,
+    request_patches: &[CacheResolvedRequestPatch],
+) -> Result<(), ProxyError> {
+    for rule in request_patches {
+        debug!(
+            "Applying request patch {} to {:?} '{}'",
+            rule.source_rule_id, rule.placement, rule.target
+        );
+        match rule.placement {
+            RequestPatchPlacement::Header => apply_header_request_patch(headers, rule)?,
+            RequestPatchPlacement::Query => apply_query_request_patch(url, rule)?,
+            RequestPatchPlacement::Body => {
+                let segments = parse_json_pointer_segments(&rule.target)?;
+                match rule.operation {
+                    RequestPatchOperation::Set => {
+                        let mut value = Some(parse_request_patch_value(rule)?);
+                        set_body_pointer_value(data, &segments, &rule.target, &mut value)?;
+                    }
+                    RequestPatchOperation::Remove => {
+                        remove_body_pointer_value(data, &segments, &rule.target)?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn build_runtime_request_patch_trace(
+    provider_id: i64,
+    model_id: Option<i64>,
+    effective_rules: Vec<CacheResolvedRequestPatch>,
+    explain: Vec<CacheRequestPatchExplainEntry>,
+    conflicts: Vec<CacheRequestPatchConflict>,
+    has_conflicts: bool,
+) -> Result<RuntimeRequestPatchTrace, ProxyError> {
+    let applied_rules = if has_conflicts {
+        Vec::new()
+    } else {
+        effective_rules.clone()
+    };
+
+    let applied_request_patch_ids_json = serde_json::to_string(
+        &applied_rules
+            .iter()
+            .map(|rule| rule.source_rule_id)
+            .collect::<Vec<_>>(),
+    )
+    .map(Some)
+    .map_err(|err| {
+        ProxyError::InternalError(format!(
+            "Failed to serialize applied request patch IDs: {}",
+            err
+        ))
+    })?;
+
+    let request_patch_summary_json = serde_json::to_string(&RequestPatchTraceSummary {
+        provider_id,
+        model_id,
+        effective_rules,
+        explain,
+        conflicts: conflicts.clone(),
+        has_conflicts,
+    })
+    .map(Some)
+    .map_err(|err| {
+        ProxyError::InternalError(format!(
+            "Failed to serialize request patch summary: {}",
+            err
+        ))
+    })?;
+
+    Ok(RuntimeRequestPatchTrace {
+        applied_rules,
+        conflicts,
+        has_conflicts,
+        applied_request_patch_ids_json,
+        request_patch_summary_json,
+    })
+}
+
+pub(crate) async fn load_runtime_request_patch_trace(
     provider: &CacheProvider,
-    model: &CacheModel,
+    model: Option<&CacheModel>,
     app_state: &Arc<AppState>,
-) -> Result<Vec<Arc<CacheCustomField>>, ProxyError> {
-    let provider_cfs = app_state
-        .get_custom_fields_by_provider_id(provider.id)
+) -> Result<RuntimeRequestPatchTrace, ProxyError> {
+    if let Some(model) = model {
+        let resolved = app_state
+            .get_model_effective_request_patches(model.id)
+            .await
+            .map_err(|err| {
+                error!(
+                    "Failed to get effective request patches for model_id {}: {:?}",
+                    model.id, err
+                );
+                ProxyError::InternalError(format!(
+                    "Failed to retrieve effective request patches for model '{}'",
+                    model.model_name
+                ))
+            })?
+            .ok_or_else(|| {
+                ProxyError::InternalError(format!(
+                    "Effective request patch snapshot is missing for model '{}'",
+                    model.model_name
+                ))
+            })?;
+
+        return build_runtime_request_patch_trace(
+            provider.id,
+            Some(model.id),
+            resolved.effective_rules.clone(),
+            resolved.explain.clone(),
+            resolved.conflicts.clone(),
+            resolved.has_conflicts,
+        );
+    }
+
+    let provider_rules = app_state
+        .get_provider_request_patch_rules(provider.id)
         .await
-        .map_err(|e| {
+        .map_err(|err| {
             error!(
-                "Failed to get custom fields for provider_id {}: {:?}",
-                provider.id, e
+                "Failed to get provider request patches for provider_id {}: {:?}",
+                provider.id, err
             );
-            ProxyError::InternalError("Failed to retrieve custom fields for provider".to_string())
-        })?;
-    let model_cfs = app_state
-        .get_custom_fields_by_model_id(model.id)
-        .await
-        .map_err(|e| {
-            error!(
-                "Failed to get custom fields for model_id {}: {:?}",
-                model.id, e
-            );
-            ProxyError::InternalError("Failed to retrieve custom fields for model".to_string())
+            ProxyError::InternalError(format!(
+                "Failed to retrieve request patches for provider '{}'",
+                provider.name
+            ))
         })?;
 
-    let mut combined_map: HashMap<i64, Arc<CacheCustomField>> = HashMap::new();
-    for cf in provider_cfs {
-        combined_map.insert(cf.id, cf);
-    }
-    for cf in model_cfs {
-        combined_map.insert(cf.id, cf);
-    }
-    let fields: Vec<Arc<CacheCustomField>> = combined_map.into_values().collect();
-    debug!(
-        "Fetched {} custom fields for provider and model",
-        fields.len()
-    );
-    Ok(fields)
+    let resolved = resolve_effective_request_patches(provider.id, 0, &provider_rules, &[]);
+    build_runtime_request_patch_trace(
+        provider.id,
+        None,
+        resolved.effective_rules,
+        resolved.explain,
+        resolved.conflicts,
+        resolved.has_conflicts,
+    )
 }
 
 /// Builds headers for a Gemini-native request.
@@ -269,13 +674,19 @@ fn resolve_real_model_name(model: &CacheModel) -> &str {
         .unwrap_or(&model.model_name)
 }
 
+fn ensure_request_body_object(data: &mut Value) {
+    if !matches!(data, Value::Object(_)) {
+        *data = Value::Object(Map::new());
+    }
+}
+
 // Prepares all elements for the downstream LLM request including URL, headers, and body.
 pub async fn prepare_llm_request(
     provider: &CacheProvider,
     model: &CacheModel,
     mut data: Value, // Takes ownership of data
     original_headers: &HeaderMap,
-    app_state: &Arc<AppState>,
+    request_patches: &[CacheResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
     path: &str,
 ) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
@@ -284,23 +695,18 @@ pub async fn prepare_llm_request(
         provider.name, model.model_name
     );
 
-    let custom_fields = fetch_combined_custom_fields(provider, model, app_state).await?;
-
-    // Prepare URL, headers, and apply custom fields
     let target_url = format!("{}/{}", provider.endpoint, path);
     let mut url = Url::parse(&target_url)
         .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
     let mut headers = build_new_headers(original_headers, &provider_credentials.request_key)?;
 
-    handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
-
-    // Set the real model name in the request body
-    let real_model_name_str = resolve_real_model_name(model);
-    if let Some(obj) = data.as_object_mut() {
-        obj.insert("model".to_string(), json!(real_model_name_str));
+    ensure_request_body_object(&mut data);
+    if let Value::Object(obj) = &mut data {
+        obj.insert("model".to_string(), json!(resolve_real_model_name(model)));
     }
 
     data = finalize_request_data(data, LlmApiType::Openai, &provider.provider_type, path);
+    apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)?;
 
     Ok((url.to_string(), headers, data, provider_credentials.key_id))
 }
@@ -310,7 +716,7 @@ pub async fn prepare_generation_request(
     model: &CacheModel,
     data: Value,
     original_headers: &HeaderMap,
-    app_state: &Arc<AppState>,
+    request_patches: &[CacheResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
     target_api_type: LlmApiType,
     is_stream: bool,
@@ -324,7 +730,7 @@ pub async fn prepare_generation_request(
                     model,
                     data,
                     original_headers,
-                    app_state,
+                    request_patches,
                     provider_credentials,
                     path,
                 )
@@ -343,7 +749,7 @@ pub async fn prepare_generation_request(
                     model,
                     data,
                     original_headers,
-                    app_state,
+                    request_patches,
                     provider_credentials,
                     is_stream,
                     params,
@@ -361,30 +767,32 @@ pub async fn prepare_generation_request(
     Ok(prepared)
 }
 
-// Prepares a simple Gemini request for utility endpoints, without custom fields or body transformation.
+// Prepares a simple Gemini request for utility endpoints with request patch application.
 pub async fn prepare_simple_gemini_request(
     provider: &CacheProvider,
     model: &CacheModel,
+    mut data: Value,
     original_headers: &HeaderMap,
-    _app_state: &Arc<AppState>,
+    request_patches: &[CacheResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
     action: &str,
     params: &HashMap<String, String>,
-) -> Result<(String, HeaderMap, i64), ProxyError> {
+) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
     debug!(
         "Preparing simple Gemini request for provider: {}, model: {}, action: {}",
         provider.name, model.model_name, action
     );
 
     let real_model_name = resolve_real_model_name(model);
-    let url = build_gemini_url(provider, real_model_name, action, params, false)?;
-    let headers = build_gemini_headers(
+    let mut url = build_gemini_url(provider, real_model_name, action, params, false)?;
+    let mut headers = build_gemini_headers(
         original_headers,
         provider,
         &provider_credentials.request_key,
     );
+    apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)?;
 
-    Ok((url.to_string(), headers, provider_credentials.key_id))
+    Ok((url.to_string(), headers, data, provider_credentials.key_id))
 }
 
 // Prepares all elements for a downstream Gemini LLM request.
@@ -393,7 +801,7 @@ pub async fn prepare_gemini_llm_request(
     model: &CacheModel,
     mut data: Value,
     original_headers: &HeaderMap,
-    app_state: &Arc<AppState>,
+    request_patches: &[CacheResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
     is_stream: bool,
     params: &HashMap<String, String>,
@@ -402,8 +810,6 @@ pub async fn prepare_gemini_llm_request(
         "Preparing Gemini LLM request for provider: {}, model: {}",
         provider.name, model.model_name
     );
-
-    let custom_fields = fetch_combined_custom_fields(provider, model, app_state).await?;
 
     let real_model_name = resolve_real_model_name(model);
     let action = if is_stream {
@@ -418,7 +824,7 @@ pub async fn prepare_gemini_llm_request(
         &provider_credentials.request_key,
     );
 
-    handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
+    apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)?;
 
     Ok((url.to_string(), headers, data, provider_credentials.key_id))
 }
@@ -428,183 +834,6 @@ fn parse_provider_model(pm: &str) -> (&str, &str) {
     let provider = parts.next().unwrap_or("");
     let model_id = parts.next().unwrap_or("");
     (provider, model_id)
-}
-
-// Sets or removes a value in a nested JSON object based on a dot-separated path.
-fn set_nested_value(data: &mut Value, path: &str, value_to_set: Option<Value>) {
-    if path.is_empty() {
-        return;
-    }
-    let mut parts: Vec<&str> = path.split('.').collect();
-    let key = match parts.pop() {
-        Some(k) => k,
-        None => return, // Should not happen if path is not empty
-    };
-
-    let mut current_level = data;
-    for part in parts {
-        if !current_level.is_object() {
-            *current_level = Value::Object(serde_json::Map::new());
-        }
-        let obj = current_level.as_object_mut().unwrap();
-        let next_level = obj
-            .entry(part.to_string())
-            .or_insert(Value::Object(serde_json::Map::new()));
-        if !next_level.is_object() {
-            *next_level = Value::Object(serde_json::Map::new());
-        }
-        current_level = next_level;
-    }
-
-    if let Some(obj) = current_level.as_object_mut() {
-        match value_to_set {
-            Some(v) => {
-                obj.insert(key.to_string(), v);
-            }
-            None => {
-                obj.remove(key);
-            }
-        }
-    }
-}
-
-pub fn handle_custom_fields(
-    data: &mut Value,        // For "BODY"
-    url: &mut Url,           // For "QUERY"
-    headers: &mut HeaderMap, // For "HEADER" (reqwest::header::HeaderMap)
-    custom_fields: &Vec<Arc<CacheCustomField>>,
-) {
-    for cf in custom_fields {
-        debug!(
-            "Applying custom field '{}' to {:?}",
-            cf.field_name, cf.field_placement
-        );
-        match cf.field_placement {
-            FieldPlacement::Body => {
-                let value_opt: Option<Value> = match cf.field_type {
-                    FieldType::Unset => {
-                        set_nested_value(data, &cf.field_name, None);
-                        continue;
-                    }
-                    FieldType::String => cf.string_value.clone().map(Value::String),
-                    FieldType::Integer => cf.integer_value.map(|v| Value::Number(v.into())),
-                    FieldType::Number => cf.number_value.map(|v| {
-                        serde_json::Number::from_f64(v as f64)
-                            .map(Value::Number)
-                            .unwrap_or(Value::Null)
-                    }),
-                    FieldType::Boolean => cf.boolean_value.map(Value::Bool),
-                    FieldType::JsonString => cf.string_value.as_ref().and_then(|s| {
-                        serde_json::from_str(s)
-                            .map_err(|e| {
-                                error!(
-                                    "Failed to parse JSON_STRING custom field '{}' for BODY: {}. Value: '{}'",
-                                    cf.field_name, e, s
-                                );
-                            })
-                            .ok()
-                    }),
-                };
-
-                if let Some(value) = value_opt {
-                    set_nested_value(data, &cf.field_name, Some(value));
-                }
-            }
-            FieldPlacement::Query => {
-                let field_name_key = cf.field_name.clone();
-                let mut new_value_opt: Option<String> = None;
-
-                match cf.field_type {
-                    FieldType::Unset => { /* new_value_opt remains None, effectively removing */ }
-                    FieldType::String => {
-                        new_value_opt = cf.string_value.clone();
-                    }
-                    FieldType::Integer => {
-                        new_value_opt = cf.integer_value.map(|v| v.to_string());
-                    }
-                    FieldType::Number => {
-                        new_value_opt = cf.number_value.map(|v| v.to_string());
-                    }
-                    FieldType::Boolean => {
-                        new_value_opt = cf.boolean_value.map(|v| v.to_string());
-                    }
-                    FieldType::JsonString => {
-                        new_value_opt = cf.string_value.clone();
-                    } // JSON as string for query
-                }
-
-                // Rebuild query parameters to ensure replacement
-                // First, collect existing pairs to drop the immutable borrow of url.
-                let existing_pairs: Vec<(String, String)> = url
-                    .query_pairs()
-                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                    .filter(|(k, _)| k != &field_name_key) // Keep pairs not matching current field name
-                    .collect();
-
-                // Now, get a mutable borrow to reconstruct.
-                let mut query_pairs_mut = url.query_pairs_mut();
-                query_pairs_mut.clear(); // Clear existing before re-adding filtered/new ones
-
-                for (k, v) in existing_pairs {
-                    query_pairs_mut.append_pair(&k, &v);
-                }
-
-                if let Some(new_val_str) = new_value_opt {
-                    query_pairs_mut.append_pair(&field_name_key, &new_val_str);
-                }
-                // UrlQueryMut updates the URL when it's dropped (goes out of scope)
-            }
-            FieldPlacement::Header => {
-                match cf.field_type {
-                    FieldType::Unset => {
-                        headers.remove(&cf.field_name);
-                    }
-                    _ => {
-                        // For all other types, convert to string and set header
-                        let value_str_opt: Option<String> = match cf.field_type {
-                            FieldType::String => cf.string_value.clone(),
-                            FieldType::Integer => cf.integer_value.map(|v| v.to_string()),
-                            FieldType::Number => cf.number_value.map(|v| v.to_string()),
-                            FieldType::Boolean => cf.boolean_value.map(|v| v.to_string()),
-                            FieldType::JsonString => cf.string_value.clone(), // JSON as string for header
-                            _ => {
-                                debug!(
-                                    "Unknown custom field type '{:?}' for field '{}' in HEADER",
-                                    cf.field_type, cf.field_name
-                                );
-                                None
-                            }
-                        };
-
-                        if let Some(value_str) = value_str_opt {
-                            match reqwest::header::HeaderName::from_bytes(cf.field_name.as_bytes())
-                            {
-                                Ok(header_name) => {
-                                    match reqwest::header::HeaderValue::from_str(&value_str) {
-                                        Ok(header_value) => {
-                                            headers.insert(header_name, header_value);
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "Invalid header value for custom field '{}': {}. Value: '{}'",
-                                                cf.field_name, e, value_str
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Invalid header name for custom field '{}': {}",
-                                        cf.field_name, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn select_primary_route_candidate(route: &CacheModelRoute) -> Result<i64, String> {
@@ -801,34 +1030,19 @@ pub async fn resolve_requested_model(
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedNameScope, handle_custom_fields, parse_provider_model, resolve_real_model_name,
-        select_generation_prepare_kind, select_primary_route_candidate, set_nested_value,
+        ResolvedNameScope, apply_request_patches, parse_provider_model, resolve_real_model_name,
+        select_generation_prepare_kind, select_primary_route_candidate,
     };
     use crate::{
-        schema::enum_def::{FieldPlacement, FieldType, LlmApiType},
-        service::cache::types::{CacheCustomField, CacheModelRoute, CacheModelRouteCandidate},
+        schema::enum_def::{LlmApiType, RequestPatchOperation, RequestPatchPlacement},
+        service::cache::types::{
+            CacheModelRoute, CacheModelRouteCandidate, CacheResolvedRequestPatch,
+            RequestPatchRuleOrigin,
+        },
     };
     use axum::http::{HeaderMap, HeaderValue};
     use reqwest::Url;
     use serde_json::{Value, json};
-    use std::sync::Arc;
-
-    fn custom_field(
-        field_name: &str,
-        field_placement: FieldPlacement,
-        field_type: FieldType,
-    ) -> CacheCustomField {
-        CacheCustomField {
-            id: 1,
-            field_name: field_name.to_string(),
-            field_placement,
-            field_type,
-            string_value: None,
-            integer_value: None,
-            number_value: None,
-            boolean_value: None,
-        }
-    }
 
     fn model(
         model_name: &str,
@@ -865,75 +1079,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_nested_value_creates_and_overwrites_nested_path() {
-        let mut data = json!({
-            "existing": "value",
-            "metadata": {
-                "mode": "old"
-            }
-        });
-
-        set_nested_value(&mut data, "metadata.config.mode", Some(json!("strict")));
-        set_nested_value(&mut data, "metadata.mode", Some(json!("new")));
-
-        assert_eq!(
-            data,
-            json!({
-                "existing": "value",
-                "metadata": {
-                    "mode": "new",
-                    "config": {
-                        "mode": "strict"
-                    }
-                }
-            })
-        );
+    fn request_patch(
+        id: i64,
+        placement: RequestPatchPlacement,
+        target: &str,
+        operation: RequestPatchOperation,
+        value: Option<Value>,
+    ) -> CacheResolvedRequestPatch {
+        CacheResolvedRequestPatch {
+            placement,
+            target: target.to_string(),
+            operation,
+            value_json: value.map(|item| serde_json::to_string(&item).unwrap()),
+            source_rule_id: id,
+            source_origin: RequestPatchRuleOrigin::ProviderDirect,
+            overridden_rule_ids: Vec::new(),
+            description: None,
+        }
     }
 
     #[test]
-    fn set_nested_value_removes_key_without_touching_siblings() {
-        let mut data = json!({
-            "metadata": {
-                "remove_me": "value",
-                "keep_me": true
-            }
-        });
-
-        set_nested_value(&mut data, "metadata.remove_me", None);
-
-        assert_eq!(
-            data,
-            json!({
-                "metadata": {
-                    "keep_me": true
-                }
-            })
-        );
-    }
-
-    #[test]
-    fn set_nested_value_replaces_non_object_intermediate_nodes() {
-        let mut data = json!({
-            "metadata": "raw"
-        });
-
-        set_nested_value(&mut data, "metadata.flags.enabled", Some(json!(true)));
-
-        assert_eq!(
-            data,
-            json!({
-                "metadata": {
-                    "flags": {
-                        "enabled": true
-                    }
-                }
-            })
-        );
-    }
-
-    #[test]
-    fn handle_custom_fields_updates_body_and_unsets_nested_value() {
+    fn apply_request_patches_creates_missing_body_parents_and_removes_object_fields() {
         let mut data = json!({
             "generation_config": {
                 "temperature": 0.2,
@@ -942,36 +1108,35 @@ mod tests {
         });
         let mut url = Url::parse("https://example.com/v1/chat").unwrap();
         let mut headers = HeaderMap::new();
-
-        let mut temperature_field = custom_field(
-            "generation_config.temperature",
-            FieldPlacement::Body,
-            FieldType::Number,
-        );
-        temperature_field.number_value = Some(0.8);
-
-        let mut extra_body_field = custom_field(
-            "generation_config.response_schema",
-            FieldPlacement::Body,
-            FieldType::JsonString,
-        );
-        extra_body_field.id = 2;
-        extra_body_field.string_value = Some(r#"{"type":"object","strict":true}"#.to_string());
-
-        let mut unset_field = custom_field(
-            "generation_config.remove_me",
-            FieldPlacement::Body,
-            FieldType::Unset,
-        );
-        unset_field.id = 3;
-
-        let custom_fields = vec![
-            Arc::new(temperature_field),
-            Arc::new(extra_body_field),
-            Arc::new(unset_field),
+        let request_patches = vec![
+            request_patch(
+                1,
+                RequestPatchPlacement::Body,
+                "/generation_config/temperature",
+                RequestPatchOperation::Set,
+                Some(json!(0.8)),
+            ),
+            request_patch(
+                2,
+                RequestPatchPlacement::Body,
+                "/generation_config/response_schema",
+                RequestPatchOperation::Set,
+                Some(json!({
+                    "type": "object",
+                    "strict": true
+                })),
+            ),
+            request_patch(
+                3,
+                RequestPatchPlacement::Body,
+                "/generation_config/remove_me",
+                RequestPatchOperation::Remove,
+                None,
+            ),
         ];
 
-        handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
+        apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
+            .expect("request patches should apply");
 
         assert_eq!(
             data["generation_config"]["response_schema"],
@@ -986,58 +1151,59 @@ mod tests {
     }
 
     #[test]
-    fn handle_custom_fields_skips_invalid_body_json_string() {
+    fn apply_request_patches_rejects_body_type_conflicts_without_rewriting_structure() {
         let mut data = json!({
-            "metadata": {
-                "keep": "value"
-            }
+            "metadata": "raw"
         });
         let mut url = Url::parse("https://example.com/v1/chat").unwrap();
         let mut headers = HeaderMap::new();
+        let request_patches = vec![request_patch(
+            1,
+            RequestPatchPlacement::Body,
+            "/metadata/flags/enabled",
+            RequestPatchOperation::Set,
+            Some(json!(true)),
+        )];
 
-        let mut invalid_json_field = custom_field(
-            "metadata.invalid",
-            FieldPlacement::Body,
-            FieldType::JsonString,
-        );
-        invalid_json_field.string_value = Some("{oops".to_string());
+        let err = apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
+            .expect_err("scalar parent should fail closed");
 
-        let custom_fields = vec![Arc::new(invalid_json_field)];
-        handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
-
-        assert_eq!(
-            data,
-            json!({
-                "metadata": {
-                    "keep": "value"
-                }
-            })
-        );
+        assert!(matches!(err, crate::proxy::ProxyError::InternalError(_)));
+        assert_eq!(data, json!({ "metadata": "raw" }));
     }
 
     #[test]
-    fn handle_custom_fields_replaces_query_values_and_supports_unset() {
+    fn apply_request_patches_replaces_query_values_and_supports_remove() {
         let mut data = Value::Null;
         let mut url =
             Url::parse("https://example.com/v1/chat?keep=1&mode=old&remove=gone").unwrap();
         let mut headers = HeaderMap::new();
-
-        let mut set_mode = custom_field("mode", FieldPlacement::Query, FieldType::String);
-        set_mode.string_value = Some("new".to_string());
-
-        let mut set_enabled = custom_field("enabled", FieldPlacement::Query, FieldType::Boolean);
-        set_enabled.id = 2;
-        set_enabled.boolean_value = Some(true);
-
-        let mut unset_remove = custom_field("remove", FieldPlacement::Query, FieldType::Unset);
-        unset_remove.id = 3;
-
-        let custom_fields = vec![
-            Arc::new(set_mode),
-            Arc::new(set_enabled),
-            Arc::new(unset_remove),
+        let request_patches = vec![
+            request_patch(
+                1,
+                RequestPatchPlacement::Query,
+                "mode",
+                RequestPatchOperation::Set,
+                Some(json!("new")),
+            ),
+            request_patch(
+                2,
+                RequestPatchPlacement::Query,
+                "enabled",
+                RequestPatchOperation::Set,
+                Some(json!(true)),
+            ),
+            request_patch(
+                3,
+                RequestPatchPlacement::Query,
+                "remove",
+                RequestPatchOperation::Remove,
+                None,
+            ),
         ];
-        handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
+
+        apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
+            .expect("query request patches should apply");
 
         let params: Vec<(String, String)> = url
             .query_pairs()
@@ -1055,43 +1221,76 @@ mod tests {
     }
 
     #[test]
-    fn handle_custom_fields_updates_headers_and_ignores_invalid_entries() {
+    fn apply_request_patches_updates_headers_and_supports_remove() {
         let mut data = Value::Null;
         let mut url = Url::parse("https://example.com/v1/chat").unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("x-existing", HeaderValue::from_static("old"));
         headers.insert("x-remove", HeaderValue::from_static("remove-me"));
-
-        let mut replace_existing =
-            custom_field("x-existing", FieldPlacement::Header, FieldType::String);
-        replace_existing.string_value = Some("new".to_string());
-
-        let mut unset_header = custom_field("x-remove", FieldPlacement::Header, FieldType::Unset);
-        unset_header.id = 2;
-
-        let mut invalid_name =
-            custom_field("bad header", FieldPlacement::Header, FieldType::String);
-        invalid_name.id = 3;
-        invalid_name.string_value = Some("ignored".to_string());
-
-        let mut invalid_value =
-            custom_field("x-invalid-value", FieldPlacement::Header, FieldType::String);
-        invalid_value.id = 4;
-        invalid_value.string_value = Some("bad\nvalue".to_string());
-
-        let custom_fields = vec![
-            Arc::new(replace_existing),
-            Arc::new(unset_header),
-            Arc::new(invalid_name),
-            Arc::new(invalid_value),
+        let request_patches = vec![
+            request_patch(
+                1,
+                RequestPatchPlacement::Header,
+                "x-existing",
+                RequestPatchOperation::Set,
+                Some(json!("new")),
+            ),
+            request_patch(
+                2,
+                RequestPatchPlacement::Header,
+                "x-remove",
+                RequestPatchOperation::Remove,
+                None,
+            ),
         ];
 
-        handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
+        apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
+            .expect("header request patches should apply");
 
         assert_eq!(headers.get("x-existing").unwrap(), "new");
         assert!(headers.get("x-remove").is_none());
-        assert!(headers.get("bad header").is_none());
-        assert!(headers.get("x-invalid-value").is_none());
+    }
+
+    #[test]
+    fn apply_request_patches_rejects_invalid_header_value() {
+        let mut data = Value::Null;
+        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
+        let mut headers = HeaderMap::new();
+        let request_patches = vec![request_patch(
+            1,
+            RequestPatchPlacement::Header,
+            "x-invalid-value",
+            RequestPatchOperation::Set,
+            Some(json!("bad\nvalue")),
+        )];
+
+        let err = apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
+            .expect_err("invalid header value should fail closed");
+
+        assert!(matches!(err, crate::proxy::ProxyError::InternalError(_)));
+    }
+
+    #[test]
+    fn apply_request_patches_rejects_array_removal_that_rewrites_structure() {
+        let mut data = json!({
+            "messages": [
+                { "role": "user", "content": "hi" }
+            ]
+        });
+        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
+        let mut headers = HeaderMap::new();
+        let request_patches = vec![request_patch(
+            1,
+            RequestPatchPlacement::Body,
+            "/messages/0",
+            RequestPatchOperation::Remove,
+            None,
+        )];
+
+        let err = apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
+            .expect_err("array removal should fail closed");
+
+        assert!(matches!(err, crate::proxy::ProxyError::InternalError(_)));
     }
 
     #[test]

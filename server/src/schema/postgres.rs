@@ -192,29 +192,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    use crate::schema::enum_def::FieldPlacementMapping;
-    use crate::schema::enum_def::FieldTypeMapping;
-    use diesel::sql_types::{Int8, Float4, Text, Bool, Nullable};
-
-    custom_field_definition (id) {
-        id -> Int8,
-        definition_name -> Nullable<Text>,
-        definition_description -> Nullable<Text>,
-        field_name -> Text,
-        field_placement -> FieldPlacementMapping,
-        field_type -> FieldTypeMapping,
-        string_value -> Nullable<Text>,
-        integer_value -> Nullable<Int8>,
-        number_value -> Nullable<Float4>,
-        boolean_value -> Nullable<Bool>,
-        is_definition_enabled -> Bool,
-        deleted_at -> Nullable<Int8>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
     model (id) {
         id -> Int8,
         provider_id -> Int8,
@@ -271,16 +248,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    model_custom_field_assignment (model_id, custom_field_definition_id) {
-        model_id -> Int8,
-        custom_field_definition_id -> Int8,
-        is_enabled -> Bool,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
     use crate::schema::enum_def::ProviderTypeMapping;
     use crate::schema::enum_def::ProviderApiKeyModeMapping;
     use diesel::sql_types::{Int8, Text, Bool, Nullable};
@@ -307,16 +274,6 @@ diesel::table! {
         api_key -> Text,
         description -> Nullable<Text>,
         deleted_at -> Nullable<Int8>,
-        is_enabled -> Bool,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    provider_custom_field_assignment (provider_id, custom_field_definition_id) {
-        provider_id -> Int8,
-        custom_field_definition_id -> Int8,
         is_enabled -> Bool,
         created_at -> Int8,
         updated_at -> Int8,
@@ -372,6 +329,8 @@ diesel::table! {
         llm_request_body -> Nullable<Text>,
         llm_response_body -> Nullable<Text>,
         user_response_body -> Nullable<Text>,
+        applied_request_patch_ids_json -> Nullable<Text>,
+        request_patch_summary_json -> Nullable<Text>,
         user_api_type -> LlmApiTypeMapping,
         llm_api_type -> LlmApiTypeMapping,
     }
@@ -384,6 +343,27 @@ diesel::table! {
         name -> Text,
         description -> Nullable<Text>,
         access_control_policy_id -> Nullable<Int8>,
+        is_enabled -> Bool,
+        deleted_at -> Nullable<Int8>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use crate::schema::enum_def::RequestPatchOperationMapping;
+    use crate::schema::enum_def::RequestPatchPlacementMapping;
+    use diesel::sql_types::{Bool, Int8, Nullable, Text};
+
+    request_patch_rule (id) {
+        id -> Int8,
+        provider_id -> Nullable<Int8>,
+        model_id -> Nullable<Int8>,
+        placement -> RequestPatchPlacementMapping,
+        target -> Text,
+        operation -> RequestPatchOperationMapping,
+        value_json -> Nullable<Text>,
+        description -> Nullable<Text>,
         is_enabled -> Bool,
         deleted_at -> Nullable<Int8>,
         created_at -> Int8,
@@ -408,17 +388,15 @@ diesel::joinable!(model -> provider (provider_id));
 diesel::joinable!(model_alias -> model (target_model_id));
 diesel::joinable!(model_route_candidate -> model (model_id));
 diesel::joinable!(model_route_candidate -> model_route (route_id));
-diesel::joinable!(model_custom_field_assignment -> custom_field_definition (custom_field_definition_id));
-diesel::joinable!(model_custom_field_assignment -> model (model_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
-diesel::joinable!(provider_custom_field_assignment -> custom_field_definition (custom_field_definition_id));
-diesel::joinable!(provider_custom_field_assignment -> provider (provider_id));
 diesel::joinable!(request_log -> cost_catalog_versions (cost_catalog_version_id));
 diesel::joinable!(request_log -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(request_log -> model (model_id));
 diesel::joinable!(request_log -> provider (provider_id));
 diesel::joinable!(request_log -> provider_api_key (provider_api_key_id));
 diesel::joinable!(request_log -> system_api_key (system_api_key_id));
+diesel::joinable!(request_patch_rule -> model (model_id));
+diesel::joinable!(request_patch_rule -> provider (provider_id));
 diesel::joinable!(system_api_key -> access_control_policy (access_control_policy_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
@@ -432,15 +410,13 @@ diesel::allow_tables_to_appear_in_same_query!(
     cost_catalogs,
     cost_catalog_versions,
     cost_components,
-    custom_field_definition,
     model,
     model_alias,
     model_route,
     model_route_candidate,
-    model_custom_field_assignment,
     provider,
     provider_api_key,
-    provider_custom_field_assignment,
     request_log,
+    request_patch_rule,
     system_api_key,
 );

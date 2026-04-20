@@ -18,7 +18,6 @@ pub mod api_key;
 pub mod api_key_acl_rule;
 pub mod api_key_rollup;
 pub mod cost;
-pub mod custom_field;
 pub mod model;
 // Legacy data-access helper for the historical `model_alias` table.
 // Keep this private so new code uses `model_route` and `api_key_model_override`.
@@ -27,6 +26,7 @@ pub mod model_route;
 pub mod provider;
 pub mod provider_runtime;
 pub mod request_log;
+pub mod request_patch;
 pub mod stat;
 pub mod system_api_key;
 //pub mod record; // Assuming this will be replaced or removed if request_log supersedes it
@@ -999,4 +999,146 @@ mod tests {
 
         assert_eq!(alias_target_count, 1);
     }
+
+    #[test]
+    fn sqlite_request_patch_rule_migration_replaces_legacy_tables_and_adds_request_log_trace_columns()
+    {
+        let temp_dir = tempdir().expect("temp dir should be created");
+        let db_path = temp_dir.path().join("request-patch-rule.sqlite");
+        let db_url = db_path.to_string_lossy().into_owned();
+        let mut connection =
+            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
+
+        connection
+            .run_pending_migrations(SQLITE_MIGRATIONS)
+            .expect("migrations should run");
+
+        let request_patch_table_count = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM sqlite_master
+             WHERE type = 'table'
+               AND name = 'request_patch_rule'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("request_patch_rule table count should be readable")
+        .count;
+        assert_eq!(request_patch_table_count, 1);
+
+        for legacy_table in [
+            "custom_field_definition",
+            "provider_custom_field_assignment",
+            "model_custom_field_assignment",
+        ] {
+            let legacy_table_count = diesel::sql_query(format!(
+                "SELECT COUNT(*) AS count
+                 FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name = '{legacy_table}'"
+            ))
+            .get_result::<CountRow>(&mut connection)
+            .expect("legacy table count should be readable")
+            .count;
+            assert_eq!(legacy_table_count, 0, "{legacy_table} should be removed");
+        }
+
+        for column in [
+            "applied_request_patch_ids_json",
+            "request_patch_summary_json",
+        ] {
+            let column_count = diesel::sql_query(format!(
+                "SELECT COUNT(*) AS count
+                 FROM pragma_table_info('request_log')
+                 WHERE name = '{column}'"
+            ))
+            .get_result::<CountRow>(&mut connection)
+            .expect("request_log column count should be readable")
+            .count;
+            assert_eq!(column_count, 1, "{column} should exist on request_log");
+        }
+
+        apply_sql(
+            &mut connection,
+            "INSERT INTO provider (
+                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
+                updated_at, provider_type, provider_api_key_mode
+            ) VALUES (
+                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name, is_enabled,
+                deleted_at, created_at, updated_at
+            ) VALUES (
+                10, 1, NULL, 'demo-model', NULL, 1, NULL, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO request_patch_rule (
+                id, provider_id, model_id, placement, target, operation, value_json, description,
+                is_enabled, deleted_at, created_at, updated_at
+            ) VALUES (
+                100, 1, NULL, 'HEADER', 'x-demo', 'SET', '\"demo\"', NULL, 1, NULL, 1, 1
+            );",
+        );
+
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_patch_rule (
+                        id, provider_id, model_id, placement, target, operation, value_json,
+                        description, is_enabled, deleted_at, created_at, updated_at
+                    ) VALUES (
+                        101, 1, NULL, 'HEADER', 'x-demo', 'SET', '\"another\"', NULL, 1, NULL, 1, 1
+                    );"
+                )
+                .is_err(),
+            "duplicate active provider identity should be rejected"
+        );
+
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_patch_rule (
+                        id, provider_id, model_id, placement, target, operation, value_json,
+                        description, is_enabled, deleted_at, created_at, updated_at
+                    ) VALUES (
+                        102, NULL, 10, 'QUERY', 'debug', 'REMOVE', 'true', NULL, 1, NULL, 1, 1
+                    );"
+                )
+                .is_err(),
+            "REMOVE with value_json should be rejected"
+        );
+
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_patch_rule (
+                        id, provider_id, model_id, placement, target, operation, value_json,
+                        description, is_enabled, deleted_at, created_at, updated_at
+                    ) VALUES (
+                        103, 1, 10, 'BODY', '/temperature', 'SET', '0.1', NULL, 1, NULL, 1, 1
+                    );"
+                )
+                .is_err(),
+            "provider/model xor constraint should be enforced"
+        );
+
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_patch_rule (
+                        id, provider_id, model_id, placement, target, operation, value_json,
+                        description, is_enabled, deleted_at, created_at, updated_at
+                    ) VALUES (
+                        104, NULL, 10, 'BODY', '/temperature', 'SET', 'not-json', NULL, 1, NULL, 1, 1
+                    );"
+                )
+                .is_err(),
+            "invalid json payload should be rejected"
+        );
+    }
+
 }

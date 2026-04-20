@@ -157,7 +157,9 @@ mod tests {
         assert_eq!(root["code"], 0);
 
         let items = root["data"].as_array().expect("data should be an array");
-        let item = items[0].as_object().expect("summary row should be an object");
+        let item = items[0]
+            .as_object()
+            .expect("summary row should be an object");
         assert_eq!(
             item.keys().cloned().collect::<BTreeSet<_>>(),
             BTreeSet::from([

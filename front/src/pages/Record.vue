@@ -756,6 +756,167 @@
 
             <section class="border-t border-gray-100 pt-4">
               <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
+                {{ $t("recordPage.detailModal.requestPatch") }}
+              </h3>
+
+              <div v-if="hasInvalidRequestPatchTrace" class="space-y-2">
+                <p class="text-sm text-amber-700">
+                  {{ $t("recordPage.detailModal.invalidRequestPatchTrace") }}
+                </p>
+                <div v-if="detailedRecord.request_patch_summary_json" class="space-y-2">
+                  <p class="text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {{ $t("recordPage.detailModal.rawTraceSummary") }}
+                  </p>
+                  <pre class="overflow-x-auto rounded-lg bg-gray-950 px-3 py-3 text-xs text-gray-100">{{ detailedRecord.request_patch_summary_json }}</pre>
+                </div>
+              </div>
+
+              <div v-else-if="parsedRequestPatchTrace" class="space-y-4">
+                <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-3">
+                    <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                      {{ $t("recordPage.detailModal.appliedRuleIds") }}
+                    </p>
+                    <p class="mt-1 break-all font-mono text-sm text-gray-900">
+                      {{ formattedAppliedRequestPatchIds || "/" }}
+                    </p>
+                  </div>
+
+                  <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-3">
+                    <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                      {{ $t("recordPage.detailModal.conflicts") }}
+                    </p>
+                    <p class="mt-1 text-sm font-medium text-gray-900">
+                      {{ requestPatchConflicts.length }}
+                    </p>
+                  </div>
+                </div>
+
+                <div
+                  v-if="parsedRequestPatchTrace.has_conflicts && requestPatchConflicts.length > 0"
+                  class="rounded-lg border border-red-200 bg-red-50 px-4 py-3"
+                >
+                  <p class="text-sm font-medium text-red-700">
+                    {{ $t("recordPage.detailModal.conflictDetected") }}
+                  </p>
+
+                  <div class="mt-3 space-y-3">
+                    <div
+                      v-for="conflict in requestPatchConflicts"
+                      :key="`${conflict.provider_rule_id}-${conflict.model_rule_id}-${conflict.placement}`"
+                      class="rounded-md border border-red-200 bg-white/70 px-3 py-2.5"
+                    >
+                      <p class="text-sm text-red-700">
+                        {{ conflict.reason }}
+                      </p>
+                      <p class="mt-1 break-all font-mono text-xs text-red-600">
+                        #{{ conflict.provider_rule_id }} · #{{ conflict.model_rule_id }} ·
+                        {{ conflict.placement }} · {{ conflict.provider_target }} /
+                        {{ conflict.model_target }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="space-y-3">
+                  <div class="min-w-0">
+                    <h4 class="text-sm font-medium text-gray-900">
+                      {{ $t("recordPage.detailModal.effectiveRules") }}
+                    </h4>
+                  </div>
+
+                  <div
+                    v-if="requestPatchEffectiveRules.length === 0"
+                    class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
+                  >
+                    {{ $t("recordPage.detailModal.noEffectiveRules") }}
+                  </div>
+
+                  <div
+                    v-else
+                    class="overflow-hidden rounded-lg border border-gray-200 bg-white"
+                  >
+                    <div
+                      v-for="rule in requestPatchEffectiveRules"
+                      :key="`${rule.source_rule_id}-${rule.placement}-${rule.target}`"
+                      class="border-t border-gray-100 px-4 py-4 first:border-t-0"
+                    >
+                      <div class="space-y-3">
+                        <div class="flex flex-wrap items-center gap-2">
+                          <Badge variant="outline" class="font-mono text-[11px]">
+                            {{ rule.placement }}
+                          </Badge>
+                          <Badge variant="secondary" class="font-mono text-[11px]">
+                            {{ rule.operation }}
+                          </Badge>
+                          <Badge
+                            class="text-[11px]"
+                            :variant="rule.source_origin === 'ModelDirect' ? 'default' : 'secondary'"
+                          >
+                            {{ getRequestPatchOriginLabel(rule.source_origin) }}
+                          </Badge>
+                        </div>
+
+                        <p class="break-all font-mono text-sm text-gray-900">
+                          {{ rule.target }}
+                        </p>
+
+                        <div class="grid gap-3 text-sm text-gray-600 sm:grid-cols-2">
+                          <div>
+                            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                              {{ $t("recordPage.detailModal.value") }}
+                            </p>
+                            <p class="mt-1 break-all font-mono text-sm text-gray-700">
+                              {{ formatRequestPatchValueForDisplay(rule.value_json) }}
+                            </p>
+                          </div>
+
+                          <div>
+                            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                              {{ $t("recordPage.detailModal.description") }}
+                            </p>
+                            <p class="mt-1 text-sm text-gray-600">
+                              {{
+                                rule.description ||
+                                $t("recordPage.detailModal.noRuleDescription")
+                              }}
+                            </p>
+                          </div>
+
+                          <div>
+                            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                              {{ $t("recordPage.detailModal.sourceRule") }}
+                            </p>
+                            <p class="mt-1 font-mono text-xs text-gray-600">
+                              #{{ rule.source_rule_id }}
+                            </p>
+                          </div>
+
+                          <div>
+                            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                              {{ $t("recordPage.detailModal.trace") }}
+                            </p>
+                            <p class="mt-1 text-sm text-gray-600">
+                              {{ getRequestPatchTrace(rule) }}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                v-else
+                class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
+              >
+                {{ $t("recordPage.detailModal.noRequestPatchTrace") }}
+              </div>
+            </section>
+
+            <section class="border-t border-gray-100 pt-4">
+              <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
                 Payloads
               </h3>
               <div v-if="showPayloads" class="space-y-4">
@@ -876,6 +1037,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { normalizeError } from "@/lib/error";
+import { formatRequestPatchValueForDisplay } from "@/lib/requestPatch";
 import { toastController } from "@/lib/toastController";
 import {
   formatCostRateFromNanos,
@@ -890,6 +1052,8 @@ import type {
   CostSnapshot,
   RecordDetail,
   RecordListItem,
+  RequestPatchTraceSummary,
+  ResolvedRequestPatchRule,
 } from "@/store/types";
 
 const { t: $t } = useI18n();
@@ -964,6 +1128,71 @@ const parsedCostSnapshot = computed<CostSnapshot | null>(() => {
   } catch {
     return null;
   }
+});
+
+const parsedRequestPatchTrace = computed<RequestPatchTraceSummary | null>(() => {
+  const raw = detailedRecord.value?.request_patch_summary_json;
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as RequestPatchTraceSummary;
+  } catch {
+    return null;
+  }
+});
+
+const parsedAppliedRequestPatchIds = computed<number[]>(() => {
+  const raw = detailedRecord.value?.applied_request_patch_ids_json;
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((id): id is number => typeof id === "number");
+  } catch {
+    return [];
+  }
+});
+
+const requestPatchExplainByRuleId = computed(() => {
+  return new Map(
+    (parsedRequestPatchTrace.value?.explain ?? []).map((entry) => [
+      entry.rule.id,
+      entry,
+    ]),
+  );
+});
+
+const requestPatchEffectiveRules = computed(() => {
+  return parsedRequestPatchTrace.value?.effective_rules ?? [];
+});
+
+const requestPatchConflicts = computed(() => {
+  return parsedRequestPatchTrace.value?.conflicts ?? [];
+});
+
+const hasInvalidRequestPatchTrace = computed(() => {
+  return Boolean(
+    detailedRecord.value?.request_patch_summary_json &&
+      parsedRequestPatchTrace.value === null,
+  );
+});
+
+const formattedAppliedRequestPatchIds = computed(() => {
+  if (parsedAppliedRequestPatchIds.value.length === 0) {
+    return null;
+  }
+
+  return parsedAppliedRequestPatchIds.value
+    .map((id) => `#${id}`)
+    .join(", ");
 });
 
 type DisplayCostDetailLine = CostDetailLine & {
@@ -1046,6 +1275,30 @@ const formatSnapshotUnitPrice = (
   const base = formatCostRateFromNanos(unitPriceNanos, mode, currency, "/");
   return meterKey.startsWith("llm.") ? `${base} tokens` : `${base}/unit`;
 };
+
+function getRequestPatchOriginLabel(origin: string): string {
+  return origin === "ModelDirect"
+    ? $t("recordPage.detailModal.originModelDirect")
+    : $t("recordPage.detailModal.originProviderDirect");
+}
+
+function formatRuleIds(ids: number[]): string {
+  return ids.map((id) => `#${id}`).join(", ");
+}
+
+function getRequestPatchTrace(rule: ResolvedRequestPatchRule): string {
+  const explainEntry = requestPatchExplainByRuleId.value.get(rule.source_rule_id);
+  if (explainEntry?.message) {
+    return explainEntry.message;
+  }
+
+  const baseTrace = `${getRequestPatchOriginLabel(rule.source_origin)} #${rule.source_rule_id}`;
+  if (rule.overridden_rule_ids.length === 0) {
+    return baseTrace;
+  }
+
+  return `${baseTrace} -> ${formatRuleIds(rule.overridden_rule_ids)}`;
+}
 
 const totalPages = computed(() =>
   Math.ceil(totalRecords.value / pageSize.value),

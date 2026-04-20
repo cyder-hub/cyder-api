@@ -1,4 +1,4 @@
-import type { CustomFieldItem } from "@/store/types";
+import type { RequestPatchRule } from "@/store/types";
 
 export interface LocalProviderApiKeyItem {
   id: number | null;
@@ -28,5 +28,5 @@ export interface EditingProviderData {
   use_proxy: boolean;
   models: LocalEditableModelItem[];
   provider_keys: LocalProviderApiKeyItem[];
-  custom_fields: CustomFieldItem[];
+  request_patches: RequestPatchRule[];
 }

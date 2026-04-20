@@ -1,6 +1,6 @@
 use rand::{Rng, rng};
 use reqwest::{Client, Proxy};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,19 +15,20 @@ use thiserror::Error;
 use crate::database::api_key::ApiKey;
 use crate::database::api_key_rollup::{ApiKeyRollupDaily, ApiKeyRollupMonthly};
 use crate::database::cost::{CostCatalogVersion, CostComponent};
-use crate::database::custom_field::CustomFieldDefinition;
 use crate::database::model::Model;
 use crate::database::model_route::{ApiKeyModelOverride, ModelRoute};
 use crate::database::provider::{Provider, ProviderApiKey};
+use crate::database::request_patch::RequestPatchRule;
 use crate::schema::enum_def::ProviderApiKeyMode;
 
 use super::cache::repository::{CacheRepository, DynCacheRepo};
 use super::cache::types::{
-    CacheApiKey, CacheApiKeyModelOverride, CacheCostCatalogVersion, CacheCustomField, CacheEntry,
-    CacheModel, CacheModelRoute, CacheModelsCatalog, CacheProvider, CacheProviderKey,
-    CacheSystemApiKey,
+    CacheApiKey, CacheApiKeyModelOverride, CacheCostCatalogVersion, CacheEntry, CacheModel,
+    CacheModelRoute, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheRequestPatchRule,
+    CacheResolvedModelRequestPatches, CacheSystemApiKey,
 };
 use super::cache::{CacheError, memory::MemoryCacheBackend};
+use super::request_patch::resolve_effective_request_patches;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupItemSelectionStrategy {
@@ -65,8 +66,9 @@ enum CacheKey<'a> {
     ModelById(i64),
     ModelByName(&'a str, &'a str),
     ProviderApiKeys(i64),
-    CustomFieldsAssignment(i64),
-    CustomField(i64),
+    ProviderRequestPatchRules(i64),
+    ModelRequestPatchRules(i64),
+    ModelEffectiveRequestPatches(i64),
     CostCatalogVersion(i64),
 }
 
@@ -89,8 +91,15 @@ impl<'a> std::fmt::Display for CacheKey<'a> {
                 write!(f, "model:name:{}/{}", provider_key, model_name)
             }
             CacheKey::ProviderApiKeys(provider_id) => write!(f, "provider_keys:{}", provider_id),
-            CacheKey::CustomFieldsAssignment(id) => write!(f, "cfa:{}", id),
-            CacheKey::CustomField(id) => write!(f, "custom_field:id:{}", id),
+            CacheKey::ProviderRequestPatchRules(provider_id) => {
+                write!(f, "request_patch:provider:{}", provider_id)
+            }
+            CacheKey::ModelRequestPatchRules(model_id) => {
+                write!(f, "request_patch:model:{}", model_id)
+            }
+            CacheKey::ModelEffectiveRequestPatches(model_id) => {
+                write!(f, "request_patch:model_effective:{}", model_id)
+            }
             CacheKey::CostCatalogVersion(id) => write!(f, "cost_catalog_version:id:{}", id),
         }
     }
@@ -115,8 +124,15 @@ impl<'a> CacheKey<'a> {
             CacheKey::ProviderApiKeys(provider_id) => {
                 format_compact!("provider_keys:{}", provider_id)
             }
-            CacheKey::CustomFieldsAssignment(id) => format_compact!("cfa:{}", id),
-            CacheKey::CustomField(id) => format_compact!("custom_field:id:{}", id),
+            CacheKey::ProviderRequestPatchRules(provider_id) => {
+                format_compact!("request_patch:provider:{}", provider_id)
+            }
+            CacheKey::ModelRequestPatchRules(model_id) => {
+                format_compact!("request_patch:model:{}", model_id)
+            }
+            CacheKey::ModelEffectiveRequestPatches(model_id) => {
+                format_compact!("request_patch:model_effective:{}", model_id)
+            }
             CacheKey::CostCatalogVersion(id) => format_compact!("cost_catalog_version:id:{}", id),
         }
     }
@@ -686,13 +702,16 @@ pub struct AppState {
     // 6. provider_id(id) -> CacheProviderKey[]
     provider_api_keys_cache: CacheRepo<Vec<CacheProviderKey>>,
 
-    // 7. entity_id(id) -> custom_field_definition_id Set
-    custom_fields_assignment_cache: CacheRepo<HashSet<i64>>,
+    // 7. provider_id(id) -> provider direct request patch rules
+    provider_request_patch_rules_cache: CacheRepo<Vec<CacheRequestPatchRule>>,
 
-    // 8. custom_field_definition_id(id) Set -> CacheCustomField[]
-    custom_field_cache: CacheRepo<CacheCustomField>,
+    // 8. model_id(id) -> model direct request patch rules
+    model_request_patch_rules_cache: CacheRepo<Vec<CacheRequestPatchRule>>,
 
-    // 9. cost_catalog_version_id(id) -> CacheCostCatalogVersion
+    // 9. model_id(id) -> resolved effective request patches
+    model_effective_request_patches_cache: CacheRepo<CacheResolvedModelRequestPatches>,
+
+    // 10. cost_catalog_version_id(id) -> CacheCostCatalogVersion
     cost_catalog_version_cache: CacheRepo<CacheCostCatalogVersion>,
 
     // HTTP clients
@@ -746,8 +765,9 @@ impl AppState {
             provider_cache: Self::create_repo(ttl, pool),
             model_cache: Self::create_repo(ttl, pool),
             provider_api_keys_cache: Self::create_repo(ttl, pool),
-            custom_fields_assignment_cache: Self::create_repo(ttl, pool),
-            custom_field_cache: Self::create_repo(ttl, pool),
+            provider_request_patch_rules_cache: Self::create_repo(ttl, pool),
+            model_request_patch_rules_cache: Self::create_repo(ttl, pool),
+            model_effective_request_patches_cache: Self::create_repo(ttl, pool),
             cost_catalog_version_cache: Self::create_repo(ttl, pool),
             client,
             proxy_client,
@@ -836,6 +856,42 @@ impl AppState {
         })?;
 
         Ok(CacheApiKey::from_db(row, acl_rules))
+    }
+
+    fn cache_request_patch_rules(
+        rows: Vec<crate::database::request_patch::RequestPatchRuleResponse>,
+    ) -> Result<Vec<CacheRequestPatchRule>, AppStoreError> {
+        rows.into_iter()
+            .map(|row| {
+                CacheRequestPatchRule::try_from(row).map_err(|err| {
+                    AppStoreError::DatabaseError(format!(
+                        "failed to serialize request patch rule for cache: {}",
+                        err
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    async fn load_model_effective_request_patches(
+        &self,
+        model_id: i64,
+    ) -> Result<Option<CacheResolvedModelRequestPatches>, AppStoreError> {
+        let Some(model) = self.get_model_by_id(model_id).await? else {
+            return Ok(None);
+        };
+
+        let provider_rules = self
+            .get_provider_request_patch_rules(model.provider_id)
+            .await?;
+        let model_rules = self.get_model_request_patch_rules(model_id).await?;
+
+        Ok(Some(resolve_effective_request_patches(
+            model.provider_id,
+            model_id,
+            provider_rules.as_ref(),
+            model_rules.as_ref(),
+        )))
     }
 
     pub async fn reload(&self) {
@@ -957,13 +1013,17 @@ impl AppState {
         if let Ok(overrides) = ApiKeyModelOverride::list_all() {
             stats.insert("API Key Model Overrides", overrides.len());
             for override_row in overrides {
-                catalog_api_key_overrides.push(CacheApiKeyModelOverride::from(override_row.clone()));
+                catalog_api_key_overrides
+                    .push(CacheApiKeyModelOverride::from(override_row.clone()));
 
                 if !override_row.is_enabled {
                     continue;
                 }
 
-                match self.get_model_route_by_id(override_row.target_route_id).await {
+                match self
+                    .get_model_route_by_id(override_row.target_route_id)
+                    .await
+                {
                     Ok(Some(route)) => {
                         let _ = self
                             .api_key_override_route_cache
@@ -989,10 +1049,10 @@ impl AppState {
         }
 
         let models_catalog = CacheModelsCatalog {
-            providers: catalog_providers,
-            models: catalog_models,
-            routes: catalog_routes,
-            api_key_overrides: catalog_api_key_overrides,
+            providers: catalog_providers.clone(),
+            models: catalog_models.clone(),
+            routes: catalog_routes.clone(),
+            api_key_overrides: catalog_api_key_overrides.clone(),
         };
         let _ = self
             .models_catalog_cache
@@ -1024,62 +1084,79 @@ impl AppState {
             }
         }
 
-        // 8. Custom Fields Definitions
-        if let Ok(defs) = CustomFieldDefinition::list_all_active() {
-            stats.insert("Custom Field Definitions", defs.len());
-            for def in defs {
-                let cache_item = CacheCustomField::from(def);
+        // 7, 8, 9. Request patch direct/effective caches
+        if let Ok(all_rules) = RequestPatchRule::list_all() {
+            stats.insert("Request Patch Rules", all_rules.len());
+
+            let mut provider_rules_by_id: HashMap<i64, Vec<CacheRequestPatchRule>> = HashMap::new();
+            let mut model_rules_by_id: HashMap<i64, Vec<CacheRequestPatchRule>> = HashMap::new();
+
+            match Self::cache_request_patch_rules(all_rules) {
+                Ok(cache_rules) => {
+                    for rule in cache_rules {
+                        if let Some(provider_id) = rule.provider_id {
+                            provider_rules_by_id
+                                .entry(provider_id)
+                                .or_default()
+                                .push(rule.clone());
+                        }
+                        if let Some(model_id) = rule.model_id {
+                            model_rules_by_id.entry(model_id).or_default().push(rule);
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("Failed to preload request patch rules into cache: {}", err);
+                }
+            }
+
+            stats.insert("Provider Request Patch Groups", provider_rules_by_id.len());
+            for provider in &catalog_providers {
+                let rules = provider_rules_by_id
+                    .get(&provider.id)
+                    .cloned()
+                    .unwrap_or_default();
                 let _ = self
-                    .custom_field_cache
+                    .provider_request_patch_rules_cache
                     .set_positive(
-                        &CacheKey::CustomField(cache_item.id).to_compact_string(),
-                        &cache_item,
+                        &CacheKey::ProviderRequestPatchRules(provider.id).to_compact_string(),
+                        &rules,
                     )
                     .await;
             }
+
+            stats.insert("Model Request Patch Groups", model_rules_by_id.len());
+            for model in &catalog_models {
+                let rules = model_rules_by_id.remove(&model.id).unwrap_or_default();
+                let _ = self
+                    .model_request_patch_rules_cache
+                    .set_positive(
+                        &CacheKey::ModelRequestPatchRules(model.id).to_compact_string(),
+                        &rules,
+                    )
+                    .await;
+
+                let resolved = resolve_effective_request_patches(
+                    model.provider_id,
+                    model.id,
+                    provider_rules_by_id
+                        .get(&model.provider_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                    &rules,
+                );
+                let _ = self
+                    .model_effective_request_patches_cache
+                    .set_positive(
+                        &CacheKey::ModelEffectiveRequestPatches(model.id).to_compact_string(),
+                        &resolved,
+                    )
+                    .await;
+            }
+            stats.insert("Model Effective Request Patch Groups", catalog_models.len());
         }
 
-        // 7. Custom Field Assignments
-        if let Ok(assignments) = CustomFieldDefinition::list_all_enabled_model_assignments() {
-            let mut by_model: HashMap<i64, HashSet<i64>> = HashMap::new();
-            for a in assignments {
-                by_model
-                    .entry(a.model_id)
-                    .or_default()
-                    .insert(a.custom_field_definition_id);
-            }
-            stats.insert("Model Custom Field Assignments", by_model.len());
-            for (model_id, field_ids) in by_model {
-                let _ = self
-                    .custom_fields_assignment_cache
-                    .set_positive(
-                        &CacheKey::CustomFieldsAssignment(model_id).to_compact_string(),
-                        &field_ids,
-                    )
-                    .await;
-            }
-        }
-        if let Ok(assignments) = CustomFieldDefinition::list_all_enabled_provider_assignments() {
-            let mut by_provider: HashMap<i64, HashSet<i64>> = HashMap::new();
-            for a in assignments {
-                by_provider
-                    .entry(a.provider_id)
-                    .or_default()
-                    .insert(a.custom_field_definition_id);
-            }
-            stats.insert("Provider Custom Field Assignments", by_provider.len());
-            for (provider_id, field_ids) in by_provider {
-                let _ = self
-                    .custom_fields_assignment_cache
-                    .set_positive(
-                        &CacheKey::CustomFieldsAssignment(provider_id).to_compact_string(),
-                        &field_ids,
-                    )
-                    .await;
-            }
-        }
-
-        // 9. Cost Catalog Versions
+        // 10. Cost Catalog Versions
         if let Ok(versions) = CostCatalogVersion::list_all() {
             stats.insert("Cost Catalog Versions", versions.len());
             let mut components_by_version: HashMap<i64, Vec<CostComponent>> = HashMap::new();
@@ -1131,11 +1208,17 @@ impl AppState {
         if let Err(e) = self.provider_api_keys_cache.clear().await {
             cyder_tools::log::error!("Failed to clear provider_api_keys_cache: {}", e);
         }
-        if let Err(e) = self.custom_fields_assignment_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear custom_fields_assignment_cache: {}", e);
+        if let Err(e) = self.provider_request_patch_rules_cache.clear().await {
+            cyder_tools::log::error!("Failed to clear provider_request_patch_rules_cache: {}", e);
         }
-        if let Err(e) = self.custom_field_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear custom_field_cache: {}", e);
+        if let Err(e) = self.model_request_patch_rules_cache.clear().await {
+            cyder_tools::log::error!("Failed to clear model_request_patch_rules_cache: {}", e);
+        }
+        if let Err(e) = self.model_effective_request_patches_cache.clear().await {
+            cyder_tools::log::error!(
+                "Failed to clear model_effective_request_patches_cache: {}",
+                e
+            );
         }
         if let Err(e) = self.cost_catalog_version_cache.clear().await {
             cyder_tools::log::error!("Failed to clear cost_catalog_version_cache: {}", e);
@@ -1391,14 +1474,19 @@ impl AppState {
         &self,
         route_id: i64,
     ) -> Result<(), AppStoreError> {
-        for override_row in ApiKeyModelOverride::list_by_target_route_id(route_id).map_err(|err| {
-            AppStoreError::DatabaseError(format!(
-                "failed to list api key overrides for route {}: {:?}",
-                route_id, err
-            ))
-        })? {
+        for override_row in
+            ApiKeyModelOverride::list_by_target_route_id(route_id).map_err(|err| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to list api key overrides for route {}: {:?}",
+                    route_id, err
+                ))
+            })?
+        {
             let _ = self
-                .invalidate_api_key_model_override(override_row.api_key_id, &override_row.source_name)
+                .invalidate_api_key_model_override(
+                    override_row.api_key_id,
+                    &override_row.source_name,
+                )
                 .await;
         }
 
@@ -1410,14 +1498,18 @@ impl AppState {
         route_id: i64,
         route_name: Option<&str>,
     ) -> Result<(), AppStoreError> {
-        debug!("invalidate model route: id={}, name={:?}", route_id, route_name);
+        debug!(
+            "invalidate model route: id={}, name={:?}",
+            route_id, route_name
+        );
         self.invalidate_models_catalog().await?;
         if let Some(name) = route_name {
             let _ = self.invalidate_model_route_by_name(name).await;
         } else if let Some(route) = self.get_model_route_by_id(route_id).await? {
             let _ = self.invalidate_model_route_by_name(&route.route_name).await;
         }
-        self.invalidate_api_key_model_overrides_by_route(route_id).await?;
+        self.invalidate_api_key_model_overrides_by_route(route_id)
+            .await?;
         Ok(self
             .model_route_cache
             .delete(&CacheKey::ModelRouteById(route_id).to_compact_string())
@@ -1555,6 +1647,7 @@ impl AppState {
         debug!("invalidate provider: id={}, key={:?}", id, key);
         self.invalidate_models_catalog().await?;
         let _ = self.invalidate_model_routes_for_provider(id).await;
+        let _ = self.invalidate_provider_request_patch_rules(id).await;
         if let Some(k) = key {
             let _ = self.invalidate_provider_by_key(k).await;
         } else if let Some(p) = self.get_provider_by_id(id).await? {
@@ -1631,6 +1724,7 @@ impl AppState {
         debug!("invalidate model: id={}, name={:?}", id, name);
         self.invalidate_models_catalog().await?;
         let _ = self.invalidate_model_routes_for_model(id).await;
+        let _ = self.invalidate_model_request_patch_rules(id).await;
         if let Some(n) = name {
             let parts: Vec<&str> = n.splitn(2, '/').collect();
             if parts.len() == 2 {
@@ -1952,152 +2046,131 @@ impl AppState {
     }
 
     // ============================================================================================
-    // 7. entity_id(id) -> custom_field_definition_id Set
+    // 7. provider_id(id) -> provider direct request patch rules
     // ============================================================================================
-    pub async fn get_model_custom_field_ids(
-        &self,
-        model_id: i64,
-    ) -> Result<Option<Arc<HashSet<i64>>>, AppStoreError> {
-        let cache_key = CacheKey::CustomFieldsAssignment(model_id).to_compact_string();
-
-        self.get_or_load(&self.custom_fields_assignment_cache, &cache_key, || async {
-            match CustomFieldDefinition::list_enabled_model_assignments_by_model_id(model_id) {
-                Ok(assignments) if !assignments.is_empty() => {
-                    let field_ids: HashSet<i64> = assignments
-                        .into_iter()
-                        .map(|a| a.custom_field_definition_id)
-                        .collect();
-                    Ok(Some(field_ids))
-                }
-                _ => Ok(None),
-            }
-        })
-        .await
-    }
-
-    pub async fn get_provider_custom_field_ids(
+    pub async fn get_provider_request_patch_rules(
         &self,
         provider_id: i64,
-    ) -> Result<Option<Arc<HashSet<i64>>>, AppStoreError> {
-        let cache_key = CacheKey::CustomFieldsAssignment(provider_id).to_compact_string();
+    ) -> Result<Arc<Vec<CacheRequestPatchRule>>, AppStoreError> {
+        let cache_key = CacheKey::ProviderRequestPatchRules(provider_id).to_compact_string();
 
-        self.get_or_load(&self.custom_fields_assignment_cache, &cache_key, || async {
-            match CustomFieldDefinition::list_enabled_provider_assignments_by_provider_id(
-                provider_id,
-            ) {
-                Ok(assignments) if !assignments.is_empty() => {
-                    let field_ids: HashSet<i64> = assignments
-                        .into_iter()
-                        .map(|a| a.custom_field_definition_id)
-                        .collect();
-                    Ok(Some(field_ids))
-                }
-                _ => Ok(None),
-            }
-        })
-        .await
+        let rules = self
+            .get_or_load(
+                &self.provider_request_patch_rules_cache,
+                &cache_key,
+                || async {
+                    match RequestPatchRule::list_by_provider_id(provider_id) {
+                        Ok(rows) => Ok(Some(Self::cache_request_patch_rules(rows)?)),
+                        Err(BaseError::NotFound(_)) => Ok(None),
+                        Err(err) => Err(AppStoreError::DatabaseError(format!(
+                            "failed to load provider request patch rules for {}: {:?}",
+                            provider_id, err
+                        ))),
+                    }
+                },
+            )
+            .await?;
+
+        Ok(rules.unwrap_or_else(|| Arc::new(Vec::new())))
     }
 
-    pub async fn get_custom_fields_by_model_id(
-        &self,
-        model_id: i64,
-    ) -> Result<Vec<Arc<CacheCustomField>>, AppStoreError> {
-        match self.get_model_custom_field_ids(model_id).await? {
-            Some(ids) if !ids.is_empty() => self.get_custom_fields(&ids).await,
-            _ => Ok(Vec::new()),
-        }
-    }
-
-    pub async fn get_custom_fields_by_provider_id(
-        &self,
-        provider_id: i64,
-    ) -> Result<Vec<Arc<CacheCustomField>>, AppStoreError> {
-        match self.get_provider_custom_field_ids(provider_id).await? {
-            Some(ids) if !ids.is_empty() => self.get_custom_fields(&ids).await,
-            _ => Ok(Vec::new()),
-        }
-    }
-
-    pub async fn invalidate_model_custom_fields(&self, model_id: i64) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::CustomFieldsAssignment(model_id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
-        Ok(self
-            .custom_fields_assignment_cache
-            .delete(&cache_key)
-            .await?)
-    }
-
-    pub async fn invalidate_provider_custom_fields(
+    pub async fn invalidate_provider_request_patch_rules(
         &self,
         provider_id: i64,
     ) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::CustomFieldsAssignment(provider_id).to_compact_string();
+        let cache_key = CacheKey::ProviderRequestPatchRules(provider_id).to_compact_string();
+        debug!("invalidate: {}", &cache_key);
+        self.provider_request_patch_rules_cache
+            .delete(&cache_key)
+            .await?;
+
+        for model in Model::list_by_provider_id(provider_id).map_err(|err| {
+            AppStoreError::DatabaseError(format!(
+                "failed to list models for provider request patch invalidation {}: {:?}",
+                provider_id, err
+            ))
+        })? {
+            let _ = self
+                .invalidate_model_effective_request_patches(model.id)
+                .await;
+        }
+
+        Ok(())
+    }
+
+    // ============================================================================================
+    // 8. model_id(id) -> model direct request patch rules
+    // ============================================================================================
+    pub async fn get_model_request_patch_rules(
+        &self,
+        model_id: i64,
+    ) -> Result<Arc<Vec<CacheRequestPatchRule>>, AppStoreError> {
+        let cache_key = CacheKey::ModelRequestPatchRules(model_id).to_compact_string();
+
+        let rules = self
+            .get_or_load(
+                &self.model_request_patch_rules_cache,
+                &cache_key,
+                || async {
+                    match RequestPatchRule::list_by_model_id(model_id) {
+                        Ok(rows) => Ok(Some(Self::cache_request_patch_rules(rows)?)),
+                        Err(BaseError::NotFound(_)) => Ok(None),
+                        Err(err) => Err(AppStoreError::DatabaseError(format!(
+                            "failed to load model request patch rules for {}: {:?}",
+                            model_id, err
+                        ))),
+                    }
+                },
+            )
+            .await?;
+
+        Ok(rules.unwrap_or_else(|| Arc::new(Vec::new())))
+    }
+
+    pub async fn invalidate_model_request_patch_rules(
+        &self,
+        model_id: i64,
+    ) -> Result<(), AppStoreError> {
+        let cache_key = CacheKey::ModelRequestPatchRules(model_id).to_compact_string();
+        debug!("invalidate: {}", &cache_key);
+        self.model_request_patch_rules_cache
+            .delete(&cache_key)
+            .await?;
+        self.invalidate_model_effective_request_patches(model_id)
+            .await
+    }
+
+    // ============================================================================================
+    // 9. model_id(id) -> resolved effective request patches
+    // ============================================================================================
+    pub async fn get_model_effective_request_patches(
+        &self,
+        model_id: i64,
+    ) -> Result<Option<Arc<CacheResolvedModelRequestPatches>>, AppStoreError> {
+        let cache_key = CacheKey::ModelEffectiveRequestPatches(model_id).to_compact_string();
+
+        self.get_or_load(
+            &self.model_effective_request_patches_cache,
+            &cache_key,
+            || async { self.load_model_effective_request_patches(model_id).await },
+        )
+        .await
+    }
+
+    pub async fn invalidate_model_effective_request_patches(
+        &self,
+        model_id: i64,
+    ) -> Result<(), AppStoreError> {
+        let cache_key = CacheKey::ModelEffectiveRequestPatches(model_id).to_compact_string();
         debug!("invalidate: {}", &cache_key);
         Ok(self
-            .custom_fields_assignment_cache
+            .model_effective_request_patches_cache
             .delete(&cache_key)
             .await?)
     }
 
     // ============================================================================================
-    // 8. custom_field_definition_id(id) Set -> CacheCustomField[]
-    // ============================================================================================
-    pub async fn get_custom_fields(
-        &self,
-        ids: &HashSet<i64>,
-    ) -> Result<Vec<Arc<CacheCustomField>>, AppStoreError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let keys: Vec<compact_str::CompactString> = ids
-            .iter()
-            .map(|id| CacheKey::CustomField(*id).to_compact_string())
-            .collect();
-        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
-
-        let results = self.custom_field_cache.mget(&key_refs).await?;
-
-        let mut final_fields = Vec::new();
-        for (id, res) in ids.iter().zip(results.into_iter()) {
-            match res {
-                Some(field) => final_fields.push(field),
-                None => {
-                    let id_val = *id;
-                    debug!("cache miss for custom field {}, fetching from DB", id_val);
-                    if let Ok(field_db) = CustomFieldDefinition::get_by_id(id_val) {
-                        let cache_item = Arc::new(CacheCustomField::from(
-                            CustomFieldDefinition::from(field_db),
-                        ));
-                        let _ = self
-                            .custom_field_cache
-                            .set_positive(
-                                &CacheKey::CustomField(id_val).to_compact_string(),
-                                &cache_item,
-                            )
-                            .await;
-                        final_fields.push(cache_item);
-                    } else {
-                        error!(
-                            "Failed to fetch custom field {} from DB after cache miss",
-                            id_val
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(final_fields)
-    }
-
-    pub async fn invalidate_custom_field(&self, id: i64) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::CustomField(id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
-        Ok(self.custom_field_cache.delete(&cache_key).await?)
-    }
-
-    // ============================================================================================
-    // 9. cost_catalog_version_id(id) -> CacheCostCatalogVersion
+    // 10. cost_catalog_version_id(id) -> CacheCostCatalogVersion
     // ============================================================================================
     pub async fn get_cost_catalog_version_by_id(
         &self,
@@ -2256,8 +2329,7 @@ mod tests {
     use crate::config::ProviderGovernanceConfig;
     use crate::schema::enum_def::{Action, ProviderApiKeyMode};
     use crate::service::cache::types::{
-        CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModelRoute,
-        CacheModelRouteCandidate,
+        CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModelRoute, CacheModelRouteCandidate,
     };
     use chrono::Utc;
     use std::collections::HashMap;
@@ -2315,8 +2387,9 @@ mod tests {
             provider_cache: AppState::create_repo(ttl, None),
             model_cache: AppState::create_repo(ttl, None),
             provider_api_keys_cache: AppState::create_repo(ttl, None),
-            custom_fields_assignment_cache: AppState::create_repo(ttl, None),
-            custom_field_cache: AppState::create_repo(ttl, None),
+            provider_request_patch_rules_cache: AppState::create_repo(ttl, None),
+            model_request_patch_rules_cache: AppState::create_repo(ttl, None),
+            model_effective_request_patches_cache: AppState::create_repo(ttl, None),
             cost_catalog_version_cache: AppState::create_repo(ttl, None),
             client: AppState::build_http_client(false),
             proxy_client: AppState::build_http_client(true),

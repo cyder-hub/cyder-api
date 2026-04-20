@@ -1,10 +1,13 @@
 use crate::database::{
     DbResult,
+    model::{Model, ModelDetail},
     provider::{
         BootstrapProviderInput, BootstrapProviderResult, NewProvider, NewProviderApiKey, Provider,
         ProviderApiKey, ProviderSummaryItem, UpdateProviderApiKeyData, UpdateProviderData,
     },
+    request_patch::RequestPatchRuleResponse,
 };
+use crate::proxy::{ProxyError, apply_request_patches, load_runtime_request_patch_trace};
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use axum::{
     extract::{Json, Path, State}, // Added State
@@ -24,22 +27,17 @@ use crate::service::vertex::get_vertex_token;
 use crate::utils::{HttpResult, ID_GENERATOR};
 
 use super::BaseError;
-use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
-use crate::database::model::Model;
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+use crate::service::cache::types::{
+    CacheModel, CacheProvider, CacheResolvedRequestPatch,
+};
 
 #[derive(Serialize)]
-struct ModelDetail {
-    model: Model,
-    custom_fields: Vec<ApiCustomFieldDefinition>,
-}
-
-#[derive(Serialize)]
-struct ProviderDetail {
+struct ProviderDetailResponse {
     provider: Provider,
     models: Vec<ModelDetail>,
     provider_keys: Vec<ProviderApiKey>,
-    custom_fields: Vec<ApiCustomFieldDefinition>,
+    request_patches: Vec<RequestPatchRuleResponse>,
 }
 
 #[derive(Deserialize)]
@@ -197,29 +195,22 @@ async fn delete_provider(
     }
 }
 
-async fn get_provider_detail(Path(id): Path<i64>) -> Result<HttpResult<ProviderDetail>, BaseError> {
-    let provider = Provider::get_by_id(id)?;
-    let models_list = Model::list_by_provider_id(id)?;
-    let provider_keys = ProviderApiKey::list_by_provider_id(id)?;
-    let custom_fields = CustomFieldDefinition::list_by_provider_id(id)?;
+async fn get_provider_detail(
+    State(_app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<HttpResult<ProviderDetailResponse>, BaseError> {
+    let detail = Provider::get_detail_by_id(id)?;
+    let models = Model::list_by_provider_id(id)?
+        .into_iter()
+        .map(|model| Model::get_detail_by_id(model.id))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let mut models_with_details: Vec<ModelDetail> = Vec::new();
-    for model in models_list {
-        let model_custom_fields = CustomFieldDefinition::list_by_model_id(model.id)?;
-        models_with_details.push(ModelDetail {
-            model,
-            custom_fields: model_custom_fields,
-        });
-    }
-
-    let detail = ProviderDetail {
-        provider,
-        models: models_with_details,
-        provider_keys,
-        custom_fields,
-    };
-
-    Ok(HttpResult::new(detail))
+    Ok(HttpResult::new(ProviderDetailResponse {
+        provider: detail.provider,
+        models,
+        provider_keys: detail.api_keys,
+        request_patches: detail.request_patches,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -236,17 +227,62 @@ struct ProviderCheckRequest {
     body: Value,
 }
 
+fn provider_check_patch_error(err: ProxyError) -> BaseError {
+    match err {
+        ProxyError::BadRequest(message) | ProxyError::UpstreamBadRequest(message) => {
+            BaseError::ParamInvalid(Some(message))
+        }
+        ProxyError::Unauthorized(message)
+        | ProxyError::KeyDisabled(message)
+        | ProxyError::KeyExpired(message)
+        | ProxyError::Forbidden(message)
+        | ProxyError::RateLimited(message)
+        | ProxyError::ConcurrencyLimited(message)
+        | ProxyError::QuotaExhausted(message)
+        | ProxyError::BudgetExhausted(message)
+        | ProxyError::PayloadTooLarge(message)
+        | ProxyError::ClientCancelled(message)
+        | ProxyError::InternalError(message)
+        | ProxyError::ProtocolTransformError(message)
+        | ProxyError::UpstreamRateLimited(message)
+        | ProxyError::UpstreamAuthentication(message)
+        | ProxyError::BadGateway(message)
+        | ProxyError::UpstreamService(message)
+        | ProxyError::UpstreamTimeout(message) => BaseError::InternalServerError(Some(message)),
+    }
+}
+
+async fn resolve_provider_check_request_patches(
+    app_state: &Arc<AppState>,
+    provider: &Provider,
+    model: Option<&Model>,
+) -> Result<Vec<CacheResolvedRequestPatch>, BaseError> {
+    let cache_provider = CacheProvider::from(provider.clone());
+    let cache_model = model.cloned().map(CacheModel::from);
+    let trace = load_runtime_request_patch_trace(&cache_provider, cache_model.as_ref(), app_state)
+        .await
+        .map_err(provider_check_patch_error)?;
+    if let Some(model) = model {
+        if let Some(conflict_error) = trace.conflict_error(&model.model_name) {
+            return Err(provider_check_patch_error(conflict_error));
+        }
+    }
+
+    Ok(trace.applied_rules)
+}
+
 async fn build_provider_check_request(
     client: &reqwest::Client,
     provider: &Provider,
     provider_api_key_id: i64,
     api_key: &str,
     model_name: &str,
+    request_patches: &[CacheResolvedRequestPatch],
 ) -> Result<ProviderCheckRequest, BaseError> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-    let request = match provider.provider_type {
+    let mut request = match provider.provider_type {
         ProviderType::Gemini => {
             headers.insert("x-goog-api-key", header_value(api_key)?);
             ProviderCheckRequest {
@@ -357,6 +393,17 @@ async fn build_provider_check_request(
             }
         }
     };
+
+    let mut url = Url::parse(&request.url)
+        .map_err(|e| BaseError::ParamInvalid(Some(format!("Failed to parse request URL: {}", e))))?;
+    apply_request_patches(
+        &mut request.body,
+        &mut url,
+        &mut request.headers,
+        request_patches,
+    )
+    .map_err(provider_check_patch_error)?;
+    request.url = url.to_string();
 
     Ok(request)
 }
@@ -470,25 +517,23 @@ fn generated_provider_key(
 
 fn base_error_message(error: &BaseError) -> String {
     match error {
-        BaseError::ParamInvalid(msg) => {
-            msg.clone().unwrap_or_else(|| "request params invalid".to_string())
-        }
-        BaseError::DatabaseFatal(msg) => {
-            msg.clone().unwrap_or_else(|| "database unknown error".to_string())
-        }
-        BaseError::DatabaseDup(msg) => {
-            msg.clone().unwrap_or_else(|| "some unique keys have conflicted".to_string())
-        }
+        BaseError::ParamInvalid(msg) => msg
+            .clone()
+            .unwrap_or_else(|| "request params invalid".to_string()),
+        BaseError::DatabaseFatal(msg) => msg
+            .clone()
+            .unwrap_or_else(|| "database unknown error".to_string()),
+        BaseError::DatabaseDup(msg) => msg
+            .clone()
+            .unwrap_or_else(|| "some unique keys have conflicted".to_string()),
         BaseError::NotFound(msg) => msg.clone().unwrap_or_else(|| "data not found".to_string()),
-        BaseError::Unauthorized(msg) => {
-            msg.clone().unwrap_or_else(|| "Unauthorized".to_string())
-        }
+        BaseError::Unauthorized(msg) => msg.clone().unwrap_or_else(|| "Unauthorized".to_string()),
         BaseError::StoreError(msg) => msg
             .clone()
             .unwrap_or_else(|| "Application cache/store operation failed".to_string()),
-        BaseError::InternalServerError(msg) => {
-            msg.clone().unwrap_or_else(|| "internal server error".to_string())
-        }
+        BaseError::InternalServerError(msg) => msg
+            .clone()
+            .unwrap_or_else(|| "internal server error".to_string()),
     }
 }
 
@@ -498,9 +543,8 @@ fn resolve_bootstrap_identity(
     name: Option<String>,
     key: Option<String>,
 ) -> Result<(String, String), BaseError> {
-    let provider_name = normalize_optional_text(name).unwrap_or_else(|| {
-        generated_provider_name(provider_type, endpoint)
-    });
+    let provider_name = normalize_optional_text(name)
+        .unwrap_or_else(|| generated_provider_name(provider_type, endpoint));
 
     if let Some(explicit_key) = normalize_optional_text(key) {
         return Ok((provider_name, explicit_key));
@@ -528,18 +572,22 @@ fn resolve_bootstrap_identity(
 }
 
 async fn perform_provider_check(
+    app_state: &Arc<AppState>,
     client: &reqwest::Client,
     provider: &Provider,
+    model: Option<&Model>,
     provider_api_key_id: i64,
     api_key: &str,
     model_name: &str,
 ) -> Result<(), BaseError> {
+    let request_patches = resolve_provider_check_request_patches(app_state, provider, model).await?;
     let check_request = build_provider_check_request(
         client,
         provider,
         provider_api_key_id,
         api_key,
         model_name,
+        &request_patches,
     )
     .await?;
 
@@ -590,19 +638,23 @@ async fn check_provider(
     Path(id): Path<i64>,
     Json(payload): Json<CheckProviderPayload>,
 ) -> Result<HttpResult<Value>, BaseError> {
+    let mut selected_model: Option<Model> = None;
     let model_name = match (payload.model_id, payload.model_name) {
         (Some(model_id), _) => {
             let model = Model::get_by_id(model_id)?;
             if model.provider_id != id {
                 return Err(BaseError::ParamInvalid(Some(format!(
                     "Model {} does not belong to provider {}",
-                    model_id, id
-                ))));
-            }
-            model
+                        model_id, id
+                    ))));
+                }
+            let resolved_name = model
                 .real_model_name
+                .clone()
                 .filter(|s| !s.is_empty())
-                .unwrap_or(model.model_name)
+                .unwrap_or_else(|| model.model_name.clone());
+            selected_model = Some(model);
+            resolved_name
         }
         (_, Some(model_name)) => model_name,
         (None, None) => {
@@ -640,7 +692,16 @@ async fn check_provider(
         &app_state.client
     };
 
-    perform_provider_check(client, &provider, provider_api_key_id, &api_key, &model_name).await?;
+    perform_provider_check(
+        &app_state,
+        client,
+        &provider,
+        selected_model.as_ref(),
+        provider_api_key_id,
+        &api_key,
+        &model_name,
+    )
+    .await?;
     Ok(HttpResult::new(serde_json::Value::Null))
 }
 
@@ -688,7 +749,10 @@ async fn bootstrap_provider(
         );
     }
 
-    if let Err(e) = app_state.invalidate_provider_api_keys(created.provider.id).await {
+    if let Err(e) = app_state
+        .invalidate_provider_api_keys(created.provider.id)
+        .await
+    {
         warn!(
             "Failed to invalidate provider API keys cache after bootstrap provider {}: {:?}",
             created.provider.id, e
@@ -709,8 +773,10 @@ async fn bootstrap_provider(
             .unwrap_or_else(|| created.created_model.model_name.clone());
 
         match perform_provider_check(
+            &app_state,
             client,
             &created.provider,
+            Some(&created.created_model),
             created.created_key.id,
             &created.created_key.api_key,
             &model_name_to_check,
@@ -820,32 +886,25 @@ async fn get_remote_models(
 
 // Removed full_commit function as Provider::full_commit is no longer available.
 
-async fn list_provider_details() -> Result<(StatusCode, HttpResult<Vec<ProviderDetail>>), BaseError>
-{
+async fn list_provider_details(
+    State(_app_state): State<Arc<AppState>>,
+) -> Result<(StatusCode, HttpResult<Vec<ProviderDetailResponse>>), BaseError> {
     let providers = Provider::list_all()?;
-    let mut provider_details: Vec<ProviderDetail> = Vec::new();
+    let mut provider_details: Vec<ProviderDetailResponse> = Vec::new();
 
     for provider in providers {
-        let models_list = Model::list_by_provider_id(provider.id)?;
-        let provider_keys = ProviderApiKey::list_by_provider_id(provider.id)?;
-        let custom_fields = CustomFieldDefinition::list_by_provider_id(provider.id)?;
+        let detail = Provider::get_detail_by_id(provider.id)?;
+        let models = Model::list_by_provider_id(provider.id)?
+            .into_iter()
+            .map(|model| Model::get_detail_by_id(model.id))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let mut models_with_details: Vec<ModelDetail> = Vec::new();
-        for model in models_list {
-            let model_custom_fields = CustomFieldDefinition::list_by_model_id(model.id)?;
-            models_with_details.push(ModelDetail {
-                model,
-                custom_fields: model_custom_fields,
-            });
-        }
-
-        let detail = ProviderDetail {
-            provider,
-            models: models_with_details,
-            provider_keys,
-            custom_fields,
-        };
-        provider_details.push(detail);
+        provider_details.push(ProviderDetailResponse {
+            provider: detail.provider,
+            models,
+            provider_keys: detail.api_keys,
+            request_patches: detail.request_patches,
+        });
     }
 
     Ok((StatusCode::OK, HttpResult::new(provider_details)))
@@ -1012,12 +1071,34 @@ pub fn create_provider_router() -> StateRouter {
 #[cfg(test)]
 mod tests {
     use super::header_value;
+    use crate::database::model::Model;
     use crate::database::provider::Provider;
     use crate::database::provider::ProviderSummaryItem;
-    use crate::database::model::Model;
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::schema::enum_def::{
+        ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
+    };
+    use crate::service::cache::types::{CacheResolvedRequestPatch, RequestPatchRuleOrigin};
     use crate::utils::HttpResult;
     use std::collections::BTreeSet;
+
+    fn request_patch(
+        id: i64,
+        placement: RequestPatchPlacement,
+        target: &str,
+        operation: RequestPatchOperation,
+        value: Option<serde_json::Value>,
+    ) -> CacheResolvedRequestPatch {
+        CacheResolvedRequestPatch {
+            placement,
+            target: target.to_string(),
+            operation,
+            value_json: value.map(|item| serde_json::to_string(&item).unwrap()),
+            source_rule_id: id,
+            source_origin: RequestPatchRuleOrigin::ProviderDirect,
+            overridden_rule_ids: Vec::new(),
+            description: None,
+        }
+    }
 
     #[tokio::test]
     async fn openai_style_check_request_uses_chat_completions() {
@@ -1028,6 +1109,7 @@ mod tests {
             0,
             "sk-test",
             "gpt-4o-mini",
+            &[],
         )
         .await
         .expect("request should build");
@@ -1056,6 +1138,7 @@ mod tests {
             0,
             "sk-gemini",
             "gemini-2.5-flash",
+            &[],
         )
         .await
         .expect("request should build");
@@ -1084,6 +1167,7 @@ mod tests {
             0,
             "ak-test",
             "claude-3-5-haiku-latest",
+            &[],
         )
         .await
         .expect("request should build");
@@ -1116,6 +1200,7 @@ mod tests {
             0,
             "gm-test",
             "gemini-2.0-flash",
+            &[],
         )
         .await
         .expect("request should build");
@@ -1143,6 +1228,7 @@ mod tests {
             0,
             "ollama-key",
             "llama3.1",
+            &[],
         )
         .await
         .expect("request should build");
@@ -1153,13 +1239,58 @@ mod tests {
         assert_eq!(request.body["messages"][0]["content"], "hi");
     }
 
+    #[tokio::test]
+    async fn provider_check_request_applies_request_patches_to_body_query_and_headers() {
+        let provider = sample_provider(ProviderType::Openai, "https://api.example.com/v1");
+        let request_patches = vec![
+            request_patch(
+                1,
+                RequestPatchPlacement::Header,
+                "x-check-mode",
+                RequestPatchOperation::Set,
+                Some(serde_json::json!("strict")),
+            ),
+            request_patch(
+                2,
+                RequestPatchPlacement::Query,
+                "trace",
+                RequestPatchOperation::Set,
+                Some(serde_json::json!(true)),
+            ),
+            request_patch(
+                3,
+                RequestPatchPlacement::Body,
+                "/messages/0/content",
+                RequestPatchOperation::Set,
+                Some(serde_json::json!("patched")),
+            ),
+        ];
+        let request = super::build_provider_check_request(
+            &reqwest::Client::new(),
+            &provider,
+            0,
+            "sk-test",
+            "gpt-4o-mini",
+            &request_patches,
+        )
+        .await
+        .expect("request should build");
+
+        assert_eq!(
+            request.url,
+            "https://api.example.com/v1/chat/completions?trace=true"
+        );
+        assert_eq!(
+            request.headers.get("x-check-mode").expect("patched header"),
+            "strict"
+        );
+        assert_eq!(request.body["messages"][0]["content"], "patched");
+    }
+
     #[test]
     fn bootstrap_provider_defaults_use_provider_type_and_endpoint_host() {
         assert_eq!(
-            super::generated_provider_name(
-                &ProviderType::Openai,
-                "https://api.example.com/v1"
-            ),
+            super::generated_provider_name(&ProviderType::Openai, "https://api.example.com/v1"),
             "OpenAI api.example.com"
         );
         assert_eq!(
@@ -1221,7 +1352,9 @@ mod tests {
         assert_eq!(root["code"], 0);
 
         let items = root["data"].as_array().expect("data should be an array");
-        let item = items[0].as_object().expect("summary row should be an object");
+        let item = items[0]
+            .as_object()
+            .expect("summary row should be an object");
         assert_eq!(
             item.keys().cloned().collect::<BTreeSet<_>>(),
             BTreeSet::from([

@@ -148,7 +148,7 @@ export function createEmptyEditingProviderData(): EditingProviderData {
     use_proxy: false,
     models: [],
     provider_keys: [],
-    custom_fields: [],
+    request_patches: [],
   };
 }
 

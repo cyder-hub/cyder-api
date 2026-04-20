@@ -87,6 +87,31 @@ pub enum FieldType {
     JsonString,
 }
 
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default, Encode, Decode,
+)]
+#[db_enum(pg_type = "request_patch_placement_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RequestPatchPlacement {
+    Header,
+    Query,
+    #[default]
+    Body,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default, Encode, Decode,
+)]
+#[db_enum(pg_type = "request_patch_operation_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RequestPatchOperation {
+    #[default]
+    Set,
+    Remove,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "request_status_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]

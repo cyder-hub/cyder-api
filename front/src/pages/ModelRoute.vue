@@ -307,7 +307,9 @@
                         <Select
                           :model-value="candidate.model_id"
                           :disabled="!candidate.provider_id"
-                          @update:model-value="(value) => (candidate.model_id = asStringOrNull(value))"
+                          @update:model-value="
+                            (value) => (candidate.model_id = asSelectValueOrNull(value))
+                          "
                         >
                           <SelectTrigger class="w-full">
                             <SelectValue :placeholder="$t('modelRoutePage.modal.placeholderModel')" />
@@ -316,7 +318,7 @@
                             <SelectItem
                               v-for="model in getModelOptions(candidate.provider_id)"
                               :key="model.value"
-                              :value="model.value"
+                              :value="String(model.value)"
                             >
                               {{ model.label }}
                             </SelectItem>
@@ -362,13 +364,13 @@ import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { normalizeError } from "@/lib/error";
 import { Api } from "@/services/request";
+import { useModelStore } from "@/store/modelStore";
 import { useProviderStore } from "@/store/providerStore";
 import type {
   ModelRouteDetail,
   ModelRouteListItem,
   ModelRoutePayload,
   ModelRouteUpdatePayload,
-  ProviderListItem,
 } from "@/store/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -430,6 +432,7 @@ type EditingRoute = {
 
 const { t: $t } = useI18n();
 const providerStore = useProviderStore();
+const modelStore = useModelStore();
 
 const routes = ref<ModelRouteListItem[]>([]);
 const loading = ref(true);
@@ -458,44 +461,57 @@ const setShowEditModal = (value: boolean) => {
   showEditModal.value = value;
 };
 
-const asStringOrNull = (value: unknown): string | null =>
-  typeof value === "string" && value.length > 0 ? value : null;
+const asSelectValueOrNull = (value: unknown): string | null => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const normalizedValue = String(value);
+  return normalizedValue.length > 0 ? normalizedValue : null;
+};
 
 const providerOptions = computed(() =>
-  providerStore.providers.map((provider) => ({
-    value: String(provider.provider.id),
-    label: provider.provider.name,
+  providerStore.providerOptions.map((provider) => ({
+    ...provider,
+    value: String(provider.value),
   })),
 );
 
-const getProviderById = (providerId: string | null): ProviderListItem | undefined => {
-  if (!providerId) return undefined;
-  return providerStore.providers.find(
-    (provider) => String(provider.provider.id) === providerId,
-  );
-};
+const getProviderById = (providerId: string | null) =>
+  providerStore.getProviderById(providerId);
 
 const getModelOptions = (providerId: string | null) => {
   const provider = getProviderById(providerId);
   if (!provider) return [];
 
-  return (provider.models || []).map((item) => ({
-    value: String(item.model.id),
-    label: item.model.model_name,
-  }));
+  return modelStore.models
+    .filter((item) => String(item.provider_id) === String(provider.id))
+    .map((item) => ({
+      value: String(item.id),
+      label: item.model_name,
+    }));
+};
+
+const ensureRouteModalDependencies = async () => {
+  await Promise.all([
+    providerStore.providers.length > 0
+      ? Promise.resolve(providerStore.providers)
+      : providerStore.fetchProviders(),
+    modelStore.models.length > 0
+      ? Promise.resolve(modelStore.models)
+      : modelStore.fetchModels(),
+  ]);
 };
 
 const getCandidateSummary = (candidate: EditingCandidate) => {
   const provider = getProviderById(candidate.provider_id);
-  const model = provider?.models.find(
-    (item) => String(item.model.id) === candidate.model_id,
-  );
+  const model = modelStore.modelById(candidate.model_id);
 
   if (!provider || !model) {
     return $t("modelRoutePage.modal.emptyCandidates");
   }
 
-  return `${provider.provider.provider_key}/${model.model.model_name}`;
+  return `${provider.provider_key}/${model.real_model_name || model.model_name}`;
 };
 
 const fetchRouteList = async () => {
@@ -512,17 +528,23 @@ const fetchRouteList = async () => {
 
 onMounted(async () => {
   try {
-    await providerStore.fetchProviders();
-    await fetchRouteList();
+    await Promise.all([ensureRouteModalDependencies(), fetchRouteList()]);
   } catch (err: unknown) {
     error.value = normalizeError(err, $t("common.unknownError")).message;
     loading.value = false;
   }
 });
 
-const handleOpenAddModal = () => {
-  editingRoute.value = createRouteTemplate();
-  showEditModal.value = true;
+const handleOpenAddModal = async () => {
+  try {
+    await ensureRouteModalDependencies();
+    editingRoute.value = createRouteTemplate();
+    showEditModal.value = true;
+  } catch (err: unknown) {
+    toastController.error(
+      normalizeError(err, $t("common.unknownError")).message,
+    );
+  }
 };
 
 const mapRouteDetailToEditingRoute = (detail: ModelRouteDetail): EditingRoute => ({
@@ -541,7 +563,10 @@ const mapRouteDetailToEditingRoute = (detail: ModelRouteDetail): EditingRoute =>
 
 const handleOpenEditModal = async (id: number) => {
   try {
-    const detail = await Api.getModelRouteDetail(id);
+    const [, detail] = await Promise.all([
+      ensureRouteModalDependencies(),
+      Api.getModelRouteDetail(id),
+    ]);
     editingRoute.value = mapRouteDetailToEditingRoute(detail);
     showEditModal.value = true;
   } catch (err: unknown) {
@@ -575,7 +600,7 @@ const moveCandidate = (index: number, delta: -1 | 1) => {
 };
 
 const handleCandidateProviderChange = (index: number, value: unknown) => {
-  const providerId = asStringOrNull(value);
+  const providerId = asSelectValueOrNull(value);
   const candidate = editingRoute.value.candidates[index];
   candidate.provider_id = providerId;
   candidate.model_id = null;

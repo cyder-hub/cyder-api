@@ -40,6 +40,17 @@ const isLinkActive = (itemPath: string) => {
   return route.path === itemPath || route.path.startsWith(`${itemPath}/`);
 };
 
+const sectionOrder = ["start", "overview", "core", "advanced"] as const;
+
+const groupedNavItems = computed(() =>
+  sectionOrder
+    .map((section) => ({
+      section,
+      items: navItems.filter((item) => item.section === section),
+    }))
+    .filter((group) => group.items.length > 0),
+);
+
 const currentPageTitle = computed(() => {
   const matchedNavItem = [...navItems]
     .sort((a, b) => b.path.length - a.path.length)
@@ -109,39 +120,47 @@ watch(isMobileNavOpen, (open) => {
         </button>
       </div>
 
-      <nav class="flex-grow overflow-y-auto overflow-x-hidden py-4 px-3">
-        <ul class="space-y-1 list-none">
-          <li v-for="item in navItems" :key="item.path">
-            <RouterLink
-              :to="item.path"
-              class="flex items-center py-2 px-3 rounded-md text-sm font-medium transition-colors duration-200 group"
-              :class="{
-                'bg-blue-50 text-blue-700': isLinkActive(item.path),
-                'text-gray-600 hover:bg-gray-100 hover:text-gray-900':
-                  !isLinkActive(item.path),
-                'justify-center px-0': isCollapsed,
-              }"
-              :title="isCollapsed ? translateNavItem(item) : undefined"
-            >
-              <span
-                class="flex items-center justify-center flex-shrink-0"
-                :class="
-                  isLinkActive(item.path)
-                    ? 'text-blue-700'
-                    : 'text-gray-400 group-hover:text-gray-500'
-                "
+      <nav class="flex-grow overflow-y-auto overflow-x-hidden px-3 py-4">
+        <div v-for="group in groupedNavItems" :key="group.section" class="mb-4 last:mb-0">
+          <p
+            v-if="!isCollapsed"
+            class="px-3 pb-2 text-[11px] font-medium uppercase tracking-wider text-gray-400"
+          >
+            {{ t(`sidebar.sections.${group.section}`) }}
+          </p>
+          <ul class="list-none space-y-1">
+            <li v-for="item in group.items" :key="item.path">
+              <RouterLink
+                :to="item.path"
+                class="group flex items-center rounded-md py-2 px-3 text-sm font-medium transition-colors duration-200"
+                :class="{
+                  'bg-blue-50 text-blue-700': isLinkActive(item.path),
+                  'text-gray-600 hover:bg-gray-100 hover:text-gray-900':
+                    !isLinkActive(item.path),
+                  'justify-center px-0': isCollapsed,
+                }"
+                :title="isCollapsed ? translateNavItem(item) : undefined"
               >
-                <component :is="item.icon" class="h-4 w-4" />
-              </span>
-              <span
-                v-if="!isCollapsed"
-                class="ml-2.5 whitespace-nowrap overflow-hidden"
-              >
-                {{ translateNavItem(item) }}
-              </span>
-            </RouterLink>
-          </li>
-        </ul>
+                <span
+                  class="flex flex-shrink-0 items-center justify-center"
+                  :class="
+                    isLinkActive(item.path)
+                      ? 'text-blue-700'
+                      : 'text-gray-400 group-hover:text-gray-500'
+                  "
+                >
+                  <component :is="item.icon" class="h-4 w-4" />
+                </span>
+                <span
+                  v-if="!isCollapsed"
+                  class="ml-2.5 overflow-hidden whitespace-nowrap"
+                >
+                  {{ translateNavItem(item) }}
+                </span>
+              </RouterLink>
+            </li>
+          </ul>
+        </div>
       </nav>
 
       <button
@@ -230,22 +249,27 @@ watch(isMobileNavOpen, (open) => {
           </div>
 
           <nav class="flex-1 overflow-y-auto px-3 py-4">
-            <ul class="space-y-1 list-none">
-              <li v-for="item in navItems" :key="item.path">
-                <RouterLink
-                  :to="item.path"
-                  class="flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors"
-                  :class="
-                    isLinkActive(item.path)
-                      ? 'bg-blue-50 text-blue-700'
-                      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
-                  "
-                >
-                  <component :is="item.icon" class="h-4 w-4 flex-shrink-0" />
-                  <span class="truncate">{{ translateNavItem(item) }}</span>
-                </RouterLink>
-              </li>
-            </ul>
+            <div v-for="group in groupedNavItems" :key="group.section" class="mb-4 last:mb-0">
+              <p class="px-3 pb-2 text-[11px] font-medium uppercase tracking-wider text-gray-400">
+                {{ t(`sidebar.sections.${group.section}`) }}
+              </p>
+              <ul class="list-none space-y-1">
+                <li v-for="item in group.items" :key="item.path">
+                  <RouterLink
+                    :to="item.path"
+                    class="flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors"
+                    :class="
+                      isLinkActive(item.path)
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                    "
+                  >
+                    <component :is="item.icon" class="h-4 w-4 flex-shrink-0" />
+                    <span class="truncate">{{ translateNavItem(item) }}</span>
+                  </RouterLink>
+                </li>
+              </ul>
+            </div>
           </nav>
 
           <div class="border-t border-gray-100 p-3">

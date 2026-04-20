@@ -17,6 +17,8 @@ import type {
   ProviderBase,
   ProviderApiKeyItem,
   ModelItem,
+  ProviderSummaryItem,
+  ModelSummaryItem,
   ProviderListItem,
   ProviderRuntimeItem,
   ProviderRuntimeListParams,
@@ -45,6 +47,8 @@ import type {
   RecordListItem,
   RecordDetail,
   RecordListParams,
+  ProviderBootstrapPayload,
+  ProviderBootstrapResponse,
   ProviderPayload,
   ProviderKeyPayload,
   ModelPayload,
@@ -125,6 +129,9 @@ export const Api = {
   // ========== Provider ==========
   getProviderDetailList(): Promise<ProviderListItem[]> {
     return request("/ai/manager/api/provider/detail/list");
+  },
+  getProviderSummaryList(): Promise<ProviderSummaryItem[]> {
+    return request.get("/ai/manager/api/provider/summary/list");
   },
   getProviderRuntimeList(
     params: ProviderRuntimeListParams = {},
@@ -289,6 +296,11 @@ export const Api = {
   },
 
   // ========== Provider CRUD (Extended) ==========
+  bootstrapProvider(
+    payload: ProviderBootstrapPayload,
+  ): Promise<ProviderBootstrapResponse> {
+    return request.post("/ai/manager/api/provider/bootstrap", payload);
+  },
   createProvider(payload: ProviderPayload): Promise<ProviderBase> {
     return request.post("/ai/manager/api/provider", payload);
   },
@@ -328,6 +340,9 @@ export const Api = {
   },
 
   // ========== Model CRUD ==========
+  getModelSummaryList(): Promise<ModelSummaryItem[]> {
+    return request.get("/ai/manager/api/model/summary/list");
+  },
   createModel(payload: ModelPayload): Promise<ModelItem> {
     return request.post("/ai/manager/api/model", payload);
   },

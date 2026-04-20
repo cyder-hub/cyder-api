@@ -4,18 +4,10 @@
       <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div class="min-w-0">
           <h1 class="text-lg font-semibold text-gray-900 tracking-tight sm:text-xl">
-            {{
-              providerId
-                ? $t("providerEditPage.titleEdit")
-                : $t("providerEditPage.titleAdd")
-            }}
+            {{ pageTitle }}
           </h1>
           <p class="mt-1 text-sm text-gray-500">
-            {{
-              providerId
-                ? $t("providerEditPage.titleEdit")
-                : $t("providerEditPage.titleAdd")
-            }}
+            {{ pageDescription }}
           </p>
         </div>
         <div class="flex w-full flex-col gap-2 sm:w-auto">
@@ -44,7 +36,16 @@
       <template v-else-if="editingData">
         <div class="space-y-5 sm:space-y-6">
           <ProviderBaseInfoForm v-model:editingData="editingData" />
-
+          <div class="space-y-3 pt-1">
+            <div class="border-t border-gray-200 pt-5">
+              <h2 class="text-base font-semibold text-gray-900">
+                {{ $t("providerEditPage.sections.advanced.title") }}
+              </h2>
+              <p class="mt-1 text-sm text-gray-500">
+                {{ $t("providerEditPage.sections.advanced.description") }}
+              </p>
+            </div>
+          </div>
           <ProviderModelList 
             v-model:editingData="editingData"
             @check-single="(index) => handleCheck('model', index)"
@@ -82,6 +83,9 @@
             <div class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
               <p class="text-sm text-gray-500">
                 {{ $t("providerEditPage.modalSelectModel.description") }}
+              </p>
+              <p class="font-mono text-xs text-gray-600">
+                {{ $t("providerEditPage.modalSelectModel.target", { target: selectedApiKeyCheckTargetLabel }) }}
               </p>
               <Select v-model="modelIndexToUseStr">
                 <SelectTrigger class="w-full">
@@ -134,6 +138,9 @@
               <p class="text-sm text-gray-500">
                 {{ $t("providerEditPage.modalSelectApiKey.description") }}
               </p>
+              <p class="font-mono text-xs text-gray-600">
+                {{ $t("providerEditPage.modalSelectApiKey.target", { target: selectedModelCheckTargetLabel }) }}
+              </p>
               <Select v-model="apiKeyIndexToUseStr">
                 <SelectTrigger class="w-full">
                   <SelectValue
@@ -176,7 +183,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { Api } from "@/services/request";
@@ -210,6 +217,7 @@ import {
 
 // Import types and composable
 import type { EditingProviderData } from "@/components/provider/types";
+import { createEmptyEditingProviderData } from "@/pages/providerEditState";
 import { useProviderCheck } from "@/composables/useProviderCheck";
 
 // Import components
@@ -236,6 +244,18 @@ const errorMsg = ref<string | null>(null);
 const editingData = ref<EditingProviderData | null>(null);
 const allCustomFields = ref<CustomFieldItem[]>([]);
 
+const pageTitle = computed(() =>
+  providerId.value || editingData.value?.id
+    ? $t("providerEditPage.titleEdit")
+    : $t("providerEditPage.titleAdd"),
+);
+
+const pageDescription = computed(() =>
+  providerId.value || editingData.value?.id
+    ? $t("providerEditPage.descriptionEdit")
+    : $t("providerEditPage.descriptionAdd"),
+);
+
 const {
   isModelSelectModalOpen,
   isApiKeySelectModalOpen,
@@ -243,6 +263,8 @@ const {
   apiKeyIndexToUseStr,
   modelOptionsForSelect,
   apiKeyOptionsForSelect,
+  selectedModelCheckTargetLabel,
+  selectedApiKeyCheckTargetLabel,
   handleCheck,
   handleBatchCheck,
   handleConfirmModelSelection,
@@ -309,15 +331,7 @@ const fetchProviderDetail = async (
 };
 
 const getEmptyProvider = (): EditingProviderData => ({
-  id: null,
-  name: "",
-  provider_key: "",
-  provider_type: "OPENAI",
-  endpoint: "",
-  use_proxy: false,
-  models: [],
-  provider_keys: [],
-  custom_fields: [],
+  ...createEmptyEditingProviderData(),
 });
 
 onMounted(async () => {
@@ -328,38 +342,39 @@ onMounted(async () => {
   allCustomFields.value = fields;
 
   if (providerId.value) {
-    const detail = await fetchProviderDetail(providerId.value);
-    if (detail) {
-      editingData.value = reactive({
-        id: detail.provider.id,
-        name: detail.provider.name,
-        provider_key: detail.provider.provider_key,
-        provider_type: detail.provider.provider_type || "OPENAI",
-        endpoint: detail.provider.endpoint,
-        use_proxy: detail.provider.use_proxy,
-        models: detail.models.map((m) => ({
-          id: m.model.id,
-          model_name: m.model.model_name,
-          real_model_name: m.model.real_model_name ?? null,
-          isEditing: false,
-          checkStatus: "unchecked" as const,
-        })),
-        provider_keys: detail.provider_keys.map((k) => ({
-          id: k.id,
-          api_key: k.api_key,
-          description: k.description ?? null,
-          isEditing: false,
-          checkStatus: "unchecked" as const,
-        })),
-        custom_fields: (detail.custom_fields || []).map(toEditableCustomField),
-      });
-    } else {
-      errorMsg.value = $t("providerEditPage.alert.loadDataFailed", {
-        providerId: providerId.value,
+      const detail = await fetchProviderDetail(providerId.value);
+      if (detail) {
+        editingData.value = {
+          id: detail.provider.id,
+          name: detail.provider.name,
+          provider_key: detail.provider.provider_key,
+          provider_type: detail.provider.provider_type || "OPENAI",
+          endpoint: detail.provider.endpoint,
+          use_proxy: detail.provider.use_proxy,
+          models: detail.models.map((m) => ({
+            id: m.model.id,
+            model_name: m.model.model_name,
+            real_model_name: m.model.real_model_name ?? null,
+            is_enabled: m.model.is_enabled,
+            isEditing: false,
+            checkStatus: "unchecked" as const,
+          })),
+          provider_keys: detail.provider_keys.map((k) => ({
+            id: k.id,
+            api_key: k.api_key,
+            description: k.description ?? null,
+            isEditing: false,
+            checkStatus: "unchecked" as const,
+          })),
+          custom_fields: (detail.custom_fields || []).map(toEditableCustomField),
+        };
+      } else {
+        errorMsg.value = $t("providerEditPage.alert.loadDataFailed", {
+          providerId: providerId.value,
       });
     }
   } else {
-    editingData.value = reactive(getEmptyProvider());
+    editingData.value = getEmptyProvider();
   }
   isLoading.value = false;
 });

@@ -37,7 +37,8 @@ import type {
   ApiKeyReveal,
   ApiKeyUpdatePayload,
   ModelRouteListItem,
-  ProviderListItem,
+  ModelSummaryItem,
+  ProviderSummaryItem,
 } from "@/store/types";
 
 interface EditableRule {
@@ -88,7 +89,8 @@ interface ApiKeyEditModalProps {
   isOpen: boolean;
   initialData: ApiKeyDetail | null;
   modelRoutes: ModelRouteListItem[];
-  providers: ProviderListItem[];
+  providers: ProviderSummaryItem[];
+  models: ModelSummaryItem[];
 }
 
 const props = defineProps<ApiKeyEditModalProps>();
@@ -159,13 +161,15 @@ const scopeOptions = computed(() =>
 
 const providerOptions = computed(() =>
   props.providers.map((item) => ({
-    value: item.provider.id,
-    label: `${item.provider.name} (${item.provider.provider_key})`,
-    models: item.models.map((modelItem) => ({
-      value: modelItem.model.id,
-      label: modelItem.model.model_name,
-      providerId: item.provider.id,
-    })),
+    value: item.id,
+    label: `${item.name} (${item.provider_key})`,
+    models: props.models
+      .filter((modelItem) => modelItem.provider_id === item.id)
+      .map((modelItem) => ({
+        value: modelItem.id,
+        label: modelItem.model_name,
+        providerId: item.id,
+      })),
   })),
 );
 

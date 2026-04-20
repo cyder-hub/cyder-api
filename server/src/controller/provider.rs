@@ -1,8 +1,8 @@
 use crate::database::{
     DbResult,
     provider::{
-        NewProvider, NewProviderApiKey, Provider, ProviderApiKey, UpdateProviderApiKeyData,
-        UpdateProviderData,
+        BootstrapProviderInput, BootstrapProviderResult, NewProvider, NewProviderApiKey, Provider,
+        ProviderApiKey, ProviderSummaryItem, UpdateProviderApiKeyData, UpdateProviderData,
     },
 };
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
@@ -42,8 +42,46 @@ struct ProviderDetail {
     custom_fields: Vec<ApiCustomFieldDefinition>,
 }
 
+#[derive(Deserialize)]
+struct BootstrapProviderPayload {
+    endpoint: String,
+    api_key: String,
+    model_name: String,
+    #[serde(default)]
+    provider_type: ProviderType,
+    name: Option<String>,
+    key: Option<String>,
+    real_model_name: Option<String>,
+    #[serde(default)]
+    use_proxy: bool,
+    #[serde(default)]
+    save_and_test: bool,
+    api_key_description: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BootstrapCheckResult {
+    success: bool,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct BootstrapProviderResponse {
+    provider: Provider,
+    created_key: ProviderApiKey,
+    created_model: Model,
+    provider_name: String,
+    provider_key: String,
+    check_result: Option<BootstrapCheckResult>,
+}
+
 async fn list() -> DbResult<HttpResult<Vec<Provider>>> {
     let result = Provider::list_all()?;
+    Ok(HttpResult::new(result))
+}
+
+async fn list_summary() -> DbResult<HttpResult<Vec<ProviderSummaryItem>>> {
+    let result = Provider::list_summary()?;
     Ok(HttpResult::new(result))
 }
 
@@ -343,6 +381,210 @@ fn header_value(value: &str) -> Result<HeaderValue, BaseError> {
         .map_err(|e| BaseError::ParamInvalid(Some(format!("Invalid request header value: {}", e))))
 }
 
+fn provider_type_label(provider_type: &ProviderType) -> &'static str {
+    match provider_type {
+        ProviderType::Openai => "OpenAI",
+        ProviderType::Gemini => "Gemini",
+        ProviderType::Vertex => "Vertex",
+        ProviderType::VertexOpenai => "Vertex OpenAI",
+        ProviderType::Ollama => "Ollama",
+        ProviderType::Anthropic => "Anthropic",
+        ProviderType::Responses => "Responses",
+        ProviderType::GeminiOpenai => "Gemini OpenAI",
+    }
+}
+
+fn endpoint_host(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    if let Ok(url) = Url::parse(trimmed) {
+        if let Some(host) = url.host_str() {
+            return match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_string(),
+            };
+        }
+    }
+
+    trimmed
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn slugify(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator {
+            if !slug.is_empty() {
+                slug.push('-');
+            }
+            last_was_separator = true;
+        }
+    }
+
+    slug.trim_matches('-').to_string()
+}
+
+fn generated_provider_name(provider_type: &ProviderType, endpoint: &str) -> String {
+    let host = endpoint_host(endpoint);
+    if host.is_empty() {
+        provider_type_label(provider_type).to_string()
+    } else {
+        format!("{} {}", provider_type_label(provider_type), host)
+    }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+fn generated_provider_key(
+    provider_type: &ProviderType,
+    endpoint: &str,
+    provider_name: &str,
+) -> String {
+    let fallback = generated_provider_name(provider_type, endpoint);
+    let candidate = slugify(provider_name);
+    if !candidate.is_empty() {
+        candidate
+    } else {
+        let fallback_slug = slugify(&fallback);
+        if !fallback_slug.is_empty() {
+            fallback_slug
+        } else {
+            slugify(provider_type_label(provider_type))
+        }
+    }
+}
+
+fn base_error_message(error: &BaseError) -> String {
+    match error {
+        BaseError::ParamInvalid(msg) => {
+            msg.clone().unwrap_or_else(|| "request params invalid".to_string())
+        }
+        BaseError::DatabaseFatal(msg) => {
+            msg.clone().unwrap_or_else(|| "database unknown error".to_string())
+        }
+        BaseError::DatabaseDup(msg) => {
+            msg.clone().unwrap_or_else(|| "some unique keys have conflicted".to_string())
+        }
+        BaseError::NotFound(msg) => msg.clone().unwrap_or_else(|| "data not found".to_string()),
+        BaseError::Unauthorized(msg) => {
+            msg.clone().unwrap_or_else(|| "Unauthorized".to_string())
+        }
+        BaseError::StoreError(msg) => msg
+            .clone()
+            .unwrap_or_else(|| "Application cache/store operation failed".to_string()),
+        BaseError::InternalServerError(msg) => {
+            msg.clone().unwrap_or_else(|| "internal server error".to_string())
+        }
+    }
+}
+
+fn resolve_bootstrap_identity(
+    provider_type: &ProviderType,
+    endpoint: &str,
+    name: Option<String>,
+    key: Option<String>,
+) -> Result<(String, String), BaseError> {
+    let provider_name = normalize_optional_text(name).unwrap_or_else(|| {
+        generated_provider_name(provider_type, endpoint)
+    });
+
+    if let Some(explicit_key) = normalize_optional_text(key) {
+        return Ok((provider_name, explicit_key));
+    }
+
+    let base_key = generated_provider_key(provider_type, endpoint, &provider_name);
+    let mut candidate = if base_key.is_empty() {
+        slugify(&generated_provider_name(provider_type, endpoint))
+    } else {
+        base_key
+    };
+
+    if candidate.is_empty() {
+        candidate = slugify(provider_type_label(provider_type));
+    }
+
+    let base_candidate = candidate.clone();
+    let mut suffix = 2;
+    while Provider::get_by_key(&candidate)?.is_some() {
+        candidate = format!("{}-{}", base_candidate, suffix);
+        suffix += 1;
+    }
+
+    Ok((provider_name, candidate))
+}
+
+async fn perform_provider_check(
+    client: &reqwest::Client,
+    provider: &Provider,
+    provider_api_key_id: i64,
+    api_key: &str,
+    model_name: &str,
+) -> Result<(), BaseError> {
+    let check_request = build_provider_check_request(
+        client,
+        provider,
+        provider_api_key_id,
+        api_key,
+        model_name,
+    )
+    .await?;
+
+    let response = client
+        .post(&check_request.url)
+        .headers(check_request.headers)
+        .json(&check_request.body)
+        .send()
+        .await
+        .map_err(|e| {
+            BaseError::ParamInvalid(Some(format!("Failed to send check request: {}", e)))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Could not retrieve error body".to_string());
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "Provider API returned status {}: {}",
+            status, error_body
+        ))));
+    }
+
+    let _ = response.text().await;
+    Ok(())
+}
+
+fn build_bootstrap_response(
+    created: BootstrapProviderResult,
+    provider_name: String,
+    provider_key: String,
+    check_result: Option<BootstrapCheckResult>,
+) -> BootstrapProviderResponse {
+    BootstrapProviderResponse {
+        provider: created.provider,
+        created_key: created.created_key,
+        created_model: created.created_model,
+        provider_name,
+        provider_key,
+        check_result,
+    }
+}
+
 async fn check_provider(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -398,41 +640,102 @@ async fn check_provider(
         &app_state.client
     };
 
-    let check_request = build_provider_check_request(
-        client,
-        &provider,
-        provider_api_key_id,
-        &api_key,
-        &model_name,
-    )
-    .await?;
+    perform_provider_check(client, &provider, provider_api_key_id, &api_key, &model_name).await?;
+    Ok(HttpResult::new(serde_json::Value::Null))
+}
 
-    let response = client
-        .post(&check_request.url)
-        .headers(check_request.headers)
-        .json(&check_request.body)
-        .send()
-        .await
-        .map_err(|e| {
-            BaseError::ParamInvalid(Some(format!("Failed to send check request: {}", e)))
-        })?;
+async fn bootstrap_provider(
+    State(app_state): State<Arc<AppState>>,
+    Json(payload): Json<BootstrapProviderPayload>,
+) -> Result<HttpResult<BootstrapProviderResponse>, BaseError> {
+    let (provider_name, provider_key) = resolve_bootstrap_identity(
+        &payload.provider_type,
+        &payload.endpoint,
+        payload.name.clone(),
+        payload.key.clone(),
+    )?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Could not retrieve error body".to_string());
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Provider API returned status {}: {}",
-            status, error_body
-        ))));
+    let provider_input = BootstrapProviderInput {
+        provider_id: ID_GENERATOR.generate_id(),
+        provider_key: provider_key.clone(),
+        name: provider_name.clone(),
+        endpoint: payload.endpoint.clone(),
+        use_proxy: payload.use_proxy,
+        provider_type: payload.provider_type.clone(),
+        provider_api_key_mode: ProviderApiKeyMode::Queue,
+        api_key: payload.api_key.clone(),
+        api_key_description: normalize_optional_text(payload.api_key_description.clone()),
+        model_name: payload.model_name.clone(),
+        real_model_name: normalize_optional_text(payload.real_model_name.clone()),
+    };
+
+    let created = Provider::bootstrap(&provider_input)?;
+
+    if let Err(e) = app_state.invalidate_models_catalog().await {
+        warn!(
+            "Failed to invalidate models catalog after bootstrap provider {}: {:?}",
+            created.provider.id, e
+        );
     }
 
-    // On success, we don't need to return the original response.
-    // Just consume the body to free up the connection and return a success indicator.
-    let _ = response.text().await;
-    Ok(HttpResult::new(serde_json::Value::Null))
+    if let Err(e) = app_state
+        .invalidate_provider(created.provider.id, Some(&created.provider.provider_key))
+        .await
+    {
+        warn!(
+            "Failed to invalidate provider cache after bootstrap provider {}: {:?}",
+            created.provider.id, e
+        );
+    }
+
+    if let Err(e) = app_state.invalidate_provider_api_keys(created.provider.id).await {
+        warn!(
+            "Failed to invalidate provider API keys cache after bootstrap provider {}: {:?}",
+            created.provider.id, e
+        );
+    }
+
+    let check_result = if payload.save_and_test {
+        let client = if created.provider.use_proxy {
+            &app_state.proxy_client
+        } else {
+            &app_state.client
+        };
+        let model_name_to_check = created
+            .created_model
+            .real_model_name
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| created.created_model.model_name.clone());
+
+        match perform_provider_check(
+            client,
+            &created.provider,
+            created.created_key.id,
+            &created.created_key.api_key,
+            &model_name_to_check,
+        )
+        .await
+        {
+            Ok(()) => Some(BootstrapCheckResult {
+                success: true,
+                message: "Provider check succeeded".to_string(),
+            }),
+            Err(e) => Some(BootstrapCheckResult {
+                success: false,
+                message: base_error_message(&e),
+            }),
+        }
+    } else {
+        None
+    };
+
+    Ok(HttpResult::new(build_bootstrap_response(
+        created,
+        provider_name,
+        provider_key,
+        check_result,
+    )))
 }
 
 async fn get_remote_models(
@@ -683,7 +986,9 @@ pub fn create_provider_router() -> StateRouter {
         "/provider",
         create_state_router()
             .route("/", post(insert))
+            .route("/bootstrap", post(bootstrap_provider))
             // .route("/commit", post(full_commit)) // Removed full_commit route
+            .route("/summary/list", get(list_summary))
             .route("/list", get(list))
             .route("/detail/list", get(list_provider_details))
             .route("/{id}", get(get_provider))
@@ -708,7 +1013,11 @@ pub fn create_provider_router() -> StateRouter {
 mod tests {
     use super::header_value;
     use crate::database::provider::Provider;
+    use crate::database::provider::ProviderSummaryItem;
+    use crate::database::model::Model;
     use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::utils::HttpResult;
+    use std::collections::BTreeSet;
 
     #[tokio::test]
     async fn openai_style_check_request_uses_chat_completions() {
@@ -842,6 +1151,116 @@ mod tests {
         assert_eq!(request.body["model"], "llama3.1");
         assert_eq!(request.body["stream"], false);
         assert_eq!(request.body["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn bootstrap_provider_defaults_use_provider_type_and_endpoint_host() {
+        assert_eq!(
+            super::generated_provider_name(
+                &ProviderType::Openai,
+                "https://api.example.com/v1"
+            ),
+            "OpenAI api.example.com"
+        );
+        assert_eq!(
+            super::generated_provider_key(
+                &ProviderType::Openai,
+                "https://api.example.com/v1",
+                "OpenAI api.example.com"
+            ),
+            "openai-api-example-com"
+        );
+    }
+
+    #[test]
+    fn bootstrap_provider_response_without_check_result_remains_null() {
+        let response = super::build_bootstrap_response(
+            sample_bootstrap_result(),
+            "OpenAI api.example.com".to_string(),
+            "openai-api-example-com".to_string(),
+            None,
+        );
+
+        assert_eq!(response.provider_name, "OpenAI api.example.com");
+        assert_eq!(response.provider_key, "openai-api-example-com");
+        assert!(response.check_result.is_none());
+    }
+
+    #[test]
+    fn bootstrap_provider_response_can_carry_check_failure() {
+        let response = super::build_bootstrap_response(
+            sample_bootstrap_result(),
+            "OpenAI api.example.com".to_string(),
+            "openai-api-example-com".to_string(),
+            Some(super::BootstrapCheckResult {
+                success: false,
+                message: "boom".to_string(),
+            }),
+        );
+
+        let check_result = response.check_result.expect("check result should exist");
+        assert!(!check_result.success);
+        assert_eq!(check_result.message, "boom");
+    }
+
+    #[test]
+    fn provider_summary_api_contract_serializes_lightweight_rows() {
+        let payload = HttpResult::new(vec![ProviderSummaryItem {
+            id: 42,
+            provider_key: "openai-api-example-com".to_string(),
+            name: "OpenAI api.example.com".to_string(),
+            is_enabled: true,
+        }]);
+
+        let value = serde_json::to_value(payload).expect("summary payload should serialize");
+        let root = value.as_object().expect("payload should be an object");
+        assert_eq!(
+            root.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["code".to_string(), "data".to_string()])
+        );
+        assert_eq!(root["code"], 0);
+
+        let items = root["data"].as_array().expect("data should be an array");
+        let item = items[0].as_object().expect("summary row should be an object");
+        assert_eq!(
+            item.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "id".to_string(),
+                "provider_key".to_string(),
+                "name".to_string(),
+                "is_enabled".to_string(),
+            ])
+        );
+        assert!(item.get("models").is_none());
+        assert!(item.get("provider_keys").is_none());
+        assert!(item.get("custom_fields").is_none());
+    }
+
+    fn sample_bootstrap_result() -> super::BootstrapProviderResult {
+        super::BootstrapProviderResult {
+            provider: sample_provider(ProviderType::Openai, "https://api.example.com/v1"),
+            created_key: super::ProviderApiKey {
+                id: 2,
+                provider_id: 1,
+                api_key: "sk-test".to_string(),
+                description: Some("bootstrap key".to_string()),
+                deleted_at: None,
+                is_enabled: true,
+                created_at: 0,
+                updated_at: 0,
+            },
+            created_model: Model {
+                id: 3,
+                provider_id: 1,
+                model_name: "gpt-4o-mini".to_string(),
+                real_model_name: None,
+                cost_catalog_id: None,
+                deleted_at: None,
+                is_enabled: true,
+                created_at: 0,
+                updated_at: 0,
+            },
+        }
     }
 
     fn sample_provider(provider_type: ProviderType, endpoint: &str) -> Provider {

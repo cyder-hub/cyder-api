@@ -334,6 +334,13 @@ export interface ProviderBase {
   provider_type: string;
 }
 
+export interface ProviderSummaryItem {
+  id: number;
+  provider_key: string;
+  name: string;
+  is_enabled: boolean;
+}
+
 export interface ProviderApiKeyItem {
   id: number;
   api_key: string;
@@ -344,11 +351,22 @@ export interface ModelItem {
   id: number;
   model_name: string;
   real_model_name: string;
+  is_enabled: boolean;
 }
 
 export interface ModelDetail {
   model: ModelItem;
   custom_fields: CustomFieldItem[];
+}
+
+export interface ModelSummaryItem {
+  id: number;
+  provider_id: number;
+  provider_key: string;
+  provider_name: string;
+  model_name: string;
+  real_model_name: string | null;
+  is_enabled: boolean;
 }
 
 export interface ProviderListItem {
@@ -555,9 +573,18 @@ export interface ModelDetailModel {
   updated_at: number;
 }
 
+export interface ModelRouteReferenceItem {
+  id: number;
+  route_name: string;
+  description: string | null;
+  is_enabled: boolean;
+  expose_in_models: boolean;
+}
+
 export interface ModelDetailResponse {
   model: ModelDetailModel;
   custom_fields: CustomFieldDefinition[];
+  route_references: ModelRouteReferenceItem[];
 }
 
 export interface CustomFieldPayload {
@@ -842,6 +869,28 @@ export interface ProviderCheckPayload {
   model_name?: string;
   provider_api_key_id?: number;
   provider_api_key?: string;
+}
+
+export interface ProviderBootstrapPayload {
+  endpoint: string;
+  api_key: string;
+  model_name: string;
+  provider_type?: string;
+  name?: string;
+  key?: string;
+  real_model_name?: string | null;
+  use_proxy?: boolean;
+  save_and_test?: boolean;
+  api_key_description?: string | null;
+}
+
+export interface ProviderBootstrapResponse {
+  provider?: ProviderBase;
+  created_key?: ProviderApiKeyItem | null;
+  created_model?: ModelItem | null;
+  provider_name?: string | null;
+  provider_key?: string | null;
+  check_result?: unknown;
 }
 
 export interface ProviderPayload {

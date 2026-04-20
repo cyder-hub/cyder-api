@@ -69,6 +69,9 @@ const costManager = useCostPage();
 const editingData = ref<EditingModelData | null>(null);
 const selectedCustomFieldId = ref<string | null>(null);
 const shouldBindCreatedCatalog = ref(false);
+const currentProvider = computed(() =>
+  providerStore.getProviderById(editingData.value?.provider_id),
+);
 
 const toEditableCustomField = (
   field: Pick<
@@ -111,6 +114,7 @@ const fetchData = async () => {
     const [detail, customFieldsRes] = await Promise.all([
       Api.getModelDetail(modelId),
       Api.getCustomFieldList(),
+      providerStore.fetchProviders(),
       costManager.refreshCostData(),
     ]);
 
@@ -250,8 +254,16 @@ const handleUnlinkCustomField = async (fieldId: number) => {
   }
 };
 
-const handleNavigateBack = () => {
+const handleNavigateToModels = () => {
+  router.push("/model");
+};
+
+const handleNavigateToProviders = () => {
   router.push("/provider");
+};
+
+const handleNavigateToRoutes = () => {
+  router.push("/model_route");
 };
 
 const handleOpenSelectedCostCatalog = () => {
@@ -311,8 +323,11 @@ onMounted(() => {
           </h1>
         </div>
         <div class="flex w-full flex-col gap-2 sm:w-auto">
-          <Button variant="outline" @click="handleNavigateBack">
-            {{ t("common.cancel") }}
+          <Button variant="outline" @click="handleNavigateToModels">
+            {{ t("modelEditPage.buttonBackToModels") }}
+          </Button>
+          <Button variant="ghost" @click="handleNavigateToProviders">
+            {{ t("modelEditPage.buttonBackToProviders") }}
           </Button>
         </div>
       </div>
@@ -339,6 +354,96 @@ onMounted(() => {
       </div>
 
       <div v-else-if="editingData" class="space-y-6">
+        <div class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+              <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                {{ t("modelEditPage.providerSummary.title") }}
+              </p>
+              <h2 class="mt-1 text-base font-semibold text-gray-900">
+                {{ currentProvider?.name || t("modelEditPage.providerSummary.unknown") }}
+              </h2>
+              <p class="mt-1 font-mono text-xs text-gray-500">
+                {{ currentProvider?.provider_key || "/" }}
+              </p>
+            </div>
+            <Badge
+              :variant="currentProvider?.is_enabled ? 'secondary' : 'outline'"
+              class="w-fit font-mono text-[11px]"
+            >
+              {{
+                currentProvider?.is_enabled
+                  ? t("modelEditPage.providerSummary.enabled")
+                  : t("modelEditPage.providerSummary.disabled")
+              }}
+            </Badge>
+          </div>
+          <p class="mt-2 text-sm text-gray-500">
+            {{ t("modelEditPage.providerSummary.description") }}
+          </p>
+        </div>
+
+        <div class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+              <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                {{ t("modelEditPage.routeReferences.title") }}
+              </p>
+              <h2 class="mt-1 text-base font-semibold text-gray-900">
+                {{ t("modelEditPage.routeReferences.heading") }}
+              </h2>
+              <p class="mt-2 text-sm text-gray-500">
+                {{ t("modelEditPage.routeReferences.description") }}
+              </p>
+            </div>
+            <Button variant="ghost" @click="handleNavigateToRoutes">
+              {{ t("modelEditPage.routeReferences.openRoutes") }}
+            </Button>
+          </div>
+
+          <div
+            v-if="!modelDetail.route_references.length"
+            class="mt-4 rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
+          >
+            {{ t("modelEditPage.routeReferences.noRoutes") }}
+          </div>
+
+          <div v-else class="mt-4 flex flex-wrap gap-2">
+            <div
+              v-for="routeReference in modelDetail.route_references"
+              :key="routeReference.id"
+              class="min-w-[12rem] rounded-lg border border-gray-200 px-3 py-3"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-mono text-sm text-gray-900">
+                  {{ routeReference.route_name }}
+                </span>
+                <Badge
+                  :variant="routeReference.is_enabled ? 'secondary' : 'outline'"
+                  class="font-mono text-[11px]"
+                >
+                  {{
+                    routeReference.is_enabled
+                      ? t("modelEditPage.routeReferences.enabled")
+                      : t("modelEditPage.routeReferences.disabled")
+                  }}
+                </Badge>
+              </div>
+              <p v-if="routeReference.description" class="mt-2 text-xs text-gray-500">
+                {{ routeReference.description }}
+              </p>
+              <p class="mt-2 text-[11px] uppercase tracking-wide text-gray-500">
+                /models:
+                {{
+                  routeReference.expose_in_models
+                    ? t("common.yes")
+                    : t("common.no")
+                }}
+              </p>
+            </div>
+          </div>
+        </div>
+
       <Card>
         <CardHeader>
           <CardTitle>{{ t("common.basicInfo") }}</CardTitle>
@@ -713,8 +818,8 @@ onMounted(() => {
           <Button
             variant="ghost"
             class="w-full text-gray-600 sm:w-auto"
-            @click="handleNavigateBack"
-            >{{ t("common.cancel") }}</Button
+            @click="handleNavigateToModels"
+            >{{ t("modelEditPage.buttonBackToModels") }}</Button
           >
           <Button variant="default" class="w-full sm:w-auto" @click="handleSaveModel">{{
             t("common.save")

@@ -1,7 +1,7 @@
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use crate::{
     controller::BaseError,
-    database::model::{Model, ModelDetail, UpdateModelData},
+    database::model::{Model, ModelDetail, ModelSummaryItem, UpdateModelData},
     utils::HttpResult, // Import HttpResult
 };
 use axum::{
@@ -102,6 +102,11 @@ async fn list_models() -> Result<HttpResult<Vec<Model>>, BaseError> {
     Ok(HttpResult::new(models))
 }
 
+async fn list_model_summaries() -> Result<HttpResult<Vec<ModelSummaryItem>>, BaseError> {
+    let models = Model::list_summary()?;
+    Ok(HttpResult::new(models))
+}
+
 async fn get_model_detail(Path(id): Path<i64>) -> Result<HttpResult<ModelDetail>, BaseError> {
     let detail = Model::get_detail_by_id(id)?;
     Ok(HttpResult::new(detail))
@@ -115,6 +120,7 @@ pub fn create_model_router() -> StateRouter {
         "/model",
         create_state_router()
             .route("/", post(insert_model))
+            .route("/summary/list", get(list_model_summaries))
             .route("/list", get(list_models))
             .route("/{id}", delete(delete_model))
             .route("/{id}", put(update_model))
@@ -122,4 +128,55 @@ pub fn create_model_router() -> StateRouter {
         // .route("/{id}/prices", get(list_model_prices)) // Removed price route
         // .route("/{id}/price", post(insert_model_price)), // Removed price route
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::database::model::ModelSummaryItem;
+    use crate::utils::HttpResult;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn model_summary_api_contract_includes_provider_context() {
+        let payload = HttpResult::new(vec![ModelSummaryItem {
+            id: 7,
+            provider_id: 3,
+            provider_key: "openai-api-example-com".to_string(),
+            provider_name: "OpenAI api.example.com".to_string(),
+            model_name: "gpt-4o-mini".to_string(),
+            real_model_name: Some("gpt-4o-mini-2024-07-18".to_string()),
+            is_enabled: true,
+        }]);
+
+        let value = serde_json::to_value(payload).expect("summary payload should serialize");
+        let root = value.as_object().expect("payload should be an object");
+        assert_eq!(
+            root.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["code".to_string(), "data".to_string()])
+        );
+        assert_eq!(root["code"], 0);
+
+        let items = root["data"].as_array().expect("data should be an array");
+        let item = items[0].as_object().expect("summary row should be an object");
+        assert_eq!(
+            item.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "id".to_string(),
+                "provider_id".to_string(),
+                "provider_key".to_string(),
+                "provider_name".to_string(),
+                "model_name".to_string(),
+                "real_model_name".to_string(),
+                "is_enabled".to_string(),
+            ])
+        );
+        assert_eq!(item["provider_id"], 3);
+        assert_eq!(item["provider_key"], "openai-api-example-com");
+        assert_eq!(item["provider_name"], "OpenAI api.example.com");
+        assert_eq!(item["model_name"], "gpt-4o-mini");
+        assert_eq!(item["real_model_name"], "gpt-4o-mini-2024-07-18");
+        assert_eq!(item["is_enabled"], true);
+        assert!(item.get("model").is_none());
+        assert!(item.get("custom_fields").is_none());
+    }
 }

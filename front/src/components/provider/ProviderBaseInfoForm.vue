@@ -2,88 +2,211 @@
   <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
     <div class="space-y-1">
       <h2 class="text-base font-semibold text-gray-900">
-        {{ $t("common.basicInfo") }}
+        {{
+          editingData.id
+            ? $t("providerEditPage.sections.quickStart.editTitle")
+            : $t("providerEditPage.sections.quickStart.title")
+        }}
       </h2>
       <p class="text-sm text-gray-500">
-        {{ editingData.id ? $t("providerEditPage.buttonUpdateBaseInfo") : $t("providerEditPage.buttonCreateBaseInfo") }}
+        {{
+          editingData.id
+            ? $t("providerEditPage.sections.quickStart.editDescription")
+            : $t("providerEditPage.sections.quickStart.description")
+        }}
       </p>
     </div>
 
     <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
       <div class="space-y-1.5">
-        <Label class="text-gray-700"
-          >{{ $t("providerEditPage.labelName") }}
-          <span class="text-red-500 ml-0.5">*</span></Label
-        >
-        <Input v-model="editingData.name" />
-      </div>
-      <div class="space-y-1.5">
-        <Label class="text-gray-700"
-          >{{ $t("providerEditPage.labelProviderKey") }}
-          <span class="text-red-500 ml-0.5">*</span></Label
-        >
-        <Input
-          v-model="editingData.provider_key"
-          :disabled="!!editingData.id"
-          class="font-mono text-sm"
-        />
-      </div>
-      <div class="space-y-1.5">
-        <Label class="text-gray-700"
-          >{{ $t("providerEditPage.labelProviderType") }}
-          <span class="text-red-500 ml-0.5">*</span></Label
-        >
-        <Select v-model="editingData.provider_type">
+        <Label class="text-gray-700">
+          {{ $t("providerEditPage.labelProviderType") }}
+          <span class="ml-0.5 text-red-500">*</span>
+        </Label>
+        <Select v-model="quickStart.provider_type">
           <SelectTrigger class="w-full">
             <SelectValue
               :placeholder="$t('providerEditPage.placeholderProviderType')"
             />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem
-              v-for="pt in providerTypes"
-              :key="pt"
-              :value="pt"
-              >{{ pt }}</SelectItem
-            >
+            <SelectItem v-for="pt in providerTypes" :key="pt" :value="pt">
+              {{ pt }}
+            </SelectItem>
           </SelectContent>
         </Select>
       </div>
+
       <div class="space-y-1.5">
-        <Label class="text-gray-700"
-          >{{ $t("providerEditPage.labelEndpoint") }}
-          <span class="text-red-500 ml-0.5">*</span></Label
-        >
-        <Input v-model="editingData.endpoint" class="font-mono text-sm" />
+        <Label class="text-gray-700">
+          {{ $t("providerEditPage.labelEndpoint") }}
+          <span class="ml-0.5 text-red-500">*</span>
+        </Label>
+        <Input v-model="quickStart.endpoint" class="font-mono text-sm" />
+      </div>
+
+      <div v-if="!editingData.id" class="space-y-1.5">
+        <Label class="text-gray-700">
+          {{ $t("providerEditPage.quickStart.labelApiKey") }}
+          <span class="ml-0.5 text-red-500">*</span>
+        </Label>
+        <Input
+          v-model="quickStart.api_key"
+          :type="quickStart.provider_type === 'VERTEX' ? 'text' : 'password'"
+          class="font-mono text-sm"
+        />
+      </div>
+
+      <div v-if="!editingData.id" class="space-y-1.5">
+        <Label class="text-gray-700">
+          {{ $t("providerEditPage.quickStart.labelModelName") }}
+          <span class="ml-0.5 text-red-500">*</span>
+        </Label>
+        <Input v-model="quickStart.model_name" class="font-mono text-sm" />
+      </div>
+
+      <div v-if="!editingData.id" class="space-y-1.5 sm:col-span-2">
+        <Label class="text-gray-700">
+          {{ $t("providerEditPage.quickStart.labelApiKeyDescription") }}
+        </Label>
+        <Input
+          v-model="quickStart.api_key_description"
+          :placeholder="$t('providerEditPage.quickStart.placeholderApiKeyDescription')"
+        />
       </div>
     </div>
 
     <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5">
-      <Label for="use_proxy_checkbox" class="cursor-pointer text-gray-700"
-        >{{ $t("providerEditPage.labelUseProxy") }}</Label
-      >
-      <Checkbox id="use_proxy_checkbox" v-model="editingData.use_proxy" />
+      <Label for="provider_quick_start_proxy" class="cursor-pointer text-gray-700">
+        {{ $t("providerEditPage.labelUseProxy") }}
+      </Label>
+      <Checkbox id="provider_quick_start_proxy" v-model="quickStart.use_proxy" />
     </div>
 
-    <div class="mt-2 flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row sm:justify-end">
-      <Button variant="default" class="w-full sm:w-auto" @click="handleUpdateProviderBaseInfo">
-        {{
-          editingData.id
-            ? $t("providerEditPage.buttonUpdateBaseInfo")
-            : $t("providerEditPage.buttonCreateBaseInfo")
-        }}
+    <div class="rounded-lg border border-gray-200 bg-gray-50/60 p-4">
+      <div class="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0">
+          <h3 class="text-sm font-semibold text-gray-900">
+            {{ $t("providerEditPage.preview.title") }}
+          </h3>
+          <p class="mt-1 text-xs text-gray-500">
+            {{ $t("providerEditPage.preview.description") }}
+          </p>
+        </div>
+        <Badge variant="outline" class="w-fit font-mono text-[10px] uppercase tracking-wider">
+          {{ $t("providerEditPage.preview.autoGenerated") }}
+        </Badge>
+      </div>
+      <dl class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div class="space-y-1">
+          <dt class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+            {{ $t("providerEditPage.preview.providerName") }}
+          </dt>
+          <dd class="break-all font-mono text-sm text-gray-800">
+            {{ preview.provider_name }}
+          </dd>
+        </div>
+        <div class="space-y-1">
+          <dt class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+            {{ $t("providerEditPage.preview.providerKey") }}
+          </dt>
+          <dd class="break-all font-mono text-sm text-gray-800">
+            {{ preview.provider_key }}
+          </dd>
+        </div>
+      </dl>
+    </div>
+
+    <div
+      v-if="editingData.id"
+      class="space-y-3 rounded-lg border border-gray-200 p-4"
+    >
+      <div class="space-y-1">
+        <h3 class="text-sm font-semibold text-gray-900">
+          {{ $t("providerEditPage.quickStart.identityTitle") }}
+        </h3>
+        <p class="text-xs text-gray-500">
+          {{ $t("providerEditPage.quickStart.identityDescription") }}
+        </p>
+      </div>
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="space-y-1.5">
+          <Label class="text-gray-700">
+            {{ $t("providerEditPage.labelName") }}
+          </Label>
+          <Input v-model="quickStart.provider_name" class="font-mono text-sm" />
+        </div>
+        <div class="space-y-1.5">
+          <Label class="text-gray-700">
+            {{ $t("providerEditPage.labelProviderKey") }}
+          </Label>
+          <Input
+            v-model="quickStart.provider_key"
+            class="font-mono text-sm"
+            :disabled="true"
+          />
+        </div>
+      </div>
+    </div>
+
+    <div class="flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row sm:justify-end">
+      <template v-if="editingData.id">
+        <Button
+          variant="default"
+          class="w-full sm:w-auto"
+          :disabled="isSubmitting"
+          @click="handleUpdateProvider()"
+        >
+          <Loader2 v-if="pendingAction === 'save'" class="mr-1.5 h-4 w-4 animate-spin" />
+          <span v-else>{{ $t("providerEditPage.buttonUpdateBaseInfo") }}</span>
+          <span v-if="pendingAction === 'save'">{{ $t("common.saving") }}</span>
+        </Button>
+      </template>
+      <template v-else>
+      <Button
+        variant="outline"
+        class="w-full sm:w-auto"
+        :disabled="isSubmitting"
+        @click="handleBootstrap(false)"
+      >
+        <Loader2 v-if="pendingAction === 'save'" class="mr-1.5 h-4 w-4 animate-spin" />
+        <span v-else>{{ $t("providerEditPage.buttonSaveOnly") }}</span>
+        <span v-if="pendingAction === 'save'">{{ $t("common.saving") }}</span>
       </Button>
+      <Button
+        variant="default"
+        class="w-full sm:w-auto"
+        :disabled="isSubmitting"
+        @click="handleBootstrap(true)"
+        >
+        <Loader2 v-if="pendingAction === 'test'" class="mr-1.5 h-4 w-4 animate-spin" />
+        <span v-else>{{ $t("providerEditPage.buttonSaveAndTest") }}</span>
+        <span v-if="pendingAction === 'test'">{{ $t("common.saving") }}</span>
+      </Button>
+      </template>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
+import { computed, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
 import { useProviderStore } from "@/store/providerStore";
 import { toastController } from "@/lib/toastController";
-import type { ProviderBase } from "@/store/types";
 import type { EditingProviderData } from "./types";
+import type { ProviderBootstrapResponse } from "@/store/types";
+import type { ProviderBootstrapFormState } from "@/pages/providerEditState";
+import {
+  buildProviderUpdatePayload,
+  createProviderBootstrapFormState,
+  buildProviderBootstrapPayload,
+  buildProviderBootstrapPreview,
+  hydrateEditingProviderDataFromBootstrap,
+  normalizeBootstrapCheckResult,
+  syncProviderBootstrapFormState,
+} from "@/pages/providerEditState";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -95,6 +218,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Loader2 } from "lucide-vue-next";
 
 const providerTypes = [
   "OPENAI",
@@ -109,55 +233,149 @@ const providerTypes = [
 
 const { t: $t } = useI18n();
 const providerStore = useProviderStore();
+const editingData = defineModel<EditingProviderData>("editingData", {
+  required: true,
+});
 
-const editingData = defineModel<EditingProviderData>("editingData", { required: true });
+const quickStart = reactive<ProviderBootstrapFormState>(
+  createProviderBootstrapFormState(editingData.value),
+);
 
-const handleUpdateProviderBaseInfo = async () => {
+const isSubmitting = ref(false);
+const pendingAction = ref<"save" | "test" | null>(null);
+
+watch(
+  editingData,
+  (data) => {
+    syncProviderBootstrapFormState(quickStart, data);
+  },
+  { immediate: true },
+);
+
+const preview = computed(() =>
+  buildProviderBootstrapPreview(quickStart, {
+    provider_name: quickStart.provider_name,
+    provider_key: quickStart.provider_key,
+  }),
+);
+
+const syncHydratedIdentity = (response: ProviderBootstrapResponse) => {
   const data = editingData.value;
   if (!data) return;
 
-  if (!data.name.trim()) {
-    toastController.warn($t("providerEditPage.alert.nameRequired"));
+  syncProviderBootstrapFormState(quickStart, data);
+  quickStart.provider_name = response.provider_name || data.name || quickStart.provider_name;
+  quickStart.provider_key = response.provider_key || data.provider_key || quickStart.provider_key;
+};
+
+const handleBootstrap = async (saveAndTest: boolean) => {
+  if (isSubmitting.value) return;
+
+  const data = editingData.value;
+  if (!data) return;
+
+  if (!quickStart.provider_type.trim()) {
+    toastController.warn($t("providerEditPage.alert.providerTypeRequired"));
     return;
   }
-  if (!data.provider_key.trim()) {
-    toastController.warn($t("providerEditPage.alert.providerKeyRequired"));
-    return;
-  }
-  if (!data.endpoint.trim()) {
+  if (!quickStart.endpoint.trim()) {
     toastController.warn($t("providerEditPage.alert.endpointRequired"));
     return;
   }
+  if (!quickStart.api_key.trim()) {
+    toastController.warn($t("providerEditPage.alert.apiKeyRequired"));
+    return;
+  }
+  if (!quickStart.model_name.trim()) {
+    toastController.warn($t("providerEditPage.alert.modelNameRequired"));
+    return;
+  }
 
-  const basePayload = {
-    key: data.provider_key,
-    name: data.name,
-    endpoint: data.endpoint,
-    use_proxy: data.use_proxy,
-    provider_type: data.provider_type,
-    omit_config: null,
-    api_keys: [],
-  };
+  const payload = buildProviderBootstrapPayload(quickStart, saveAndTest);
+
+  isSubmitting.value = true;
+  pendingAction.value = saveAndTest ? "test" : "save";
 
   try {
-    if (data.id) {
-      await Api.updateProvider(data.id, basePayload);
-      toastController.success($t("providerEditPage.alert.baseInfoUpdateSuccess"));
-    } else {
-      const newProvider = await Api.createProvider(basePayload) as ProviderBase;
-      data.id = newProvider.id;
-      toastController.success($t("providerEditPage.alert.createSuccess"));
-    }
+    const response = await Api.bootstrapProvider(payload);
+    hydrateEditingProviderDataFromBootstrap(data, response);
+    syncHydratedIdentity(response);
+
+    const checkResult = normalizeBootstrapCheckResult(response.check_result);
     void providerStore.fetchProviders().catch((error) => {
-      console.error("Failed to refresh providers after save:", error);
+      console.error("Failed to refresh providers after bootstrap:", error);
     });
+
+    if (saveAndTest && checkResult && !checkResult.ok) {
+      toastController.error(
+        $t("providerEditPage.alert.bootstrapSaveAndTestFailed", {
+          error: checkResult.message || $t("common.unknownError"),
+        }),
+      );
+      return;
+    }
+
+    if (saveAndTest) {
+      toastController.success($t("providerEditPage.alert.bootstrapSaveAndTestSuccess"));
+    } else {
+      toastController.success($t("providerEditPage.alert.bootstrapSaveSuccess"));
+    }
   } catch (error) {
-    console.error("Failed to save provider base info:", error);
+    console.error("Failed to bootstrap provider:", error);
+    toastController.error(
+      $t("providerEditPage.alert.bootstrapFailed", {
+        error: (error as Error).message || $t("common.unknownError"),
+      }),
+    );
+  } finally {
+    isSubmitting.value = false;
+    pendingAction.value = null;
+  }
+};
+
+const handleUpdateProvider = async () => {
+  const data = editingData.value;
+  if (!data?.id || isSubmitting.value) return;
+  const providerName = quickStart.provider_name?.trim() ?? "";
+
+  if (!quickStart.provider_type.trim()) {
+    toastController.warn($t("providerEditPage.alert.providerTypeRequired"));
+    return;
+  }
+  if (!quickStart.endpoint.trim()) {
+    toastController.warn($t("providerEditPage.alert.endpointRequired"));
+    return;
+  }
+  if (!providerName) {
+    toastController.warn($t("providerEditPage.alert.nameRequired"));
+    return;
+  }
+
+  isSubmitting.value = true;
+  pendingAction.value = "save";
+
+  try {
+    await Api.updateProvider(data.id, buildProviderUpdatePayload(data, quickStart));
+    data.name = providerName;
+    data.provider_type = quickStart.provider_type.trim();
+    data.endpoint = quickStart.endpoint.trim();
+    data.use_proxy = !!quickStart.use_proxy;
+    syncProviderBootstrapFormState(quickStart, data);
+
+    void providerStore.fetchProviders().catch((error) => {
+      console.error("Failed to refresh providers after update:", error);
+    });
+    toastController.success($t("providerEditPage.alert.baseInfoUpdateSuccess"));
+  } catch (error) {
+    console.error("Failed to update provider:", error);
     toastController.error(
       $t("providerEditPage.alert.baseInfoSaveFailed", {
         error: (error as Error).message || $t("common.unknownError"),
       }),
     );
+  } finally {
+    isSubmitting.value = false;
+    pendingAction.value = null;
   }
 };
 </script>

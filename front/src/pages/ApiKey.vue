@@ -563,6 +563,7 @@
         :initial-data="editingDetail"
         :model-routes="modelRoutes"
         :providers="providerStore.providers"
+        :models="modelStore.models"
         @save-success="handleSaveSuccess"
       />
     </template>
@@ -606,6 +607,7 @@ import { copyText } from "@/lib/clipboard";
 import { toastController } from "@/lib/toastController";
 import { confirm } from "@/lib/confirmController";
 import { useApiKeyStore } from "@/store/apiKeyStore";
+import { useModelStore } from "@/store/modelStore";
 import { useProviderStore } from "@/store/providerStore";
 import type {
   ApiKeyAclRule,
@@ -623,6 +625,7 @@ import type {
 const { t: $t } = useI18n();
 
 const apiKeyStore = useApiKeyStore();
+const modelStore = useModelStore();
 const providerStore = useProviderStore();
 
 const loading = ref(true);
@@ -661,26 +664,9 @@ const runtimeById = computed(() => {
   return map;
 });
 
-const providerNameById = computed(() => {
-  const map = new Map<number, string>();
-  for (const item of providerStore.providers) {
-    map.set(item.provider.id, `${item.provider.name} (${item.provider.provider_key})`);
-  }
-  return map;
-});
+const providerNameById = providerStore.providerNameById;
 
-const modelNameById = computed(() => {
-  const map = new Map<number, string>();
-  for (const item of providerStore.providers) {
-    for (const modelItem of item.models) {
-      map.set(
-        modelItem.model.id,
-        `${item.provider.provider_key} / ${modelItem.model.model_name}`,
-      );
-    }
-  }
-  return map;
-});
+const modelNameById = modelStore.modelNameById;
 
 const routeNameById = computed(() => {
   const map = new Map<number, string>();
@@ -870,9 +856,9 @@ function governanceItems(detail: ApiKeyDetail) {
 
 function aclRuleTarget(rule: ApiKeyAclRule) {
   if (rule.scope === "PROVIDER") {
-    return providerNameById.value.get(rule.provider_id ?? -1) ?? $t("common.notAvailable");
+    return providerNameById.get(rule.provider_id ?? -1) ?? $t("common.notAvailable");
   }
-  return modelNameById.value.get(rule.model_id ?? -1) ?? $t("common.notAvailable");
+  return modelNameById.get(rule.model_id ?? -1) ?? $t("common.notAvailable");
 }
 
 function modelOverrideTargetLabel(item: ApiKeyModelOverrideItem) {
@@ -892,6 +878,7 @@ async function fetchData() {
       apiKeyStore.fetchApiKeys(),
       apiKeyStore.fetchRuntimeSnapshots(),
       providerStore.fetchProviders(),
+      modelStore.fetchModels(),
       Api.getModelRouteList().then((items) => {
         modelRoutes.value = items;
       }),

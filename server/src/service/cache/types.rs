@@ -4,6 +4,7 @@ use bincode::{Decode, Encode};
 // reducing memory footprint and improving cache performance.
 
 use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
+use crate::database::model_route::{ApiKeyModelOverride, ModelRouteDetail};
 use crate::schema::enum_def::{
     Action, FieldPlacement, FieldType, ProviderApiKeyMode, ProviderType, RuleScope,
 };
@@ -70,12 +71,35 @@ pub struct CacheProvider {
     pub is_enabled: bool,
 }
 
-/// Cached model alias with only fields needed for model resolution and listing
+/// Cached model route candidate ordered by runtime priority.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheModelAlias {
+pub struct CacheModelRouteCandidate {
+    pub route_id: i64,
+    pub model_id: i64,
+    pub provider_id: i64,
+    pub priority: i32,
+    pub is_enabled: bool,
+}
+
+/// Cached logical model route used by request resolution.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CacheModelRoute {
     pub id: i64,
-    pub alias_name: String,
-    pub target_model_id: i64,
+    pub route_name: String,
+    pub description: Option<String>,
+    pub is_enabled: bool,
+    pub expose_in_models: bool,
+    pub candidates: Vec<CacheModelRouteCandidate>,
+}
+
+/// Cached API key scoped name override definition.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CacheApiKeyModelOverride {
+    pub id: i64,
+    pub api_key_id: i64,
+    pub source_name: String,
+    pub target_route_id: i64,
+    pub description: Option<String>,
     pub is_enabled: bool,
 }
 
@@ -84,7 +108,8 @@ pub struct CacheModelAlias {
 pub struct CacheModelsCatalog {
     pub providers: Vec<CacheProvider>,
     pub models: Vec<CacheModel>,
-    pub aliases: Vec<CacheModelAlias>,
+    pub routes: Vec<CacheModelRoute>,
+    pub api_key_overrides: Vec<CacheApiKeyModelOverride>,
 }
 
 /// Cached provider API key
@@ -195,12 +220,37 @@ impl From<crate::database::model::Model> for CacheModel {
     }
 }
 
-impl From<crate::database::model_alias::ModelAlias> for CacheModelAlias {
-    fn from(db: crate::database::model_alias::ModelAlias) -> Self {
+impl CacheModelRoute {
+    pub fn from_detail(detail: &ModelRouteDetail) -> Self {
+        Self {
+            id: detail.route.id,
+            route_name: detail.route.route_name.clone(),
+            description: detail.route.description.clone(),
+            is_enabled: detail.route.is_enabled,
+            expose_in_models: detail.route.expose_in_models,
+            candidates: detail
+                .candidates
+                .iter()
+                .map(|candidate| CacheModelRouteCandidate {
+                    route_id: candidate.candidate.route_id,
+                    model_id: candidate.candidate.model_id,
+                    provider_id: candidate.provider_id,
+                    priority: candidate.candidate.priority,
+                    is_enabled: candidate.candidate.is_enabled,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<ApiKeyModelOverride> for CacheApiKeyModelOverride {
+    fn from(db: ApiKeyModelOverride) -> Self {
         Self {
             id: db.id,
-            alias_name: db.alias_name,
-            target_model_id: db.target_model_id,
+            api_key_id: db.api_key_id,
+            source_name: db.source_name,
+            target_route_id: db.target_route_id,
+            description: db.description,
             is_enabled: db.is_enabled,
         }
     }

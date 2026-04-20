@@ -10,8 +10,11 @@ use super::{
     auth::{admit_api_key_request, check_access_control},
     cancellation::ProxyCancellationContext,
     core::proxy_request,
-    logging::{LoggedBody, RequestLogContext},
-    prepare::{get_provider_and_model, prepare_generation_request},
+    logging::{
+        LoggedBody, RequestLogContext, build_initial_request_log_context,
+        record_request_completion_and_log,
+    },
+    prepare::{prepare_generation_request, resolve_provider_credentials, resolve_requested_model},
     protocol_transform_error,
     request::ParsedProxyRequest,
     util::{
@@ -29,6 +32,11 @@ use crate::{
 };
 
 pub(super) struct ResolvedProxyTarget {
+    pub requested_model: String,
+    pub resolved_name_scope: String,
+    pub resolved_route_id: Option<i64>,
+    pub resolved_route_name: Option<String>,
+    pub candidate_ids: Vec<i64>,
     pub provider: Arc<CacheProvider>,
     pub model: Arc<CacheModel>,
     pub target_api_type: LlmApiType,
@@ -61,15 +69,23 @@ pub(super) fn extract_model_from_request(data: &Value) -> Result<&str, ProxyErro
 
 pub(super) async fn resolve_proxy_target(
     app_state: &Arc<AppState>,
+    api_key_id: i64,
     requested_model: &str,
 ) -> Result<ResolvedProxyTarget, ProxyError> {
-    let (provider, model) = get_provider_and_model(app_state, requested_model)
+    let resolved = resolve_requested_model(app_state, api_key_id, requested_model)
         .await
         .map_err(ProxyError::BadRequest)?;
+    let provider = resolved.provider;
+    let model = resolved.model;
     let target_api_type = determine_target_api_type(&provider);
     let cost_catalog_version = get_cost_catalog_version(&model, app_state).await;
 
     Ok(ResolvedProxyTarget {
+        requested_model: resolved.requested_name,
+        resolved_name_scope: resolved.resolved_scope.as_str().to_string(),
+        resolved_route_id: resolved.resolved_route_id,
+        resolved_route_name: resolved.resolved_route_name,
+        candidate_ids: resolved.candidates,
         provider,
         model,
         target_api_type,
@@ -78,14 +94,10 @@ pub(super) async fn resolve_proxy_target(
 }
 
 pub(super) fn prepare_generation_log_seed(
-    system_api_key: &CacheSystemApiKey,
+    mut log_context: RequestLogContext,
     resolved_target: &ResolvedProxyTarget,
-    provider_api_key_id: i64,
-    start_time: i64,
-    client_ip_addr: &Option<String>,
     api_type: LlmApiType,
     original_request_value: &Value,
-    original_request_body: Bytes,
     final_body_value: &Value,
     final_body: &Bytes,
 ) -> Result<PreparedLogSeed, ProxyError> {
@@ -97,23 +109,26 @@ pub(super) fn prepare_generation_log_seed(
         final_body,
     )?;
 
-    let mut log_context = RequestLogContext::new(
-        system_api_key,
-        &resolved_target.provider,
-        &resolved_target.model,
-        provider_api_key_id,
-        start_time,
-        client_ip_addr,
-        api_type,
-        resolved_target.target_api_type,
-    );
     log_context.llm_request_body = llm_request_body.map(LoggedBody::from_bytes);
-    log_context.user_request_body = Some(LoggedBody::from_bytes(original_request_body));
 
     Ok(PreparedLogSeed {
         model_str: format_model_str(&resolved_target.provider, &resolved_target.model),
         log_context,
     })
+}
+
+async fn record_early_generation_failure(
+    app_state: &Arc<AppState>,
+    mut log_context: RequestLogContext,
+    proxy_error: &ProxyError,
+) {
+    log_context.completion_ts = Some(chrono::Utc::now().timestamp_millis());
+    log_context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+        crate::schema::enum_def::RequestStatus::Cancelled
+    } else {
+        crate::schema::enum_def::RequestStatus::Error
+    };
+    record_request_completion_and_log(app_state, log_context).await;
 }
 
 pub(super) async fn execute_generation_proxy(
@@ -143,46 +158,82 @@ pub(super) async fn execute_generation_proxy(
         api_type, requested_model
     );
 
-    let resolved_target = resolve_proxy_target(&app_state, &requested_model)
+    let resolved_target = resolve_proxy_target(&app_state, system_api_key.id, &requested_model)
         .await
         .map_err(|e| {
             warn!("Failed to resolve model '{}': {}", requested_model, e);
             e
         })?;
     let target_api_type = resolved_target.target_api_type;
+    let provider_credentials = resolve_provider_credentials(&resolved_target.provider, &app_state)
+        .await
+        .map_err(|e| {
+            warn!(
+                "Failed to resolve provider credentials for provider {}: {:?}",
+                resolved_target.provider.id, e
+            );
+            e
+        })?;
+    let initial_log_context = build_initial_request_log_context(
+        &system_api_key,
+        &resolved_target.provider,
+        &resolved_target.model,
+        provider_credentials.key_id,
+        &resolved_target.requested_model,
+        &resolved_target.resolved_name_scope,
+        resolved_target.resolved_route_id,
+        resolved_target.resolved_route_name.as_deref(),
+        start_time,
+        &client_ip_addr,
+        api_type,
+        resolved_target.target_api_type,
+        Some(original_request_body.clone()),
+    );
+    info!(
+        "Resolved request model '{}' via {} to candidate {}",
+        resolved_target.requested_model,
+        resolved_target.resolved_name_scope,
+        resolved_target.model.id
+    );
 
     data = transform_request_data(data, api_type, target_api_type, is_stream);
 
-    check_access_control(
+    if let Err(e) = check_access_control(
         &system_api_key,
         &resolved_target.provider,
         &resolved_target.model,
         &app_state,
     )
     .await
-    .map_err(|e| {
+    {
         warn!("Access control check failed: {:?}", e);
-        e
-    })?;
+        record_early_generation_failure(&app_state, initial_log_context.clone(), &e).await;
+        return Err(e);
+    }
 
-    let prepared_request = prepare_generation_request(
+    let prepared_request = match prepare_generation_request(
         &resolved_target.provider,
         &resolved_target.model,
         data,
         &original_headers,
         &app_state,
+        &provider_credentials,
         target_api_type,
         is_stream,
         &query_params,
     )
     .await
-    .map_err(|e| {
-        error!(
-            "Failed to prepare generation request for target {:?}: {:?}",
-            target_api_type, e
-        );
-        e
-    })?;
+    {
+        Ok(prepared_request) => prepared_request,
+        Err(e) => {
+            error!(
+                "Failed to prepare generation request for target {:?}: {:?}",
+                target_api_type, e
+            );
+            record_early_generation_failure(&app_state, initial_log_context.clone(), &e).await;
+            return Err(e);
+        }
+    };
 
     let final_body = Bytes::from(
         serde_json::to_vec(&prepared_request.final_body_value)
@@ -190,14 +241,10 @@ pub(super) async fn execute_generation_proxy(
     );
 
     let log_seed = prepare_generation_log_seed(
-        &system_api_key,
+        initial_log_context,
         &resolved_target,
-        prepared_request.provider_api_key_id,
-        start_time,
-        &client_ip_addr,
         api_type,
         &original_request_value,
-        original_request_body,
         &prepared_request.final_body_value,
         &final_body,
     )?;
@@ -232,7 +279,7 @@ mod tests {
         PreparedLogSeed, ResolvedProxyTarget, extract_model_from_request,
         prepare_generation_log_seed,
     };
-    use crate::proxy::logging::LoggedBody;
+    use crate::proxy::logging::{LoggedBody, build_initial_request_log_context};
     use crate::{
         proxy::ProxyError,
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType},
@@ -246,6 +293,11 @@ mod tests {
 
     fn resolved_target(target_api_type: LlmApiType) -> ResolvedProxyTarget {
         ResolvedProxyTarget {
+            requested_model: "manual-smoke-route".to_string(),
+            resolved_name_scope: "global_route".to_string(),
+            resolved_route_id: Some(42),
+            resolved_route_name: Some("manual-smoke-route".to_string()),
+            candidate_ids: vec![2, 3],
             provider: Arc::new(CacheProvider {
                 id: 1,
                 provider_key: "provider".to_string(),
@@ -327,19 +379,30 @@ mod tests {
         let original_request_body =
             Bytes::from_static(br#"{"model":"provider/gpt-test","messages":[]}"#);
         let final_body = Bytes::from_static(br#"{"contents":[]}"#);
+        let initial_log_context = build_initial_request_log_context(
+            &system_api_key,
+            resolved_target.provider.as_ref(),
+            resolved_target.model.as_ref(),
+            99,
+            &resolved_target.requested_model,
+            &resolved_target.resolved_name_scope,
+            resolved_target.resolved_route_id,
+            resolved_target.resolved_route_name.as_deref(),
+            1234,
+            &Some("127.0.0.1".to_string()),
+            LlmApiType::Openai,
+            LlmApiType::Gemini,
+            Some(original_request_body.clone()),
+        );
 
         let PreparedLogSeed {
             log_context,
             model_str,
         } = prepare_generation_log_seed(
-            &system_api_key,
+            initial_log_context,
             &resolved_target,
-            99,
-            1234,
-            &Some("127.0.0.1".to_string()),
             LlmApiType::Openai,
             &original_request_value,
-            original_request_body.clone(),
             &final_body_value,
             &final_body,
         )
@@ -358,6 +421,13 @@ mod tests {
         }
         assert_eq!(log_context.model_name, "gpt-test");
         assert_eq!(log_context.real_model_name, "real-gpt-test");
+        assert_eq!(log_context.requested_model_name, "manual-smoke-route");
+        assert_eq!(log_context.resolved_name_scope, "global_route");
+        assert_eq!(log_context.resolved_route_id, Some(42));
+        assert_eq!(
+            log_context.resolved_route_name.as_deref(),
+            Some("manual-smoke-route")
+        );
         assert_eq!(log_context.user_api_type, LlmApiType::Openai);
         assert_eq!(log_context.llm_api_type, LlmApiType::Gemini);
     }

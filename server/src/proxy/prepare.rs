@@ -12,7 +12,7 @@ use crate::{
     schema::enum_def::{FieldPlacement, FieldType, LlmApiType, ProviderType},
     service::{
         app_state::{AppState, GroupItemSelectionStrategy},
-        cache::types::{CacheCustomField, CacheModel, CacheProvider},
+        cache::types::{CacheCustomField, CacheModel, CacheModelRoute, CacheProvider},
         transform::finalize_request_data,
         vertex::get_vertex_token,
     },
@@ -25,6 +25,34 @@ pub struct PreparedGenerationRequest {
     pub final_headers: HeaderMap,
     pub final_body_value: Value,
     pub provider_api_key_id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedNameScope {
+    Direct,
+    GlobalRoute,
+    ApiKeyOverride,
+}
+
+impl ResolvedNameScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::GlobalRoute => "global_route",
+            Self::ApiKeyOverride => "api_key_override",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedModelTarget {
+    pub requested_name: String,
+    pub resolved_scope: ResolvedNameScope,
+    pub resolved_route_id: Option<i64>,
+    pub resolved_route_name: Option<String>,
+    pub candidates: Vec<i64>,
+    pub provider: Arc<CacheProvider>,
+    pub model: Arc<CacheModel>,
 }
 
 #[derive(Debug)]
@@ -52,12 +80,12 @@ fn select_generation_prepare_kind(
 
 /// Resolved API key info for a provider, including the selected key ID and the
 /// final request credential (which may be a Vertex AI OAuth token).
-struct ProviderCredentials {
+pub(super) struct ProviderCredentials {
     /// The database ID of the selected provider API key.
-    key_id: i64,
+    pub key_id: i64,
     /// The credential to use for the downstream request. For Vertex AI providers,
     /// this is an OAuth token; for others, it's the raw API key.
-    request_key: String,
+    pub request_key: String,
 }
 
 /// Resolves the API key and authentication credential for a provider.
@@ -65,7 +93,7 @@ struct ProviderCredentials {
 /// This handles: selecting a provider API key via the provider's configured
 /// selection strategy, and exchanging it for a Vertex AI OAuth token when the
 /// provider type requires it.
-async fn resolve_provider_credentials(
+pub(super) async fn resolve_provider_credentials(
     provider: &CacheProvider,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredentials, ProxyError> {
@@ -248,6 +276,7 @@ pub async fn prepare_llm_request(
     mut data: Value, // Takes ownership of data
     original_headers: &HeaderMap,
     app_state: &Arc<AppState>,
+    provider_credentials: &ProviderCredentials,
     path: &str,
 ) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
     debug!(
@@ -255,14 +284,13 @@ pub async fn prepare_llm_request(
         provider.name, model.model_name
     );
 
-    let creds = resolve_provider_credentials(provider, app_state).await?;
     let custom_fields = fetch_combined_custom_fields(provider, model, app_state).await?;
 
     // Prepare URL, headers, and apply custom fields
     let target_url = format!("{}/{}", provider.endpoint, path);
     let mut url = Url::parse(&target_url)
         .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
-    let mut headers = build_new_headers(original_headers, &creds.request_key)?;
+    let mut headers = build_new_headers(original_headers, &provider_credentials.request_key)?;
 
     handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
 
@@ -274,7 +302,7 @@ pub async fn prepare_llm_request(
 
     data = finalize_request_data(data, LlmApiType::Openai, &provider.provider_type, path);
 
-    Ok((url.to_string(), headers, data, creds.key_id))
+    Ok((url.to_string(), headers, data, provider_credentials.key_id))
 }
 
 pub async fn prepare_generation_request(
@@ -283,6 +311,7 @@ pub async fn prepare_generation_request(
     data: Value,
     original_headers: &HeaderMap,
     app_state: &Arc<AppState>,
+    provider_credentials: &ProviderCredentials,
     target_api_type: LlmApiType,
     is_stream: bool,
     params: &HashMap<String, String>,
@@ -290,8 +319,16 @@ pub async fn prepare_generation_request(
     let prepared = match select_generation_prepare_kind(target_api_type, is_stream)? {
         GenerationPrepareKind::Llm { path } => {
             let (final_url, final_headers, final_body_value, provider_api_key_id) =
-                prepare_llm_request(provider, model, data, original_headers, app_state, path)
-                    .await?;
+                prepare_llm_request(
+                    provider,
+                    model,
+                    data,
+                    original_headers,
+                    app_state,
+                    provider_credentials,
+                    path,
+                )
+                .await?;
             PreparedGenerationRequest {
                 final_url,
                 final_headers,
@@ -307,6 +344,7 @@ pub async fn prepare_generation_request(
                     data,
                     original_headers,
                     app_state,
+                    provider_credentials,
                     is_stream,
                     params,
                 )
@@ -328,7 +366,8 @@ pub async fn prepare_simple_gemini_request(
     provider: &CacheProvider,
     model: &CacheModel,
     original_headers: &HeaderMap,
-    app_state: &Arc<AppState>,
+    _app_state: &Arc<AppState>,
+    provider_credentials: &ProviderCredentials,
     action: &str,
     params: &HashMap<String, String>,
 ) -> Result<(String, HeaderMap, i64), ProxyError> {
@@ -337,13 +376,15 @@ pub async fn prepare_simple_gemini_request(
         provider.name, model.model_name, action
     );
 
-    let creds = resolve_provider_credentials(provider, app_state).await?;
-
     let real_model_name = resolve_real_model_name(model);
     let url = build_gemini_url(provider, real_model_name, action, params, false)?;
-    let headers = build_gemini_headers(original_headers, provider, &creds.request_key);
+    let headers = build_gemini_headers(
+        original_headers,
+        provider,
+        &provider_credentials.request_key,
+    );
 
-    Ok((url.to_string(), headers, creds.key_id))
+    Ok((url.to_string(), headers, provider_credentials.key_id))
 }
 
 // Prepares all elements for a downstream Gemini LLM request.
@@ -353,6 +394,7 @@ pub async fn prepare_gemini_llm_request(
     mut data: Value,
     original_headers: &HeaderMap,
     app_state: &Arc<AppState>,
+    provider_credentials: &ProviderCredentials,
     is_stream: bool,
     params: &HashMap<String, String>,
 ) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
@@ -361,7 +403,6 @@ pub async fn prepare_gemini_llm_request(
         provider.name, model.model_name
     );
 
-    let creds = resolve_provider_credentials(provider, app_state).await?;
     let custom_fields = fetch_combined_custom_fields(provider, model, app_state).await?;
 
     let real_model_name = resolve_real_model_name(model);
@@ -371,11 +412,15 @@ pub async fn prepare_gemini_llm_request(
         "generateContent"
     };
     let mut url = build_gemini_url(provider, real_model_name, action, params, is_stream)?;
-    let mut headers = build_gemini_headers(original_headers, provider, &creds.request_key);
+    let mut headers = build_gemini_headers(
+        original_headers,
+        provider,
+        &provider_credentials.request_key,
+    );
 
     handle_custom_fields(&mut data, &mut url, &mut headers, &custom_fields);
 
-    Ok((url.to_string(), headers, data, creds.key_id))
+    Ok((url.to_string(), headers, data, provider_credentials.key_id))
 }
 
 fn parse_provider_model(pm: &str) -> (&str, &str) {
@@ -562,57 +607,87 @@ pub fn handle_custom_fields(
     }
 }
 
-// Fetches provider and model from AppState cache, resolving aliases first.
-pub async fn get_provider_and_model(
-    app_state: &Arc<AppState>,
-    pre_model_value: &str,
-) -> Result<(Arc<CacheProvider>, Arc<CacheModel>), String> {
-    // Attempt to resolve as a model alias first
-    match app_state.get_model_by_alias(pre_model_value).await {
-        Ok(Some(model)) => {
-            let provider = app_state
-                .get_provider_by_id(model.provider_id)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Error accessing cache for provider ID {}: {:?}",
-                        model.provider_id, e
-                    )
-                })?
-                .ok_or_else(|| {
-                    format!(
-                        "Provider ID {} for model '{}' (from alias '{}') not found in cache.",
-                        model.provider_id, model.model_name, pre_model_value
-                    )
-                })?;
+fn select_primary_route_candidate(route: &CacheModelRoute) -> Result<i64, String> {
+    route
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.is_enabled)
+        .next()
+        .map(|candidate| candidate.model_id)
+        .ok_or_else(|| {
+            format!(
+                "Model route '{}' does not have any enabled candidates.",
+                route.route_name
+            )
+        })
+}
 
-            debug!(
-                "Resolved '{}' as an alias to model '{}' from provider '{}'",
-                pre_model_value, model.model_name, provider.name
-            );
-            return Ok((provider, model));
-        }
-        Ok(None) => {
-            debug!(
-                "'{}' is not a model alias. Attempting provider/model parsing.",
-                pre_model_value
-            );
-        }
-        Err(e) => {
-            error!("Error checking model alias '{}': {:?}", pre_model_value, e);
-            return Err(format!(
-                "Internal server error while checking model alias '{}'.",
-                pre_model_value
-            ));
-        }
+async fn resolve_route_target(
+    app_state: &Arc<AppState>,
+    requested_name: &str,
+    resolved_scope: ResolvedNameScope,
+    route: Arc<CacheModelRoute>,
+) -> Result<ResolvedModelTarget, String> {
+    if !route.is_enabled {
+        return Err(format!("Model route '{}' is disabled.", route.route_name));
     }
 
-    // Fallback: try parsing as provider/model
-    let (provider_key_str, model_name_str) = parse_provider_model(pre_model_value);
+    let selected_model_id = select_primary_route_candidate(&route)?;
+    let model = app_state
+        .get_model_by_id(selected_model_id)
+        .await
+        .map_err(|e| {
+            format!(
+                "Error accessing cache for route candidate model {}: {:?}",
+                selected_model_id, e
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "Primary candidate model {} for route '{}' was not found.",
+                selected_model_id, route.route_name
+            )
+        })?;
+    let provider = app_state
+        .get_provider_by_id(model.provider_id)
+        .await
+        .map_err(|e| {
+            format!(
+                "Error accessing cache for provider ID {}: {:?}",
+                model.provider_id, e
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "Provider ID {} for route '{}' was not found.",
+                model.provider_id, route.route_name
+            )
+        })?;
+
+    Ok(ResolvedModelTarget {
+        requested_name: requested_name.to_string(),
+        resolved_scope,
+        resolved_route_id: Some(route.id),
+        resolved_route_name: Some(route.route_name.clone()),
+        candidates: route
+            .candidates
+            .iter()
+            .map(|candidate| candidate.model_id)
+            .collect(),
+        provider,
+        model,
+    })
+}
+
+async fn resolve_direct_target(
+    app_state: &Arc<AppState>,
+    requested_name: &str,
+) -> Result<ResolvedModelTarget, String> {
+    let (provider_key_str, model_name_str) = parse_provider_model(requested_name);
     if provider_key_str.is_empty() || model_name_str.is_empty() {
         return Err(format!(
-            "Invalid model format: '{}'. Expected 'provider/model' or a valid alias.",
-            pre_model_value
+            "Invalid model format: '{}'. Expected a configured route or 'provider/model'.",
+            requested_name
         ));
     }
 
@@ -633,10 +708,10 @@ pub async fn get_provider_and_model(
         .map_err(|e| {
             format!(
                 "Error accessing cache for model name '{}': {:?}",
-                pre_model_value, e
+                requested_name, e
             )
         })?
-        .ok_or_else(|| format!("Model '{}' not found.", pre_model_value))?;
+        .ok_or_else(|| format!("Model '{}' not found.", requested_name))?;
 
     if model.provider_id != provider.id {
         return Err(format!(
@@ -645,22 +720,93 @@ pub async fn get_provider_and_model(
         ));
     }
 
-    debug!(
-        "Resolved '{}' as provider '{}' and model '{}'",
-        pre_model_value, provider.name, model.model_name
-    );
-    Ok((provider, model))
+    Ok(ResolvedModelTarget {
+        requested_name: requested_name.to_string(),
+        resolved_scope: ResolvedNameScope::Direct,
+        resolved_route_id: None,
+        resolved_route_name: None,
+        candidates: vec![model.id],
+        provider,
+        model,
+    })
+}
+
+pub async fn resolve_requested_model(
+    app_state: &Arc<AppState>,
+    api_key_id: i64,
+    requested_name: &str,
+) -> Result<ResolvedModelTarget, String> {
+    match app_state
+        .get_api_key_override_route(api_key_id, requested_name)
+        .await
+    {
+        Ok(Some(route)) => {
+            debug!(
+                "Resolved '{}' via api key override for api_key_id {} to route '{}'",
+                requested_name, api_key_id, route.route_name
+            );
+            return resolve_route_target(
+                app_state,
+                requested_name,
+                ResolvedNameScope::ApiKeyOverride,
+                route,
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            error!(
+                "Error checking api key override for {}:{}: {:?}",
+                api_key_id, requested_name, e
+            );
+            return Err(format!(
+                "Internal server error while checking api key overrides for '{}'.",
+                requested_name
+            ));
+        }
+    }
+
+    match app_state.get_model_route_by_name(requested_name).await {
+        Ok(Some(route)) => {
+            debug!(
+                "Resolved '{}' as a global model route '{}'",
+                requested_name, route.route_name
+            );
+            return resolve_route_target(
+                app_state,
+                requested_name,
+                ResolvedNameScope::GlobalRoute,
+                route,
+            )
+            .await;
+        }
+        Ok(None) => {
+            debug!(
+                "'{}' is not a configured route. Attempting direct provider/model parsing.",
+                requested_name
+            );
+        }
+        Err(e) => {
+            error!("Error checking model route '{}': {:?}", requested_name, e);
+            return Err(format!(
+                "Internal server error while checking configured routes for '{}'.",
+                requested_name
+            ));
+        }
+    }
+
+    resolve_direct_target(app_state, requested_name).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_custom_fields, parse_provider_model, resolve_real_model_name,
-        select_generation_prepare_kind, set_nested_value,
+        ResolvedNameScope, handle_custom_fields, parse_provider_model, resolve_real_model_name,
+        select_generation_prepare_kind, select_primary_route_candidate, set_nested_value,
     };
     use crate::{
         schema::enum_def::{FieldPlacement, FieldType, LlmApiType},
-        service::cache::types::CacheCustomField,
+        service::cache::types::{CacheCustomField, CacheModelRoute, CacheModelRouteCandidate},
     };
     use axum::http::{HeaderMap, HeaderValue};
     use reqwest::Url;
@@ -695,6 +841,27 @@ mod tests {
             real_model_name: real_model_name.map(str::to_string),
             cost_catalog_id: None,
             is_enabled: true,
+        }
+    }
+
+    fn route(candidate_flags: &[bool]) -> CacheModelRoute {
+        CacheModelRoute {
+            id: 7,
+            route_name: "manual-smoke-route".to_string(),
+            description: None,
+            is_enabled: true,
+            expose_in_models: true,
+            candidates: candidate_flags
+                .iter()
+                .enumerate()
+                .map(|(index, is_enabled)| CacheModelRouteCandidate {
+                    route_id: 7,
+                    model_id: (index + 1) as i64,
+                    provider_id: 2,
+                    priority: index as i32,
+                    is_enabled: *is_enabled,
+                })
+                .collect(),
         }
     }
 
@@ -987,5 +1154,33 @@ mod tests {
             err.to_string(),
             "[server_error] unsupported generation target api type: Anthropic"
         );
+    }
+
+    #[test]
+    fn resolved_name_scope_labels_are_stable() {
+        assert_eq!(ResolvedNameScope::Direct.as_str(), "direct");
+        assert_eq!(ResolvedNameScope::GlobalRoute.as_str(), "global_route");
+        assert_eq!(
+            ResolvedNameScope::ApiKeyOverride.as_str(),
+            "api_key_override"
+        );
+    }
+
+    #[test]
+    fn select_primary_route_candidate_uses_first_enabled_candidate() {
+        assert_eq!(
+            select_primary_route_candidate(&route(&[true, true])).unwrap(),
+            1
+        );
+        assert_eq!(
+            select_primary_route_candidate(&route(&[false, true])).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn select_primary_route_candidate_rejects_route_without_enabled_candidates() {
+        let err = select_primary_route_candidate(&route(&[false, false])).unwrap_err();
+        assert!(err.contains("does not have any enabled candidates"));
     }
 }

@@ -18,6 +18,10 @@ db_object! {
         pub provider_id: i64,
         pub model_id: i64,
         pub provider_api_key_id: i64,
+        pub requested_model_name: Option<String>,
+        pub resolved_name_scope: Option<String>,
+        pub resolved_route_id: Option<i64>,
+        pub resolved_route_name: Option<String>,
         pub model_name: String,
         pub real_model_name: String,
         pub request_received_at: i64,
@@ -62,6 +66,9 @@ db_object! {
         // Keep the same semantics as `RequestLog.system_api_key_id`.
         pub system_api_key_id: i64,
         pub provider_id: i64,
+        pub requested_model_name: Option<String>,
+        pub resolved_name_scope: Option<String>,
+        pub resolved_route_name: Option<String>,
         pub model_name: String,
         pub request_received_at: i64,
         pub llm_request_sent_at: i64,
@@ -190,11 +197,22 @@ impl RequestLog {
                     if let Ok(id_search) = search_term.parse::<i64>() {
                         let search_filter = request_log::dsl::id
                             .eq(id_search)
-                            .or(request_log::dsl::model_name.like(pattern.clone()));
+                            .or(request_log::dsl::model_name.like(pattern.clone()))
+                            .or(
+                                request_log::dsl::requested_model_name
+                                    .nullable()
+                                    .like(pattern.clone()),
+                            );
                         query = query.filter(search_filter.clone());
                         count_query = count_query.filter(search_filter);
                     } else {
-                        let search_filter = request_log::dsl::model_name.like(pattern);
+                        let search_filter = request_log::dsl::model_name
+                            .like(pattern.clone())
+                            .or(
+                                request_log::dsl::requested_model_name
+                                    .nullable()
+                                    .like(pattern),
+                            );
                         query = query.filter(search_filter.clone());
                         count_query = count_query.filter(search_filter);
                     }
@@ -272,11 +290,22 @@ impl RequestLog {
                     if let Ok(id_search) = search_term.parse::<i64>() {
                         let search_filter = request_log::dsl::id
                             .eq(id_search)
-                            .or(request_log::dsl::model_name.like(pattern.clone()));
+                            .or(request_log::dsl::model_name.like(pattern.clone()))
+                            .or(
+                                request_log::dsl::requested_model_name
+                                    .nullable()
+                                    .like(pattern.clone()),
+                            );
                         query = query.filter(search_filter.clone());
                         count_query = count_query.filter(search_filter);
                     } else {
-                        let search_filter = request_log::dsl::model_name.like(pattern);
+                        let search_filter = request_log::dsl::model_name
+                            .like(pattern.clone())
+                            .or(
+                                request_log::dsl::requested_model_name
+                                    .nullable()
+                                    .like(pattern),
+                            );
                         query = query.filter(search_filter.clone());
                         count_query = count_query.filter(search_filter);
                     }

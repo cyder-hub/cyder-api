@@ -223,6 +223,7 @@ export interface ApiKeyItem {
 
 export interface ApiKeyDetail extends ApiKeyItem {
   acl_rules: ApiKeyAclRule[];
+  model_overrides: ApiKeyModelOverrideItem[];
 }
 
 export interface ApiKeyReveal {
@@ -269,6 +270,22 @@ export interface ApiKeyAclRulePayload {
   description?: string | null;
 }
 
+export interface ApiKeyModelOverrideItem {
+  id: number;
+  source_name: string;
+  target_route_id: number;
+  target_route_name: string | null;
+  description: string | null;
+  is_enabled: boolean;
+}
+
+export interface ApiKeyModelOverridePayload {
+  source_name: string;
+  target_route_id: number;
+  description?: string | null;
+  is_enabled?: boolean;
+}
+
 export interface ApiKeyCreatePayload {
   name: string;
   description?: string | null;
@@ -285,6 +302,7 @@ export interface ApiKeyCreatePayload {
   budget_monthly_nanos?: number | null;
   budget_monthly_currency?: string | null;
   acl_rules?: ApiKeyAclRulePayload[];
+  model_overrides?: ApiKeyModelOverridePayload[];
 }
 
 export interface ApiKeyUpdatePayload {
@@ -303,6 +321,7 @@ export interface ApiKeyUpdatePayload {
   budget_monthly_nanos?: number | null;
   budget_monthly_currency?: string | null;
   acl_rules?: ApiKeyAclRulePayload[];
+  model_overrides?: ApiKeyModelOverridePayload[];
 }
 
 // ========== Provider Types ==========
@@ -429,37 +448,68 @@ export interface ProviderRuntimeListParams {
   only_enabled?: boolean;
 }
 
-// ========== Model Alias Types ==========
-export interface ModelAliasListItem {
+// ========== Model Route Types ==========
+export interface ModelRouteItem {
   id: number;
-  alias_name: string;
+  route_name: string;
+  description: string | null;
+  is_enabled: boolean;
+  expose_in_models: boolean;
+  deleted_at?: number | null;
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface ModelRouteListItem {
+  route: ModelRouteItem;
+  candidate_count: number;
+}
+
+export interface ModelRouteCandidate {
+  id: number;
+  route_id: number;
+  model_id: number;
+  priority: number;
+  is_enabled: boolean;
+  deleted_at?: number | null;
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface ModelRouteCandidateDetail {
+  candidate: ModelRouteCandidate;
+  provider_id: number;
   provider_key: string;
   model_name: string;
-  target_model_id: number;
-  is_enabled: boolean;
-  description: string | null;
+  real_model_name: string | null;
+  model_is_enabled: boolean;
+}
+
+export interface ModelRouteDetail {
+  route: ModelRouteItem;
+  candidates: ModelRouteCandidateDetail[];
+}
+
+export interface ModelRouteCandidatePayload {
+  model_id: number;
   priority: number;
+  is_enabled?: boolean;
 }
 
-export interface EditingModelAlias {
-  id: number | null;
-  alias_name: string;
-  provider_id: string | null;
-  target_model_id: string | null;
-  is_enabled: boolean;
+export interface ModelRoutePayload {
+  route_name: string;
+  description?: string | null;
+  is_enabled?: boolean;
+  expose_in_models?: boolean;
+  candidates: ModelRouteCandidatePayload[];
 }
 
-export interface ModelAliasDetail {
-  id: number;
-  alias_name: string;
-  target_model_id: number;
-  is_enabled: boolean;
-}
-
-export interface ModelAliasPayload {
-  alias_name: string;
-  target_model_id: number;
-  is_enabled: boolean;
+export interface ModelRouteUpdatePayload {
+  route_name?: string;
+  description?: string | null;
+  is_enabled?: boolean;
+  expose_in_models?: boolean;
+  candidates?: ModelRouteCandidatePayload[];
 }
 
 // ========== Custom Field Types ==========
@@ -713,6 +763,9 @@ export interface RecordListItem {
   id: number;
   provider_id: number;
   system_api_key_id: number;
+  requested_model_name?: string | null;
+  resolved_name_scope?: string | null;
+  resolved_route_name?: string | null;
   model_name: string;
   is_stream: boolean;
   status: string | null;
@@ -731,6 +784,7 @@ export interface RecordListItem {
 export interface RecordDetail extends RecordListItem {
   cost_catalog_id?: number | null;
   cost_catalog_version_id?: number | null;
+  resolved_route_id?: number | null;
   real_model_name?: string | null;
   input_text_tokens?: number | null;
   output_text_tokens?: number | null;

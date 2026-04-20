@@ -10,7 +10,8 @@ use crate::{db_execute, db_object};
 use crate::database::custom_field::{ApiCustomFieldDefinition, CustomFieldDefinition};
 use serde::Serialize;
 
-// Import necessary items from the provider module for query_provider_model
+// `Model` is the canonical provider-scoped candidate identity used at execution time.
+// Shared logical names and key-scoped overrides are intentionally modeled elsewhere.
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug, Clone, serde::Serialize)]

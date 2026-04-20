@@ -43,8 +43,8 @@ export const navItems: NavItem[] = [
     icon: KeyRound,
   },
   {
-    path: "/model_transform",
-    i18nKey: "sidebar.modelTransform",
+    path: "/model_route",
+    i18nKey: "sidebar.modelRoute",
     icon: ArrowRightLeft,
   },
   {

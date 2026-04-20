@@ -10,7 +10,7 @@ use axum::{
 use cost::create_cost_router;
 use custom_field::create_custom_field_router;
 use model::create_model_router;
-use model_alias::create_model_alias_router;
+use model_route::create_model_route_router;
 use provider::create_provider_router;
 use provider_runtime::create_provider_runtime_router;
 use request_log::create_record_router;
@@ -28,7 +28,7 @@ mod error;
 
 mod api_key;
 mod model;
-mod model_alias;
+mod model_route;
 mod provider;
 mod provider_runtime;
 mod request_log;
@@ -58,7 +58,7 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_provider_runtime_router())
             .merge(create_api_key_management_router())
             .merge(create_model_router())
-            .merge(create_model_alias_router())
+            .merge(create_model_route_router())
             .merge(create_custom_field_router())
             .merge(create_cost_router())
             .merge(create_stat_router())

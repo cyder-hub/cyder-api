@@ -55,9 +55,9 @@ async fn delete_model(
     if num_deleted > 0 {
         // Invalidate from cache
         if let Err(store_err) = app_state.invalidate_model(id, None).await {
-            eprintln!(
-                "Failed to invalidate model from cache after DB delete: {:?}",
-                store_err
+            warn!(
+                "Failed to invalidate model from cache after DB delete {}: {:?}",
+                id, store_err
             );
         }
     }
@@ -88,9 +88,9 @@ async fn update_model(
 
     // Invalidate from cache
     if let Err(store_err) = app_state.invalidate_model(id, None).await {
-        eprintln!(
-            "Failed to invalidate model in cache after DB update: {:?}",
-            store_err
+        warn!(
+            "Failed to invalidate model in cache after DB update {}: {:?}",
+            id, store_err
         );
     }
 

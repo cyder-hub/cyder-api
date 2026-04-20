@@ -184,6 +184,10 @@ pub struct RequestLogContext {
     pub provider_id: i64,
     pub model_id: i64,
     pub provider_api_key_id: i64,
+    pub requested_model_name: String,
+    pub resolved_name_scope: String,
+    pub resolved_route_id: Option<i64>,
+    pub resolved_route_name: Option<String>,
     pub model_name: String,
     pub real_model_name: String,
     pub user_api_type: LlmApiType,
@@ -215,6 +219,10 @@ impl RequestLogContext {
         provider: &CacheProvider,
         model: &CacheModel,
         provider_api_key_id: i64,
+        requested_model_name: &str,
+        resolved_name_scope: &str,
+        resolved_route_id: Option<i64>,
+        resolved_route_name: Option<&str>,
         start_time: i64,
         client_ip_addr: &Option<String>,
         user_api_type: LlmApiType,
@@ -232,6 +240,10 @@ impl RequestLogContext {
             provider_id: provider.id,
             model_id: model.id,
             provider_api_key_id,
+            requested_model_name: requested_model_name.to_string(),
+            resolved_name_scope: resolved_name_scope.to_string(),
+            resolved_route_id,
+            resolved_route_name: resolved_route_name.map(str::to_string),
             model_name: model.model_name.clone(),
             real_model_name: real_model_name.to_string(),
             user_api_type,
@@ -255,6 +267,39 @@ impl RequestLogContext {
             user_response_body: None,
         }
     }
+}
+
+pub(super) fn build_initial_request_log_context(
+    system_api_key: &CacheSystemApiKey,
+    provider: &CacheProvider,
+    model: &CacheModel,
+    provider_api_key_id: i64,
+    requested_model_name: &str,
+    resolved_name_scope: &str,
+    resolved_route_id: Option<i64>,
+    resolved_route_name: Option<&str>,
+    start_time: i64,
+    client_ip_addr: &Option<String>,
+    user_api_type: LlmApiType,
+    llm_api_type: LlmApiType,
+    user_request_body: Option<Bytes>,
+) -> RequestLogContext {
+    let mut context = RequestLogContext::new(
+        system_api_key,
+        provider,
+        model,
+        provider_api_key_id,
+        requested_model_name,
+        resolved_name_scope,
+        resolved_route_id,
+        resolved_route_name,
+        start_time,
+        client_ip_addr,
+        user_api_type,
+        llm_api_type,
+    );
+    context.user_request_body = user_request_body.map(LoggedBody::from_bytes);
+    context
 }
 
 const ROLLUP_UNSPECIFIED_CURRENCY: &str = "NUL";
@@ -996,6 +1041,10 @@ impl LogManager {
             provider_id: context.provider_id,
             model_id: context.model_id,
             provider_api_key_id: context.provider_api_key_id,
+            requested_model_name: Some(context.requested_model_name.clone()),
+            resolved_name_scope: Some(context.resolved_name_scope.clone()),
+            resolved_route_id: context.resolved_route_id,
+            resolved_route_name: context.resolved_route_name.clone(),
             model_name: context.model_name.clone(),
             real_model_name: context.real_model_name.clone(),
             request_received_at: context.request_received_at,
@@ -1214,6 +1263,10 @@ mod tests {
             &provider,
             &model,
             4,
+            "manual-smoke-route",
+            "global_route",
+            Some(8),
+            Some("manual-smoke-route"),
             1234,
             &Some("127.0.0.1".to_string()),
             LlmApiType::Responses,
@@ -1297,6 +1350,19 @@ mod tests {
         assert_eq!(request_log.user_api_type, LlmApiType::Responses);
         assert_eq!(request_log.llm_api_type, LlmApiType::Anthropic);
         assert_eq!(
+            request_log.requested_model_name.as_deref(),
+            Some("manual-smoke-route")
+        );
+        assert_eq!(
+            request_log.resolved_name_scope.as_deref(),
+            Some("global_route")
+        );
+        assert_eq!(request_log.resolved_route_id, Some(8));
+        assert_eq!(
+            request_log.resolved_route_name.as_deref(),
+            Some("manual-smoke-route")
+        );
+        assert_eq!(
             request_log.llm_request_uri.as_deref(),
             Some("https://example.com/v1/chat/completions")
         );
@@ -1309,6 +1375,36 @@ mod tests {
         assert_eq!(request_log.cache_read_tokens, Some(3));
         assert_eq!(request_log.estimated_cost_currency.as_deref(), Some("USD"));
         assert_eq!(request_log.cost_catalog_version_id, Some(9));
+    }
+
+    #[test]
+    fn build_request_log_preserves_route_trace_for_early_failures() {
+        let mut context = make_log_context();
+        context.overall_status = RequestStatus::Error;
+        context.completion_ts = Some(1800);
+        context.llm_request_sent_at = None;
+        context.request_url = None;
+
+        let request_log = LogManager::build_request_log(&context, None, 2000);
+
+        assert_eq!(request_log.status, Some(RequestStatus::Error));
+        assert_eq!(
+            request_log.requested_model_name.as_deref(),
+            Some("manual-smoke-route")
+        );
+        assert_eq!(
+            request_log.resolved_name_scope.as_deref(),
+            Some("global_route")
+        );
+        assert_eq!(request_log.resolved_route_id, Some(8));
+        assert_eq!(
+            request_log.resolved_route_name.as_deref(),
+            Some("manual-smoke-route")
+        );
+        assert_eq!(request_log.model_name, "gpt-test");
+        assert_eq!(request_log.real_model_name, "real-gpt-test");
+        assert!(request_log.llm_request_uri.is_none());
+        assert!(request_log.llm_response_status.is_none());
     }
 
     #[tokio::test]

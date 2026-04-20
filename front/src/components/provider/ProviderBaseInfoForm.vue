@@ -62,11 +62,7 @@
       <Label for="use_proxy_checkbox" class="cursor-pointer text-gray-700"
         >{{ $t("providerEditPage.labelUseProxy") }}</Label
       >
-      <Checkbox
-        id="use_proxy_checkbox"
-        :checked="editingData.use_proxy"
-        @update:checked="(val: boolean) => (editingData.use_proxy = val)"
-      />
+      <Checkbox id="use_proxy_checkbox" v-model="editingData.use_proxy" />
     </div>
 
     <div class="mt-2 flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row sm:justify-end">

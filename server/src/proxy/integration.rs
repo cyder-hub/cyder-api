@@ -3,6 +3,7 @@ use crate::{
     database::{
         access_control::{AccessControlPolicy, ApiCreateAccessControlPolicyPayload},
         model::Model,
+        model_route::{CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput},
         provider::{NewProvider, NewProviderApiKey, Provider, ProviderApiKey},
         request_log::{RequestLog, RequestLogQueryPayload},
         system_api_key::SystemApiKey,
@@ -350,6 +351,22 @@ impl TestFixture {
             "expected one request log for provider_id={} model_id={}",
             self.provider.id, self.model.id
         )
+    }
+
+    async fn create_route(&self, route_name: &str) {
+        ModelRoute::create(&CreateModelRoutePayload {
+            route_name: route_name.to_string(),
+            description: Some("integration test route".to_string()),
+            is_enabled: Some(true),
+            expose_in_models: Some(true),
+            candidates: vec![ModelRouteCandidateInput {
+                model_id: self.model.id,
+                priority: 0,
+                is_enabled: Some(true),
+            }],
+        })
+        .expect("model route should be created");
+        self.app_state.reload().await;
     }
 
     async fn cleanup(&self) {
@@ -788,7 +805,7 @@ fn streaming_client_disconnect_marks_log_cancelled() {
 }
 
 #[test]
-fn acl_denials_short_circuit_before_upstream_and_do_not_write_logs() {
+fn acl_denials_short_circuit_before_upstream_and_persist_route_trace_logs() {
     RUNTIME.block_on(async {
         let _ = ensure_test_database();
         let _guard = DB_LOCK.lock().await;
@@ -806,6 +823,8 @@ fn acl_denials_short_circuit_before_upstream_and_do_not_write_logs() {
             Some("upstream-denied-model".to_string()),
         )
         .await;
+        let route_name = format!("proxy-int-route-{}", ID_GENERATOR.generate_id());
+        fixture.create_route(&route_name).await;
 
         let request = build_json_request(
             "/openai/v1/chat/completions",
@@ -814,7 +833,7 @@ fn acl_denials_short_circuit_before_upstream_and_do_not_write_logs() {
                 format!("Bearer {}", fixture.system_api_key.api_key),
             )],
             json!({
-                "model": fixture.requested_model(),
+                "model": route_name.clone(),
                 "messages": [{"role": "user", "content": "hi"}]
             }),
         );
@@ -825,7 +844,19 @@ fn acl_denials_short_circuit_before_upstream_and_do_not_write_logs() {
             serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
         assert_eq!(body["code"], "permission_error");
         assert_eq!(upstream.captured_requests().await.len(), 0);
-        assert!(fixture.list_logs().await.is_empty());
+        let log = fixture.latest_log().await;
+        assert_eq!(log.status, Some(RequestStatus::Error));
+        assert_eq!(
+            log.requested_model_name.as_deref(),
+            Some(route_name.as_str())
+        );
+        assert_eq!(log.resolved_name_scope.as_deref(), Some("global_route"));
+        assert_eq!(
+            log.resolved_route_name.as_deref(),
+            Some(route_name.as_str())
+        );
+        assert_eq!(log.model_name, fixture.model.model_name);
+        assert!(log.llm_response_status.is_none());
 
         fixture.cleanup().await;
     });

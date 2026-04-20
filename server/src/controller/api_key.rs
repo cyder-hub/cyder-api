@@ -6,12 +6,15 @@ use axum::{
     routing::{get, post, put},
 };
 use cyder_tools::log::warn;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     database::api_key::{
-        ApiKey, ApiKeyDetail, ApiKeyDetailWithSecret, ApiKeyReveal, ApiKeySummary,
-        CreateApiKeyPayload, UpdateApiKeyMetadataPayload, hash_api_key,
+        ApiKey, ApiKeyDetail, ApiKeyReveal, ApiKeySummary, CreateApiKeyPayload,
+        UpdateApiKeyMetadataPayload, hash_api_key,
+    },
+    database::model_route::{
+        ApiKeyModelOverride, CreateApiKeyModelOverridePayload, ModelRoute,
     },
     service::app_state::{ApiKeyBilledAmountSnapshot, ApiKeyGovernanceSnapshot, AppState},
     service::app_state::{StateRouter, create_state_router},
@@ -76,26 +79,167 @@ impl From<ApiKeyGovernanceSnapshot> for ApiKeyRuntimeSnapshotResponse {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApiKeyModelOverridePayload {
+    pub source_name: String,
+    pub target_route_id: i64,
+    pub description: Option<String>,
+    pub is_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ApiKeyModelOverrideResponse {
+    pub id: i64,
+    pub source_name: String,
+    pub target_route_id: i64,
+    pub target_route_name: Option<String>,
+    pub description: Option<String>,
+    pub is_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ApiKeyDetailResponse {
+    #[serde(flatten)]
+    pub detail: ApiKeyDetail,
+    pub model_overrides: Vec<ApiKeyModelOverrideResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ApiKeyDetailWithSecretResponse {
+    pub detail: ApiKeyDetailResponse,
+    pub reveal: ApiKeyReveal,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreateApiKeyRequest {
+    #[serde(flatten)]
+    pub detail: CreateApiKeyPayload,
+    #[serde(default)]
+    pub model_overrides: Vec<ApiKeyModelOverridePayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateApiKeyRequest {
+    #[serde(flatten)]
+    pub detail: UpdateApiKeyMetadataPayload,
+    #[serde(default)]
+    pub model_overrides: Vec<ApiKeyModelOverridePayload>,
+}
+
+fn load_api_key_model_override_responses(
+    api_key_id: i64,
+) -> Result<Vec<ApiKeyModelOverrideResponse>, BaseError> {
+    ApiKeyModelOverride::list_by_api_key_id(api_key_id)?
+        .into_iter()
+        .map(|override_row| {
+            let target_route_name = ModelRoute::get_by_id(override_row.target_route_id)
+                .ok()
+                .map(|route| route.route_name);
+
+            Ok(ApiKeyModelOverrideResponse {
+                id: override_row.id,
+                source_name: override_row.source_name,
+                target_route_id: override_row.target_route_id,
+                target_route_name,
+                description: override_row.description,
+                is_enabled: override_row.is_enabled,
+            })
+        })
+        .collect()
+}
+
+fn load_api_key_detail_response(api_key_id: i64) -> Result<ApiKeyDetailResponse, BaseError> {
+    Ok(ApiKeyDetailResponse {
+        detail: ApiKey::get_detail(api_key_id)?,
+        model_overrides: load_api_key_model_override_responses(api_key_id)?,
+    })
+}
+
+async fn replace_api_key_model_overrides(
+    app_state: &Arc<AppState>,
+    api_key_id: i64,
+    payloads: &[ApiKeyModelOverridePayload],
+) -> Result<Vec<ApiKeyModelOverrideResponse>, BaseError> {
+    let existing = ApiKeyModelOverride::list_by_api_key_id(api_key_id)?;
+    for override_row in existing {
+        let source_name = override_row.source_name.clone();
+        ApiKeyModelOverride::delete(override_row.id)?;
+        if let Err(err) = app_state
+            .invalidate_api_key_model_override(api_key_id, &source_name)
+            .await
+        {
+            warn!(
+                "Failed to invalidate deleted api key model override {}:{}: {:?}",
+                api_key_id, source_name, err
+            );
+        }
+    }
+
+    for payload in payloads {
+        ApiKeyModelOverride::create(&CreateApiKeyModelOverridePayload {
+            api_key_id,
+            source_name: payload.source_name.clone(),
+            target_route_id: payload.target_route_id,
+            description: payload.description.clone(),
+            is_enabled: payload.is_enabled,
+        })?;
+
+        if let Err(err) = app_state
+            .invalidate_api_key_model_override(api_key_id, &payload.source_name)
+            .await
+        {
+            warn!(
+                "Failed to invalidate created api key model override {}:{}: {:?}",
+                api_key_id, payload.source_name, err
+            );
+        }
+    }
+
+    if let Err(err) = app_state.invalidate_models_catalog().await {
+        warn!(
+            "Failed to invalidate models catalog after api key override replace {}: {:?}",
+            api_key_id, err
+        );
+    }
+
+    load_api_key_model_override_responses(api_key_id)
+}
+
 async fn create_api_key(
-    Json(payload): Json<CreateApiKeyPayload>,
-) -> Result<HttpResult<ApiKeyDetailWithSecret>, BaseError> {
-    Ok(HttpResult::new(ApiKey::create(&payload)?))
+    State(app_state): State<Arc<AppState>>,
+    Json(payload): Json<CreateApiKeyRequest>,
+) -> Result<HttpResult<ApiKeyDetailWithSecretResponse>, BaseError> {
+    let created = ApiKey::create(&payload.detail)?;
+    let overrides =
+        replace_api_key_model_overrides(&app_state, created.detail.id, &payload.model_overrides)
+            .await?;
+
+    Ok(HttpResult::new(ApiKeyDetailWithSecretResponse {
+        detail: ApiKeyDetailResponse {
+            detail: created.detail,
+            model_overrides: overrides,
+        },
+        reveal: created.reveal,
+    }))
 }
 
 async fn list_api_keys() -> Result<HttpResult<Vec<ApiKeySummary>>, BaseError> {
     Ok(HttpResult::new(ApiKey::list_summary()?))
 }
 
-async fn get_api_key_detail(Path(id): Path<i64>) -> Result<HttpResult<ApiKeyDetail>, BaseError> {
-    Ok(HttpResult::new(ApiKey::get_detail(id)?))
+async fn get_api_key_detail(
+    Path(id): Path<i64>,
+) -> Result<HttpResult<ApiKeyDetailResponse>, BaseError> {
+    Ok(HttpResult::new(load_api_key_detail_response(id)?))
 }
 
 async fn update_api_key(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-    Json(payload): Json<UpdateApiKeyMetadataPayload>,
-) -> Result<HttpResult<ApiKeyDetail>, BaseError> {
-    let updated = ApiKey::update_metadata(id, &payload)?;
+    Json(payload): Json<UpdateApiKeyRequest>,
+) -> Result<HttpResult<ApiKeyDetailResponse>, BaseError> {
+    let updated = ApiKey::update_metadata(id, &payload.detail)?;
+    let overrides = replace_api_key_model_overrides(&app_state, id, &payload.model_overrides).await?;
 
     if let Err(err) = app_state.invalidate_api_key_id(id).await {
         warn!(
@@ -104,7 +248,10 @@ async fn update_api_key(
         );
     }
 
-    Ok(HttpResult::new(updated))
+    Ok(HttpResult::new(ApiKeyDetailResponse {
+        detail: updated,
+        model_overrides: overrides,
+    }))
 }
 
 async fn rotate_api_key(
@@ -143,6 +290,20 @@ async fn delete_api_key(
         .unwrap_or_else(|| hash_api_key(&existing.api_key));
 
     ApiKey::delete(id)?;
+    let overrides = ApiKeyModelOverride::list_by_api_key_id(id)?;
+    for override_row in overrides {
+        let source_name = override_row.source_name.clone();
+        ApiKeyModelOverride::delete(override_row.id)?;
+        if let Err(err) = app_state
+            .invalidate_api_key_model_override(id, &source_name)
+            .await
+        {
+            warn!(
+                "Failed to invalidate deleted api key override {}:{}: {:?}",
+                id, source_name, err
+            );
+        }
+    }
 
     if let Err(err) = app_state.invalidate_api_key_hash(&api_key_hash).await {
         warn!("Failed to invalidate deleted api key {}: {:?}", id, err);
@@ -172,6 +333,24 @@ async fn list_api_key_runtime_snapshots(
     Ok(HttpResult::new(snapshots))
 }
 
+async fn list_api_key_model_overrides(
+    Path(id): Path<i64>,
+) -> Result<HttpResult<Vec<ApiKeyModelOverrideResponse>>, BaseError> {
+    ApiKey::get_by_id(id)?;
+    Ok(HttpResult::new(load_api_key_model_override_responses(id)?))
+}
+
+async fn replace_api_key_model_override_routes(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<Vec<ApiKeyModelOverridePayload>>,
+) -> Result<HttpResult<Vec<ApiKeyModelOverrideResponse>>, BaseError> {
+    ApiKey::get_by_id(id)?;
+    Ok(HttpResult::new(
+        replace_api_key_model_overrides(&app_state, id, &payload).await?,
+    ))
+}
+
 pub fn create_api_key_management_router() -> StateRouter {
     create_state_router().nest(
         "/api_key",
@@ -187,13 +366,20 @@ pub fn create_api_key_management_router() -> StateRouter {
             )
             .route("/{id}/rotate", post(rotate_api_key))
             .route("/{id}/reveal", get(reveal_api_key))
+            .route("/{id}/model_override/list", get(list_api_key_model_overrides))
+            .route(
+                "/{id}/model_override/replace",
+                put(replace_api_key_model_override_routes),
+            )
             .route("/{id}/runtime", get(get_api_key_runtime_snapshot)),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::create_api_key_management_router;
+    use super::{
+        ApiKeyDetailResponse, ApiKeyModelOverrideResponse, create_api_key_management_router,
+    };
     use crate::database::api_key::{ApiKeyDetail, ApiKeyReveal, ApiKeySummary};
     use crate::schema::enum_def::Action;
     use serde_json::json;
@@ -264,5 +450,50 @@ mod tests {
         assert_eq!(summary_json.get("api_key"), None);
         assert_eq!(detail_json.get("api_key"), None);
         assert_eq!(reveal_json.get("api_key"), Some(&json!("cyder-secret")));
+    }
+
+    #[test]
+    fn detail_shape_includes_model_overrides_at_top_level() {
+        let detail = ApiKeyDetail {
+            id: 1,
+            key_prefix: "cyder-abcdef".to_string(),
+            key_last4: "1234".to_string(),
+            name: "detail".to_string(),
+            description: None,
+            default_action: Action::Allow,
+            is_enabled: true,
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: Some(10),
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            created_at: 1,
+            updated_at: 2,
+            acl_rules: vec![],
+        };
+        let response = ApiKeyDetailResponse {
+            detail,
+            model_overrides: vec![ApiKeyModelOverrideResponse {
+                id: 7,
+                source_name: "manual-cli-model".to_string(),
+                target_route_id: 3,
+                target_route_name: Some("manual-smoke-route".to_string()),
+                description: Some("cli shim".to_string()),
+                is_enabled: true,
+            }],
+        };
+
+        let json = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(json.get("name"), Some(&json!("detail")));
+        assert_eq!(
+            json.pointer("/model_overrides/0/source_name"),
+            Some(&json!("manual-cli-model"))
+        );
     }
 }

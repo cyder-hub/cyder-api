@@ -36,9 +36,14 @@ const router = createRouter({
           component: () => import("@/pages/CustomFields.vue"),
         },
         {
+          path: "model_route",
+          name: "ModelRoute",
+          component: () => import("@/pages/ModelRoute.vue"),
+        },
+        {
           path: "model_transform",
-          name: "ModelTransform",
-          component: () => import("@/pages/ModelTransform.vue"),
+          // Legacy redirect for the historical manager UI path.
+          redirect: { name: "ModelRoute" },
         },
         {
           path: "cost",

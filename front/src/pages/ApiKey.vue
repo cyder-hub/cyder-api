@@ -385,6 +385,66 @@
 
             <section class="space-y-3 border-t border-gray-100 pt-6">
               <div class="flex items-center gap-2">
+                <KeyRound class="h-4 w-4 text-gray-400" />
+                <h3 class="text-base font-semibold text-gray-900">
+                  {{ $t("apiKeyPage.sections.overrideTitle") }}
+                </h3>
+              </div>
+              <p class="text-sm text-gray-500">
+                {{ $t("apiKeyPage.sections.overrideDescription") }}
+              </p>
+
+              <div
+                v-if="!selectedDetail.model_overrides.length"
+                class="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-sm text-gray-500"
+              >
+                {{ $t("apiKeyPage.noOverrides") }}
+              </div>
+
+              <div v-else class="space-y-3">
+                <div
+                  v-for="item in selectedDetail.model_overrides"
+                  :key="item.id"
+                  class="rounded-lg border border-gray-200 px-4 py-3"
+                >
+                  <div class="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline" class="text-[11px]">
+                      {{ item.source_name }}
+                    </Badge>
+                    <Badge variant="secondary" class="text-[11px]">
+                      {{ modelOverrideTargetLabel(item) }}
+                    </Badge>
+                    <Badge
+                      :class="
+                        item.is_enabled
+                          ? 'border border-gray-200 bg-white text-gray-600'
+                          : 'border border-gray-200 bg-gray-100 text-gray-400'
+                      "
+                      class="text-[11px]"
+                    >
+                      {{
+                        item.is_enabled
+                          ? $t("apiKeyPage.rule.enabled")
+                          : $t("apiKeyPage.rule.disabled")
+                      }}
+                    </Badge>
+                  </div>
+                  <p class="mt-2 text-sm text-gray-900">
+                    {{
+                      $t("apiKeyPage.override.targetRoute", {
+                        value: modelOverrideTargetLabel(item),
+                      })
+                    }}
+                  </p>
+                  <p v-if="item.description" class="mt-1 text-sm text-gray-500">
+                    {{ item.description }}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section class="space-y-3 border-t border-gray-100 pt-6">
+              <div class="flex items-center gap-2">
                 <Activity class="h-4 w-4 text-gray-400" />
                 <h3 class="text-base font-semibold text-gray-900">
                   {{ $t("apiKeyPage.sections.runtimeTitle") }}
@@ -501,6 +561,7 @@
       <ApiKeyEditModal
         v-model:isOpen="showEditModal"
         :initial-data="editingDetail"
+        :model-routes="modelRoutes"
         :providers="providerStore.providers"
         @save-success="handleSaveSuccess"
       />
@@ -552,9 +613,11 @@ import type {
   ApiKeyAclRuleScope,
   ApiKeyDetail,
   ApiKeyItem,
+  ApiKeyModelOverrideItem,
   ApiKeyReveal,
   ApiKeyRuntimeBilledAmount,
   ApiKeyRuntimeSnapshot,
+  ModelRouteListItem,
 } from "@/store/types";
 
 const { t: $t } = useI18n();
@@ -572,6 +635,7 @@ const showEditModal = ref(false);
 const showMobileKeyPicker = ref(false);
 const editingDetail = ref<ApiKeyDetail | null>(null);
 const secretReveal = ref<ApiKeyReveal | null>(null);
+const modelRoutes = ref<ModelRouteListItem[]>([]);
 
 function emptyRuntimeSnapshot(apiKeyId: number): ApiKeyRuntimeSnapshot {
   return {
@@ -614,6 +678,14 @@ const modelNameById = computed(() => {
         `${item.provider.provider_key} / ${modelItem.model.model_name}`,
       );
     }
+  }
+  return map;
+});
+
+const routeNameById = computed(() => {
+  const map = new Map<number, string>();
+  for (const item of modelRoutes.value) {
+    map.set(item.route.id, item.route.route_name);
   }
   return map;
 });
@@ -803,6 +875,14 @@ function aclRuleTarget(rule: ApiKeyAclRule) {
   return modelNameById.value.get(rule.model_id ?? -1) ?? $t("common.notAvailable");
 }
 
+function modelOverrideTargetLabel(item: ApiKeyModelOverrideItem) {
+  return (
+    item.target_route_name ??
+    routeNameById.value.get(item.target_route_id) ??
+    $t("common.notAvailable")
+  );
+}
+
 async function fetchData() {
   loading.value = true;
   error.value = null;
@@ -812,6 +892,9 @@ async function fetchData() {
       apiKeyStore.fetchApiKeys(),
       apiKeyStore.fetchRuntimeSnapshots(),
       providerStore.fetchProviders(),
+      Api.getModelRouteList().then((items) => {
+        modelRoutes.value = items;
+      }),
     ]);
 
     if (!apiKeyStore.apiKeys.length) {

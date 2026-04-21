@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn sqlite_request_patch_rule_migration_replaces_legacy_tables_and_adds_request_log_trace_columns()
-    {
+     {
         let temp_dir = tempdir().expect("temp dir should be created");
         let db_path = temp_dir.path().join("request-patch-rule.sqlite");
         let db_url = db_path.to_string_lossy().into_owned();
@@ -1140,5 +1140,4 @@ mod tests {
             "invalid json payload should be rejected"
         );
     }
-
 }

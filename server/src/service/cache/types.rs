@@ -364,7 +364,6 @@ impl From<ApiKeyAclRule> for CacheApiKeyAclRule {
     }
 }
 
-
 impl TryFrom<crate::database::request_patch::RequestPatchRuleResponse> for CacheRequestPatchRule {
     type Error = serde_json::Error;
 

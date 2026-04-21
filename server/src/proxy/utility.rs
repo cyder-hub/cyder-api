@@ -18,11 +18,11 @@ use super::{
         build_response_builder, decode_response_body, finalize_non_streaming_log_context,
         read_response_bytes_with_cancellation, send_with_first_byte_timeout,
     },
+    load_runtime_request_patch_trace,
     logging::{
         LoggedBody, RequestLogContext, build_initial_request_log_context,
         record_request_completion_and_log,
     },
-    load_runtime_request_patch_trace,
     prepare::{
         prepare_llm_request, prepare_simple_gemini_request, resolve_provider_credentials,
         resolve_requested_model,
@@ -189,7 +189,8 @@ pub(super) async fn execute_utility_proxy(
     initial_log_context.request_patch_summary_json =
         request_patch_trace.request_patch_summary_json.clone();
     if let Some(conflict_error) = request_patch_trace.conflict_error(&model.model_name) {
-        record_early_utility_failure(&app_state, initial_log_context.clone(), &conflict_error).await;
+        record_early_utility_failure(&app_state, initial_log_context.clone(), &conflict_error)
+            .await;
         return Err(conflict_error);
     }
     let cost_catalog_version = get_cost_catalog_version(&model, &app_state).await;

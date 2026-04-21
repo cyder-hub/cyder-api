@@ -716,8 +716,13 @@ mod tests {
         };
 
         let value = serde_json::to_value(detail).expect("model detail should serialize");
-        let object = value.as_object().expect("detail should serialize as object");
-        assert!(matches!(object.get("request_patches"), Some(Value::Array(_))));
+        let object = value
+            .as_object()
+            .expect("detail should serialize as object");
+        assert!(matches!(
+            object.get("request_patches"),
+            Some(Value::Array(_))
+        ));
         assert!(matches!(
             object.get("inherited_request_patches"),
             Some(Value::Array(_))

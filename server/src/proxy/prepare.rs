@@ -3,10 +3,13 @@ use std::{collections::HashMap, sync::Arc};
 use axum::http::{HeaderMap, HeaderValue};
 use reqwest::{
     Url,
-    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue as ReqwestHeaderValue},
+    header::{
+        ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST, HeaderName,
+        HeaderValue as ReqwestHeaderValue,
+    },
 };
-use serde_json::{Map, Value, json};
 use serde::Serialize;
+use serde_json::{Map, Value, json};
 
 use super::ProxyError;
 use crate::{
@@ -273,8 +276,7 @@ fn set_body_pointer_value(
                 let slot = items.get_mut(index).ok_or_else(|| {
                     ProxyError::InternalError(format!(
                         "BODY request patch target '{}' is out of bounds for an array of length {}",
-                        pointer,
-                        len
+                        pointer, len
                     ))
                 })?;
                 *slot = final_value;
@@ -305,8 +307,7 @@ fn set_body_pointer_value(
                 let child = items.get_mut(index).ok_or_else(|| {
                     ProxyError::InternalError(format!(
                         "BODY request patch target '{}' is out of bounds for an array of length {}",
-                        pointer,
-                        len
+                        pointer, len
                     ))
                 })?;
                 set_body_pointer_value(child, &segments[1..], pointer, value)
@@ -387,7 +388,10 @@ fn scalar_request_patch_value(rule: &CacheResolvedRequestPatch) -> Result<String
     }
 }
 
-fn apply_query_request_patch(url: &mut Url, rule: &CacheResolvedRequestPatch) -> Result<(), ProxyError> {
+fn apply_query_request_patch(
+    url: &mut Url,
+    rule: &CacheResolvedRequestPatch,
+) -> Result<(), ProxyError> {
     let mut existing_pairs: Vec<(String, String)> = url
         .query_pairs()
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -424,8 +428,8 @@ fn apply_header_request_patch(
             Ok(())
         }
         RequestPatchOperation::Set => {
-            let header_value =
-                ReqwestHeaderValue::from_str(&scalar_request_patch_value(rule)?).map_err(|err| {
+            let header_value = ReqwestHeaderValue::from_str(&scalar_request_patch_value(rule)?)
+                .map_err(|err| {
                     ProxyError::InternalError(format!(
                         "request patch rule {} has invalid header value for '{}': {}",
                         rule.source_rule_id, rule.target, err

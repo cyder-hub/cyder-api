@@ -821,9 +821,14 @@ mod tests {
         };
 
         let value = serde_json::to_value(detail).expect("provider detail should serialize");
-        let object = value.as_object().expect("detail should serialize as object");
+        let object = value
+            .as_object()
+            .expect("detail should serialize as object");
         assert!(matches!(object.get("api_keys"), Some(Value::Array(_))));
-        assert!(matches!(object.get("request_patches"), Some(Value::Array(_))));
+        assert!(matches!(
+            object.get("request_patches"),
+            Some(Value::Array(_))
+        ));
         assert_eq!(
             object["request_patches"][0]["value_json"],
             serde_json::json!({ "temperature": 0.2 })

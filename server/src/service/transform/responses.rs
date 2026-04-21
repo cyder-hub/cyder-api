@@ -493,9 +493,12 @@ impl<'de> Deserialize<'de> for ItemField {
             .unwrap_or_default();
 
         match type_name {
-            "message" => serde_json::from_value(value)
-                .map(ItemField::Message)
-                .map_err(serde::de::Error::custom),
+            "message" => match serde_json::from_value::<Message>(value.clone()) {
+                Ok(message) => Ok(ItemField::Message(message)),
+                Err(_) => try_deserialize_shorthand_message(&value)
+                    .map(ItemField::Message)
+                    .ok_or_else(|| serde::de::Error::custom("failed to deserialize message item")),
+            },
             "function_call" => serde_json::from_value(value)
                 .map(ItemField::FunctionCall)
                 .map_err(serde::de::Error::custom),
@@ -529,7 +532,9 @@ struct ShorthandMessage {
 fn try_deserialize_shorthand_message(value: &Value) -> Option<Message> {
     let shorthand: ShorthandMessage = serde_json::from_value(value.clone()).ok()?;
     let content = match shorthand.content {
-        ShorthandMessageContent::Text(text) => vec![ItemContentPart::InputText { text }],
+        ShorthandMessageContent::Text(text) => {
+            shorthand_text_content_to_message_parts(&shorthand.role, text)
+        }
         ShorthandMessageContent::Parts(parts) => parts,
     };
 
@@ -540,6 +545,39 @@ fn try_deserialize_shorthand_message(value: &Value) -> Option<Message> {
         role: shorthand.role,
         content,
     })
+}
+
+fn shorthand_text_content_to_message_parts(
+    role: &MessageRole,
+    text: String,
+) -> Vec<ItemContentPart> {
+    match role {
+        MessageRole::Assistant => vec![ItemContentPart::OutputText {
+            text,
+            annotations: Vec::new(),
+            logprobs: None,
+        }],
+        MessageRole::User | MessageRole::System | MessageRole::Developer => {
+            vec![ItemContentPart::InputText { text }]
+        }
+    }
+}
+
+fn default_input_image_detail() -> String {
+    "auto".to_string()
+}
+
+fn serialize_output_text_logprobs<S>(
+    logprobs: &Option<Vec<LogProb>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match logprobs {
+        Some(logprobs) => logprobs.serialize(serializer),
+        None => Vec::<LogProb>::new().serialize(serializer),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -563,7 +601,7 @@ pub enum ItemContentPart {
     OutputText {
         text: String,
         annotations: Vec<Annotation>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(serialize_with = "serialize_output_text_logprobs")]
         logprobs: Option<Vec<LogProb>>,
     },
     Text {
@@ -580,6 +618,7 @@ pub enum ItemContentPart {
     },
     InputImage {
         image_url: Option<String>,
+        #[serde(default = "default_input_image_detail")]
         detail: String,
     },
     InputFile {
@@ -4100,6 +4139,12 @@ fn collect_completed_output_items(state: &StreamTransformer) -> Vec<ItemField> {
         .collect()
 }
 
+fn clear_current_message_item(state: &mut StreamTransformer) {
+    state.session.responses.current_item_id = None;
+    state.session.responses.current_item_role = None;
+    state.session.responses.output_text.clear();
+}
+
 fn complete_current_message_item(state: &mut StreamTransformer) -> Option<(u32, ItemField)> {
     let output_index = state.session.responses.current_output_index;
     let item_id = state.session.responses.current_item_id.clone()?;
@@ -4115,7 +4160,62 @@ fn complete_current_message_item(state: &mut StreamTransformer) -> Option<(u32, 
         .responses
         .completed_output
         .insert(output_index, item.clone());
+    clear_current_message_item(state);
     Some((output_index, item))
+}
+
+fn next_responses_sequence_number(state: &mut StreamTransformer) -> u64 {
+    let sequence_number = state.session.responses.next_sequence_number;
+    state.session.responses.next_sequence_number = state
+        .session
+        .responses
+        .next_sequence_number
+        .saturating_add(1);
+    sequence_number
+}
+
+fn finalize_public_responses_stream_frame(
+    mut frame: Value,
+    state: &mut StreamTransformer,
+) -> Value {
+    let Some(obj) = frame.as_object_mut() else {
+        return frame;
+    };
+
+    let Some(event_type) = obj
+        .get("type")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+    else {
+        return frame;
+    };
+
+    obj.insert(
+        "sequence_number".to_string(),
+        json!(next_responses_sequence_number(state)),
+    );
+
+    if event_type == "response.output_text.delta" && !obj.contains_key("logprobs") {
+        obj.insert("logprobs".to_string(), json!([]));
+    }
+
+    frame
+}
+
+fn default_text_output_part(text: impl Into<String>) -> Value {
+    json!({
+        "type": "output_text",
+        "text": text.into(),
+        "annotations": [],
+        "logprobs": []
+    })
+}
+
+fn default_reasoning_summary_part(text: impl Into<String>) -> Value {
+    json!({
+        "type": "summary_text",
+        "text": text.into()
+    })
 }
 
 fn resolve_responses_stream_item_identity(
@@ -4354,6 +4454,13 @@ fn encode_formal_responses_stream_event(
                 state.session.stream_model = Some(model);
             }
 
+            if state.session.responses.current_item_id.is_some()
+                && state.session.responses.current_item_role.as_ref() == Some(&role)
+                && !state.session.responses.completion_pending
+            {
+                return frames;
+            }
+
             if !state.session.responses.created_sent {
                 state.session.responses.created_sent = true;
                 frames.push(json!({
@@ -4428,7 +4535,7 @@ fn encode_formal_responses_stream_event(
             item_index,
             item_id,
             part_index,
-            ..
+            part,
         } => {
             let output_index = item_index.unwrap_or(state.session.responses.current_output_index);
             let item_id = item_id
@@ -4442,10 +4549,15 @@ fn encode_formal_responses_stream_event(
                 })
                 .or_else(|| state.session.responses.current_item_id.clone());
             if let Some(item_id) = item_id {
+                let part = part
+                    .and_then(|part| serde_json::to_value(part).ok())
+                    .unwrap_or_else(|| default_text_output_part(""));
                 frames.push(json!({
                     "type": "response.content_part.added",
                     "item_id": item_id,
-                    "content_index": part_index
+                    "output_index": output_index,
+                    "content_index": part_index,
+                    "part": part
                 }));
             }
         }
@@ -4469,7 +4581,9 @@ fn encode_formal_responses_stream_event(
                 frames.push(json!({
                     "type": "response.content_part.done",
                     "item_id": item_id,
-                    "content_index": part_index
+                    "output_index": output_index,
+                    "content_index": part_index,
+                    "part": default_text_output_part(state.session.responses.output_text.clone())
                 }));
             }
         }
@@ -4633,7 +4747,9 @@ fn encode_formal_responses_stream_event(
                 frames.push(json!({
                     "type": "response.reasoning_summary_part.added",
                     "item_id": item_id,
-                    "summary_index": part_index
+                    "output_index": output_index,
+                    "summary_index": part_index,
+                    "part": default_reasoning_summary_part("")
                 }));
             }
         }
@@ -4666,6 +4782,7 @@ fn encode_formal_responses_stream_event(
             frames.push(json!({
                 "type": "response.reasoning_summary_text.delta",
                 "item_id": response_item_id.unwrap_or_default(),
+                "output_index": output_index,
                 "summary_index": summary_index,
                 "delta": text
             }));
@@ -4685,10 +4802,19 @@ fn encode_formal_responses_stream_event(
                     .cloned()
             });
             if let Some(item_id) = item_id {
+                let summary_text = state
+                    .session
+                    .responses
+                    .reasoning_summaries
+                    .get(&output_index)
+                    .cloned()
+                    .unwrap_or_default();
                 frames.push(json!({
                     "type": "response.reasoning_summary_part.done",
                     "item_id": item_id,
-                    "summary_index": part_index
+                    "output_index": output_index,
+                    "summary_index": part_index,
+                    "part": default_reasoning_summary_part(summary_text)
                 }));
             }
         }
@@ -4705,7 +4831,9 @@ fn encode_formal_responses_stream_event(
                     id: item_id.clone(),
                     content: None,
                     summary: (!summary.is_empty())
-                        .then_some(vec![ItemContentPart::SummaryText { text: summary }])
+                        .then_some(vec![ItemContentPart::SummaryText {
+                            text: summary.clone(),
+                        }])
                         .unwrap_or_default(),
                     encrypted_content: None,
                 });
@@ -4717,7 +4845,9 @@ fn encode_formal_responses_stream_event(
                 frames.push(json!({
                     "type": "response.reasoning_summary_part.done",
                     "item_id": item_id,
-                    "summary_index": 0
+                    "output_index": index,
+                    "summary_index": 0,
+                    "part": default_reasoning_summary_part(summary.clone())
                 }));
                 frames.push(json!({
                     "type": "response.output_item.done",
@@ -4818,6 +4948,7 @@ pub fn transform_unified_stream_events_to_responses_events(
     for event in stream_events {
         state.update_session_from_stream_event(&event);
         for frame in encode_formal_responses_stream_event(event, state) {
+            let frame = finalize_public_responses_stream_frame(frame, state);
             events.push(SseEvent {
                 data: serde_json::to_string(&frame).unwrap_or_default(),
                 ..Default::default()
@@ -5102,6 +5233,40 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_request_from_shorthand_assistant_message_uses_output_text_family() {
+        let payload = json!({
+            "model": "gemini-2.5-flash-lite",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Hello Alice! Nice to meet you. How can I help you today?"
+                }
+            ]
+        });
+
+        let responses_req: ResponsesRequestPayload =
+            serde_json::from_value(payload).expect("valid responses request");
+
+        let Input::Items(items) = responses_req.input else {
+            panic!("expected item-based responses input");
+        };
+
+        assert!(matches!(
+            &items[0],
+            ItemField::Message(Message { role, content, .. })
+                if matches!(role, MessageRole::Assistant)
+                    && matches!(
+                        &content[0],
+                        ItemContentPart::OutputText { text, annotations, logprobs }
+                            if text == "Hello Alice! Nice to meet you. How can I help you today?"
+                                && annotations.is_empty()
+                                && logprobs.is_none()
+                    )
+        ));
+    }
+
+    #[test]
     fn test_unified_response_to_responses_preserves_structured_items() {
         let unified_res = UnifiedResponse {
             id: "resp_1".to_string(),
@@ -5190,6 +5355,10 @@ mod tests {
             ItemField::Message(Message { content, .. })
             if matches!(&content[0], ItemContentPart::OutputText { text, .. } if text == "```python\nprint(1)\n```")
         ));
+
+        let serialized = serde_json::to_value(&responses_res).expect("serialize responses");
+        assert_eq!(serialized["output"][0]["content"][0]["logprobs"], json!([]));
+        assert_eq!(serialized["output"][4]["content"][0]["logprobs"], json!([]));
     }
 
     #[test]
@@ -6053,12 +6222,18 @@ mod tests {
             .collect();
 
         assert_eq!(chunks[0]["type"], json!("response.created"));
+        assert_eq!(chunks[0]["sequence_number"], json!(0));
         assert_eq!(chunks[1]["type"], json!("response.output_item.added"));
+        assert_eq!(chunks[1]["sequence_number"], json!(1));
         assert_eq!(chunks[1]["item"]["role"], json!("assistant"));
         assert_eq!(chunks[2]["type"], json!("response.output_text.delta"));
+        assert_eq!(chunks[2]["sequence_number"], json!(2));
         assert_eq!(chunks[2]["delta"], json!("hello"));
+        assert_eq!(chunks[2]["logprobs"], json!([]));
         assert_eq!(chunks[3]["type"], json!("response.output_item.done"));
+        assert_eq!(chunks[3]["sequence_number"], json!(3));
         assert_eq!(chunks[4]["type"], json!("response.completed"));
+        assert_eq!(chunks[4]["sequence_number"], json!(4));
         assert_eq!(
             chunks[4]["response"]["usage"],
             json!({
@@ -7406,6 +7581,73 @@ mod tests {
                 && frame["call_id"] == json!("call_1")
                 && frame["arguments"] == json!("{\"city\":\"Boston\"}")
         }));
+    }
+
+    #[test]
+    fn test_unified_stream_events_to_responses_ignores_duplicate_message_start_for_active_item() {
+        let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+        let sse = transform_unified_stream_events_to_responses_events(
+            vec![
+                UnifiedStreamEvent::MessageStart {
+                    id: Some("resp_repeat".to_string()),
+                    model: Some("deepseek-ai/DeepSeek-V3.2".to_string()),
+                    role: UnifiedRole::Assistant,
+                },
+                UnifiedStreamEvent::ContentBlockDelta {
+                    index: 0,
+                    item_index: None,
+                    item_id: None,
+                    part_index: Some(0),
+                    text: "1".to_string(),
+                },
+                UnifiedStreamEvent::MessageStart {
+                    id: Some("resp_repeat".to_string()),
+                    model: Some("deepseek-ai/DeepSeek-V3.2".to_string()),
+                    role: UnifiedRole::Assistant,
+                },
+                UnifiedStreamEvent::ContentBlockDelta {
+                    index: 0,
+                    item_index: None,
+                    item_id: None,
+                    part_index: Some(0),
+                    text: "2".to_string(),
+                },
+                UnifiedStreamEvent::MessageDelta {
+                    finish_reason: Some("stop".to_string()),
+                },
+                UnifiedStreamEvent::Usage {
+                    usage: UnifiedUsage {
+                        input_tokens: 12,
+                        output_tokens: 2,
+                        total_tokens: 14,
+                        ..Default::default()
+                    },
+                },
+            ],
+            &mut state,
+        )
+        .unwrap();
+
+        let frames: Vec<Value> = sse
+            .iter()
+            .map(|event| serde_json::from_str(&event.data).unwrap())
+            .collect();
+
+        let added_frames: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame["type"] == json!("response.output_item.added"))
+            .collect();
+        assert_eq!(added_frames.len(), 1);
+
+        let completed = frames
+            .iter()
+            .find(|frame| frame["type"] == json!("response.completed"))
+            .unwrap();
+        assert_eq!(completed["response"]["output"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"],
+            json!("12")
+        );
     }
 
     #[test]

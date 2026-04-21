@@ -144,8 +144,8 @@ pub fn resolve_effective_request_patches(
 
     let mut effective_rules = Vec::new();
     for rule in &provider_active {
-        if let Some(overriding_model_rule) = model_exact_rules
-            .get(&(placement_rank(rule.placement), rule.target.clone()))
+        if let Some(overriding_model_rule) =
+            model_exact_rules.get(&(placement_rank(rule.placement), rule.target.clone()))
         {
             effective_rules.push(CacheResolvedRequestPatch {
                 placement: overriding_model_rule.placement,

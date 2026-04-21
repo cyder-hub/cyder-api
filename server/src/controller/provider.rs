@@ -28,9 +28,7 @@ use crate::utils::{HttpResult, ID_GENERATOR};
 
 use super::BaseError;
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
-use crate::service::cache::types::{
-    CacheModel, CacheProvider, CacheResolvedRequestPatch,
-};
+use crate::service::cache::types::{CacheModel, CacheProvider, CacheResolvedRequestPatch};
 
 #[derive(Serialize)]
 struct ProviderDetailResponse {
@@ -394,8 +392,9 @@ async fn build_provider_check_request(
         }
     };
 
-    let mut url = Url::parse(&request.url)
-        .map_err(|e| BaseError::ParamInvalid(Some(format!("Failed to parse request URL: {}", e))))?;
+    let mut url = Url::parse(&request.url).map_err(|e| {
+        BaseError::ParamInvalid(Some(format!("Failed to parse request URL: {}", e)))
+    })?;
     apply_request_patches(
         &mut request.body,
         &mut url,
@@ -580,7 +579,8 @@ async fn perform_provider_check(
     api_key: &str,
     model_name: &str,
 ) -> Result<(), BaseError> {
-    let request_patches = resolve_provider_check_request_patches(app_state, provider, model).await?;
+    let request_patches =
+        resolve_provider_check_request_patches(app_state, provider, model).await?;
     let check_request = build_provider_check_request(
         client,
         provider,
@@ -645,9 +645,9 @@ async fn check_provider(
             if model.provider_id != id {
                 return Err(BaseError::ParamInvalid(Some(format!(
                     "Model {} does not belong to provider {}",
-                        model_id, id
-                    ))));
-                }
+                    model_id, id
+                ))));
+            }
             let resolved_name = model
                 .real_model_name
                 .clone()

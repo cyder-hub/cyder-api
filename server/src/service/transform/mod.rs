@@ -688,6 +688,7 @@ pub struct GeminiSessionState {
 pub struct ResponsesSessionState {
     pub created_sent: bool,
     pub completion_pending: bool,
+    pub next_sequence_number: u64,
     pub next_output_index: u32,
     pub current_output_index: u32,
     pub current_item_id: Option<String>,
@@ -3150,6 +3151,146 @@ mod tests {
     }
 
     #[test]
+    fn test_transform_request_data_responses_to_openai_accepts_typed_string_messages() {
+        let responses_request = json!({
+            "model": "deepseek-v3.2",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "system",
+                    "content": "You are a pirate. Always respond in pirate speak."
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Say hello."
+                }
+            ],
+            "stream": false
+        });
+
+        let transformed = transform_request_data(
+            responses_request,
+            LlmApiType::Responses,
+            LlmApiType::Openai,
+            false,
+        );
+
+        assert!(transformed.get("input").is_none());
+        assert_eq!(transformed["messages"][0]["role"], json!("system"));
+        assert_eq!(
+            transformed["messages"][0]["content"],
+            json!("You are a pirate. Always respond in pirate speak.")
+        );
+        assert_eq!(transformed["messages"][1]["role"], json!("user"));
+        assert_eq!(transformed["messages"][1]["content"], json!("Say hello."));
+        assert_eq!(transformed["stream"], json!(false));
+    }
+
+    #[test]
+    fn test_transform_request_data_responses_to_openai_accepts_shorthand_assistant_history() {
+        let responses_request = json!({
+            "model": "gemini-2.5-flash-lite",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "My name is Alice."
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Hello Alice! Nice to meet you. How can I help you today?"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "What is my name?"
+                }
+            ],
+            "stream": false
+        });
+
+        let transformed = transform_request_data(
+            responses_request,
+            LlmApiType::Responses,
+            LlmApiType::Openai,
+            false,
+        );
+
+        assert!(transformed.get("input").is_none());
+        assert_eq!(transformed["messages"][0]["role"], json!("user"));
+        assert_eq!(
+            transformed["messages"][0]["content"],
+            json!("My name is Alice.")
+        );
+        assert_eq!(transformed["messages"][1]["role"], json!("assistant"));
+        assert_eq!(
+            transformed["messages"][1]["content"],
+            json!("Hello Alice! Nice to meet you. How can I help you today?")
+        );
+        assert_eq!(transformed["messages"][2]["role"], json!("user"));
+        assert_eq!(
+            transformed["messages"][2]["content"],
+            json!("What is my name?")
+        );
+        assert_eq!(transformed["stream"], json!(false));
+    }
+
+    #[test]
+    fn test_transform_request_data_responses_to_openai_accepts_typed_multimodal_messages_without_detail()
+     {
+        let responses_request = json!({
+            "model": "deepseek-v3.2",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "What do you see in this image? Answer in one sentence."
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAABmklEQVR42tyWAaTyUBzFew/eG4AHz+MBSAHKBiJRGFKwIgQQJKLUIioBIhCAiCAAEizAQIAECaASqFFJq84nudjnaqvuPnxzgP9xfrq5938csPn7PwHTKSoViCIEAYEAMhmoKsU2mUCWEQqB5xEMIp/HaGQG2G6RSuH9HQ7H34rFrtPbdz4jl6PbwmEsl3QA1mt4vcRKk8dz9eg6IpF7tt9fzGY0gCgafFRFo5Blc5vLhf3eCOj1yNhM5GRMVK0aATxPZoz09YXjkQDmczJgquGQAPp9WwCNBgG027YACgUC6HRsAZRKBDAY2AJoNv/ZnwzA6WScznG3p4UAymXGAEkyXrTFAh8fLAGqagQAyGaZpYsi7bHTNPz8MEj//LxuFPo+UBS8vb0KaLXubrRa7aX0RMLCykwmn0z3+XA4WACcTpCkh9MFAZpmuVXo+mO/w+/HZvNgbblcUCxaSo/Hyck80Yu6XXDcvfVZr79cvMZjuN2U9O9vKAqjZrfbIZ0mV4TUi9Xqz6jddNy//7+e3n8Fhf/Llo2kxi8AQyGRoDkmAhAAAAAASUVORK5CYII="
+                        }
+                    ]
+                }
+            ],
+            "stream": false
+        });
+
+        let transformed = transform_request_data(
+            responses_request,
+            LlmApiType::Responses,
+            LlmApiType::Openai,
+            false,
+        );
+
+        assert!(transformed.get("input").is_none());
+        assert_eq!(transformed["messages"][0]["role"], json!("user"));
+        assert_eq!(
+            transformed["messages"][0]["content"][0],
+            json!({
+                "type": "text",
+                "text": "What do you see in this image? Answer in one sentence."
+            })
+        );
+        assert_eq!(
+            transformed["messages"][0]["content"][1],
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAABmklEQVR42tyWAaTyUBzFew/eG4AHz+MBSAHKBiJRGFKwIgQQJKLUIioBIhCAiCAAEizAQIAECaASqFFJq84nudjnaqvuPnxzgP9xfrq5938csPn7PwHTKSoViCIEAYEAMhmoKsU2mUCWEQqB5xEMIp/HaGQG2G6RSuH9HQ7H34rFrtPbdz4jl6PbwmEsl3QA1mt4vcRKk8dz9eg6IpF7tt9fzGY0gCgafFRFo5Blc5vLhf3eCOj1yNhM5GRMVK0aATxPZoz09YXjkQDmczJgquGQAPp9WwCNBgG027YACgUC6HRsAZRKBDAY2AJoNv/ZnwzA6WScznG3p4UAymXGAEkyXrTFAh8fLAGqagQAyGaZpYsi7bHTNPz8MEj//LxuFPo+UBS8vb0KaLXubrRa7aX0RMLCykwmn0z3+XA4WACcTpCkh9MFAZpmuVXo+mO/w+/HZvNgbblcUCxaSo/Hyck80Yu6XXDcvfVZr79cvMZjuN2U9O9vKAqjZrfbIZ0mV4TUi9Xqz6jddNy//7+e3n8Fhf/Llo2kxi8AQyGRoDkmAhAAAAAASUVORK5CYII=",
+                    "detail": "auto"
+                }
+            })
+        );
+        assert_eq!(transformed["stream"], json!(false));
+    }
+
+    #[test]
     fn test_transform_request_data_responses_to_openai_with_function_call_output() {
         let responses_request = json!({
             "model": "deepseek-ai/DeepSeek-V3.2",
@@ -4460,8 +4601,6 @@ impl StreamTransformer {
             }
             UnifiedStreamEvent::MessageStop
             | UnifiedStreamEvent::ContentBlockDelta { .. }
-            | UnifiedStreamEvent::ToolCallArgumentsDelta { .. }
-            | UnifiedStreamEvent::ToolCallStop { .. }
             | UnifiedStreamEvent::BlobDelta { .. } => {}
         }
     }

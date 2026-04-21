@@ -230,7 +230,8 @@ pub(super) async fn execute_generation_proxy(
     initial_log_context.request_patch_summary_json =
         request_patch_trace.request_patch_summary_json.clone();
 
-    if let Some(conflict_error) = request_patch_trace.conflict_error(&resolved_target.model.model_name)
+    if let Some(conflict_error) =
+        request_patch_trace.conflict_error(&resolved_target.model.model_name)
     {
         record_early_generation_failure(&app_state, initial_log_context.clone(), &conflict_error)
             .await;

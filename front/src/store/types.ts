@@ -30,8 +30,8 @@ export interface DashboardOverviewStats {
   enabled_model_count: number;
   provider_key_count: number;
   enabled_provider_key_count: number;
-  system_api_key_count: number;
-  enabled_system_api_key_count: number;
+  api_key_count: number;
+  enabled_api_key_count: number;
 }
 
 export interface DashboardTodayStats {
@@ -48,7 +48,7 @@ export interface DashboardTodayStats {
   avg_total_latency_ms: number | null;
   active_provider_count: number;
   active_model_count: number;
-  active_system_api_key_count: number;
+  active_api_key_count: number;
 }
 
 export interface DashboardRuntimeSummary {
@@ -155,11 +155,11 @@ export interface DashboardAlertsSection {
 export interface UsageStatItem {
   provider_id: number | null;
   model_id: number | null;
-  system_api_key_id: number | null;
+  api_key_id: number | null;
   provider_key: string | null;
   model_name: string | null;
   real_model_name: string | null;
-  system_api_key_name: string | null;
+  api_key_name: string | null;
   group_key: string;
   group_label: string;
   group_detail: string | null;
@@ -885,7 +885,7 @@ export interface CostSnapshot {
 export interface RecordListItem {
   id: number;
   provider_id: number;
-  system_api_key_id: number;
+  api_key_id: number;
   requested_model_name?: string | null;
   resolved_name_scope?: string | null;
   resolved_route_name?: string | null;
@@ -934,7 +934,7 @@ export interface RecordDetail extends RecordListItem {
 export interface RecordListParams {
   page?: number;
   page_size?: number;
-  system_api_key_id?: number;
+  api_key_id?: number;
   provider_id?: number;
   status?: string;
   search?: string;

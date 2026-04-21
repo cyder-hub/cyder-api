@@ -55,7 +55,7 @@ type UsageMetric =
   | "avg_latency"
   | "error_count";
 
-type UsageGroupBy = "provider" | "model" | "system_api_key";
+type UsageGroupBy = "provider" | "model" | "api_key";
 
 interface UsageStatsResponse {
   stats: UsageStatsPeriod[];
@@ -270,8 +270,8 @@ const groupByOptions = computed(() => [
   { value: "model", label: t("dashboard.usageStats.groupBy.model") },
   { value: "provider", label: t("dashboard.usageStats.groupBy.provider") },
   {
-    value: "system_api_key",
-    label: t("dashboard.usageStats.groupBy.system_api_key"),
+    value: "api_key",
+    label: t("dashboard.usageStats.groupBy.api_key"),
   },
 ]);
 

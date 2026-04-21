@@ -9,7 +9,7 @@ use crate::{
     service::app_state::{
         ApiKeyConcurrencyGuard, ApiKeyGovernanceAdmissionError, AppState, AppStoreError,
     },
-    service::cache::types::{CacheModel, CacheProvider, CacheSystemApiKey},
+    service::cache::types::{CacheApiKey, CacheModel, CacheProvider},
     utils::acl::ACL_EVALUATOR,
 };
 use cyder_tools::log::{debug, error, info, warn};
@@ -23,7 +23,7 @@ pub enum ApiKeyPosition {
 }
 
 pub struct ApiKeyCheckResult {
-    pub api_key: Arc<CacheSystemApiKey>,
+    pub api_key: Arc<CacheApiKey>,
     pub position: ApiKeyPosition,
 }
 
@@ -107,7 +107,7 @@ pub async fn authenticate_ollama_request(
 
 // Checks if the request is allowed by the API key's embedded ACL snapshot.
 pub async fn check_access_control(
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
     provider: &CacheProvider,
     model: &CacheModel,
     _app_state: &Arc<AppState>,
@@ -134,7 +134,7 @@ pub async fn check_access_control(
 
 pub async fn admit_api_key_request(
     app_state: &Arc<AppState>,
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
 ) -> Result<Option<ApiKeyConcurrencyGuard>, ProxyError> {
     match app_state.try_begin_api_key_request(system_api_key).await {
         Ok(guard) => Ok(guard),
@@ -259,7 +259,7 @@ pub async fn check_system_api_key(
     position: ApiKeyPosition,
 ) -> Result<ApiKeyCheckResult, ProxyError> {
     if key_str.starts_with("cyder-") {
-        match app_state.get_system_api_key(key_str).await {
+        match app_state.get_api_key(key_str).await {
             Ok(Some(api_key)) => Ok(ApiKeyCheckResult { api_key, position }),
             Ok(None) => classify_missing_active_api_key(key_str),
             Err(AppStoreError::LockError(e)) => {

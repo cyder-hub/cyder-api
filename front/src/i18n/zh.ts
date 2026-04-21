@@ -79,7 +79,7 @@ export const zhDict = {
       providers: "渠道",
       models: "模型",
       providerKeys: "渠道 Key",
-      systemApiKeys: "系统 API Key",
+      apiKeys: "API Key",
       enabledTotal: "启用数 / 总数",
       activeToday: "今日活跃",
     },
@@ -150,7 +150,7 @@ export const zhDict = {
       groupBy: {
         provider: "按渠道",
         model: "按模型",
-        system_api_key: "按系统 API Key",
+        api_key: "按 API Key",
       },
       intervals: {
         hour: "每小时",

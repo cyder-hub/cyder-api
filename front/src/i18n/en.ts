@@ -80,7 +80,7 @@ export const enDict = {
       providers: "Providers",
       models: "Models",
       providerKeys: "Provider Keys",
-      systemApiKeys: "System API Keys",
+      apiKeys: "API Keys",
       enabledTotal: "Enabled / Total",
       activeToday: "Active today",
     },
@@ -153,7 +153,7 @@ export const enDict = {
       groupBy: {
         provider: "By Provider",
         model: "By Model",
-        system_api_key: "By System API Key",
+        api_key: "By API Key",
       },
       intervals: {
         hour: "Hourly",

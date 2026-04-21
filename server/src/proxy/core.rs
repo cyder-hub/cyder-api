@@ -1092,7 +1092,7 @@ mod tests {
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus},
         service::app_state::AppState,
         service::cache::types::{
-            CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
+            CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider,
         },
         service::transform::StreamTransformer,
         utils::sse::SseParser,
@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     fn make_log_context() -> RequestLogContext {
-        let system_api_key = CacheSystemApiKey {
+        let system_api_key = CacheApiKey {
             id: 1,
             api_key_hash: "hash".to_string(),
             key_prefix: "cyder-prefix".to_string(),

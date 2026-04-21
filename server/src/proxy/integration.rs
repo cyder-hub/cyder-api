@@ -5,7 +5,7 @@ use crate::{
         model::Model,
         model_route::{CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput},
         provider::{NewProvider, NewProviderApiKey, Provider, ProviderApiKey},
-        request_log::{RequestLog, RequestLogQueryPayload},
+        request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
         system_api_key::SystemApiKey,
     },
     schema::enum_def::{Action, ProviderApiKeyMode, ProviderType, RequestStatus},
@@ -318,7 +318,7 @@ impl TestFixture {
             .expect("proxy router should respond")
     }
 
-    async fn list_logs(&self) -> Vec<RequestLog> {
+    async fn list_logs(&self) -> Vec<RequestLogRecord> {
         flush_proxy_logs().await;
         RequestLog::list_full(RequestLogQueryPayload {
             provider_id: Some(self.provider.id),
@@ -331,7 +331,7 @@ impl TestFixture {
         .list
     }
 
-    async fn latest_log(&self) -> RequestLog {
+    async fn latest_log(&self) -> RequestLogRecord {
         const MAX_ATTEMPTS: usize = 20;
         const RETRY_DELAY_MS: u64 = 100;
 

@@ -7,8 +7,8 @@ export function buildEmptyDashboard() {
       enabled_model_count: 0,
       provider_key_count: 0,
       enabled_provider_key_count: 0,
-      system_api_key_count: 0,
-      enabled_system_api_key_count: 0,
+      api_key_count: 0,
+      enabled_api_key_count: 0,
     },
     today: {
       request_count: 0,
@@ -24,7 +24,7 @@ export function buildEmptyDashboard() {
       avg_total_latency_ms: null,
       active_provider_count: 0,
       active_model_count: 0,
-      active_system_api_key_count: 0,
+      active_api_key_count: 0,
     },
     runtime: {
       window: "1h",

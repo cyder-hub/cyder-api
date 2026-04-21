@@ -184,7 +184,7 @@ Based on the current codebase, the most valuable next steps are:
 3. add replay/debug tooling for request logs
 4. productize transform diagnostics for operations/debugging
 5. add proactive alert channels
-6. tighten manager auth and clean up legacy `system_api_key` naming
+6. tighten manager auth and finish the remaining `api_key` convergence/docs/test cleanup
 
 ## Docker
 

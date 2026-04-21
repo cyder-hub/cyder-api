@@ -46,8 +46,6 @@ pub struct CacheApiKey {
     pub acl_rules: Vec<CacheApiKeyAclRule>,
 }
 
-pub type CacheSystemApiKey = CacheApiKey;
-
 /// Cached model with only essential fields
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheModel {

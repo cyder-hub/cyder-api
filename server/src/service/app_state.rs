@@ -25,7 +25,7 @@ use super::cache::repository::{CacheRepository, DynCacheRepo};
 use super::cache::types::{
     CacheApiKey, CacheApiKeyModelOverride, CacheCostCatalogVersion, CacheEntry, CacheModel,
     CacheModelRoute, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheRequestPatchRule,
-    CacheResolvedModelRequestPatches, CacheSystemApiKey,
+    CacheResolvedModelRequestPatches,
 };
 use super::cache::{CacheError, memory::MemoryCacheBackend};
 use super::request_patch::resolve_effective_request_patches;
@@ -1266,12 +1266,9 @@ impl AppState {
     }
 
     // ============================================================================================
-    // 1. api_key(hash) -> CacheApiKey
+    // 1. api_key(value) -> CacheApiKey
     // ============================================================================================
-    pub async fn get_system_api_key(
-        &self,
-        key: &str,
-    ) -> Result<Option<Arc<CacheSystemApiKey>>, AppStoreError> {
+    pub async fn get_api_key(&self, key: &str) -> Result<Option<Arc<CacheApiKey>>, AppStoreError> {
         let hashed_key = Self::hash_api_key(key);
         let cache_key = CacheKey::ApiKeyHash(&hashed_key).to_compact_string();
         let now = chrono::Utc::now().timestamp_millis();
@@ -1353,7 +1350,7 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn invalidate_system_api_key(&self, key: &str) -> Result<(), AppStoreError> {
+    pub async fn invalidate_api_key(&self, key: &str) -> Result<(), AppStoreError> {
         self.invalidate_api_key_hash(&Self::hash_api_key(key)).await
     }
 

@@ -5,8 +5,9 @@ use crate::service::app_state::{AppState, StateRouter, create_state_router};
 use crate::{
     controller::error::BaseError,
     database::stat::{
-        DashboardOverviewStats, DashboardTodayStats, DashboardTopModelItem, SystemOverviewStats,
-        TodayRequestLogStats, UsageStatsGroupBy, UsageStatsQueryItem,
+        DashboardOverviewStats as DbDashboardOverviewStats,
+        DashboardTodayStats as DbDashboardTodayStats, DashboardTopModelItem, SystemOverviewStats,
+        TodayRequestLogStats, UsageStatsGroupBy as DbUsageStatsGroupBy, UsageStatsQueryItem,
         get_dashboard_cost_alert_models, get_dashboard_overview_stats, get_dashboard_today_stats,
         get_dashboard_top_models, get_system_overview_stats, get_today_request_log_stats,
         get_usage_stats_aggregates,
@@ -32,7 +33,7 @@ pub struct UsageStatsParams {
     interval: Interval, // "month", "day", "hour"
     provider_id: Option<i64>,
     model_id: Option<i64>,
-    system_api_key_id: Option<i64>,
+    api_key_id: Option<i64>,
     provider_api_key_id: Option<i64>,
     #[serde(default = "default_group_by")]
     group_by: UsageGroupBy,
@@ -113,15 +114,15 @@ impl Interval {
 enum UsageGroupBy {
     Provider,
     Model,
-    SystemApiKey,
+    ApiKey,
 }
 
 impl UsageGroupBy {
-    fn to_database_group_by(self) -> UsageStatsGroupBy {
+    fn to_database_group_by(self) -> DbUsageStatsGroupBy {
         match self {
-            UsageGroupBy::Provider => UsageStatsGroupBy::Provider,
-            UsageGroupBy::Model => UsageStatsGroupBy::Model,
-            UsageGroupBy::SystemApiKey => UsageStatsGroupBy::SystemApiKey,
+            UsageGroupBy::Provider => DbUsageStatsGroupBy::Provider,
+            UsageGroupBy::Model => DbUsageStatsGroupBy::Model,
+            UsageGroupBy::ApiKey => DbUsageStatsGroupBy::ApiKey,
         }
     }
 }
@@ -144,11 +145,11 @@ enum UsageMetric {
 pub struct UsageStatItem {
     provider_id: Option<i64>,
     model_id: Option<i64>,
-    system_api_key_id: Option<i64>,
+    api_key_id: Option<i64>,
     provider_key: Option<String>,
     model_name: Option<String>,
     real_model_name: Option<String>,
-    system_api_key_name: Option<String>,
+    api_key_name: Option<String>,
     group_key: String,
     group_label: String,
     group_detail: Option<String>,
@@ -164,6 +165,72 @@ pub struct UsageStatItem {
     latency_sample_count: i64,
     total_cost: HashMap<String, i64>,
     is_other: bool,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct DashboardOverviewStats {
+    provider_count: i64,
+    enabled_provider_count: i64,
+    model_count: i64,
+    enabled_model_count: i64,
+    provider_key_count: i64,
+    enabled_provider_key_count: i64,
+    api_key_count: i64,
+    enabled_api_key_count: i64,
+}
+
+impl From<DbDashboardOverviewStats> for DashboardOverviewStats {
+    fn from(value: DbDashboardOverviewStats) -> Self {
+        Self {
+            provider_count: value.provider_count,
+            enabled_provider_count: value.enabled_provider_count,
+            model_count: value.model_count,
+            enabled_model_count: value.enabled_model_count,
+            provider_key_count: value.provider_key_count,
+            enabled_provider_key_count: value.enabled_provider_key_count,
+            api_key_count: value.api_key_count,
+            enabled_api_key_count: value.enabled_api_key_count,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct DashboardTodayStats {
+    request_count: i64,
+    success_count: i64,
+    error_count: i64,
+    success_rate: Option<f64>,
+    total_input_tokens: i64,
+    total_output_tokens: i64,
+    total_reasoning_tokens: i64,
+    total_tokens: i64,
+    total_cost: HashMap<String, i64>,
+    avg_first_byte_ms: Option<f64>,
+    avg_total_latency_ms: Option<f64>,
+    active_provider_count: i64,
+    active_model_count: i64,
+    active_api_key_count: i64,
+}
+
+impl From<DbDashboardTodayStats> for DashboardTodayStats {
+    fn from(value: DbDashboardTodayStats) -> Self {
+        Self {
+            request_count: value.request_count,
+            success_count: value.success_count,
+            error_count: value.error_count,
+            success_rate: value.success_rate,
+            total_input_tokens: value.total_input_tokens,
+            total_output_tokens: value.total_output_tokens,
+            total_reasoning_tokens: value.total_reasoning_tokens,
+            total_tokens: value.total_tokens,
+            total_cost: value.total_cost,
+            avg_first_byte_ms: value.avg_first_byte_ms,
+            avg_total_latency_ms: value.avg_total_latency_ms,
+            active_provider_count: value.active_provider_count,
+            active_model_count: value.active_model_count,
+            active_api_key_count: value.active_api_key_count,
+        }
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -276,11 +343,11 @@ fn usage_stat_item_from_query_item(item: UsageStatsQueryItem) -> UsageStatItem {
     UsageStatItem {
         provider_id: item.provider_id,
         model_id: item.model_id,
-        system_api_key_id: item.system_api_key_id,
+        api_key_id: item.api_key_id,
         provider_key: item.provider_key,
         model_name: item.model_name,
         real_model_name: item.real_model_name,
-        system_api_key_name: item.system_api_key_name,
+        api_key_name: item.api_key_name,
         group_key: item.group_id.to_string(),
         group_label: item.group_label,
         group_detail: item.group_detail,
@@ -630,8 +697,8 @@ fn build_dashboard_alerts_section(
 async fn system_dashboard(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardResponse>, BaseError> {
-    let overview = get_dashboard_overview_stats()?;
-    let today = get_dashboard_today_stats()?;
+    let overview = DashboardOverviewStats::from(get_dashboard_overview_stats()?);
+    let today = DashboardTodayStats::from(get_dashboard_today_stats()?);
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     let runtime = runtime_summary_from_items(&runtime_items);
     let alerts_section = build_dashboard_alerts_section(&runtime_items)?;
@@ -649,7 +716,7 @@ async fn system_dashboard(
 async fn system_dashboard_kpi(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardKpiSection>, BaseError> {
-    let today = get_dashboard_today_stats()?;
+    let today = DashboardTodayStats::from(get_dashboard_today_stats()?);
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     let runtime = runtime_summary_from_items(&runtime_items);
 
@@ -659,8 +726,8 @@ async fn system_dashboard_kpi(
 async fn system_dashboard_resources(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardResourcesSection>, BaseError> {
-    let overview = get_dashboard_overview_stats()?;
-    let today = get_dashboard_today_stats()?;
+    let overview = DashboardOverviewStats::from(get_dashboard_overview_stats()?);
+    let today = DashboardTodayStats::from(get_dashboard_today_stats()?);
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     let runtime = runtime_summary_from_items(&runtime_items);
 
@@ -731,7 +798,7 @@ async fn system_usage_stats(
         params.group_by.to_database_group_by(),
         params.provider_id,
         params.model_id,
-        params.system_api_key_id,
+        params.api_key_id,
         params.provider_api_key_id,
     )?;
 
@@ -743,11 +810,11 @@ async fn system_usage_stats(
                 group_id: item.group_id,
                 provider_id: item.provider_id,
                 model_id: item.model_id,
-                system_api_key_id: item.system_api_key_id,
+                api_key_id: item.api_key_id,
                 provider_key: item.provider_key.clone(),
                 model_name: item.model_name.clone(),
                 real_model_name: item.real_model_name.clone(),
-                system_api_key_name: item.system_api_key_name.clone(),
+                api_key_name: item.api_key_name.clone(),
                 group_label: item.group_label.clone(),
                 group_detail: item.group_detail.clone(),
                 total_input_tokens: item.total_input_tokens,
@@ -830,13 +897,15 @@ pub fn routes() -> StateRouter {
 #[cfg(test)]
 mod tests {
     use super::{
-        DashboardRuntimeSummary, UsageMetric, UsageStatItem, dashboard_alerts_from_runtime_items,
+        DashboardOverviewStats, DashboardRuntimeSummary, DbDashboardOverviewStats, UsageGroupBy,
+        UsageMetric, UsageStatItem, dashboard_alerts_from_runtime_items,
         runtime_summary_from_items, top_group_keys, top_providers_from_runtime_items,
     };
     use crate::controller::provider_runtime::{
         ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeItem,
         ProviderRuntimeLevel, ProviderRuntimeStatusCodeStat, ProviderRuntimeWindow,
     };
+    use serde_json::to_value;
     use std::collections::HashMap;
 
     fn sample_runtime_item(
@@ -1007,5 +1076,52 @@ mod tests {
         );
 
         assert_eq!(keys, vec!["slow".to_string()]);
+    }
+
+    #[test]
+    fn usage_group_by_serializes_api_key() {
+        let value = to_value(UsageGroupBy::ApiKey).expect("enum should serialize");
+        assert_eq!(value.as_str(), Some("api_key"));
+    }
+
+    #[test]
+    fn usage_stat_item_serializes_api_key_fields() {
+        let value = to_value(UsageStatItem {
+            api_key_id: Some(7),
+            api_key_name: Some("gateway-key".to_string()),
+            ..Default::default()
+        })
+        .expect("usage stat item should serialize");
+
+        assert_eq!(value.get("api_key_id").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(
+            value.get("api_key_name").and_then(|v| v.as_str()),
+            Some("gateway-key")
+        );
+        assert!(value.get("system_api_key_id").is_none());
+        assert!(value.get("system_api_key_name").is_none());
+    }
+
+    #[test]
+    fn dashboard_overview_stats_serializes_api_key_counts() {
+        let value = to_value(DashboardOverviewStats::from(DbDashboardOverviewStats {
+            provider_count: 1,
+            enabled_provider_count: 1,
+            model_count: 2,
+            enabled_model_count: 2,
+            provider_key_count: 3,
+            enabled_provider_key_count: 2,
+            api_key_count: 4,
+            enabled_api_key_count: 3,
+        }))
+        .expect("dashboard overview stats should serialize");
+
+        assert_eq!(value.get("api_key_count").and_then(|v| v.as_i64()), Some(4));
+        assert_eq!(
+            value.get("enabled_api_key_count").and_then(|v| v.as_i64()),
+            Some(3)
+        );
+        assert!(value.get("system_api_key_count").is_none());
+        assert!(value.get("enabled_system_api_key_count").is_none());
     }
 }

@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     schema::enum_def::LlmApiType,
-    service::{app_state::AppState, cache::types::CacheSystemApiKey},
+    service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub(super) enum ProxyOperation {
 
 pub(super) struct ProxyPipelineContext {
     pub app_state: Arc<AppState>,
-    pub system_api_key: Arc<CacheSystemApiKey>,
+    pub system_api_key: Arc<CacheApiKey>,
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
@@ -191,7 +191,7 @@ impl OperationAdapter {
         app_state: &Arc<AppState>,
         headers: &HeaderMap,
         query_params: &HashMap<String, String>,
-    ) -> Result<Arc<CacheSystemApiKey>, ProxyError> {
+    ) -> Result<Arc<CacheApiKey>, ProxyError> {
         let result = match self.auth {
             AuthenticationStrategy::OpenaiCompatible => {
                 authenticate_openai_request(headers, query_params, app_state).await

@@ -8,9 +8,7 @@ use crate::{
     },
     schema::enum_def::{LlmApiType, RequestStatus, StorageType},
     service::app_state::{ApiKeyCompletionDelta, AppState},
-    service::cache::types::{
-        CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
-    },
+    service::cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider},
     service::storage::{Storage, get_storage, types::PutObjectOptions},
     utils::{
         ID_GENERATOR,
@@ -217,7 +215,7 @@ pub struct RequestLogContext {
 
 impl RequestLogContext {
     pub fn new(
-        system_api_key: &CacheSystemApiKey,
+        system_api_key: &CacheApiKey,
         provider: &CacheProvider,
         model: &CacheModel,
         provider_api_key_id: i64,
@@ -274,7 +272,7 @@ impl RequestLogContext {
 }
 
 pub(super) fn build_initial_request_log_context(
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
     provider: &CacheProvider,
     model: &CacheModel,
     provider_api_key_id: i64,
@@ -1217,14 +1215,14 @@ mod tests {
         LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus, StorageType,
     };
     use crate::service::cache::types::{
-        CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
+        CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider,
     };
     use crate::utils::storage::{LogBodyCaptureState, LogBundle};
     use crate::utils::usage::UsageInfo;
     use bytes::Bytes;
 
     fn make_log_context() -> RequestLogContext {
-        let system_api_key = CacheSystemApiKey {
+        let system_api_key = CacheApiKey {
             id: 1,
             api_key_hash: "hash".to_string(),
             key_prefix: "cyder-prefix".to_string(),

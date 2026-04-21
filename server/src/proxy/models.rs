@@ -12,8 +12,8 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::{
-            CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelsCatalog,
-            CacheProvider, CacheSystemApiKey,
+            CacheApiKey, CacheApiKeyModelOverride, CacheModel, CacheModelRoute,
+            CacheModelsCatalog, CacheProvider,
         },
     },
     utils::acl::ACL_EVALUATOR,
@@ -29,7 +29,7 @@ pub(super) struct AccessibleModel {
 
 pub(super) async fn get_accessible_models(
     app_state: &Arc<AppState>,
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
 ) -> Result<Vec<AccessibleModel>, ProxyError> {
     debug!(
         "Fetching accessible models for SystemApiKey ID: {}",
@@ -53,7 +53,7 @@ pub(super) async fn get_accessible_models(
 
 pub(super) async fn execute_models_listing(
     app_state: Arc<AppState>,
-    system_api_key: Arc<CacheSystemApiKey>,
+    system_api_key: Arc<CacheApiKey>,
     api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
     let _api_key_concurrency_guard = admit_api_key_request(&app_state, &system_api_key)
@@ -159,7 +159,7 @@ fn render_models_response(
 
 fn collect_accessible_models(
     catalog: &CacheModelsCatalog,
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
 ) -> Vec<AccessibleModel> {
     let providers_by_id = catalog
         .providers
@@ -289,7 +289,7 @@ fn select_first_accessible_route_candidate<'a>(
     route: &'a CacheModelRoute,
     models_by_id: &'a HashMap<i64, &'a CacheModel>,
     providers_by_id: &'a HashMap<i64, &'a CacheProvider>,
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
 ) -> Option<&'a CacheModel> {
     route
         .candidates
@@ -306,7 +306,7 @@ fn build_route_accessible_model(
     route: &CacheModelRoute,
     providers_by_id: &HashMap<i64, &CacheProvider>,
     models_by_id: &HashMap<i64, &CacheModel>,
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
 ) -> Option<AccessibleModel> {
     let model = select_first_accessible_route_candidate(
         route,
@@ -328,7 +328,7 @@ fn build_override_accessible_model(
     route: &CacheModelRoute,
     providers_by_id: &HashMap<i64, &CacheProvider>,
     models_by_id: &HashMap<i64, &CacheModel>,
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
 ) -> Option<AccessibleModel> {
     let model = select_first_accessible_route_candidate(
         route,
@@ -346,7 +346,7 @@ fn build_override_accessible_model(
 }
 
 fn is_model_allowed(
-    system_api_key: &CacheSystemApiKey,
+    system_api_key: &CacheApiKey,
     provider: &CacheProvider,
     model: &CacheModel,
 ) -> bool {
@@ -373,8 +373,8 @@ mod tests {
     use super::{collect_accessible_models, render_models_response};
     use crate::schema::enum_def::{Action, LlmApiType, ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::{
-        CacheApiKeyAclRule, CacheApiKeyModelOverride, CacheModel, CacheModelRoute,
-        CacheModelRouteCandidate, CacheModelsCatalog, CacheProvider, CacheSystemApiKey,
+        CacheApiKey, CacheApiKeyAclRule, CacheApiKeyModelOverride, CacheModel, CacheModelRoute,
+        CacheModelRouteCandidate, CacheModelsCatalog, CacheProvider,
     };
 
     fn provider(id: i64, provider_key: &str, is_enabled: bool) -> CacheProvider {
@@ -401,8 +401,8 @@ mod tests {
         }
     }
 
-    fn api_key(default_action: Action, acl_rules: Vec<CacheApiKeyAclRule>) -> CacheSystemApiKey {
-        CacheSystemApiKey {
+    fn api_key(default_action: Action, acl_rules: Vec<CacheApiKeyAclRule>) -> CacheApiKey {
+        CacheApiKey {
             id: 1,
             api_key_hash: "hash".to_string(),
             key_prefix: "cyder-prefix".to_string(),

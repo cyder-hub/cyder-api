@@ -640,10 +640,10 @@ const resourceItems = computed(() => [
     description: $t("dashboard.resources.enabledTotal"),
   },
   {
-    key: "system_api_keys",
-    label: $t("dashboard.resources.systemApiKeys"),
-    value: `${formatCount(resourcesSection.value.overview.enabled_system_api_key_count)} / ${formatCount(resourcesSection.value.overview.system_api_key_count)}`,
-    description: `${$t("dashboard.resources.activeToday")} ${formatCount(resourcesSection.value.today.active_system_api_key_count)}`,
+    key: "api_keys",
+    label: $t("dashboard.resources.apiKeys"),
+    value: `${formatCount(resourcesSection.value.overview.enabled_api_key_count)} / ${formatCount(resourcesSection.value.overview.api_key_count)}`,
+    description: `${$t("dashboard.resources.activeToday")} ${formatCount(resourcesSection.value.today.active_api_key_count)}`,
   },
 ]);
 

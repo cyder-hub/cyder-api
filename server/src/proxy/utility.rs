@@ -39,7 +39,7 @@ use super::{
 };
 use crate::{
     schema::enum_def::{LlmApiType, RequestStatus},
-    service::{app_state::AppState, cache::types::CacheSystemApiKey},
+    service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +58,7 @@ pub(super) struct UtilityOperation {
 
 pub(super) struct UtilityExecutionInput {
     pub cancellation: ProxyCancellationContext,
-    pub system_api_key: Arc<CacheSystemApiKey>,
+    pub system_api_key: Arc<CacheApiKey>,
     pub operation: UtilityOperation,
     pub requested_model: String,
     pub query_params: HashMap<String, String>,

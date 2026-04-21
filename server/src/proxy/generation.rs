@@ -27,7 +27,7 @@ use crate::{
     schema::enum_def::LlmApiType,
     service::{
         app_state::AppState,
-        cache::types::{CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey},
+        cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider},
         transform::transform_request_data,
     },
 };
@@ -51,7 +51,7 @@ pub(super) struct PreparedLogSeed {
 
 pub(super) struct GenerationExecutionInput {
     pub cancellation: ProxyCancellationContext,
-    pub system_api_key: Arc<CacheSystemApiKey>,
+    pub system_api_key: Arc<CacheApiKey>,
     pub api_type: LlmApiType,
     pub requested_model: String,
     pub is_stream: bool,
@@ -311,7 +311,7 @@ mod tests {
         proxy::ProxyError,
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType},
         service::cache::types::{
-            CacheCostCatalogVersion, CacheModel, CacheProvider, CacheSystemApiKey,
+            CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider,
         },
     };
     use bytes::Bytes;
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn prepare_generation_log_seed_initializes_log_context() {
-        let system_api_key = CacheSystemApiKey {
+        let system_api_key = CacheApiKey {
             id: 10,
             api_key_hash: "hash".to_string(),
             key_prefix: "cyder-prefix".to_string(),

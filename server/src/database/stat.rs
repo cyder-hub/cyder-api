@@ -1,6 +1,9 @@
 use crate::config::CONFIG;
 use crate::database::model::Model;
 use crate::database::provider::{Provider, ProviderApiKey};
+// Import the legacy physical-table model under an explicit alias so it is clear
+// this dependency exists only because dashboard/stat SQL still reads the old
+// storage shape.
 use crate::database::system_api_key::SystemApiKey as FullSystemApiKey;
 use crate::database::{DbConnection, DbResult, get_connection};
 use crate::{db_execute, db_object};
@@ -14,6 +17,11 @@ use diesel::sql_types::{BigInt, Double, Nullable, Text};
 use serde::Serialize;
 use std::collections::HashMap;
 
+// Legacy database compatibility boundary.
+// This module still joins `system_api_key` and reads `request_log.system_api_key_id`
+// because the physical schema has not been renamed yet. Treat those names as
+// storage details only; controller/service/frontend layers should expose
+// canonical `api_key` semantics instead of propagating the legacy identifiers.
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug)]
     #[diesel(table_name = system_api_key)]
@@ -65,8 +73,8 @@ pub struct DashboardOverviewStats {
     pub enabled_model_count: i64,
     pub provider_key_count: i64,
     pub enabled_provider_key_count: i64,
-    pub system_api_key_count: i64,
-    pub enabled_system_api_key_count: i64,
+    pub api_key_count: i64,
+    pub enabled_api_key_count: i64,
 }
 
 #[derive(Serialize, Debug, Default)]
@@ -84,7 +92,7 @@ pub struct DashboardTodayStats {
     pub avg_total_latency_ms: Option<f64>,
     pub active_provider_count: i64,
     pub active_model_count: i64,
-    pub active_system_api_key_count: i64,
+    pub active_api_key_count: i64,
 }
 
 #[derive(Serialize, Debug, Default, Clone)]
@@ -170,6 +178,8 @@ struct DashboardTodayAggregateRow {
     active_provider_count: i64,
     #[diesel(sql_type = BigInt)]
     active_model_count: i64,
+    // Physical SQL alias kept legacy so raw query columns can bind to Diesel.
+    // Convert it to canonical `active_api_key_count` at the return boundary.
     #[diesel(sql_type = BigInt)]
     active_system_api_key_count: i64,
 }
@@ -178,7 +188,7 @@ struct DashboardTodayAggregateRow {
 pub enum UsageStatsGroupBy {
     Provider,
     Model,
-    SystemApiKey,
+    ApiKey,
 }
 
 #[derive(Debug)]
@@ -187,11 +197,11 @@ pub struct UsageStatsQueryItem {
     pub group_id: i64,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
-    pub system_api_key_id: Option<i64>,
+    pub api_key_id: Option<i64>,
     pub provider_key: Option<String>,
     pub model_name: Option<String>,
     pub real_model_name: Option<String>,
-    pub system_api_key_name: Option<String>,
+    pub api_key_name: Option<String>,
     pub group_label: String,
     pub group_detail: Option<String>,
     pub total_input_tokens: i64,
@@ -217,6 +227,8 @@ struct UsageStatsBaseRow {
     provider_id: Option<i64>,
     #[diesel(sql_type = Nullable<BigInt>)]
     model_id: Option<i64>,
+    // Physical DB/query alias only. Map to canonical `api_key_id` before
+    // returning usage stats to controller/service layers.
     #[diesel(sql_type = Nullable<BigInt>)]
     system_api_key_id: Option<i64>,
     #[diesel(sql_type = Nullable<Text>)]
@@ -225,6 +237,8 @@ struct UsageStatsBaseRow {
     model_name: Option<String>,
     #[diesel(sql_type = Nullable<Text>)]
     real_model_name: Option<String>,
+    // Physical DB/query alias only. Map to canonical `api_key_name` before
+    // returning usage stats to controller/service layers.
     #[diesel(sql_type = Nullable<Text>)]
     system_api_key_name: Option<String>,
     #[diesel(sql_type = Nullable<Text>)]
@@ -296,7 +310,7 @@ pub fn get_request_logs_in_range(
     end_time_ms: i64,
     provider_id_filter: Option<i64>,
     model_id_filter: Option<i64>,
-    system_api_key_id_filter: Option<i64>,
+    api_key_id_filter: Option<i64>,
     provider_api_key_id_filter: Option<i64>,
 ) -> DbResult<Vec<RequestLogEntryForStats>> {
     let conn = &mut get_connection()?;
@@ -314,8 +328,8 @@ pub fn get_request_logs_in_range(
         if let Some(model_id) = model_id_filter {
             query = query.filter(request_log::dsl::model_id.eq(model_id));
         }
-        if let Some(system_api_key_id) = system_api_key_id_filter {
-            query = query.filter(request_log::dsl::system_api_key_id.eq(system_api_key_id));
+        if let Some(api_key_id) = api_key_id_filter {
+            query = query.filter(request_log::dsl::system_api_key_id.eq(api_key_id));
         }
         if let Some(provider_api_key_id) = provider_api_key_id_filter {
             query = query.filter(request_log::dsl::provider_api_key_id.eq(provider_api_key_id));
@@ -361,7 +375,9 @@ pub fn get_dashboard_overview_stats() -> DbResult<DashboardOverviewStats> {
     let providers = Provider::list_all()?;
     let models = Model::list_all()?;
     let provider_keys = ProviderApiKey::list_all()?;
-    let system_api_keys = FullSystemApiKey::list_all()?;
+    // Legacy table read stays isolated here; returned counts are renamed to
+    // canonical `api_key_*` fields below.
+    let legacy_api_keys = FullSystemApiKey::list_all()?;
 
     Ok(DashboardOverviewStats {
         provider_count: providers.len() as i64,
@@ -371,8 +387,8 @@ pub fn get_dashboard_overview_stats() -> DbResult<DashboardOverviewStats> {
         provider_key_count: provider_keys.len() as i64,
         enabled_provider_key_count: provider_keys.iter().filter(|item| item.is_enabled).count()
             as i64,
-        system_api_key_count: system_api_keys.len() as i64,
-        enabled_system_api_key_count: system_api_keys
+        api_key_count: legacy_api_keys.len() as i64,
+        enabled_api_key_count: legacy_api_keys
             .iter()
             .filter(|item| item.is_enabled)
             .count() as i64,
@@ -398,7 +414,8 @@ pub fn get_dashboard_today_stats() -> DbResult<DashboardTodayStats> {
         avg_total_latency_ms: aggregate.avg_total_latency_ms,
         active_provider_count: aggregate.active_provider_count,
         active_model_count: aggregate.active_model_count,
-        active_system_api_key_count: aggregate.active_system_api_key_count,
+        // Canonical response boundary for the legacy SQL alias above.
+        active_api_key_count: aggregate.active_system_api_key_count,
     })
 }
 
@@ -499,7 +516,7 @@ pub fn get_usage_stats_aggregates(
     group_by: UsageStatsGroupBy,
     provider_id_filter: Option<i64>,
     model_id_filter: Option<i64>,
-    system_api_key_id_filter: Option<i64>,
+    api_key_id_filter: Option<i64>,
     provider_api_key_id_filter: Option<i64>,
 ) -> DbResult<Vec<UsageStatsQueryItem>> {
     let conn = &mut get_connection()?;
@@ -511,7 +528,7 @@ pub fn get_usage_stats_aggregates(
         group_by,
         provider_id_filter,
         model_id_filter,
-        system_api_key_id_filter,
+        api_key_id_filter,
         provider_api_key_id_filter,
     )?;
 
@@ -532,11 +549,13 @@ pub fn get_usage_stats_aggregates(
                     group_id: row.group_id,
                     provider_id: row.provider_id,
                     model_id: row.model_id,
-                    system_api_key_id: row.system_api_key_id,
+                    // Canonical response boundary for the legacy SQL aliases
+                    // carried by `UsageStatsBaseRow`.
+                    api_key_id: row.system_api_key_id,
                     provider_key: row.provider_key,
                     model_name: row.model_name,
                     real_model_name: row.real_model_name,
-                    system_api_key_name: row.system_api_key_name,
+                    api_key_name: row.system_api_key_name,
                     group_label: row.group_label.unwrap_or_default(),
                     group_detail: row.group_detail,
                     total_input_tokens: row.total_input_tokens,
@@ -567,7 +586,7 @@ pub fn get_usage_stats_aggregates(
         group_by,
         provider_id_filter,
         model_id_filter,
-        system_api_key_id_filter,
+        api_key_id_filter,
         provider_api_key_id_filter,
     )? {
         if let Some(item) = items.get_mut(&(row.time_bucket, row.group_id)) {
@@ -635,7 +654,11 @@ fn usage_group_sql(group_by: UsageStatsGroupBy) -> (&'static str, &'static str) 
              COALESCE(m.real_model_name, rl.real_model_name) AS group_detail",
             "rl.model_id, rl.provider_id, p.provider_key, m.model_name, m.real_model_name, rl.model_name, rl.real_model_name",
         ),
-        UsageStatsGroupBy::SystemApiKey => (
+        UsageStatsGroupBy::ApiKey => (
+            // Keep legacy SQL aliases here because the raw query loader below
+            // still binds against `system_api_key_*` field names. The
+            // conversion to canonical `api_key_*` happens in
+            // `get_usage_stats_aggregates`.
             "rl.system_api_key_id AS group_id,
              CAST(NULL AS BIGINT) AS provider_id,
              CAST(NULL AS BIGINT) AS model_id,
@@ -699,7 +722,7 @@ fn load_usage_stats_base_rows(
     group_by: UsageStatsGroupBy,
     provider_id_filter: Option<i64>,
     model_id_filter: Option<i64>,
-    system_api_key_id_filter: Option<i64>,
+    api_key_id_filter: Option<i64>,
     provider_api_key_id_filter: Option<i64>,
 ) -> DbResult<Vec<UsageStatsBaseRow>> {
     let (group_select_sql, group_by_sql) = usage_group_sql(group_by);
@@ -744,7 +767,7 @@ fn load_usage_stats_base_rows(
                 .bind::<BigInt, _>(end_time_ms)
                 .bind::<Nullable<BigInt>, _>(provider_id_filter)
                 .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(system_api_key_id_filter)
+                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
                 .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
                 .load::<UsageStatsBaseRow>(pg_conn)
                 .map_err(|e| {
@@ -796,8 +819,8 @@ fn load_usage_stats_base_rows(
                 .bind::<Nullable<BigInt>, _>(provider_id_filter)
                 .bind::<Nullable<BigInt>, _>(model_id_filter)
                 .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(system_api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(system_api_key_id_filter)
+                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
+                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
                 .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
                 .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
                 .load::<UsageStatsBaseRow>(sqlite_conn)
@@ -819,14 +842,15 @@ fn load_usage_stats_cost_rows(
     group_by: UsageStatsGroupBy,
     provider_id_filter: Option<i64>,
     model_id_filter: Option<i64>,
-    system_api_key_id_filter: Option<i64>,
+    api_key_id_filter: Option<i64>,
     provider_api_key_id_filter: Option<i64>,
 ) -> DbResult<Vec<UsageStatsCostRow>> {
     let (_, group_by_sql) = usage_group_sql(group_by);
     let group_id_sql = match group_by {
         UsageStatsGroupBy::Provider => "rl.provider_id",
         UsageStatsGroupBy::Model => "rl.model_id",
-        UsageStatsGroupBy::SystemApiKey => "rl.system_api_key_id",
+        // The raw SQL still groups on the physical request-log column.
+        UsageStatsGroupBy::ApiKey => "rl.system_api_key_id",
     };
 
     match conn {
@@ -841,6 +865,8 @@ fn load_usage_stats_cost_rows(
                  FROM request_log rl \
                  LEFT JOIN provider p ON p.id = rl.provider_id \
                  LEFT JOIN model m ON m.id = rl.model_id \
+                 -- Legacy join retained only because the physical schema still
+                 -- uses `system_api_key` / `system_api_key_id`.
                  LEFT JOIN system_api_key sak ON sak.id = rl.system_api_key_id \
                  WHERE rl.request_received_at >= $1 \
                    AND rl.request_received_at < $2 \
@@ -858,7 +884,7 @@ fn load_usage_stats_cost_rows(
                 .bind::<BigInt, _>(end_time_ms)
                 .bind::<Nullable<BigInt>, _>(provider_id_filter)
                 .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(system_api_key_id_filter)
+                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
                 .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
                 .load::<UsageStatsCostRow>(pg_conn)
                 .map_err(|e| {
@@ -879,6 +905,8 @@ fn load_usage_stats_cost_rows(
                  FROM request_log rl \
                  LEFT JOIN provider p ON p.id = rl.provider_id \
                  LEFT JOIN model m ON m.id = rl.model_id \
+                 -- Legacy join retained only because the physical schema still
+                 -- uses `system_api_key` / `system_api_key_id`.
                  LEFT JOIN system_api_key sak ON sak.id = rl.system_api_key_id \
                  WHERE rl.request_received_at >= ? \
                    AND rl.request_received_at < ? \
@@ -898,8 +926,8 @@ fn load_usage_stats_cost_rows(
                 .bind::<Nullable<BigInt>, _>(provider_id_filter)
                 .bind::<Nullable<BigInt>, _>(model_id_filter)
                 .bind::<Nullable<BigInt>, _>(model_id_filter)
-                .bind::<Nullable<BigInt>, _>(system_api_key_id_filter)
-                .bind::<Nullable<BigInt>, _>(system_api_key_id_filter)
+                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
+                .bind::<Nullable<BigInt>, _>(api_key_id_filter)
                 .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
                 .bind::<Nullable<BigInt>, _>(provider_api_key_id_filter)
                 .load::<UsageStatsCostRow>(sqlite_conn)

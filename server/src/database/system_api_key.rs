@@ -8,11 +8,18 @@ use crate::controller::BaseError;
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
-// Legacy source model for the future `api_key` aggregate.
+// Legacy database compatibility boundary.
+// `system_api_key` is still the physical table behind part of the historical
+// data model, but current business semantics should converge on `api_key`.
 // Migration must preserve existing IDs because `request_log.system_api_key_id`
 // relies on them as historical fact. New governance capabilities should not
-// keep expanding this split `system_api_key + access_control_policy` shape.
+// keep expanding this split `system_api_key + access_control_policy` shape, and
+// controller/service/frontend layers should avoid re-exporting this legacy name.
 db_object! {
+    // Legacy physical-table model only.
+    // This struct exists so Diesel can keep reading/writing the historical
+    // `system_api_key` table while upper layers continue converging on the
+    // canonical `api_key` aggregate and DTO naming.
     #[derive(Queryable, Selectable, Identifiable, Debug)]
     #[diesel(table_name = system_api_key)] // Refers to table from schema in db_execute!
     pub struct SystemApiKey {
@@ -27,8 +34,9 @@ db_object! {
         pub updated_at: i64,
     }
 
-    // Struct for inserting a new SystemApiKey.
-    // Derives Insertable and points to the specific schema table.
+    // Legacy insert payload for the physical `system_api_key` table.
+    // Keep this type local to the database boundary; do not reuse its name in
+    // controller/service/frontend business contracts.
     #[derive(Insertable, Debug)]
     #[diesel(table_name = system_api_key)] // This will resolve correctly inside db_execute!
     pub struct NewSystemApiKey {
@@ -43,10 +51,9 @@ db_object! {
         pub updated_at: i64,
     }
 
-    // Struct for updating an existing SystemApiKey.
-    // Derives AsChangeset and points to the specific schema table.
-    // Optional fields allow for partial updates.
-    // Option<Option<T>> allows explicitly setting a nullable field to NULL.
+    // Legacy update payload for the physical `system_api_key` table.
+    // Optional fields allow for partial updates; Option<Option<T>> allows
+    // explicitly setting a nullable field to NULL.
     #[derive(AsChangeset, Deserialize, Debug, Default)] // Default can be useful for building update payloads
     #[diesel(table_name = system_api_key)] // This will resolve correctly inside db_execute!
     pub struct UpdateSystemApiKeyData {
@@ -63,6 +70,10 @@ db_object! {
 }
 
 impl SystemApiKey {
+    // Compatibility CRUD for the historical `system_api_key` table. Keep these
+    // methods constrained to database-facing maintenance/reporting paths rather
+    // than using them as the semantic source of truth for new governance work.
+
     /// Creates a new system API key.
     pub fn create(
         name: &str,

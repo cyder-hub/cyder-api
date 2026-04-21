@@ -519,7 +519,7 @@
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">API Key</dt>
-                      <dd class="truncate text-right text-sm text-gray-900">{{ getApiKeyName(detailedRecord.system_api_key_id) }}</dd>
+                      <dd class="truncate text-right text-sm text-gray-900">{{ getApiKeyName(detailedRecord.api_key_id) }}</dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">Requested Model</dt>
@@ -1483,7 +1483,7 @@ const fetchRecords = async () => {
     const params = {
       page: currentPage.value,
       page_size: pageSize.value,
-      system_api_key_id: filters.api_key_id || undefined,
+      api_key_id: filters.api_key_id || undefined,
       provider_id: filters.provider_id || undefined,
       status:
         filters.status === DEFAULT_FILTERS.status ? undefined : filters.status,
@@ -1497,8 +1497,8 @@ const fetchRecords = async () => {
           ? providerStore.providers.find((p) => p.id === r.provider_id)?.name || "/"
           : "/";
       const apiKeyName =
-        r.system_api_key_id != null
-          ? apiKeyStore.apiKeys.find((k) => k.id === r.system_api_key_id)?.name || "/"
+        r.api_key_id != null
+          ? apiKeyStore.apiKeys.find((k) => k.id === r.api_key_id)?.name || "/"
           : "/";
       const isStreamDisplay = r.is_stream ? $t("common.yes") : $t("common.no");
 

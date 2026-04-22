@@ -50,6 +50,12 @@ interface EditingModelData {
   cost_catalog_id: number | null;
   model_name: string;
   real_model_name: string;
+  supports_streaming: boolean;
+  supports_tools: boolean;
+  supports_reasoning: boolean;
+  supports_image_input: boolean;
+  supports_embeddings: boolean;
+  supports_rerank: boolean;
   is_enabled: boolean;
   request_patches: RequestPatchRule[];
 }
@@ -66,6 +72,14 @@ const costManager = useCostPage();
 
 const editingData = ref<EditingModelData | null>(null);
 const shouldBindCreatedCatalog = ref(false);
+const capabilityItems = [
+  { key: "supports_streaming", labelKey: "modelCapabilities.streaming" },
+  { key: "supports_tools", labelKey: "modelCapabilities.tools" },
+  { key: "supports_reasoning", labelKey: "modelCapabilities.reasoning" },
+  { key: "supports_image_input", labelKey: "modelCapabilities.imageInput" },
+  { key: "supports_embeddings", labelKey: "modelCapabilities.embeddings" },
+  { key: "supports_rerank", labelKey: "modelCapabilities.rerank" },
+] as const;
 const currentProvider = computed(() =>
   providerStore.getProviderById(editingData.value?.provider_id),
 );
@@ -96,6 +110,12 @@ const fetchData = async () => {
         cost_catalog_id: detail.model.cost_catalog_id ?? null,
         model_name: detail.model.model_name,
         real_model_name: detail.model.real_model_name ?? "",
+        supports_streaming: detail.model.supports_streaming,
+        supports_tools: detail.model.supports_tools,
+        supports_reasoning: detail.model.supports_reasoning,
+        supports_image_input: detail.model.supports_image_input,
+        supports_embeddings: detail.model.supports_embeddings,
+        supports_rerank: detail.model.supports_rerank,
         is_enabled: detail.model.is_enabled,
         request_patches: detail.request_patches || [],
       };
@@ -132,6 +152,12 @@ const handleSaveModel = async () => {
   const payload = {
     model_name: editingData.value.model_name,
     real_model_name: editingData.value.real_model_name || null,
+    supports_streaming: editingData.value.supports_streaming,
+    supports_tools: editingData.value.supports_tools,
+    supports_reasoning: editingData.value.supports_reasoning,
+    supports_image_input: editingData.value.supports_image_input,
+    supports_embeddings: editingData.value.supports_embeddings,
+    supports_rerank: editingData.value.supports_rerank,
     is_enabled: editingData.value.is_enabled,
     cost_catalog_id: editingData.value.cost_catalog_id,
   };
@@ -375,6 +401,35 @@ onMounted(() => {
               id="is_enabled"
               v-model="editingData.is_enabled"
             />
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <h3 class="text-sm font-semibold text-gray-900">
+                {{ t("modelEditPage.capabilities.title") }}
+              </h3>
+              <p class="mt-1 text-sm text-gray-500">
+                {{ t("modelEditPage.capabilities.description") }}
+              </p>
+            </div>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div
+                v-for="capability in capabilityItems"
+                :key="capability.key"
+                class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5"
+              >
+                <Label class="cursor-pointer text-gray-700">
+                  {{ t(capability.labelKey) }}
+                </Label>
+                <Checkbox
+                  :model-value="editingData[capability.key]"
+                  @update:model-value="
+                    (value: boolean | 'indeterminate') =>
+                      (editingData![capability.key] = value === true)
+                  "
+                />
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>

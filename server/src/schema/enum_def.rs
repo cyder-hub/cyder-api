@@ -116,12 +116,41 @@ pub enum RequestPatchOperation {
 #[db_enum(pg_type = "request_status_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+/// Request-level aggregate status for `request_log`.
 pub enum RequestStatus {
     #[default]
     Pending,
     Success,
     Error,
     Cancelled,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default, Encode, Decode,
+)]
+#[db_enum(pg_type = "request_attempt_status_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RequestAttemptStatus {
+    #[default]
+    Skipped,
+    Success,
+    Error,
+    Cancelled,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default, Encode, Decode,
+)]
+#[db_enum(pg_type = "scheduler_action_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SchedulerAction {
+    ReturnSuccess,
+    #[default]
+    FailFast,
+    RetrySameCandidate,
+    FallbackNextCandidate,
 }
 
 #[derive(
@@ -144,4 +173,49 @@ pub enum StorageType {
     #[default]
     FileSystem,
     S3,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RequestAttemptStatus, SchedulerAction};
+
+    #[test]
+    fn request_attempt_status_serializes_to_stable_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&RequestAttemptStatus::Skipped).unwrap(),
+            "\"SKIPPED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestAttemptStatus::Success).unwrap(),
+            "\"SUCCESS\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestAttemptStatus::Error).unwrap(),
+            "\"ERROR\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestAttemptStatus::Cancelled).unwrap(),
+            "\"CANCELLED\""
+        );
+    }
+
+    #[test]
+    fn scheduler_action_serializes_to_stable_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&SchedulerAction::ReturnSuccess).unwrap(),
+            "\"RETURN_SUCCESS\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SchedulerAction::FailFast).unwrap(),
+            "\"FAIL_FAST\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SchedulerAction::RetrySameCandidate).unwrap(),
+            "\"RETRY_SAME_CANDIDATE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SchedulerAction::FallbackNextCandidate).unwrap(),
+            "\"FALLBACK_NEXT_CANDIDATE\""
+        );
+    }
 }

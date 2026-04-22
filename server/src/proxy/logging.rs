@@ -1,18 +1,26 @@
+use super::orchestrator::RequestAttemptDraft;
 use crate::{
     cost::{CostLedger, CostRatingContext, CostSnapshot, UsageNormalization, rate_cost},
     database::{
         api_key_rollup::{
             ApiKeyRollupDaily, ApiKeyRollupMonthly, NewApiKeyRollupDaily, NewApiKeyRollupMonthly,
         },
+        request_attempt::RequestAttempt,
         request_log::RequestLog,
     },
-    schema::enum_def::{LlmApiType, RequestStatus, StorageType},
+    schema::enum_def::{
+        LlmApiType, RequestAttemptStatus, RequestStatus, SchedulerAction, StorageType,
+    },
     service::app_state::{ApiKeyCompletionDelta, AppState},
     service::cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider},
     service::storage::{Storage, get_storage, types::PutObjectOptions},
     utils::{
         ID_GENERATOR,
-        storage::{LogBodyCaptureState, LogBundle, generate_storage_path_from_id},
+        storage::{
+            LogBodyCaptureState, REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleAttemptSection,
+            RequestLogBundleRequestSection, RequestLogBundleV2, RequestLogBundleV2Builder,
+            generate_storage_path_from_id,
+        },
         usage::UsageInfo,
     },
 };
@@ -178,10 +186,12 @@ impl Drop for StreamingBodyWriter {
 pub struct RequestLogContext {
     // from create_request_log
     pub id: i64,
-    pub system_api_key_id: i64,
+    pub api_key_id: i64,
     pub provider_id: i64,
+    pub provider_key: String,
+    pub provider_name: String,
     pub model_id: i64,
-    pub provider_api_key_id: i64,
+    pub provider_api_key_id: Option<i64>,
     pub requested_model_name: String,
     pub resolved_name_scope: String,
     pub resolved_route_id: Option<i64>,
@@ -197,6 +207,7 @@ pub struct RequestLogContext {
     // from log_final_update
     pub request_url: Option<String>,
     pub llm_status: Option<StatusCode>,
+    pub response_headers_json: Option<String>,
     pub is_stream: bool,
     pub first_chunk_ts: Option<i64>,
     pub completion_ts: Option<i64>,
@@ -209,8 +220,10 @@ pub struct RequestLogContext {
     pub llm_request_body: Option<LoggedBody>,
     pub llm_response_body: Option<LoggedBody>,
     pub user_response_body: Option<LoggedBody>,
-    pub applied_request_patch_ids_json: Option<String>,
-    pub request_patch_summary_json: Option<String>,
+    pub final_error_code: Option<String>,
+    pub final_error_message: Option<String>,
+    pub(super) skipped_attempts: Vec<RequestAttemptDraft>,
+    pub(super) attempts: Vec<RequestAttemptDraft>,
 }
 
 impl RequestLogContext {
@@ -218,7 +231,7 @@ impl RequestLogContext {
         system_api_key: &CacheApiKey,
         provider: &CacheProvider,
         model: &CacheModel,
-        provider_api_key_id: i64,
+        provider_api_key_id: Option<i64>,
         requested_model_name: &str,
         resolved_name_scope: &str,
         resolved_route_id: Option<i64>,
@@ -236,8 +249,10 @@ impl RequestLogContext {
 
         Self {
             id: ID_GENERATOR.generate_id(),
-            system_api_key_id: system_api_key.id,
+            api_key_id: system_api_key.id,
             provider_id: provider.id,
+            provider_key: provider.provider_key.clone(),
+            provider_name: provider.name.clone(),
             model_id: model.id,
             provider_api_key_id,
             requested_model_name: requested_model_name.to_string(),
@@ -253,6 +268,7 @@ impl RequestLogContext {
             llm_request_sent_at: None,
             request_url: None,
             llm_status: None,
+            response_headers_json: None,
             is_stream: false,
             first_chunk_ts: None,
             completion_ts: None,
@@ -265,43 +281,92 @@ impl RequestLogContext {
             llm_request_body: None,
             llm_response_body: None,
             user_response_body: None,
-            applied_request_patch_ids_json: None,
-            request_patch_summary_json: None,
+            final_error_code: None,
+            final_error_message: None,
+            skipped_attempts: Vec::new(),
+            attempts: Vec::new(),
         }
     }
-}
 
-pub(super) fn build_initial_request_log_context(
-    system_api_key: &CacheApiKey,
-    provider: &CacheProvider,
-    model: &CacheModel,
-    provider_api_key_id: i64,
-    requested_model_name: &str,
-    resolved_name_scope: &str,
-    resolved_route_id: Option<i64>,
-    resolved_route_name: Option<&str>,
-    start_time: i64,
-    client_ip_addr: &Option<String>,
-    user_api_type: LlmApiType,
-    llm_api_type: LlmApiType,
-    user_request_body: Option<Bytes>,
-) -> RequestLogContext {
-    let mut context = RequestLogContext::new(
-        system_api_key,
-        provider,
-        model,
-        provider_api_key_id,
-        requested_model_name,
-        resolved_name_scope,
-        resolved_route_id,
-        resolved_route_name,
-        start_time,
-        client_ip_addr,
-        user_api_type,
-        llm_api_type,
-    );
-    context.user_request_body = user_request_body.map(LoggedBody::from_bytes);
-    context
+    pub(super) fn new_for_skipped_candidates(
+        system_api_key: &CacheApiKey,
+        requested_model_name: &str,
+        resolved_name_scope: &str,
+        resolved_route_id: Option<i64>,
+        resolved_route_name: Option<&str>,
+        start_time: i64,
+        client_ip_addr: &Option<String>,
+        user_api_type: LlmApiType,
+        first_skipped_attempt: &RequestAttemptDraft,
+    ) -> Self {
+        Self {
+            id: ID_GENERATOR.generate_id(),
+            api_key_id: system_api_key.id,
+            provider_id: first_skipped_attempt
+                .provider_id
+                .expect("skipped capability attempts should carry provider_id"),
+            provider_key: first_skipped_attempt
+                .provider_key_snapshot
+                .clone()
+                .unwrap_or_default(),
+            provider_name: first_skipped_attempt
+                .provider_name_snapshot
+                .clone()
+                .unwrap_or_default(),
+            model_id: first_skipped_attempt
+                .model_id
+                .expect("skipped capability attempts should carry model_id"),
+            provider_api_key_id: None,
+            requested_model_name: requested_model_name.to_string(),
+            resolved_name_scope: resolved_name_scope.to_string(),
+            resolved_route_id,
+            resolved_route_name: resolved_route_name.map(str::to_string),
+            model_name: first_skipped_attempt
+                .model_name_snapshot
+                .clone()
+                .unwrap_or_default(),
+            real_model_name: first_skipped_attempt
+                .real_model_name_snapshot
+                .clone()
+                .unwrap_or_default(),
+            user_api_type,
+            llm_api_type: first_skipped_attempt.llm_api_type.unwrap_or(user_api_type),
+            request_received_at: start_time,
+            client_ip: client_ip_addr.clone(),
+            llm_request_sent_at: None,
+            request_url: None,
+            llm_status: None,
+            response_headers_json: None,
+            is_stream: false,
+            first_chunk_ts: None,
+            completion_ts: None,
+            usage: None,
+            usage_normalization: None,
+            cost_catalog_id: None,
+            cost_catalog_version: None,
+            overall_status: RequestStatus::Pending,
+            user_request_body: None,
+            llm_request_body: None,
+            llm_response_body: None,
+            user_response_body: None,
+            final_error_code: None,
+            final_error_message: None,
+            skipped_attempts: Vec::new(),
+            attempts: Vec::new(),
+        }
+    }
+
+    pub(super) fn set_attempts_for_logging(
+        &mut self,
+        skipped_attempts: &[RequestAttemptDraft],
+        current_attempt: Option<RequestAttemptDraft>,
+    ) {
+        self.skipped_attempts = skipped_attempts.to_vec();
+        self.attempts = skipped_attempts.to_vec();
+        if let Some(attempt) = current_attempt {
+            self.attempts.push(attempt);
+        }
+    }
 }
 
 const ROLLUP_UNSPECIFIED_CURRENCY: &str = "NUL";
@@ -333,7 +398,7 @@ pub(super) fn completion_delta_from_log_context(
 ) -> ApiKeyCompletionDelta {
     let cost_outcome = LogManager::build_cost_outcome(context);
     ApiKeyCompletionDelta {
-        api_key_id: context.system_api_key_id,
+        api_key_id: context.api_key_id,
         occurred_at: context.completion_ts.unwrap_or(context.request_received_at),
         total_tokens: total_tokens_for_context(context),
         billed_amount_nanos: cost_outcome.estimated_cost_nanos.unwrap_or_default(),
@@ -351,7 +416,7 @@ pub(super) async fn record_request_completion_and_log(
     {
         error!(
             "Failed to record api key completion delta for key {}: {}",
-            context.system_api_key_id, err
+            context.api_key_id, err
         );
     }
 
@@ -610,15 +675,16 @@ impl LogManager {
         false
     }
 
-    fn insert_request_log_with_retry(
+    fn insert_request_log_with_attempts_with_retry(
         request_log: &RequestLog,
+        request_attempts: &[RequestAttempt],
         metrics: &LogManagerMetrics,
         log_id: i64,
     ) -> bool {
         const MAX_ATTEMPTS: usize = 3;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            match RequestLog::insert(request_log) {
+            match RequestLog::insert_with_attempts(request_log, request_attempts) {
                 Ok(_) => return true,
                 Err(e) => {
                     metrics.record_db_failure();
@@ -627,7 +693,7 @@ impl LogManager {
                         log_id,
                         LogProcessingStage::MetadataPersistFailed,
                         &format!(
-                            "attempt={}/{} request_log_insert_failed error={:?}",
+                            "attempt={}/{} request_log_and_attempts_insert_failed error={:?}",
                             attempt, MAX_ATTEMPTS, e
                         ),
                     );
@@ -652,7 +718,7 @@ impl LogManager {
         let request_at = request_log.request_received_at;
         let currency = normalize_rollup_currency(request_log.estimated_cost_currency.as_deref());
         let daily_delta = NewApiKeyRollupDaily {
-            api_key_id: request_log.system_api_key_id,
+            api_key_id: request_log.api_key_id,
             day_bucket: request_at.div_euclid(86_400_000) * 86_400_000,
             currency: currency.clone(),
             request_count: 1,
@@ -666,7 +732,7 @@ impl LogManager {
             updated_at: now,
         };
         let monthly_delta = NewApiKeyRollupMonthly {
-            api_key_id: request_log.system_api_key_id,
+            api_key_id: request_log.api_key_id,
             month_bucket: {
                 let timestamp = chrono::Utc
                     .timestamp_millis_opt(request_at)
@@ -759,10 +825,9 @@ impl LogManager {
 
     async fn store_bundle(
         storage: &dyn Storage,
-        storage_type: &crate::schema::enum_def::StorageType,
-        created_at: i64,
+        key: &str,
         id: i64,
-        bundle: &LogBundle,
+        bundle: &RequestLogBundleV2,
         metrics: &LogManagerMetrics,
     ) -> bool {
         let serialized_body = match to_vec_named(bundle) {
@@ -793,13 +858,11 @@ impl LogManager {
             }
         };
 
-        let key = generate_storage_path_from_id(created_at, id, storage_type);
-
         debug!("Storing log bundle for log_id {}: {:?}", id, key);
 
         Self::put_object_with_retry(
             storage,
-            &key,
+            key,
             compressed_body,
             Some(PutObjectOptions {
                 content_type: Some("application/msgpack"),
@@ -810,6 +873,321 @@ impl LogManager {
             "bundle",
         )
         .await
+    }
+
+    fn has_downstream_request(context: &RequestLogContext) -> bool {
+        context.request_url.is_some()
+            || context.llm_request_sent_at.is_some()
+            || context.llm_status.is_some()
+            || context.llm_request_body.is_some()
+            || context.llm_response_body.is_some()
+    }
+
+    fn terminal_attempt_index(attempts: &[RequestAttemptDraft]) -> Option<usize> {
+        attempts.iter().rposition(|attempt| {
+            attempt.attempt_status != RequestAttemptStatus::Skipped
+                || attempt.request_uri.is_some()
+                || attempt.started_at.is_some()
+        })
+    }
+
+    fn final_attempt(attempts: &[RequestAttempt]) -> Option<&RequestAttempt> {
+        attempts
+            .iter()
+            .rfind(|attempt| attempt.attempt_status != RequestAttemptStatus::Skipped)
+            .or_else(|| attempts.last())
+    }
+
+    fn fill_attempt_usage_from_context(
+        attempt: &mut RequestAttemptDraft,
+        context: &RequestLogContext,
+    ) {
+        if let Some(usage) = context.usage_normalization.as_ref() {
+            attempt.total_input_tokens = attempt
+                .total_input_tokens
+                .or(Some(usage.total_input_tokens as i32));
+            attempt.total_output_tokens = attempt
+                .total_output_tokens
+                .or(Some(usage.total_output_tokens as i32));
+            attempt.input_text_tokens = attempt
+                .input_text_tokens
+                .or(Some(usage.input_text_tokens as i32));
+            attempt.output_text_tokens = attempt
+                .output_text_tokens
+                .or(Some(usage.output_text_tokens as i32));
+            attempt.input_image_tokens = attempt
+                .input_image_tokens
+                .or(Some(usage.input_image_tokens as i32));
+            attempt.output_image_tokens = attempt
+                .output_image_tokens
+                .or(Some(usage.output_image_tokens as i32));
+            attempt.cache_read_tokens = attempt
+                .cache_read_tokens
+                .or(Some(usage.cache_read_tokens as i32));
+            attempt.cache_write_tokens = attempt
+                .cache_write_tokens
+                .or(Some(usage.cache_write_tokens as i32));
+            attempt.reasoning_tokens = attempt
+                .reasoning_tokens
+                .or(Some(usage.reasoning_tokens as i32));
+            attempt.total_tokens = attempt.total_tokens.or(Some(
+                (usage.total_input_tokens + usage.total_output_tokens) as i32,
+            ));
+        } else if let Some(usage) = context.usage.as_ref() {
+            attempt.total_input_tokens = attempt.total_input_tokens.or(Some(usage.input_tokens));
+            attempt.total_output_tokens = attempt.total_output_tokens.or(Some(usage.output_tokens));
+            attempt.input_image_tokens = attempt
+                .input_image_tokens
+                .or(Some(usage.input_image_tokens));
+            attempt.output_image_tokens = attempt
+                .output_image_tokens
+                .or(Some(usage.output_image_tokens));
+            attempt.cache_read_tokens = attempt.cache_read_tokens.or(Some(usage.cached_tokens));
+            attempt.reasoning_tokens = attempt.reasoning_tokens.or(Some(usage.reasoning_tokens));
+            attempt.total_tokens = attempt.total_tokens.or(Some(usage.total_tokens));
+        }
+    }
+
+    fn log_body_capture_state_as_db_str(capture_state: LogBodyCaptureState) -> &'static str {
+        match capture_state {
+            LogBodyCaptureState::Complete => "COMPLETE",
+            LogBodyCaptureState::Incomplete => "INCOMPLETE",
+            LogBodyCaptureState::NotCaptured => "NOT_CAPTURED",
+        }
+    }
+
+    fn merge_context_into_terminal_attempt(
+        attempt: &mut RequestAttemptDraft,
+        context: &RequestLogContext,
+        llm_response_capture_state: Option<LogBodyCaptureState>,
+        now: i64,
+    ) {
+        attempt.provider_id = attempt.provider_id.or(Some(context.provider_id));
+        attempt.provider_api_key_id = attempt.provider_api_key_id.or(context.provider_api_key_id);
+        attempt.model_id = attempt.model_id.or(Some(context.model_id));
+        if attempt.provider_key_snapshot.is_none() {
+            attempt.provider_key_snapshot = Some(context.provider_key.clone());
+        }
+        if attempt.provider_name_snapshot.is_none() {
+            attempt.provider_name_snapshot = Some(context.provider_name.clone());
+        }
+        if attempt.model_name_snapshot.is_none() {
+            attempt.model_name_snapshot = Some(context.model_name.clone());
+        }
+        if attempt.real_model_name_snapshot.is_none() {
+            attempt.real_model_name_snapshot = Some(context.real_model_name.clone());
+        }
+        attempt.llm_api_type = attempt.llm_api_type.or(Some(context.llm_api_type));
+        attempt.request_uri = attempt.request_uri.clone().or(context.request_url.clone());
+        attempt.response_headers_json = attempt
+            .response_headers_json
+            .clone()
+            .or(context.response_headers_json.clone());
+        attempt.http_status = attempt
+            .http_status
+            .or_else(|| context.llm_status.map(|status| i32::from(status.as_u16())));
+        attempt.started_at = attempt.started_at.or(context.llm_request_sent_at);
+        attempt.first_byte_at = attempt.first_byte_at.or(context.first_chunk_ts);
+        attempt.completed_at = attempt.completed_at.or(context.completion_ts).or(Some(now));
+        attempt.response_started_to_client |= context.first_chunk_ts.is_some();
+
+        match context.overall_status {
+            RequestStatus::Success => {
+                attempt.attempt_status = RequestAttemptStatus::Success;
+                attempt.scheduler_action = SchedulerAction::ReturnSuccess;
+            }
+            RequestStatus::Cancelled => {
+                attempt.attempt_status = RequestAttemptStatus::Cancelled;
+                if attempt.scheduler_action == SchedulerAction::ReturnSuccess {
+                    attempt.scheduler_action = SchedulerAction::FailFast;
+                }
+            }
+            RequestStatus::Error => {
+                if attempt.attempt_status == RequestAttemptStatus::Skipped
+                    || attempt.request_uri.is_some()
+                    || attempt.started_at.is_some()
+                {
+                    attempt.attempt_status = RequestAttemptStatus::Error;
+                }
+                if attempt.scheduler_action == SchedulerAction::ReturnSuccess {
+                    attempt.scheduler_action = SchedulerAction::FailFast;
+                }
+            }
+            RequestStatus::Pending => {}
+        }
+
+        if attempt.error_code.is_none() {
+            attempt.error_code = context.final_error_code.clone();
+        }
+        if attempt.error_message.is_none() {
+            attempt.error_message = context.final_error_message.clone();
+        }
+
+        Self::fill_attempt_usage_from_context(attempt, context);
+        let cost_outcome = Self::build_cost_outcome(context);
+        attempt.estimated_cost_nanos = attempt
+            .estimated_cost_nanos
+            .or(cost_outcome.estimated_cost_nanos);
+        attempt.estimated_cost_currency = attempt
+            .estimated_cost_currency
+            .clone()
+            .or(cost_outcome.estimated_cost_currency);
+        attempt.cost_catalog_version_id = attempt
+            .cost_catalog_version_id
+            .or(cost_outcome.cost_catalog_version_id)
+            .or_else(|| {
+                context
+                    .cost_catalog_version
+                    .as_ref()
+                    .map(|version| version.id)
+            });
+        if let Some(capture_state) = llm_response_capture_state {
+            attempt.llm_response_capture_state =
+                Some(Self::log_body_capture_state_as_db_str(capture_state).to_string());
+        }
+        if attempt.llm_request_body_for_log.is_none() {
+            attempt.llm_request_body_for_log = context.llm_request_body.clone();
+        }
+        if attempt.llm_response_body_for_log.is_none() {
+            attempt.llm_response_body_for_log = context.llm_response_body.clone();
+        }
+    }
+
+    fn synthesize_downstream_attempt(
+        context: &RequestLogContext,
+        now: i64,
+        llm_response_capture_state: Option<LogBodyCaptureState>,
+    ) -> RequestAttemptDraft {
+        let mut attempt = RequestAttemptDraft {
+            candidate_position: context.skipped_attempts.len() as i32 + 1,
+            provider_id: Some(context.provider_id),
+            provider_api_key_id: context.provider_api_key_id,
+            model_id: Some(context.model_id),
+            provider_key_snapshot: Some(context.provider_key.clone()),
+            provider_name_snapshot: Some(context.provider_name.clone()),
+            model_name_snapshot: Some(context.model_name.clone()),
+            real_model_name_snapshot: Some(context.real_model_name.clone()),
+            llm_api_type: Some(context.llm_api_type),
+            ..RequestAttemptDraft::default()
+        };
+        Self::merge_context_into_terminal_attempt(
+            &mut attempt,
+            context,
+            llm_response_capture_state,
+            now,
+        );
+        attempt
+    }
+
+    fn request_attempt_drafts_for_context(
+        context: &RequestLogContext,
+        now: i64,
+        llm_response_capture_state: Option<LogBodyCaptureState>,
+    ) -> Vec<RequestAttemptDraft> {
+        let mut attempts = if context.attempts.is_empty() {
+            context.skipped_attempts.clone()
+        } else {
+            context.attempts.clone()
+        };
+
+        if Self::has_downstream_request(context) {
+            if let Some(index) = Self::terminal_attempt_index(&attempts) {
+                Self::merge_context_into_terminal_attempt(
+                    &mut attempts[index],
+                    context,
+                    llm_response_capture_state,
+                    now,
+                );
+            } else {
+                attempts.push(Self::synthesize_downstream_attempt(
+                    context,
+                    now,
+                    llm_response_capture_state,
+                ));
+            }
+        }
+
+        attempts
+    }
+
+    fn build_request_attempts_for_logging(
+        context: &RequestLogContext,
+        now: i64,
+        llm_response_capture_state: Option<LogBodyCaptureState>,
+    ) -> Vec<RequestAttempt> {
+        Self::request_attempt_drafts_for_context(context, now, llm_response_capture_state)
+            .iter()
+            .enumerate()
+            .map(|(index, attempt)| {
+                attempt.to_request_attempt_with_id(
+                    ID_GENERATOR.generate_id(),
+                    context.id,
+                    (index + 1) as i32,
+                    now,
+                )
+            })
+            .collect()
+    }
+
+    fn clear_attempt_bundle_refs(attempts: &mut [RequestAttempt]) {
+        for attempt in attempts {
+            attempt.llm_request_blob_id = None;
+            attempt.llm_request_patch_id = None;
+            attempt.llm_response_blob_id = None;
+        }
+    }
+
+    fn logged_body_in_memory_bytes(body: &LoggedBody) -> Option<Bytes> {
+        match body {
+            LoggedBody::InMemory { bytes, .. } => Some(bytes.clone()),
+            LoggedBody::Spooled { .. } => None,
+        }
+    }
+
+    fn apply_attempt_rollup_to_request_log(
+        request_log: &mut RequestLog,
+        attempts: &[RequestAttempt],
+    ) {
+        request_log.attempt_count = attempts.len() as i32;
+        request_log.retry_count = attempts
+            .iter()
+            .filter(|attempt| attempt.scheduler_action == SchedulerAction::RetrySameCandidate)
+            .count() as i32;
+        request_log.fallback_count = attempts
+            .iter()
+            .filter(|attempt| attempt.scheduler_action == SchedulerAction::FallbackNextCandidate)
+            .count() as i32;
+        request_log.first_attempt_started_at =
+            attempts.iter().find_map(|attempt| attempt.started_at);
+        if request_log.response_started_to_client_at.is_none() {
+            request_log.response_started_to_client_at =
+                attempts.iter().find_map(|attempt| attempt.first_byte_at);
+        }
+        if request_log.completed_at.is_none() {
+            request_log.completed_at = attempts
+                .iter()
+                .rev()
+                .find_map(|attempt| attempt.completed_at);
+        }
+
+        if let Some(final_attempt) = Self::final_attempt(attempts) {
+            request_log.final_attempt_id = Some(final_attempt.id);
+            request_log.final_provider_id = final_attempt.provider_id;
+            request_log.final_provider_api_key_id = final_attempt.provider_api_key_id;
+            request_log.final_model_id = final_attempt.model_id;
+            request_log.final_provider_key_snapshot = final_attempt.provider_key_snapshot.clone();
+            request_log.final_provider_name_snapshot = final_attempt.provider_name_snapshot.clone();
+            request_log.final_model_name_snapshot = final_attempt.model_name_snapshot.clone();
+            request_log.final_real_model_name_snapshot =
+                final_attempt.real_model_name_snapshot.clone();
+            request_log.final_llm_api_type = final_attempt.llm_api_type;
+            if request_log.final_error_code.is_none() {
+                request_log.final_error_code = final_attempt.error_code.clone();
+            }
+            if request_log.final_error_message.is_none() {
+                request_log.final_error_message = final_attempt.error_message.clone();
+            }
+        }
     }
 
     async fn process_log(context: RequestLogContext, metrics: &LogManagerMetrics) {
@@ -891,37 +1269,38 @@ impl LogManager {
             _ => None,
         };
 
-        let bundle = LogBundle {
-            version: 1,
+        let llm_response_capture_state = response_capture_state_for_bundle(
+            context.llm_response_body.as_ref(),
+            llm_response_body.as_ref(),
+            context.request_url.is_some() || context.llm_status.is_some(),
+        );
+        let user_response_capture_state = response_capture_state_for_bundle(
+            context.user_response_body.as_ref(),
+            user_response_body.as_ref(),
+            context.request_url.is_some() || context.user_response_body.is_some(),
+        );
+        let now = Utc::now().timestamp_millis();
+        let mut request_attempts =
+            Self::build_request_attempts_for_logging(&context, now, llm_response_capture_state);
+        let bundle = Self::build_request_log_bundle_v2(
             log_id,
             created_at,
+            &context,
+            &mut request_attempts,
             user_request_body,
             llm_request_body,
-            llm_response_body: llm_response_body.clone(),
-            llm_response_capture_state: llm_response_body.as_ref().and_then(|_| {
-                context
-                    .llm_response_body
-                    .as_ref()
-                    .map(LoggedBody::capture_state)
-            }),
-            user_response_body: user_response_body.clone(),
-            user_response_capture_state: user_response_body.as_ref().and_then(|_| {
-                context
-                    .user_response_body
-                    .as_ref()
-                    .map(LoggedBody::capture_state)
-            }),
-        };
-        let bundle_stored = Self::store_bundle(
-            &**storage,
-            &storage_type,
-            created_at,
-            log_id,
-            &bundle,
-            metrics,
-        )
-        .await;
+            llm_response_body,
+            llm_response_capture_state,
+            user_response_body,
+            user_response_capture_state,
+        );
+        let bundle_storage_key = generate_storage_path_from_id(created_at, log_id, &storage_type);
+        let bundle_stored =
+            Self::store_bundle(&**storage, &bundle_storage_key, log_id, &bundle, metrics).await;
         let final_storage_type = bundle_stored.then_some(storage_type);
+        if !bundle_stored {
+            Self::clear_attempt_bundle_refs(&mut request_attempts);
+        }
 
         if bundle_stored {
             Self::log_stage_event(
@@ -997,16 +1376,20 @@ impl LogManager {
             }
         }
 
-        let now = Utc::now().timestamp_millis();
+        let mut request_log = Self::build_request_log(&context, final_storage_type, now);
+        Self::apply_attempt_rollup_to_request_log(&mut request_log, &request_attempts);
 
-        let request_log = Self::build_request_log(&context, final_storage_type, now);
-
-        if Self::insert_request_log_with_retry(&request_log, metrics, log_id) {
+        if Self::insert_request_log_with_attempts_with_retry(
+            &request_log,
+            &request_attempts,
+            metrics,
+            log_id,
+        ) {
             Self::log_stage_event(
                 metrics,
                 log_id,
                 LogProcessingStage::MetadataPersisted,
-                "request_log_inserted",
+                "request_log_and_attempts_inserted",
             );
             if Self::add_api_key_rollup_delta_with_retry(&request_log, metrics, log_id) {
                 Self::log_stage_event(metrics, log_id, LogProcessingStage::Completed, "done");
@@ -1036,35 +1419,56 @@ impl LogManager {
         now: i64,
     ) -> RequestLog {
         let cost_outcome = Self::build_cost_outcome(context);
+        let bundle_storage_key = final_storage_type.as_ref().map(|storage_type| {
+            generate_storage_path_from_id(context.request_received_at, context.id, storage_type)
+        });
+        let attempt_drafts = Self::request_attempt_drafts_for_context(context, now, None);
+        let first_attempt_started_at = attempt_drafts
+            .iter()
+            .find_map(|attempt| attempt.started_at)
+            .or(context.llm_request_sent_at);
 
         RequestLog {
             id: context.id,
-            system_api_key_id: context.system_api_key_id,
-            provider_id: context.provider_id,
-            model_id: context.model_id,
-            provider_api_key_id: context.provider_api_key_id,
+            api_key_id: context.api_key_id,
             requested_model_name: Some(context.requested_model_name.clone()),
             resolved_name_scope: Some(context.resolved_name_scope.clone()),
             resolved_route_id: context.resolved_route_id,
             resolved_route_name: context.resolved_route_name.clone(),
-            model_name: context.model_name.clone(),
-            real_model_name: context.real_model_name.clone(),
+            user_api_type: context.user_api_type,
+            overall_status: context.overall_status.clone(),
+            final_error_code: context.final_error_code.clone(),
+            final_error_message: context.final_error_message.clone(),
+            attempt_count: attempt_drafts.len() as i32,
+            retry_count: attempt_drafts
+                .iter()
+                .filter(|attempt| attempt.scheduler_action == SchedulerAction::RetrySameCandidate)
+                .count() as i32,
+            fallback_count: attempt_drafts
+                .iter()
+                .filter(|attempt| {
+                    attempt.scheduler_action == SchedulerAction::FallbackNextCandidate
+                })
+                .count() as i32,
             request_received_at: context.request_received_at,
-            llm_request_sent_at: context.llm_request_sent_at.unwrap_or(now),
-            llm_response_first_chunk_at: context.first_chunk_ts,
-            llm_response_completed_at: context.completion_ts,
+            first_attempt_started_at,
+            response_started_to_client_at: context.first_chunk_ts,
+            completed_at: context.completion_ts.or(Some(now)),
             client_ip: context.client_ip.clone(),
-            llm_request_uri: context.request_url.clone(),
-            llm_response_status: context.llm_status.map(|s| s.as_u16() as i32),
-            status: Some(context.overall_status.clone()),
-            is_stream: context.is_stream,
+            final_attempt_id: None,
+            final_provider_id: Some(context.provider_id),
+            final_provider_api_key_id: context.provider_api_key_id,
+            final_model_id: Some(context.model_id),
+            final_provider_key_snapshot: Some(context.provider_key.clone()),
+            final_provider_name_snapshot: Some(context.provider_name.clone()),
+            final_model_name_snapshot: Some(context.model_name.clone()),
+            final_real_model_name_snapshot: Some(context.real_model_name.clone()),
+            final_llm_api_type: Some(context.llm_api_type),
             estimated_cost_nanos: cost_outcome.estimated_cost_nanos,
             estimated_cost_currency: cost_outcome.estimated_cost_currency,
             cost_catalog_id: context.cost_catalog_id,
             cost_catalog_version_id: cost_outcome.cost_catalog_version_id,
             cost_snapshot_json: cost_outcome.cost_snapshot_json,
-            created_at: context.request_received_at,
-            updated_at: now,
             total_input_tokens: context
                 .usage_normalization
                 .as_ref()
@@ -1112,16 +1516,161 @@ impl LogManager {
                 .as_ref()
                 .map(|u| (u.total_input_tokens + u.total_output_tokens) as i32)
                 .or_else(|| context.usage.as_ref().map(|u| u.total_tokens)),
-            storage_type: final_storage_type,
-            user_request_body: None,
-            llm_request_body: None,
-            llm_response_body: None,
-            user_response_body: None,
-            applied_request_patch_ids_json: context.applied_request_patch_ids_json.clone(),
-            request_patch_summary_json: context.request_patch_summary_json.clone(),
-            user_api_type: context.user_api_type,
-            llm_api_type: context.llm_api_type,
+            bundle_version: final_storage_type
+                .as_ref()
+                .map(|_| REQUEST_LOG_BUNDLE_V2_VERSION as i32),
+            bundle_storage_type: final_storage_type,
+            bundle_storage_key,
+            created_at: context.request_received_at,
+            updated_at: now,
         }
+    }
+
+    fn build_request_log_bundle_v2(
+        log_id: i64,
+        created_at: i64,
+        context: &RequestLogContext,
+        request_attempts: &mut [RequestAttempt],
+        user_request_body: Option<Bytes>,
+        llm_request_body: Option<Bytes>,
+        llm_response_body: Option<Bytes>,
+        llm_response_capture_state: Option<LogBodyCaptureState>,
+        user_response_body: Option<Bytes>,
+        user_response_capture_state: Option<LogBodyCaptureState>,
+    ) -> RequestLogBundleV2 {
+        let mut builder = RequestLogBundleV2Builder::new();
+        let user_request_blob_id = user_request_body
+            .clone()
+            .map(|body| builder.add_user_request_body(body));
+        let user_response_blob_id = user_response_body
+            .clone()
+            .map(|body| builder.add_response_body(body));
+        let body_attempt_index = request_attempts.iter().rposition(|attempt| {
+            attempt.request_uri.is_some()
+                || attempt.started_at.is_some()
+                || attempt.attempt_status != RequestAttemptStatus::Skipped
+        });
+        let attempt_drafts = Self::request_attempt_drafts_for_context(
+            context,
+            context.completion_ts.unwrap_or(created_at),
+            llm_response_capture_state,
+        );
+
+        for (index, request_attempt) in request_attempts.iter_mut().enumerate() {
+            let attempt_request_body = attempt_drafts
+                .get(index)
+                .and_then(|attempt| attempt.llm_request_body_for_log.as_ref())
+                .and_then(Self::logged_body_in_memory_bytes)
+                .or_else(|| {
+                    (Some(index) == body_attempt_index)
+                        .then(|| llm_request_body.clone())
+                        .flatten()
+                });
+
+            if let Some(body) = attempt_request_body {
+                let llm_api_type = request_attempt.llm_api_type.unwrap_or(context.llm_api_type);
+                let body_ref = builder.add_llm_request_body(
+                    context.user_api_type,
+                    llm_api_type,
+                    request_attempt.attempt_index,
+                    body,
+                );
+                request_attempt.llm_request_blob_id = Some(body_ref.blob_id);
+                request_attempt.llm_request_patch_id = body_ref.patch_id;
+            }
+
+            let attempt_response_body = attempt_drafts
+                .get(index)
+                .and_then(|attempt| attempt.llm_response_body_for_log.as_ref())
+                .and_then(Self::logged_body_in_memory_bytes)
+                .or_else(|| {
+                    (Some(index) == body_attempt_index)
+                        .then(|| llm_response_body.clone())
+                        .flatten()
+                });
+
+            if let Some(body) = attempt_response_body {
+                request_attempt.llm_response_blob_id = Some(builder.add_response_body(body));
+            }
+
+            let attempt_capture_state = attempt_drafts
+                .get(index)
+                .and_then(|attempt| attempt.llm_response_capture_state.as_deref())
+                .and_then(log_body_capture_state_from_db_str)
+                .or_else(|| {
+                    (Some(index) == body_attempt_index)
+                        .then_some(llm_response_capture_state)
+                        .flatten()
+                });
+            request_attempt.llm_response_capture_state =
+                attempt_capture_state.map(|capture_state| {
+                    Self::log_body_capture_state_as_db_str(capture_state).to_string()
+                });
+        }
+
+        if request_attempts
+            .iter()
+            .all(|attempt| attempt.llm_request_blob_id.is_none())
+        {
+            if let (Some(index), Some(body)) = (body_attempt_index, llm_request_body) {
+                let llm_api_type = request_attempts[index]
+                    .llm_api_type
+                    .unwrap_or(context.llm_api_type);
+                let body_ref = builder.add_llm_request_body(
+                    context.user_api_type,
+                    llm_api_type,
+                    request_attempts[index].attempt_index,
+                    body,
+                );
+                request_attempts[index].llm_request_blob_id = Some(body_ref.blob_id);
+                request_attempts[index].llm_request_patch_id = body_ref.patch_id;
+            }
+        }
+
+        if request_attempts
+            .iter()
+            .all(|attempt| attempt.llm_response_blob_id.is_none())
+        {
+            if let (Some(index), Some(body)) = (body_attempt_index, llm_response_body) {
+                request_attempts[index].llm_response_blob_id =
+                    Some(builder.add_response_body(body));
+            }
+        }
+
+        if let Some(index) = body_attempt_index {
+            if request_attempts[index].llm_response_capture_state.is_none() {
+                request_attempts[index].llm_response_capture_state = llm_response_capture_state
+                    .map(|capture_state| {
+                        Self::log_body_capture_state_as_db_str(capture_state).to_string()
+                    });
+            }
+        }
+
+        let attempt_sections = request_attempts
+            .iter()
+            .map(|attempt| RequestLogBundleAttemptSection {
+                attempt_id: Some(attempt.id),
+                attempt_index: attempt.attempt_index,
+                llm_request_blob_id: attempt.llm_request_blob_id,
+                llm_request_patch_id: attempt.llm_request_patch_id,
+                llm_response_blob_id: attempt.llm_response_blob_id,
+                llm_response_capture_state: attempt
+                    .llm_response_capture_state
+                    .as_deref()
+                    .and_then(log_body_capture_state_from_db_str),
+            })
+            .collect::<Vec<_>>();
+
+        builder.finish(
+            log_id,
+            created_at,
+            RequestLogBundleRequestSection {
+                user_request_blob_id,
+                user_response_blob_id,
+                user_response_capture_state,
+            },
+            attempt_sections,
+        )
     }
 
     fn build_cost_outcome(context: &RequestLogContext) -> CostOutcome {
@@ -1198,6 +1747,33 @@ fn should_persist_response_bodies(status: &RequestStatus) -> bool {
     *status != RequestStatus::Cancelled
 }
 
+fn response_capture_state_for_bundle(
+    logged_body: Option<&LoggedBody>,
+    persisted_body: Option<&Bytes>,
+    response_context_present: bool,
+) -> Option<LogBodyCaptureState> {
+    if persisted_body.is_some() {
+        return logged_body
+            .map(LoggedBody::capture_state)
+            .or(Some(LogBodyCaptureState::NotCaptured));
+    }
+
+    if logged_body.is_some() || response_context_present {
+        Some(LogBodyCaptureState::NotCaptured)
+    } else {
+        None
+    }
+}
+
+fn log_body_capture_state_from_db_str(value: &str) -> Option<LogBodyCaptureState> {
+    match value {
+        "COMPLETE" => Some(LogBodyCaptureState::Complete),
+        "INCOMPLETE" => Some(LogBodyCaptureState::Incomplete),
+        "NOT_CAPTURED" => Some(LogBodyCaptureState::NotCaptured),
+        _ => None,
+    }
+}
+
 static LOG_MANAGER: LazyLock<LogManager> = LazyLock::new(LogManager::new);
 
 pub fn get_log_manager() -> &'static LogManager {
@@ -1207,17 +1783,21 @@ pub fn get_log_manager() -> &'static LogManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        LogBodyKind, LogManager, LogManagerMetrics, RequestLogContext, StreamingBodyWriter,
-        should_persist_response_bodies,
+        LogBodyKind, LogManager, LogManagerMetrics, LoggedBody, RequestLogContext,
+        StreamingBodyWriter, response_capture_state_for_bundle, should_persist_response_bodies,
     };
     use crate::cost::UsageNormalization;
+    use crate::proxy::orchestrator::{
+        CAPABILITY_MISMATCH_SKIPPED_ERROR, NO_CANDIDATE_AVAILABLE_ERROR, RequestAttemptDraft,
+    };
     use crate::schema::enum_def::{
-        LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus, StorageType,
+        LlmApiType, ProviderApiKeyMode, ProviderType, RequestAttemptStatus, RequestStatus,
+        SchedulerAction, StorageType,
     };
     use crate::service::cache::types::{
         CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider,
     };
-    use crate::utils::storage::{LogBodyCaptureState, LogBundle};
+    use crate::utils::storage::{LogBodyCaptureState, REQUEST_LOG_BUNDLE_V2_VERSION};
     use crate::utils::usage::UsageInfo;
     use bytes::Bytes;
 
@@ -1259,6 +1839,12 @@ mod tests {
             model_name: "gpt-test".to_string(),
             real_model_name: Some("real-gpt-test".to_string()),
             cost_catalog_id: None,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_image_input: true,
+            supports_embeddings: true,
+            supports_rerank: true,
             is_enabled: true,
         };
 
@@ -1266,7 +1852,7 @@ mod tests {
             &system_api_key,
             &provider,
             &model,
-            4,
+            Some(4),
             "manual-smoke-route",
             "global_route",
             Some(8),
@@ -1279,29 +1865,371 @@ mod tests {
     }
 
     #[test]
-    fn log_bundle_tracks_only_response_capture_state() {
-        let bundle = LogBundle {
-            version: 1,
-            log_id: 42,
-            created_at: 1_744_100_800_000,
-            user_request_body: Some(Bytes::from_static(b"user request")),
-            llm_request_body: Some(Bytes::from_static(b"llm request")),
-            llm_response_body: Some(Bytes::from_static(b"llm response")),
-            llm_response_capture_state: Some(LogBodyCaptureState::Incomplete),
-            user_response_body: Some(Bytes::from_static(b"user response")),
-            user_response_capture_state: Some(LogBodyCaptureState::Complete),
-        };
-
-        assert_eq!(
-            bundle.user_request_body,
-            Some(Bytes::from_static(b"user request"))
+    fn request_log_bundle_v2_tracks_sections_and_blob_refs() {
+        let mut context = make_log_context();
+        context.request_url = Some("https://example.com/v1/chat/completions".to_string());
+        context.overall_status = RequestStatus::Success;
+        let mut request_attempts = LogManager::build_request_attempts_for_logging(
+            &context,
+            2_000,
+            Some(LogBodyCaptureState::Incomplete),
         );
+        let bundle = LogManager::build_request_log_bundle_v2(
+            42,
+            1_744_100_800_000,
+            &context,
+            &mut request_attempts,
+            Some(Bytes::from_static(b"user request")),
+            Some(Bytes::from_static(b"llm request")),
+            Some(Bytes::from_static(b"llm response")),
+            Some(LogBodyCaptureState::Incomplete),
+            Some(Bytes::from_static(b"user response")),
+            Some(LogBodyCaptureState::Complete),
+        );
+
+        assert_eq!(bundle.version, REQUEST_LOG_BUNDLE_V2_VERSION);
+        assert_eq!(bundle.request_section.user_request_blob_id, Some(1));
+        assert_eq!(bundle.request_section.user_response_blob_id, Some(2));
         assert_eq!(
-            bundle.llm_response_capture_state,
+            bundle.request_section.user_response_capture_state,
+            Some(LogBodyCaptureState::Complete)
+        );
+        assert_eq!(bundle.attempt_sections.len(), 1);
+        assert_eq!(
+            bundle.attempt_sections[0].attempt_id,
+            Some(request_attempts[0].id)
+        );
+        assert_eq!(bundle.attempt_sections[0].llm_request_blob_id, Some(3));
+        assert_eq!(
+            bundle.attempt_sections[0].llm_response_capture_state,
             Some(LogBodyCaptureState::Incomplete)
         );
+        assert_eq!(bundle.blob_pool.len(), 4);
+        assert_eq!(request_attempts[0].llm_request_blob_id, Some(3));
+        assert_eq!(request_attempts[0].llm_response_blob_id, Some(4));
+
+        LogManager::clear_attempt_bundle_refs(&mut request_attempts);
+        assert_eq!(request_attempts[0].llm_request_blob_id, None);
+        assert_eq!(request_attempts[0].llm_request_patch_id, None);
+        assert_eq!(request_attempts[0].llm_response_blob_id, None);
+    }
+
+    #[test]
+    fn request_log_bundle_v2_uses_each_attempt_body_snapshot() {
+        let mut context = make_log_context();
+        context.user_api_type = LlmApiType::Openai;
+        context.llm_api_type = LlmApiType::Openai;
+        context.request_url = Some("https://example.com/v1/chat/completions".to_string());
+        context.overall_status = RequestStatus::Success;
+        context.completion_ts = Some(2_000);
+
+        let prompt = "This long prompt makes a model-only JSON patch smaller than storing the full request body for every attempt.";
+        let user_request = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "route",
+                "messages": [{"role": "user", "content": prompt}]
+            }))
+            .unwrap(),
+        );
+        let first_attempt_body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "candidate-a",
+                "messages": [{"role": "user", "content": prompt}]
+            }))
+            .unwrap(),
+        );
+        let second_attempt_body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "candidate-b",
+                "messages": [{"role": "user", "content": prompt}]
+            }))
+            .unwrap(),
+        );
+
+        context.attempts = vec![
+            RequestAttemptDraft {
+                candidate_position: 1,
+                provider_id: Some(2),
+                model_id: Some(3),
+                llm_api_type: Some(LlmApiType::Openai),
+                attempt_status: RequestAttemptStatus::Error,
+                scheduler_action: SchedulerAction::FallbackNextCandidate,
+                request_uri: Some("https://example.com/v1/chat/completions".to_string()),
+                started_at: Some(1_000),
+                completed_at: Some(1_100),
+                llm_request_body_for_log: Some(LoggedBody::from_bytes(first_attempt_body)),
+                llm_response_body_for_log: Some(LoggedBody::from_bytes(Bytes::from_static(
+                    br#"{"error":"rate limited"}"#,
+                ))),
+                llm_response_capture_state: Some("COMPLETE".to_string()),
+                ..RequestAttemptDraft::default()
+            },
+            RequestAttemptDraft {
+                candidate_position: 2,
+                provider_id: Some(2),
+                model_id: Some(4),
+                llm_api_type: Some(LlmApiType::Openai),
+                attempt_status: RequestAttemptStatus::Success,
+                scheduler_action: SchedulerAction::ReturnSuccess,
+                request_uri: Some("https://example.com/v1/chat/completions".to_string()),
+                started_at: Some(1_200),
+                completed_at: Some(1_300),
+                llm_request_body_for_log: Some(LoggedBody::from_bytes(second_attempt_body)),
+                llm_response_body_for_log: Some(LoggedBody::from_bytes(Bytes::from_static(
+                    br#"{"choices":[{"message":{"content":"ok"}}]}"#,
+                ))),
+                llm_response_capture_state: Some("COMPLETE".to_string()),
+                ..RequestAttemptDraft::default()
+            },
+        ];
+
+        let mut request_attempts =
+            LogManager::build_request_attempts_for_logging(&context, 2_000, None);
+        let bundle = LogManager::build_request_log_bundle_v2(
+            42,
+            1_744_100_800_000,
+            &context,
+            &mut request_attempts,
+            Some(user_request),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(bundle.attempt_sections.len(), 2);
+        assert!(bundle.attempt_sections[0].llm_request_blob_id.is_some());
+        assert!(bundle.attempt_sections[1].llm_request_blob_id.is_some());
+        assert!(bundle.attempt_sections[0].llm_request_patch_id.is_some());
+        assert!(bundle.attempt_sections[1].llm_request_patch_id.is_some());
+        assert!(bundle.attempt_sections[0].llm_response_blob_id.is_some());
+        assert!(bundle.attempt_sections[1].llm_response_blob_id.is_some());
+        assert_eq!(request_attempts[0].llm_request_patch_id, Some(1));
+        assert_eq!(request_attempts[1].llm_request_patch_id, Some(2));
+    }
+
+    #[test]
+    fn request_log_bundle_v2_marks_response_as_not_captured_when_body_is_absent() {
+        let mut context = make_log_context();
+        context.request_url = Some("https://example.com/v1/chat/completions".to_string());
+        context.llm_status = Some(reqwest::StatusCode::OK);
+        context.overall_status = RequestStatus::Success;
+        let mut request_attempts = LogManager::build_request_attempts_for_logging(
+            &context,
+            2_000,
+            Some(LogBodyCaptureState::NotCaptured),
+        );
+
+        let bundle = LogManager::build_request_log_bundle_v2(
+            42,
+            1_744_100_800_000,
+            &context,
+            &mut request_attempts,
+            Some(Bytes::from_static(b"user request")),
+            Some(Bytes::from_static(b"llm request")),
+            None,
+            Some(LogBodyCaptureState::NotCaptured),
+            None,
+            Some(LogBodyCaptureState::NotCaptured),
+        );
+
         assert_eq!(
-            bundle.user_response_capture_state,
+            bundle.request_section.user_response_capture_state,
+            Some(LogBodyCaptureState::NotCaptured)
+        );
+        assert_eq!(bundle.request_section.user_response_blob_id, None);
+        assert_eq!(
+            bundle.attempt_sections[0].llm_response_capture_state,
+            Some(LogBodyCaptureState::NotCaptured)
+        );
+        assert_eq!(bundle.attempt_sections[0].llm_response_blob_id, None);
+    }
+
+    #[test]
+    fn request_log_rollup_uses_preallocated_attempt_ids_and_scheduler_counts() {
+        let mut context = make_log_context();
+        context.request_url = Some("https://example.com/v1/chat/completions".to_string());
+        context.llm_request_sent_at = Some(1_500);
+        context.first_chunk_ts = Some(1_600);
+        context.completion_ts = Some(1_700);
+        context.overall_status = RequestStatus::Success;
+        let skipped_attempt = RequestAttemptDraft {
+            candidate_position: 1,
+            provider_id: Some(10),
+            provider_name_snapshot: Some("Skipped Provider".to_string()),
+            model_id: Some(11),
+            model_name_snapshot: Some("skipped-model".to_string()),
+            llm_api_type: Some(LlmApiType::Openai),
+            attempt_status: RequestAttemptStatus::Skipped,
+            scheduler_action: SchedulerAction::FallbackNextCandidate,
+            error_code: Some(CAPABILITY_MISMATCH_SKIPPED_ERROR.to_string()),
+            ..RequestAttemptDraft::default()
+        };
+        let terminal_attempt = RequestAttemptDraft {
+            candidate_position: 2,
+            provider_id: Some(20),
+            provider_api_key_id: Some(21),
+            model_id: Some(22),
+            provider_key_snapshot: Some("final-provider".to_string()),
+            provider_name_snapshot: Some("Final Provider".to_string()),
+            model_name_snapshot: Some("final-model".to_string()),
+            real_model_name_snapshot: Some("real-final-model".to_string()),
+            llm_api_type: Some(LlmApiType::Anthropic),
+            request_uri: context.request_url.clone(),
+            started_at: Some(1_500),
+            ..RequestAttemptDraft::default()
+        };
+        context.set_attempts_for_logging(&[skipped_attempt], Some(terminal_attempt));
+
+        let request_attempts = LogManager::build_request_attempts_for_logging(
+            &context,
+            2_000,
+            Some(LogBodyCaptureState::Complete),
+        );
+        let mut request_log =
+            LogManager::build_request_log(&context, Some(StorageType::FileSystem), 2_000);
+        LogManager::apply_attempt_rollup_to_request_log(&mut request_log, &request_attempts);
+
+        assert_eq!(request_log.attempt_count, 2);
+        assert_eq!(request_log.retry_count, 0);
+        assert_eq!(request_log.fallback_count, 1);
+        assert_eq!(request_log.final_attempt_id, Some(request_attempts[1].id));
+        assert_eq!(request_log.final_provider_id, Some(20));
+        assert_eq!(request_log.final_provider_api_key_id, Some(21));
+        assert_eq!(
+            request_log.final_model_name_snapshot.as_deref(),
+            Some("final-model")
+        );
+    }
+
+    #[test]
+    fn request_log_rollup_counts_same_candidate_retry_success() {
+        let mut context = make_log_context();
+        context.request_url = Some("https://example.com/v1/chat/completions".to_string());
+        context.llm_request_sent_at = Some(1_500);
+        context.first_chunk_ts = Some(1_650);
+        context.completion_ts = Some(1_900);
+        context.overall_status = RequestStatus::Success;
+        context.attempts = vec![
+            RequestAttemptDraft {
+                candidate_position: 1,
+                provider_id: Some(20),
+                provider_api_key_id: Some(21),
+                model_id: Some(22),
+                provider_key_snapshot: Some("retry-provider".to_string()),
+                provider_name_snapshot: Some("Retry Provider".to_string()),
+                model_name_snapshot: Some("retry-model".to_string()),
+                real_model_name_snapshot: Some("real-retry-model".to_string()),
+                llm_api_type: Some(LlmApiType::Openai),
+                attempt_status: RequestAttemptStatus::Error,
+                scheduler_action: SchedulerAction::RetrySameCandidate,
+                error_code: Some("upstream_timeout".to_string()),
+                started_at: Some(1_500),
+                completed_at: Some(1_550),
+                backoff_ms: Some(250),
+                ..RequestAttemptDraft::default()
+            },
+            RequestAttemptDraft {
+                candidate_position: 1,
+                provider_id: Some(20),
+                provider_api_key_id: Some(21),
+                model_id: Some(22),
+                provider_key_snapshot: Some("retry-provider".to_string()),
+                provider_name_snapshot: Some("Retry Provider".to_string()),
+                model_name_snapshot: Some("retry-model".to_string()),
+                real_model_name_snapshot: Some("real-retry-model".to_string()),
+                llm_api_type: Some(LlmApiType::Openai),
+                attempt_status: RequestAttemptStatus::Success,
+                scheduler_action: SchedulerAction::ReturnSuccess,
+                request_uri: context.request_url.clone(),
+                started_at: Some(1_650),
+                first_byte_at: Some(1_700),
+                completed_at: Some(1_900),
+                response_started_to_client: true,
+                total_input_tokens: Some(10),
+                total_output_tokens: Some(20),
+                total_tokens: Some(30),
+                ..RequestAttemptDraft::default()
+            },
+        ];
+
+        let request_attempts = LogManager::build_request_attempts_for_logging(
+            &context,
+            2_000,
+            Some(LogBodyCaptureState::Complete),
+        );
+        let mut request_log =
+            LogManager::build_request_log(&context, Some(StorageType::FileSystem), 2_000);
+        LogManager::apply_attempt_rollup_to_request_log(&mut request_log, &request_attempts);
+
+        assert_eq!(request_log.attempt_count, 2);
+        assert_eq!(request_log.retry_count, 1);
+        assert_eq!(request_log.fallback_count, 0);
+        assert_eq!(request_log.final_attempt_id, Some(request_attempts[1].id));
+        assert_eq!(request_log.final_provider_id, Some(20));
+        assert_eq!(
+            request_log.final_model_name_snapshot.as_deref(),
+            Some("retry-model")
+        );
+    }
+
+    #[test]
+    fn terminal_attempt_merge_backfills_response_headers_from_context() {
+        let mut context = make_log_context();
+        context.request_url = Some("https://example.com/v1/chat/completions".to_string());
+        context.response_headers_json = Some(
+            r#"{"content-type":"text/event-stream","x-request-id":"stream-req-1"}"#.to_string(),
+        );
+        context.llm_request_sent_at = Some(1_500);
+        context.completion_ts = Some(1_700);
+        context.overall_status = RequestStatus::Success;
+        context.set_attempts_for_logging(
+            &[],
+            Some(RequestAttemptDraft {
+                candidate_position: 1,
+                provider_id: Some(20),
+                model_id: Some(22),
+                request_uri: context.request_url.clone(),
+                started_at: Some(1_500),
+                ..RequestAttemptDraft::default()
+            }),
+        );
+
+        let request_attempts = LogManager::build_request_attempts_for_logging(
+            &context,
+            2_000,
+            Some(LogBodyCaptureState::Complete),
+        );
+
+        assert_eq!(request_attempts.len(), 1);
+        assert_eq!(
+            request_attempts[0].response_headers_json.as_deref(),
+            Some(r#"{"content-type":"text/event-stream","x-request-id":"stream-req-1"}"#)
+        );
+    }
+
+    #[test]
+    fn response_capture_state_for_bundle_marks_missing_body_as_not_captured() {
+        assert_eq!(
+            response_capture_state_for_bundle(None, None, true),
+            Some(LogBodyCaptureState::NotCaptured)
+        );
+        assert_eq!(response_capture_state_for_bundle(None, None, false), None);
+        assert_eq!(
+            response_capture_state_for_bundle(
+                Some(&LoggedBody::from_bytes(Bytes::from_static(b"ok"))),
+                None,
+                true,
+            ),
+            Some(LogBodyCaptureState::NotCaptured)
+        );
+        assert_eq!(
+            response_capture_state_for_bundle(
+                Some(&LoggedBody::from_bytes(Bytes::from_static(b"ok"))),
+                Some(&Bytes::from_static(b"ok")),
+                true,
+            ),
             Some(LogBodyCaptureState::Complete)
         );
     }
@@ -1347,17 +2275,11 @@ mod tests {
             is_enabled: true,
             components: vec![],
         });
-        context.applied_request_patch_ids_json = Some("[11,22]".to_string());
-        context.request_patch_summary_json = Some(
-            r#"{"provider_id":2,"model_id":3,"effective_rules":[],"explain":[],"conflicts":[],"has_conflicts":false}"#
-                .to_string(),
-        );
-
         let request_log =
             LogManager::build_request_log(&context, Some(StorageType::FileSystem), 2000);
 
         assert_eq!(request_log.user_api_type, LlmApiType::Responses);
-        assert_eq!(request_log.llm_api_type, LlmApiType::Anthropic);
+        assert_eq!(request_log.final_llm_api_type, Some(LlmApiType::Anthropic));
         assert_eq!(
             request_log.requested_model_name.as_deref(),
             Some("manual-smoke-route")
@@ -1371,9 +2293,14 @@ mod tests {
             request_log.resolved_route_name.as_deref(),
             Some("manual-smoke-route")
         );
+        assert_eq!(request_log.attempt_count, 1);
+        assert_eq!(request_log.retry_count, 0);
+        assert_eq!(request_log.fallback_count, 0);
+        assert_eq!(request_log.final_provider_id, Some(2));
+        assert_eq!(request_log.final_model_id, Some(3));
         assert_eq!(
-            request_log.llm_request_uri.as_deref(),
-            Some("https://example.com/v1/chat/completions")
+            request_log.final_model_name_snapshot.as_deref(),
+            Some("gpt-test")
         );
         assert_eq!(request_log.total_input_tokens, Some(10));
         assert_eq!(request_log.total_output_tokens, Some(20));
@@ -1385,16 +2312,14 @@ mod tests {
         assert_eq!(request_log.estimated_cost_currency.as_deref(), Some("USD"));
         assert_eq!(request_log.cost_catalog_version_id, Some(9));
         assert_eq!(
-            request_log.applied_request_patch_ids_json.as_deref(),
-            Some("[11,22]")
+            request_log.bundle_version,
+            Some(REQUEST_LOG_BUNDLE_V2_VERSION as i32)
         );
-        assert!(
-            request_log
-                .request_patch_summary_json
-                .as_deref()
-                .unwrap_or_default()
-                .contains("\"provider_id\":2")
+        assert_eq!(
+            request_log.bundle_storage_type,
+            Some(StorageType::FileSystem)
         );
+        assert!(request_log.bundle_storage_key.is_some());
     }
 
     #[test]
@@ -1407,7 +2332,7 @@ mod tests {
 
         let request_log = LogManager::build_request_log(&context, None, 2000);
 
-        assert_eq!(request_log.status, Some(RequestStatus::Error));
+        assert_eq!(request_log.overall_status, RequestStatus::Error);
         assert_eq!(
             request_log.requested_model_name.as_deref(),
             Some("manual-smoke-route")
@@ -1421,10 +2346,52 @@ mod tests {
             request_log.resolved_route_name.as_deref(),
             Some("manual-smoke-route")
         );
-        assert_eq!(request_log.model_name, "gpt-test");
-        assert_eq!(request_log.real_model_name, "real-gpt-test");
-        assert!(request_log.llm_request_uri.is_none());
-        assert!(request_log.llm_response_status.is_none());
+        assert_eq!(
+            request_log.final_model_name_snapshot.as_deref(),
+            Some("gpt-test")
+        );
+        assert_eq!(
+            request_log.final_real_model_name_snapshot.as_deref(),
+            Some("real-gpt-test")
+        );
+        assert_eq!(request_log.attempt_count, 0);
+        assert!(request_log.first_attempt_started_at.is_none());
+        assert!(request_log.bundle_storage_key.is_none());
+    }
+
+    #[test]
+    fn build_request_log_counts_skipped_attempts_and_preserves_final_error() {
+        let mut context = make_log_context();
+        context.overall_status = RequestStatus::Error;
+        context.final_error_code = Some(NO_CANDIDATE_AVAILABLE_ERROR.to_string());
+        context.final_error_message = Some("No execution candidate is available.".to_string());
+        context.provider_api_key_id = None;
+        context.skipped_attempts = vec![RequestAttemptDraft {
+            candidate_position: 1,
+            provider_id: Some(2),
+            provider_api_key_id: None,
+            model_id: Some(3),
+            provider_key_snapshot: Some("provider".to_string()),
+            provider_name_snapshot: Some("Provider".to_string()),
+            model_name_snapshot: Some("gpt-test".to_string()),
+            real_model_name_snapshot: Some("real-gpt-test".to_string()),
+            llm_api_type: Some(LlmApiType::Anthropic),
+            attempt_status: RequestAttemptStatus::Skipped,
+            scheduler_action: SchedulerAction::FallbackNextCandidate,
+            error_code: Some(CAPABILITY_MISMATCH_SKIPPED_ERROR.to_string()),
+            error_message: Some("missing tools".to_string()),
+            ..RequestAttemptDraft::default()
+        }];
+
+        let request_log = LogManager::build_request_log(&context, None, 2000);
+
+        assert_eq!(request_log.attempt_count, 1);
+        assert_eq!(request_log.fallback_count, 1);
+        assert_eq!(
+            request_log.final_error_code.as_deref(),
+            Some(NO_CANDIDATE_AVAILABLE_ERROR)
+        );
+        assert_eq!(request_log.final_provider_api_key_id, None);
     }
 
     #[tokio::test]

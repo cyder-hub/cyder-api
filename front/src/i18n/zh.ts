@@ -317,6 +317,7 @@ export const zhDict = {
         SUCCESS: "成功",
         PENDING: "处理中",
         ERROR: "失败",
+        CANCELLED: "已取消",
       },
       applyButton: "应用筛选",
       resetButton: "重置",
@@ -468,8 +469,17 @@ export const zhDict = {
       provider: "渠道",
       model: "模型",
       realModel: "真实模型",
+      capabilities: "能力",
       enabled: "启用",
     },
+  },
+  modelCapabilities: {
+    streaming: "流式",
+    tools: "工具",
+    reasoning: "推理",
+    imageInput: "图像输入",
+    embeddings: "向量",
+    rerank: "重排",
   },
   apiKeyPage: {
     title: "API Key 管理",
@@ -848,7 +858,10 @@ export const zhDict = {
           "在这里管理额外 API Key、更多模型、request patch 和远端模型同步。",
       },
       modelsDescription:
-        "这里可直接编辑模型名称、映射模型名称和启用状态。完整配置仍然留在 ModelEdit。",
+        "这里可直接编辑模型名称、映射模型名称、能力和启用状态。完整配置仍然留在 ModelEdit。",
+    },
+    modelCapabilities: {
+      title: "能力",
     },
     preview: {
       title: "生成预览",
@@ -931,6 +944,11 @@ export const zhDict = {
     labelModelName: "模型名称",
     labelRealModelName: "真实模型名称",
     labelEnabled: "已启用",
+    capabilities: {
+      title: "模型能力",
+      description:
+        "路由 prefilter 会读取这些显式运行时能力。启用 retry / fallback 前，请让它们与真实渠道行为保持一致。",
+    },
     alert: {
       missingId: "缺少模型ID，无法编辑。",
       loadDataFailed: "加载模型数据失败，ID: {modelId}。",

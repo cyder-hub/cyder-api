@@ -128,6 +128,12 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
     model_name: "gemini-1.5-pro",
     real_model_name: "gemini-1.5-pro-latest",
     is_enabled: false,
+    supports_streaming: true,
+    supports_tools: true,
+    supports_reasoning: true,
+    supports_image_input: true,
+    supports_embeddings: true,
+    supports_rerank: true,
     isEditing: false,
     checkStatus: "unchecked",
   });

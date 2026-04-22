@@ -322,6 +322,7 @@ export const enDict = {
         SUCCESS: "Success",
         PENDING: "Pending",
         ERROR: "Error",
+        CANCELLED: "Cancelled",
       },
       applyButton: "Apply Filter",
       resetButton: "Reset",
@@ -478,8 +479,17 @@ export const enDict = {
       provider: "Provider",
       model: "Model",
       realModel: "Real Model",
+      capabilities: "Capabilities",
       enabled: "Enabled",
     },
+  },
+  modelCapabilities: {
+    streaming: "Streaming",
+    tools: "Tools",
+    reasoning: "Reasoning",
+    imageInput: "Image Input",
+    embeddings: "Embeddings",
+    rerank: "Rerank",
   },
   apiKeyPage: {
     title: "API Key Management",
@@ -882,7 +892,10 @@ export const enDict = {
           "Manage extra API keys, more models, request patches, and remote model sync here.",
       },
       modelsDescription:
-        "Edit model name, mapped model name, and enabled state inline. Full configuration still lives in ModelEdit.",
+        "Edit model name, mapped model name, capabilities, and enabled state inline. Full configuration still lives in ModelEdit.",
+    },
+    modelCapabilities: {
+      title: "Capabilities",
     },
     preview: {
       title: "Generated Preview",
@@ -968,6 +981,11 @@ export const enDict = {
     labelModelName: "Model Name",
     labelRealModelName: "Real Model Name",
     labelEnabled: "Enabled",
+    capabilities: {
+      title: "Model Capabilities",
+      description:
+        "Explicit runtime capabilities used by routing prefilter. Keep these aligned with provider behavior before enabling retry and fallback.",
+    },
     alert: {
       missingId: "Model ID is missing. Cannot edit.",
       loadDataFailed: "Failed to load model data for ID: {modelId}.",

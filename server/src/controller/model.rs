@@ -1,7 +1,9 @@
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use crate::{
     controller::BaseError,
-    database::model::{Model, ModelDetail, ModelSummaryItem, UpdateModelData},
+    database::model::{
+        Model, ModelCapabilityFlags, ModelDetail, ModelSummaryItem, UpdateModelData,
+    },
     utils::HttpResult, // Import HttpResult
 };
 use axum::{
@@ -23,6 +25,18 @@ pub struct InsertModelRequest {
     pub real_model_name: Option<String>,
     #[serde(default = "default_true")]
     pub is_enabled: bool,
+    #[serde(default = "default_true")]
+    pub supports_streaming: bool,
+    #[serde(default = "default_true")]
+    pub supports_tools: bool,
+    #[serde(default = "default_true")]
+    pub supports_reasoning: bool,
+    #[serde(default = "default_true")]
+    pub supports_image_input: bool,
+    #[serde(default = "default_true")]
+    pub supports_embeddings: bool,
+    #[serde(default = "default_true")]
+    pub supports_rerank: bool,
 }
 
 async fn insert_model(
@@ -34,6 +48,14 @@ async fn insert_model(
         &request.model_name,
         request.real_model_name.as_deref(),
         request.is_enabled,
+        ModelCapabilityFlags {
+            supports_streaming: request.supports_streaming,
+            supports_tools: request.supports_tools,
+            supports_reasoning: request.supports_reasoning,
+            supports_image_input: request.supports_image_input,
+            supports_embeddings: request.supports_embeddings,
+            supports_rerank: request.supports_rerank,
+        },
     )?;
 
     if let Err(store_err) = app_state.invalidate_models_catalog().await {
@@ -71,6 +93,12 @@ pub struct UpdateModelRequest {
     pub real_model_name: Option<String>,
     pub is_enabled: bool,
     pub cost_catalog_id: Option<i64>,
+    pub supports_streaming: Option<bool>,
+    pub supports_tools: Option<bool>,
+    pub supports_reasoning: Option<bool>,
+    pub supports_image_input: Option<bool>,
+    pub supports_embeddings: Option<bool>,
+    pub supports_rerank: Option<bool>,
 }
 
 async fn update_model(
@@ -83,6 +111,12 @@ async fn update_model(
         real_model_name: Some(request.real_model_name),
         is_enabled: Some(request.is_enabled),
         cost_catalog_id: Some(request.cost_catalog_id),
+        supports_streaming: request.supports_streaming,
+        supports_tools: request.supports_tools,
+        supports_reasoning: request.supports_reasoning,
+        supports_image_input: request.supports_image_input,
+        supports_embeddings: request.supports_embeddings,
+        supports_rerank: request.supports_rerank,
     };
     let updated_model = Model::update(id, &update_data)?;
 
@@ -145,6 +179,12 @@ mod tests {
             provider_name: "OpenAI api.example.com".to_string(),
             model_name: "gpt-4o-mini".to_string(),
             real_model_name: Some("gpt-4o-mini-2024-07-18".to_string()),
+            supports_streaming: true,
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_image_input: true,
+            supports_embeddings: true,
+            supports_rerank: true,
             is_enabled: true,
         }]);
 
@@ -169,6 +209,12 @@ mod tests {
                 "provider_name".to_string(),
                 "model_name".to_string(),
                 "real_model_name".to_string(),
+                "supports_streaming".to_string(),
+                "supports_tools".to_string(),
+                "supports_reasoning".to_string(),
+                "supports_image_input".to_string(),
+                "supports_embeddings".to_string(),
+                "supports_rerank".to_string(),
                 "is_enabled".to_string(),
             ])
         );

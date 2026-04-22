@@ -161,6 +161,38 @@ impl ProviderGovernanceConfig {
     }
 }
 
+pub const DEFAULT_SAME_CANDIDATE_MAX_RETRIES: u32 = 1;
+pub const DEFAULT_MAX_CANDIDATES_PER_REQUEST: u32 = 2;
+pub const DEFAULT_BASE_BACKOFF_MS: u64 = 250;
+pub const DEFAULT_MAX_BACKOFF_MS: u64 = 1500;
+pub const DEFAULT_RESPECT_RETRY_AFTER_UP_TO_SECONDS: u64 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingResilienceConfig {
+    #[serde(default = "default_same_candidate_max_retries")]
+    pub same_candidate_max_retries: u32,
+    #[serde(default = "default_max_candidates_per_request")]
+    pub max_candidates_per_request: u32,
+    #[serde(default = "default_base_backoff_ms")]
+    pub base_backoff_ms: u64,
+    #[serde(default = "default_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+    #[serde(default = "default_respect_retry_after_up_to_seconds")]
+    pub respect_retry_after_up_to_seconds: u64,
+}
+
+impl Default for RoutingResilienceConfig {
+    fn default() -> Self {
+        Self {
+            same_candidate_max_retries: default_same_candidate_max_retries(),
+            max_candidates_per_request: default_max_candidates_per_request(),
+            base_backoff_ms: default_base_backoff_ms(),
+            max_backoff_ms: default_max_backoff_ms(),
+            respect_retry_after_up_to_seconds: default_respect_retry_after_up_to_seconds(),
+        }
+    }
+}
+
 // --- START STORAGE CONFIG ---
 
 /// S3 Access Mode
@@ -270,6 +302,26 @@ fn default_provider_governance_open_cooldown_seconds() -> u64 {
     30
 }
 
+fn default_same_candidate_max_retries() -> u32 {
+    DEFAULT_SAME_CANDIDATE_MAX_RETRIES
+}
+
+fn default_max_candidates_per_request() -> u32 {
+    DEFAULT_MAX_CANDIDATES_PER_REQUEST
+}
+
+fn default_base_backoff_ms() -> u64 {
+    DEFAULT_BASE_BACKOFF_MS
+}
+
+fn default_max_backoff_ms() -> u64 {
+    DEFAULT_MAX_BACKOFF_MS
+}
+
+fn default_respect_retry_after_up_to_seconds() -> u64 {
+    DEFAULT_RESPECT_RETRY_AFTER_UP_TO_SECONDS
+}
+
 fn default_pool_size() -> usize {
     10
 }
@@ -312,6 +364,8 @@ pub struct FinalConfig {
     pub proxy_request: ProxyRequestConfig,
     #[serde(default)]
     pub provider_governance: ProviderGovernanceConfig,
+    #[serde(default)]
+    pub routing_resilience: RoutingResilienceConfig,
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
@@ -365,6 +419,7 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
         redis: None,
         proxy_request: ProxyRequestConfig::default(),
         provider_governance: ProviderGovernanceConfig::default(),
+        routing_resilience: RoutingResilienceConfig::default(),
         cache: CacheConfig::default(),
         storage: StorageConfig::default(),
     };
@@ -428,7 +483,9 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
 
 #[cfg(test)]
 mod tests {
-    use super::{FinalConfig, ProviderGovernanceConfig, ProxyRequestConfig};
+    use super::{
+        FinalConfig, ProviderGovernanceConfig, ProxyRequestConfig, RoutingResilienceConfig,
+    };
 
     #[test]
     fn proxy_request_config_defaults_keep_overall_timeout_disabled() {
@@ -452,7 +509,17 @@ mod tests {
     }
 
     #[test]
-    fn final_config_deserializes_proxy_request_overrides() {
+    fn routing_resilience_defaults_match_task_contract() {
+        let config = RoutingResilienceConfig::default();
+        assert_eq!(config.same_candidate_max_retries, 1);
+        assert_eq!(config.max_candidates_per_request, 2);
+        assert_eq!(config.base_backoff_ms, 250);
+        assert_eq!(config.max_backoff_ms, 1500);
+        assert_eq!(config.respect_retry_after_up_to_seconds, 3);
+    }
+
+    #[test]
+    fn final_config_deserializes_proxy_request_and_resilience_overrides() {
         let yaml = r#"
 host: 0.0.0.0
 port: 8000
@@ -475,6 +542,12 @@ provider_governance:
   enabled: true
   consecutive_failure_threshold: 7
   open_cooldown_seconds: 45
+routing_resilience:
+  same_candidate_max_retries: 2
+  max_candidates_per_request: 3
+  base_backoff_ms: 125
+  max_backoff_ms: 1000
+  respect_retry_after_up_to_seconds: 2
 "#;
 
         let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
@@ -484,6 +557,14 @@ provider_governance:
         assert!(config.provider_governance.enabled);
         assert_eq!(config.provider_governance.consecutive_failure_threshold, 7);
         assert_eq!(config.provider_governance.open_cooldown_seconds, 45);
+        assert_eq!(config.routing_resilience.same_candidate_max_retries, 2);
+        assert_eq!(config.routing_resilience.max_candidates_per_request, 3);
+        assert_eq!(config.routing_resilience.base_backoff_ms, 125);
+        assert_eq!(config.routing_resilience.max_backoff_ms, 1000);
+        assert_eq!(
+            config.routing_resilience.respect_retry_after_up_to_seconds,
+            2
+        );
         assert_eq!(
             config
                 .proxy_request

@@ -54,6 +54,12 @@ pub struct CacheModel {
     pub model_name: String,
     pub real_model_name: Option<String>,
     pub cost_catalog_id: Option<i64>,
+    pub supports_streaming: bool,
+    pub supports_tools: bool,
+    pub supports_reasoning: bool,
+    pub supports_image_input: bool,
+    pub supports_embeddings: bool,
+    pub supports_rerank: bool,
     pub is_enabled: bool,
 }
 
@@ -281,6 +287,12 @@ impl From<crate::database::model::Model> for CacheModel {
             real_model_name: db.real_model_name,
             model_name: db.model_name,
             cost_catalog_id: db.cost_catalog_id,
+            supports_streaming: db.supports_streaming,
+            supports_tools: db.supports_tools,
+            supports_reasoning: db.supports_reasoning,
+            supports_image_input: db.supports_image_input,
+            supports_embeddings: db.supports_embeddings,
+            supports_rerank: db.supports_rerank,
             is_enabled: db.is_enabled,
         }
     }

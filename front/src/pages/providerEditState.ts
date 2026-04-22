@@ -109,7 +109,21 @@ function buildPreviewSubject(form: ProviderBootstrapPreviewState): string {
 
 function mapCreatedModel(
   model:
-    | Partial<Pick<ModelItem, "id" | "model_name" | "real_model_name" | "is_enabled">>
+    | Partial<
+        Pick<
+          ModelItem,
+          | "id"
+          | "model_name"
+          | "real_model_name"
+          | "supports_streaming"
+          | "supports_tools"
+          | "supports_reasoning"
+          | "supports_image_input"
+          | "supports_embeddings"
+          | "supports_rerank"
+          | "is_enabled"
+        >
+      >
     | null
     | undefined,
 ): LocalEditableModelItem {
@@ -117,6 +131,12 @@ function mapCreatedModel(
     id: model?.id ?? null,
     model_name: model?.model_name ?? "",
     real_model_name: model?.real_model_name ?? null,
+    supports_streaming: model?.supports_streaming ?? true,
+    supports_tools: model?.supports_tools ?? true,
+    supports_reasoning: model?.supports_reasoning ?? true,
+    supports_image_input: model?.supports_image_input ?? true,
+    supports_embeddings: model?.supports_embeddings ?? true,
+    supports_rerank: model?.supports_rerank ?? true,
     is_enabled: model?.is_enabled ?? true,
     isEditing: false,
     checkStatus: "unchecked",

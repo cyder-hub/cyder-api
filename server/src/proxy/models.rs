@@ -12,8 +12,8 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::{
-            CacheApiKey, CacheApiKeyModelOverride, CacheModel, CacheModelRoute,
-            CacheModelsCatalog, CacheProvider,
+            CacheApiKey, CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelsCatalog,
+            CacheProvider,
         },
     },
     utils::acl::ACL_EVALUATOR,
@@ -397,6 +397,12 @@ mod tests {
             model_name: model_name.to_string(),
             real_model_name: None,
             cost_catalog_id: None,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_image_input: true,
+            supports_embeddings: true,
+            supports_rerank: true,
             is_enabled,
         }
     }

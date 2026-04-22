@@ -1,16 +1,25 @@
 use super::{create_proxy_router, flush_proxy_logs};
 use crate::{
+    config::CONFIG,
     database::{
         access_control::{AccessControlPolicy, ApiCreateAccessControlPolicyPayload},
-        model::Model,
+        api_key::{ApiKey, CreateApiKeyPayload},
+        model::{Model, ModelCapabilityFlags},
         model_route::{CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput},
         provider::{NewProvider, NewProviderApiKey, Provider, ProviderApiKey},
+        request_attempt::RequestAttempt,
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
-        system_api_key::SystemApiKey,
+        request_patch::{CreateRequestPatchPayload, RequestPatchMutationOutcome, RequestPatchRule},
     },
-    schema::enum_def::{Action, ProviderApiKeyMode, ProviderType, RequestStatus},
-    service::app_state::{AppState, create_app_state},
-    utils::ID_GENERATOR,
+    schema::enum_def::{
+        Action, LlmApiType, ProviderApiKeyMode, ProviderType, RequestAttemptStatus,
+        RequestPatchOperation, RequestPatchPlacement, RequestStatus, SchedulerAction,
+    },
+    service::{
+        app_state::{AppState, create_app_state},
+        storage::{get_storage, types::GetObjectOptions},
+    },
+    utils::{ID_GENERATOR, storage::RequestLogBundleV2},
 };
 use axum::{
     body::{Body, Bytes},
@@ -137,6 +146,31 @@ impl UpstreamReply {
             body: Body::from_stream(stream),
         }
     }
+
+    fn erroring_sse(chunks: Vec<(u64, &'static [u8])>, message: &'static str) -> Self {
+        let stream = async_stream::stream! {
+            for (delay_ms, chunk) in chunks {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                yield Ok::<Bytes, std::io::Error>(Bytes::from_static(chunk));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            yield Err::<Bytes, std::io::Error>(std::io::Error::other(message));
+        };
+
+        Self {
+            status: StatusCode::OK,
+            headers: vec![(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"))],
+            body: Body::from_stream(stream),
+        }
+    }
+
+    fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+        self.headers.push((
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        ));
+        self
+    }
 }
 
 struct TestUpstream {
@@ -238,11 +272,60 @@ impl Drop for TestUpstream {
 
 struct TestFixture {
     app_state: Arc<AppState>,
-    system_api_key: SystemApiKey,
+    system_api_key: TestApiKey,
     provider: Provider,
     provider_api_key: ProviderApiKey,
     model: Model,
     access_control_policy_id: Option<i64>,
+}
+
+struct TestApiKey {
+    id: i64,
+    api_key: String,
+}
+
+fn create_provider_model(
+    provider_type: ProviderType,
+    endpoint: String,
+    real_model_name: Option<String>,
+) -> (Provider, ProviderApiKey, Model) {
+    let nonce = ID_GENERATOR.generate_id();
+    let now = chrono::Utc::now().timestamp_millis();
+    let provider = Provider::create(&NewProvider {
+        id: nonce,
+        provider_key: format!("proxy-int-provider-{nonce}"),
+        name: format!("Proxy Integration Provider {nonce}"),
+        endpoint,
+        use_proxy: false,
+        is_enabled: true,
+        created_at: now,
+        updated_at: now,
+        provider_type,
+        provider_api_key_mode: ProviderApiKeyMode::Queue,
+    })
+    .expect("provider should be created");
+
+    let provider_api_key = ProviderApiKey::insert(&NewProviderApiKey {
+        id: ID_GENERATOR.generate_id(),
+        provider_id: provider.id,
+        api_key: format!("provider-secret-{nonce}"),
+        description: Some("integration test provider key".to_string()),
+        is_enabled: true,
+        created_at: now,
+        updated_at: now,
+    })
+    .expect("provider api key should be created");
+
+    let model = Model::create(
+        provider.id,
+        &format!("proxy-int-model-{nonce}"),
+        real_model_name.as_deref(),
+        true,
+        ModelCapabilityFlags::default(),
+    )
+    .expect("model should be created");
+
+    (provider, provider_api_key, model)
 }
 
 impl TestFixture {
@@ -252,47 +335,35 @@ impl TestFixture {
         access_control_policy_id: Option<i64>,
         real_model_name: Option<String>,
     ) -> Self {
-        let nonce = ID_GENERATOR.generate_id();
-        let now = chrono::Utc::now().timestamp_millis();
-        let provider = Provider::create(&NewProvider {
-            id: nonce,
-            provider_key: format!("proxy-int-provider-{nonce}"),
-            name: format!("Proxy Integration Provider {nonce}"),
-            endpoint,
-            use_proxy: false,
-            is_enabled: true,
-            created_at: now,
-            updated_at: now,
-            provider_type,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        let (provider, provider_api_key, model) =
+            create_provider_model(provider_type, endpoint, real_model_name);
+        let system_key_nonce = ID_GENERATOR.generate_id();
+        let created_api_key = ApiKey::create(&CreateApiKeyPayload {
+            name: format!("proxy-int-system-{system_key_nonce}"),
+            description: Some("proxy integration test".to_string()),
+            default_action: Some(if access_control_policy_id.is_some() {
+                Action::Deny
+            } else {
+                Action::Allow
+            }),
+            is_enabled: Some(true),
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: None,
         })
-        .expect("provider should be created");
-
-        let provider_api_key = ProviderApiKey::insert(&NewProviderApiKey {
-            id: ID_GENERATOR.generate_id(),
-            provider_id: provider.id,
-            api_key: format!("provider-secret-{nonce}"),
-            description: Some("integration test provider key".to_string()),
-            is_enabled: true,
-            created_at: now,
-            updated_at: now,
-        })
-        .expect("provider api key should be created");
-
-        let model = Model::create(
-            provider.id,
-            &format!("proxy-int-model-{nonce}"),
-            real_model_name.as_deref(),
-            true,
-        )
-        .expect("model should be created");
-
-        let system_api_key = SystemApiKey::create(
-            &format!("proxy-int-system-{nonce}"),
-            Some("proxy integration test"),
-            access_control_policy_id,
-        )
-        .expect("system api key should be created");
+        .expect("api key should be created");
+        let system_api_key = TestApiKey {
+            id: created_api_key.detail.id,
+            api_key: created_api_key.reveal.api_key,
+        };
 
         let app_state = create_app_state().await;
 
@@ -353,6 +424,39 @@ impl TestFixture {
         )
     }
 
+    async fn latest_log_for_provider(&self, provider_id: i64) -> RequestLogRecord {
+        const MAX_ATTEMPTS: usize = 20;
+        const RETRY_DELAY_MS: u64 = 100;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            flush_proxy_logs().await;
+            let mut logs = RequestLog::list_full(RequestLogQueryPayload {
+                provider_id: Some(provider_id),
+                page: Some(1),
+                page_size: Some(100),
+                ..Default::default()
+            })
+            .expect("request logs should be queryable")
+            .list;
+            logs.sort_by_key(|log| log.request_received_at);
+            if let Some(log) = logs.pop() {
+                return log;
+            }
+
+            if attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+            }
+        }
+
+        panic!("expected one request log for provider_id={provider_id}");
+    }
+
+    async fn attempts_for_log(&self, log_id: i64) -> Vec<RequestAttempt> {
+        flush_proxy_logs().await;
+        RequestAttempt::list_by_request_log_id(log_id)
+            .expect("request attempts should be queryable")
+    }
+
     async fn create_route(&self, route_name: &str) {
         ModelRoute::create(&CreateModelRoutePayload {
             route_name: route_name.to_string(),
@@ -374,12 +478,82 @@ impl TestFixture {
         let _ = Model::delete(self.model.id);
         let _ = ProviderApiKey::delete(self.provider_api_key.id);
         let _ = Provider::delete(self.provider.id);
-        let _ = SystemApiKey::delete(self.system_api_key.id);
+        let _ = ApiKey::delete(self.system_api_key.id);
         if let Some(policy_id) = self.access_control_policy_id {
             let _ = AccessControlPolicy::delete(policy_id);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+async fn bundle_for_log(log: &RequestLogRecord) -> RequestLogBundleV2 {
+    let key = log
+        .bundle_storage_key
+        .as_deref()
+        .expect("request log should have bundle key");
+    let storage = get_storage().await;
+    let bytes = storage
+        .get_object(
+            key,
+            Some(GetObjectOptions {
+                content_encoding: Some("gzip"),
+            }),
+        )
+        .await
+        .expect("request log bundle should be readable");
+
+    rmp_serde::from_slice(&bytes).expect("request log bundle should decode")
+}
+
+fn bundle_blob_json(bundle: &RequestLogBundleV2, blob_id: i32) -> Value {
+    let blob = bundle
+        .blob_pool
+        .iter()
+        .find(|blob| blob.blob_id == blob_id)
+        .expect("bundle blob should exist");
+
+    serde_json::from_slice(&blob.body).expect("bundle blob should be json")
+}
+
+fn bundle_attempt_request_json(bundle: &RequestLogBundleV2, attempt_index: i32) -> Value {
+    let section = bundle
+        .attempt_sections
+        .iter()
+        .find(|section| section.attempt_index == attempt_index)
+        .expect("attempt bundle section");
+    let mut value = bundle_blob_json(
+        bundle,
+        section
+            .llm_request_blob_id
+            .expect("attempt request body blob"),
+    );
+
+    if let Some(patch_id) = section.llm_request_patch_id {
+        let patch = bundle
+            .patch_pool
+            .iter()
+            .find(|patch| patch.patch_id == patch_id)
+            .expect("request body patch should exist");
+        let patch: json_patch::Patch =
+            serde_json::from_slice(&patch.patch_body).expect("request body patch should decode");
+        json_patch::patch(&mut value, &patch).expect("request body patch should apply");
+    }
+
+    value
+}
+
+fn bundle_attempt_response_json(bundle: &RequestLogBundleV2, attempt_index: i32) -> Value {
+    let section = bundle
+        .attempt_sections
+        .iter()
+        .find(|section| section.attempt_index == attempt_index)
+        .expect("attempt bundle section");
+    bundle_blob_json(
+        bundle,
+        section
+            .llm_response_blob_id
+            .expect("attempt response body blob"),
+    )
 }
 
 fn build_json_request(uri: &str, headers: &[(&str, String)], body: Value) -> Request<Body> {
@@ -491,13 +665,10 @@ fn openai_generation_handles_gzip_response_and_persists_log() {
         assert_eq!(upstream.captured_requests().await.len(), 1);
 
         let log = fixture.latest_log().await;
-        assert_eq!(log.status, Some(RequestStatus::Success));
-        assert_eq!(log.llm_response_status, Some(200));
-        assert!(!log.is_stream);
-        assert!(log.user_request_body.is_none());
-        assert!(log.llm_request_body.is_none());
-        assert!(log.llm_response_body.is_none());
-        assert!(log.user_response_body.is_none());
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(log.bundle_version, Some(2));
+        assert!(log.bundle_storage_key.is_some());
 
         fixture.cleanup().await;
     });
@@ -582,13 +753,19 @@ fn gemini_generation_routes_to_native_endpoint_and_logs_success() {
         );
 
         let log = fixture.latest_log().await;
-        assert_eq!(log.status, Some(RequestStatus::Success));
-        assert_eq!(log.llm_response_status, Some(200));
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.attempt_count, 1);
         assert_eq!(log.total_input_tokens, Some(4));
         assert_eq!(log.total_output_tokens, Some(2));
         assert_eq!(log.total_tokens, Some(6));
-        assert!(log.llm_response_body.is_none());
-        assert!(log.user_response_body.is_none());
+        assert_eq!(
+            log.final_model_name_snapshot.as_deref(),
+            Some(fixture.model.model_name.as_str())
+        );
+        assert_eq!(
+            log.final_real_model_name_snapshot.as_deref(),
+            Some("upstream-gemini-model")
+        );
 
         fixture.cleanup().await;
     });
@@ -601,6 +778,16 @@ fn utility_requests_share_proxy_lifecycle_and_write_logs() {
         let _guard = DB_LOCK.lock().await;
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(request.path, "/v1/embeddings");
+            assert_eq!(request.query, None);
+            assert!(
+                request
+                    .headers
+                    .get(AUTHORIZATION)
+                    .expect("provider auth header")
+                    .to_str()
+                    .expect("auth header should be utf8")
+                    .starts_with("Bearer provider-secret-")
+            );
             let body: Value = serde_json::from_slice(&request.body)
                 .expect("upstream request body should be json");
             assert_eq!(body["model"], "upstream-embedding-model");
@@ -654,13 +841,156 @@ fn utility_requests_share_proxy_lifecycle_and_write_logs() {
         assert_eq!(body["data"][0]["embedding"][1], json!(0.2));
 
         let log = fixture.latest_log().await;
-        assert_eq!(log.status, Some(RequestStatus::Success));
-        assert_eq!(log.llm_response_status, Some(200));
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.attempt_count, 1);
         assert_eq!(log.total_input_tokens, Some(4));
         assert_eq!(log.total_output_tokens, Some(0));
         assert_eq!(log.total_tokens, Some(4));
-        assert!(log.user_request_body.is_none());
-        assert!(log.user_response_body.is_none());
+        assert!(log.bundle_storage_key.is_some());
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        let attempt = &attempts[0];
+        assert_eq!(attempt.attempt_status, RequestAttemptStatus::Success);
+        assert_eq!(attempt.scheduler_action, SchedulerAction::ReturnSuccess);
+        assert_eq!(attempt.llm_api_type, Some(LlmApiType::Openai));
+        assert!(
+            attempt
+                .request_uri
+                .as_deref()
+                .expect("attempt request uri")
+                .ends_with("/v1/embeddings")
+        );
+        let logged_headers: Value = serde_json::from_str(
+            attempt
+                .request_headers_json
+                .as_deref()
+                .expect("attempt request headers"),
+        )
+        .expect("request headers json");
+        assert!(logged_headers.get("authorization").is_none());
+        assert_eq!(logged_headers["content-type"], "application/json");
+        assert!(attempt.llm_request_blob_id.is_some());
+        assert!(attempt.llm_response_blob_id.is_some());
+        assert_eq!(
+            attempt.llm_response_capture_state.as_deref(),
+            Some("COMPLETE")
+        );
+
+        let bundle = bundle_for_log(&log).await;
+        let request_json = bundle_attempt_request_json(&bundle, 1);
+        let response_json = bundle_attempt_response_json(&bundle, 1);
+        assert_eq!(request_json["model"], "upstream-embedding-model");
+        assert_eq!(request_json["input"], "embed me");
+        assert_eq!(response_json["usage"]["total_tokens"], 4);
+
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn gemini_utility_requests_capture_attempt_materials_and_usage() {
+    RUNTIME.block_on(async {
+        let _ = ensure_test_database();
+        let _guard = DB_LOCK.lock().await;
+        let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+            assert_eq!(
+                request.path,
+                "/v1beta/models/upstream-gemini-model:countTokens"
+            );
+            assert_eq!(request.query.as_deref(), Some("foo=bar"));
+            assert!(
+                request
+                    .headers
+                    .get("x-goog-api-key")
+                    .expect("gemini api key header")
+                    .to_str()
+                    .expect("gemini api key should be utf8")
+                    .starts_with("provider-secret-")
+            );
+            let body: Value = serde_json::from_slice(&request.body)
+                .expect("upstream request body should be json");
+            assert_eq!(body["contents"][0]["parts"][0]["text"], "count this");
+
+            UpstreamReply::json(
+                StatusCode::OK,
+                json!({
+                    "totalTokens": 9
+                }),
+            )
+        })
+        .await
+        else {
+            return;
+        };
+        let fixture = TestFixture::new(
+            ProviderType::Gemini,
+            format!("{}/v1beta/models", upstream.base_url),
+            None,
+            Some("upstream-gemini-model".to_string()),
+        )
+        .await;
+
+        let request = build_json_request(
+            &format!(
+                "/gemini/v1beta/models/{}:countTokens?foo=bar&key={}",
+                fixture.requested_model(),
+                fixture.system_api_key.api_key
+            ),
+            &[],
+            json!({
+                "contents": [{
+                    "parts": [{"text": "count this"}]
+                }]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
+        assert_eq!(body["totalTokens"], 9);
+
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(log.total_input_tokens, Some(9));
+        assert_eq!(log.total_output_tokens, Some(0));
+        assert_eq!(log.total_tokens, Some(9));
+        assert!(log.bundle_storage_key.is_some());
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        let attempt = &attempts[0];
+        assert_eq!(attempt.attempt_status, RequestAttemptStatus::Success);
+        assert_eq!(attempt.scheduler_action, SchedulerAction::ReturnSuccess);
+        assert_eq!(attempt.llm_api_type, Some(LlmApiType::Gemini));
+        let request_uri = attempt.request_uri.as_deref().expect("attempt request uri");
+        assert!(request_uri.ends_with("/v1beta/models/upstream-gemini-model:countTokens?foo=bar"));
+        let logged_headers: Value = serde_json::from_str(
+            attempt
+                .request_headers_json
+                .as_deref()
+                .expect("attempt request headers"),
+        )
+        .expect("request headers json");
+        assert!(logged_headers.get("x-goog-api-key").is_none());
+        assert_eq!(logged_headers["content-type"], "application/json");
+        assert!(attempt.llm_request_blob_id.is_some());
+        assert!(attempt.llm_response_blob_id.is_some());
+        assert_eq!(
+            attempt.llm_response_capture_state.as_deref(),
+            Some("COMPLETE")
+        );
+
+        let bundle = bundle_for_log(&log).await;
+        let request_json = bundle_attempt_request_json(&bundle, 1);
+        let response_json = bundle_attempt_response_json(&bundle, 1);
+        assert_eq!(
+            request_json["contents"][0]["parts"][0]["text"],
+            "count this"
+        );
+        assert_eq!(response_json["totalTokens"], 9);
 
         fixture.cleanup().await;
     });
@@ -688,6 +1018,8 @@ data: [DONE]
 
 "#,
         ))
+        .with_header("x-request-id", "stream-req-1")
+        .with_header("set-cookie", "session=secret")
     })
     .await
     else {
@@ -729,13 +1061,233 @@ data: [DONE]
     assert!(body_text.contains("data: [DONE]"));
 
     let log = fixture.latest_log().await;
-    assert_eq!(log.status, Some(RequestStatus::Success));
-    assert_eq!(log.llm_response_status, Some(200));
-    assert!(log.is_stream);
-    assert!(log.llm_response_first_chunk_at.is_some());
+    assert_eq!(log.overall_status, RequestStatus::Success);
+    assert_eq!(log.attempt_count, 1);
+    assert!(log.response_started_to_client_at.is_some());
     assert_eq!(log.total_tokens, Some(5));
-    assert!(log.llm_response_body.is_none());
-    assert!(log.user_response_body.is_none());
+    assert!(log.bundle_storage_key.is_some());
+
+    let attempts = fixture.attempts_for_log(log.id).await;
+    assert_eq!(attempts.len(), 1);
+    let response_headers: Value = serde_json::from_str(
+        attempts[0]
+            .response_headers_json
+            .as_deref()
+            .expect("streaming attempt response headers"),
+    )
+    .expect("response headers json");
+    assert_eq!(response_headers["content-type"], "text/event-stream");
+    assert_eq!(response_headers["x-request-id"], "stream-req-1");
+    assert!(response_headers.get("set-cookie").is_none());
+    assert!(response_headers.get("content-length").is_none());
+    assert!(response_headers.get("transfer-encoding").is_none());
+
+    fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn streaming_raw_chunk_without_visible_output_keeps_response_started_null_on_error() {
+    RUNTIME.block_on(async {
+        let _ = ensure_test_database();
+        let _guard = DB_LOCK.lock().await;
+        let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+            assert_eq!(request.path, "/v1/chat/completions");
+            UpstreamReply::erroring_sse(
+                vec![(0, br#"data: {"id":"partial-chunk"}"#)],
+                "upstream stream broke before a visible SSE event",
+            )
+            .with_header("x-request-id", "stream-error-1")
+            .with_header("set-cookie", "session=secret")
+        })
+        .await
+        else {
+            return;
+        };
+        let fixture = TestFixture::new(
+            ProviderType::Openai,
+            format!("{}/v1", upstream.base_url),
+            None,
+            Some("upstream-stream-model".to_string()),
+        )
+        .await;
+
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.system_api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .expect("sse content type"),
+            "text/event-stream"
+        );
+        let mut stream = response.into_body().into_data_stream();
+        let first_item = stream
+            .next()
+            .await
+            .expect("expected streaming body item after upstream failure");
+        assert!(first_item.is_err());
+        assert!(stream.next().await.is_none());
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Error);
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(log.response_started_to_client_at, None);
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].response_started_to_client);
+        let response_headers: Value = serde_json::from_str(
+            attempts[0]
+                .response_headers_json
+                .as_deref()
+                .expect("streaming error attempt response headers"),
+        )
+        .expect("response headers json");
+        assert_eq!(response_headers["content-type"], "text/event-stream");
+        assert_eq!(response_headers["x-request-id"], "stream-error-1");
+        assert!(response_headers.get("set-cookie").is_none());
+        assert!(response_headers.get("content-length").is_none());
+        assert!(response_headers.get("transfer-encoding").is_none());
+        assert_eq!(upstream.captured_requests().await.len(), 1);
+
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn streaming_request_without_upstream_response_keeps_attempt_response_headers_null() {
+    RUNTIME.block_on(async {
+        let _ = ensure_test_database();
+        let _guard = DB_LOCK.lock().await;
+        let fixture = TestFixture::new(
+            ProviderType::Openai,
+            "http://127.0.0.1:9/v1".to_string(),
+            None,
+            Some("upstream-stream-model".to_string()),
+        )
+        .await;
+
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.system_api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Error);
+        assert!(log.attempt_count >= 1);
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), log.attempt_count as usize);
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt.response_headers_json.is_none())
+        );
+
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn streaming_visible_chunk_before_upstream_error_marks_attempt_visible_without_retry() {
+    RUNTIME.block_on(async {
+    let _ = ensure_test_database();
+    let _guard = DB_LOCK.lock().await;
+    let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+        assert_eq!(request.path, "/v1/chat/completions");
+        UpstreamReply::erroring_sse(
+            vec![(
+                0,
+                br#"data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":1,"model":"upstream-stream-model","choices":[{"index":0,"delta":{"content":"hel"},"finish_reason":null}],"usage":null}
+
+"#,
+            )],
+            "upstream stream broke after a visible SSE event",
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let fixture = TestFixture::new(
+        ProviderType::Openai,
+        format!("{}/v1", upstream.base_url),
+        None,
+        Some("upstream-stream-model".to_string()),
+    )
+    .await;
+
+    let request = build_json_request(
+        "/openai/v1/chat/completions",
+        &[(
+            "authorization",
+            format!("Bearer {}", fixture.system_api_key.api_key),
+        )],
+        json!({
+            "model": fixture.requested_model(),
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+    );
+
+    let response = fixture.send(request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let first_chunk = stream
+        .next()
+        .await
+        .expect("expected first streamed chunk")
+        .expect("first streamed chunk should succeed");
+    assert!(String::from_utf8_lossy(&first_chunk).contains("hel"));
+    let second_item = stream
+        .next()
+        .await
+        .expect("expected upstream failure after visible chunk");
+    assert!(second_item.is_err());
+    assert!(stream.next().await.is_none());
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let log = fixture.latest_log().await;
+    assert_eq!(log.overall_status, RequestStatus::Error);
+    assert_eq!(log.attempt_count, 1);
+    assert_eq!(log.retry_count, 0);
+    assert_eq!(log.fallback_count, 0);
+    assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+    assert!(log.response_started_to_client_at.is_some());
+
+    let attempts = fixture.attempts_for_log(log.id).await;
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Error);
+    assert_eq!(attempts[0].scheduler_action, SchedulerAction::FailFast);
+    assert_eq!(attempts[0].error_code.as_deref(), Some("upstream_error"));
+    assert!(attempts[0].response_started_to_client);
+    assert_eq!(upstream.captured_requests().await.len(), 1);
 
     fixture.cleanup().await;
     });
@@ -796,9 +1348,8 @@ fn streaming_client_disconnect_marks_log_cancelled() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     let log = fixture.latest_log().await;
-    assert_eq!(log.status, Some(RequestStatus::Cancelled));
-    assert!(log.llm_response_body.is_none());
-    assert!(log.user_response_body.is_none());
+    assert_eq!(log.overall_status, RequestStatus::Cancelled);
+    assert!(log.bundle_storage_key.is_some());
 
     fixture.cleanup().await;
     });
@@ -845,7 +1396,7 @@ fn acl_denials_short_circuit_before_upstream_and_persist_route_trace_logs() {
         assert_eq!(body["code"], "permission_error");
         assert_eq!(upstream.captured_requests().await.len(), 0);
         let log = fixture.latest_log().await;
-        assert_eq!(log.status, Some(RequestStatus::Error));
+        assert_eq!(log.overall_status, RequestStatus::Error);
         assert_eq!(
             log.requested_model_name.as_deref(),
             Some(route_name.as_str())
@@ -855,8 +1406,279 @@ fn acl_denials_short_circuit_before_upstream_and_persist_route_trace_logs() {
             log.resolved_route_name.as_deref(),
             Some(route_name.as_str())
         );
-        assert_eq!(log.model_name, fixture.model.model_name);
-        assert!(log.llm_response_status.is_none());
+        assert_eq!(
+            log.final_model_name_snapshot.as_deref(),
+            Some(fixture.model.model_name.as_str())
+        );
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(log.retry_count, 0);
+        assert_eq!(log.fallback_count, 0);
+        assert_eq!(log.final_error_code.as_deref(), Some("permission_error"));
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Error);
+        assert_eq!(attempts[0].scheduler_action, SchedulerAction::FailFast);
+        assert_eq!(attempts[0].error_code.as_deref(), Some("permission_error"));
+        assert_eq!(attempts[0].http_status, None);
+        assert_eq!(attempts[0].request_uri, None);
+
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream_call() {
+    RUNTIME.block_on(async {
+        let _ = ensure_test_database();
+        let _guard = DB_LOCK.lock().await;
+        if !CONFIG.provider_governance.is_enabled() {
+            eprintln!("skipping provider governance integration scenario: governance disabled");
+            return;
+        }
+
+        let Some(skipped_upstream) = spawn_test_upstream_or_skip(|_| {
+            UpstreamReply::json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": {"message": "skipped provider should not be called"}}),
+            )
+        })
+        .await
+        else {
+            return;
+        };
+        let Some(fallback_upstream) = spawn_test_upstream_or_skip(|request| {
+            assert_eq!(request.path, "/v1/chat/completions");
+            UpstreamReply::json(
+                StatusCode::OK,
+                json!({
+                    "id": "chatcmpl-fallback",
+                    "object": "chat.completion",
+                    "model": "fallback-openai-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "fallback ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                        "total_tokens": 5
+                    }
+                }),
+            )
+        })
+        .await
+        else {
+            return;
+        };
+
+        let fixture = TestFixture::new(
+            ProviderType::Openai,
+            format!("{}/v1", skipped_upstream.base_url),
+            None,
+            Some("skipped-openai-model".to_string()),
+        )
+        .await;
+        let (fallback_provider, fallback_key, fallback_model) = create_provider_model(
+            ProviderType::Openai,
+            format!("{}/v1", fallback_upstream.base_url),
+            Some("fallback-openai-model".to_string()),
+        );
+        let route_name = format!("proxy-int-governance-route-{}", ID_GENERATOR.generate_id());
+        let route = ModelRoute::create(&CreateModelRoutePayload {
+            route_name: route_name.clone(),
+            description: Some("provider governance fallback integration test".to_string()),
+            is_enabled: Some(true),
+            expose_in_models: Some(true),
+            candidates: vec![
+                ModelRouteCandidateInput {
+                    model_id: fixture.model.id,
+                    priority: 0,
+                    is_enabled: Some(true),
+                },
+                ModelRouteCandidateInput {
+                    model_id: fallback_model.id,
+                    priority: 1,
+                    is_enabled: Some(true),
+                },
+            ],
+        })
+        .expect("model route should be created");
+        fixture.app_state.reload().await;
+
+        for _ in 0..CONFIG
+            .provider_governance
+            .consecutive_failure_threshold
+            .max(1)
+        {
+            fixture
+                .app_state
+                .record_provider_failure(fixture.provider.id, "forced test failure".to_string())
+                .await;
+        }
+
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.system_api_key.api_key),
+            )],
+            json!({
+                "model": route_name.clone(),
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
+        assert_eq!(body["choices"][0]["message"]["content"], "fallback ok");
+        assert_eq!(skipped_upstream.captured_requests().await.len(), 0);
+        assert_eq!(fallback_upstream.captured_requests().await.len(), 1);
+
+        let log = fixture.latest_log_for_provider(fallback_provider.id).await;
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.attempt_count, 2);
+        assert_eq!(log.fallback_count, 1);
+        assert_eq!(log.final_provider_id, Some(fallback_provider.id));
+        assert_eq!(log.final_model_id, Some(fallback_model.id));
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Skipped);
+        assert_eq!(
+            attempts[0].error_code.as_deref(),
+            Some("provider_open_skipped")
+        );
+        assert_eq!(
+            attempts[0].scheduler_action,
+            SchedulerAction::FallbackNextCandidate
+        );
+        assert_eq!(attempts[0].http_status, None);
+        assert!(attempts[0].request_uri.is_none());
+        assert_eq!(attempts[0].llm_response_blob_id, None);
+        assert_eq!(attempts[1].attempt_status, RequestAttemptStatus::Success);
+        assert_eq!(attempts[1].scheduler_action, SchedulerAction::ReturnSuccess);
+
+        let _ = ModelRoute::delete(route.route.id);
+        let _ = Model::delete(fallback_model.id);
+        let _ = ProviderApiKey::delete(fallback_key.id);
+        let _ = Provider::delete(fallback_provider.id);
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn request_patch_conflict_uses_stable_error_code_in_attempt_and_request_log() {
+    RUNTIME.block_on(async {
+        let _ = ensure_test_database();
+        let _guard = DB_LOCK.lock().await;
+        let Some(upstream) = spawn_test_upstream_or_skip(|_| {
+            UpstreamReply::json(
+                StatusCode::OK,
+                json!({
+                    "id": "chatcmpl-conflict",
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "should not call upstream"},
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
+        })
+        .await
+        else {
+            return;
+        };
+        let fixture = TestFixture::new(
+            ProviderType::Openai,
+            format!("{}/v1", upstream.base_url),
+            None,
+            Some("upstream-conflict-model".to_string()),
+        )
+        .await;
+
+        let provider_rule = RequestPatchRule::create_for_provider(
+            fixture.provider.id,
+            &CreateRequestPatchPayload {
+                placement: RequestPatchPlacement::Body,
+                target: "/generation_config".to_string(),
+                operation: RequestPatchOperation::Set,
+                value_json: Some(Some(json!({ "temperature": 0.8 }))),
+                description: Some("integration provider body patch".to_string()),
+                is_enabled: Some(true),
+                confirm_dangerous_target: None,
+            },
+        )
+        .expect("provider request patch should be created");
+        assert!(matches!(
+            provider_rule,
+            RequestPatchMutationOutcome::Saved { .. }
+        ));
+        let model_rule = RequestPatchRule::create_for_model(
+            fixture.model.id,
+            &CreateRequestPatchPayload {
+                placement: RequestPatchPlacement::Body,
+                target: "/generation_config/temperature".to_string(),
+                operation: RequestPatchOperation::Set,
+                value_json: Some(Some(json!(0.2))),
+                description: Some("integration model body patch".to_string()),
+                is_enabled: Some(true),
+                confirm_dangerous_target: None,
+            },
+        )
+        .expect("model request patch should be created");
+        assert!(matches!(
+            model_rule,
+            RequestPatchMutationOutcome::Saved { .. }
+        ));
+        fixture.app_state.reload().await;
+
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.system_api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: Value =
+            serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
+        assert_eq!(body["code"], "request_patch_conflict_error");
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("error message")
+                .contains("Request patch conflicts prevent model")
+        );
+        assert_eq!(upstream.captured_requests().await.len(), 0);
+
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Error);
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("request_patch_conflict_error")
+        );
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Error);
+        assert_eq!(
+            attempts[0].error_code.as_deref(),
+            Some("request_patch_conflict_error")
+        );
+        assert_eq!(attempts[0].scheduler_action, SchedulerAction::FailFast);
+        assert_eq!(attempts[0].http_status, None);
 
         fixture.cleanup().await;
     });
@@ -915,10 +1737,37 @@ fn upstream_errors_are_mapped_and_persisted_in_request_logs() {
         );
 
         let log = fixture.latest_log().await;
-        assert_eq!(log.status, Some(RequestStatus::Error));
-        assert_eq!(log.llm_response_status, Some(429));
-        assert!(log.llm_response_body.is_none());
-        assert!(log.user_response_body.is_none());
+        assert_eq!(log.overall_status, RequestStatus::Error);
+        assert_eq!(log.attempt_count, 2);
+        assert_eq!(log.retry_count, 1);
+        assert_eq!(log.fallback_count, 0);
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("upstream_rate_limit_error")
+        );
+        assert!(log.bundle_storage_key.is_some());
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Error);
+        assert_eq!(
+            attempts[0].scheduler_action,
+            SchedulerAction::RetrySameCandidate
+        );
+        assert_eq!(
+            attempts[0].error_code.as_deref(),
+            Some("upstream_rate_limit_error")
+        );
+        assert_eq!(attempts[0].http_status, Some(429));
+        assert!(attempts[0].backoff_ms.is_some());
+        assert_eq!(attempts[1].attempt_status, RequestAttemptStatus::Error);
+        assert_eq!(attempts[1].scheduler_action, SchedulerAction::FailFast);
+        assert_eq!(
+            attempts[1].error_code.as_deref(),
+            Some("upstream_rate_limit_error")
+        );
+        assert_eq!(attempts[1].http_status, Some(429));
+        assert_eq!(upstream.captured_requests().await.len(), 2);
 
         fixture.cleanup().await;
     });

@@ -82,6 +82,30 @@
             </Label>
             <Checkbox v-model="model.is_enabled" />
           </div>
+
+          <div class="space-y-2">
+            <Label class="text-gray-700">
+              {{ $t("providerEditPage.modelCapabilities.title") }}
+            </Label>
+            <div class="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2">
+              <div
+                v-for="capability in capabilityItems"
+                :key="capability.key"
+                class="flex items-center justify-between rounded-lg border border-gray-200 p-3"
+              >
+                <Label class="cursor-pointer text-xs text-gray-700">
+                  {{ $t(capability.labelKey) }}
+                </Label>
+                <Checkbox
+                  :model-value="model[capability.key]"
+                  @update:model-value="
+                    (value: boolean | 'indeterminate') =>
+                      (model[capability.key] = value === true)
+                  "
+                />
+              </div>
+            </div>
+          </div>
         </div>
 
         <template #header>
@@ -151,13 +175,16 @@
 
     <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
       <div
-        class="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-4 border-b border-gray-200 bg-gray-50/80 px-4 py-3"
+        class="grid grid-cols-[1fr_1fr_2fr_auto_auto] items-center gap-4 border-b border-gray-200 bg-gray-50/80 px-4 py-3"
       >
         <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
           {{ $t("providerEditPage.tableHeaderModelId") }}
         </span>
         <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
           {{ $t("providerEditPage.tableHeaderMappedModelId") }}
+        </span>
+        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
+          {{ $t("providerEditPage.modelCapabilities.title") }}
         </span>
         <span class="text-xs font-medium uppercase tracking-wider text-gray-500">
           {{ $t("providerEditPage.labelEnabled") }}
@@ -170,7 +197,7 @@
       <div
         v-for="(model, index) in editingData.models"
         :key="`desktop-${index}`"
-        class="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-4 border-b border-gray-100 px-4 py-3 last:border-0 transition-colors hover:bg-gray-50/50"
+        class="grid grid-cols-[1fr_1fr_2fr_auto_auto] items-center gap-4 border-b border-gray-100 px-4 py-3 last:border-0 transition-colors hover:bg-gray-50/50"
       >
         <Input
           v-model="model.model_name"
@@ -185,6 +212,24 @@
             (v: string | number) => (model.real_model_name = String(v).trim() || null)
           "
         />
+        <div class="grid grid-cols-2 gap-2 xl:grid-cols-3">
+          <div
+            v-for="capability in capabilityItems"
+            :key="`desktop-${index}-${capability.key}`"
+            class="flex items-center justify-between gap-2 rounded-md border border-gray-200 px-2.5 py-2"
+          >
+            <Label class="cursor-pointer text-[11px] text-gray-600">
+              {{ $t(capability.labelKey) }}
+            </Label>
+            <Checkbox
+              :model-value="model[capability.key]"
+              @update:model-value="
+                (value: boolean | 'indeterminate') =>
+                  (model[capability.key] = value === true)
+              "
+            />
+          </div>
+        </div>
         <div class="flex items-center justify-start">
           <Checkbox v-model="model.is_enabled" />
         </div>
@@ -289,6 +334,15 @@ const { t: $t } = useI18n();
 const router = useRouter();
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
 
+const capabilityItems = [
+  { key: "supports_streaming", labelKey: "modelCapabilities.streaming" },
+  { key: "supports_tools", labelKey: "modelCapabilities.tools" },
+  { key: "supports_reasoning", labelKey: "modelCapabilities.reasoning" },
+  { key: "supports_image_input", labelKey: "modelCapabilities.imageInput" },
+  { key: "supports_embeddings", labelKey: "modelCapabilities.embeddings" },
+  { key: "supports_rerank", labelKey: "modelCapabilities.rerank" },
+] as const;
+
 const emit = defineEmits<{
   (e: "checkSingle", index: number): void;
   (e: "checkBatch"): void;
@@ -304,6 +358,12 @@ const addModel = () => {
     id: null,
     model_name: "",
     real_model_name: null,
+    supports_streaming: true,
+    supports_tools: true,
+    supports_reasoning: true,
+    supports_image_input: true,
+    supports_embeddings: true,
+    supports_rerank: true,
     is_enabled: true,
     isEditing: false,
     checkStatus: "unchecked",
@@ -330,6 +390,12 @@ const handleSaveSingleModel = async (index: number) => {
   const payload = {
     model_name: modelItem.model_name.trim(),
     real_model_name: modelItem.real_model_name?.trim() || null,
+    supports_streaming: modelItem.supports_streaming,
+    supports_tools: modelItem.supports_tools,
+    supports_reasoning: modelItem.supports_reasoning,
+    supports_image_input: modelItem.supports_image_input,
+    supports_embeddings: modelItem.supports_embeddings,
+    supports_rerank: modelItem.supports_rerank,
     is_enabled: modelItem.is_enabled,
   };
 
@@ -345,6 +411,12 @@ const handleSaveSingleModel = async (index: number) => {
       modelItem.id = savedModel.id;
       modelItem.model_name = savedModel.model_name;
       modelItem.real_model_name = savedModel.real_model_name ?? null;
+      modelItem.supports_streaming = savedModel.supports_streaming;
+      modelItem.supports_tools = savedModel.supports_tools;
+      modelItem.supports_reasoning = savedModel.supports_reasoning;
+      modelItem.supports_image_input = savedModel.supports_image_input;
+      modelItem.supports_embeddings = savedModel.supports_embeddings;
+      modelItem.supports_rerank = savedModel.supports_rerank;
       modelItem.is_enabled = savedModel.is_enabled;
       toastController.success($t("providerEditPage.alert.modelSaveSuccess"));
     }
@@ -447,6 +519,12 @@ const handleFetchRemoteModels = async () => {
           id: null,
           model_name,
           real_model_name: null,
+          supports_streaming: true,
+          supports_tools: true,
+          supports_reasoning: true,
+          supports_image_input: true,
+          supports_embeddings: true,
+          supports_rerank: true,
           is_enabled: true,
           isEditing: false,
           checkStatus: "unchecked",

@@ -1,10 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{body::Body, extract::Request};
 use cyder_tools::log::debug;
 use serde_json::Value;
 
-use super::{ProxyError, protocol_transform_error};
+use super::ProxyError;
 use crate::{
     config::CONFIG,
     cost::UsageNormalization,
@@ -13,37 +13,48 @@ use crate::{
     service::app_state::AppState,
     service::cache::types::{CacheCostCatalogVersion, CacheModel, CacheProvider},
 };
-use bytes::Bytes;
 
-// Helper to serialize reqwest::header::HeaderMap to JSON String
-pub(super) fn serialize_reqwest_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    let mut header_map_simplified = HashMap::new();
+fn serialize_headers_for_log(
+    headers: &reqwest::header::HeaderMap,
+    redacted_names: &[&str],
+) -> Option<String> {
+    let mut header_map_simplified = BTreeMap::new();
     for (name, value) in headers.iter() {
-        header_map_simplified.insert(
-            name.as_str().to_string(),
-            value.to_str().unwrap_or("").to_string(),
-        );
+        let normalized_name = name.as_str().to_ascii_lowercase();
+        if redacted_names.contains(&normalized_name.as_str()) {
+            continue;
+        }
+
+        header_map_simplified.insert(normalized_name, value.to_str().unwrap_or("").to_string());
     }
     serde_json::to_string(&header_map_simplified).ok()
 }
 
-// Helper to serialize axum::http::HeaderMap
+pub(super) fn serialize_reqwest_headers_for_debug(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<String> {
+    serialize_headers_for_log(
+        headers,
+        &["authorization", "x-api-key", "x-goog-api-key", "cookie"],
+    )
+}
 
-const IGNORED_AXUM_HEADERS: [&str; 2] = ["authorization", "cookie"];
+pub(super) fn serialize_downstream_request_headers_for_log(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<String> {
+    serialize_headers_for_log(
+        headers,
+        &["authorization", "x-api-key", "x-goog-api-key", "cookie"],
+    )
+}
 
-pub(super) fn _serialize_axum_headers(headers: &axum::http::HeaderMap) -> Option<String> {
-    let mut header_map_simplified = HashMap::new();
-    for (name, value) in headers.iter() {
-        let name_str = name.as_str().to_lowercase();
-        if IGNORED_AXUM_HEADERS.contains(&name_str.as_str()) {
-            continue;
-        }
-        header_map_simplified.insert(
-            name.as_str().to_string(),
-            value.to_str().unwrap_or("").to_string(),
-        );
-    }
-    serde_json::to_string(&header_map_simplified).ok()
+pub(super) fn serialize_upstream_response_headers_for_log(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<String> {
+    serialize_headers_for_log(
+        headers,
+        &["set-cookie", "transfer-encoding", "content-length"],
+    )
 }
 
 pub(super) async fn get_cost_catalog_version(
@@ -87,6 +98,7 @@ pub(super) fn parse_utility_usage_normalization(
         .get("usage")
         .and_then(|u| u.get("total_tokens"))
         .and_then(|t| t.as_i64())
+        .or_else(|| response_body.get("totalTokens").and_then(|t| t.as_i64()))
         .or_else(|| {
             response_body
                 .get("meta")
@@ -142,36 +154,16 @@ pub(super) fn format_model_str(provider: &CacheProvider, model: &CacheModel) -> 
     }
 }
 
-pub(super) fn calculate_llm_request_body_for_log(
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-    original_request_value: &serde_json::Value,
-    final_body_value: &serde_json::Value,
-    final_body_bytes: &Bytes,
-) -> Result<Option<Bytes>, ProxyError> {
-    if api_type == target_api_type {
-        let patch = json_patch::diff(original_request_value, final_body_value);
-        if patch.is_empty() {
-            // If there's no difference, we can treat it as a full body
-            // that is identical to the user request body, allowing for hash optimization.
-            Ok(None)
-        } else {
-            let patch_bytes = Bytes::from(
-                serde_json::to_vec(&patch)
-                    .map_err(|e| protocol_transform_error("Failed to serialize json-patch", e))?,
-            );
-            Ok(Some(patch_bytes))
-        }
-    } else {
-        Ok(Some(final_body_bytes.clone()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::determine_target_api_type;
+    use super::{
+        determine_target_api_type, parse_utility_usage_normalization,
+        serialize_downstream_request_headers_for_log, serialize_upstream_response_headers_for_log,
+    };
     use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::CacheProvider;
+    use reqwest::header::{HeaderMap, HeaderValue};
+    use serde_json::Value;
 
     #[test]
     fn determine_target_api_type_maps_gemini_openai_separately() {
@@ -190,5 +182,55 @@ mod tests {
             determine_target_api_type(&provider),
             crate::schema::enum_def::LlmApiType::GeminiOpenai
         );
+    }
+
+    #[test]
+    fn serialize_downstream_request_headers_for_log_redacts_sensitive_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        headers.insert("x-goog-api-key", HeaderValue::from_static("secret"));
+        headers.insert("cookie", HeaderValue::from_static("session=secret"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        let serialized = serialize_downstream_request_headers_for_log(&headers).unwrap();
+        let parsed: Value = serde_json::from_str(&serialized).unwrap();
+
+        assert!(parsed.get("authorization").is_none());
+        assert!(parsed.get("x-api-key").is_none());
+        assert!(parsed.get("x-goog-api-key").is_none());
+        assert!(parsed.get("cookie").is_none());
+        assert_eq!(parsed["content-type"], "application/json");
+    }
+
+    #[test]
+    fn serialize_upstream_response_headers_for_log_redacts_transport_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("set-cookie", HeaderValue::from_static("session=secret"));
+        headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        headers.insert("content-length", HeaderValue::from_static("42"));
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+
+        let serialized = serialize_upstream_response_headers_for_log(&headers).unwrap();
+        let parsed: Value = serde_json::from_str(&serialized).unwrap();
+
+        assert!(parsed.get("set-cookie").is_none());
+        assert!(parsed.get("transfer-encoding").is_none());
+        assert!(parsed.get("content-length").is_none());
+        assert_eq!(parsed["content-type"], "application/json");
+    }
+
+    #[test]
+    fn parse_utility_usage_normalization_supports_openai_and_gemini_shapes() {
+        let openai_usage =
+            parse_utility_usage_normalization(&serde_json::json!({"usage": {"total_tokens": 4}}))
+                .unwrap();
+        let gemini_usage =
+            parse_utility_usage_normalization(&serde_json::json!({"totalTokens": 9})).unwrap();
+
+        assert_eq!(openai_usage.total_input_tokens, 4);
+        assert_eq!(openai_usage.total_output_tokens, 0);
+        assert_eq!(gemini_usage.total_input_tokens, 9);
+        assert_eq!(gemini_usage.total_output_tokens, 0);
     }
 }

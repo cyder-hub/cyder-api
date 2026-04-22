@@ -350,7 +350,13 @@ export interface ProviderApiKeyItem {
 export interface ModelItem {
   id: number;
   model_name: string;
-  real_model_name: string;
+  real_model_name: string | null;
+  supports_streaming: boolean;
+  supports_tools: boolean;
+  supports_reasoning: boolean;
+  supports_image_input: boolean;
+  supports_embeddings: boolean;
+  supports_rerank: boolean;
   is_enabled: boolean;
 }
 
@@ -366,6 +372,12 @@ export interface ModelSummaryItem {
   provider_name: string;
   model_name: string;
   real_model_name: string | null;
+  supports_streaming: boolean;
+  supports_tools: boolean;
+  supports_reasoning: boolean;
+  supports_image_input: boolean;
+  supports_embeddings: boolean;
+  supports_rerank: boolean;
   is_enabled: boolean;
 }
 
@@ -601,6 +613,12 @@ export interface ModelDetailModel {
   model_name: string;
   real_model_name: string | null;
   cost_catalog_id: number | null;
+  supports_streaming: boolean;
+  supports_tools: boolean;
+  supports_reasoning: boolean;
+  supports_image_input: boolean;
+  supports_embeddings: boolean;
+  supports_rerank: boolean;
   deleted_at: number | null;
   is_enabled: boolean;
   created_at: number;
@@ -884,51 +902,109 @@ export interface CostSnapshot {
 // ========== Request Log Types ==========
 export interface RecordListItem {
   id: number;
-  provider_id: number;
   api_key_id: number;
   requested_model_name?: string | null;
   resolved_name_scope?: string | null;
   resolved_route_name?: string | null;
-  model_name: string;
-  is_stream: boolean;
-  status: string | null;
+  overall_status: string;
+  attempt_count: number;
+  retry_count: number;
+  fallback_count: number;
+  request_received_at: number;
+  first_attempt_started_at: number | null;
+  response_started_to_client_at: number | null;
+  completed_at: number | null;
+  final_provider_id: number | null;
+  final_provider_name_snapshot: string | null;
+  final_model_id: number | null;
+  final_model_name_snapshot: string | null;
+  final_real_model_name_snapshot: string | null;
+  estimated_cost_nanos: number | null;
+  estimated_cost_currency: string | null;
   total_input_tokens: number | null;
   total_output_tokens: number | null;
   reasoning_tokens: number | null;
   total_tokens: number | null;
-  estimated_cost_nanos: number | null;
-  estimated_cost_currency: string | null;
-  request_received_at: number;
-  llm_request_sent_at: number;
-  llm_response_first_chunk_at: number | null;
-  llm_response_completed_at: number | null;
 }
 
-export interface RecordDetail extends RecordListItem {
-  cost_catalog_id?: number | null;
-  cost_catalog_version_id?: number | null;
-  resolved_route_id?: number | null;
-  real_model_name?: string | null;
-  input_text_tokens?: number | null;
-  output_text_tokens?: number | null;
-  input_image_tokens?: number | null;
-  output_image_tokens?: number | null;
-  cache_read_tokens?: number | null;
-  cache_write_tokens?: number | null;
-  request_headers: string | null;
-  response_headers: string | null;
-  storage_type: string | null;
+export interface RecordRequest extends RecordListItem {
+  resolved_route_id: number | null;
+  user_api_type: string;
+  final_error_code: string | null;
+  final_error_message: string | null;
+  client_ip: string | null;
+  final_attempt_id: number | null;
+  final_provider_api_key_id: number | null;
+  final_provider_key_snapshot: string | null;
+  final_llm_api_type: string | null;
+  cost_catalog_id: number | null;
+  cost_catalog_version_id: number | null;
+  cost_snapshot_json: string | null;
+  created_at: number;
+  updated_at: number;
+  input_text_tokens: number | null;
+  output_text_tokens: number | null;
+  input_image_tokens: number | null;
+  output_image_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  bundle_version: number | null;
+  bundle_storage_type: string | null;
+  bundle_storage_key: string | null;
+}
+
+export interface RecordAttempt {
+  id: number;
+  request_log_id: number;
+  attempt_index: number;
+  candidate_position: number;
+  provider_id: number | null;
+  provider_api_key_id: number | null;
+  model_id: number | null;
+  provider_key_snapshot: string | null;
+  provider_name_snapshot: string | null;
+  model_name_snapshot: string | null;
+  real_model_name_snapshot: string | null;
+  llm_api_type: string | null;
+  attempt_status: string;
+  scheduler_action: string;
+  error_code: string | null;
   error_message: string | null;
-  user_api_type?: string | null;
-  llm_api_type?: string | null;
-  response_sent_to_client_at: number | null;
-  cost_snapshot_json?: string | null;
-  applied_request_patch_ids_json?: string | null;
-  request_patch_summary_json?: string | null;
-  user_request_body?: string | null;
-  llm_request_body?: string | null;
-  llm_response_body?: string | null;
-  user_response_body?: string | null;
+  request_uri: string | null;
+  request_headers_json: string | null;
+  response_headers_json: string | null;
+  http_status: number | null;
+  started_at: number | null;
+  first_byte_at: number | null;
+  completed_at: number | null;
+  response_started_to_client: boolean;
+  backoff_ms: number | null;
+  applied_request_patch_ids_json: string | null;
+  request_patch_summary_json: string | null;
+  estimated_cost_nanos: number | null;
+  estimated_cost_currency: string | null;
+  cost_catalog_version_id: number | null;
+  total_input_tokens: number | null;
+  total_output_tokens: number | null;
+  input_text_tokens: number | null;
+  output_text_tokens: number | null;
+  input_image_tokens: number | null;
+  output_image_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  reasoning_tokens: number | null;
+  total_tokens: number | null;
+  llm_request_blob_id: number | null;
+  llm_request_patch_id: number | null;
+  llm_response_blob_id: number | null;
+  llm_response_capture_state: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface RecordDetail {
+  request: RecordRequest;
+  attempts: RecordAttempt[];
 }
 
 export interface RecordListParams {
@@ -1013,6 +1089,12 @@ export interface ModelPayload {
   real_model_name?: string | null;
   is_enabled: boolean;
   cost_catalog_id?: number | null;
+  supports_streaming?: boolean;
+  supports_tools?: boolean;
+  supports_reasoning?: boolean;
+  supports_image_input?: boolean;
+  supports_embeddings?: boolean;
+  supports_rerank?: boolean;
 }
 
 // ========== Paginated Response ==========

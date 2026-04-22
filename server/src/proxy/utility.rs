@@ -1,44 +1,17 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{
-    body::{Body, Bytes},
-    http::HeaderMap,
-    response::Response,
-};
-use chrono::Utc;
-use cyder_tools::log::{debug, error, info, warn};
-use reqwest::{Method, header::CONTENT_ENCODING};
+use axum::{body::Body, http::HeaderMap, response::Response};
+use cyder_tools::log::info;
 
 use super::{
     ProxyError,
-    auth::{admit_api_key_request, check_access_control},
-    cancellation::{CancellationDropGuard, ProxyCancellationContext},
-    classify_upstream_status,
-    core::{
-        build_response_builder, decode_response_body, finalize_non_streaming_log_context,
-        read_response_bytes_with_cancellation, send_with_first_byte_timeout,
-    },
-    load_runtime_request_patch_trace,
-    logging::{
-        LoggedBody, RequestLogContext, build_initial_request_log_context,
-        record_request_completion_and_log,
-    },
-    prepare::{
-        prepare_llm_request, prepare_simple_gemini_request, resolve_provider_credentials,
-        resolve_requested_model,
-    },
-    protocol_transform_error,
-    provider_governance::{
-        ensure_provider_request_allowed, record_provider_failure, record_provider_success,
-    },
+    cancellation::ProxyCancellationContext,
+    orchestrator::{UtilityOrchestrationInput, orchestrate_utility},
+    prepare::ExecutionPlan,
     request::ParsedProxyRequest,
-    util::{
-        determine_target_api_type, format_model_str, get_cost_catalog_version,
-        parse_utility_usage_normalization, serialize_reqwest_headers,
-    },
 };
 use crate::{
-    schema::enum_def::{LlmApiType, RequestStatus},
+    schema::enum_def::LlmApiType,
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
@@ -60,7 +33,7 @@ pub(super) struct UtilityExecutionInput {
     pub cancellation: ProxyCancellationContext,
     pub system_api_key: Arc<CacheApiKey>,
     pub operation: UtilityOperation,
-    pub requested_model: String,
+    pub execution_plan: ExecutionPlan,
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
@@ -68,7 +41,7 @@ pub(super) struct UtilityExecutionInput {
     pub parsed_request: ParsedProxyRequest,
 }
 
-fn validate_utility_target(
+pub(super) fn validate_utility_target(
     operation: &UtilityOperation,
     target_api_type: LlmApiType,
 ) -> Result<(), ProxyError> {
@@ -86,20 +59,6 @@ fn validate_utility_target(
     }
 }
 
-async fn record_early_utility_failure(
-    app_state: &Arc<AppState>,
-    mut log_context: RequestLogContext,
-    proxy_error: &ProxyError,
-) {
-    log_context.completion_ts = Some(Utc::now().timestamp_millis());
-    log_context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
-        RequestStatus::Cancelled
-    } else {
-        RequestStatus::Error
-    };
-    record_request_completion_and_log(app_state, log_context).await;
-}
-
 pub(super) async fn execute_utility_proxy(
     app_state: Arc<AppState>,
     input: UtilityExecutionInput,
@@ -108,7 +67,7 @@ pub(super) async fn execute_utility_proxy(
         cancellation,
         system_api_key,
         operation,
-        requested_model,
+        execution_plan,
         query_params,
         original_headers,
         client_ip_addr,
@@ -123,302 +82,25 @@ pub(super) async fn execute_utility_proxy(
 
     info!(
         "Processing {:?} utility request ({}) for model: {}",
-        operation.api_type, operation.name, requested_model
-    );
-    let mut cancellation_guard = CancellationDropGuard::new(
-        cancellation.clone(),
-        format!(
-            "Client disconnected during utility operation '{}'.",
-            operation.name
-        ),
+        operation.api_type, operation.name, execution_plan.requested_name
     );
 
-    let resolved_target = resolve_requested_model(&app_state, system_api_key.id, &requested_model)
-        .await
-        .map_err(|e| {
-            warn!("Failed to resolve model '{}': {}", requested_model, e);
-            ProxyError::BadRequest(e)
-        })?;
-    let requested_name = resolved_target.requested_name;
-    let resolved_name_scope = resolved_target.resolved_scope.as_str().to_string();
-    let resolved_route_id = resolved_target.resolved_route_id;
-    let resolved_route_name = resolved_target.resolved_route_name;
-    let provider = resolved_target.provider;
-    let model = resolved_target.model;
-    let target_api_type = determine_target_api_type(&provider);
-    let provider_credentials = resolve_provider_credentials(&provider, &app_state)
-        .await
-        .map_err(|e| {
-            warn!(
-                "Failed to resolve provider credentials for provider {}: {:?}",
-                provider.id, e
-            );
-            e
-        })?;
-    let mut initial_log_context = build_initial_request_log_context(
-        &system_api_key,
-        &provider,
-        &model,
-        provider_credentials.key_id,
-        &requested_name,
-        &resolved_name_scope,
-        resolved_route_id,
-        resolved_route_name.as_deref(),
-        start_time,
-        &client_ip_addr,
-        operation.api_type,
-        target_api_type,
-        Some(original_request_body.clone()),
-    );
-    if let Err(e) = validate_utility_target(&operation, target_api_type) {
-        record_early_utility_failure(&app_state, initial_log_context.clone(), &e).await;
-        return Err(e);
-    }
-
-    let request_patch_trace = load_runtime_request_patch_trace(&provider, Some(&model), &app_state)
-        .await
-        .map_err(|e| {
-            warn!(
-                "Failed to load request patch trace for utility model {}: {:?}",
-                model.id, e
-            );
-            e
-        })?;
-    initial_log_context.applied_request_patch_ids_json =
-        request_patch_trace.applied_request_patch_ids_json.clone();
-    initial_log_context.request_patch_summary_json =
-        request_patch_trace.request_patch_summary_json.clone();
-    if let Some(conflict_error) = request_patch_trace.conflict_error(&model.model_name) {
-        record_early_utility_failure(&app_state, initial_log_context.clone(), &conflict_error)
-            .await;
-        return Err(conflict_error);
-    }
-    let cost_catalog_version = get_cost_catalog_version(&model, &app_state).await;
-    info!(
-        "Resolved utility request model '{}' via {} to candidate {}",
-        requested_name, resolved_name_scope, model.id
-    );
-
-    if let Err(e) = check_access_control(&system_api_key, &provider, &model, &app_state).await {
-        warn!("Access control check failed: {:?}", e);
-        record_early_utility_failure(&app_state, initial_log_context.clone(), &e).await;
-        return Err(e);
-    }
-
-    let (final_url, final_headers, final_body, provider_api_key_id) = match operation.protocol {
-        UtilityProtocol::OpenaiCompatible => {
-            let (final_url, final_headers, final_body_value, provider_api_key_id) =
-                match prepare_llm_request(
-                    &provider,
-                    &model,
-                    data,
-                    &original_headers,
-                    &request_patch_trace.applied_rules,
-                    &provider_credentials,
-                    &operation.downstream_path,
-                )
-                .await
-                {
-                    Ok(prepared) => prepared,
-                    Err(e) => {
-                        error!(
-                            "Failed to prepare utility request '{}': {:?}",
-                            operation.name, e
-                        );
-                        record_early_utility_failure(&app_state, initial_log_context.clone(), &e)
-                            .await;
-                        return Err(e);
-                    }
-                };
-            let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
-                protocol_transform_error("Failed to serialize final request body", e)
-            })?);
-            (final_url, final_headers, final_body, provider_api_key_id)
-        }
-        UtilityProtocol::GeminiCompatible => {
-            let (final_url, final_headers, final_body_value, provider_api_key_id) =
-                match prepare_simple_gemini_request(
-                    &provider,
-                    &model,
-                    data,
-                    &original_headers,
-                    &request_patch_trace.applied_rules,
-                    &provider_credentials,
-                    &operation.downstream_path,
-                    &query_params,
-                )
-                .await
-                {
-                    Ok(prepared) => prepared,
-                    Err(e) => {
-                        error!(
-                            "Failed to prepare utility request '{}': {:?}",
-                            operation.name, e
-                        );
-                        record_early_utility_failure(&app_state, initial_log_context.clone(), &e)
-                            .await;
-                        return Err(e);
-                    }
-                };
-            let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|e| {
-                protocol_transform_error("Failed to serialize final request body", e)
-            })?);
-            (final_url, final_headers, final_body, provider_api_key_id)
-        }
-    };
-
-    let mut log_context = initial_log_context;
-    debug_assert_eq!(provider_api_key_id, provider_credentials.key_id);
-    log_context.llm_request_body = Some(LoggedBody::from_bytes(final_body.clone()));
-
-    let _api_key_concurrency_guard = match admit_api_key_request(&app_state, &system_api_key).await
-    {
-        Ok(guard) => guard,
-        Err(e) => {
-            warn!("API key request admission failed: {:?}", e);
-            record_early_utility_failure(&app_state, log_context, &e).await;
-            return Err(e);
-        }
-    };
-
-    let model_str = format_model_str(&provider, &model);
-    let client = if provider.use_proxy {
-        &app_state.proxy_client
-    } else {
-        &app_state.client
-    };
-    if let Err(e) = ensure_provider_request_allowed(&app_state, provider.id, &model_str).await {
-        record_early_utility_failure(&app_state, log_context, &e).await;
-        return Err(e);
-    }
-
-    debug!(
-        "[utility:{}] proxy request header: {:?}",
-        operation.name,
-        serialize_reqwest_headers(&final_headers)
-    );
-    debug!(
-        "[utility:{}] proxy request data: {}",
-        operation.name,
-        String::from_utf8_lossy(&final_body)
-    );
-
-    log_context.llm_request_sent_at = Some(Utc::now().timestamp_millis());
-    let response = match send_with_first_byte_timeout(
-        &cancellation,
-        client
-            .request(Method::POST, &final_url)
-            .headers(final_headers)
-            .body(final_body.clone()),
-        "LLM request",
+    orchestrate_utility(
+        app_state,
+        UtilityOrchestrationInput {
+            cancellation,
+            system_api_key,
+            operation,
+            execution_plan,
+            query_params,
+            original_headers,
+            client_ip_addr,
+            start_time,
+            data,
+            original_request_body,
+        },
     )
     .await
-    {
-        Ok(resp) => resp,
-        Err(proxy_error) => {
-            cancellation_guard.disarm();
-            error!("[utility:{}] {}", operation.name, proxy_error);
-            if !matches!(proxy_error, ProxyError::ClientCancelled(_)) {
-                record_provider_failure(&app_state, provider.id, &model_str, &proxy_error).await;
-            }
-            log_context.request_url = Some(final_url.clone());
-            log_context.completion_ts = Some(Utc::now().timestamp_millis());
-            log_context.cost_catalog_version = cost_catalog_version.clone();
-            log_context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
-                RequestStatus::Cancelled
-            } else {
-                RequestStatus::Error
-            };
-            record_request_completion_and_log(&app_state, log_context).await;
-            return Err(proxy_error);
-        }
-    };
-
-    let status_code = response.status();
-    let response_headers = response.headers().clone();
-    let response_builder = build_response_builder(status_code, &response_headers);
-    let is_gzip = response_headers
-        .get(CONTENT_ENCODING)
-        .map_or(false, |value| value.to_str().unwrap_or("").contains("gzip"));
-
-    let body_bytes = match read_response_bytes_with_cancellation(
-        response,
-        "Reading upstream response body",
-        &cancellation,
-    )
-    .await
-    {
-        Ok(b) => b,
-        Err(proxy_error) => {
-            cancellation_guard.disarm();
-            error!("[utility:{}] {}", operation.name, proxy_error);
-            if !matches!(proxy_error, ProxyError::ClientCancelled(_)) {
-                record_provider_failure(&app_state, provider.id, &model_str, &proxy_error).await;
-            }
-            log_context.request_url = Some(final_url);
-            log_context.llm_status = Some(status_code);
-            log_context.completion_ts = Some(Utc::now().timestamp_millis());
-            log_context.cost_catalog_version = cost_catalog_version;
-            log_context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
-                RequestStatus::Cancelled
-            } else {
-                RequestStatus::Error
-            };
-            log_context.llm_response_body =
-                Some(LoggedBody::from_bytes(Bytes::from(proxy_error.to_string())));
-            record_request_completion_and_log(&app_state, log_context).await;
-            return Err(proxy_error);
-        }
-    };
-
-    let decompressed_body = decode_response_body(body_bytes, is_gzip);
-    let completion_ts = Utc::now().timestamp_millis();
-    let parsed_usage_normalization =
-        serde_json::from_slice::<serde_json::Value>(&decompressed_body)
-            .ok()
-            .and_then(|val| parse_utility_usage_normalization(&val));
-
-    let overall_status = if status_code.is_success() {
-        RequestStatus::Success
-    } else {
-        RequestStatus::Error
-    };
-    finalize_non_streaming_log_context(
-        &mut log_context,
-        &final_url,
-        status_code,
-        completion_ts,
-        cost_catalog_version.as_ref(),
-        overall_status,
-        None,
-        parsed_usage_normalization,
-        decompressed_body.clone(),
-        decompressed_body.clone(),
-    );
-    record_request_completion_and_log(&app_state, log_context.clone()).await;
-    cancellation_guard.disarm();
-
-    if status_code.is_success() {
-        record_provider_success(&app_state, provider.id, &model_str).await;
-        info!(
-            "{}: Utility request '{}' completed for log_id {}.",
-            model_str, operation.name, log_context.id
-        );
-        Ok(response_builder
-            .body(Body::from(decompressed_body))
-            .unwrap())
-    } else {
-        error!(
-            "[utility:{}] LLM request failed with status {} for log_id {}: {}",
-            operation.name,
-            status_code,
-            log_context.id,
-            String::from_utf8_lossy(&decompressed_body)
-        );
-        let proxy_error = classify_upstream_status(status_code, &decompressed_body);
-        record_provider_failure(&app_state, provider.id, &model_str, &proxy_error).await;
-        Err(proxy_error)
-    }
 }
 
 #[cfg(test)]

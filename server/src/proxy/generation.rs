@@ -7,6 +7,7 @@ use serde_json::Value;
 use super::{
     ProxyError,
     cancellation::ProxyCancellationContext,
+    core::ProxyExecutionPolicy,
     orchestrator::{GenerationOrchestrationInput, orchestrate_generation},
     prepare::ExecutionPlan,
     request::ParsedProxyRequest,
@@ -14,6 +15,7 @@ use super::{
 use crate::{
     schema::enum_def::LlmApiType,
     service::{app_state::AppState, cache::types::CacheApiKey},
+    utils::storage::RequestLogBundleRequestSnapshot,
 };
 
 pub(super) struct GenerationExecutionInput {
@@ -24,6 +26,7 @@ pub(super) struct GenerationExecutionInput {
     pub is_stream: bool,
     pub query_params: std::collections::HashMap<String, String>,
     pub original_headers: HeaderMap,
+    pub request_snapshot: RequestLogBundleRequestSnapshot,
     pub client_ip_addr: Option<String>,
     pub start_time: i64,
     pub parsed_request: ParsedProxyRequest,
@@ -47,6 +50,7 @@ pub(super) async fn execute_generation_proxy(
         is_stream,
         query_params,
         original_headers,
+        request_snapshot,
         client_ip_addr,
         start_time,
         parsed_request,
@@ -71,12 +75,15 @@ pub(super) async fn execute_generation_proxy(
             execution_plan,
             is_stream,
             query_params,
+            replay_query_params: None,
             original_headers,
+            request_snapshot,
             client_ip_addr,
             start_time,
             data,
             original_request_value,
             original_request_body,
+            execution_policy: ProxyExecutionPolicy::Normal,
         },
     )
     .await

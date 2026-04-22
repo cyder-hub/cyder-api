@@ -63,6 +63,9 @@ db_object! {
         pub cache_write_tokens: Option<i32>,
         pub reasoning_tokens: Option<i32>,
         pub total_tokens: Option<i32>,
+        pub has_transform_diagnostics: bool,
+        pub transform_diagnostic_count: i32,
+        pub transform_diagnostic_max_loss_level: Option<String>,
         pub bundle_version: Option<i32>,
         #[diesel(column_name = storage_type)]
         pub bundle_storage_type: Option<StorageType>,
@@ -106,6 +109,9 @@ db_object! {
         pub total_output_tokens: Option<i32>,
         pub reasoning_tokens: Option<i32>,
         pub total_tokens: Option<i32>,
+        pub has_transform_diagnostics: bool,
+        pub transform_diagnostic_count: i32,
+        pub transform_diagnostic_max_loss_level: Option<String>,
     }
 }
 
@@ -117,6 +123,18 @@ pub struct RequestLogQueryPayload {
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
     pub status: Option<RequestStatus>,
+    pub user_api_type: Option<LlmApiType>,
+    pub resolved_name_scope: Option<String>,
+    pub final_error_code: Option<String>,
+    pub has_retry: Option<bool>,
+    pub has_fallback: Option<bool>,
+    pub has_transform_diagnostics: Option<bool>,
+    pub latency_ms_min: Option<i64>,
+    pub latency_ms_max: Option<i64>,
+    pub total_tokens_min: Option<i32>,
+    pub total_tokens_max: Option<i32>,
+    pub estimated_cost_nanos_min: Option<i64>,
+    pub estimated_cost_nanos_max: Option<i64>,
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
     pub page: Option<i64>,
@@ -361,6 +379,101 @@ impl RequestLog {
                 query = query.filter(request_log::dsl::status.eq(val.clone()));
                 count_query = count_query.filter(request_log::dsl::status.eq(val));
             }
+            if let Some(val) = payload.user_api_type {
+                query = query.filter(request_log::dsl::user_api_type.eq(val));
+                count_query = count_query.filter(request_log::dsl::user_api_type.eq(val));
+            }
+            if let Some(val) = payload.resolved_name_scope.as_ref() {
+                if !val.is_empty() {
+                    query = query.filter(request_log::dsl::resolved_name_scope.eq(Some(val)));
+                    count_query =
+                        count_query.filter(request_log::dsl::resolved_name_scope.eq(Some(val)));
+                }
+            }
+            if let Some(val) = payload.final_error_code.as_ref() {
+                if !val.is_empty() {
+                    query = query.filter(request_log::dsl::final_error_code.eq(Some(val)));
+                    count_query =
+                        count_query.filter(request_log::dsl::final_error_code.eq(Some(val)));
+                }
+            }
+            if let Some(val) = payload.has_retry {
+                if val {
+                    query = query.filter(request_log::dsl::retry_count.gt(0));
+                    count_query = count_query.filter(request_log::dsl::retry_count.gt(0));
+                } else {
+                    query = query.filter(request_log::dsl::retry_count.eq(0));
+                    count_query = count_query.filter(request_log::dsl::retry_count.eq(0));
+                }
+            }
+            if let Some(val) = payload.has_fallback {
+                if val {
+                    query = query.filter(request_log::dsl::fallback_count.gt(0));
+                    count_query = count_query.filter(request_log::dsl::fallback_count.gt(0));
+                } else {
+                    query = query.filter(request_log::dsl::fallback_count.eq(0));
+                    count_query = count_query.filter(request_log::dsl::fallback_count.eq(0));
+                }
+            }
+            if let Some(val) = payload.has_transform_diagnostics {
+                query = query.filter(request_log::dsl::has_transform_diagnostics.eq(val));
+                count_query =
+                    count_query.filter(request_log::dsl::has_transform_diagnostics.eq(val));
+            }
+            if let Some(val) = payload.latency_ms_min {
+                let filter = request_log::dsl::llm_response_completed_at
+                    .is_not_null()
+                    .and(
+                        request_log::dsl::llm_response_completed_at
+                            .assume_not_null()
+                            .ge(request_log::dsl::request_received_at + val),
+                    );
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.latency_ms_max {
+                let filter = request_log::dsl::llm_response_completed_at
+                    .is_not_null()
+                    .and(
+                        request_log::dsl::llm_response_completed_at
+                            .assume_not_null()
+                            .le(request_log::dsl::request_received_at + val),
+                    );
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.total_tokens_min {
+                let filter = request_log::dsl::total_tokens
+                    .is_not_null()
+                    .and(request_log::dsl::total_tokens.assume_not_null().ge(val));
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.total_tokens_max {
+                let filter = request_log::dsl::total_tokens
+                    .is_not_null()
+                    .and(request_log::dsl::total_tokens.assume_not_null().le(val));
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.estimated_cost_nanos_min {
+                let filter = request_log::dsl::estimated_cost_nanos.is_not_null().and(
+                    request_log::dsl::estimated_cost_nanos
+                        .assume_not_null()
+                        .ge(val),
+                );
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.estimated_cost_nanos_max {
+                let filter = request_log::dsl::estimated_cost_nanos.is_not_null().and(
+                    request_log::dsl::estimated_cost_nanos
+                        .assume_not_null()
+                        .le(val),
+                );
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
             if let Some(search_term) = payload.search.as_ref() {
                 if !search_term.is_empty() {
                     let pattern = format!("%{}%", search_term);
@@ -387,7 +500,12 @@ impl RequestLog {
                                 request_log::dsl::final_provider_name_snapshot
                                     .assume_not_null()
                                     .like(pattern.clone()),
-                            ));
+                            ))
+                        .or(request_log::dsl::final_error_code.is_not_null().and(
+                            request_log::dsl::final_error_code
+                                .assume_not_null()
+                                .like(pattern.clone()),
+                        ));
 
                     if let Ok(id_search) = search_term.parse::<i64>() {
                         let search_filter = request_log::dsl::id.eq(id_search).or(text_filter);
@@ -461,6 +579,101 @@ impl RequestLog {
                 query = query.filter(request_log::dsl::status.eq(val.clone()));
                 count_query = count_query.filter(request_log::dsl::status.eq(val));
             }
+            if let Some(val) = payload.user_api_type {
+                query = query.filter(request_log::dsl::user_api_type.eq(val));
+                count_query = count_query.filter(request_log::dsl::user_api_type.eq(val));
+            }
+            if let Some(val) = payload.resolved_name_scope.as_ref() {
+                if !val.is_empty() {
+                    query = query.filter(request_log::dsl::resolved_name_scope.eq(Some(val)));
+                    count_query =
+                        count_query.filter(request_log::dsl::resolved_name_scope.eq(Some(val)));
+                }
+            }
+            if let Some(val) = payload.final_error_code.as_ref() {
+                if !val.is_empty() {
+                    query = query.filter(request_log::dsl::final_error_code.eq(Some(val)));
+                    count_query =
+                        count_query.filter(request_log::dsl::final_error_code.eq(Some(val)));
+                }
+            }
+            if let Some(val) = payload.has_retry {
+                if val {
+                    query = query.filter(request_log::dsl::retry_count.gt(0));
+                    count_query = count_query.filter(request_log::dsl::retry_count.gt(0));
+                } else {
+                    query = query.filter(request_log::dsl::retry_count.eq(0));
+                    count_query = count_query.filter(request_log::dsl::retry_count.eq(0));
+                }
+            }
+            if let Some(val) = payload.has_fallback {
+                if val {
+                    query = query.filter(request_log::dsl::fallback_count.gt(0));
+                    count_query = count_query.filter(request_log::dsl::fallback_count.gt(0));
+                } else {
+                    query = query.filter(request_log::dsl::fallback_count.eq(0));
+                    count_query = count_query.filter(request_log::dsl::fallback_count.eq(0));
+                }
+            }
+            if let Some(val) = payload.has_transform_diagnostics {
+                query = query.filter(request_log::dsl::has_transform_diagnostics.eq(val));
+                count_query =
+                    count_query.filter(request_log::dsl::has_transform_diagnostics.eq(val));
+            }
+            if let Some(val) = payload.latency_ms_min {
+                let filter = request_log::dsl::llm_response_completed_at
+                    .is_not_null()
+                    .and(
+                        request_log::dsl::llm_response_completed_at
+                            .assume_not_null()
+                            .ge(request_log::dsl::request_received_at + val),
+                    );
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.latency_ms_max {
+                let filter = request_log::dsl::llm_response_completed_at
+                    .is_not_null()
+                    .and(
+                        request_log::dsl::llm_response_completed_at
+                            .assume_not_null()
+                            .le(request_log::dsl::request_received_at + val),
+                    );
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.total_tokens_min {
+                let filter = request_log::dsl::total_tokens
+                    .is_not_null()
+                    .and(request_log::dsl::total_tokens.assume_not_null().ge(val));
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.total_tokens_max {
+                let filter = request_log::dsl::total_tokens
+                    .is_not_null()
+                    .and(request_log::dsl::total_tokens.assume_not_null().le(val));
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.estimated_cost_nanos_min {
+                let filter = request_log::dsl::estimated_cost_nanos.is_not_null().and(
+                    request_log::dsl::estimated_cost_nanos
+                        .assume_not_null()
+                        .ge(val),
+                );
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
+            if let Some(val) = payload.estimated_cost_nanos_max {
+                let filter = request_log::dsl::estimated_cost_nanos.is_not_null().and(
+                    request_log::dsl::estimated_cost_nanos
+                        .assume_not_null()
+                        .le(val),
+                );
+                query = query.filter(filter.clone());
+                count_query = count_query.filter(filter);
+            }
             if let Some(search_term) = payload.search.as_ref() {
                 if !search_term.is_empty() {
                     let pattern = format!("%{}%", search_term);
@@ -487,7 +700,12 @@ impl RequestLog {
                                 request_log::dsl::final_provider_name_snapshot
                                     .assume_not_null()
                                     .like(pattern.clone()),
-                            ));
+                            ))
+                        .or(request_log::dsl::final_error_code.is_not_null().and(
+                            request_log::dsl::final_error_code
+                                .assume_not_null()
+                                .like(pattern.clone()),
+                        ));
 
                     if let Ok(id_search) = search_term.parse::<i64>() {
                         let search_filter = request_log::dsl::id.eq(id_search).or(text_filter);

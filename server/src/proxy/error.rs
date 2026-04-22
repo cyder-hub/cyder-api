@@ -63,7 +63,7 @@ pub enum ProxyError {
 }
 
 impl ProxyError {
-    pub(super) fn status_code(&self) -> StatusCode {
+    pub(crate) fn status_code(&self) -> StatusCode {
         match self {
             ProxyError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ProxyError::KeyDisabled(_) => StatusCode::FORBIDDEN,
@@ -93,7 +93,7 @@ impl ProxyError {
         }
     }
 
-    pub(super) fn error_code(&self) -> &'static str {
+    pub(crate) fn error_code(&self) -> &'static str {
         match self {
             ProxyError::Unauthorized(_) => "authentication_error",
             ProxyError::KeyDisabled(_) => "api_key_disabled_error",
@@ -120,7 +120,7 @@ impl ProxyError {
         }
     }
 
-    pub(super) fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         match self {
             ProxyError::Unauthorized(msg)
             | ProxyError::KeyDisabled(msg)
@@ -159,11 +159,11 @@ pub(super) fn classify_request_body_error(message: impl Into<String>) -> ProxyEr
     }
 }
 
-pub(super) fn protocol_transform_error(operation: &str, err: impl fmt::Display) -> ProxyError {
+pub(crate) fn protocol_transform_error(operation: &str, err: impl fmt::Display) -> ProxyError {
     ProxyError::ProtocolTransformError(format!("{operation}: {err}"))
 }
 
-pub(super) fn classify_reqwest_error(context: &str, err: &ReqwestError) -> ProxyError {
+pub(crate) fn classify_reqwest_error(context: &str, err: &ReqwestError) -> ProxyError {
     if err.is_timeout() {
         return ProxyError::UpstreamTimeout(format!("{context} timed out: {err}"));
     }
@@ -189,7 +189,7 @@ pub(super) fn classify_reqwest_error(context: &str, err: &ReqwestError) -> Proxy
     ProxyError::BadGateway(format!("{context} failed: {err}"))
 }
 
-pub(super) fn classify_upstream_status(status: StatusCode, body: &[u8]) -> ProxyError {
+pub(crate) fn classify_upstream_status(status: StatusCode, body: &[u8]) -> ProxyError {
     let body_message = extract_upstream_error_message(body);
     let message = format!("Upstream returned {}: {}", status.as_u16(), body_message);
 

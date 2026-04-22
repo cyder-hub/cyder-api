@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use axum::{
-    extract::{Path, Query},
+    Json,
+    extract::{Path, Query, State},
     http::header,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use cyder_tools::log::debug;
 use serde::{Deserialize, Serialize};
@@ -15,12 +18,26 @@ use crate::{
             RequestLog, RequestLogListItem, RequestLogQueryPayload as DbRequestLogQueryPayload,
             RequestLogRecord,
         },
+        request_replay_run::{RequestReplayRun, RequestReplayRunRecord},
     },
     schema::enum_def::{
-        LlmApiType, RequestAttemptStatus, RequestStatus, SchedulerAction, StorageType,
+        LlmApiType, RequestAttemptStatus, RequestReplayKind, RequestReplayMode,
+        RequestReplaySemanticBasis, RequestReplayStatus, RequestStatus, SchedulerAction,
+        StorageType,
     },
     service::{
-        app_state::StateRouter,
+        app_state::{AppState, StateRouter},
+        request_log_artifact::{
+            RequestLogArtifactResponse, get_request_log_artifacts as load_request_log_artifacts,
+        },
+        request_replay::{
+            AttemptReplayExecuteParams, AttemptReplayPreviewParams, AttemptReplayPreviewResponse,
+            GatewayReplayExecuteParams, GatewayReplayPreviewParams, GatewayReplayPreviewResponse,
+            RequestReplayArtifact, execute_attempt_replay as execute_attempt_replay_service,
+            execute_gateway_replay as execute_gateway_replay_service, load_replay_artifact_for_run,
+            preview_attempt_replay as preview_attempt_replay_service,
+            preview_gateway_replay as preview_gateway_replay_service,
+        },
         storage::{Storage, get_local_storage, get_s3_storage, types::GetObjectOptions},
     },
     utils::HttpResult,
@@ -34,6 +51,18 @@ struct RequestLogQueryParams {
     provider_id: Option<i64>,
     model_id: Option<i64>,
     status: Option<RequestStatus>,
+    user_api_type: Option<LlmApiType>,
+    resolved_name_scope: Option<String>,
+    final_error_code: Option<String>,
+    has_retry: Option<bool>,
+    has_fallback: Option<bool>,
+    has_transform_diagnostics: Option<bool>,
+    latency_ms_min: Option<i64>,
+    latency_ms_max: Option<i64>,
+    total_tokens_min: Option<i32>,
+    total_tokens_max: Option<i32>,
+    estimated_cost_nanos_min: Option<i64>,
+    estimated_cost_nanos_max: Option<i64>,
     start_time: Option<i64>,
     end_time: Option<i64>,
     page: Option<i64>,
@@ -48,6 +77,18 @@ impl From<RequestLogQueryParams> for DbRequestLogQueryPayload {
             provider_id: value.provider_id,
             model_id: value.model_id,
             status: value.status,
+            user_api_type: value.user_api_type,
+            resolved_name_scope: value.resolved_name_scope,
+            final_error_code: value.final_error_code,
+            has_retry: value.has_retry,
+            has_fallback: value.has_fallback,
+            has_transform_diagnostics: value.has_transform_diagnostics,
+            latency_ms_min: value.latency_ms_min,
+            latency_ms_max: value.latency_ms_max,
+            total_tokens_min: value.total_tokens_min,
+            total_tokens_max: value.total_tokens_max,
+            estimated_cost_nanos_min: value.estimated_cost_nanos_min,
+            estimated_cost_nanos_max: value.estimated_cost_nanos_max,
             start_time: value.start_time,
             end_time: value.end_time,
             page: value.page,
@@ -83,6 +124,9 @@ struct RequestLogListItemResponse {
     total_output_tokens: Option<i32>,
     reasoning_tokens: Option<i32>,
     total_tokens: Option<i32>,
+    has_transform_diagnostics: bool,
+    transform_diagnostic_count: i32,
+    transform_diagnostic_max_loss_level: Option<String>,
 }
 
 impl From<RequestLogListItem> for RequestLogListItemResponse {
@@ -112,6 +156,9 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
             total_output_tokens: value.total_output_tokens,
             reasoning_tokens: value.reasoning_tokens,
             total_tokens: value.total_tokens,
+            has_transform_diagnostics: value.has_transform_diagnostics,
+            transform_diagnostic_count: value.transform_diagnostic_count,
+            transform_diagnostic_max_loss_level: value.transform_diagnostic_max_loss_level,
         }
     }
 }
@@ -162,6 +209,9 @@ struct RequestLogResponse {
     cache_write_tokens: Option<i32>,
     reasoning_tokens: Option<i32>,
     total_tokens: Option<i32>,
+    has_transform_diagnostics: bool,
+    transform_diagnostic_count: i32,
+    transform_diagnostic_max_loss_level: Option<String>,
     bundle_version: Option<i32>,
     bundle_storage_type: Option<StorageType>,
     bundle_storage_key: Option<String>,
@@ -214,6 +264,9 @@ impl From<RequestLogRecord> for RequestLogResponse {
             cache_write_tokens: value.cache_write_tokens,
             reasoning_tokens: value.reasoning_tokens,
             total_tokens: value.total_tokens,
+            has_transform_diagnostics: value.has_transform_diagnostics,
+            transform_diagnostic_count: value.transform_diagnostic_count,
+            transform_diagnostic_max_loss_level: value.transform_diagnostic_max_loss_level,
             bundle_version: value.bundle_version,
             bundle_storage_type: value.bundle_storage_type,
             bundle_storage_key: value.bundle_storage_key,
@@ -330,6 +383,81 @@ struct RequestLogDetailResponse {
     attempts: Vec<RequestAttemptResponse>,
 }
 
+#[derive(Serialize, Debug)]
+struct RequestReplayRunResponse {
+    id: i64,
+    source_request_log_id: i64,
+    source_attempt_id: Option<i64>,
+    replay_kind: RequestReplayKind,
+    replay_mode: RequestReplayMode,
+    semantic_basis: RequestReplaySemanticBasis,
+    status: RequestReplayStatus,
+    executed_route_id: Option<i64>,
+    executed_route_name: Option<String>,
+    executed_provider_id: Option<i64>,
+    executed_provider_api_key_id: Option<i64>,
+    executed_model_id: Option<i64>,
+    executed_llm_api_type: Option<LlmApiType>,
+    downstream_request_uri: Option<String>,
+    http_status: Option<i32>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    total_input_tokens: Option<i32>,
+    total_output_tokens: Option<i32>,
+    reasoning_tokens: Option<i32>,
+    total_tokens: Option<i32>,
+    estimated_cost_nanos: Option<i64>,
+    estimated_cost_currency: Option<String>,
+    diff_summary_json: Option<String>,
+    artifact_version: Option<i32>,
+    artifact_storage_type: Option<StorageType>,
+    artifact_storage_key: Option<String>,
+    started_at: Option<i64>,
+    first_byte_at: Option<i64>,
+    completed_at: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl From<RequestReplayRunRecord> for RequestReplayRunResponse {
+    fn from(value: RequestReplayRunRecord) -> Self {
+        Self {
+            id: value.id,
+            source_request_log_id: value.source_request_log_id,
+            source_attempt_id: value.source_attempt_id,
+            replay_kind: value.replay_kind,
+            replay_mode: value.replay_mode,
+            semantic_basis: value.semantic_basis,
+            status: value.status,
+            executed_route_id: value.executed_route_id,
+            executed_route_name: value.executed_route_name,
+            executed_provider_id: value.executed_provider_id,
+            executed_provider_api_key_id: value.executed_provider_api_key_id,
+            executed_model_id: value.executed_model_id,
+            executed_llm_api_type: value.executed_llm_api_type,
+            downstream_request_uri: value.downstream_request_uri,
+            http_status: value.http_status,
+            error_code: value.error_code,
+            error_message: value.error_message,
+            total_input_tokens: value.total_input_tokens,
+            total_output_tokens: value.total_output_tokens,
+            reasoning_tokens: value.reasoning_tokens,
+            total_tokens: value.total_tokens,
+            estimated_cost_nanos: value.estimated_cost_nanos,
+            estimated_cost_currency: value.estimated_cost_currency,
+            diff_summary_json: value.diff_summary_json,
+            artifact_version: value.artifact_version,
+            artifact_storage_type: value.artifact_storage_type,
+            artifact_storage_key: value.artifact_storage_key,
+            started_at: value.started_at,
+            first_byte_at: value.first_byte_at,
+            completed_at: value.completed_at,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
 async fn list_request_log(
     Query(params): Query<RequestLogQueryParams>,
 ) -> Result<HttpResult<ListResult<RequestLogListItemResponse>>, BaseError> {
@@ -357,6 +485,72 @@ async fn get_request_log(
         }
         Err(e) => Err(e),
     }
+}
+
+async fn get_request_log_artifacts(
+    Path(id): Path<i64>,
+) -> Result<HttpResult<RequestLogArtifactResponse>, BaseError> {
+    Ok(HttpResult::new(load_request_log_artifacts(id).await?))
+}
+
+async fn preview_attempt_replay(
+    State(app_state): State<Arc<AppState>>,
+    Path((request_log_id, attempt_id)): Path<(i64, i64)>,
+    Json(payload): Json<AttemptReplayPreviewParams>,
+) -> Result<HttpResult<AttemptReplayPreviewResponse>, BaseError> {
+    Ok(HttpResult::new(
+        preview_attempt_replay_service(&app_state, request_log_id, attempt_id, payload).await?,
+    ))
+}
+
+async fn execute_attempt_replay(
+    State(app_state): State<Arc<AppState>>,
+    Path((request_log_id, attempt_id)): Path<(i64, i64)>,
+    Json(payload): Json<AttemptReplayExecuteParams>,
+) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
+    let run =
+        execute_attempt_replay_service(&app_state, request_log_id, attempt_id, payload).await?;
+    Ok(HttpResult::new(run.into()))
+}
+
+async fn preview_gateway_replay(
+    State(app_state): State<Arc<AppState>>,
+    Path(request_log_id): Path<i64>,
+    Json(payload): Json<GatewayReplayPreviewParams>,
+) -> Result<HttpResult<GatewayReplayPreviewResponse>, BaseError> {
+    Ok(HttpResult::new(
+        preview_gateway_replay_service(&app_state, request_log_id, payload).await?,
+    ))
+}
+
+async fn execute_gateway_replay(
+    State(app_state): State<Arc<AppState>>,
+    Path(request_log_id): Path<i64>,
+    Json(payload): Json<GatewayReplayExecuteParams>,
+) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
+    let run = execute_gateway_replay_service(&app_state, request_log_id, payload).await?;
+    Ok(HttpResult::new(run.into()))
+}
+
+async fn list_request_replay_runs(
+    Path(request_log_id): Path<i64>,
+) -> Result<HttpResult<Vec<RequestReplayRunResponse>>, BaseError> {
+    let runs = RequestReplayRun::list_by_source_request_log_id(request_log_id)?;
+    Ok(HttpResult::new(runs.into_iter().map(Into::into).collect()))
+}
+
+async fn get_request_replay_run(
+    Path((request_log_id, replay_run_id)): Path<(i64, i64)>,
+) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
+    let run = RequestReplayRun::get_by_source_and_id(request_log_id, replay_run_id)?;
+    Ok(HttpResult::new(run.into()))
+}
+
+async fn get_request_replay_artifacts(
+    Path((request_log_id, replay_run_id)): Path<(i64, i64)>,
+) -> Result<HttpResult<RequestReplayArtifact>, BaseError> {
+    let run = RequestReplayRun::get_by_source_and_id(request_log_id, replay_run_id)?;
+    Ok(HttpResult::new(load_replay_artifact_for_run(&run).await?))
 }
 
 fn resolve_request_log_content_location(
@@ -421,6 +615,23 @@ pub fn create_record_router() -> StateRouter {
         StateRouter::new()
             .route("/list", get(list_request_log))
             .route("/{id}", get(get_request_log))
+            .route("/{id}/artifacts", get(get_request_log_artifacts))
+            .route(
+                "/{id}/replay/attempt/{attempt_id}/preview",
+                post(preview_attempt_replay),
+            )
+            .route(
+                "/{id}/replay/attempt/{attempt_id}/execute",
+                post(execute_attempt_replay),
+            )
+            .route("/{id}/replay/gateway/preview", post(preview_gateway_replay))
+            .route("/{id}/replay/gateway/execute", post(execute_gateway_replay))
+            .route("/{id}/replay", get(list_request_replay_runs))
+            .route("/{id}/replay/{replay_run_id}", get(get_request_replay_run))
+            .route(
+                "/{id}/replay/{replay_run_id}/artifacts",
+                get(get_request_replay_artifacts),
+            )
             .route("/{id}/content", get(get_request_log_content)),
     )
 }
@@ -429,12 +640,15 @@ pub fn create_record_router() -> StateRouter {
 mod tests {
     use super::{
         RequestAttemptResponse, RequestLogDetailResponse, RequestLogListItemResponse,
-        RequestLogQueryParams, RequestLogResponse, create_record_router,
+        RequestLogQueryParams, RequestLogResponse, RequestReplayRunResponse, create_record_router,
         resolve_request_log_content_location,
     };
     use crate::controller::BaseError;
+    use crate::database::request_replay_run::RequestReplayRunRecord;
     use crate::schema::enum_def::{
-        LlmApiType, RequestAttemptStatus, RequestStatus, SchedulerAction, StorageType,
+        LlmApiType, RequestAttemptStatus, RequestReplayKind, RequestReplayMode,
+        RequestReplaySemanticBasis, RequestReplayStatus, RequestStatus, SchedulerAction,
+        StorageType,
     };
     use serde_json::{from_value, json, to_value};
 
@@ -444,15 +658,60 @@ mod tests {
     }
 
     #[test]
+    fn request_replay_run_response_serializes_lightweight_summary() {
+        let value = to_value(RequestReplayRunResponse::from(RequestReplayRunRecord {
+            id: 1001,
+            source_request_log_id: 42,
+            source_attempt_id: Some(101),
+            replay_kind: RequestReplayKind::AttemptUpstream,
+            replay_mode: RequestReplayMode::Live,
+            semantic_basis: RequestReplaySemanticBasis::HistoricalAttemptSnapshot,
+            status: RequestReplayStatus::Success,
+            http_status: Some(200),
+            total_tokens: Some(12),
+            diff_summary_json: Some("{\"status_changed\":false}".to_string()),
+            artifact_version: Some(1),
+            artifact_storage_type: Some(StorageType::FileSystem),
+            artifact_storage_key: Some("replays/2026/04/22/1001.mp.gz".to_string()),
+            created_at: 100,
+            updated_at: 200,
+            ..Default::default()
+        }))
+        .expect("response should serialize");
+
+        assert_eq!(value.get("id").and_then(|item| item.as_i64()), Some(1001));
+        assert_eq!(
+            value.get("replay_kind").and_then(|item| item.as_str()),
+            Some("attempt_upstream")
+        );
+        assert_eq!(
+            value.get("status").and_then(|item| item.as_str()),
+            Some("success")
+        );
+        assert_eq!(
+            value
+                .get("artifact_storage_type")
+                .and_then(|item| item.as_str()),
+            Some("FILE_SYSTEM")
+        );
+        assert!(value.get("response_body").is_none());
+        assert!(value.get("input_snapshot").is_none());
+    }
+
+    #[test]
     fn request_log_query_params_use_api_key_id() {
         let params: RequestLogQueryParams = from_value(json!({
             "api_key_id": 42,
-            "status": "SUCCESS"
+            "status": "SUCCESS",
+            "has_retry": true,
+            "latency_ms_min": 100
         }))
         .expect("query params should deserialize");
 
         assert_eq!(params.api_key_id, Some(42));
         assert_eq!(params.status, Some(RequestStatus::Success));
+        assert_eq!(params.has_retry, Some(true));
+        assert_eq!(params.latency_ms_min, Some(100));
     }
 
     #[test]
@@ -482,10 +741,19 @@ mod tests {
             total_output_tokens: None,
             reasoning_tokens: None,
             total_tokens: None,
+            has_transform_diagnostics: true,
+            transform_diagnostic_count: 1,
+            transform_diagnostic_max_loss_level: Some("lossy_minor".to_string()),
         })
         .expect("response should serialize");
 
         assert_eq!(value.get("api_key_id").and_then(|v| v.as_i64()), Some(2));
+        assert_eq!(
+            value
+                .get("has_transform_diagnostics")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         let legacy_api_key_id_field = ["system", "api", "key", "id"].join("_");
         assert!(value.get(&legacy_api_key_id_field).is_none());
     }
@@ -557,6 +825,9 @@ mod tests {
                 cache_write_tokens: None,
                 reasoning_tokens: Some(1),
                 total_tokens: Some(31),
+                has_transform_diagnostics: true,
+                transform_diagnostic_count: 1,
+                transform_diagnostic_max_loss_level: Some("lossy_major".to_string()),
                 bundle_version: Some(2),
                 bundle_storage_type: Some(StorageType::FileSystem),
                 bundle_storage_key: Some("logs/1.mp.gz".to_string()),

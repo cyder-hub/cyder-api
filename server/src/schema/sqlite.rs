@@ -290,7 +290,7 @@ diesel::table! {
     use crate::schema::enum_def::RequestStatusMapping;
     use crate::schema::enum_def::StorageTypeMapping;
     use crate::schema::enum_def::LlmApiTypeMapping;
-    use diesel::sql_types::{Integer, BigInt, Text, Nullable};
+    use diesel::sql_types::{BigInt, Bool, Integer, Nullable, Text};
 
     request_log (id) {
         id -> BigInt,
@@ -347,6 +347,9 @@ diesel::table! {
         cache_write_tokens -> Nullable<Integer>,
         reasoning_tokens -> Nullable<Integer>,
         total_tokens -> Nullable<Integer>,
+        has_transform_diagnostics -> Bool,
+        transform_diagnostic_count -> Integer,
+        transform_diagnostic_max_loss_level -> Nullable<Text>,
         bundle_version -> Nullable<Integer>,
         #[sql_name = "bundle_storage_type"]
         storage_type -> Nullable<StorageTypeMapping>,
@@ -406,6 +409,51 @@ diesel::table! {
         llm_request_patch_id -> Nullable<Integer>,
         llm_response_blob_id -> Nullable<Integer>,
         llm_response_capture_state -> Nullable<Text>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use crate::schema::enum_def::LlmApiTypeMapping;
+    use crate::schema::enum_def::RequestReplayKindMapping;
+    use crate::schema::enum_def::RequestReplayModeMapping;
+    use crate::schema::enum_def::RequestReplaySemanticBasisMapping;
+    use crate::schema::enum_def::RequestReplayStatusMapping;
+    use crate::schema::enum_def::StorageTypeMapping;
+    use diesel::sql_types::{BigInt, Integer, Nullable, Text};
+
+    request_replay_run (id) {
+        id -> BigInt,
+        source_request_log_id -> BigInt,
+        source_attempt_id -> Nullable<BigInt>,
+        replay_kind -> RequestReplayKindMapping,
+        replay_mode -> RequestReplayModeMapping,
+        semantic_basis -> RequestReplaySemanticBasisMapping,
+        status -> RequestReplayStatusMapping,
+        executed_route_id -> Nullable<BigInt>,
+        executed_route_name -> Nullable<Text>,
+        executed_provider_id -> Nullable<BigInt>,
+        executed_provider_api_key_id -> Nullable<BigInt>,
+        executed_model_id -> Nullable<BigInt>,
+        executed_llm_api_type -> Nullable<LlmApiTypeMapping>,
+        downstream_request_uri -> Nullable<Text>,
+        http_status -> Nullable<Integer>,
+        error_code -> Nullable<Text>,
+        error_message -> Nullable<Text>,
+        total_input_tokens -> Nullable<Integer>,
+        total_output_tokens -> Nullable<Integer>,
+        reasoning_tokens -> Nullable<Integer>,
+        total_tokens -> Nullable<Integer>,
+        estimated_cost_nanos -> Nullable<BigInt>,
+        estimated_cost_currency -> Nullable<Text>,
+        diff_summary_json -> Nullable<Text>,
+        artifact_version -> Nullable<Integer>,
+        artifact_storage_type -> Nullable<StorageTypeMapping>,
+        artifact_storage_key -> Nullable<Text>,
+        started_at -> Nullable<BigInt>,
+        first_byte_at -> Nullable<BigInt>,
+        completed_at -> Nullable<BigInt>,
         created_at -> BigInt,
         updated_at -> BigInt,
     }
@@ -476,6 +524,8 @@ diesel::joinable!(request_log -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(request_log -> model (model_id));
 diesel::joinable!(request_log -> provider (provider_id));
 diesel::joinable!(request_log -> provider_api_key (provider_api_key_id));
+diesel::joinable!(request_replay_run -> request_attempt (source_attempt_id));
+diesel::joinable!(request_replay_run -> request_log (source_request_log_id));
 diesel::joinable!(request_patch_rule -> model (model_id));
 diesel::joinable!(request_patch_rule -> provider (provider_id));
 diesel::joinable!(system_api_key -> access_control_policy (access_control_policy_id));
@@ -499,6 +549,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     provider_api_key,
     request_attempt,
     request_log,
+    request_replay_run,
     request_patch_rule,
     system_api_key,
 );

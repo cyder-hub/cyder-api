@@ -15,15 +15,18 @@ use super::{
     ProxyError,
     auth::{admit_api_key_request, check_access_control},
     cancellation::ProxyCancellationContext,
-    core::{ProxyLogMode, ProxyRequestFailure, ProxyResponseMode, proxy_request},
+    core::{
+        ProxyExecutionPolicy, ProxyLogMode, ProxyRequestFailure, ProxyResponseMode, proxy_request,
+    },
     load_runtime_request_patch_trace,
     logging::{LoggedBody, RequestLogContext, record_request_completion_and_log},
     prepare::{
-        ExecutionCandidate, ExecutionPlan, prepare_generation_request, prepare_llm_request,
-        prepare_simple_gemini_request, resolve_provider_credentials,
+        ExecutionCandidate, ExecutionPlan, build_execution_plan, prepare_generation_request,
+        prepare_llm_request, prepare_simple_gemini_request, rebuild_gemini_url_query_from_snapshot,
+        resolve_provider_credentials,
     },
     protocol_transform_error,
-    provider_governance::ensure_provider_request_allowed,
+    provider_governance::{ensure_provider_request_allowed, preview_provider_request_allowed},
     retry_policy::{
         ProviderGovernanceRejection, RetryDecision, RetryFailureKind, RetryPolicyContext,
         decide_retry,
@@ -36,14 +39,20 @@ use super::{
 };
 use crate::{
     config::CONFIG,
+    cost::UsageNormalization,
     database::request_attempt::RequestAttempt,
     schema::enum_def::{LlmApiType, RequestAttemptStatus, RequestStatus, SchedulerAction},
     service::{
         app_state::AppState,
         cache::types::{CacheApiKey, CacheCostCatalogVersion},
-        transform::transform_request_data,
+        transform::{transform_request_data_with_diagnostics, unified::UnifiedTransformDiagnostic},
     },
-    utils::storage::LogBodyCaptureState,
+    utils::storage::{
+        LogBodyCaptureState, RequestLogBundleCandidateManifest,
+        RequestLogBundleCandidateManifestItem, RequestLogBundleQueryParam,
+        RequestLogBundleRequestSnapshot, RequestLogBundleTransformDiagnosticItem,
+        RequestLogBundleTransformDiagnosticPhase,
+    },
 };
 
 pub(super) const CAPABILITY_MISMATCH_SKIPPED_ERROR: &str = "capability_mismatch_skipped";
@@ -72,6 +81,27 @@ impl ExecutionRequirement {
         .into_iter()
         .filter_map(|(required, name)| required.then_some(name))
         .collect()
+    }
+}
+
+fn build_candidate_manifest(execution_plan: &ExecutionPlan) -> RequestLogBundleCandidateManifest {
+    RequestLogBundleCandidateManifest {
+        items: execution_plan
+            .candidates
+            .iter()
+            .map(|candidate| RequestLogBundleCandidateManifestItem {
+                candidate_position: candidate.candidate_position as i32,
+                route_id: candidate.route_id,
+                route_name: candidate.route_name.clone(),
+                provider_id: candidate.provider.id,
+                provider_key: candidate.provider.provider_key.clone(),
+                model_id: candidate.model.id,
+                model_name: candidate.model.model_name.clone(),
+                real_model_name: candidate.model.real_model_name.clone(),
+                llm_api_type: candidate.llm_api_type,
+                provider_api_key_mode: candidate.provider_api_key_mode.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -305,15 +335,20 @@ pub(super) struct AttemptExecutionInput {
     pub resolved_route_id: Option<i64>,
     pub resolved_route_name: Option<String>,
     pub query_params: HashMap<String, String>,
+    pub replay_query_params: Option<Vec<RequestLogBundleQueryParam>>,
     pub original_headers: HeaderMap,
+    pub request_snapshot: RequestLogBundleRequestSnapshot,
+    pub candidate_manifest: RequestLogBundleCandidateManifest,
     pub original_request_body: Bytes,
     pub client_ip_addr: Option<String>,
     pub start_time: i64,
     pub skipped_attempts: Vec<RequestAttemptDraft>,
+    pub prior_transform_diagnostics: Vec<RequestLogBundleTransformDiagnosticItem>,
     pub same_candidate_retry_count: u32,
     pub attempted_candidate_count: u32,
     pub next_candidate_available: bool,
     pub log_mode: AttemptLogMode,
+    pub execution_policy: ProxyExecutionPolicy,
     pub kind: AttemptExecutionKind,
 }
 
@@ -348,6 +383,7 @@ struct MaterializedAttemptRequest {
     final_headers: HeaderMap,
     final_body: Bytes,
     llm_request_body_for_log: Option<LoggedBody>,
+    transform_diagnostics: Vec<UnifiedTransformDiagnostic>,
     model_str: String,
     response_mode: ProxyResponseMode,
 }
@@ -376,10 +412,13 @@ async fn record_attempt_failure(
     skipped_attempts: &[RequestAttemptDraft],
     attempt: &RequestAttemptDraft,
     proxy_error: &ProxyError,
+    execution_policy: ProxyExecutionPolicy,
 ) -> RequestLogContext {
     let log_context =
         finalize_attempt_failure_context(log_context, skipped_attempts, attempt, proxy_error);
-    record_request_completion_and_log(app_state, log_context.clone()).await;
+    if execution_policy.records_request_log() {
+        record_request_completion_and_log(app_state, log_context.clone()).await;
+    }
     log_context
 }
 
@@ -390,6 +429,7 @@ async fn maybe_record_attempt_failure(
     attempt: &RequestAttemptDraft,
     proxy_error: &ProxyError,
     log_mode: AttemptLogMode,
+    execution_policy: ProxyExecutionPolicy,
 ) -> RequestLogContext {
     if log_mode.should_record_attempt_failure() {
         record_attempt_failure(
@@ -398,6 +438,7 @@ async fn maybe_record_attempt_failure(
             skipped_attempts,
             attempt,
             proxy_error,
+            execution_policy,
         )
         .await
     } else {
@@ -574,11 +615,14 @@ async fn materialize_generation_attempt(
     _original_request_value: &Value,
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
+    replay_query_params: Option<&[RequestLogBundleQueryParam]>,
     request_patches: &[crate::service::cache::types::CacheResolvedRequestPatch],
     provider_credentials: &super::prepare::ProviderCredentials,
 ) -> Result<MaterializedAttemptRequest, ProxyError> {
     let target_api_type = candidate.llm_api_type;
-    data = transform_request_data(data, user_api_type, target_api_type, is_stream);
+    let transform_output =
+        transform_request_data_with_diagnostics(data, user_api_type, target_api_type, is_stream);
+    data = transform_output.value;
     let prepared_request = prepare_generation_request(
         &candidate.provider,
         &candidate.model,
@@ -591,15 +635,29 @@ async fn materialize_generation_attempt(
         query_params,
     )
     .await?;
+    let final_url = if target_api_type == LlmApiType::Gemini {
+        match replay_query_params {
+            Some(params) => rebuild_gemini_url_query_from_snapshot(
+                &prepared_request.final_url,
+                params,
+                is_stream,
+                request_patches,
+            )?,
+            None => prepared_request.final_url,
+        }
+    } else {
+        prepared_request.final_url
+    };
     let final_body = Bytes::from(
         serde_json::to_vec(&prepared_request.final_body_value).map_err(|err| {
             protocol_transform_error("Failed to serialize final request body", err)
         })?,
     );
     Ok(MaterializedAttemptRequest {
-        final_url: prepared_request.final_url,
+        final_url,
         final_headers: prepared_request.final_headers,
         llm_request_body_for_log: Some(LoggedBody::from_bytes(final_body.clone())),
+        transform_diagnostics: transform_output.diagnostics,
         final_body,
         model_str: format_model_str(&candidate.provider, &candidate.model),
         response_mode: ProxyResponseMode::Generation {
@@ -615,6 +673,7 @@ async fn materialize_utility_attempt(
     data: Value,
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
+    replay_query_params: Option<&[RequestLogBundleQueryParam]>,
     request_patches: &[crate::service::cache::types::CacheResolvedRequestPatch],
     provider_credentials: &super::prepare::ProviderCredentials,
 ) -> Result<MaterializedAttemptRequest, ProxyError> {
@@ -646,6 +705,12 @@ async fn materialize_utility_attempt(
             .await?
         }
     };
+    let final_url = match (operation.protocol, replay_query_params) {
+        (UtilityProtocol::GeminiCompatible, Some(params)) => {
+            rebuild_gemini_url_query_from_snapshot(&final_url, params, false, request_patches)?
+        }
+        _ => final_url,
+    };
     debug_assert_eq!(provider_api_key_id, provider_credentials.key_id);
     let final_body =
         Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
@@ -656,6 +721,7 @@ async fn materialize_utility_attempt(
         final_url,
         final_headers,
         llm_request_body_for_log: Some(LoggedBody::from_bytes(final_body.clone())),
+        transform_diagnostics: Vec::new(),
         final_body,
         model_str: format_model_str(&candidate.provider, &candidate.model),
         response_mode: ProxyResponseMode::Utility {
@@ -677,15 +743,20 @@ pub(super) async fn execute_attempt(
         resolved_route_id,
         resolved_route_name,
         query_params,
+        replay_query_params,
         original_headers,
+        request_snapshot,
+        candidate_manifest,
         original_request_body,
         client_ip_addr,
         start_time,
         skipped_attempts,
+        prior_transform_diagnostics,
         same_candidate_retry_count,
         attempted_candidate_count,
         next_candidate_available,
         log_mode,
+        execution_policy,
         kind,
     } = input;
 
@@ -714,6 +785,9 @@ pub(super) async fn execute_attempt(
         user_api_type_for_log,
         candidate.llm_api_type,
     );
+    log_context.set_request_snapshot(request_snapshot.clone());
+    log_context.set_candidate_manifest(candidate_manifest);
+    log_context.seed_transform_diagnostics(&prior_transform_diagnostics);
     log_context.user_request_body = Some(LoggedBody::from_bytes(original_request_body));
     log_context.set_attempts_for_logging(&skipped_attempts_for_log, Some(attempt.clone()));
 
@@ -741,6 +815,7 @@ pub(super) async fn execute_attempt(
                     &attempt,
                     &proxy_error,
                     log_mode,
+                    execution_policy,
                 )
                 .await;
                 return AttemptExecutionResult {
@@ -772,6 +847,7 @@ pub(super) async fn execute_attempt(
                 &attempt,
                 &proxy_error,
                 log_mode,
+                execution_policy,
             )
             .await;
             return AttemptExecutionResult {
@@ -807,6 +883,7 @@ pub(super) async fn execute_attempt(
             &attempt,
             &proxy_error,
             log_mode,
+            execution_policy,
         )
         .await;
         return AttemptExecutionResult {
@@ -845,6 +922,7 @@ pub(super) async fn execute_attempt(
                 &attempt,
                 &proxy_error,
                 log_mode,
+                execution_policy,
             )
             .await;
             return AttemptExecutionResult {
@@ -875,6 +953,7 @@ pub(super) async fn execute_attempt(
             &attempt,
             &proxy_error,
             log_mode,
+            execution_policy,
         )
         .await;
         return AttemptExecutionResult {
@@ -900,6 +979,7 @@ pub(super) async fn execute_attempt(
                 &original_request_value,
                 &original_headers,
                 &query_params,
+                replay_query_params.as_deref(),
                 &request_patch_trace.applied_rules,
                 &provider_credentials,
             )
@@ -927,6 +1007,7 @@ pub(super) async fn execute_attempt(
                         &attempt,
                         &proxy_error,
                         log_mode,
+                        execution_policy,
                     )
                     .await;
                     return AttemptExecutionResult {
@@ -943,6 +1024,7 @@ pub(super) async fn execute_attempt(
             data,
             &original_headers,
             &query_params,
+            replay_query_params.as_deref(),
             &request_patch_trace.applied_rules,
             &provider_credentials,
         )
@@ -970,6 +1052,7 @@ pub(super) async fn execute_attempt(
                     &attempt,
                     &proxy_error,
                     log_mode,
+                    execution_policy,
                 )
                 .await;
                 return AttemptExecutionResult {
@@ -980,9 +1063,12 @@ pub(super) async fn execute_attempt(
             }
         },
     };
-
     attempt.llm_request_body_for_log = materialized.llm_request_body_for_log.clone();
     log_context.llm_request_body = materialized.llm_request_body_for_log;
+    log_context.append_transform_diagnostics(
+        RequestLogBundleTransformDiagnosticPhase::Request,
+        &materialized.transform_diagnostics,
+    );
     attempt.request_uri = Some(materialized.final_url.clone());
     attempt.request_headers_json =
         serialize_downstream_request_headers_for_log(&materialized.final_headers);
@@ -990,34 +1076,39 @@ pub(super) async fn execute_attempt(
     sync_attempt_timing_and_usage(&mut attempt, &log_context, cost_catalog_version.as_ref());
     log_context.set_attempts_for_logging(&skipped_attempts_for_log, Some(attempt.clone()));
 
-    let api_key_concurrency_guard = match admit_api_key_request(&app_state, &system_api_key).await {
-        Ok(guard) => guard,
-        Err(proxy_error) => {
-            warn!("API key request admission failed: {:?}", proxy_error);
-            attempt.completed_at = Some(Utc::now().timestamp_millis());
-            classify_attempt_failure(
-                &mut attempt,
-                &proxy_error,
-                same_candidate_retry_count,
-                attempted_candidate_count,
-                next_candidate_available,
-                None,
-            );
-            let log_context = maybe_record_attempt_failure(
-                &app_state,
-                log_context,
-                &skipped_attempts_for_log,
-                &attempt,
-                &proxy_error,
-                log_mode,
-            )
-            .await;
-            return AttemptExecutionResult {
-                attempt,
-                response: Err(proxy_error),
-                log_context,
-            };
+    let api_key_concurrency_guard = if execution_policy.admits_api_key_requests() {
+        match admit_api_key_request(&app_state, &system_api_key).await {
+            Ok(guard) => guard,
+            Err(proxy_error) => {
+                warn!("API key request admission failed: {:?}", proxy_error);
+                attempt.completed_at = Some(Utc::now().timestamp_millis());
+                classify_attempt_failure(
+                    &mut attempt,
+                    &proxy_error,
+                    same_candidate_retry_count,
+                    attempted_candidate_count,
+                    next_candidate_available,
+                    None,
+                );
+                let log_context = maybe_record_attempt_failure(
+                    &app_state,
+                    log_context,
+                    &skipped_attempts_for_log,
+                    &attempt,
+                    &proxy_error,
+                    log_mode,
+                    execution_policy,
+                )
+                .await;
+                return AttemptExecutionResult {
+                    attempt,
+                    response: Err(proxy_error),
+                    log_context,
+                };
+            }
         }
+    } else {
+        None
     };
 
     if let Err(rejection) = ensure_provider_request_allowed(
@@ -1063,6 +1154,7 @@ pub(super) async fn execute_attempt(
             &attempt,
             &proxy_error,
             log_mode,
+            execution_policy,
         )
         .await;
         return AttemptExecutionResult {
@@ -1085,6 +1177,7 @@ pub(super) async fn execute_attempt(
         api_key_concurrency_guard,
         materialized.response_mode,
         log_mode.proxy_log_mode(),
+        execution_policy,
     )
     .await;
     let completed_at = Utc::now().timestamp_millis();
@@ -1140,12 +1233,15 @@ pub(super) struct GenerationOrchestrationInput {
     pub execution_plan: ExecutionPlan,
     pub is_stream: bool,
     pub query_params: HashMap<String, String>,
+    pub replay_query_params: Option<Vec<RequestLogBundleQueryParam>>,
     pub original_headers: HeaderMap,
+    pub request_snapshot: RequestLogBundleRequestSnapshot,
     pub client_ip_addr: Option<String>,
     pub start_time: i64,
     pub data: Value,
     pub original_request_value: Value,
     pub original_request_body: Bytes,
+    pub execution_policy: ProxyExecutionPolicy,
 }
 
 pub(super) struct UtilityOrchestrationInput {
@@ -1154,11 +1250,647 @@ pub(super) struct UtilityOrchestrationInput {
     pub operation: UtilityOperation,
     pub execution_plan: ExecutionPlan,
     pub query_params: HashMap<String, String>,
+    pub replay_query_params: Option<Vec<RequestLogBundleQueryParam>>,
     pub original_headers: HeaderMap,
+    pub request_snapshot: RequestLogBundleRequestSnapshot,
     pub client_ip_addr: Option<String>,
     pub start_time: i64,
     pub data: Value,
     pub original_request_body: Bytes,
+    pub execution_policy: ProxyExecutionPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum GatewayReplayAttemptKind {
+    Generation {
+        api_type: LlmApiType,
+        is_stream: bool,
+        data: Value,
+        original_request_value: Value,
+    },
+    Utility {
+        operation: UtilityOperation,
+        data: Value,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GatewayReplayInput {
+    pub system_api_key: Arc<CacheApiKey>,
+    pub requested_model_name: String,
+    pub query_params: Vec<RequestLogBundleQueryParam>,
+    pub original_headers: HeaderMap,
+    pub request_snapshot: RequestLogBundleRequestSnapshot,
+    pub client_ip_addr: Option<String>,
+    pub start_time: i64,
+    pub original_request_body: Bytes,
+    pub kind: GatewayReplayAttemptKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GatewayReplayPreparedRequest {
+    pub requested_model_name: String,
+    pub resolved_name_scope: String,
+    pub resolved_route_id: Option<i64>,
+    pub resolved_route_name: Option<String>,
+    pub candidate_position: i32,
+    pub provider_id: i64,
+    pub provider_api_key_id: i64,
+    pub model_id: i64,
+    pub llm_api_type: LlmApiType,
+    pub applied_request_patch_summary: Option<Value>,
+    pub final_request_uri: String,
+    pub final_request_headers: HeaderMap,
+    pub final_request_body: Bytes,
+    pub transform_diagnostics: Vec<UnifiedTransformDiagnostic>,
+    pub candidate_manifest: RequestLogBundleCandidateManifest,
+    pub candidate_decisions: Vec<GatewayReplayCandidateDecision>,
+}
+
+fn replay_query_params_to_map(params: &[RequestLogBundleQueryParam]) -> HashMap<String, String> {
+    params
+        .iter()
+        .filter_map(|param| {
+            param
+                .value_for_replay()
+                .map(|value| (param.name.clone(), value))
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+pub(crate) struct GatewayReplayExecutionSuccess {
+    pub response: Response<Body>,
+    pub metadata: GatewayReplayExecutionMetadata,
+}
+
+#[derive(Debug)]
+pub(crate) struct GatewayReplayExecutionFailure {
+    pub error: ProxyError,
+    pub metadata: Option<GatewayReplayExecutionMetadata>,
+    pub candidate_decisions: Vec<GatewayReplayCandidateDecision>,
+}
+
+impl GatewayReplayExecutionFailure {
+    fn without_attempt(error: ProxyError) -> Self {
+        Self {
+            error,
+            metadata: None,
+            candidate_decisions: Vec::new(),
+        }
+    }
+
+    fn with_decisions(
+        error: ProxyError,
+        candidate_decisions: Vec<GatewayReplayCandidateDecision>,
+    ) -> Self {
+        Self {
+            error,
+            metadata: None,
+            candidate_decisions,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GatewayReplayExecutionMetadata {
+    pub resolved_route_id: Option<i64>,
+    pub resolved_route_name: Option<String>,
+    pub final_attempt: GatewayReplayFinalAttempt,
+    pub candidate_decisions: Vec<GatewayReplayCandidateDecision>,
+    pub transform_diagnostics: Vec<UnifiedTransformDiagnostic>,
+    pub usage_normalization: Option<UsageNormalization>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GatewayReplayFinalAttempt {
+    pub candidate_position: i32,
+    pub provider_id: Option<i64>,
+    pub provider_api_key_id: Option<i64>,
+    pub model_id: Option<i64>,
+    pub llm_api_type: Option<LlmApiType>,
+    pub attempt_status: RequestAttemptStatus,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub request_uri: Option<String>,
+    pub request_headers_json: Option<String>,
+    pub request_body: Option<Bytes>,
+    pub request_body_capture_state: Option<String>,
+    pub response_headers_json: Option<String>,
+    pub response_body: Option<Bytes>,
+    pub response_body_capture_state: Option<String>,
+    pub http_status: Option<i32>,
+    pub first_byte_at: Option<i64>,
+    pub applied_request_patch_summary: Option<Value>,
+    pub total_input_tokens: Option<i32>,
+    pub total_output_tokens: Option<i32>,
+    pub reasoning_tokens: Option<i32>,
+    pub total_tokens: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GatewayReplayCandidateDecision {
+    pub candidate_position: i32,
+    pub provider_id: Option<i64>,
+    pub provider_api_key_id: Option<i64>,
+    pub model_id: Option<i64>,
+    pub llm_api_type: Option<LlmApiType>,
+    pub attempt_status: RequestAttemptStatus,
+    pub scheduler_action: SchedulerAction,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub request_uri: Option<String>,
+}
+
+impl From<&RequestAttemptDraft> for GatewayReplayCandidateDecision {
+    fn from(attempt: &RequestAttemptDraft) -> Self {
+        Self {
+            candidate_position: attempt.candidate_position,
+            provider_id: attempt.provider_id,
+            provider_api_key_id: attempt.provider_api_key_id,
+            model_id: attempt.model_id,
+            llm_api_type: attempt.llm_api_type,
+            attempt_status: attempt.attempt_status,
+            scheduler_action: attempt.scheduler_action,
+            error_code: attempt.error_code.clone(),
+            error_message: attempt.error_message.clone(),
+            request_uri: attempt.request_uri.clone(),
+        }
+    }
+}
+
+fn gateway_replay_candidate_decisions(
+    prior_attempts: &[RequestAttemptDraft],
+    terminal_attempt: Option<&RequestAttemptDraft>,
+) -> Vec<GatewayReplayCandidateDecision> {
+    prior_attempts
+        .iter()
+        .chain(terminal_attempt)
+        .map(GatewayReplayCandidateDecision::from)
+        .collect()
+}
+
+fn logged_body_bytes(body: &Option<LoggedBody>) -> Option<Bytes> {
+    match body {
+        Some(LoggedBody::InMemory { bytes, .. }) => Some(bytes.clone()),
+        Some(LoggedBody::Spooled { .. }) | None => None,
+    }
+}
+
+fn logged_body_capture_state_string(body: &Option<LoggedBody>) -> Option<String> {
+    body.as_ref()
+        .map(|body| log_body_capture_state_as_str(body.capture_state()).to_string())
+}
+
+fn gateway_replay_execution_metadata(
+    resolved_route_id: Option<i64>,
+    resolved_route_name: Option<String>,
+    prior_attempts: &[RequestAttemptDraft],
+    terminal_attempt: &RequestAttemptDraft,
+    log_context: &RequestLogContext,
+) -> GatewayReplayExecutionMetadata {
+    let candidate_decisions =
+        gateway_replay_candidate_decisions(prior_attempts, Some(terminal_attempt));
+    GatewayReplayExecutionMetadata {
+        resolved_route_id,
+        resolved_route_name,
+        final_attempt: GatewayReplayFinalAttempt {
+            candidate_position: terminal_attempt.candidate_position,
+            provider_id: terminal_attempt.provider_id,
+            provider_api_key_id: terminal_attempt.provider_api_key_id,
+            model_id: terminal_attempt.model_id,
+            llm_api_type: terminal_attempt.llm_api_type,
+            attempt_status: terminal_attempt.attempt_status,
+            error_code: terminal_attempt.error_code.clone(),
+            error_message: terminal_attempt.error_message.clone(),
+            request_uri: terminal_attempt.request_uri.clone(),
+            request_headers_json: terminal_attempt.request_headers_json.clone(),
+            request_body: logged_body_bytes(&terminal_attempt.llm_request_body_for_log),
+            request_body_capture_state: logged_body_capture_state_string(
+                &terminal_attempt.llm_request_body_for_log,
+            ),
+            response_headers_json: terminal_attempt.response_headers_json.clone(),
+            response_body: logged_body_bytes(&terminal_attempt.llm_response_body_for_log),
+            response_body_capture_state: terminal_attempt.llm_response_capture_state.clone(),
+            http_status: terminal_attempt.http_status,
+            first_byte_at: terminal_attempt.first_byte_at,
+            applied_request_patch_summary: terminal_attempt
+                .request_patch_summary_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
+            total_input_tokens: terminal_attempt.total_input_tokens,
+            total_output_tokens: terminal_attempt.total_output_tokens,
+            reasoning_tokens: terminal_attempt.reasoning_tokens,
+            total_tokens: terminal_attempt.total_tokens,
+        },
+        candidate_decisions,
+        transform_diagnostics: log_context
+            .transform_diagnostics
+            .iter()
+            .map(|item| item.diagnostic.clone())
+            .collect(),
+        usage_normalization: log_context.usage_normalization.clone(),
+    }
+}
+
+pub(crate) async fn preview_gateway_replay_request(
+    app_state: Arc<AppState>,
+    input: GatewayReplayInput,
+) -> Result<GatewayReplayPreparedRequest, ProxyError> {
+    debug_assert!(!ProxyExecutionPolicy::ReplayDryRun.admits_api_key_requests());
+    let execution_plan = build_execution_plan(
+        &app_state,
+        input.system_api_key.id,
+        &input.requested_model_name,
+    )
+    .await
+    .map_err(ProxyError::BadRequest)?;
+    materialize_gateway_replay_request(app_state, input, execution_plan).await
+}
+
+pub(crate) async fn execute_gateway_replay_request(
+    app_state: Arc<AppState>,
+    input: GatewayReplayInput,
+) -> Result<GatewayReplayExecutionSuccess, GatewayReplayExecutionFailure> {
+    let execution_plan = build_execution_plan(
+        &app_state,
+        input.system_api_key.id,
+        &input.requested_model_name,
+    )
+    .await
+    .map_err(|err| GatewayReplayExecutionFailure::without_attempt(ProxyError::BadRequest(err)))?;
+
+    match input.kind {
+        GatewayReplayAttemptKind::Generation {
+            api_type,
+            is_stream,
+            data,
+            original_request_value,
+        } => {
+            orchestrate_generation_with_outcome(
+                app_state,
+                GenerationOrchestrationInput {
+                    cancellation: ProxyCancellationContext::new(),
+                    system_api_key: input.system_api_key,
+                    api_type,
+                    execution_plan,
+                    is_stream,
+                    query_params: replay_query_params_to_map(&input.query_params),
+                    replay_query_params: Some(input.query_params),
+                    original_headers: input.original_headers,
+                    request_snapshot: input.request_snapshot,
+                    client_ip_addr: input.client_ip_addr,
+                    start_time: input.start_time,
+                    data,
+                    original_request_value,
+                    original_request_body: input.original_request_body,
+                    execution_policy: ProxyExecutionPolicy::ReplayLive,
+                },
+            )
+            .await
+        }
+        GatewayReplayAttemptKind::Utility { operation, data } => {
+            orchestrate_utility_with_outcome(
+                app_state,
+                UtilityOrchestrationInput {
+                    cancellation: ProxyCancellationContext::new(),
+                    system_api_key: input.system_api_key,
+                    operation,
+                    execution_plan,
+                    query_params: replay_query_params_to_map(&input.query_params),
+                    replay_query_params: Some(input.query_params),
+                    original_headers: input.original_headers,
+                    request_snapshot: input.request_snapshot,
+                    client_ip_addr: input.client_ip_addr,
+                    start_time: input.start_time,
+                    data,
+                    original_request_body: input.original_request_body,
+                    execution_policy: ProxyExecutionPolicy::ReplayLive,
+                },
+            )
+            .await
+        }
+    }
+}
+
+async fn materialize_gateway_replay_request(
+    app_state: Arc<AppState>,
+    input: GatewayReplayInput,
+    execution_plan: ExecutionPlan,
+) -> Result<GatewayReplayPreparedRequest, ProxyError> {
+    let candidate_manifest = build_candidate_manifest(&execution_plan);
+    let requirement = match &input.kind {
+        GatewayReplayAttemptKind::Generation {
+            api_type,
+            is_stream,
+            data,
+            ..
+        } => derive_generation_requirement(data, *api_type, *is_stream),
+        GatewayReplayAttemptKind::Utility { operation, data } => {
+            derive_utility_requirement(&operation.name, data)
+        }
+    };
+    let prefiltered_plan = prefilter_execution_plan(execution_plan, &requirement);
+    let execution_plan = prefiltered_plan.execution_plan;
+    let mut candidate_decisions: Vec<GatewayReplayCandidateDecision> = prefiltered_plan
+        .skipped_attempts
+        .iter()
+        .map(GatewayReplayCandidateDecision::from)
+        .collect();
+    if execution_plan.candidates.is_empty() {
+        return Err(ProxyError::BadRequest(no_candidate_error_message(
+            &requirement,
+        )));
+    }
+
+    let candidate_budget = CONFIG.routing_resilience.max_candidates_per_request.max(1) as usize;
+    let mut candidate_index = 0usize;
+    while candidate_index < execution_plan.candidates.len() && candidate_index < candidate_budget {
+        let candidate = execution_plan.candidates[candidate_index].clone();
+        let attempted_candidate_count = (candidate_index + 1) as u32;
+        let mut same_candidate_retry_count = 0u32;
+
+        loop {
+            let next_candidate_available = candidate_index + 1 < execution_plan.candidates.len()
+                && candidate_index + 1 < candidate_budget;
+            match materialize_gateway_replay_candidate(
+                &app_state,
+                &input,
+                &execution_plan,
+                &candidate_manifest,
+                &candidate,
+                same_candidate_retry_count,
+                attempted_candidate_count,
+                next_candidate_available,
+            )
+            .await?
+            {
+                GatewayReplayCandidateMaterialization::Ready {
+                    mut prepared,
+                    attempt,
+                } => {
+                    candidate_decisions.push(GatewayReplayCandidateDecision::from(&attempt));
+                    prepared.candidate_decisions = candidate_decisions;
+                    return Ok(prepared);
+                }
+                GatewayReplayCandidateMaterialization::Rejected { attempt, error } => {
+                    let scheduler_action = attempt.scheduler_action;
+                    candidate_decisions.push(GatewayReplayCandidateDecision::from(&attempt));
+                    match scheduler_action {
+                        SchedulerAction::RetrySameCandidate => {
+                            same_candidate_retry_count =
+                                same_candidate_retry_count.saturating_add(1);
+                        }
+                        SchedulerAction::FallbackNextCandidate
+                            if candidate_index + 1 < execution_plan.candidates.len()
+                                && candidate_index + 1 < candidate_budget =>
+                        {
+                            candidate_index += 1;
+                            break;
+                        }
+                        _ => return Err(error),
+                    }
+                }
+            }
+        }
+    }
+
+    Err(ProxyError::BadRequest(no_candidate_error_message(
+        &requirement,
+    )))
+}
+
+enum GatewayReplayCandidateMaterialization {
+    Ready {
+        prepared: GatewayReplayPreparedRequest,
+        attempt: RequestAttemptDraft,
+    },
+    Rejected {
+        attempt: RequestAttemptDraft,
+        error: ProxyError,
+    },
+}
+
+fn rejected_gateway_replay_candidate(
+    mut attempt: RequestAttemptDraft,
+    proxy_error: ProxyError,
+    same_candidate_retry_count: u32,
+    attempted_candidate_count: u32,
+    next_candidate_available: bool,
+) -> GatewayReplayCandidateMaterialization {
+    attempt.completed_at = Some(Utc::now().timestamp_millis());
+    classify_attempt_failure(
+        &mut attempt,
+        &proxy_error,
+        same_candidate_retry_count,
+        attempted_candidate_count,
+        next_candidate_available,
+        None,
+    );
+    GatewayReplayCandidateMaterialization::Rejected {
+        attempt,
+        error: proxy_error,
+    }
+}
+
+async fn materialize_gateway_replay_candidate(
+    app_state: &Arc<AppState>,
+    input: &GatewayReplayInput,
+    execution_plan: &ExecutionPlan,
+    candidate_manifest: &RequestLogBundleCandidateManifest,
+    candidate: &ExecutionCandidate,
+    same_candidate_retry_count: u32,
+    attempted_candidate_count: u32,
+    next_candidate_available: bool,
+) -> Result<GatewayReplayCandidateMaterialization, ProxyError> {
+    let mut attempt = RequestAttemptDraft::pending_for_candidate(candidate);
+    let provider_credentials =
+        match resolve_provider_credentials(&candidate.provider, app_state).await {
+            Ok(credentials) => credentials,
+            Err(proxy_error) => {
+                return Ok(rejected_gateway_replay_candidate(
+                    attempt,
+                    proxy_error,
+                    same_candidate_retry_count,
+                    attempted_candidate_count,
+                    next_candidate_available,
+                ));
+            }
+        };
+    attempt.provider_api_key_id = Some(provider_credentials.key_id);
+
+    if let GatewayReplayAttemptKind::Utility { operation, .. } = &input.kind {
+        if let Err(proxy_error) = validate_utility_target(operation, candidate.llm_api_type) {
+            return Ok(rejected_gateway_replay_candidate(
+                attempt,
+                proxy_error,
+                same_candidate_retry_count,
+                attempted_candidate_count,
+                next_candidate_available,
+            ));
+        }
+    }
+
+    if let Err(proxy_error) = check_access_control(
+        &input.system_api_key,
+        &candidate.provider,
+        &candidate.model,
+        app_state,
+    )
+    .await
+    {
+        return Ok(rejected_gateway_replay_candidate(
+            attempt,
+            proxy_error,
+            same_candidate_retry_count,
+            attempted_candidate_count,
+            next_candidate_available,
+        ));
+    }
+
+    let request_patch_trace = match load_runtime_request_patch_trace(
+        &candidate.provider,
+        Some(&candidate.model),
+        app_state,
+    )
+    .await
+    {
+        Ok(trace) => trace,
+        Err(proxy_error) => {
+            return Ok(rejected_gateway_replay_candidate(
+                attempt,
+                proxy_error,
+                same_candidate_retry_count,
+                attempted_candidate_count,
+                next_candidate_available,
+            ));
+        }
+    };
+    attempt.applied_request_patch_ids_json =
+        request_patch_trace.applied_request_patch_ids_json.clone();
+    attempt.request_patch_summary_json = request_patch_trace.request_patch_summary_json.clone();
+    if let Some(proxy_error) = request_patch_trace.conflict_error(&candidate.model.model_name) {
+        return Ok(rejected_gateway_replay_candidate(
+            attempt,
+            proxy_error,
+            same_candidate_retry_count,
+            attempted_candidate_count,
+            next_candidate_available,
+        ));
+    }
+
+    let replay_query_param_map = replay_query_params_to_map(&input.query_params);
+    let materialized = match &input.kind {
+        GatewayReplayAttemptKind::Generation {
+            api_type,
+            is_stream,
+            data,
+            original_request_value,
+        } => match materialize_generation_attempt(
+            candidate,
+            data.clone(),
+            *api_type,
+            *is_stream,
+            original_request_value,
+            &input.original_headers,
+            &replay_query_param_map,
+            Some(&input.query_params),
+            &request_patch_trace.applied_rules,
+            &provider_credentials,
+        )
+        .await
+        {
+            Ok(materialized) => materialized,
+            Err(proxy_error) => {
+                return Ok(rejected_gateway_replay_candidate(
+                    attempt,
+                    proxy_error,
+                    same_candidate_retry_count,
+                    attempted_candidate_count,
+                    next_candidate_available,
+                ));
+            }
+        },
+        GatewayReplayAttemptKind::Utility { operation, data } => match materialize_utility_attempt(
+            candidate,
+            operation,
+            data.clone(),
+            &input.original_headers,
+            &replay_query_param_map,
+            Some(&input.query_params),
+            &request_patch_trace.applied_rules,
+            &provider_credentials,
+        )
+        .await
+        {
+            Ok(materialized) => materialized,
+            Err(proxy_error) => {
+                return Ok(rejected_gateway_replay_candidate(
+                    attempt,
+                    proxy_error,
+                    same_candidate_retry_count,
+                    attempted_candidate_count,
+                    next_candidate_available,
+                ));
+            }
+        },
+    };
+    attempt.llm_request_body_for_log = materialized.llm_request_body_for_log.clone();
+    attempt.request_uri = Some(materialized.final_url.clone());
+    attempt.request_headers_json =
+        serialize_downstream_request_headers_for_log(&materialized.final_headers);
+    let now = Utc::now().timestamp_millis();
+    attempt.started_at = Some(now);
+
+    if let Err(rejection) = preview_provider_request_allowed(app_state, candidate.provider.id).await
+    {
+        attempt.completed_at = Some(Utc::now().timestamp_millis());
+        attempt.started_at = None;
+        attempt.provider_api_key_id = None;
+        attempt.request_uri = None;
+        attempt.request_headers_json = None;
+        attempt.llm_request_body_for_log = None;
+        classify_provider_governance_skip(
+            &mut attempt,
+            rejection,
+            materialized.model_str.as_str(),
+            attempted_candidate_count,
+            next_candidate_available,
+        );
+        return Ok(GatewayReplayCandidateMaterialization::Rejected {
+            attempt,
+            error: rejection.to_proxy_error(materialized.model_str.as_str()),
+        });
+    }
+
+    attempt.completed_at = Some(now);
+    attempt.attempt_status = RequestAttemptStatus::Success;
+    attempt.scheduler_action = SchedulerAction::ReturnSuccess;
+
+    Ok(GatewayReplayCandidateMaterialization::Ready {
+        prepared: GatewayReplayPreparedRequest {
+            requested_model_name: execution_plan.requested_name.clone(),
+            resolved_name_scope: execution_plan.resolved_scope.as_str().to_string(),
+            resolved_route_id: execution_plan.resolved_route_id,
+            resolved_route_name: execution_plan.resolved_route_name.clone(),
+            candidate_position: candidate.candidate_position as i32,
+            provider_id: candidate.provider.id,
+            provider_api_key_id: provider_credentials.key_id,
+            model_id: candidate.model.id,
+            llm_api_type: candidate.llm_api_type,
+            applied_request_patch_summary: request_patch_trace
+                .request_patch_summary_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok()),
+            final_request_uri: materialized.final_url,
+            final_request_headers: materialized.final_headers,
+            final_request_body: materialized.final_body,
+            transform_diagnostics: materialized.transform_diagnostics,
+            candidate_manifest: candidate_manifest.clone(),
+            candidate_decisions: Vec::new(),
+        },
+        attempt,
+    })
 }
 
 async fn record_no_candidate_generation_failure(
@@ -1167,13 +1899,16 @@ async fn record_no_candidate_generation_failure(
     execution_plan: &ExecutionPlan,
     skipped_attempts: Vec<RequestAttemptDraft>,
     api_type: LlmApiType,
+    request_snapshot: RequestLogBundleRequestSnapshot,
+    candidate_manifest: RequestLogBundleCandidateManifest,
     original_request_body: Bytes,
     start_time: i64,
     client_ip_addr: &Option<String>,
     message: &str,
-) {
+    execution_policy: ProxyExecutionPolicy,
+) -> Option<RequestLogContext> {
     let Some(first_skipped_attempt) = skipped_attempts.first() else {
-        return;
+        return None;
     };
 
     let mut log_context = RequestLogContext::new_for_skipped_candidates(
@@ -1187,13 +1922,18 @@ async fn record_no_candidate_generation_failure(
         api_type,
         first_skipped_attempt,
     );
+    log_context.set_request_snapshot(request_snapshot);
+    log_context.set_candidate_manifest(candidate_manifest);
     log_context.user_request_body = Some(LoggedBody::from_bytes(original_request_body));
     log_context.completion_ts = Some(Utc::now().timestamp_millis());
     log_context.overall_status = RequestStatus::Error;
     log_context.final_error_code = Some(NO_CANDIDATE_AVAILABLE_ERROR.to_string());
     log_context.final_error_message = Some(message.to_string());
     log_context.set_attempts_for_logging(&skipped_attempts, None);
-    record_request_completion_and_log(app_state, log_context).await;
+    if execution_policy.records_request_log() {
+        record_request_completion_and_log(app_state, log_context.clone()).await;
+    }
+    Some(log_context)
 }
 
 async fn record_no_candidate_utility_failure(
@@ -1202,13 +1942,16 @@ async fn record_no_candidate_utility_failure(
     execution_plan: &ExecutionPlan,
     skipped_attempts: Vec<RequestAttemptDraft>,
     operation: &UtilityOperation,
+    request_snapshot: RequestLogBundleRequestSnapshot,
+    candidate_manifest: RequestLogBundleCandidateManifest,
     original_request_body: Bytes,
     start_time: i64,
     client_ip_addr: &Option<String>,
     message: &str,
-) {
+    execution_policy: ProxyExecutionPolicy,
+) -> Option<RequestLogContext> {
     let Some(first_skipped_attempt) = skipped_attempts.first() else {
-        return;
+        return None;
     };
 
     let mut log_context = RequestLogContext::new_for_skipped_candidates(
@@ -1222,19 +1965,34 @@ async fn record_no_candidate_utility_failure(
         operation.api_type,
         first_skipped_attempt,
     );
+    log_context.set_request_snapshot(request_snapshot);
+    log_context.set_candidate_manifest(candidate_manifest);
     log_context.user_request_body = Some(LoggedBody::from_bytes(original_request_body));
     log_context.completion_ts = Some(Utc::now().timestamp_millis());
     log_context.overall_status = RequestStatus::Error;
     log_context.final_error_code = Some(NO_CANDIDATE_AVAILABLE_ERROR.to_string());
     log_context.final_error_message = Some(message.to_string());
     log_context.set_attempts_for_logging(&skipped_attempts, None);
-    record_request_completion_and_log(app_state, log_context).await;
+    if execution_policy.records_request_log() {
+        record_request_completion_and_log(app_state, log_context.clone()).await;
+    }
+    Some(log_context)
 }
 
 pub(super) async fn orchestrate_generation(
     app_state: Arc<AppState>,
     input: GenerationOrchestrationInput,
 ) -> Result<Response<Body>, ProxyError> {
+    orchestrate_generation_with_outcome(app_state, input)
+        .await
+        .map(|outcome| outcome.response)
+        .map_err(|failure| failure.error)
+}
+
+pub(super) async fn orchestrate_generation_with_outcome(
+    app_state: Arc<AppState>,
+    input: GenerationOrchestrationInput,
+) -> Result<GatewayReplayExecutionSuccess, GatewayReplayExecutionFailure> {
     let GenerationOrchestrationInput {
         cancellation,
         system_api_key,
@@ -1242,18 +2000,23 @@ pub(super) async fn orchestrate_generation(
         execution_plan,
         is_stream,
         query_params,
+        replay_query_params,
         original_headers,
+        request_snapshot,
         client_ip_addr,
         start_time,
         data,
         original_request_value,
         original_request_body,
+        execution_policy,
     } = input;
 
+    let candidate_manifest = build_candidate_manifest(&execution_plan);
     let requirement = derive_generation_requirement(&data, api_type, is_stream);
     let prefiltered_plan = prefilter_execution_plan(execution_plan, &requirement);
     let execution_plan = prefiltered_plan.execution_plan;
     let mut prior_attempts = prefiltered_plan.skipped_attempts;
+    let mut prior_transform_diagnostics = Vec::new();
 
     if execution_plan.candidates.is_empty() {
         let message = no_candidate_error_message(&requirement);
@@ -1261,15 +2024,21 @@ pub(super) async fn orchestrate_generation(
             &app_state,
             &system_api_key,
             &execution_plan,
-            prior_attempts,
+            prior_attempts.clone(),
             api_type,
+            request_snapshot,
+            candidate_manifest,
             original_request_body,
             start_time,
             &client_ip_addr,
             &message,
+            execution_policy,
         )
         .await;
-        return Err(ProxyError::BadRequest(message));
+        return Err(GatewayReplayExecutionFailure::with_decisions(
+            ProxyError::BadRequest(message),
+            gateway_replay_candidate_decisions(&prior_attempts, None),
+        ));
     }
 
     let requested_model_name = execution_plan.requested_name.clone();
@@ -1306,15 +2075,20 @@ pub(super) async fn orchestrate_generation(
                     resolved_route_id,
                     resolved_route_name: resolved_route_name.clone(),
                     query_params: query_params.clone(),
+                    replay_query_params: replay_query_params.clone(),
                     original_headers: original_headers.clone(),
+                    request_snapshot: request_snapshot.clone(),
+                    candidate_manifest: candidate_manifest.clone(),
                     original_request_body: original_request_body.clone(),
                     client_ip_addr: client_ip_addr.clone(),
                     start_time,
                     skipped_attempts: prior_attempts.clone(),
+                    prior_transform_diagnostics: prior_transform_diagnostics.clone(),
                     same_candidate_retry_count,
                     attempted_candidate_count,
                     next_candidate_available,
                     log_mode: AttemptLogMode::DeferNonStreaming,
+                    execution_policy,
                     kind: AttemptExecutionKind::Generation {
                         user_api_type: api_type,
                         is_stream,
@@ -1333,14 +2107,22 @@ pub(super) async fn orchestrate_generation(
 
             match response {
                 Ok(response) => {
-                    if !log_context.is_stream {
+                    let metadata = gateway_replay_execution_metadata(
+                        resolved_route_id,
+                        resolved_route_name.clone(),
+                        &prior_attempts,
+                        &attempt,
+                        &log_context,
+                    );
+                    if !log_context.is_stream && execution_policy.records_request_log() {
                         record_request_completion_and_log(&app_state, log_context).await;
                     }
-                    return Ok(response);
+                    return Ok(GatewayReplayExecutionSuccess { response, metadata });
                 }
                 Err(error) => match attempt.scheduler_action {
                     SchedulerAction::RetrySameCandidate => {
                         let backoff_ms = attempt.backoff_ms.unwrap_or_default().max(0) as u64;
+                        prior_transform_diagnostics = log_context.transform_diagnostics.clone();
                         prior_attempts.push(attempt);
                         if backoff_ms > 0 {
                             sleep(Duration::from_millis(backoff_ms)).await;
@@ -1351,13 +2133,28 @@ pub(super) async fn orchestrate_generation(
                         if candidate_index + 1 < execution_plan.candidates.len()
                             && candidate_index + 1 < candidate_budget =>
                     {
+                        prior_transform_diagnostics = log_context.transform_diagnostics.clone();
                         prior_attempts.push(attempt);
                         candidate_index += 1;
                         break;
                     }
                     _ => {
-                        record_request_completion_and_log(&app_state, log_context).await;
-                        return Err(error);
+                        let metadata = gateway_replay_execution_metadata(
+                            resolved_route_id,
+                            resolved_route_name.clone(),
+                            &prior_attempts,
+                            &attempt,
+                            &log_context,
+                        );
+                        let candidate_decisions = metadata.candidate_decisions.clone();
+                        if execution_policy.records_request_log() {
+                            record_request_completion_and_log(&app_state, log_context).await;
+                        }
+                        return Err(GatewayReplayExecutionFailure {
+                            error,
+                            metadata: Some(metadata),
+                            candidate_decisions,
+                        });
                     }
                 },
             }
@@ -1365,30 +2162,48 @@ pub(super) async fn orchestrate_generation(
     }
 
     let message = no_candidate_error_message(&requirement);
-    Err(ProxyError::BadRequest(message))
+    Err(GatewayReplayExecutionFailure::with_decisions(
+        ProxyError::BadRequest(message),
+        gateway_replay_candidate_decisions(&prior_attempts, None),
+    ))
 }
 
 pub(super) async fn orchestrate_utility(
     app_state: Arc<AppState>,
     input: UtilityOrchestrationInput,
 ) -> Result<Response<Body>, ProxyError> {
+    orchestrate_utility_with_outcome(app_state, input)
+        .await
+        .map(|outcome| outcome.response)
+        .map_err(|failure| failure.error)
+}
+
+pub(super) async fn orchestrate_utility_with_outcome(
+    app_state: Arc<AppState>,
+    input: UtilityOrchestrationInput,
+) -> Result<GatewayReplayExecutionSuccess, GatewayReplayExecutionFailure> {
     let UtilityOrchestrationInput {
         cancellation,
         system_api_key,
         operation,
         execution_plan,
         query_params,
+        replay_query_params,
         original_headers,
+        request_snapshot,
         client_ip_addr,
         start_time,
         data,
         original_request_body,
+        execution_policy,
     } = input;
 
+    let candidate_manifest = build_candidate_manifest(&execution_plan);
     let requirement = derive_utility_requirement(&operation.name, &data);
     let prefiltered_plan = prefilter_execution_plan(execution_plan, &requirement);
     let execution_plan = prefiltered_plan.execution_plan;
     let mut prior_attempts = prefiltered_plan.skipped_attempts;
+    let mut prior_transform_diagnostics = Vec::new();
 
     if execution_plan.candidates.is_empty() {
         let message = no_candidate_error_message(&requirement);
@@ -1396,15 +2211,21 @@ pub(super) async fn orchestrate_utility(
             &app_state,
             &system_api_key,
             &execution_plan,
-            prior_attempts,
+            prior_attempts.clone(),
             &operation,
+            request_snapshot,
+            candidate_manifest,
             original_request_body,
             start_time,
             &client_ip_addr,
             &message,
+            execution_policy,
         )
         .await;
-        return Err(ProxyError::BadRequest(message));
+        return Err(GatewayReplayExecutionFailure::with_decisions(
+            ProxyError::BadRequest(message),
+            gateway_replay_candidate_decisions(&prior_attempts, None),
+        ));
     }
 
     let requested_model_name = execution_plan.requested_name.clone();
@@ -1442,15 +2263,20 @@ pub(super) async fn orchestrate_utility(
                     resolved_route_id,
                     resolved_route_name: resolved_route_name.clone(),
                     query_params: query_params.clone(),
+                    replay_query_params: replay_query_params.clone(),
                     original_headers: original_headers.clone(),
+                    request_snapshot: request_snapshot.clone(),
+                    candidate_manifest: candidate_manifest.clone(),
                     original_request_body: original_request_body.clone(),
                     client_ip_addr: client_ip_addr.clone(),
                     start_time,
                     skipped_attempts: prior_attempts.clone(),
+                    prior_transform_diagnostics: prior_transform_diagnostics.clone(),
                     same_candidate_retry_count,
                     attempted_candidate_count,
                     next_candidate_available,
                     log_mode: AttemptLogMode::DeferNonStreaming,
+                    execution_policy,
                     kind: AttemptExecutionKind::Utility {
                         operation: operation.clone(),
                         data: data.clone(),
@@ -1467,14 +2293,22 @@ pub(super) async fn orchestrate_utility(
 
             match response {
                 Ok(response) => {
-                    if !log_context.is_stream {
+                    let metadata = gateway_replay_execution_metadata(
+                        resolved_route_id,
+                        resolved_route_name.clone(),
+                        &prior_attempts,
+                        &attempt,
+                        &log_context,
+                    );
+                    if !log_context.is_stream && execution_policy.records_request_log() {
                         record_request_completion_and_log(&app_state, log_context).await;
                     }
-                    return Ok(response);
+                    return Ok(GatewayReplayExecutionSuccess { response, metadata });
                 }
                 Err(error) => match attempt.scheduler_action {
                     SchedulerAction::RetrySameCandidate => {
                         let backoff_ms = attempt.backoff_ms.unwrap_or_default().max(0) as u64;
+                        prior_transform_diagnostics = log_context.transform_diagnostics.clone();
                         prior_attempts.push(attempt);
                         if backoff_ms > 0 {
                             sleep(Duration::from_millis(backoff_ms)).await;
@@ -1485,13 +2319,28 @@ pub(super) async fn orchestrate_utility(
                         if candidate_index + 1 < execution_plan.candidates.len()
                             && candidate_index + 1 < candidate_budget =>
                     {
+                        prior_transform_diagnostics = log_context.transform_diagnostics.clone();
                         prior_attempts.push(attempt);
                         candidate_index += 1;
                         break;
                     }
                     _ => {
-                        record_request_completion_and_log(&app_state, log_context).await;
-                        return Err(error);
+                        let metadata = gateway_replay_execution_metadata(
+                            resolved_route_id,
+                            resolved_route_name.clone(),
+                            &prior_attempts,
+                            &attempt,
+                            &log_context,
+                        );
+                        let candidate_decisions = metadata.candidate_decisions.clone();
+                        if execution_policy.records_request_log() {
+                            record_request_completion_and_log(&app_state, log_context).await;
+                        }
+                        return Err(GatewayReplayExecutionFailure {
+                            error,
+                            metadata: Some(metadata),
+                            candidate_decisions,
+                        });
                     }
                 },
             }
@@ -1499,7 +2348,10 @@ pub(super) async fn orchestrate_utility(
     }
 
     let message = no_candidate_error_message(&requirement);
-    Err(ProxyError::BadRequest(message))
+    Err(GatewayReplayExecutionFailure::with_decisions(
+        ProxyError::BadRequest(message),
+        gateway_replay_candidate_decisions(&prior_attempts, None),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -1974,6 +2826,7 @@ mod tests {
             json!({ "input": "embed me" }),
             &original_headers,
             &HashMap::new(),
+            None,
             &[],
             &credentials,
         )
@@ -2039,6 +2892,7 @@ mod tests {
             json!({ "contents": [{ "parts": [{ "text": "count this" }] }] }),
             &original_headers,
             &query_params,
+            None,
             &[],
             &credentials,
         )

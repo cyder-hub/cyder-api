@@ -1,4 +1,10 @@
-use crate::schema::enum_def::{LlmApiType, StorageType};
+use crate::{
+    schema::enum_def::{LlmApiType, ProviderApiKeyMode, StorageType},
+    service::transform::unified::{
+        UnifiedTransformDiagnostic, UnifiedTransformDiagnosticKind,
+        UnifiedTransformDiagnosticLossLevel,
+    },
+};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -29,8 +35,21 @@ pub struct RequestLogBundleV2 {
     pub created_at: i64,
     pub request_section: RequestLogBundleRequestSection,
     pub attempt_sections: Vec<RequestLogBundleAttemptSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_snapshot: Option<RequestLogBundleRequestSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_manifest: Option<RequestLogBundleCandidateManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform_diagnostics: Option<RequestLogBundleTransformDiagnostics>,
     pub blob_pool: Vec<RequestLogBundleBlob>,
     pub patch_pool: Vec<RequestLogBundlePatch>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestLogBundleV2DiagnosticAssets {
+    pub request_snapshot: Option<RequestLogBundleRequestSnapshot>,
+    pub candidate_manifest: Option<RequestLogBundleCandidateManifest>,
+    pub transform_diagnostics: Option<RequestLogBundleTransformDiagnostics>,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
@@ -48,6 +67,116 @@ pub struct RequestLogBundleAttemptSection {
     pub llm_request_patch_id: Option<i32>,
     pub llm_response_blob_id: Option<i32>,
     pub llm_response_capture_state: Option<LogBodyCaptureState>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogBundleRequestSnapshot {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub operation_kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub query_params: Vec<RequestLogBundleQueryParam>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sanitized_original_headers: Vec<RequestLogBundleHttpHeader>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogBundleQueryParam {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub value_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoded_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoded_value: Option<String>,
+}
+
+impl RequestLogBundleQueryParam {
+    pub fn has_value(&self) -> bool {
+        self.value_present || self.value.is_some()
+    }
+
+    pub fn value_for_replay(&self) -> Option<String> {
+        if self.has_value() {
+            Some(self.value.clone().unwrap_or_default())
+        } else {
+            None
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogBundleHttpHeader {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogBundleCandidateManifest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<RequestLogBundleCandidateManifestItem>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogBundleCandidateManifestItem {
+    pub candidate_position: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_name: Option<String>,
+    pub provider_id: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_key: String,
+    pub model_id: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_model_name: Option<String>,
+    pub llm_api_type: LlmApiType,
+    pub provider_api_key_mode: ProviderApiKeyMode,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogBundleTransformDiagnostics {
+    #[serde(default)]
+    pub summary: RequestLogBundleTransformDiagnosticsSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<RequestLogBundleTransformDiagnosticItem>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogBundleTransformDiagnosticsSummary {
+    pub count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_loss_level: Option<UnifiedTransformDiagnosticLossLevel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<UnifiedTransformDiagnosticKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<RequestLogBundleTransformDiagnosticPhase>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestLogBundleTransformDiagnosticPhase {
+    Request,
+    Response,
+    Stream,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogBundleTransformDiagnosticItem {
+    pub phase: RequestLogBundleTransformDiagnosticPhase,
+    pub diagnostic: UnifiedTransformDiagnostic,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -265,6 +394,7 @@ impl RequestLogBundleV2Builder {
         created_at: i64,
         request_section: RequestLogBundleRequestSection,
         attempt_sections: Vec<RequestLogBundleAttemptSection>,
+        diagnostic_assets: RequestLogBundleV2DiagnosticAssets,
     ) -> RequestLogBundleV2 {
         RequestLogBundleV2 {
             version: REQUEST_LOG_BUNDLE_V2_VERSION,
@@ -272,6 +402,9 @@ impl RequestLogBundleV2Builder {
             created_at,
             request_section,
             attempt_sections,
+            request_snapshot: diagnostic_assets.request_snapshot,
+            candidate_manifest: diagnostic_assets.candidate_manifest,
+            transform_diagnostics: diagnostic_assets.transform_diagnostics,
             blob_pool: self.blob_pool,
             patch_pool: self.patch_pool,
         }
@@ -325,16 +458,52 @@ pub fn generate_storage_path_from_id(
     }
 }
 
+pub fn generate_replay_artifact_storage_path(
+    created_at_millis: i64,
+    replay_run_id: i64,
+    storage_type: &StorageType,
+) -> String {
+    let dt = DateTime::from_timestamp_millis(created_at_millis).unwrap_or_else(|| Utc::now());
+    let date_str = dt.format("%Y/%m/%d").to_string();
+    let id_str = replay_run_id.to_string();
+
+    match storage_type {
+        StorageType::FileSystem => {
+            let len = id_str.len();
+            if len >= 6 {
+                let sub_dir = &id_str[len - 6..len - 4];
+                format!("replays/{}/{}/{}.mp.gz", date_str, sub_dir, id_str)
+            } else {
+                format!("replays/{}/{}.mp.gz", date_str, id_str)
+            }
+        }
+        StorageType::S3 => {
+            format!("replays/{}/{}.mp.gz", date_str, id_str)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         LogBodyCaptureState, LogBundle, REQUEST_LOG_BUNDLE_V1_VERSION,
         REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleAttemptSection,
-        RequestLogBundleRequestSection, RequestLogBundleV2Builder, StorageType,
+        RequestLogBundleCandidateManifest, RequestLogBundleCandidateManifestItem,
+        RequestLogBundleHttpHeader, RequestLogBundleQueryParam, RequestLogBundleRequestSection,
+        RequestLogBundleRequestSnapshot, RequestLogBundleTransformDiagnosticItem,
+        RequestLogBundleTransformDiagnosticPhase, RequestLogBundleTransformDiagnostics,
+        RequestLogBundleTransformDiagnosticsSummary, RequestLogBundleV2, RequestLogBundleV2Builder,
+        RequestLogBundleV2DiagnosticAssets, StorageType, generate_replay_artifact_storage_path,
         generate_storage_path_from_id,
     };
     use crate::schema::enum_def::LlmApiType;
+    use crate::schema::enum_def::ProviderApiKeyMode;
+    use crate::service::transform::unified::{
+        UnifiedTransformDiagnostic, UnifiedTransformDiagnosticAction,
+        UnifiedTransformDiagnosticKind, UnifiedTransformDiagnosticLossLevel,
+    };
     use bytes::Bytes;
+    use serde::Serialize;
     use serde_json::{Value, json};
 
     #[test]
@@ -390,6 +559,7 @@ mod tests {
                 llm_response_blob_id: Some(response_blob_id),
                 llm_response_capture_state: Some(LogBodyCaptureState::Complete),
             }],
+            RequestLogBundleV2DiagnosticAssets::default(),
         );
 
         assert_eq!(bundle.version, REQUEST_LOG_BUNDLE_V2_VERSION);
@@ -427,6 +597,7 @@ mod tests {
                 llm_response_blob_id: Some(llm_response_blob_id),
                 llm_response_capture_state: Some(LogBodyCaptureState::Complete),
             }],
+            RequestLogBundleV2DiagnosticAssets::default(),
         );
 
         assert_eq!(user_response_blob_id, llm_response_blob_id);
@@ -481,6 +652,7 @@ mod tests {
                 llm_response_blob_id: None,
                 llm_response_capture_state: None,
             }],
+            RequestLogBundleV2DiagnosticAssets::default(),
         );
 
         assert_eq!(request_ref.blob_id, user_blob_id);
@@ -522,6 +694,132 @@ mod tests {
     }
 
     #[test]
+    fn request_log_bundle_v2_round_trips_optional_diagnostic_assets() {
+        let bundle = RequestLogBundleV2 {
+            version: REQUEST_LOG_BUNDLE_V2_VERSION,
+            log_id: 42,
+            created_at: 1_744_100_800_000,
+            request_section: RequestLogBundleRequestSection {
+                user_request_blob_id: Some(1),
+                user_response_blob_id: Some(2),
+                user_response_capture_state: Some(LogBodyCaptureState::Complete),
+            },
+            attempt_sections: vec![RequestLogBundleAttemptSection {
+                attempt_id: Some(101),
+                attempt_index: 1,
+                llm_request_blob_id: Some(3),
+                llm_request_patch_id: Some(1),
+                llm_response_blob_id: Some(4),
+                llm_response_capture_state: Some(LogBodyCaptureState::Incomplete),
+            }],
+            request_snapshot: Some(RequestLogBundleRequestSnapshot {
+                request_path: "/ai/responses".to_string(),
+                operation_kind: "responses_create".to_string(),
+                query_params: vec![
+                    RequestLogBundleQueryParam {
+                        name: "stream".to_string(),
+                        value: Some("true".to_string()),
+                        value_present: true,
+                        encoded_name: Some("stream".to_string()),
+                        encoded_value: Some("true".to_string()),
+                    },
+                    RequestLogBundleQueryParam {
+                        name: "verbose".to_string(),
+                        value: None,
+                        value_present: false,
+                        encoded_name: Some("verbose".to_string()),
+                        encoded_value: None,
+                    },
+                ],
+                sanitized_original_headers: vec![RequestLogBundleHttpHeader {
+                    name: "x-trace-id".to_string(),
+                    value: "trace-123".to_string(),
+                }],
+            }),
+            candidate_manifest: Some(RequestLogBundleCandidateManifest {
+                items: vec![RequestLogBundleCandidateManifestItem {
+                    candidate_position: 1,
+                    route_id: Some(8),
+                    route_name: Some("manual-smoke-route".to_string()),
+                    provider_id: 2,
+                    provider_key: "provider".to_string(),
+                    model_id: 3,
+                    model_name: "gpt-test".to_string(),
+                    real_model_name: Some("real-gpt-test".to_string()),
+                    llm_api_type: LlmApiType::Responses,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                }],
+            }),
+            transform_diagnostics: Some(RequestLogBundleTransformDiagnostics {
+                summary: RequestLogBundleTransformDiagnosticsSummary {
+                    count: 1,
+                    max_loss_level: Some(UnifiedTransformDiagnosticLossLevel::LossyMajor),
+                    kinds: vec![UnifiedTransformDiagnosticKind::CapabilityDowngrade],
+                    phases: vec![RequestLogBundleTransformDiagnosticPhase::Request],
+                },
+                items: vec![RequestLogBundleTransformDiagnosticItem {
+                    phase: RequestLogBundleTransformDiagnosticPhase::Request,
+                    diagnostic: UnifiedTransformDiagnostic {
+                        type_: "transform_diagnostic".to_string(),
+                        diagnostic_kind: UnifiedTransformDiagnosticKind::CapabilityDowngrade,
+                        provider: "Responses".to_string(),
+                        target_provider: "Openai".to_string(),
+                        source: "responses".to_string(),
+                        target: "openai".to_string(),
+                        stream_id: None,
+                        stage: Some("request".to_string()),
+                        loss_level: UnifiedTransformDiagnosticLossLevel::LossyMajor,
+                        action: UnifiedTransformDiagnosticAction::Drop,
+                        semantic_unit: "reasoning".to_string(),
+                        reason: "reasoning summary was dropped".to_string(),
+                        context: Some("bounded to task 1 bundle contract".to_string()),
+                        raw_data_summary: None,
+                        recovery_hint: Some("inspect upstream request".to_string()),
+                    },
+                }],
+            }),
+            blob_pool: vec![],
+            patch_pool: vec![],
+        };
+
+        let encoded = rmp_serde::to_vec_named(&bundle).unwrap();
+        let decoded: RequestLogBundleV2 = rmp_serde::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
+    fn request_log_bundle_v2_deserializes_old_payload_without_diagnostic_assets() {
+        #[derive(Serialize)]
+        struct LegacyBundleV2 {
+            version: u32,
+            log_id: i64,
+            created_at: i64,
+            request_section: RequestLogBundleRequestSection,
+            attempt_sections: Vec<RequestLogBundleAttemptSection>,
+            blob_pool: Vec<super::RequestLogBundleBlob>,
+            patch_pool: Vec<super::RequestLogBundlePatch>,
+        }
+
+        let legacy = LegacyBundleV2 {
+            version: REQUEST_LOG_BUNDLE_V2_VERSION,
+            log_id: 42,
+            created_at: 1_744_100_800_000,
+            request_section: RequestLogBundleRequestSection::default(),
+            attempt_sections: vec![],
+            blob_pool: vec![],
+            patch_pool: vec![],
+        };
+
+        let encoded = rmp_serde::to_vec_named(&legacy).unwrap();
+        let decoded: RequestLogBundleV2 = rmp_serde::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.request_snapshot, None);
+        assert_eq!(decoded.candidate_manifest, None);
+        assert_eq!(decoded.transform_diagnostics, None);
+    }
+
+    #[test]
     fn generate_storage_path_from_id_uses_expected_layout() {
         let filesystem_path =
             generate_storage_path_from_id(1_744_100_800_000, 123456, &StorageType::FileSystem);
@@ -529,5 +827,19 @@ mod tests {
 
         let s3_path = generate_storage_path_from_id(1_744_100_800_000, 123456, &StorageType::S3);
         assert_eq!(s3_path, "logs/2025/04/08/123456.mp.gz");
+    }
+
+    #[test]
+    fn generate_replay_artifact_storage_path_uses_replay_namespace() {
+        let filesystem_path = generate_replay_artifact_storage_path(
+            1_776_840_000_000,
+            654321,
+            &StorageType::FileSystem,
+        );
+        assert_eq!(filesystem_path, "replays/2026/04/22/65/654321.mp.gz");
+
+        let s3_path =
+            generate_replay_artifact_storage_path(1_776_840_000_000, 654321, &StorageType::S3);
+        assert_eq!(s3_path, "replays/2026/04/22/654321.mp.gz");
     }
 }

@@ -1,7 +1,7 @@
 <template>
   <div class="mb-2 border-b border-gray-200 pb-2 last:border-b-0 last:pb-0">
     <p class="break-all text-xs font-semibold text-gray-600">
-      event: {{ event.event }}
+      {{ $t("recordPage.detailDialog.sse.event", { name: event.event }) }}
     </p>
     <pre
       v-if="eventData.type !== 'empty'"
@@ -12,10 +12,13 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import { useI18n } from "vue-i18n";
 
 const props = defineProps<{
   event: any;
 }>();
+
+const { t: $t } = useI18n();
 
 const eventData = computed(() => {
   if (!props.event.data) return { type: "empty" };

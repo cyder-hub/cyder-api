@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::HeaderMap;
 use reqwest::{
     Url,
     header::{
@@ -27,6 +27,7 @@ use crate::{
         transform::finalize_request_data,
         vertex::get_vertex_token,
     },
+    utils::storage::RequestLogBundleQueryParam,
 };
 use cyder_tools::log::{debug, error};
 
@@ -242,6 +243,64 @@ pub(super) async fn resolve_provider_credentials(
         key_id: selected_key.id,
         request_key,
     })
+}
+
+pub(crate) fn apply_provider_request_auth_header(
+    headers: &mut HeaderMap,
+    provider: &CacheProvider,
+    target_api_type: LlmApiType,
+    request_key: &str,
+) -> Result<(), ProxyError> {
+    let (header_name, header_value) =
+        provider_request_auth_header(provider, target_api_type, request_key)?;
+
+    headers.remove(AUTHORIZATION);
+    headers.remove("x-api-key");
+    headers.remove("x-goog-api-key");
+    headers.insert(header_name, header_value);
+
+    Ok(())
+}
+
+fn provider_request_auth_header(
+    provider: &CacheProvider,
+    target_api_type: LlmApiType,
+    request_key: &str,
+) -> Result<(HeaderName, ReqwestHeaderValue), ProxyError> {
+    let header_name = match (&provider.provider_type, target_api_type) {
+        (ProviderType::Openai, LlmApiType::Openai)
+        | (ProviderType::Responses, LlmApiType::Responses)
+        | (ProviderType::Vertex, LlmApiType::Gemini)
+        | (ProviderType::VertexOpenai, LlmApiType::Openai)
+        | (ProviderType::Ollama, LlmApiType::Ollama)
+        | (ProviderType::GeminiOpenai, LlmApiType::GeminiOpenai) => AUTHORIZATION,
+        (ProviderType::Gemini, LlmApiType::Gemini) => HeaderName::from_static("x-goog-api-key"),
+        (ProviderType::Anthropic, LlmApiType::Anthropic) => HeaderName::from_static("x-api-key"),
+        _ => {
+            return Err(ProxyError::BadRequest(format!(
+                "Provider '{}' with type {:?} does not support downstream protocol {:?}",
+                provider.name, provider.provider_type, target_api_type
+            )));
+        }
+    };
+
+    let header_value = if header_name == AUTHORIZATION {
+        ReqwestHeaderValue::try_from(format!("Bearer {}", request_key)).map_err(|err| {
+            ProxyError::BadRequest(format!(
+                "Invalid provider credential for replay/auth header '{}': {}",
+                header_name, err
+            ))
+        })?
+    } else {
+        ReqwestHeaderValue::try_from(request_key).map_err(|err| {
+            ProxyError::BadRequest(format!(
+                "Invalid provider credential for replay/auth header '{}': {}",
+                header_name, err
+            ))
+        })?
+    };
+
+    Ok((header_name, header_value))
 }
 
 fn describe_json_kind(value: &Value) -> &'static str {
@@ -473,6 +532,92 @@ fn apply_query_request_patch(
     Ok(())
 }
 
+pub(crate) fn rebuild_gemini_url_query_from_snapshot(
+    final_url: &str,
+    snapshot_query_params: &[RequestLogBundleQueryParam],
+    is_stream: bool,
+    request_patches: &[CacheResolvedRequestPatch],
+) -> Result<String, ProxyError> {
+    let mut url = Url::parse(final_url)
+        .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
+    let mut query_params = snapshot_query_params
+        .iter()
+        .filter(|param| !param.name.eq_ignore_ascii_case("key"))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if is_stream {
+        query_params.push(RequestLogBundleQueryParam {
+            name: "alt".to_string(),
+            value: Some("sse".to_string()),
+            value_present: true,
+            encoded_name: None,
+            encoded_value: None,
+        });
+    }
+
+    for rule in request_patches
+        .iter()
+        .filter(|rule| rule.placement == RequestPatchPlacement::Query)
+    {
+        query_params.retain(|param| param.name != rule.target);
+        if rule.operation == RequestPatchOperation::Set {
+            query_params.push(RequestLogBundleQueryParam {
+                name: rule.target.clone(),
+                value: Some(scalar_request_patch_value(rule)?),
+                value_present: true,
+                encoded_name: None,
+                encoded_value: None,
+            });
+        }
+    }
+
+    set_url_query_from_ordered_params(&mut url, &query_params);
+    Ok(url.to_string())
+}
+
+fn set_url_query_from_ordered_params(url: &mut Url, query_params: &[RequestLogBundleQueryParam]) {
+    if query_params.is_empty() {
+        url.set_query(None);
+        return;
+    }
+
+    let query = query_params
+        .iter()
+        .map(|param| {
+            let name = param
+                .encoded_name
+                .as_ref()
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .unwrap_or_else(|| percent_encode_query_component(&param.name));
+            if param.has_value() {
+                let value = param.encoded_value.clone().unwrap_or_else(|| {
+                    percent_encode_query_component(param.value.as_deref().unwrap_or_default())
+                });
+                format!("{name}={value}")
+            } else {
+                name
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    url.set_query(Some(&query));
+}
+
+fn percent_encode_query_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(*byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
 fn apply_header_request_patch(
     headers: &mut HeaderMap,
     rule: &CacheResolvedRequestPatch,
@@ -658,7 +803,7 @@ fn build_gemini_headers(
     original_headers: &HeaderMap,
     provider: &CacheProvider,
     api_key: &str,
-) -> HeaderMap {
+) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in original_headers.iter() {
         if name != HOST
@@ -672,20 +817,9 @@ fn build_gemini_headers(
         }
     }
 
-    if provider.provider_type == ProviderType::Vertex {
-        let bearer_token = format!("Bearer {}", api_key);
-        headers.insert(
-            AUTHORIZATION,
-            reqwest::header::HeaderValue::try_from(bearer_token).unwrap(),
-        );
-    } else {
-        headers.insert(
-            "X-Goog-Api-Key",
-            reqwest::header::HeaderValue::try_from(api_key).unwrap(),
-        );
-    }
+    apply_provider_request_auth_header(&mut headers, provider, LlmApiType::Gemini, api_key)?;
 
-    headers
+    Ok(headers)
 }
 
 /// Builds the Gemini-style URL: `{endpoint}/{model_name}:{action}`, appending
@@ -714,7 +848,12 @@ fn build_gemini_url(
     Ok(url)
 }
 
-pub fn build_new_headers(pre_headers: &HeaderMap, api_key: &str) -> Result<HeaderMap, ProxyError> {
+pub fn build_new_headers(
+    pre_headers: &HeaderMap,
+    provider: &CacheProvider,
+    target_api_type: LlmApiType,
+    api_key: &str,
+) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in pre_headers.iter() {
         if name != HOST // do not expose host to api endpoint
@@ -726,8 +865,7 @@ pub fn build_new_headers(pre_headers: &HeaderMap, api_key: &str) -> Result<Heade
             headers.insert(name.clone(), value.clone());
         }
     }
-    let request_key = format!("Bearer {}", api_key);
-    headers.insert(AUTHORIZATION, HeaderValue::try_from(request_key).unwrap());
+    apply_provider_request_auth_header(&mut headers, provider, target_api_type, api_key)?;
     Ok(headers)
 }
 
@@ -764,7 +902,13 @@ pub async fn prepare_llm_request(
     let target_url = format!("{}/{}", provider.endpoint, path);
     let mut url = Url::parse(&target_url)
         .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
-    let mut headers = build_new_headers(original_headers, &provider_credentials.request_key)?;
+    let target_api_type = determine_target_api_type(provider);
+    let mut headers = build_new_headers(
+        original_headers,
+        provider,
+        target_api_type,
+        &provider_credentials.request_key,
+    )?;
 
     ensure_request_body_object(&mut data);
     if let Value::Object(obj) = &mut data {
@@ -855,7 +999,7 @@ pub async fn prepare_simple_gemini_request(
         original_headers,
         provider,
         &provider_credentials.request_key,
-    );
+    )?;
     apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)?;
 
     Ok((url.to_string(), headers, data, provider_credentials.key_id))
@@ -888,7 +1032,7 @@ pub async fn prepare_gemini_llm_request(
         original_headers,
         provider,
         &provider_credentials.request_key,
-    );
+    )?;
 
     apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)?;
 
@@ -1127,7 +1271,8 @@ pub async fn build_execution_plan(
 mod tests {
     use super::{
         ResolvedNameScope, apply_request_patches, build_execution_plan_from_catalog,
-        parse_provider_model, resolve_real_model_name, select_generation_prepare_kind,
+        parse_provider_model, rebuild_gemini_url_query_from_snapshot, resolve_real_model_name,
+        select_generation_prepare_kind,
     };
     use crate::{
         schema::enum_def::{
@@ -1138,6 +1283,7 @@ mod tests {
             CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
             CacheModelsCatalog, CacheProvider, CacheResolvedRequestPatch, RequestPatchRuleOrigin,
         },
+        utils::storage::RequestLogBundleQueryParam,
     };
     use axum::http::{HeaderMap, HeaderValue};
     use reqwest::Url;
@@ -1376,6 +1522,149 @@ mod tests {
                 ("mode".to_string(), "new".to_string()),
                 ("enabled".to_string(), "true".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn rebuild_gemini_url_query_from_snapshot_preserves_order_flags_empty_and_encoding() {
+        let snapshot = vec![
+            RequestLogBundleQueryParam {
+                name: "tag".to_string(),
+                value: Some("a".to_string()),
+                value_present: true,
+                encoded_name: Some("tag".to_string()),
+                encoded_value: Some("a".to_string()),
+            },
+            RequestLogBundleQueryParam {
+                name: "tag".to_string(),
+                value: Some("b".to_string()),
+                value_present: true,
+                encoded_name: Some("tag".to_string()),
+                encoded_value: Some("b".to_string()),
+            },
+            RequestLogBundleQueryParam {
+                name: "flag".to_string(),
+                value: None,
+                value_present: false,
+                encoded_name: Some("flag".to_string()),
+                encoded_value: None,
+            },
+            RequestLogBundleQueryParam {
+                name: "mode".to_string(),
+                value: Some(String::new()),
+                value_present: true,
+                encoded_name: Some("mode".to_string()),
+                encoded_value: Some(String::new()),
+            },
+            RequestLogBundleQueryParam {
+                name: "q".to_string(),
+                value: Some("a b".to_string()),
+                value_present: true,
+                encoded_name: Some("q".to_string()),
+                encoded_value: Some("a%20b".to_string()),
+            },
+        ];
+
+        let final_url = rebuild_gemini_url_query_from_snapshot(
+            "https://example.com/v1beta/models/gemini:generateContent?stale=1",
+            &snapshot,
+            false,
+            &[],
+        )
+        .expect("query should rebuild");
+
+        assert_eq!(
+            final_url,
+            "https://example.com/v1beta/models/gemini:generateContent?tag=a&tag=b&flag&mode=&q=a%20b"
+        );
+    }
+
+    #[test]
+    fn rebuild_gemini_url_query_from_snapshot_preserves_original_plus_and_percent_encoding() {
+        let snapshot = vec![
+            RequestLogBundleQueryParam {
+                name: "space".to_string(),
+                value: Some("a b".to_string()),
+                value_present: true,
+                encoded_name: Some("space".to_string()),
+                encoded_value: Some("a%20b".to_string()),
+            },
+            RequestLogBundleQueryParam {
+                name: "plus".to_string(),
+                value: Some("a b".to_string()),
+                value_present: true,
+                encoded_name: Some("plus".to_string()),
+                encoded_value: Some("a+b".to_string()),
+            },
+            RequestLogBundleQueryParam {
+                name: "literal".to_string(),
+                value: Some("a+b".to_string()),
+                value_present: true,
+                encoded_name: Some("literal".to_string()),
+                encoded_value: Some("a%2Bb".to_string()),
+            },
+        ];
+
+        let final_url = rebuild_gemini_url_query_from_snapshot(
+            "https://example.com/v1beta/models/gemini:generateContent?stale=1",
+            &snapshot,
+            false,
+            &[],
+        )
+        .expect("query should rebuild");
+
+        assert_eq!(
+            final_url,
+            "https://example.com/v1beta/models/gemini:generateContent?space=a%20b&plus=a+b&literal=a%2Bb"
+        );
+    }
+
+    #[test]
+    fn rebuild_gemini_url_query_from_snapshot_applies_query_patches_after_snapshot() {
+        let snapshot = vec![
+            RequestLogBundleQueryParam {
+                name: "flag".to_string(),
+                value: None,
+                value_present: false,
+                encoded_name: Some("flag".to_string()),
+                encoded_value: None,
+            },
+            RequestLogBundleQueryParam {
+                name: "mode".to_string(),
+                value: Some("old".to_string()),
+                value_present: true,
+                encoded_name: Some("mode".to_string()),
+                encoded_value: Some("old".to_string()),
+            },
+        ];
+        let request_patches = vec![
+            request_patch(
+                1,
+                RequestPatchPlacement::Query,
+                "flag",
+                RequestPatchOperation::Remove,
+                None,
+            ),
+            request_patch(
+                2,
+                RequestPatchPlacement::Query,
+                "mode",
+                RequestPatchOperation::Set,
+                Some(json!("new")),
+            ),
+        ];
+
+        let final_url = rebuild_gemini_url_query_from_snapshot(
+            "https://example.com/v1beta/models/gemini:streamGenerateContent?flag&mode=old",
+            &snapshot,
+            true,
+            &request_patches,
+        )
+        .expect("query should rebuild");
+
+        assert_eq!(
+            final_url,
+            "https://example.com/v1beta/models/gemini:streamGenerateContent?alt=sse&mode=new"
         );
     }
 

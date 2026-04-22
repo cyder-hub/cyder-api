@@ -1,7 +1,10 @@
 use cyder_tools::log::{info, warn};
 
 use super::{ProxyError, retry_policy::ProviderGovernanceRejection};
-use crate::service::app_state::{AppState, ProviderHealthStatus};
+use crate::{
+    config::CONFIG,
+    service::app_state::{AppState, ProviderHealthStatus},
+};
 
 pub(super) async fn ensure_provider_request_allowed(
     app_state: &AppState,
@@ -20,6 +23,41 @@ pub(super) async fn ensure_provider_request_allowed(
         }
         Err(Some(_retry_after)) => Err(ProviderGovernanceRejection::Open),
         Err(None) => Err(ProviderGovernanceRejection::HalfOpenProbeInFlight),
+    }
+}
+
+pub(super) async fn preview_provider_request_allowed(
+    app_state: &AppState,
+    provider_id: i64,
+) -> Result<(), ProviderGovernanceRejection> {
+    if !CONFIG.provider_governance.is_enabled() {
+        return Ok(());
+    }
+
+    let snapshot = app_state.get_provider_health_snapshot(provider_id).await;
+    match snapshot.status {
+        ProviderHealthStatus::Healthy => Ok(()),
+        ProviderHealthStatus::Open => {
+            let Some(opened_at) = snapshot.opened_at else {
+                return Err(ProviderGovernanceRejection::Open);
+            };
+            let now = chrono::Utc::now().timestamp_millis();
+            let elapsed_ms = now.saturating_sub(opened_at);
+            let cooldown_ms = i64::try_from(CONFIG.provider_governance.open_cooldown().as_millis())
+                .unwrap_or(i64::MAX);
+            if elapsed_ms < cooldown_ms {
+                Err(ProviderGovernanceRejection::Open)
+            } else {
+                Ok(())
+            }
+        }
+        ProviderHealthStatus::HalfOpen => {
+            if snapshot.half_open_probe_in_flight {
+                Err(ProviderGovernanceRejection::HalfOpenProbeInFlight)
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 

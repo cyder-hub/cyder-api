@@ -342,6 +342,10 @@ fn default_local_storage_root() -> String {
     "storage/storage".to_string()
 }
 
+fn default_replay_response_capture_max_bytes() -> usize {
+    4 * 1024 * 1024
+}
+
 // The fully resolved configuration used by the application.
 // This is also the format for the default configuration file.
 #[derive(Debug, Deserialize, Serialize)]
@@ -358,6 +362,8 @@ pub struct FinalConfig {
     pub log_level: String,
     pub timezone: Option<String>,
     pub max_body_size: usize,
+    #[serde(default = "default_replay_response_capture_max_bytes")]
+    pub replay_response_capture_max_bytes: usize,
     pub db_pool_size: u32,
     pub redis: Option<RedisConfig>,
     #[serde(default)]
@@ -415,6 +421,7 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
         log_level: "info".to_string(),
         timezone: None,
         max_body_size: 100 * 1024 * 1024, // 100MB
+        replay_response_capture_max_bytes: default_replay_response_capture_max_bytes(),
         db_pool_size: 5,
         redis: None,
         proxy_request: ProxyRequestConfig::default(),
@@ -485,6 +492,7 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
 mod tests {
     use super::{
         FinalConfig, ProviderGovernanceConfig, ProxyRequestConfig, RoutingResilienceConfig,
+        default_replay_response_capture_max_bytes,
     };
 
     #[test]
@@ -516,6 +524,11 @@ mod tests {
         assert_eq!(config.base_backoff_ms, 250);
         assert_eq!(config.max_backoff_ms, 1500);
         assert_eq!(config.respect_retry_after_up_to_seconds, 3);
+    }
+
+    #[test]
+    fn replay_response_capture_default_is_independent_from_request_body_limit() {
+        assert_eq!(default_replay_response_capture_max_bytes(), 4 * 1024 * 1024);
     }
 
     #[test]

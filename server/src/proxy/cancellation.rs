@@ -4,13 +4,13 @@ use tokio_util::sync::CancellationToken;
 use super::ProxyError;
 
 #[derive(Clone, Debug)]
-pub(super) struct ProxyCancellationContext {
+pub(crate) struct ProxyCancellationContext {
     token: CancellationToken,
     reason: Arc<Mutex<Option<String>>>,
 }
 
 impl ProxyCancellationContext {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             token: CancellationToken::new(),
             reason: Arc::new(Mutex::new(None)),

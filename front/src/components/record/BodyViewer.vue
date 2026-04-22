@@ -1,6 +1,6 @@
 <template>
   <div v-if="isLoadingBodies" class="py-4 text-center text-sm text-gray-500">
-    Loading bodies...
+    {{ $t("recordPage.detailDialog.payloadViewer.loadingBodies") }}
   </div>
   <div
     v-else-if="bodyError"
@@ -11,9 +11,11 @@
   <div v-else-if="bundleView" class="space-y-4">
     <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div>
-        <h4 class="text-sm font-semibold text-gray-900">Payload bundle</h4>
+        <h4 class="text-sm font-semibold text-gray-900">
+          {{ $t("recordPage.detailDialog.payloadViewer.title") }}
+        </h4>
         <p class="mt-1 text-xs text-gray-500">
-          Stored request and response payloads.
+          {{ $t("recordPage.detailDialog.payloadViewer.description") }}
         </p>
       </div>
       <Badge variant="outline" class="font-mono text-xs">
@@ -32,7 +34,7 @@
       >
         <SingleRequestBodyContent
           :content="legacyBodies.userRequestBody"
-          title="User Request Body"
+          :title="$t('recordPage.detailDialog.payloadViewer.userRequestBody')"
         />
         <SingleRequestBodyContent :content="legacyLlmContent" :title="legacyLlmTitle">
           <template v-if="legacyPatchInfo.isPatch" #action>
@@ -42,7 +44,11 @@
               class="h-8 px-2 text-[11px]"
               @click="showLegacyPatched = !showLegacyPatched"
             >
-              {{ showLegacyPatched ? "Show Raw Patch" : "Show Patched Body" }}
+              {{
+                showLegacyPatched
+                  ? $t("recordPage.detailDialog.payloadViewer.showRawPatch")
+                  : $t("recordPage.detailDialog.payloadViewer.showPatchedBody")
+              }}
             </Button>
           </template>
         </SingleRequestBodyContent>
@@ -50,7 +56,7 @@
       <SingleRequestBodyContent
         v-else
         :content="legacyBodies.userRequestBody || legacyBodies.llmRequestBody"
-        title="Request Body"
+        :title="$t('recordPage.detailDialog.payloadViewer.requestBody')"
       />
 
       <div
@@ -63,19 +69,19 @@
       >
         <SingleResponseBodyContent
           :content="legacyBodies.llmResponseBody"
-          title="LLM Response Body"
+          :title="$t('recordPage.detailDialog.payloadViewer.llmResponseBody')"
           :status="status"
         />
         <SingleResponseBodyContent
           :content="legacyBodies.userResponseBody"
-          title="User Response Body"
+          :title="$t('recordPage.detailDialog.payloadViewer.userResponseBody')"
           :status="status"
         />
       </div>
       <SingleResponseBodyContent
         v-else
         :content="legacyBodies.userResponseBody || legacyBodies.llmResponseBody"
-        title="Response Body"
+        :title="$t('recordPage.detailDialog.payloadViewer.responseBody')"
         :status="status"
       />
     </template>
@@ -83,9 +89,15 @@
     <template v-else-if="v2Bodies">
       <section class="space-y-3">
         <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-          <h4 class="text-sm font-semibold text-gray-900">User exchange</h4>
+          <h4 class="text-sm font-semibold text-gray-900">
+            {{ $t("recordPage.detailDialog.payloadViewer.userExchange") }}
+          </h4>
           <span class="text-xs text-gray-500">
-            Response capture: {{ formatCaptureState(v2Bodies.request.userResponseCaptureState) }}
+            {{
+              $t("recordPage.detailDialog.payloadViewer.responseCapture", {
+                state: formatCaptureState(v2Bodies.request.userResponseCaptureState),
+              })
+            }}
           </span>
         </div>
         <div
@@ -95,12 +107,12 @@
           <SingleRequestBodyContent
             v-if="v2Bodies.request.userRequestBody"
             :content="v2Bodies.request.userRequestBody"
-            title="User Request Body"
+            :title="$t('recordPage.detailDialog.payloadViewer.userRequestBody')"
           />
           <SingleResponseBodyContent
             v-if="v2Bodies.request.userResponseBody"
             :content="v2Bodies.request.userResponseBody"
-            title="User Response Body"
+            :title="$t('recordPage.detailDialog.payloadViewer.userResponseBody')"
             :status="status"
           />
         </div>
@@ -108,15 +120,17 @@
           v-else
           class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-5 text-sm text-gray-500"
         >
-          No request-level payload was captured for this bundle.
+          {{ $t("recordPage.detailDialog.payloadViewer.noRequestLevelPayload") }}
         </div>
       </section>
 
       <section class="space-y-3 border-t border-gray-100 pt-4">
         <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-          <h4 class="text-sm font-semibold text-gray-900">Attempt payloads</h4>
+          <h4 class="text-sm font-semibold text-gray-900">
+            {{ $t("recordPage.detailDialog.payloadViewer.attemptPayloads") }}
+          </h4>
           <Badge variant="outline" class="font-mono text-xs">
-            {{ v2AttemptRows.length }} attempts
+            {{ $t("recordPage.detailDialog.payloadViewer.attemptCount", { count: v2AttemptRows.length }) }}
           </Badge>
         </div>
 
@@ -124,7 +138,7 @@
           v-if="v2AttemptRows.length === 0"
           class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-5 text-sm text-gray-500"
         >
-          No attempt payload sections were recorded for this bundle.
+          {{ $t("recordPage.detailDialog.payloadViewer.noAttemptPayloads") }}
         </div>
 
         <div
@@ -136,13 +150,13 @@
             <div class="min-w-0 space-y-1">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="text-sm font-semibold text-gray-900">
-                  Attempt #{{ attempt.attemptIndex }}
+                  {{ $t("recordPage.detailDialog.payloadViewer.attemptTitle", { index: attempt.attemptIndex }) }}
                 </span>
                 <Badge :variant="getStatusBadgeVariant(attempt.status)">
-                  {{ attempt.status || "UNKNOWN" }}
+                  {{ attempt.status || $t("recordPage.detailDialog.payloadViewer.unknownStatus") }}
                 </Badge>
                 <Badge variant="outline" class="font-mono text-[11px]">
-                  {{ attempt.schedulerAction || "NO_ACTION" }}
+                  {{ attempt.schedulerAction || $t("recordPage.detailDialog.payloadViewer.noAction") }}
                 </Badge>
                 <Badge v-if="attempt.httpStatus != null" variant="outline" class="font-mono text-[11px]">
                   HTTP {{ attempt.httpStatus }}
@@ -153,9 +167,15 @@
               </p>
             </div>
             <div class="font-mono text-[11px] text-gray-500 sm:text-right">
-              <div>request blob: {{ formatNullableNumber(attempt.requestBlobId) }}</div>
-              <div>patch: {{ formatNullableNumber(attempt.requestPatchId) }}</div>
-              <div>response blob: {{ formatNullableNumber(attempt.responseBlobId) }}</div>
+              <div>
+                {{ $t("recordPage.detailDialog.payloadViewer.requestBlob", { value: formatNullableNumber(attempt.requestBlobId) }) }}
+              </div>
+              <div>
+                {{ $t("recordPage.detailDialog.payloadViewer.patchBlob", { value: formatNullableNumber(attempt.requestPatchId) }) }}
+              </div>
+              <div>
+                {{ $t("recordPage.detailDialog.payloadViewer.responseBlob", { value: formatNullableNumber(attempt.responseBlobId) }) }}
+              </div>
             </div>
           </div>
 
@@ -177,8 +197,8 @@
                 >
                   {{
                     isAttemptPatchRaw(attempt.key)
-                      ? "Show Patched Body"
-                      : "Show Raw Patch"
+                      ? $t("recordPage.detailDialog.payloadViewer.showPatchedBody")
+                      : $t("recordPage.detailDialog.payloadViewer.showRawPatch")
                   }}
                 </Button>
               </template>
@@ -186,7 +206,7 @@
             <SingleResponseBodyContent
               v-if="attempt.responseContent"
               :content="attempt.responseContent"
-              title="LLM Response Body"
+              :title="$t('recordPage.detailDialog.payloadViewer.llmResponseBody')"
               :status="attempt.status"
             />
           </div>
@@ -194,11 +214,15 @@
             v-else
             class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-5 text-sm text-gray-500"
           >
-            No LLM request or response body was captured for this attempt.
-            Response capture: {{ formatCaptureState(attempt.responseCaptureState) }}.
+            {{ $t("recordPage.detailDialog.payloadViewer.noAttemptBody") }}
+            {{
+              $t("recordPage.detailDialog.payloadViewer.responseCaptureSentence", {
+                state: formatCaptureState(attempt.responseCaptureState),
+              })
+            }}
           </div>
           <p v-if="attempt.requestPatchError" class="text-xs text-amber-700">
-            {{ attempt.requestPatchError }}
+            {{ formatPatchError(attempt.requestPatchError) }}
           </p>
         </div>
       </section>
@@ -208,12 +232,13 @@
     v-else
     class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-5 text-sm text-gray-500"
   >
-    No payload bundle is available for this request.
+    {{ $t("recordPage.detailDialog.payloadViewer.bundleEmpty") }}
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
 import * as msgpack from "@msgpack/msgpack";
 import { Badge } from "@/components/ui/badge";
@@ -241,6 +266,7 @@ const isLoadingBodies = ref(false);
 const bodyError = ref<string | null>(null);
 const showLegacyPatched = ref(true);
 const rawPatchByAttempt = ref<Record<string, boolean>>({});
+const { t: $t } = useI18n();
 
 const fetchAndDecodeBody = async () => {
   if (!props.storageType || !props.recordId) return;
@@ -256,9 +282,9 @@ const fetchAndDecodeBody = async () => {
     bundleView.value = decodeBundleView(decoded);
   } catch (error) {
     console.error("Failed to fetch or decode body content:", error);
-    bodyError.value = `Failed to fetch or decode body content: ${
-      error instanceof Error ? error.message : String(error)
-    }`;
+    bodyError.value = $t("recordPage.detailDialog.payloadViewer.fetchError", {
+      error: error instanceof Error ? error.message : String(error),
+    });
   } finally {
     isLoadingBodies.value = false;
   }
@@ -279,7 +305,10 @@ const hasRequestLevelPayload = computed(
 );
 
 const v2AttemptRows = computed<V2AttemptRow[]>(() => {
-  return buildV2AttemptRows(v2Bodies.value?.attempts ?? [], props.attempts ?? []);
+  return buildV2AttemptRows(v2Bodies.value?.attempts ?? [], props.attempts ?? [], {
+    unknownProvider: $t("recordPage.detailDialog.payloadViewer.unknownProvider"),
+    unknownModel: $t("recordPage.detailDialog.payloadViewer.unknownModel"),
+  });
 });
 
 const legacyPatchInfo = computed(() => {
@@ -293,10 +322,12 @@ const legacyLlmContent = computed(() => {
 });
 
 const legacyLlmTitle = computed(() => {
-  if (!legacyPatchInfo.value.isPatch) return "LLM Request Body";
+  if (!legacyPatchInfo.value.isPatch) {
+    return $t("recordPage.detailDialog.payloadViewer.llmRequestBody");
+  }
   return showLegacyPatched.value
-    ? "LLM Request Body (Patched)"
-    : "LLM Request Body (Raw Patch)";
+    ? $t("recordPage.detailDialog.payloadViewer.llmRequestBodyPatched")
+    : $t("recordPage.detailDialog.payloadViewer.llmRequestBodyRawPatch");
 });
 
 const getStatusBadgeVariant = (status: string | null) => {
@@ -318,6 +349,19 @@ const formatNullableNumber = (value: number | null) => value ?? "/";
 const formatCaptureState = (state: string | null | undefined) =>
   state ? state.replaceAll("_", " ") : "/";
 
+const formatPatchError = (error: string) => {
+  const prefix = "Unable to apply JSON patch: ";
+  if (error === "Unable to apply JSON patch because the target blob is missing.") {
+    return $t("recordPage.detailDialog.payloadViewer.patchMissing");
+  }
+  if (error.startsWith(prefix)) {
+    return $t("recordPage.detailDialog.payloadViewer.patchFailed", {
+      error: error.slice(prefix.length),
+    });
+  }
+  return error;
+};
+
 const isAttemptPatchRaw = (key: string) => Boolean(rawPatchByAttempt.value[key]);
 
 const toggleAttemptPatch = (key: string) => {
@@ -335,10 +379,12 @@ const displayAttemptRequestContent = (attempt: V2AttemptRow) => {
 };
 
 const attemptRequestTitle = (attempt: V2AttemptRow) => {
-  if (!attempt.requestRawPatchContent) return "LLM Request Body";
+  if (!attempt.requestRawPatchContent) {
+    return $t("recordPage.detailDialog.payloadViewer.llmRequestBody");
+  }
   return isAttemptPatchRaw(attempt.key)
-    ? "LLM Request Body (Raw Patch)"
-    : "LLM Request Body (Patched)";
+    ? $t("recordPage.detailDialog.payloadViewer.llmRequestBodyRawPatch")
+    : $t("recordPage.detailDialog.payloadViewer.llmRequestBodyPatched");
 };
 
 onMounted(fetchAndDecodeBody);

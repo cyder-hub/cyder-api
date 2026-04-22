@@ -42,9 +42,18 @@ import type {
   CostPreviewResponse,
   ImportCostTemplatePayload,
   ImportCostTemplateResponse,
+  RecordArtifactResponse,
+  RecordAttemptReplayExecuteParams,
+  RecordAttemptReplayPreviewParams,
+  RecordAttemptReplayPreviewResponse,
+  RecordGatewayReplayExecuteParams,
+  RecordGatewayReplayPreviewParams,
+  RecordGatewayReplayPreviewResponse,
   RecordListItem,
   RecordDetail,
   RecordListParams,
+  RecordReplayArtifact,
+  RecordReplayRun,
   ProviderBootstrapPayload,
   ProviderBootstrapResponse,
   ProviderPayload,
@@ -265,6 +274,64 @@ export const Api = {
   },
   getRecordDetail(id: number | string): Promise<RecordDetail> {
     return request.get(`/ai/manager/api/request_log/${id}`);
+  },
+  getRecordArtifacts(id: number | string): Promise<RecordArtifactResponse> {
+    return request.get(`/ai/manager/api/request_log/${id}/artifacts`);
+  },
+  previewAttemptReplay(
+    id: number | string,
+    attemptId: number | string,
+    payload: RecordAttemptReplayPreviewParams = {},
+  ): Promise<RecordAttemptReplayPreviewResponse> {
+    return request.post(
+      `/ai/manager/api/request_log/${id}/replay/attempt/${attemptId}/preview`,
+      payload,
+    );
+  },
+  executeAttemptReplay(
+    id: number | string,
+    attemptId: number | string,
+    payload: RecordAttemptReplayExecuteParams,
+  ): Promise<RecordReplayRun> {
+    return request.post(
+      `/ai/manager/api/request_log/${id}/replay/attempt/${attemptId}/execute`,
+      payload,
+    );
+  },
+  previewGatewayReplay(
+    id: number | string,
+    payload: RecordGatewayReplayPreviewParams = {},
+  ): Promise<RecordGatewayReplayPreviewResponse> {
+    return request.post(
+      `/ai/manager/api/request_log/${id}/replay/gateway/preview`,
+      payload,
+    );
+  },
+  executeGatewayReplay(
+    id: number | string,
+    payload: RecordGatewayReplayExecuteParams,
+  ): Promise<RecordReplayRun> {
+    return request.post(
+      `/ai/manager/api/request_log/${id}/replay/gateway/execute`,
+      payload,
+    );
+  },
+  getRecordReplayRuns(id: number | string): Promise<RecordReplayRun[]> {
+    return request.get(`/ai/manager/api/request_log/${id}/replay`);
+  },
+  getRecordReplayRun(
+    id: number | string,
+    replayRunId: number | string,
+  ): Promise<RecordReplayRun> {
+    return request.get(`/ai/manager/api/request_log/${id}/replay/${replayRunId}`);
+  },
+  getRecordReplayArtifacts(
+    id: number | string,
+    replayRunId: number | string,
+  ): Promise<RecordReplayArtifact> {
+    return request.get(
+      `/ai/manager/api/request_log/${id}/replay/${replayRunId}/artifacts`,
+    );
   },
   getRecordContent(id: number | string): Promise<ArrayBuffer> {
     return request.get(`/ai/manager/api/request_log/${id}/content`, {

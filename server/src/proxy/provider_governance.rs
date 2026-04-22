@@ -1,13 +1,13 @@
 use cyder_tools::log::{info, warn};
 
-use super::ProxyError;
+use super::{ProxyError, retry_policy::ProviderGovernanceRejection};
 use crate::service::app_state::{AppState, ProviderHealthStatus};
 
 pub(super) async fn ensure_provider_request_allowed(
     app_state: &AppState,
     provider_id: i64,
     provider_label: &str,
-) -> Result<(), ProxyError> {
+) -> Result<(), ProviderGovernanceRejection> {
     match app_state.allow_provider_request(provider_id).await {
         Ok(snapshot) => {
             if snapshot.status == ProviderHealthStatus::HalfOpen {
@@ -18,15 +18,8 @@ pub(super) async fn ensure_provider_request_allowed(
             }
             Ok(())
         }
-        Err(retry_after) => {
-            let retry_hint = retry_after
-                .map(|duration| format!(" Retry after {}s.", duration.as_secs()))
-                .unwrap_or_else(|| " Another half-open probe is already in flight.".to_string());
-            Err(ProxyError::UpstreamService(format!(
-                "Provider '{}' is temporarily unavailable due to recent upstream failures.{}",
-                provider_label, retry_hint
-            )))
-        }
+        Err(Some(_retry_after)) => Err(ProviderGovernanceRejection::Open),
+        Err(None) => Err(ProviderGovernanceRejection::HalfOpenProbeInFlight),
     }
 }
 
@@ -98,5 +91,11 @@ mod tests {
         assert!(!counts_against_provider_governance(&ProxyError::Forbidden(
             "forbidden".to_string()
         )));
+        assert!(!counts_against_provider_governance(
+            &ProxyError::ProviderOpenSkipped("open".to_string())
+        ));
+        assert!(!counts_against_provider_governance(
+            &ProxyError::ProviderHalfOpenProbeInFlight("probe".to_string())
+        ));
     }
 }

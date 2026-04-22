@@ -25,6 +25,7 @@ mod model_alias;
 pub mod model_route;
 pub mod provider;
 pub mod provider_runtime;
+pub mod request_attempt;
 pub mod request_log;
 pub mod request_patch;
 pub mod stat;
@@ -667,7 +668,7 @@ mod tests {
             "SELECT COUNT(*) AS count
              FROM request_log AS rl
              JOIN api_key AS ak
-               ON rl.system_api_key_id = ak.id
+               ON rl.api_key_id = ak.id
              WHERE rl.id = 20
                AND ak.id = 3",
         )
@@ -1047,13 +1048,13 @@ mod tests {
         ] {
             let column_count = diesel::sql_query(format!(
                 "SELECT COUNT(*) AS count
-                 FROM pragma_table_info('request_log')
+                 FROM pragma_table_info('request_attempt')
                  WHERE name = '{column}'"
             ))
             .get_result::<CountRow>(&mut connection)
-            .expect("request_log column count should be readable")
+            .expect("request_attempt column count should be readable")
             .count;
-            assert_eq!(column_count, 1, "{column} should exist on request_log");
+            assert_eq!(column_count, 1, "{column} should exist on request_attempt");
         }
 
         apply_sql(

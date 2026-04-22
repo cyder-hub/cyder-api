@@ -229,16 +229,16 @@
                     {{ $t("recordPage.table.status") }}
                   </p>
                   <div>
-                    <Badge :variant="getStatusBadgeVariant(record.status)">
-                      {{ record.status || $t("common.notAvailable") }}
+                    <Badge :variant="getStatusBadgeVariant(record.overall_status)">
+                      {{ record.overall_status || $t("common.notAvailable") }}
                     </Badge>
                   </div>
                 </div>
                 <div class="space-y-1">
                   <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                    {{ $t("recordPage.table.stream") }}
+                    Attempts
                   </p>
-                  <p class="text-sm text-gray-900">{{ record.isStreamDisplay }}</p>
+                  <p class="font-mono text-sm text-gray-900">{{ record.attemptsDisplay }}</p>
                 </div>
               </div>
 
@@ -301,7 +301,7 @@
                     Tokens
                   </TableHead>
                   <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
-                    {{ $t("recordPage.table.stream") }}
+                    Attempts
                   </TableHead>
                   <TableHead class="min-w-[200px] text-xs font-medium uppercase tracking-wider text-gray-500">
                     Performance
@@ -329,15 +329,15 @@
                   <TableCell class="w-14 text-center">
                     <div
                       class="flex justify-center"
-                      :title="getStatusMeta(record.status).label"
-                      :aria-label="getStatusMeta(record.status).label"
+                      :title="getStatusMeta(record.overall_status).label"
+                      :aria-label="getStatusMeta(record.overall_status).label"
                     >
                       <component
-                        :is="getStatusMeta(record.status).icon"
+                        :is="getStatusMeta(record.overall_status).icon"
                         class="h-4 w-4"
-                        :class="getStatusMeta(record.status).className"
+                        :class="getStatusMeta(record.overall_status).className"
                       />
-                      <span class="sr-only">{{ getStatusMeta(record.status).label }}</span>
+                      <span class="sr-only">{{ getStatusMeta(record.overall_status).label }}</span>
                     </div>
                   </TableCell>
                   <TableCell
@@ -351,7 +351,12 @@
                       record.total_tokens,
                     ]) }}
                   </TableCell>
-                  <TableCell>{{ record.isStreamDisplay }}</TableCell>
+                  <TableCell
+                    class="font-mono text-xs text-gray-700"
+                    title="attempts / retries / fallbacks"
+                  >
+                    {{ record.attemptsDisplay }}
+                  </TableCell>
                   <TableCell
                     class="font-mono text-xs text-gray-700"
                     :title="`${$t('recordPage.table.firstResp')} / ${$t('recordPage.table.totalResp')} / ${$t('recordPage.table.tps')}`"
@@ -475,25 +480,32 @@
           </div>
           <div v-else-if="detailedRecord" class="space-y-4 text-sm sm:space-y-5">
             <section class="border-b border-gray-100 pb-1">
-              <dl class="grid grid-cols-1 divide-y divide-gray-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4">
+              <dl class="grid grid-cols-1 divide-y divide-gray-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-5">
                 <div class="flex items-center justify-between gap-3 px-4 py-3">
                   <dt class="text-xs uppercase tracking-wide text-gray-500">Status</dt>
                   <dd>
-                    <Badge :variant="getStatusBadgeVariant(detailedRecord.status)">
-                      {{ detailedRecord.status || $t("common.notAvailable") }}
+                    <Badge :variant="getStatusBadgeVariant(detailedRecord.overall_status)">
+                      {{ detailedRecord.overall_status || $t("common.notAvailable") }}
                     </Badge>
+                  </dd>
+                </div>
+                <div class="flex items-center justify-between gap-3 px-4 py-3">
+                  <dt class="text-xs uppercase tracking-wide text-gray-500">Attempts</dt>
+                  <dd class="font-mono text-sm font-semibold text-gray-900">
+                    {{ detailedRecord.attempt_count }} / {{ detailedRecord.retry_count }} /
+                    {{ detailedRecord.fallback_count }}
                   </dd>
                 </div>
                 <div class="flex items-center justify-between gap-3 px-4 py-3">
                   <dt class="text-xs uppercase tracking-wide text-gray-500">Provider</dt>
                   <dd class="truncate text-right text-sm font-medium text-gray-900">
-                    {{ getProviderName(detailedRecord.provider_id) }}
+                    {{ getProviderName(detailedRecord.final_provider_id) }}
                   </dd>
                 </div>
                 <div class="flex items-center justify-between gap-3 px-4 py-3">
                   <dt class="text-xs uppercase tracking-wide text-gray-500">Model</dt>
                   <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">
-                    {{ detailedRecord.requested_model_name || detailedRecord.model_name || "/" }}
+                    {{ detailedRecord.requested_model_name || detailedRecord.final_model_name_snapshot || "/" }}
                   </dd>
                 </div>
                 <div class="flex items-center justify-between gap-3 px-4 py-3">
@@ -524,7 +536,7 @@
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">Requested Model</dt>
                       <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">
-                        {{ detailedRecord.requested_model_name || detailedRecord.model_name || "/" }}
+                        {{ detailedRecord.requested_model_name || detailedRecord.final_model_name_snapshot || "/" }}
                       </dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
@@ -542,16 +554,20 @@
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">Selected Model</dt>
                       <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">
-                        {{ detailedRecord.model_name || "/" }}
+                        {{ detailedRecord.final_model_name_snapshot || "/" }}
                       </dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">Real Model</dt>
-                      <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">{{ detailedRecord.real_model_name || "/" }}</dd>
+                      <dd class="truncate text-right font-mono text-xs text-gray-900 sm:text-sm">{{ detailedRecord.final_real_model_name_snapshot || "/" }}</dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
-                      <dt class="text-xs uppercase tracking-wide text-gray-500">Stream</dt>
-                      <dd class="text-right text-sm text-gray-900">{{ detailedRecord.is_stream ? $t("common.yes") : $t("common.no") }}</dd>
+                      <dt class="text-xs uppercase tracking-wide text-gray-500">Attempts</dt>
+                      <dd class="text-right font-mono text-xs text-gray-900 sm:text-sm">
+                        {{ detailedRecord.attempt_count }} attempts /
+                        {{ detailedRecord.retry_count }} retries /
+                        {{ detailedRecord.fallback_count }} fallbacks
+                      </dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">User API Type</dt>
@@ -559,7 +575,7 @@
                     </div>
                     <div class="flex items-center justify-between gap-3 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">LLM API Type</dt>
-                      <dd class="truncate text-right text-sm text-gray-900">{{ detailedRecord.llm_api_type || $t("common.notAvailable") }}</dd>
+                      <dd class="truncate text-right text-sm text-gray-900">{{ detailedRecord.final_llm_api_type || $t("common.notAvailable") }}</dd>
                     </div>
                   </dl>
               </section>
@@ -591,21 +607,196 @@
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">LLM Request Sent</dt>
-                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.llm_request_sent_at) }}</dd>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.first_attempt_started_at) }}</dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">LLM First Chunk</dt>
-                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.llm_response_first_chunk_at) }}</dd>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.response_started_to_client_at) }}</dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">LLM Completed</dt>
-                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.llm_response_completed_at) }}</dd>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.completed_at) }}</dd>
                     </div>
                     <div class="flex items-center justify-between gap-3 py-2.5">
                       <dt class="text-xs uppercase tracking-wide text-gray-500">Response to Client</dt>
-                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.response_sent_to_client_at) }}</dd>
+                      <dd class="text-right text-sm text-gray-900">{{ formatDate(detailedRecord.completed_at) }}</dd>
                     </div>
                   </dl>
+              </section>
+
+              <section class="border-t border-gray-100 pt-4">
+                <div class="mb-3 flex flex-col gap-2 border-b border-gray-100 pb-2 sm:flex-row sm:items-center sm:justify-between">
+                  <h3 class="text-base font-semibold text-gray-900">
+                    Attempts Timeline
+                  </h3>
+                  <Badge variant="outline" class="font-mono text-xs">
+                    {{ detailedAttempts.length }} attempts
+                  </Badge>
+                </div>
+                <div
+                  v-if="detailedAttempts.length === 0"
+                  class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
+                >
+                  No attempt details were recorded for this request.
+                </div>
+                <ol v-else class="divide-y divide-gray-100">
+                  <li
+                    v-for="attempt in detailedAttempts"
+                    :key="attempt.id"
+                    class="grid grid-cols-[auto_minmax(0,1fr)] gap-3 py-4 first:pt-0"
+                  >
+                    <div class="pt-1">
+                      <component
+                        :is="getStatusMeta(attempt.attempt_status).icon"
+                        class="h-4 w-4"
+                        :class="getStatusMeta(attempt.attempt_status).className"
+                      />
+                    </div>
+                    <div class="min-w-0 space-y-3">
+                      <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div class="min-w-0">
+                          <div class="flex flex-wrap items-center gap-2">
+                            <h4 class="text-sm font-semibold text-gray-900">
+                              Attempt #{{ attempt.attempt_index }}
+                            </h4>
+                            <Badge :variant="getStatusBadgeVariant(attempt.attempt_status)">
+                              {{ attempt.attempt_status }}
+                            </Badge>
+                            <Badge variant="outline" class="font-mono text-[11px]">
+                              {{ attempt.scheduler_action }}
+                            </Badge>
+                            <Badge
+                              v-if="attempt.http_status != null"
+                              variant="outline"
+                              class="font-mono text-[11px]"
+                            >
+                              HTTP {{ attempt.http_status }}
+                            </Badge>
+                          </div>
+                          <p class="mt-1 break-all font-mono text-xs text-gray-600">
+                            {{ formatAttemptProviderModel(attempt) }}
+                          </p>
+                        </div>
+                        <div class="font-mono text-xs text-gray-500 sm:text-right">
+                          <div>candidate {{ attempt.candidate_position }}</div>
+                          <div>{{ formatDuration(attempt.started_at, attempt.completed_at) }}</div>
+                        </div>
+                      </div>
+
+                      <div
+                        v-if="attempt.error_code || attempt.error_message"
+                        class="rounded-lg border border-red-100 bg-red-50/70 px-3 py-2 text-sm text-red-800"
+                      >
+                        <div class="font-mono text-xs font-semibold">
+                          {{ attempt.error_code || "attempt_error" }}
+                        </div>
+                        <div v-if="attempt.error_message" class="mt-1 break-words">
+                          {{ attempt.error_message }}
+                        </div>
+                      </div>
+
+                      <dl class="grid grid-cols-1 gap-x-6 sm:grid-cols-2 xl:grid-cols-3">
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">Started</dt>
+                          <dd class="text-right text-sm text-gray-900">{{ formatDate(attempt.started_at) }}</dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">First byte</dt>
+                          <dd class="text-right text-sm text-gray-900">{{ formatDate(attempt.first_byte_at) }}</dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">Completed</dt>
+                          <dd class="text-right text-sm text-gray-900">{{ formatDate(attempt.completed_at) }}</dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">First byte latency</dt>
+                          <dd class="text-right font-mono text-xs text-gray-900">
+                            {{ formatDuration(attempt.started_at, attempt.first_byte_at) }}
+                          </dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">Client visible</dt>
+                          <dd class="text-right text-sm text-gray-900">
+                            {{ formatBoolean(attempt.response_started_to_client) }}
+                          </dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">Backoff</dt>
+                          <dd class="text-right font-mono text-xs text-gray-900">
+                            {{ attempt.backoff_ms != null ? `${attempt.backoff_ms} ms` : "/" }}
+                          </dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">LLM API</dt>
+                          <dd class="truncate text-right text-sm text-gray-900">
+                            {{ attempt.llm_api_type || "/" }}
+                          </dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">Tokens</dt>
+                          <dd class="text-right font-mono text-xs text-gray-900">
+                            {{ formatAttemptTokens(attempt) }}
+                          </dd>
+                        </div>
+                        <div class="flex items-center justify-between gap-3 border-b border-gray-100 py-2">
+                          <dt class="text-xs uppercase tracking-wide text-gray-500">Cost</dt>
+                          <dd class="text-right font-mono text-xs text-gray-900">
+                            {{ formatAttemptCost(attempt) }}
+                          </dd>
+                        </div>
+                      </dl>
+
+                      <div
+                        v-if="attempt.request_uri"
+                        class="space-y-1 border-b border-gray-100 pb-3"
+                      >
+                        <div class="text-xs uppercase tracking-wide text-gray-500">Request URI</div>
+                        <div class="break-all font-mono text-xs text-gray-700">
+                          {{ attempt.request_uri }}
+                        </div>
+                      </div>
+
+                      <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+                        <details
+                          v-if="hasText(attempt.request_headers_json)"
+                          class="rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2"
+                        >
+                          <summary class="cursor-pointer text-xs font-medium uppercase tracking-wide text-gray-500">
+                            Request headers
+                          </summary>
+                          <pre class="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-gray-700">{{ formatJsonText(attempt.request_headers_json) }}</pre>
+                        </details>
+                        <details
+                          v-if="hasText(attempt.response_headers_json)"
+                          class="rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2"
+                        >
+                          <summary class="cursor-pointer text-xs font-medium uppercase tracking-wide text-gray-500">
+                            Response headers
+                          </summary>
+                          <pre class="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-gray-700">{{ formatJsonText(attempt.response_headers_json) }}</pre>
+                        </details>
+                        <details
+                          v-if="hasText(attempt.request_patch_summary_json)"
+                          class="rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2"
+                        >
+                          <summary class="cursor-pointer text-xs font-medium uppercase tracking-wide text-gray-500">
+                            Patch trace
+                          </summary>
+                          <pre class="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-gray-700">{{ formatJsonText(attempt.request_patch_summary_json) }}</pre>
+                        </details>
+                        <details
+                          v-if="hasText(attempt.applied_request_patch_ids_json)"
+                          class="rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2"
+                        >
+                          <summary class="cursor-pointer text-xs font-medium uppercase tracking-wide text-gray-500">
+                            Applied patch rules
+                          </summary>
+                          <pre class="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-gray-700">{{ formatJsonText(attempt.applied_request_patch_ids_json) }}</pre>
+                        </details>
+                      </div>
+                    </div>
+                  </li>
+                </ol>
               </section>
 
               <section class="border-t border-gray-100 pt-4">
@@ -756,197 +947,20 @@
 
             <section class="border-t border-gray-100 pt-4">
               <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
-                {{ $t("recordPage.detailModal.requestPatch") }}
-              </h3>
-
-              <div v-if="hasInvalidRequestPatchTrace" class="space-y-2">
-                <p class="text-sm text-amber-700">
-                  {{ $t("recordPage.detailModal.invalidRequestPatchTrace") }}
-                </p>
-                <div v-if="detailedRecord.request_patch_summary_json" class="space-y-2">
-                  <p class="text-xs font-medium uppercase tracking-wide text-gray-500">
-                    {{ $t("recordPage.detailModal.rawTraceSummary") }}
-                  </p>
-                  <pre class="overflow-x-auto rounded-lg bg-gray-950 px-3 py-3 text-xs text-gray-100">{{ detailedRecord.request_patch_summary_json }}</pre>
-                </div>
-              </div>
-
-              <div v-else-if="parsedRequestPatchTrace" class="space-y-4">
-                <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-3">
-                    <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                      {{ $t("recordPage.detailModal.appliedRuleIds") }}
-                    </p>
-                    <p class="mt-1 break-all font-mono text-sm text-gray-900">
-                      {{ formattedAppliedRequestPatchIds || "/" }}
-                    </p>
-                  </div>
-
-                  <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-3">
-                    <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                      {{ $t("recordPage.detailModal.conflicts") }}
-                    </p>
-                    <p class="mt-1 text-sm font-medium text-gray-900">
-                      {{ requestPatchConflicts.length }}
-                    </p>
-                  </div>
-                </div>
-
-                <div
-                  v-if="parsedRequestPatchTrace.has_conflicts && requestPatchConflicts.length > 0"
-                  class="rounded-lg border border-red-200 bg-red-50 px-4 py-3"
-                >
-                  <p class="text-sm font-medium text-red-700">
-                    {{ $t("recordPage.detailModal.conflictDetected") }}
-                  </p>
-
-                  <div class="mt-3 space-y-3">
-                    <div
-                      v-for="conflict in requestPatchConflicts"
-                      :key="`${conflict.provider_rule_id}-${conflict.model_rule_id}-${conflict.placement}`"
-                      class="rounded-md border border-red-200 bg-white/70 px-3 py-2.5"
-                    >
-                      <p class="text-sm text-red-700">
-                        {{ conflict.reason }}
-                      </p>
-                      <p class="mt-1 break-all font-mono text-xs text-red-600">
-                        #{{ conflict.provider_rule_id }} · #{{ conflict.model_rule_id }} ·
-                        {{ conflict.placement }} · {{ conflict.provider_target }} /
-                        {{ conflict.model_target }}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="space-y-3">
-                  <div class="min-w-0">
-                    <h4 class="text-sm font-medium text-gray-900">
-                      {{ $t("recordPage.detailModal.effectiveRules") }}
-                    </h4>
-                  </div>
-
-                  <div
-                    v-if="requestPatchEffectiveRules.length === 0"
-                    class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
-                  >
-                    {{ $t("recordPage.detailModal.noEffectiveRules") }}
-                  </div>
-
-                  <div
-                    v-else
-                    class="overflow-hidden rounded-lg border border-gray-200 bg-white"
-                  >
-                    <div
-                      v-for="rule in requestPatchEffectiveRules"
-                      :key="`${rule.source_rule_id}-${rule.placement}-${rule.target}`"
-                      class="border-t border-gray-100 px-4 py-4 first:border-t-0"
-                    >
-                      <div class="space-y-3">
-                        <div class="flex flex-wrap items-center gap-2">
-                          <Badge variant="outline" class="font-mono text-[11px]">
-                            {{ rule.placement }}
-                          </Badge>
-                          <Badge variant="secondary" class="font-mono text-[11px]">
-                            {{ rule.operation }}
-                          </Badge>
-                          <Badge
-                            class="text-[11px]"
-                            :variant="rule.source_origin === 'ModelDirect' ? 'default' : 'secondary'"
-                          >
-                            {{ getRequestPatchOriginLabel(rule.source_origin) }}
-                          </Badge>
-                        </div>
-
-                        <p class="break-all font-mono text-sm text-gray-900">
-                          {{ rule.target }}
-                        </p>
-
-                        <div class="grid gap-3 text-sm text-gray-600 sm:grid-cols-2">
-                          <div>
-                            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                              {{ $t("recordPage.detailModal.value") }}
-                            </p>
-                            <p class="mt-1 break-all font-mono text-sm text-gray-700">
-                              {{ formatRequestPatchValueForDisplay(rule.value_json) }}
-                            </p>
-                          </div>
-
-                          <div>
-                            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                              {{ $t("recordPage.detailModal.description") }}
-                            </p>
-                            <p class="mt-1 text-sm text-gray-600">
-                              {{
-                                rule.description ||
-                                $t("recordPage.detailModal.noRuleDescription")
-                              }}
-                            </p>
-                          </div>
-
-                          <div>
-                            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                              {{ $t("recordPage.detailModal.sourceRule") }}
-                            </p>
-                            <p class="mt-1 font-mono text-xs text-gray-600">
-                              #{{ rule.source_rule_id }}
-                            </p>
-                          </div>
-
-                          <div>
-                            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                              {{ $t("recordPage.detailModal.trace") }}
-                            </p>
-                            <p class="mt-1 text-sm text-gray-600">
-                              {{ getRequestPatchTrace(rule) }}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div
-                v-else
-                class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
-              >
-                {{ $t("recordPage.detailModal.noRequestPatchTrace") }}
-              </div>
-            </section>
-
-            <section class="border-t border-gray-100 pt-4">
-              <h3 class="mb-3 border-b border-gray-100 pb-2 text-base font-semibold text-gray-900">
                 Payloads
               </h3>
               <div v-if="showPayloads" class="space-y-4">
-                <template v-if="detailedRecord.storage_type">
+                <template v-if="detailedRecord.bundle_storage_type">
                   <BodyViewer
                     :record-id="detailedRecord.id"
-                    :storage-type="detailedRecord.storage_type"
-                    :status="detailedRecord.status"
+                    :storage-type="detailedRecord.bundle_storage_type"
+                    :status="detailedRecord.overall_status"
+                    :attempts="detailedAttempts"
                   />
                 </template>
                 <template v-else>
-                  <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-                    <SingleRequestBodyContent
-                      :content="detailedRecord.user_request_body ?? null"
-                      title="User Request Body"
-                    />
-                    <SingleRequestBodyContent
-                      :content="detailedRecord.llm_request_body ?? null"
-                      title="LLM Request Body"
-                    />
-                    <SingleResponseBodyContent
-                      :content="detailedRecord.llm_response_body ?? null"
-                      title="LLM Response Body"
-                      :status="detailedRecord.status"
-                    />
-                    <SingleResponseBodyContent
-                      :content="detailedRecord.user_response_body ?? null"
-                      title="User Response Body"
-                      :status="detailedRecord.status"
-                    />
+                  <div class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500">
+                    No payload bundle is available for this request.
                   </div>
                 </template>
               </div>
@@ -994,8 +1008,6 @@ import {
 } from "lucide-vue-next";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import BodyViewer from "@/components/record/BodyViewer.vue";
-import SingleRequestBodyContent from "@/components/record/SingleRequestBodyContent.vue";
-import SingleResponseBodyContent from "@/components/record/SingleResponseBodyContent.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -1037,7 +1049,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { normalizeError } from "@/lib/error";
-import { formatRequestPatchValueForDisplay } from "@/lib/requestPatch";
 import { toastController } from "@/lib/toastController";
 import {
   formatCostRateFromNanos,
@@ -1050,10 +1061,9 @@ import { useProviderStore } from "@/store/providerStore";
 import type {
   CostDetailLine,
   CostSnapshot,
-  RecordDetail,
+  RecordAttempt,
   RecordListItem,
-  RequestPatchTraceSummary,
-  ResolvedRequestPatchRule,
+  RecordRequest,
 } from "@/store/types";
 
 const { t: $t } = useI18n();
@@ -1081,7 +1091,7 @@ const DEFAULT_FILTERS: RecordFilters = {
   search: "",
 };
 
-const VALID_STATUSES = new Set(["ALL", "SUCCESS", "PENDING", "ERROR"]);
+const VALID_STATUSES = new Set(["ALL", "SUCCESS", "PENDING", "ERROR", "CANCELLED"]);
 
 const records = ref<
   (RecordListItem & {
@@ -1090,6 +1100,7 @@ const records = ref<
     displayRequestedModelName: string;
     resolvedScopeDisplay: string;
     isStreamDisplay: string;
+    attemptsDisplay: string;
     firstRespTimeDisplay: string;
     totalRespTimeDisplay: string;
     tpsDisplay: string;
@@ -1114,7 +1125,8 @@ const filters = reactive<RecordFilters>({
 
 const isDetailModalOpen = ref(false);
 const isDetailLoading = ref(false);
-const detailedRecord = ref<RecordDetail | null>(null);
+const detailedRecord = ref<RecordRequest | null>(null);
+const detailedAttempts = ref<RecordAttempt[]>([]);
 const showPayloads = ref(false);
 
 const parsedCostSnapshot = computed<CostSnapshot | null>(() => {
@@ -1128,71 +1140,6 @@ const parsedCostSnapshot = computed<CostSnapshot | null>(() => {
   } catch {
     return null;
   }
-});
-
-const parsedRequestPatchTrace = computed<RequestPatchTraceSummary | null>(() => {
-  const raw = detailedRecord.value?.request_patch_summary_json;
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(raw) as RequestPatchTraceSummary;
-  } catch {
-    return null;
-  }
-});
-
-const parsedAppliedRequestPatchIds = computed<number[]>(() => {
-  const raw = detailedRecord.value?.applied_request_patch_ids_json;
-  if (!raw) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    return parsed.filter((id): id is number => typeof id === "number");
-  } catch {
-    return [];
-  }
-});
-
-const requestPatchExplainByRuleId = computed(() => {
-  return new Map(
-    (parsedRequestPatchTrace.value?.explain ?? []).map((entry) => [
-      entry.rule.id,
-      entry,
-    ]),
-  );
-});
-
-const requestPatchEffectiveRules = computed(() => {
-  return parsedRequestPatchTrace.value?.effective_rules ?? [];
-});
-
-const requestPatchConflicts = computed(() => {
-  return parsedRequestPatchTrace.value?.conflicts ?? [];
-});
-
-const hasInvalidRequestPatchTrace = computed(() => {
-  return Boolean(
-    detailedRecord.value?.request_patch_summary_json &&
-      parsedRequestPatchTrace.value === null,
-  );
-});
-
-const formattedAppliedRequestPatchIds = computed(() => {
-  if (parsedAppliedRequestPatchIds.value.length === 0) {
-    return null;
-  }
-
-  return parsedAppliedRequestPatchIds.value
-    .map((id) => `#${id}`)
-    .join(", ");
 });
 
 type DisplayCostDetailLine = CostDetailLine & {
@@ -1276,30 +1223,6 @@ const formatSnapshotUnitPrice = (
   return meterKey.startsWith("llm.") ? `${base} tokens` : `${base}/unit`;
 };
 
-function getRequestPatchOriginLabel(origin: string): string {
-  return origin === "ModelDirect"
-    ? $t("recordPage.detailModal.originModelDirect")
-    : $t("recordPage.detailModal.originProviderDirect");
-}
-
-function formatRuleIds(ids: number[]): string {
-  return ids.map((id) => `#${id}`).join(", ");
-}
-
-function getRequestPatchTrace(rule: ResolvedRequestPatchRule): string {
-  const explainEntry = requestPatchExplainByRuleId.value.get(rule.source_rule_id);
-  if (explainEntry?.message) {
-    return explainEntry.message;
-  }
-
-  const baseTrace = `${getRequestPatchOriginLabel(rule.source_origin)} #${rule.source_rule_id}`;
-  if (rule.overridden_rule_ids.length === 0) {
-    return baseTrace;
-  }
-
-  return `${baseTrace} -> ${formatRuleIds(rule.overridden_rule_ids)}`;
-}
-
 const totalPages = computed(() =>
   Math.ceil(totalRecords.value / pageSize.value),
 );
@@ -1336,7 +1259,7 @@ const statusOptions = computed(() => {
     value: DEFAULT_FILTERS.status,
     label: $t("recordPage.filter.allStatuses"),
   };
-  const statuses = ["SUCCESS", "PENDING", "ERROR"].map((s) => ({
+  const statuses = ["SUCCESS", "PENDING", "ERROR", "CANCELLED"].map((s) => ({
     value: s,
     label: $t(`recordPage.filter.status.${s}`),
   }));
@@ -1493,34 +1416,30 @@ const fetchRecords = async () => {
 
     records.value = (result.list || []).map((r: RecordListItem) => {
       const providerName =
-        r.provider_id != null
-          ? providerStore.providers.find((p) => p.id === r.provider_id)?.name || "/"
-          : "/";
+        r.final_provider_name_snapshot ||
+        (r.final_provider_id != null
+          ? providerStore.providers.find((p) => p.id === r.final_provider_id)?.name || "/"
+          : "/");
       const apiKeyName =
         r.api_key_id != null
           ? apiKeyStore.apiKeys.find((k) => k.id === r.api_key_id)?.name || "/"
           : "/";
-      const isStreamDisplay = r.is_stream ? $t("common.yes") : $t("common.no");
+      const isStreamDisplay = "/";
 
       const firstRespTimeDisplay =
-        r.llm_response_first_chunk_at != null && r.llm_request_sent_at != null
-          ? ((r.llm_response_first_chunk_at - r.llm_request_sent_at) / 1000).toFixed(3)
+        r.response_started_to_client_at != null && r.first_attempt_started_at != null
+          ? ((r.response_started_to_client_at - r.first_attempt_started_at) / 1000).toFixed(3)
           : "/";
       const totalRespTimeDisplay =
-        r.llm_response_completed_at != null && r.llm_request_sent_at != null
-          ? ((r.llm_response_completed_at - r.llm_request_sent_at) / 1000).toFixed(3)
+        r.completed_at != null && r.first_attempt_started_at != null
+          ? ((r.completed_at - r.first_attempt_started_at) / 1000).toFixed(3)
           : "/";
 
       let tpsDisplay = "/";
-      if (r.total_output_tokens != null && r.llm_response_completed_at != null) {
+      if (r.total_output_tokens != null && r.completed_at != null) {
         let durationMs;
-        if (r.is_stream) {
-          if (r.llm_response_first_chunk_at != null) {
-            durationMs =
-              r.llm_response_completed_at - r.llm_response_first_chunk_at;
-          }
-        } else if (r.llm_request_sent_at != null) {
-          durationMs = r.llm_response_completed_at - r.llm_request_sent_at;
+        if (r.first_attempt_started_at != null) {
+          durationMs = r.completed_at - r.first_attempt_started_at;
         }
 
         if (durationMs != null && durationMs > 0) {
@@ -1533,14 +1452,19 @@ const fetchRecords = async () => {
         r.estimated_cost_currency,
         "/",
       );
+      const attemptsDisplay = `${r.attempt_count ?? 0} / ${r.retry_count ?? 0} / ${
+        r.fallback_count ?? 0
+      }`;
 
       return {
         ...r,
         providerName,
         apiKeyName,
-        displayRequestedModelName: r.requested_model_name || r.model_name || "/",
+        displayRequestedModelName:
+          r.final_model_name_snapshot || r.requested_model_name || "/",
         resolvedScopeDisplay: formatResolvedScope(r.resolved_name_scope),
         isStreamDisplay,
+        attemptsDisplay,
         firstRespTimeDisplay,
         totalRespTimeDisplay,
         tpsDisplay,
@@ -1664,10 +1588,15 @@ const handleViewDetails = async (id: number) => {
   isDetailModalOpen.value = true;
   isDetailLoading.value = true;
   detailedRecord.value = null;
+  detailedAttempts.value = [];
   showPayloads.value = false;
 
   try {
-    detailedRecord.value = await Api.getRecordDetail(id);
+    const detail = await Api.getRecordDetail(id);
+    detailedRecord.value = detail.request;
+    detailedAttempts.value = [...(detail.attempts ?? [])].sort(
+      (left, right) => left.attempt_index - right.attempt_index,
+    );
     await nextTick();
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -1694,6 +1623,7 @@ const toggleFilterPanel = () => {
 watch(isDetailModalOpen, (isOpen) => {
   if (!isOpen) {
     showPayloads.value = false;
+    detailedAttempts.value = [];
   }
 });
 
@@ -1727,6 +1657,55 @@ const formatCompactMetrics = (
   return values.map(formatCompactMetric).join(" / ");
 };
 
+const formatDuration = (
+  start: number | null | undefined,
+  end: number | null | undefined,
+) => {
+  if (start == null || end == null || end < start) {
+    return "/";
+  }
+  return `${((end - start) / 1000).toFixed(3)} s`;
+};
+
+const formatBoolean = (value: boolean | null | undefined) => {
+  if (value == null) return "/";
+  return value ? $t("common.yes", "Yes") : $t("common.no", "No");
+};
+
+const hasText = (value: string | null | undefined) =>
+  Boolean(value && value.trim().length > 0);
+
+const formatJsonText = (value: string | null | undefined) => {
+  if (!value) return "";
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+};
+
+const formatAttemptProviderModel = (attempt: RecordAttempt) => {
+  const provider = attempt.provider_name_snapshot || "/";
+  const model = attempt.model_name_snapshot || "/";
+  const realModel = attempt.real_model_name_snapshot;
+  return realModel ? `${provider} / ${model} -> ${realModel}` : `${provider} / ${model}`;
+};
+
+const formatAttemptTokens = (attempt: RecordAttempt) =>
+  formatCompactMetrics([
+    attempt.total_input_tokens,
+    attempt.total_output_tokens,
+    attempt.reasoning_tokens,
+    attempt.total_tokens,
+  ]);
+
+const formatAttemptCost = (attempt: RecordAttempt) =>
+  formatPriceFromNanos(
+    attempt.estimated_cost_nanos,
+    attempt.estimated_cost_currency,
+    "/",
+  );
+
 const getStatusBadgeVariant = (status: string | null) => {
   switch (status) {
     case "SUCCESS":
@@ -1735,6 +1714,9 @@ const getStatusBadgeVariant = (status: string | null) => {
       return "destructive";
     case "PENDING":
       return "outline";
+    case "CANCELLED":
+    case "SKIPPED":
+      return "secondary";
     default:
       return "secondary";
   }
@@ -1759,6 +1741,18 @@ const getStatusMeta = (status: string | null) => {
         icon: Clock3,
         className: "text-amber-600",
         label: $t("recordPage.filter.status.PENDING"),
+      };
+    case "CANCELLED":
+      return {
+        icon: CircleHelp,
+        className: "text-gray-500",
+        label: $t("recordPage.filter.status.CANCELLED", "Cancelled"),
+      };
+    case "SKIPPED":
+      return {
+        icon: CircleHelp,
+        className: "text-gray-500",
+        label: "Skipped",
       };
     default:
       return {

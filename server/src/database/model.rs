@@ -28,6 +28,12 @@ db_object! {
         pub model_name: String,
         pub real_model_name: Option<String>,
         pub cost_catalog_id: Option<i64>,
+        pub supports_streaming: bool,
+        pub supports_tools: bool,
+        pub supports_reasoning: bool,
+        pub supports_image_input: bool,
+        pub supports_embeddings: bool,
+        pub supports_rerank: bool,
         pub deleted_at: Option<i64>,
         pub is_enabled: bool,
         pub created_at: i64,
@@ -41,6 +47,12 @@ pub struct NewModel {
     pub provider_id: i64,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub supports_streaming: bool,
+    pub supports_tools: bool,
+    pub supports_reasoning: bool,
+    pub supports_image_input: bool,
+    pub supports_embeddings: bool,
+    pub supports_rerank: bool,
     pub is_enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -53,8 +65,37 @@ pub struct UpdateModelData {
     pub real_model_name: Option<Option<String>>, // Allow setting to NULL
     pub is_enabled: Option<bool>,
     pub cost_catalog_id: Option<Option<i64>>,
+    pub supports_streaming: Option<bool>,
+    pub supports_tools: Option<bool>,
+    pub supports_reasoning: Option<bool>,
+    pub supports_image_input: Option<bool>,
+    pub supports_embeddings: Option<bool>,
+    pub supports_rerank: Option<bool>,
 }
 
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct ModelCapabilityFlags {
+    pub supports_streaming: bool,
+    pub supports_tools: bool,
+    pub supports_reasoning: bool,
+    pub supports_image_input: bool,
+    pub supports_embeddings: bool,
+    pub supports_rerank: bool,
+}
+
+impl Default for ModelCapabilityFlags {
+    fn default() -> Self {
+        Self {
+            supports_streaming: true,
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_image_input: true,
+            supports_embeddings: true,
+            supports_rerank: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +118,12 @@ pub struct ModelSummaryItem {
     pub provider_name: String,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub supports_streaming: bool,
+    pub supports_tools: bool,
+    pub supports_reasoning: bool,
+    pub supports_image_input: bool,
+    pub supports_embeddings: bool,
+    pub supports_rerank: bool,
     pub is_enabled: bool,
 }
 
@@ -102,6 +149,7 @@ impl Model {
         model_name_val: &str,
         real_model_name_val: Option<&str>,
         is_enabled_val: bool,
+        capabilities: ModelCapabilityFlags,
     ) -> DbResult<Model> {
         let now = Utc::now().timestamp_millis();
         let new_id = ID_GENERATOR.generate_id();
@@ -111,6 +159,12 @@ impl Model {
             provider_id: provider_id_val,
             model_name: model_name_val.to_string(),
             real_model_name: real_model_name_val.map(|s| s.to_string()),
+            supports_streaming: capabilities.supports_streaming,
+            supports_tools: capabilities.supports_tools,
+            supports_reasoning: capabilities.supports_reasoning,
+            supports_image_input: capabilities.supports_image_input,
+            supports_embeddings: capabilities.supports_embeddings,
+            supports_rerank: capabilities.supports_rerank,
             is_enabled: is_enabled_val,
             created_at: now,
             updated_at: now,
@@ -312,9 +366,29 @@ impl Model {
                     provider::dsl::name,
                     model::dsl::model_name,
                     model::dsl::real_model_name,
+                    model::dsl::supports_streaming,
+                    model::dsl::supports_tools,
+                    model::dsl::supports_reasoning,
+                    model::dsl::supports_image_input,
+                    model::dsl::supports_embeddings,
+                    model::dsl::supports_rerank,
                     model::dsl::is_enabled,
                 ))
-                .load::<(i64, i64, String, String, String, Option<String>, bool)>(conn)
+                .load::<(
+                    i64,
+                    i64,
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    bool,
+                    bool,
+                    bool,
+                    bool,
+                    bool,
+                    bool,
+                    bool,
+                )>(conn)
                 .map_err(|e| {
                     BaseError::DatabaseFatal(Some(format!("Failed to list model summaries: {}", e)))
                 })?;
@@ -329,6 +403,12 @@ impl Model {
                         provider_name,
                         model_name,
                         real_model_name,
+                        supports_streaming,
+                        supports_tools,
+                        supports_reasoning,
+                        supports_image_input,
+                        supports_embeddings,
+                        supports_rerank,
                         is_enabled,
                     )| {
                         ModelSummaryItem {
@@ -338,6 +418,12 @@ impl Model {
                             provider_name,
                             model_name,
                             real_model_name,
+                            supports_streaming,
+                            supports_tools,
+                            supports_reasoning,
+                            supports_image_input,
+                            supports_embeddings,
+                            supports_rerank,
                             is_enabled,
                         }
                     },
@@ -408,6 +494,12 @@ impl Model {
                         is_enabled: Some(true), // Ensure it's enabled
                         model_name: None,       // Not changing model_name itself here
                         cost_catalog_id: None,  // Do not update cost_catalog_id during upsert
+                        supports_streaming: None,
+                        supports_tools: None,
+                        supports_reasoning: None,
+                        supports_image_input: None,
+                        supports_embeddings: None,
+                        supports_rerank: None,
                     };
 
                     // Also ensure it's not deleted
@@ -435,6 +527,12 @@ impl Model {
                         provider_id: provider_id_val,
                         model_name: model_name_val.to_string(),
                         real_model_name: real_model_name_val.map(|s| s.to_string()),
+                        supports_streaming: true,
+                        supports_tools: true,
+                        supports_reasoning: true,
+                        supports_image_input: true,
+                        supports_embeddings: true,
+                        supports_rerank: true,
                         is_enabled: true,
                         created_at: now,
                         updated_at: now,
@@ -534,6 +632,12 @@ mod tests {
             provider_id: provider_id_val,
             model_name: model_name_val.to_string(),
             real_model_name: real_model_name_val.map(ToString::to_string),
+            supports_streaming: true,
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_image_input: true,
+            supports_embeddings: true,
+            supports_rerank: true,
             is_enabled: is_enabled_val,
             created_at: now,
             updated_at: now,
@@ -558,9 +662,29 @@ mod tests {
                 provider::dsl::name,
                 model::dsl::model_name,
                 model::dsl::real_model_name,
+                model::dsl::supports_streaming,
+                model::dsl::supports_tools,
+                model::dsl::supports_reasoning,
+                model::dsl::supports_image_input,
+                model::dsl::supports_embeddings,
+                model::dsl::supports_rerank,
                 model::dsl::is_enabled,
             ))
-            .load::<(i64, i64, String, String, String, Option<String>, bool)>(conn)
+            .load::<(
+                i64,
+                i64,
+                String,
+                String,
+                String,
+                Option<String>,
+                bool,
+                bool,
+                bool,
+                bool,
+                bool,
+                bool,
+                bool,
+            )>(conn)
             .expect("model summary rows should load");
 
         rows.into_iter()
@@ -572,6 +696,12 @@ mod tests {
                     provider_name,
                     model_name,
                     real_model_name,
+                    supports_streaming,
+                    supports_tools,
+                    supports_reasoning,
+                    supports_image_input,
+                    supports_embeddings,
+                    supports_rerank,
                     is_enabled,
                 )| ModelSummaryItem {
                     id,
@@ -580,6 +710,12 @@ mod tests {
                     provider_name,
                     model_name,
                     real_model_name,
+                    supports_streaming,
+                    supports_tools,
+                    supports_reasoning,
+                    supports_image_input,
+                    supports_embeddings,
+                    supports_rerank,
                     is_enabled,
                 },
             )
@@ -659,6 +795,12 @@ mod tests {
                 model_name: "alpha-model".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_reasoning: true,
+                supports_image_input: true,
+                supports_embeddings: true,
+                supports_rerank: true,
                 deleted_at: None,
                 is_enabled: true,
                 created_at: 1,
@@ -701,6 +843,12 @@ mod tests {
                 model_name: "alpha-model".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_reasoning: true,
+                supports_image_input: true,
+                supports_embeddings: true,
+                supports_rerank: true,
                 deleted_at: None,
                 is_enabled: true,
                 created_at: 1,

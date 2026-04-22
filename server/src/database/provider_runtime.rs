@@ -12,8 +12,7 @@ pub struct RequestLogEntryForProviderRuntime {
     pub llm_request_sent_at: i64,
     pub llm_response_first_chunk_at: Option<i64>,
     pub llm_response_completed_at: Option<i64>,
-    pub llm_response_status: Option<i32>,
-    pub status: Option<RequestStatus>,
+    pub status: RequestStatus,
     pub estimated_cost_nanos: Option<i64>,
     pub estimated_cost_currency: Option<String>,
 }
@@ -115,15 +114,12 @@ fn update_latest(target: &mut Option<i64>, candidate: i64) {
     *target = Some(target.map_or(candidate, |current| current.max(candidate)));
 }
 
-fn is_success_status(status: Option<&RequestStatus>) -> bool {
-    matches!(status, Some(RequestStatus::Success))
+fn is_success_status(status: &RequestStatus) -> bool {
+    matches!(status, RequestStatus::Success)
 }
 
-fn is_error_status(status: Option<&RequestStatus>) -> bool {
-    matches!(
-        status,
-        Some(RequestStatus::Error) | Some(RequestStatus::Cancelled)
-    )
+fn is_error_status(status: &RequestStatus) -> bool {
+    matches!(status, RequestStatus::Error | RequestStatus::Cancelled)
 }
 
 fn positive_duration_ms(start_ms: i64, end_ms: Option<i64>) -> Option<i64> {
@@ -144,7 +140,6 @@ pub fn aggregate_provider_runtime_entries(
             llm_request_sent_at,
             llm_response_first_chunk_at,
             llm_response_completed_at,
-            llm_response_status,
             status,
             estimated_cost_nanos,
             estimated_cost_currency,
@@ -154,10 +149,10 @@ pub fn aggregate_provider_runtime_entries(
         item.request_count += 1;
         update_latest(&mut item.last_request_at, request_received_at);
 
-        if is_success_status(status.as_ref()) {
+        if is_success_status(&status) {
             item.success_count += 1;
             update_latest(&mut item.last_success_at, request_received_at);
-        } else if is_error_status(status.as_ref()) {
+        } else if is_error_status(&status) {
             item.error_count += 1;
             update_latest(&mut item.last_error_at, request_received_at);
         }
@@ -174,10 +169,6 @@ pub fn aggregate_provider_runtime_entries(
         {
             item.total_latency_sum_ms += total_latency_ms;
             item.total_latency_count += 1;
-        }
-
-        if let Some(status_code) = llm_response_status {
-            *item.status_code_breakdown.entry(status_code).or_insert(0) += 1;
         }
 
         if let (Some(cost_nanos), Some(currency)) = (estimated_cost_nanos, estimated_cost_currency)
@@ -208,10 +199,11 @@ pub fn get_provider_runtime_aggregates_in_range(
             let mut query = request_log::table
                 .filter(request_log::dsl::request_received_at.ge(start_time_ms))
                 .filter(request_log::dsl::request_received_at.lt(end_time_ms))
+                .filter(request_log::dsl::provider_id.is_not_null())
                 .into_boxed();
 
             if let Some(provider_id) = provider_id_filter {
-                query = query.filter(request_log::dsl::provider_id.eq(provider_id));
+                query = query.filter(request_log::dsl::provider_id.eq(Some(provider_id)));
             }
 
             query
@@ -221,13 +213,46 @@ pub fn get_provider_runtime_aggregates_in_range(
                     request_log::dsl::llm_request_sent_at,
                     request_log::dsl::llm_response_first_chunk_at,
                     request_log::dsl::llm_response_completed_at,
-                    request_log::dsl::llm_response_status,
                     request_log::dsl::status,
                     request_log::dsl::estimated_cost_nanos,
                     request_log::dsl::estimated_cost_currency.nullable(),
                 ))
                 .order(request_log::dsl::request_received_at.asc())
-                .load::<RequestLogEntryForProviderRuntime>(conn)?
+                .load::<(
+                    Option<i64>,
+                    i64,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    RequestStatus,
+                    Option<i64>,
+                    Option<String>,
+                )>(conn)?
+                .into_iter()
+                .filter_map(
+                    |(
+                        provider_id,
+                        request_received_at,
+                        llm_request_sent_at,
+                        llm_response_first_chunk_at,
+                        llm_response_completed_at,
+                        status,
+                        estimated_cost_nanos,
+                        estimated_cost_currency,
+                    )| {
+                        provider_id.map(|provider_id| RequestLogEntryForProviderRuntime {
+                            provider_id,
+                            request_received_at,
+                            llm_request_sent_at: llm_request_sent_at.unwrap_or(request_received_at),
+                            llm_response_first_chunk_at,
+                            llm_response_completed_at,
+                            status,
+                            estimated_cost_nanos,
+                            estimated_cost_currency,
+                        })
+                    },
+                )
+                .collect()
         }
         DbConnection::Sqlite(conn) => {
             use crate::database::_sqlite_schema::request_log;
@@ -235,10 +260,11 @@ pub fn get_provider_runtime_aggregates_in_range(
             let mut query = request_log::table
                 .filter(request_log::dsl::request_received_at.ge(start_time_ms))
                 .filter(request_log::dsl::request_received_at.lt(end_time_ms))
+                .filter(request_log::dsl::provider_id.is_not_null())
                 .into_boxed();
 
             if let Some(provider_id) = provider_id_filter {
-                query = query.filter(request_log::dsl::provider_id.eq(provider_id));
+                query = query.filter(request_log::dsl::provider_id.eq(Some(provider_id)));
             }
 
             query
@@ -248,13 +274,46 @@ pub fn get_provider_runtime_aggregates_in_range(
                     request_log::dsl::llm_request_sent_at,
                     request_log::dsl::llm_response_first_chunk_at,
                     request_log::dsl::llm_response_completed_at,
-                    request_log::dsl::llm_response_status,
                     request_log::dsl::status,
                     request_log::dsl::estimated_cost_nanos,
                     request_log::dsl::estimated_cost_currency.nullable(),
                 ))
                 .order(request_log::dsl::request_received_at.asc())
-                .load::<RequestLogEntryForProviderRuntime>(conn)?
+                .load::<(
+                    Option<i64>,
+                    i64,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    RequestStatus,
+                    Option<i64>,
+                    Option<String>,
+                )>(conn)?
+                .into_iter()
+                .filter_map(
+                    |(
+                        provider_id,
+                        request_received_at,
+                        llm_request_sent_at,
+                        llm_response_first_chunk_at,
+                        llm_response_completed_at,
+                        status,
+                        estimated_cost_nanos,
+                        estimated_cost_currency,
+                    )| {
+                        provider_id.map(|provider_id| RequestLogEntryForProviderRuntime {
+                            provider_id,
+                            request_received_at,
+                            llm_request_sent_at: llm_request_sent_at.unwrap_or(request_received_at),
+                            llm_response_first_chunk_at,
+                            llm_response_completed_at,
+                            status,
+                            estimated_cost_nanos,
+                            estimated_cost_currency,
+                        })
+                    },
+                )
+                .collect()
         }
     };
 
@@ -275,8 +334,7 @@ mod tests {
         llm_request_sent_at: i64,
         first_chunk_at: Option<i64>,
         completed_at: Option<i64>,
-        llm_response_status: Option<i32>,
-        status: Option<RequestStatus>,
+        status: RequestStatus,
         estimated_cost_nanos: Option<i64>,
         estimated_cost_currency: Option<&str>,
     ) -> RequestLogEntryForProviderRuntime {
@@ -286,7 +344,6 @@ mod tests {
             llm_request_sent_at,
             llm_response_first_chunk_at: first_chunk_at,
             llm_response_completed_at: completed_at,
-            llm_response_status,
             status,
             estimated_cost_nanos,
             estimated_cost_currency: estimated_cost_currency.map(str::to_string),
@@ -308,8 +365,7 @@ mod tests {
                 1_000,
                 Some(1_050),
                 Some(1_200),
-                Some(200),
-                Some(RequestStatus::Success),
+                RequestStatus::Success,
                 Some(100),
                 Some("USD"),
             ),
@@ -319,8 +375,7 @@ mod tests {
                 2_000,
                 Some(2_100),
                 Some(2_400),
-                Some(429),
-                Some(RequestStatus::Error),
+                RequestStatus::Error,
                 Some(50),
                 Some("USD"),
             ),
@@ -330,8 +385,7 @@ mod tests {
                 3_000,
                 None,
                 None,
-                Some(499),
-                Some(RequestStatus::Cancelled),
+                RequestStatus::Cancelled,
                 None,
                 None,
             ),
@@ -347,7 +401,7 @@ mod tests {
         assert_eq!(aggregate.last_request_at, Some(3_000));
         assert_eq!(aggregate.last_success_at, Some(1_000));
         assert_eq!(aggregate.last_error_at, Some(3_000));
-        assert_eq!(aggregate.status_code_breakdown.len(), 3);
+        assert!(aggregate.status_code_breakdown.is_empty());
         assert_eq!(aggregate.total_cost.len(), 1);
         assert_eq!(aggregate.total_cost[0].currency, "USD");
         assert_eq!(aggregate.total_cost[0].amount_nanos, 150);
@@ -361,8 +415,7 @@ mod tests {
             2_000,
             Some(1_000),
             Some(1_500),
-            Some(200),
-            Some(RequestStatus::Success),
+            RequestStatus::Success,
             None,
             None,
         )]);
@@ -381,8 +434,7 @@ mod tests {
                 2_000,
                 Some(2_020),
                 Some(2_100),
-                Some(200),
-                Some(RequestStatus::Success),
+                RequestStatus::Success,
                 None,
                 None,
             ),
@@ -392,8 +444,7 @@ mod tests {
                 1_000,
                 Some(1_050),
                 Some(1_200),
-                Some(500),
-                Some(RequestStatus::Error),
+                RequestStatus::Error,
                 None,
                 None,
             ),

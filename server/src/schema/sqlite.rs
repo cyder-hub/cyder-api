@@ -198,6 +198,12 @@ diesel::table! {
         cost_catalog_id -> Nullable<BigInt>,
         model_name -> Text,
         real_model_name -> Nullable<Text>,
+        supports_streaming -> Bool,
+        supports_tools -> Bool,
+        supports_reasoning -> Bool,
+        supports_image_input -> Bool,
+        supports_embeddings -> Bool,
+        supports_rerank -> Bool,
         is_enabled -> Bool,
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
@@ -284,29 +290,46 @@ diesel::table! {
     use crate::schema::enum_def::RequestStatusMapping;
     use crate::schema::enum_def::StorageTypeMapping;
     use crate::schema::enum_def::LlmApiTypeMapping;
-    use diesel::sql_types::{Bool, Integer, BigInt, Text, Nullable};
+    use diesel::sql_types::{Integer, BigInt, Text, Nullable};
 
     request_log (id) {
         id -> BigInt,
-        system_api_key_id -> BigInt,
-        provider_id -> BigInt,
-        model_id -> BigInt,
-        provider_api_key_id -> BigInt,
+        api_key_id -> BigInt,
         requested_model_name -> Nullable<Text>,
         resolved_name_scope -> Nullable<Text>,
         resolved_route_id -> Nullable<BigInt>,
         resolved_route_name -> Nullable<Text>,
-        model_name -> Text,
-        real_model_name -> Text,
         request_received_at -> BigInt,
-        llm_request_sent_at -> BigInt,
+        #[sql_name = "first_attempt_started_at"]
+        llm_request_sent_at -> Nullable<BigInt>,
+        #[sql_name = "response_started_to_client_at"]
         llm_response_first_chunk_at -> Nullable<BigInt>,
+        #[sql_name = "completed_at"]
         llm_response_completed_at -> Nullable<BigInt>,
         client_ip -> Nullable<Text>,
-        llm_request_uri -> Nullable<Text>,
-        llm_response_status -> Nullable<Integer>,
-        status -> Nullable<RequestStatusMapping>,
-        is_stream -> Bool,
+        #[sql_name = "final_attempt_id"]
+        final_attempt_id -> Nullable<BigInt>,
+        #[sql_name = "final_provider_id"]
+        provider_id -> Nullable<BigInt>,
+        #[sql_name = "final_provider_api_key_id"]
+        provider_api_key_id -> Nullable<BigInt>,
+        #[sql_name = "final_model_id"]
+        model_id -> Nullable<BigInt>,
+        final_provider_key_snapshot -> Nullable<Text>,
+        final_provider_name_snapshot -> Nullable<Text>,
+        #[sql_name = "final_model_name_snapshot"]
+        model_name -> Nullable<Text>,
+        #[sql_name = "final_real_model_name_snapshot"]
+        real_model_name -> Nullable<Text>,
+        #[sql_name = "final_llm_api_type"]
+        llm_api_type -> Nullable<LlmApiTypeMapping>,
+        #[sql_name = "overall_status"]
+        status -> RequestStatusMapping,
+        final_error_code -> Nullable<Text>,
+        final_error_message -> Nullable<Text>,
+        attempt_count -> Integer,
+        retry_count -> Integer,
+        fallback_count -> Integer,
         estimated_cost_nanos -> Nullable<BigInt>,
         estimated_cost_currency -> Nullable<Text>,
         cost_catalog_id -> Nullable<BigInt>,
@@ -324,15 +347,67 @@ diesel::table! {
         cache_write_tokens -> Nullable<Integer>,
         reasoning_tokens -> Nullable<Integer>,
         total_tokens -> Nullable<Integer>,
+        bundle_version -> Nullable<Integer>,
+        #[sql_name = "bundle_storage_type"]
         storage_type -> Nullable<StorageTypeMapping>,
-        user_request_body -> Nullable<Text>,
-        llm_request_body -> Nullable<Text>,
-        llm_response_body -> Nullable<Text>,
-        user_response_body -> Nullable<Text>,
+        bundle_storage_key -> Nullable<Text>,
+        user_api_type -> LlmApiTypeMapping,
+    }
+}
+
+diesel::table! {
+    use crate::schema::enum_def::LlmApiTypeMapping;
+    use crate::schema::enum_def::RequestAttemptStatusMapping;
+    use crate::schema::enum_def::SchedulerActionMapping;
+    use diesel::sql_types::{BigInt, Bool, Integer, Nullable, Text};
+
+    request_attempt (id) {
+        id -> BigInt,
+        request_log_id -> BigInt,
+        attempt_index -> Integer,
+        candidate_position -> Integer,
+        provider_id -> Nullable<BigInt>,
+        provider_api_key_id -> Nullable<BigInt>,
+        model_id -> Nullable<BigInt>,
+        provider_key_snapshot -> Nullable<Text>,
+        provider_name_snapshot -> Nullable<Text>,
+        model_name_snapshot -> Nullable<Text>,
+        real_model_name_snapshot -> Nullable<Text>,
+        llm_api_type -> Nullable<LlmApiTypeMapping>,
+        attempt_status -> RequestAttemptStatusMapping,
+        scheduler_action -> SchedulerActionMapping,
+        error_code -> Nullable<Text>,
+        error_message -> Nullable<Text>,
+        request_uri -> Nullable<Text>,
+        request_headers_json -> Nullable<Text>,
+        response_headers_json -> Nullable<Text>,
+        http_status -> Nullable<Integer>,
+        started_at -> Nullable<BigInt>,
+        first_byte_at -> Nullable<BigInt>,
+        completed_at -> Nullable<BigInt>,
+        response_started_to_client -> Bool,
+        backoff_ms -> Nullable<Integer>,
         applied_request_patch_ids_json -> Nullable<Text>,
         request_patch_summary_json -> Nullable<Text>,
-        user_api_type -> LlmApiTypeMapping,
-        llm_api_type -> LlmApiTypeMapping,
+        estimated_cost_nanos -> Nullable<BigInt>,
+        estimated_cost_currency -> Nullable<Text>,
+        cost_catalog_version_id -> Nullable<BigInt>,
+        total_input_tokens -> Nullable<Integer>,
+        total_output_tokens -> Nullable<Integer>,
+        input_text_tokens -> Nullable<Integer>,
+        output_text_tokens -> Nullable<Integer>,
+        input_image_tokens -> Nullable<Integer>,
+        output_image_tokens -> Nullable<Integer>,
+        cache_read_tokens -> Nullable<Integer>,
+        cache_write_tokens -> Nullable<Integer>,
+        reasoning_tokens -> Nullable<Integer>,
+        total_tokens -> Nullable<Integer>,
+        llm_request_blob_id -> Nullable<Integer>,
+        llm_request_patch_id -> Nullable<Integer>,
+        llm_response_blob_id -> Nullable<Integer>,
+        llm_response_capture_state -> Nullable<Text>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
     }
 }
 
@@ -390,12 +465,17 @@ diesel::joinable!(model_alias -> model (target_model_id));
 diesel::joinable!(model_route_candidate -> model (model_id));
 diesel::joinable!(model_route_candidate -> model_route (route_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
+diesel::joinable!(request_attempt -> cost_catalog_versions (cost_catalog_version_id));
+diesel::joinable!(request_attempt -> model (model_id));
+diesel::joinable!(request_attempt -> provider (provider_id));
+diesel::joinable!(request_attempt -> provider_api_key (provider_api_key_id));
+diesel::joinable!(request_attempt -> request_log (request_log_id));
+diesel::joinable!(request_log -> api_key (api_key_id));
 diesel::joinable!(request_log -> cost_catalog_versions (cost_catalog_version_id));
 diesel::joinable!(request_log -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(request_log -> model (model_id));
 diesel::joinable!(request_log -> provider (provider_id));
 diesel::joinable!(request_log -> provider_api_key (provider_api_key_id));
-diesel::joinable!(request_log -> system_api_key (system_api_key_id));
 diesel::joinable!(request_patch_rule -> model (model_id));
 diesel::joinable!(request_patch_rule -> provider (provider_id));
 diesel::joinable!(system_api_key -> access_control_policy (access_control_policy_id));
@@ -417,6 +497,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     model_route_candidate,
     provider,
     provider_api_key,
+    request_attempt,
     request_log,
     request_patch_rule,
     system_api_key,

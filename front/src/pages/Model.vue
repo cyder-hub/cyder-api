@@ -24,6 +24,14 @@ const router = useRouter();
 const modelStore = useModelStore();
 
 const query = ref("");
+const capabilityItems = [
+  { key: "supports_streaming", labelKey: "modelCapabilities.streaming" },
+  { key: "supports_tools", labelKey: "modelCapabilities.tools" },
+  { key: "supports_reasoning", labelKey: "modelCapabilities.reasoning" },
+  { key: "supports_image_input", labelKey: "modelCapabilities.imageInput" },
+  { key: "supports_embeddings", labelKey: "modelCapabilities.embeddings" },
+  { key: "supports_rerank", labelKey: "modelCapabilities.rerank" },
+] as const;
 
 const modelPageState = computed(() => buildModelPageState(modelStore.models, query.value));
 
@@ -157,6 +165,19 @@ onMounted(() => {
                 {{ model.real_model_name || $t("common.notAvailable") }}
               </span>
             </div>
+            <div class="rounded-lg border border-gray-100 px-3 py-2.5">
+              <span>{{ $t("modelPage.table.capabilities") }}</span>
+              <div class="mt-2 flex flex-wrap gap-1.5">
+                <Badge
+                  v-for="capability in capabilityItems"
+                  :key="capability.key"
+                  :variant="model[capability.key] ? 'secondary' : 'outline'"
+                  class="font-mono text-[11px]"
+                >
+                  {{ $t(capability.labelKey) }}
+                </Badge>
+              </div>
+            </div>
           </div>
 
           <template #actions>
@@ -182,6 +203,9 @@ onMounted(() => {
                 {{ $t("modelPage.table.realModel") }}
               </TableHead>
               <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
+                {{ $t("modelPage.table.capabilities") }}
+              </TableHead>
+              <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
                 {{ $t("modelPage.table.enabled") }}
               </TableHead>
               <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
@@ -204,6 +228,18 @@ onMounted(() => {
               </TableCell>
               <TableCell class="font-mono text-sm text-gray-700">
                 {{ model.real_model_name || $t("common.notAvailable") }}
+              </TableCell>
+              <TableCell>
+                <div class="flex max-w-md flex-wrap gap-1.5">
+                  <Badge
+                    v-for="capability in capabilityItems"
+                    :key="capability.key"
+                    :variant="model[capability.key] ? 'secondary' : 'outline'"
+                    class="font-mono text-[11px]"
+                  >
+                    {{ $t(capability.labelKey) }}
+                  </Badge>
+                </div>
               </TableCell>
               <TableCell>
                 <Badge :variant="model.is_enabled ? 'secondary' : 'outline'" class="font-mono text-[11px]">

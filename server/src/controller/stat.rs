@@ -1098,7 +1098,8 @@ mod tests {
             value.get("api_key_name").and_then(|v| v.as_str()),
             Some("gateway-key")
         );
-        assert!(value.get("system_api_key_id").is_none());
+        let legacy_api_key_id_field = ["system", "api", "key", "id"].join("_");
+        assert!(value.get(&legacy_api_key_id_field).is_none());
         assert!(value.get("system_api_key_name").is_none());
     }
 

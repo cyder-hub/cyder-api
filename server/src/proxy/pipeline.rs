@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 use chrono::Utc;
-use cyder_tools::log::debug;
+use cyder_tools::log::{debug, warn};
 
 use super::{
     ProxyError,
@@ -13,6 +13,7 @@ use super::{
     cancellation::ProxyCancellationContext,
     generation::{GenerationExecutionInput, execute_generation_proxy, extract_model_from_request},
     models::execute_models_listing,
+    prepare::build_execution_plan,
     request::parse_json_request,
     utility::{UtilityExecutionInput, UtilityOperation, execute_utility_proxy},
 };
@@ -233,6 +234,24 @@ async fn execute_generation_operation(
     let parsed_request = parse_json_request(request).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
     let is_stream = resolve_stream_mode(operation.stream_mode, &parsed_request.data);
+    let execution_plan = build_execution_plan(
+        &context.app_state,
+        context.system_api_key.id,
+        &requested_model,
+    )
+    .await
+    .map_err(|e| {
+        warn!(
+            "Failed to build execution plan for '{}': {}",
+            requested_model, e
+        );
+        ProxyError::BadRequest(e)
+    })?;
+    debug!(
+        "Built execution plan for '{}': {}",
+        requested_model,
+        execution_plan.candidate_summary_for_log()
+    );
 
     execute_generation_proxy(
         context.app_state,
@@ -240,7 +259,7 @@ async fn execute_generation_operation(
             cancellation,
             system_api_key: context.system_api_key,
             api_type: operation.api_type,
-            requested_model,
+            execution_plan,
             is_stream,
             query_params: context.query_params,
             original_headers: context.original_headers,
@@ -260,6 +279,24 @@ async fn execute_utility_operation(
 ) -> Result<Response<Body>, ProxyError> {
     let parsed_request = parse_json_request(request).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
+    let execution_plan = build_execution_plan(
+        &context.app_state,
+        context.system_api_key.id,
+        &requested_model,
+    )
+    .await
+    .map_err(|e| {
+        warn!(
+            "Failed to build execution plan for '{}': {}",
+            requested_model, e
+        );
+        ProxyError::BadRequest(e)
+    })?;
+    debug!(
+        "Built utility execution plan for '{}': {}",
+        requested_model,
+        execution_plan.candidate_summary_for_log()
+    );
 
     execute_utility_proxy(
         context.app_state,
@@ -267,7 +304,7 @@ async fn execute_utility_operation(
             cancellation,
             system_api_key: context.system_api_key,
             operation: operation.operation,
-            requested_model,
+            execution_plan,
             query_params: context.query_params,
             original_headers: context.original_headers,
             client_ip_addr: context.client_ip_addr,

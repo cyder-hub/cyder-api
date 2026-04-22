@@ -2,14 +2,14 @@ use super::logging::{
     LogBodyKind, LoggedBody, RequestLogContext, StreamingBodyWriter,
     record_request_completion_and_log,
 };
-use super::util::serialize_reqwest_headers;
+use super::util::{
+    serialize_reqwest_headers_for_debug, serialize_upstream_response_headers_for_log,
+};
 use super::{
     ProxyError,
     cancellation::{CancellationDropGuard, ProxyCancellationContext},
     classify_reqwest_error, classify_upstream_status, protocol_transform_error,
-    provider_governance::{
-        ensure_provider_request_allowed, record_provider_failure, record_provider_success,
-    },
+    provider_governance::{record_provider_failure, record_provider_success},
 };
 
 use crate::config::CONFIG;
@@ -44,17 +44,73 @@ use std::time::Duration;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tokio::time::timeout;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ProxyResponseMode {
+    Generation {
+        api_type: LlmApiType,
+        target_api_type: LlmApiType,
+    },
+    Utility {
+        api_type: LlmApiType,
+    },
+}
+
+impl ProxyResponseMode {
+    fn api_types(self) -> (LlmApiType, LlmApiType) {
+        match self {
+            Self::Generation {
+                api_type,
+                target_api_type,
+            } => (api_type, target_api_type),
+            Self::Utility { api_type } => (api_type, api_type),
+        }
+    }
+}
+
+pub(super) struct ProxyRequestOutcome {
+    pub response: Response<Body>,
+    pub log_context: RequestLogContext,
+}
+
+pub(super) struct ProxyRequestFailure {
+    pub error: ProxyError,
+    pub log_context: RequestLogContext,
+    pub response_headers: Option<HeaderMap>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProxyLogMode {
+    RecordAll,
+    DeferNonStreaming,
+}
+
+impl ProxyLogMode {
+    fn should_record_immediate(self) -> bool {
+        matches!(self, Self::RecordAll)
+    }
+
+    fn should_record_streaming(self) -> bool {
+        matches!(self, Self::RecordAll | Self::DeferNonStreaming)
+    }
+}
+
 struct RequestLogContextGuard {
     app_state: Arc<AppState>,
     context: Arc<TokioMutex<RequestLogContext>>,
+    log_mode: ProxyLogMode,
     is_armed: bool,
 }
 
 impl RequestLogContextGuard {
-    fn new(app_state: Arc<AppState>, context: Arc<TokioMutex<RequestLogContext>>) -> Self {
+    fn new(
+        app_state: Arc<AppState>,
+        context: Arc<TokioMutex<RequestLogContext>>,
+        log_mode: ProxyLogMode,
+    ) -> Self {
         Self {
             app_state,
             context,
+            log_mode,
             is_armed: true,
         }
     }
@@ -66,7 +122,7 @@ impl RequestLogContextGuard {
 
 impl Drop for RequestLogContextGuard {
     fn drop(&mut self) {
-        if self.is_armed {
+        if self.is_armed && self.log_mode.should_record_immediate() {
             let app_state = Arc::clone(&self.app_state);
             let context_clone = Arc::clone(&self.context);
             tokio::spawn(async move {
@@ -323,6 +379,20 @@ async fn sync_stream_usage_to_log_context(
     context.usage_normalization = usage_normalization;
 }
 
+async fn mark_stream_response_started_to_client(
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
+    transformed_chunk: &Bytes,
+) {
+    if transformed_chunk.is_empty() {
+        return;
+    }
+
+    let mut context = log_context.lock().await;
+    if context.first_chunk_ts.is_none() {
+        context.first_chunk_ts = Some(Utc::now().timestamp_millis());
+    }
+}
+
 fn next_stream_chunk_timeout_duration(first_chunk_received_at_proxy: i64) -> Option<Duration> {
     if first_chunk_received_at_proxy == 0 {
         CONFIG.proxy_request.first_byte_timeout()
@@ -349,7 +419,7 @@ pub(super) async fn simple_proxy_request(
 
     debug!(
         "[simple_proxy_request] request header: {:?}",
-        serialize_reqwest_headers(&headers)
+        serialize_reqwest_headers_for_debug(&headers)
     );
     debug!("[simple_proxy_request] request data: {}", &data);
 
@@ -418,15 +488,14 @@ pub(super) async fn proxy_request(
     use_proxy: bool,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-) -> Result<Response<Body>, ProxyError> {
+    response_mode: ProxyResponseMode,
+    log_mode: ProxyLogMode,
+) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let provider_id = log_context.provider_id;
     info!(
         "Starting proxy request for log_id {}, model {}",
         log_context.id, model_str
     );
-    ensure_provider_request_allowed(&app_state, provider_id, &model_str).await?;
     let log_context = Arc::new(TokioMutex::new(log_context));
 
     // 1. Get HTTP client from AppState, with proxy if configured
@@ -437,7 +506,7 @@ pub(super) async fn proxy_request(
     };
 
     let mut cancellation_guard =
-        RequestLogContextGuard::new(Arc::clone(&app_state), log_context.clone());
+        RequestLogContextGuard::new(Arc::clone(&app_state), log_context.clone(), log_mode);
     let mut drop_cancellation_guard = CancellationDropGuard::new(
         cancellation.clone(),
         format!(
@@ -477,11 +546,23 @@ pub(super) async fn proxy_request(
             } else {
                 RequestStatus::Error
             };
-            record_request_completion_and_log(&app_state, context.clone()).await;
+            if log_mode.should_record_immediate() {
+                record_request_completion_and_log(&app_state, context.clone()).await;
+            }
 
-            return Err(proxy_error);
+            return Err(ProxyRequestFailure {
+                error: proxy_error,
+                log_context: context.clone(),
+                response_headers: None,
+            });
         }
     };
+
+    {
+        let mut context = log_context.lock().await;
+        context.response_headers_json =
+            serialize_upstream_response_headers_for_log(response.headers());
+    }
 
     // 3. Process the response stream
     let is_sse = response.status().is_success()
@@ -495,11 +576,12 @@ pub(super) async fn proxy_request(
     }
 
     let result = if is_sse {
-        handle_streaming_response(
+        let (api_type, target_api_type) = response_mode.api_types();
+        match handle_streaming_response(
             &app_state,
             cancellation.clone(),
             provider_id,
-            log_context,
+            log_context.clone(),
             model_str,
             response,
             &url,
@@ -507,8 +589,23 @@ pub(super) async fn proxy_request(
             api_key_concurrency_guard,
             api_type,
             target_api_type,
+            log_mode,
         )
         .await
+        {
+            Ok(response) => {
+                let log_context = log_context.lock().await.clone();
+                Ok(ProxyRequestOutcome {
+                    response,
+                    log_context,
+                })
+            }
+            Err(error) => Err(ProxyRequestFailure {
+                error,
+                log_context: log_context.lock().await.clone(),
+                response_headers: None,
+            }),
+        }
     } else {
         handle_non_streaming_response(
             &app_state,
@@ -520,8 +617,8 @@ pub(super) async fn proxy_request(
             &url,
             cost_catalog_version.as_ref(),
             api_key_concurrency_guard,
-            api_type,
-            target_api_type,
+            response_mode,
+            log_mode,
         )
         .await
     };
@@ -541,9 +638,9 @@ async fn handle_non_streaming_response(
     url: &str,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     _api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
-) -> Result<Response<Body>, ProxyError> {
+    response_mode: ProxyResponseMode,
+    log_mode: ProxyLogMode,
+) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
     debug!(
@@ -583,9 +680,15 @@ async fn handle_non_streaming_response(
             };
             context.llm_response_body =
                 Some(LoggedBody::from_bytes(Bytes::from(proxy_error.to_string())));
-            record_request_completion_and_log(app_state, context.clone()).await;
+            if log_mode.should_record_immediate() {
+                record_request_completion_and_log(app_state, context.clone()).await;
+            }
 
-            return Err(proxy_error);
+            return Err(ProxyRequestFailure {
+                error: proxy_error,
+                log_context: context.clone(),
+                response_headers: Some(response_headers),
+            });
         }
     };
 
@@ -593,8 +696,18 @@ async fn handle_non_streaming_response(
     let llm_response_completed_at = Utc::now().timestamp_millis();
 
     if status_code.is_success() {
-        let (final_body, parsed_usage_info, parsed_usage_normalization) =
-            process_success_response_body(&decompressed_body, api_type, target_api_type);
+        let (final_body, parsed_usage_info, parsed_usage_normalization) = match response_mode {
+            ProxyResponseMode::Generation {
+                api_type,
+                target_api_type,
+            } => process_success_response_body(&decompressed_body, api_type, target_api_type),
+            ProxyResponseMode::Utility { .. } => {
+                let usage_normalization = serde_json::from_slice::<Value>(&decompressed_body)
+                    .ok()
+                    .and_then(|val| super::util::parse_utility_usage_normalization(&val));
+                (decompressed_body.clone(), None, usage_normalization)
+            }
+        };
 
         let mut context = log_context.lock().await;
         finalize_non_streaming_log_context(
@@ -609,7 +722,9 @@ async fn handle_non_streaming_response(
             decompressed_body.clone(),
             final_body.clone(),
         );
-        record_request_completion_and_log(app_state, context.clone()).await;
+        if log_mode.should_record_immediate() {
+            record_request_completion_and_log(app_state, context.clone()).await;
+        }
         record_provider_success(app_state, provider_id, &model_str).await;
 
         info!(
@@ -617,7 +732,11 @@ async fn handle_non_streaming_response(
             model_str, context.id
         );
 
-        Ok(response_builder.body(Body::from(final_body)).unwrap())
+        let response = response_builder.body(Body::from(final_body)).unwrap();
+        Ok(ProxyRequestOutcome {
+            response,
+            log_context: context.clone(),
+        })
     } else {
         let error_body_str = String::from_utf8_lossy(&decompressed_body).into_owned();
         let mut context = log_context.lock().await;
@@ -638,10 +757,16 @@ async fn handle_non_streaming_response(
             decompressed_body.clone(),
             decompressed_body.clone(),
         );
-        record_request_completion_and_log(app_state, context.clone()).await;
+        if log_mode.should_record_immediate() {
+            record_request_completion_and_log(app_state, context.clone()).await;
+        }
         let proxy_error = classify_upstream_status(status_code, &decompressed_body);
         record_provider_failure(app_state, provider_id, &model_str, &proxy_error).await;
-        Err(proxy_error)
+        Err(ProxyRequestFailure {
+            error: proxy_error,
+            log_context: context.clone(),
+            response_headers: Some(response_headers),
+        })
     }
 }
 
@@ -658,6 +783,7 @@ async fn handle_streaming_response(
     api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
+    log_mode: ProxyLogMode,
 ) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -747,7 +873,7 @@ async fn handle_streaming_response(
                             None,
                         ).await;
                         yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, proxy_error.to_string()));
-                        break;
+                        return;
                     }
                     Ok(result) => match result {
                     Ok(result) => result,
@@ -774,8 +900,12 @@ async fn handle_streaming_response(
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                             None => None,
                         };
-                        record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         let proxy_error = ProxyError::UpstreamTimeout(stream_error_message.clone());
+                        context.final_error_code = Some(proxy_error.error_code().to_string());
+                        context.final_error_message = Some(proxy_error.message().to_string());
+                        if log_mode.should_record_streaming() {
+                            record_request_completion_and_log(&app_state_clone, context.clone()).await;
+                        }
                         record_provider_failure(
                             &app_state_clone,
                             provider_id,
@@ -785,7 +915,7 @@ async fn handle_streaming_response(
                         .await;
 
                         yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut, stream_error_message));
-                        break;
+                        return;
                     }
                 }},
                 None => {
@@ -808,7 +938,7 @@ async fn handle_streaming_response(
                                 None,
                             ).await;
                             yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, cancellation.cancellation_error().await.to_string()));
-                            break;
+                            return;
                         }
                         result = rx.recv() => result,
                     }
@@ -841,8 +971,12 @@ async fn handle_streaming_response(
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                             None => None,
                         };
-                        record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         let proxy_error = ProxyError::InternalError(stream_error_message.clone());
+                        context.final_error_code = Some(proxy_error.error_code().to_string());
+                        context.final_error_message = Some(proxy_error.message().to_string());
+                        if log_mode.should_record_streaming() {
+                            record_request_completion_and_log(&app_state_clone, context.clone()).await;
+                        }
                         record_provider_failure(
                             &app_state_clone,
                             provider_id,
@@ -852,7 +986,7 @@ async fn handle_streaming_response(
                         .await;
 
                         yield Err(std::io::Error::other(stream_error_message));
-                        break;
+                        return;
                     }
 
                     {
@@ -863,8 +997,6 @@ async fn handle_streaming_response(
 
                     if first_chunk_received_at_proxy == 0 {
                         first_chunk_received_at_proxy = Utc::now().timestamp_millis();
-                        let mut context = log_context_clone.lock().await;
-                        context.first_chunk_ts = Some(first_chunk_received_at_proxy);
                     }
 
                     let events = parser.process(&chunk);
@@ -908,8 +1040,12 @@ async fn handle_streaming_response(
                             Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                             None => None,
                         };
-                        record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         let proxy_error = ProxyError::InternalError(stream_error_message.clone());
+                        context.final_error_code = Some(proxy_error.error_code().to_string());
+                        context.final_error_message = Some(proxy_error.message().to_string());
+                        if log_mode.should_record_streaming() {
+                            record_request_completion_and_log(&app_state_clone, context.clone()).await;
+                        }
                         record_provider_failure(
                             &app_state_clone,
                             provider_id,
@@ -919,7 +1055,7 @@ async fn handle_streaming_response(
                         .await;
 
                         yield Err(std::io::Error::other(stream_error_message));
-                        break;
+                        return;
                     }
 
                     {
@@ -929,6 +1065,11 @@ async fn handle_streaming_response(
                     }
 
                     if !transformed_chunk.is_empty() {
+                        mark_stream_response_started_to_client(
+                            &log_context_clone,
+                            &transformed_chunk,
+                        )
+                        .await;
                         yield Ok::<_, std::io::Error>(transformed_chunk);
                     }
                 }
@@ -952,8 +1093,12 @@ async fn handle_streaming_response(
                         Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                         None => None,
                     };
-                    record_request_completion_and_log(&app_state_clone, context.clone()).await;
                     let proxy_error = ProxyError::BadGateway(stream_error_message.clone());
+                    context.final_error_code = Some(proxy_error.error_code().to_string());
+                    context.final_error_message = Some(proxy_error.message().to_string());
+                    if log_mode.should_record_streaming() {
+                        record_request_completion_and_log(&app_state_clone, context.clone()).await;
+                    }
                     record_provider_failure(
                         &app_state_clone,
                         provider_id,
@@ -963,7 +1108,7 @@ async fn handle_streaming_response(
                     .await;
 
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, stream_error_message));
-                    break;
+                    return;
                 }
             }
         }
@@ -991,8 +1136,12 @@ async fn handle_streaming_response(
                     Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                     None => None,
                 };
-                record_request_completion_and_log(&app_state_clone, context.clone()).await;
                 let proxy_error = ProxyError::InternalError(stream_error_message.clone());
+                context.final_error_code = Some(proxy_error.error_code().to_string());
+                context.final_error_message = Some(proxy_error.message().to_string());
+                if log_mode.should_record_streaming() {
+                    record_request_completion_and_log(&app_state_clone, context.clone()).await;
+                }
                 record_provider_failure(
                     &app_state_clone,
                     provider_id,
@@ -1009,6 +1158,7 @@ async fn handle_streaming_response(
                 context.user_response_body =
                     Some(user_body_writer.as_ref().expect("user stream writer should exist").snapshot(LogBodyCaptureState::Incomplete));
             }
+            mark_stream_response_started_to_client(&log_context_clone, &done_chunk).await;
             yield Ok::<_, std::io::Error>(done_chunk);
         }
 
@@ -1036,7 +1186,9 @@ async fn handle_streaming_response(
                 info!("{}: SSE stream completed without usage info.", model_str);
             }
 
-            record_request_completion_and_log(&app_state_clone, context.clone()).await;
+            if log_mode.should_record_streaming() {
+                record_request_completion_and_log(&app_state_clone, context.clone()).await;
+            }
             record_provider_success(&app_state_clone, provider_id, &model_str).await;
             info!("{}: SSE stream completed.", model_str);
             response_drop_guard.disarm();
@@ -1055,8 +1207,12 @@ async fn handle_streaming_response(
                 Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
                 None => None,
             };
-            record_request_completion_and_log(&app_state_clone, context.clone()).await;
             let proxy_error = classify_upstream_status(status_code, &[]);
+            context.final_error_code = Some(proxy_error.error_code().to_string());
+            context.final_error_message = Some(proxy_error.message().to_string());
+            if log_mode.should_record_streaming() {
+                record_request_completion_and_log(&app_state_clone, context.clone()).await;
+            }
             record_provider_failure(&app_state_clone, provider_id, &model_str, &proxy_error).await;
             response_drop_guard.disarm();
         }
@@ -1080,9 +1236,10 @@ async fn handle_streaming_response(
 mod tests {
     use super::{
         build_response_builder, decode_response_body, finalize_cancelled_log_context,
-        finalize_non_streaming_log_context, next_stream_chunk_timeout_duration,
-        process_success_response_body, send_with_first_byte_timeout,
-        should_forward_response_header, sync_stream_usage_to_log_context,
+        finalize_non_streaming_log_context, mark_stream_response_started_to_client,
+        next_stream_chunk_timeout_duration, process_success_response_body,
+        send_with_first_byte_timeout, should_forward_response_header,
+        sync_stream_usage_to_log_context,
     };
     use crate::{
         cost::UsageNormalization,
@@ -1091,9 +1248,7 @@ mod tests {
         proxy::{ProxyError, cancellation::ProxyCancellationContext},
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus},
         service::app_state::AppState,
-        service::cache::types::{
-            CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider,
-        },
+        service::cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider},
         service::transform::StreamTransformer,
         utils::sse::SseParser,
         utils::usage::UsageInfo,
@@ -1154,6 +1309,12 @@ mod tests {
             model_name: "gpt-test".to_string(),
             real_model_name: None,
             cost_catalog_id: None,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_image_input: true,
+            supports_embeddings: true,
+            supports_rerank: true,
             is_enabled: true,
         };
 
@@ -1161,7 +1322,7 @@ mod tests {
             &system_api_key,
             &provider,
             &model,
-            4,
+            Some(4),
             "provider/gpt-test",
             "direct",
             None,
@@ -1208,6 +1369,37 @@ mod tests {
                 .map(|value| value.as_secs())
         );
         assert_eq!(next_stream_chunk_timeout_duration(1), None);
+    }
+
+    #[tokio::test]
+    async fn visible_stream_timestamp_is_set_only_for_non_empty_transformed_chunks() {
+        let log_context = std::sync::Arc::new(tokio::sync::Mutex::new(make_log_context()));
+
+        mark_stream_response_started_to_client(&log_context, &bytes::Bytes::new()).await;
+        assert!(log_context.lock().await.first_chunk_ts.is_none());
+
+        mark_stream_response_started_to_client(
+            &log_context,
+            &bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            ),
+        )
+        .await;
+        let first_visible_ts = log_context
+            .lock()
+            .await
+            .first_chunk_ts
+            .expect("visible chunk should set timestamp");
+
+        mark_stream_response_started_to_client(
+            &log_context,
+            &bytes::Bytes::from_static(b"data: [DONE]\n\n"),
+        )
+        .await;
+        assert_eq!(
+            log_context.lock().await.first_chunk_ts,
+            Some(first_visible_ts)
+        );
     }
 
     #[test]

@@ -6,6 +6,8 @@ use reqwest::{Error as ReqwestError, StatusCode};
 use serde::Serialize;
 use std::fmt;
 
+pub(crate) const REQUEST_PATCH_CONFLICT_ERROR: &str = "request_patch_conflict_error";
+
 /// Structured error type for the proxy module.
 ///
 /// All proxy errors are serialized to a flat JSON format:
@@ -32,10 +34,16 @@ pub enum ProxyError {
     QuotaExhausted(String),
     /// 403 — API key budget was exhausted.
     BudgetExhausted(String),
+    /// 503 — Provider circuit is open and this candidate was skipped.
+    ProviderOpenSkipped(String),
+    /// 503 — Provider half-open probe is already in flight and this candidate was skipped.
+    ProviderHalfOpenProbeInFlight(String),
     /// 413 — Request body exceeds configured size or upstream rejects payload size.
     PayloadTooLarge(String),
     /// 499 — Client disconnected before the request lifecycle completed.
     ClientCancelled(String),
+    /// 500 — Effective provider/model request patch rules conflict.
+    RequestPatchConflict(String),
     /// 500 — Internal gateway error (cache failure, serialization, etc.).
     InternalError(String),
     /// 500 — Request/response transform or serialization failed.
@@ -55,7 +63,7 @@ pub enum ProxyError {
 }
 
 impl ProxyError {
-    fn status_code(&self) -> StatusCode {
+    pub(super) fn status_code(&self) -> StatusCode {
         match self {
             ProxyError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             ProxyError::KeyDisabled(_) => StatusCode::FORBIDDEN,
@@ -66,10 +74,14 @@ impl ProxyError {
             ProxyError::ConcurrencyLimited(_) => StatusCode::TOO_MANY_REQUESTS,
             ProxyError::QuotaExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
             ProxyError::BudgetExhausted(_) => StatusCode::FORBIDDEN,
+            ProxyError::ProviderOpenSkipped(_) | ProxyError::ProviderHalfOpenProbeInFlight(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             ProxyError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ProxyError::ClientCancelled(_) => {
                 StatusCode::from_u16(499).expect("499 should be a valid status code")
             }
+            ProxyError::RequestPatchConflict(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ProxyError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ProxyError::ProtocolTransformError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ProxyError::UpstreamBadRequest(_) => StatusCode::BAD_REQUEST,
@@ -81,7 +93,7 @@ impl ProxyError {
         }
     }
 
-    fn error_code(&self) -> &'static str {
+    pub(super) fn error_code(&self) -> &'static str {
         match self {
             ProxyError::Unauthorized(_) => "authentication_error",
             ProxyError::KeyDisabled(_) => "api_key_disabled_error",
@@ -92,8 +104,11 @@ impl ProxyError {
             ProxyError::ConcurrencyLimited(_) => "concurrency_limit_error",
             ProxyError::QuotaExhausted(_) => "quota_exhausted_error",
             ProxyError::BudgetExhausted(_) => "budget_exhausted_error",
+            ProxyError::ProviderOpenSkipped(_) => "provider_open_skipped",
+            ProxyError::ProviderHalfOpenProbeInFlight(_) => "provider_half_open_skipped",
             ProxyError::PayloadTooLarge(_) => "body_too_large_error",
             ProxyError::ClientCancelled(_) => "client_cancelled_error",
+            ProxyError::RequestPatchConflict(_) => REQUEST_PATCH_CONFLICT_ERROR,
             ProxyError::InternalError(_) => "server_error",
             ProxyError::ProtocolTransformError(_) => "protocol_transform_error",
             ProxyError::UpstreamBadRequest(_) => "upstream_invalid_request_error",
@@ -105,7 +120,7 @@ impl ProxyError {
         }
     }
 
-    fn message(&self) -> &str {
+    pub(super) fn message(&self) -> &str {
         match self {
             ProxyError::Unauthorized(msg)
             | ProxyError::KeyDisabled(msg)
@@ -116,8 +131,11 @@ impl ProxyError {
             | ProxyError::ConcurrencyLimited(msg)
             | ProxyError::QuotaExhausted(msg)
             | ProxyError::BudgetExhausted(msg)
+            | ProxyError::ProviderOpenSkipped(msg)
+            | ProxyError::ProviderHalfOpenProbeInFlight(msg)
             | ProxyError::PayloadTooLarge(msg)
             | ProxyError::ClientCancelled(msg)
+            | ProxyError::RequestPatchConflict(msg)
             | ProxyError::InternalError(msg)
             | ProxyError::ProtocolTransformError(msg)
             | ProxyError::UpstreamBadRequest(msg)
@@ -307,6 +325,35 @@ mod tests {
         assert_eq!(
             ProxyError::KeyExpired("expired".to_string()).to_string(),
             "[api_key_expired_error] expired"
+        );
+    }
+
+    #[test]
+    fn provider_governance_skip_errors_use_dedicated_codes() {
+        let open = ProxyError::ProviderOpenSkipped("open".to_string()).into_response();
+        let half_open =
+            ProxyError::ProviderHalfOpenProbeInFlight("half-open".to_string()).into_response();
+
+        assert_eq!(open.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(half_open.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            ProxyError::ProviderOpenSkipped("open".to_string()).to_string(),
+            "[provider_open_skipped] open"
+        );
+        assert_eq!(
+            ProxyError::ProviderHalfOpenProbeInFlight("half-open".to_string()).to_string(),
+            "[provider_half_open_skipped] half-open"
+        );
+    }
+
+    #[test]
+    fn request_patch_conflict_uses_dedicated_code() {
+        let response = ProxyError::RequestPatchConflict("conflict".to_string()).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            ProxyError::RequestPatchConflict("conflict".to_string()).to_string(),
+            "[request_patch_conflict_error] conflict"
         );
     }
 }

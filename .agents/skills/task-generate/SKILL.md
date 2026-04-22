@@ -31,6 +31,7 @@ Follow this sequence:
 5. Design the target solution using best practices.
 6. Write the result into the requested `task/*.md` file.
 7. If the user asks for a task list, append a sequential implementation checklist with acceptance criteria.
+8. If the user says the document should be self-explanatory or the sole implementation guide, rewrite the final document as a closed design: absorb necessary context from older docs, remove dependency on them, and resolve open options into fixed rules.
 
 Do not skip the code reading step. The document must be anchored in the actual repository.
 
@@ -45,6 +46,13 @@ Before writing, inspect the relevant code paths. At minimum, look for the pieces
 - logging and observability hooks
 - frontend management pages if the topic affects the admin UI
 - related task docs already present in `task/`
+
+For fragile runtime or architecture work, also inspect the exact implementation entry points that currently own behavior. Examples:
+
+- selector functions that currently decide the main path
+- logging builders that currently assemble persisted records
+- request execution paths that currently send downstream traffic
+- DTO builders and frontend viewers that currently shape the operator-facing contract
 
 When analyzing, explicitly separate:
 
@@ -69,6 +77,8 @@ Unless the user explicitly asks for compatibility, assume:
 
 Optimize for the final system, not the easiest partial patch.
 
+If the user says the document will be the only development guide, do not leave unresolved branches. Pick one final design after code inspection and write it as the required implementation shape.
+
 ## Output file rules
 
 Write the result into a file under `task/`, usually the exact path the user requested.
@@ -82,6 +92,10 @@ Examples:
 If the user does not specify a file but clearly wants a task document, choose a sensible file name under `task/` and state it.
 
 Use Markdown. Keep the structure readable and stable across modules.
+
+Default to a self-contained document. The final task doc should be understandable without opening another task doc for core meaning.
+
+If earlier task docs contain useful context, absorb the needed conclusions into the new file instead of making the new file depend on them.
 
 ## Document structure
 
@@ -148,6 +162,7 @@ The document should be:
 - repository-specific
 - opinionated
 - implementation-oriented
+- self-contained when feasible
 
 It should not be:
 
@@ -155,6 +170,8 @@ It should not be:
 - a changelog of files
 - a compatibility plan unless the user asked for one
 - vague brainstorming without decisions
+
+If the document is meant to guide implementation directly, prefer fixed rules over suggestion language. Replace open-ended wording such as “可以考虑”, “建议”, “可能”, “可选”, “推荐”, “首版” with explicit decisions, constraints, or banned alternatives.
 
 When discussing current code, reference concrete module paths in prose where helpful.
 
@@ -179,10 +196,20 @@ The task list must follow these rules:
    - numeric identifier
    - priority
    - difficulty
-   - concrete scope
+   - goal
+   - modification entry points
+   - replacement result
+   - banned approaches when relevant
+   - execution requirements
    - acceptance criteria
 5. Number tasks in strict ascending order using `1.`, `2.`, `3.` style section titles or headings.
 6. Make dependencies implicit via order; do not rely on nested dependency graphs unless necessary.
+7. For tasks that touch fragile runtime behavior, specify the concrete modules or functions that should be modified first.
+8. If the document is intended as the sole implementation guide, each task must make clear:
+   - where to start
+   - what new structure takes ownership afterward
+   - which old implementation must stop being extended
+   - what is explicitly forbidden
 
 Use this task template:
 
@@ -191,13 +218,23 @@ Use this task template:
 
 - 优先级：P0 / P1 / P2
 - 难度：低 / 中 / 高
-- 具体内容说明：
-  - ...
+- 目标：
+- 修改入口：
+- 替换结果：
+- 禁止项：
+  1. ...
+- 执行要求：
+  1. ...
 - 验收标准：
-  - ...
+  1. ...
 ```
 
 Use Chinese for the task body if the surrounding document is Chinese.
+
+Do not turn the task list into a patch tutorial. The right granularity is architecture and module ownership:
+
+- specific enough that an engineer knows where to change code and what must replace what
+- not so specific that the task doc becomes a line-by-line editing script
 
 ## Task splitting guidance
 
@@ -215,6 +252,8 @@ Good task boundaries:
 - frontend admin page redesign
 - testing and regression baseline
 - old module removal
+- replacing a weak runtime entrypoint with a new unique owner
+- converting a legacy read/write contract into a new fixed contract
 
 Bad task boundaries:
 
@@ -242,6 +281,8 @@ For subsystem analysis, cover as many of these as applicable:
 
 If the subsystem interacts with other major modules such as pricing, retry, routing, API keys, request logs, or provider governance, call out the boundaries explicitly.
 
+When old modules or fields should no longer be used, say that directly. Do not merely describe the new structure; also state which old structures stop being extended.
+
 ## What to avoid
 
 Do not:
@@ -252,6 +293,9 @@ Do not:
 - write a migration or compatibility strategy unless requested
 - produce tasks that are too large to verify
 - produce tasks that are too tiny to matter
+- leave key architecture choices unresolved when the user asked for a final design
+- hide important implementation constraints in prose outside the task list
+- rely on another task doc for definitions that the current file could state directly
 
 ## Tone
 
@@ -283,3 +327,6 @@ Before finishing, verify:
 - the task list is appended if requested
 - task ordering is executable in sequence
 - tasks optimize for the final architecture, not intermediate compatibility
+- the document is self-contained for core concepts and does not require another task doc to be readable
+- the task list states modification entry points, replacement boundaries, and banned alternatives for fragile tasks
+- the final wording does not leave “maybe/optional/recommended” branches in sections that are meant to be implementation rules

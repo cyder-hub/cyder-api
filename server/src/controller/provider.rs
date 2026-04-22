@@ -226,9 +226,13 @@ struct ProviderCheckRequest {
 }
 
 fn provider_check_patch_error(err: ProxyError) -> BaseError {
+    let formatted_error = err.to_string();
     match err {
         ProxyError::BadRequest(message) | ProxyError::UpstreamBadRequest(message) => {
             BaseError::ParamInvalid(Some(message))
+        }
+        ProxyError::RequestPatchConflict(_) => {
+            BaseError::InternalServerError(Some(formatted_error))
         }
         ProxyError::Unauthorized(message)
         | ProxyError::KeyDisabled(message)
@@ -238,6 +242,8 @@ fn provider_check_patch_error(err: ProxyError) -> BaseError {
         | ProxyError::ConcurrencyLimited(message)
         | ProxyError::QuotaExhausted(message)
         | ProxyError::BudgetExhausted(message)
+        | ProxyError::ProviderOpenSkipped(message)
+        | ProxyError::ProviderHalfOpenProbeInFlight(message)
         | ProxyError::PayloadTooLarge(message)
         | ProxyError::ClientCancelled(message)
         | ProxyError::InternalError(message)
@@ -1288,6 +1294,18 @@ mod tests {
     }
 
     #[test]
+    fn provider_check_request_patch_conflict_preserves_proxy_error_code() {
+        let error =
+            super::provider_check_patch_error(crate::proxy::ProxyError::RequestPatchConflict(
+                "conflicting request patch rules".to_string(),
+            ));
+
+        let message = super::base_error_message(&error);
+        assert!(message.contains("request_patch_conflict_error"));
+        assert!(message.contains("conflicting request patch rules"));
+    }
+
+    #[test]
     fn bootstrap_provider_defaults_use_provider_type_and_endpoint_host() {
         assert_eq!(
             super::generated_provider_name(&ProviderType::Openai, "https://api.example.com/v1"),
@@ -1388,6 +1406,12 @@ mod tests {
                 model_name: "gpt-4o-mini".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_reasoning: true,
+                supports_image_input: true,
+                supports_embeddings: true,
+                supports_rerank: true,
                 deleted_at: None,
                 is_enabled: true,
                 created_at: 0,

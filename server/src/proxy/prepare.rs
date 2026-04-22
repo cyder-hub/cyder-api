@@ -13,11 +13,14 @@ use serde_json::{Map, Value, json};
 
 use super::ProxyError;
 use crate::{
-    schema::enum_def::{LlmApiType, ProviderType, RequestPatchOperation, RequestPatchPlacement},
+    schema::enum_def::{
+        LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
+    },
     service::{
         app_state::{AppState, GroupItemSelectionStrategy},
         cache::types::{
-            CacheModel, CacheModelRoute, CacheProvider, CacheRequestPatchConflict,
+            CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
+            CacheModelsCatalog, CacheProvider, CacheRequestPatchConflict,
             CacheRequestPatchExplainEntry, CacheResolvedRequestPatch,
         },
         request_patch::resolve_effective_request_patches,
@@ -26,6 +29,8 @@ use crate::{
     },
 };
 use cyder_tools::log::{debug, error};
+
+use super::util::determine_target_api_type;
 
 /// Unified downstream request payload for generation operations.
 pub struct PreparedGenerationRequest {
@@ -67,7 +72,7 @@ impl RuntimeRequestPatchTrace {
             .collect::<Vec<_>>()
             .join("; ");
 
-        Some(ProxyError::InternalError(format!(
+        Some(ProxyError::RequestPatchConflict(format!(
             "Request patch conflicts prevent model '{}' from being used: {}",
             model_name, reasons
         )))
@@ -92,14 +97,71 @@ impl ResolvedNameScope {
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedModelTarget {
+pub struct ExecutionCandidate {
+    pub candidate_position: usize,
+    pub route_id: Option<i64>,
+    pub route_name: Option<String>,
+    pub route_candidate_priority: Option<i32>,
+    pub provider: Arc<CacheProvider>,
+    pub model: Arc<CacheModel>,
+    pub llm_api_type: LlmApiType,
+    pub provider_api_key_mode: ProviderApiKeyMode,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionPlan {
     pub requested_name: String,
     pub resolved_scope: ResolvedNameScope,
     pub resolved_route_id: Option<i64>,
     pub resolved_route_name: Option<String>,
-    pub candidates: Vec<i64>,
-    pub provider: Arc<CacheProvider>,
-    pub model: Arc<CacheModel>,
+    pub candidates: Vec<ExecutionCandidate>,
+}
+
+impl ExecutionPlan {
+    pub fn primary_candidate(&self) -> Result<&ExecutionCandidate, String> {
+        self.candidates.first().ok_or_else(|| {
+            format!(
+                "Execution plan for '{}' does not have any candidates.",
+                self.requested_name
+            )
+        })
+    }
+
+    pub fn candidate_model_ids(&self) -> Vec<i64> {
+        self.candidates
+            .iter()
+            .map(|candidate| candidate.model.id)
+            .collect()
+    }
+
+    pub fn candidate_summary_for_log(&self) -> String {
+        let candidate_details = self
+            .candidates
+            .iter()
+            .map(|candidate| {
+                format!(
+                    "#{} route={:?}/{} priority={:?} provider={}/{} model={}/{} llm_api={:?} key_mode={:?}",
+                    candidate.candidate_position,
+                    candidate.route_id,
+                    candidate.route_name.as_deref().unwrap_or("direct"),
+                    candidate.route_candidate_priority,
+                    candidate.provider.id,
+                    candidate.provider.provider_key,
+                    candidate.model.id,
+                    candidate.model.model_name,
+                    candidate.llm_api_type,
+                    candidate.provider_api_key_mode
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        format!(
+            "model_ids={:?}; {}",
+            self.candidate_model_ids(),
+            candidate_details
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -840,82 +902,106 @@ fn parse_provider_model(pm: &str) -> (&str, &str) {
     (provider, model_id)
 }
 
-fn select_primary_route_candidate(route: &CacheModelRoute) -> Result<i64, String> {
-    route
-        .candidates
+fn build_candidate(
+    catalog: &CacheModelsCatalog,
+    requested_name: &str,
+    route: Option<&CacheModelRoute>,
+    route_candidate: Option<&CacheModelRouteCandidate>,
+    model_id: i64,
+    candidate_position: usize,
+) -> Result<ExecutionCandidate, String> {
+    let model = catalog
+        .models
         .iter()
-        .filter(|candidate| candidate.is_enabled)
-        .next()
-        .map(|candidate| candidate.model_id)
-        .ok_or_else(|| {
-            format!(
-                "Model route '{}' does not have any enabled candidates.",
-                route.route_name
-            )
-        })
+        .find(|model| model.id == model_id)
+        .cloned()
+        .ok_or_else(|| match route {
+            Some(route) => format!(
+                "Candidate model {} for route '{}' was not found.",
+                model_id, route.route_name
+            ),
+            None => format!("Model '{}' was not found.", requested_name),
+        })?;
+    let provider = catalog
+        .providers
+        .iter()
+        .find(|provider| provider.id == model.provider_id)
+        .cloned()
+        .ok_or_else(|| match route {
+            Some(route) => format!(
+                "Provider ID {} for route '{}' was not found.",
+                model.provider_id, route.route_name
+            ),
+            None => format!(
+                "Provider ID {} for model '{}' was not found.",
+                model.provider_id, model.model_name
+            ),
+        })?;
+    let llm_api_type = determine_target_api_type(&provider);
+    let provider_api_key_mode = provider.provider_api_key_mode.clone();
+
+    Ok(ExecutionCandidate {
+        candidate_position,
+        route_id: route.map(|route| route.id),
+        route_name: route.map(|route| route.route_name.clone()),
+        route_candidate_priority: route_candidate.map(|candidate| candidate.priority),
+        provider: Arc::new(provider),
+        model: Arc::new(model),
+        llm_api_type,
+        provider_api_key_mode,
+    })
 }
 
-async fn resolve_route_target(
-    app_state: &Arc<AppState>,
+fn build_route_execution_plan(
+    catalog: &CacheModelsCatalog,
     requested_name: &str,
     resolved_scope: ResolvedNameScope,
-    route: Arc<CacheModelRoute>,
-) -> Result<ResolvedModelTarget, String> {
+    route: &CacheModelRoute,
+) -> Result<ExecutionPlan, String> {
     if !route.is_enabled {
         return Err(format!("Model route '{}' is disabled.", route.route_name));
     }
 
-    let selected_model_id = select_primary_route_candidate(&route)?;
-    let model = app_state
-        .get_model_by_id(selected_model_id)
-        .await
-        .map_err(|e| {
-            format!(
-                "Error accessing cache for route candidate model {}: {:?}",
-                selected_model_id, e
-            )
-        })?
-        .ok_or_else(|| {
-            format!(
-                "Primary candidate model {} for route '{}' was not found.",
-                selected_model_id, route.route_name
-            )
-        })?;
-    let provider = app_state
-        .get_provider_by_id(model.provider_id)
-        .await
-        .map_err(|e| {
-            format!(
-                "Error accessing cache for provider ID {}: {:?}",
-                model.provider_id, e
-            )
-        })?
-        .ok_or_else(|| {
-            format!(
-                "Provider ID {} for route '{}' was not found.",
-                model.provider_id, route.route_name
-            )
-        })?;
+    let enabled_candidates = route
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.is_enabled)
+        .collect::<Vec<_>>();
+    if enabled_candidates.is_empty() {
+        return Err(format!(
+            "Model route '{}' does not have any enabled candidates.",
+            route.route_name
+        ));
+    }
 
-    Ok(ResolvedModelTarget {
+    let candidates = enabled_candidates
+        .iter()
+        .enumerate()
+        .map(|(index, route_candidate)| {
+            build_candidate(
+                catalog,
+                requested_name,
+                Some(route),
+                Some(route_candidate),
+                route_candidate.model_id,
+                index + 1,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(ExecutionPlan {
         requested_name: requested_name.to_string(),
         resolved_scope,
         resolved_route_id: Some(route.id),
         resolved_route_name: Some(route.route_name.clone()),
-        candidates: route
-            .candidates
-            .iter()
-            .map(|candidate| candidate.model_id)
-            .collect(),
-        provider,
-        model,
+        candidates,
     })
 }
 
-async fn resolve_direct_target(
-    app_state: &Arc<AppState>,
+fn build_direct_execution_plan(
+    catalog: &CacheModelsCatalog,
     requested_name: &str,
-) -> Result<ResolvedModelTarget, String> {
+) -> Result<ExecutionPlan, String> {
     let (provider_key_str, model_name_str) = parse_provider_model(requested_name);
     if provider_key_str.is_empty() || model_name_str.is_empty() {
         return Err(format!(
@@ -924,26 +1010,16 @@ async fn resolve_direct_target(
         ));
     }
 
-    let provider = app_state
-        .get_provider_by_key(provider_key_str)
-        .await
-        .map_err(|e| {
-            format!(
-                "Error accessing cache for provider key '{}': {:?}",
-                provider_key_str, e
-            )
-        })?
+    let provider = catalog
+        .providers
+        .iter()
+        .find(|provider| provider.provider_key == provider_key_str)
         .ok_or_else(|| format!("Provider '{}' not found.", provider_key_str))?;
 
-    let model = app_state
-        .get_model_by_name(provider_key_str, model_name_str)
-        .await
-        .map_err(|e| {
-            format!(
-                "Error accessing cache for model name '{}': {:?}",
-                requested_name, e
-            )
-        })?
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.provider_id == provider.id && model.model_name == model_name_str)
         .ok_or_else(|| format!("Model '{}' not found.", requested_name))?;
 
     if model.provider_id != provider.id {
@@ -953,133 +1029,212 @@ async fn resolve_direct_target(
         ));
     }
 
-    Ok(ResolvedModelTarget {
+    let candidate = build_candidate(catalog, requested_name, None, None, model.id, 1)?;
+
+    Ok(ExecutionPlan {
         requested_name: requested_name.to_string(),
         resolved_scope: ResolvedNameScope::Direct,
         resolved_route_id: None,
         resolved_route_name: None,
-        candidates: vec![model.id],
-        provider,
-        model,
+        candidates: vec![candidate],
     })
 }
 
-pub async fn resolve_requested_model(
+fn find_enabled_override<'a>(
+    catalog: &'a CacheModelsCatalog,
+    api_key_id: i64,
+    requested_name: &str,
+) -> Option<&'a CacheApiKeyModelOverride> {
+    catalog.api_key_overrides.iter().find(|override_row| {
+        override_row.api_key_id == api_key_id
+            && override_row.source_name == requested_name
+            && override_row.is_enabled
+    })
+}
+
+fn build_execution_plan_from_catalog(
+    catalog: &CacheModelsCatalog,
+    api_key_id: i64,
+    requested_name: &str,
+) -> Result<ExecutionPlan, String> {
+    if let Some(override_row) = find_enabled_override(catalog, api_key_id, requested_name) {
+        let route = catalog
+            .routes
+            .iter()
+            .find(|route| route.id == override_row.target_route_id)
+            .ok_or_else(|| {
+                format!(
+                    "API key override for '{}' references missing route {}.",
+                    requested_name, override_row.target_route_id
+                )
+            })?;
+        debug!(
+            "Resolved '{}' via api key override for api_key_id {} to route '{}'",
+            requested_name, api_key_id, route.route_name
+        );
+        return build_route_execution_plan(
+            catalog,
+            requested_name,
+            ResolvedNameScope::ApiKeyOverride,
+            route,
+        );
+    }
+
+    if let Some(route) = catalog
+        .routes
+        .iter()
+        .find(|route| route.route_name == requested_name)
+    {
+        debug!(
+            "Resolved '{}' as a global model route '{}'",
+            requested_name, route.route_name
+        );
+        return build_route_execution_plan(
+            catalog,
+            requested_name,
+            ResolvedNameScope::GlobalRoute,
+            route,
+        );
+    }
+
+    debug!(
+        "'{}' is not a configured route. Attempting direct provider/model parsing.",
+        requested_name
+    );
+    build_direct_execution_plan(catalog, requested_name)
+}
+
+pub async fn build_execution_plan(
     app_state: &Arc<AppState>,
     api_key_id: i64,
     requested_name: &str,
-) -> Result<ResolvedModelTarget, String> {
-    match app_state
-        .get_api_key_override_route(api_key_id, requested_name)
-        .await
-    {
-        Ok(Some(route)) => {
-            debug!(
-                "Resolved '{}' via api key override for api_key_id {} to route '{}'",
-                requested_name, api_key_id, route.route_name
-            );
-            return resolve_route_target(
-                app_state,
-                requested_name,
-                ResolvedNameScope::ApiKeyOverride,
-                route,
-            )
-            .await;
-        }
-        Ok(None) => {}
-        Err(e) => {
-            error!(
-                "Error checking api key override for {}:{}: {:?}",
-                api_key_id, requested_name, e
-            );
-            return Err(format!(
-                "Internal server error while checking api key overrides for '{}'.",
-                requested_name
-            ));
-        }
-    }
+) -> Result<ExecutionPlan, String> {
+    let catalog = app_state.get_models_catalog().await.map_err(|e| {
+        error!(
+            "Error loading models catalog while resolving '{}': {:?}",
+            requested_name, e
+        );
+        format!(
+            "Internal server error while loading model catalog for '{}'.",
+            requested_name
+        )
+    })?;
 
-    match app_state.get_model_route_by_name(requested_name).await {
-        Ok(Some(route)) => {
-            debug!(
-                "Resolved '{}' as a global model route '{}'",
-                requested_name, route.route_name
-            );
-            return resolve_route_target(
-                app_state,
-                requested_name,
-                ResolvedNameScope::GlobalRoute,
-                route,
-            )
-            .await;
-        }
-        Ok(None) => {
-            debug!(
-                "'{}' is not a configured route. Attempting direct provider/model parsing.",
-                requested_name
-            );
-        }
-        Err(e) => {
-            error!("Error checking model route '{}': {:?}", requested_name, e);
-            return Err(format!(
-                "Internal server error while checking configured routes for '{}'.",
-                requested_name
-            ));
-        }
-    }
-
-    resolve_direct_target(app_state, requested_name).await
+    build_execution_plan_from_catalog(catalog.as_ref(), api_key_id, requested_name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedNameScope, apply_request_patches, parse_provider_model, resolve_real_model_name,
-        select_generation_prepare_kind, select_primary_route_candidate,
+        ResolvedNameScope, apply_request_patches, build_execution_plan_from_catalog,
+        parse_provider_model, resolve_real_model_name, select_generation_prepare_kind,
     };
     use crate::{
-        schema::enum_def::{LlmApiType, RequestPatchOperation, RequestPatchPlacement},
+        schema::enum_def::{
+            LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation,
+            RequestPatchPlacement,
+        },
         service::cache::types::{
-            CacheModelRoute, CacheModelRouteCandidate, CacheResolvedRequestPatch,
-            RequestPatchRuleOrigin,
+            CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
+            CacheModelsCatalog, CacheProvider, CacheResolvedRequestPatch, RequestPatchRuleOrigin,
         },
     };
     use axum::http::{HeaderMap, HeaderValue};
     use reqwest::Url;
     use serde_json::{Value, json};
 
-    fn model(
-        model_name: &str,
-        real_model_name: Option<&str>,
-    ) -> crate::service::cache::types::CacheModel {
-        crate::service::cache::types::CacheModel {
-            id: 1,
-            provider_id: 2,
-            model_name: model_name.to_string(),
-            real_model_name: real_model_name.map(str::to_string),
-            cost_catalog_id: None,
+    fn provider(id: i64, provider_key: &str, provider_type: ProviderType) -> CacheProvider {
+        CacheProvider {
+            id,
+            provider_key: provider_key.to_string(),
+            name: provider_key.to_string(),
+            endpoint: "https://example.com".to_string(),
+            use_proxy: false,
+            provider_type,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
             is_enabled: true,
         }
     }
 
-    fn route(candidate_flags: &[bool]) -> CacheModelRoute {
+    fn model_with_id(
+        id: i64,
+        provider_id: i64,
+        model_name: &str,
+        real_model_name: Option<&str>,
+    ) -> CacheModel {
+        CacheModel {
+            id,
+            provider_id,
+            model_name: model_name.to_string(),
+            real_model_name: real_model_name.map(str::to_string),
+            cost_catalog_id: None,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_reasoning: true,
+            supports_image_input: true,
+            supports_embeddings: true,
+            supports_rerank: true,
+            is_enabled: true,
+        }
+    }
+
+    fn model(model_name: &str, real_model_name: Option<&str>) -> CacheModel {
+        model_with_id(1, 2, model_name, real_model_name)
+    }
+
+    fn route_with_candidates(
+        id: i64,
+        route_name: &str,
+        candidates: &[(i64, i32, bool)],
+    ) -> CacheModelRoute {
         CacheModelRoute {
-            id: 7,
-            route_name: "manual-smoke-route".to_string(),
+            id,
+            route_name: route_name.to_string(),
             description: None,
             is_enabled: true,
             expose_in_models: true,
-            candidates: candidate_flags
+            candidates: candidates
                 .iter()
-                .enumerate()
-                .map(|(index, is_enabled)| CacheModelRouteCandidate {
-                    route_id: 7,
-                    model_id: (index + 1) as i64,
-                    provider_id: 2,
-                    priority: index as i32,
-                    is_enabled: *is_enabled,
-                })
+                .map(
+                    |(model_id, priority, is_enabled)| CacheModelRouteCandidate {
+                        route_id: id,
+                        model_id: *model_id,
+                        provider_id: 2,
+                        priority: *priority,
+                        is_enabled: *is_enabled,
+                    },
+                )
                 .collect(),
+        }
+    }
+
+    fn catalog() -> CacheModelsCatalog {
+        CacheModelsCatalog {
+            providers: vec![
+                provider(1, "openai", ProviderType::Openai),
+                provider(2, "gemini", ProviderType::Gemini),
+            ],
+            models: vec![
+                model_with_id(10, 1, "gpt-primary", Some("gpt-real")),
+                model_with_id(20, 2, "gemini-primary", None),
+                model_with_id(30, 1, "gpt-fallback", None),
+            ],
+            routes: vec![
+                route_with_candidates(
+                    100,
+                    "smart-route",
+                    &[(10, 10, true), (20, 20, false), (30, 30, true)],
+                ),
+                route_with_candidates(200, "override-route", &[(20, 5, true), (10, 10, true)]),
+            ],
+            api_key_overrides: vec![CacheApiKeyModelOverride {
+                id: 500,
+                api_key_id: 42,
+                source_name: "smart-route".to_string(),
+                target_route_id: 200,
+                description: None,
+                is_enabled: true,
+            }],
         }
     }
 
@@ -1370,20 +1525,52 @@ mod tests {
     }
 
     #[test]
-    fn select_primary_route_candidate_uses_first_enabled_candidate() {
-        assert_eq!(
-            select_primary_route_candidate(&route(&[true, true])).unwrap(),
-            1
-        );
-        assert_eq!(
-            select_primary_route_candidate(&route(&[false, true])).unwrap(),
-            2
-        );
+    fn build_execution_plan_outputs_single_direct_candidate() {
+        let catalog = catalog();
+
+        let plan = build_execution_plan_from_catalog(&catalog, 42, "openai/gpt-primary")
+            .expect("direct model should resolve");
+
+        assert_eq!(plan.resolved_scope, ResolvedNameScope::Direct);
+        assert_eq!(plan.resolved_route_id, None);
+        assert_eq!(plan.candidate_model_ids(), vec![10]);
+        let candidate = plan.primary_candidate().unwrap();
+        assert_eq!(candidate.candidate_position, 1);
+        assert_eq!(candidate.route_id, None);
+        assert_eq!(candidate.llm_api_type, LlmApiType::Openai);
+        assert_eq!(candidate.provider_api_key_mode, ProviderApiKeyMode::Queue);
     }
 
     #[test]
-    fn select_primary_route_candidate_rejects_route_without_enabled_candidates() {
-        let err = select_primary_route_candidate(&route(&[false, false])).unwrap_err();
-        assert!(err.contains("does not have any enabled candidates"));
+    fn build_execution_plan_outputs_global_route_candidates_in_order() {
+        let catalog = catalog();
+
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "smart-route")
+            .expect("global route should resolve");
+
+        assert_eq!(plan.resolved_scope, ResolvedNameScope::GlobalRoute);
+        assert_eq!(plan.resolved_route_id, Some(100));
+        assert_eq!(plan.resolved_route_name.as_deref(), Some("smart-route"));
+        assert_eq!(plan.candidate_model_ids(), vec![10, 30]);
+        assert_eq!(plan.candidates[0].candidate_position, 1);
+        assert_eq!(plan.candidates[0].route_candidate_priority, Some(10));
+        assert_eq!(plan.candidates[1].candidate_position, 2);
+        assert_eq!(plan.candidates[1].route_candidate_priority, Some(30));
+    }
+
+    #[test]
+    fn build_execution_plan_outputs_override_route_before_global_route() {
+        let catalog = catalog();
+
+        let plan = build_execution_plan_from_catalog(&catalog, 42, "smart-route")
+            .expect("api key override should resolve");
+
+        assert_eq!(plan.resolved_scope, ResolvedNameScope::ApiKeyOverride);
+        assert_eq!(plan.resolved_route_id, Some(200));
+        assert_eq!(plan.resolved_route_name.as_deref(), Some("override-route"));
+        assert_eq!(plan.candidate_model_ids(), vec![20, 10]);
+        assert_eq!(plan.candidates[0].candidate_position, 1);
+        assert_eq!(plan.candidates[0].llm_api_type, LlmApiType::Gemini);
+        assert_eq!(plan.candidates[1].candidate_position, 2);
     }
 }

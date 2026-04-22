@@ -81,6 +81,121 @@ test("v2 request log bundle reconstructs attempt request body from blob and patc
     choices: [{ message: { content: "ok" } }],
   });
   assert.equal(view.attempts[0].requestRawPatchContent, '[{"op":"replace","path":"/model","value":"candidate-a"}]');
+  assert.equal(view.requestSnapshot, null);
+  assert.equal(view.candidateManifest, null);
+  assert.equal(view.transformDiagnostics, null);
+});
+
+test("v2 request log bundle decodes diagnostic assets without affecting payload reconstruction", () => {
+  const view = decodeBundleView({
+    version: 2,
+    request_section: {
+      user_request_blob_id: 1,
+    },
+    request_snapshot: {
+      request_path: "/ai/responses",
+      operation_kind: "responses_create",
+      query_params: [
+        { name: "stream", value: "true" },
+        { name: "verbose" },
+      ],
+      sanitized_original_headers: [
+        { name: "x-trace-id", value: "trace-123" },
+      ],
+    },
+    candidate_manifest: {
+      items: [
+        {
+          candidate_position: 1,
+          route_id: 8,
+          route_name: "manual-smoke-route",
+          provider_id: 2,
+          provider_key: "provider-a",
+          model_id: 3,
+          model_name: "gpt-test",
+          real_model_name: "real-gpt-test",
+          llm_api_type: "RESPONSES",
+          provider_api_key_mode: "QUEUE",
+        },
+      ],
+    },
+    transform_diagnostics: {
+      summary: {
+        count: 1,
+        max_loss_level: "lossy_major",
+        kinds: ["capability_downgrade"],
+        phases: ["request"],
+      },
+      items: [
+        {
+          phase: "request",
+          diagnostic: {
+            type: "transform_diagnostic",
+            diagnostic_kind: "capability_downgrade",
+            loss_level: "lossy_major",
+            reason: "reasoning summary was dropped",
+          },
+        },
+      ],
+    },
+    attempt_sections: [],
+    blob_pool: [
+      {
+        blob_id: 1,
+        body: bytes('{"model":"route","input":"hello"}'),
+      },
+    ],
+    patch_pool: [],
+  });
+
+  assert.equal(view.kind, "v2");
+  assert.equal(view.request.userRequestBody, '{"model":"route","input":"hello"}');
+  assert.deepEqual(view.requestSnapshot, {
+    requestPath: "/ai/responses",
+    operationKind: "responses_create",
+    queryParams: [
+      { name: "stream", value: "true" },
+      { name: "verbose", value: null },
+    ],
+    sanitizedOriginalHeaders: [
+      { name: "x-trace-id", value: "trace-123" },
+    ],
+  });
+  assert.deepEqual(view.candidateManifest, {
+    items: [
+      {
+        candidatePosition: 1,
+        routeId: 8,
+        routeName: "manual-smoke-route",
+        providerId: 2,
+        providerKey: "provider-a",
+        modelId: 3,
+        modelName: "gpt-test",
+        realModelName: "real-gpt-test",
+        llmApiType: "RESPONSES",
+        providerApiKeyMode: "QUEUE",
+      },
+    ],
+  });
+  assert.deepEqual(view.transformDiagnostics, {
+    summary: {
+      count: 1,
+      maxLossLevel: "lossy_major",
+      kinds: ["capability_downgrade"],
+      phases: ["request"],
+    },
+    items: [
+      {
+        phase: "request",
+        diagnostic: {
+          type: "transform_diagnostic",
+          diagnostic_kind: "capability_downgrade",
+          loss_level: "lossy_major",
+          reason: "reasoning summary was dropped",
+        },
+      },
+    ],
+  });
 });
 
 test("v2 attempt rows merge persisted metadata and include metadata-only attempts", () => {

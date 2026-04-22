@@ -17,9 +17,13 @@ use crate::cost::UsageNormalization;
 use crate::schema::enum_def::{LlmApiType, RequestStatus};
 use crate::service::app_state::{ApiKeyConcurrencyGuard, AppState};
 use crate::service::cache::types::CacheCostCatalogVersion;
-use crate::service::transform::{StreamTransformer, transform_result_with_cost};
+use crate::service::transform::{
+    StreamTransformer, transform_result_with_cost_and_diagnostics,
+    unified::UnifiedTransformDiagnostic,
+};
 use crate::utils::sse::SseParser;
 use crate::utils::storage::LogBodyCaptureState;
+use crate::utils::storage::RequestLogBundleTransformDiagnosticPhase;
 use crate::utils::usage::UsageInfo;
 
 use axum::{
@@ -94,10 +98,32 @@ impl ProxyLogMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProxyExecutionPolicy {
+    Normal,
+    ReplayDryRun,
+    ReplayLive,
+}
+
+impl ProxyExecutionPolicy {
+    pub(crate) fn records_request_log(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    pub(crate) fn records_provider_runtime(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
+    pub(crate) fn admits_api_key_requests(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+}
+
 struct RequestLogContextGuard {
     app_state: Arc<AppState>,
     context: Arc<TokioMutex<RequestLogContext>>,
     log_mode: ProxyLogMode,
+    execution_policy: ProxyExecutionPolicy,
     is_armed: bool,
 }
 
@@ -106,11 +132,13 @@ impl RequestLogContextGuard {
         app_state: Arc<AppState>,
         context: Arc<TokioMutex<RequestLogContext>>,
         log_mode: ProxyLogMode,
+        execution_policy: ProxyExecutionPolicy,
     ) -> Self {
         Self {
             app_state,
             context,
             log_mode,
+            execution_policy,
             is_armed: true,
         }
     }
@@ -122,7 +150,10 @@ impl RequestLogContextGuard {
 
 impl Drop for RequestLogContextGuard {
     fn drop(&mut self) {
-        if self.is_armed && self.log_mode.should_record_immediate() {
+        if self.is_armed
+            && self.log_mode.should_record_immediate()
+            && self.execution_policy.records_request_log()
+        {
             let app_state = Arc::clone(&self.app_state);
             let context_clone = Arc::clone(&self.context);
             tokio::spawn(async move {
@@ -146,6 +177,7 @@ struct ResponseStreamCancellationGuard {
     url: String,
     status_code: StatusCode,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
+    execution_policy: ProxyExecutionPolicy,
     reason: String,
     armed: bool,
 }
@@ -158,6 +190,7 @@ impl ResponseStreamCancellationGuard {
         url: impl Into<String>,
         status_code: StatusCode,
         cost_catalog_version: Option<CacheCostCatalogVersion>,
+        execution_policy: ProxyExecutionPolicy,
         reason: impl Into<String>,
     ) -> Self {
         Self {
@@ -167,6 +200,7 @@ impl ResponseStreamCancellationGuard {
             url: url.into(),
             status_code,
             cost_catalog_version,
+            execution_policy,
             reason: reason.into(),
             armed: true,
         }
@@ -180,8 +214,11 @@ impl ResponseStreamCancellationGuard {
 impl Drop for ResponseStreamCancellationGuard {
     fn drop(&mut self) {
         if self.armed {
-            let app_state = Arc::clone(&self.app_state);
             self.cancellation.cancel_now(self.reason.clone());
+            if !self.execution_policy.records_request_log() {
+                return;
+            }
+            let app_state = Arc::clone(&self.app_state);
             let context = Arc::clone(&self.context);
             let url = self.url.clone();
             let status_code = self.status_code;
@@ -219,7 +256,7 @@ pub(super) fn build_response_builder(
     response_builder
 }
 
-pub(super) fn decode_response_body(body_bytes: Bytes, is_gzip: bool) -> Bytes {
+pub(crate) fn decode_response_body(body_bytes: Bytes, is_gzip: bool) -> Bytes {
     if !is_gzip {
         return body_bytes;
     }
@@ -239,20 +276,28 @@ pub(super) fn decode_response_body(body_bytes: Bytes, is_gzip: bool) -> Bytes {
     }
 }
 
-fn process_success_response_body(
+pub(crate) fn process_success_response_body(
     decompressed_body: &Bytes,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
-) -> (Bytes, Option<UsageInfo>, Option<UsageNormalization>) {
+) -> (
+    Bytes,
+    Option<UsageInfo>,
+    Option<UsageNormalization>,
+    Vec<UnifiedTransformDiagnostic>,
+) {
     match serde_json::from_slice::<Value>(decompressed_body) {
         Ok(original_value) => {
-            let (transformed_value, usage_info, usage_normalization) =
-                transform_result_with_cost(original_value, target_api_type, api_type);
+            let output = transform_result_with_cost_and_diagnostics(
+                original_value,
+                target_api_type,
+                api_type,
+            );
 
             let body_bytes = if api_type == target_api_type {
                 decompressed_body.clone()
             } else {
-                match serde_json::to_vec(&transformed_value) {
+                match serde_json::to_vec(&output.value) {
                     Ok(b) => Bytes::from(b),
                     Err(e) => {
                         error!(
@@ -263,7 +308,12 @@ fn process_success_response_body(
                     }
                 }
             };
-            (body_bytes, usage_info, usage_normalization)
+            (
+                body_bytes,
+                output.usage_info,
+                output.usage_normalization,
+                output.diagnostics,
+            )
         }
         Err(e) => {
             debug!(
@@ -271,7 +321,7 @@ fn process_success_response_body(
                 e,
                 String::from_utf8_lossy(decompressed_body)
             );
-            (decompressed_body.clone(), None, None)
+            (decompressed_body.clone(), None, None, Vec::new())
         }
     }
 }
@@ -299,7 +349,7 @@ pub(super) fn finalize_non_streaming_log_context(
     context.user_response_body = Some(LoggedBody::from_bytes(user_response_body));
 }
 
-pub(super) async fn send_with_first_byte_timeout(
+pub(crate) async fn send_with_first_byte_timeout(
     cancellation: &ProxyCancellationContext,
     request: reqwest::RequestBuilder,
     context: &str,
@@ -369,14 +419,19 @@ async fn sync_stream_usage_to_log_context(
 ) {
     let usage = transformer.parse_usage_info();
     let usage_normalization = transformer.parse_usage_normalization();
+    let diagnostics = transformer.diagnostics_snapshot();
 
-    if usage.is_none() && usage_normalization.is_none() {
+    if usage.is_none() && usage_normalization.is_none() && diagnostics.is_empty() {
         return;
     }
 
     let mut context = log_context.lock().await;
     context.usage = usage;
     context.usage_normalization = usage_normalization;
+    context.replace_transform_diagnostics_phase(
+        RequestLogBundleTransformDiagnosticPhase::Stream,
+        &diagnostics,
+    );
 }
 
 async fn mark_stream_response_started_to_client(
@@ -490,6 +545,7 @@ pub(super) async fn proxy_request(
     api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
     response_mode: ProxyResponseMode,
     log_mode: ProxyLogMode,
+    execution_policy: ProxyExecutionPolicy,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let provider_id = log_context.provider_id;
     info!(
@@ -505,8 +561,12 @@ pub(super) async fn proxy_request(
         &app_state.client
     };
 
-    let mut cancellation_guard =
-        RequestLogContextGuard::new(Arc::clone(&app_state), log_context.clone(), log_mode);
+    let mut cancellation_guard = RequestLogContextGuard::new(
+        Arc::clone(&app_state),
+        log_context.clone(),
+        log_mode,
+        execution_policy,
+    );
     let mut drop_cancellation_guard = CancellationDropGuard::new(
         cancellation.clone(),
         format!(
@@ -532,7 +592,9 @@ pub(super) async fn proxy_request(
             drop_cancellation_guard.disarm();
             cancellation_guard.disarm();
             error!("{}", proxy_error);
-            if !matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+            if execution_policy.records_provider_runtime()
+                && !matches!(proxy_error, ProxyError::ClientCancelled(_))
+            {
                 record_provider_failure(&app_state, provider_id, &model_str, &proxy_error).await;
             }
             let completed_at = Utc::now().timestamp_millis();
@@ -546,7 +608,7 @@ pub(super) async fn proxy_request(
             } else {
                 RequestStatus::Error
             };
-            if log_mode.should_record_immediate() {
+            if log_mode.should_record_immediate() && execution_policy.records_request_log() {
                 record_request_completion_and_log(&app_state, context.clone()).await;
             }
 
@@ -590,6 +652,7 @@ pub(super) async fn proxy_request(
             api_type,
             target_api_type,
             log_mode,
+            execution_policy,
         )
         .await
         {
@@ -619,6 +682,7 @@ pub(super) async fn proxy_request(
             api_key_concurrency_guard,
             response_mode,
             log_mode,
+            execution_policy,
         )
         .await
     };
@@ -640,6 +704,7 @@ async fn handle_non_streaming_response(
     _api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
     response_mode: ProxyResponseMode,
     log_mode: ProxyLogMode,
+    execution_policy: ProxyExecutionPolicy,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -663,7 +728,9 @@ async fn handle_non_streaming_response(
         Ok(b) => b,
         Err(proxy_error) => {
             error!("[handle_non_streaming_response] {}", proxy_error);
-            if !matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+            if execution_policy.records_provider_runtime()
+                && !matches!(proxy_error, ProxyError::ClientCancelled(_))
+            {
                 record_provider_failure(app_state, provider_id, &model_str, &proxy_error).await;
             }
             let completed_at = Utc::now().timestamp_millis();
@@ -680,7 +747,7 @@ async fn handle_non_streaming_response(
             };
             context.llm_response_body =
                 Some(LoggedBody::from_bytes(Bytes::from(proxy_error.to_string())));
-            if log_mode.should_record_immediate() {
+            if log_mode.should_record_immediate() && execution_policy.records_request_log() {
                 record_request_completion_and_log(app_state, context.clone()).await;
             }
 
@@ -696,18 +763,24 @@ async fn handle_non_streaming_response(
     let llm_response_completed_at = Utc::now().timestamp_millis();
 
     if status_code.is_success() {
-        let (final_body, parsed_usage_info, parsed_usage_normalization) = match response_mode {
-            ProxyResponseMode::Generation {
-                api_type,
-                target_api_type,
-            } => process_success_response_body(&decompressed_body, api_type, target_api_type),
-            ProxyResponseMode::Utility { .. } => {
-                let usage_normalization = serde_json::from_slice::<Value>(&decompressed_body)
-                    .ok()
-                    .and_then(|val| super::util::parse_utility_usage_normalization(&val));
-                (decompressed_body.clone(), None, usage_normalization)
-            }
-        };
+        let (final_body, parsed_usage_info, parsed_usage_normalization, transform_diagnostics) =
+            match response_mode {
+                ProxyResponseMode::Generation {
+                    api_type,
+                    target_api_type,
+                } => process_success_response_body(&decompressed_body, api_type, target_api_type),
+                ProxyResponseMode::Utility { .. } => {
+                    let usage_normalization = serde_json::from_slice::<Value>(&decompressed_body)
+                        .ok()
+                        .and_then(|val| super::util::parse_utility_usage_normalization(&val));
+                    (
+                        decompressed_body.clone(),
+                        None,
+                        usage_normalization,
+                        Vec::new(),
+                    )
+                }
+            };
 
         let mut context = log_context.lock().await;
         finalize_non_streaming_log_context(
@@ -722,10 +795,16 @@ async fn handle_non_streaming_response(
             decompressed_body.clone(),
             final_body.clone(),
         );
-        if log_mode.should_record_immediate() {
+        context.append_transform_diagnostics(
+            RequestLogBundleTransformDiagnosticPhase::Response,
+            &transform_diagnostics,
+        );
+        if log_mode.should_record_immediate() && execution_policy.records_request_log() {
             record_request_completion_and_log(app_state, context.clone()).await;
         }
-        record_provider_success(app_state, provider_id, &model_str).await;
+        if execution_policy.records_provider_runtime() {
+            record_provider_success(app_state, provider_id, &model_str).await;
+        }
 
         info!(
             "{}: Non-SSE request completed for log_id {}.",
@@ -757,11 +836,13 @@ async fn handle_non_streaming_response(
             decompressed_body.clone(),
             decompressed_body.clone(),
         );
-        if log_mode.should_record_immediate() {
+        if log_mode.should_record_immediate() && execution_policy.records_request_log() {
             record_request_completion_and_log(app_state, context.clone()).await;
         }
         let proxy_error = classify_upstream_status(status_code, &decompressed_body);
-        record_provider_failure(app_state, provider_id, &model_str, &proxy_error).await;
+        if execution_policy.records_provider_runtime() {
+            record_provider_failure(app_state, provider_id, &model_str, &proxy_error).await;
+        }
         Err(ProxyRequestFailure {
             error: proxy_error,
             log_context: context.clone(),
@@ -784,6 +865,7 @@ async fn handle_streaming_response(
     api_type: LlmApiType,
     target_api_type: LlmApiType,
     log_mode: ProxyLogMode,
+    execution_policy: ProxyExecutionPolicy,
 ) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -843,6 +925,7 @@ async fn handle_streaming_response(
             url_owned.clone(),
             status_code,
             cost_catalog_version_clone.clone(),
+            execution_policy,
             format!("Client disconnected while receiving streaming response for log_id {}.", log_id),
         );
         let mut first_chunk_received_at_proxy: i64 = 0;
@@ -863,15 +946,17 @@ async fn handle_streaming_response(
                         if let Some(writer) = user_body_writer.take() {
                             let _ = writer.abort().await;
                         }
-                        finalize_cancelled_log_context(
-                            &app_state_clone,
-                            &log_context_clone,
-                            &url_owned,
-                            Some(status_code),
-                            cost_catalog_version_clone.as_ref(),
-                            None,
-                            None,
-                        ).await;
+                        if execution_policy.records_request_log() {
+                            finalize_cancelled_log_context(
+                                &app_state_clone,
+                                &log_context_clone,
+                                &url_owned,
+                                Some(status_code),
+                                cost_catalog_version_clone.as_ref(),
+                                None,
+                                None,
+                            ).await;
+                        }
                         yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, proxy_error.to_string()));
                         return;
                     }
@@ -903,16 +988,20 @@ async fn handle_streaming_response(
                         let proxy_error = ProxyError::UpstreamTimeout(stream_error_message.clone());
                         context.final_error_code = Some(proxy_error.error_code().to_string());
                         context.final_error_message = Some(proxy_error.message().to_string());
-                        if log_mode.should_record_streaming() {
+                        if log_mode.should_record_streaming()
+                            && execution_policy.records_request_log()
+                        {
                             record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         }
-                        record_provider_failure(
-                            &app_state_clone,
-                            provider_id,
-                            &model_str,
-                            &proxy_error,
-                        )
-                        .await;
+                        if execution_policy.records_provider_runtime() {
+                            record_provider_failure(
+                                &app_state_clone,
+                                provider_id,
+                                &model_str,
+                                &proxy_error,
+                            )
+                            .await;
+                        }
 
                         yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut, stream_error_message));
                         return;
@@ -928,15 +1017,17 @@ async fn handle_streaming_response(
                             if let Some(writer) = user_body_writer.take() {
                                 let _ = writer.abort().await;
                             }
-                            finalize_cancelled_log_context(
-                                &app_state_clone,
-                                &log_context_clone,
-                                &url_owned,
-                                Some(status_code),
-                                cost_catalog_version_clone.as_ref(),
-                                None,
-                                None,
-                            ).await;
+                            if execution_policy.records_request_log() {
+                                finalize_cancelled_log_context(
+                                    &app_state_clone,
+                                    &log_context_clone,
+                                    &url_owned,
+                                    Some(status_code),
+                                    cost_catalog_version_clone.as_ref(),
+                                    None,
+                                    None,
+                                ).await;
+                            }
                             yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, cancellation.cancellation_error().await.to_string()));
                             return;
                         }
@@ -974,16 +1065,20 @@ async fn handle_streaming_response(
                         let proxy_error = ProxyError::InternalError(stream_error_message.clone());
                         context.final_error_code = Some(proxy_error.error_code().to_string());
                         context.final_error_message = Some(proxy_error.message().to_string());
-                        if log_mode.should_record_streaming() {
+                        if log_mode.should_record_streaming()
+                            && execution_policy.records_request_log()
+                        {
                             record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         }
-                        record_provider_failure(
-                            &app_state_clone,
-                            provider_id,
-                            &model_str,
-                            &proxy_error,
-                        )
-                        .await;
+                        if execution_policy.records_provider_runtime() {
+                            record_provider_failure(
+                                &app_state_clone,
+                                provider_id,
+                                &model_str,
+                                &proxy_error,
+                            )
+                            .await;
+                        }
 
                         yield Err(std::io::Error::other(stream_error_message));
                         return;
@@ -1043,16 +1138,20 @@ async fn handle_streaming_response(
                         let proxy_error = ProxyError::InternalError(stream_error_message.clone());
                         context.final_error_code = Some(proxy_error.error_code().to_string());
                         context.final_error_message = Some(proxy_error.message().to_string());
-                        if log_mode.should_record_streaming() {
+                        if log_mode.should_record_streaming()
+                            && execution_policy.records_request_log()
+                        {
                             record_request_completion_and_log(&app_state_clone, context.clone()).await;
                         }
-                        record_provider_failure(
-                            &app_state_clone,
-                            provider_id,
-                            &model_str,
-                            &proxy_error,
-                        )
-                        .await;
+                        if execution_policy.records_provider_runtime() {
+                            record_provider_failure(
+                                &app_state_clone,
+                                provider_id,
+                                &model_str,
+                                &proxy_error,
+                            )
+                            .await;
+                        }
 
                         yield Err(std::io::Error::other(stream_error_message));
                         return;
@@ -1096,16 +1195,20 @@ async fn handle_streaming_response(
                     let proxy_error = ProxyError::BadGateway(stream_error_message.clone());
                     context.final_error_code = Some(proxy_error.error_code().to_string());
                     context.final_error_message = Some(proxy_error.message().to_string());
-                    if log_mode.should_record_streaming() {
+                    if log_mode.should_record_streaming()
+                        && execution_policy.records_request_log()
+                    {
                         record_request_completion_and_log(&app_state_clone, context.clone()).await;
                     }
-                    record_provider_failure(
-                        &app_state_clone,
-                        provider_id,
-                        &model_str,
-                        &proxy_error,
-                    )
-                    .await;
+                    if execution_policy.records_provider_runtime() {
+                        record_provider_failure(
+                            &app_state_clone,
+                            provider_id,
+                            &model_str,
+                            &proxy_error,
+                        )
+                        .await;
+                    }
 
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, stream_error_message));
                     return;
@@ -1139,16 +1242,20 @@ async fn handle_streaming_response(
                 let proxy_error = ProxyError::InternalError(stream_error_message.clone());
                 context.final_error_code = Some(proxy_error.error_code().to_string());
                 context.final_error_message = Some(proxy_error.message().to_string());
-                if log_mode.should_record_streaming() {
+                if log_mode.should_record_streaming()
+                    && execution_policy.records_request_log()
+                {
                     record_request_completion_and_log(&app_state_clone, context.clone()).await;
                 }
-                record_provider_failure(
-                    &app_state_clone,
-                    provider_id,
-                    &model_str,
-                    &proxy_error,
-                )
-                .await;
+                if execution_policy.records_provider_runtime() {
+                    record_provider_failure(
+                        &app_state_clone,
+                        provider_id,
+                        &model_str,
+                        &proxy_error,
+                    )
+                    .await;
+                }
 
                 yield Err(std::io::Error::other(stream_error_message));
                 return;
@@ -1182,14 +1289,20 @@ async fn handle_streaming_response(
 
             context.usage = transformer.parse_usage_info();
             context.usage_normalization = transformer.parse_usage_normalization();
+            context.replace_transform_diagnostics_phase(
+                RequestLogBundleTransformDiagnosticPhase::Stream,
+                &transformer.diagnostics_snapshot(),
+            );
             if context.usage.is_none() {
                 info!("{}: SSE stream completed without usage info.", model_str);
             }
 
-            if log_mode.should_record_streaming() {
+            if log_mode.should_record_streaming() && execution_policy.records_request_log() {
                 record_request_completion_and_log(&app_state_clone, context.clone()).await;
             }
-            record_provider_success(&app_state_clone, provider_id, &model_str).await;
+            if execution_policy.records_provider_runtime() {
+                record_provider_success(&app_state_clone, provider_id, &model_str).await;
+            }
             info!("{}: SSE stream completed.", model_str);
             response_drop_guard.disarm();
         } else { // !status_code.is_success()
@@ -1210,10 +1323,12 @@ async fn handle_streaming_response(
             let proxy_error = classify_upstream_status(status_code, &[]);
             context.final_error_code = Some(proxy_error.error_code().to_string());
             context.final_error_message = Some(proxy_error.message().to_string());
-            if log_mode.should_record_streaming() {
+            if log_mode.should_record_streaming() && execution_policy.records_request_log() {
                 record_request_completion_and_log(&app_state_clone, context.clone()).await;
             }
-            record_provider_failure(&app_state_clone, provider_id, &model_str, &proxy_error).await;
+            if execution_policy.records_provider_runtime() {
+                record_provider_failure(&app_state_clone, provider_id, &model_str, &proxy_error).await;
+            }
             response_drop_guard.disarm();
         }
     };
@@ -1441,7 +1556,7 @@ mod tests {
             .to_string(),
         );
 
-        let (final_body, usage, normalization) =
+        let (final_body, usage, normalization, diagnostics) =
             process_success_response_body(&gemini_result, LlmApiType::Openai, LlmApiType::Gemini);
         let final_value: Value = serde_json::from_slice(&final_body).unwrap();
 
@@ -1471,6 +1586,7 @@ mod tests {
                 ..Default::default()
             })
         );
+        assert!(diagnostics.is_empty());
     }
 
     #[tokio::test]
@@ -1499,12 +1615,13 @@ mod tests {
     fn process_success_response_body_passes_through_non_json() {
         let body = bytes::Bytes::from_static(b"plain text response");
 
-        let (final_body, usage, normalization) =
+        let (final_body, usage, normalization, diagnostics) =
             process_success_response_body(&body, LlmApiType::Openai, LlmApiType::Gemini);
 
         assert_eq!(final_body, body);
         assert!(usage.is_none());
         assert!(normalization.is_none());
+        assert!(diagnostics.is_empty());
     }
 
     #[tokio::test]

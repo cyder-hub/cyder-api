@@ -43,11 +43,61 @@ export type V2AttemptRow = V2AttemptBodies & {
   providerModelDisplay: string;
 };
 
+export type BundleNameValue = {
+  name: string | null;
+  value: string | null;
+  valuePresent?: boolean | null;
+};
+
+export type V2RequestSnapshot = {
+  requestPath: string | null;
+  operationKind: string | null;
+  queryParams: BundleNameValue[];
+  sanitizedOriginalHeaders: BundleNameValue[];
+};
+
+export type V2CandidateManifestItem = {
+  candidatePosition: number | null;
+  routeId: number | null;
+  routeName: string | null;
+  providerId: number | null;
+  providerKey: string | null;
+  modelId: number | null;
+  modelName: string | null;
+  realModelName: string | null;
+  llmApiType: string | null;
+  providerApiKeyMode: string | null;
+};
+
+export type V2CandidateManifest = {
+  items: V2CandidateManifestItem[];
+};
+
+export type V2TransformDiagnosticSummary = {
+  count: number;
+  maxLossLevel: string | null;
+  kinds: string[];
+  phases: string[];
+};
+
+export type V2TransformDiagnosticItem = {
+  phase: string | null;
+  diagnostic: Record<string, unknown> | null;
+};
+
+export type V2TransformDiagnostics = {
+  summary: V2TransformDiagnosticSummary;
+  items: V2TransformDiagnosticItem[];
+};
+
 export type V2Bodies = {
   kind: "v2";
   version: 2;
   request: V2RequestBodies;
   attempts: V2AttemptBodies[];
+  requestSnapshot: V2RequestSnapshot | null;
+  candidateManifest: V2CandidateManifest | null;
+  transformDiagnostics: V2TransformDiagnostics | null;
 };
 
 export type BundleView = LegacyBodies | V2Bodies;
@@ -69,6 +119,31 @@ const asNumber = (value: unknown) =>
 
 const asString = (value: unknown) =>
   typeof value === "string" && value.length > 0 ? value : null;
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const decodeNameValues = (value: unknown): BundleNameValue[] =>
+  (Array.isArray(value) ? value : [])
+    .map((entry) => asRecord(entry))
+    .filter((entry): entry is Record<string, unknown> => entry != null)
+    .map((entry) => {
+      const item: BundleNameValue = {
+        name: asString(entry.name),
+        value:
+          entry.value == null
+            ? null
+            : typeof entry.value === "string"
+              ? entry.value
+              : String(entry.value),
+      };
+      if (typeof entry.value_present === "boolean") {
+        item.valuePresent = entry.value_present;
+      }
+      return item;
+    });
 
 export const decodeLegacyBundle = (
   decoded: Record<string, unknown>,
@@ -155,11 +230,19 @@ export const decodeV2Bundle = (
       : decodeBytes(patchesById.get(patchId)?.patch_body, textDecoder);
 
   const requestSection =
-    decoded.request_section && typeof decoded.request_section === "object"
-      ? (decoded.request_section as Record<string, unknown>)
-      : {};
+    asRecord(decoded.request_section) ?? {};
   const userRequestBlobId = asNumber(requestSection.user_request_blob_id);
   const userResponseBlobId = asNumber(requestSection.user_response_blob_id);
+  const requestSnapshot = asRecord(decoded.request_snapshot);
+  const candidateManifest = asRecord(decoded.candidate_manifest);
+  const transformDiagnostics = asRecord(decoded.transform_diagnostics);
+  const transformDiagnosticsSummary = asRecord(transformDiagnostics?.summary);
+  const transformDiagnosticKinds = Array.isArray(transformDiagnosticsSummary?.kinds)
+    ? transformDiagnosticsSummary.kinds
+    : [];
+  const transformDiagnosticPhases = Array.isArray(transformDiagnosticsSummary?.phases)
+    ? transformDiagnosticsSummary.phases
+    : [];
 
   const attempts = (
     Array.isArray(decoded.attempt_sections) ? decoded.attempt_sections : []
@@ -205,6 +288,59 @@ export const decodeV2Bundle = (
       userResponseCaptureState: asString(requestSection.user_response_capture_state),
     },
     attempts,
+    requestSnapshot: requestSnapshot
+      ? {
+          requestPath: asString(requestSnapshot.request_path),
+          operationKind: asString(requestSnapshot.operation_kind),
+          queryParams: decodeNameValues(requestSnapshot.query_params),
+          sanitizedOriginalHeaders: decodeNameValues(
+            requestSnapshot.sanitized_original_headers,
+          ),
+        }
+      : null,
+    candidateManifest: candidateManifest
+      ? {
+          items: (Array.isArray(candidateManifest.items) ? candidateManifest.items : [])
+            .map((entry) => asRecord(entry))
+            .filter((entry): entry is Record<string, unknown> => entry != null)
+            .map((entry) => ({
+              candidatePosition: asNumber(entry.candidate_position),
+              routeId: asNumber(entry.route_id),
+              routeName: asString(entry.route_name),
+              providerId: asNumber(entry.provider_id),
+              providerKey: asString(entry.provider_key),
+              modelId: asNumber(entry.model_id),
+              modelName: asString(entry.model_name),
+              realModelName: asString(entry.real_model_name),
+              llmApiType: asString(entry.llm_api_type),
+              providerApiKeyMode: asString(entry.provider_api_key_mode),
+            })),
+        }
+      : null,
+    transformDiagnostics: transformDiagnostics
+        ? {
+            summary: {
+              count: asNumber(transformDiagnosticsSummary?.count) ?? 0,
+              maxLossLevel: asString(transformDiagnosticsSummary?.max_loss_level),
+              kinds: transformDiagnosticKinds.filter(
+                (entry): entry is string => typeof entry === "string",
+              ),
+              phases: transformDiagnosticPhases.filter(
+                (entry): entry is string => typeof entry === "string",
+              ),
+            },
+          items: (Array.isArray(transformDiagnostics.items)
+            ? transformDiagnostics.items
+            : []
+          )
+            .map((entry) => asRecord(entry))
+            .filter((entry): entry is Record<string, unknown> => entry != null)
+            .map((entry) => ({
+              phase: asString(entry.phase),
+              diagnostic: asRecord(entry.diagnostic),
+            })),
+        }
+      : null,
   };
 };
 
@@ -216,19 +352,32 @@ export const decodeBundleView = (
     ? decodeV2Bundle(decoded, textDecoder)
     : decodeLegacyBundle(decoded, textDecoder);
 
-const formatProviderModelDisplay = (attempt: RecordAttempt) =>
+type BuildV2AttemptRowsOptions = {
+  unknownProvider?: string;
+  unknownModel?: string;
+};
+
+const formatProviderModelDisplay = (
+  attempt: RecordAttempt,
+  options: Required<BuildV2AttemptRowsOptions>,
+) =>
   attempt.real_model_name_snapshot
-    ? `${attempt.provider_name_snapshot ?? "unknown provider"} / ${
-        attempt.model_name_snapshot ?? "unknown model"
+    ? `${attempt.provider_name_snapshot ?? options.unknownProvider} / ${
+        attempt.model_name_snapshot ?? options.unknownModel
       } -> ${attempt.real_model_name_snapshot}`
-    : `${attempt.provider_name_snapshot ?? "unknown provider"} / ${
-        attempt.model_name_snapshot ?? "unknown model"
+    : `${attempt.provider_name_snapshot ?? options.unknownProvider} / ${
+        attempt.model_name_snapshot ?? options.unknownModel
       }`;
 
 export const buildV2AttemptRows = (
   payloadAttempts: V2AttemptBodies[],
   metadataAttempts: RecordAttempt[] = [],
+  options: BuildV2AttemptRowsOptions = {},
 ): V2AttemptRow[] => {
+  const labels = {
+    unknownProvider: options.unknownProvider ?? "unknown provider",
+    unknownModel: options.unknownModel ?? "unknown model",
+  };
   const metadataById = new Map<number, RecordAttempt>();
   const metadataByIndex = new Map<number, RecordAttempt>();
   for (const attempt of metadataAttempts) {
@@ -241,8 +390,8 @@ export const buildV2AttemptRows = (
       (attempt.attemptId != null ? metadataById.get(attempt.attemptId) : null) ??
       metadataByIndex.get(attempt.attemptIndex) ??
       null;
-    const providerName = metadata?.provider_name_snapshot ?? "unknown provider";
-    const modelName = metadata?.model_name_snapshot ?? "unknown model";
+    const providerName = metadata?.provider_name_snapshot ?? labels.unknownProvider;
+    const modelName = metadata?.model_name_snapshot ?? labels.unknownModel;
     const realModelName = metadata?.real_model_name_snapshot;
 
     return {
@@ -275,7 +424,7 @@ export const buildV2AttemptRows = (
       status: attempt.attempt_status,
       schedulerAction: attempt.scheduler_action,
       httpStatus: attempt.http_status,
-      providerModelDisplay: formatProviderModelDisplay(attempt),
+      providerModelDisplay: formatProviderModelDisplay(attempt, labels),
     });
   }
 

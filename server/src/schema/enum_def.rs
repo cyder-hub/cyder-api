@@ -18,7 +18,7 @@ pub enum ProviderType {
     GeminiOpenai,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default)]
 #[db_enum(pg_type = "llm_api_type_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -32,7 +32,7 @@ pub enum LlmApiType {
     GeminiOpenai,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
 #[db_enum(pg_type = "provider_api_key_mode_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -175,9 +175,56 @@ pub enum StorageType {
     S3,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "request_replay_kind_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
+pub enum RequestReplayKind {
+    #[default]
+    AttemptUpstream,
+    GatewayRequest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "request_replay_mode_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
+pub enum RequestReplayMode {
+    #[default]
+    DryRun,
+    Live,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "request_replay_semantic_basis_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
+pub enum RequestReplaySemanticBasis {
+    #[default]
+    HistoricalAttemptSnapshot,
+    HistoricalRequestSnapshotWithCurrentConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "request_replay_status_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "snake_case")]
+pub enum RequestReplayStatus {
+    #[default]
+    Pending,
+    Running,
+    Success,
+    Error,
+    Cancelled,
+    Rejected,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RequestAttemptStatus, SchedulerAction};
+    use super::{
+        RequestAttemptStatus, RequestReplayKind, RequestReplayMode, RequestReplaySemanticBasis,
+        RequestReplayStatus, SchedulerAction,
+    };
 
     #[test]
     fn request_attempt_status_serializes_to_stable_wire_values() {
@@ -216,6 +263,30 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&SchedulerAction::FallbackNextCandidate).unwrap(),
             "\"FALLBACK_NEXT_CANDIDATE\""
+        );
+    }
+
+    #[test]
+    fn request_replay_enums_serialize_to_api_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&RequestReplayKind::AttemptUpstream).unwrap(),
+            "\"attempt_upstream\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestReplayKind::GatewayRequest).unwrap(),
+            "\"gateway_request\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestReplayMode::DryRun).unwrap(),
+            "\"dry_run\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestReplaySemanticBasis::HistoricalAttemptSnapshot).unwrap(),
+            "\"historical_attempt_snapshot\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RequestReplayStatus::Rejected).unwrap(),
+            "\"rejected\""
         );
     }
 }

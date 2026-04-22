@@ -1,6 +1,9 @@
 use cyder_tools::log::{debug, error, warn};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, VecDeque},
+};
 
 use crate::cost::UsageNormalization;
 use crate::schema::enum_def::{LlmApiType, ProviderType};
@@ -1108,6 +1111,32 @@ fn build_transform_diagnostic(
     }
 }
 
+thread_local! {
+    static TRANSFORM_DIAGNOSTIC_STACK: RefCell<Vec<Vec<UnifiedTransformDiagnostic>>> = const {
+        RefCell::new(Vec::new())
+    };
+}
+
+fn capture_transform_diagnostics<T>(f: impl FnOnce() -> T) -> (T, Vec<UnifiedTransformDiagnostic>) {
+    TRANSFORM_DIAGNOSTIC_STACK.with(|stack| {
+        stack.borrow_mut().push(Vec::new());
+    });
+
+    let result = f();
+    let diagnostics =
+        TRANSFORM_DIAGNOSTIC_STACK.with(|stack| stack.borrow_mut().pop().unwrap_or_default());
+
+    (result, diagnostics)
+}
+
+fn record_captured_transform_diagnostic(diagnostic: &UnifiedTransformDiagnostic) {
+    TRANSFORM_DIAGNOSTIC_STACK.with(|stack| {
+        if let Some(active_capture) = stack.borrow_mut().last_mut() {
+            active_capture.push(diagnostic.clone());
+        }
+    });
+}
+
 pub(crate) fn apply_transform_policy(
     source: TransformProtocol,
     target: TransformProtocol,
@@ -1128,6 +1157,7 @@ pub(crate) fn apply_transform_policy(
             None,
             Some(decision.reason.to_string()),
         );
+        record_captured_transform_diagnostic(&diagnostic);
         let diagnostic_json =
             serde_json::to_string(&diagnostic).unwrap_or_else(|_| "{}".to_string());
         match decision.level {
@@ -1213,6 +1243,33 @@ pub fn finalize_request_data(
 }
 
 pub fn transform_request_data(
+    data: Value,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+    is_stream: bool,
+) -> Value {
+    transform_request_data_with_diagnostics(data, api_type, target_api_type, is_stream).value
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestTransformOutput {
+    pub value: Value,
+    pub diagnostics: Vec<UnifiedTransformDiagnostic>,
+}
+
+pub fn transform_request_data_with_diagnostics(
+    data: Value,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+    is_stream: bool,
+) -> RequestTransformOutput {
+    let (value, diagnostics) = capture_transform_diagnostics(|| {
+        transform_request_data_inner(data, api_type, target_api_type, is_stream)
+    });
+    RequestTransformOutput { value, diagnostics }
+}
+
+fn transform_request_data_inner(
     data: Value,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
@@ -4198,11 +4255,46 @@ pub fn transform_result(
     api_type: LlmApiType,
     target_api_type: LlmApiType,
 ) -> (Value, Option<UsageInfo>) {
-    let (value, usage_info, _) = transform_result_with_cost(data, api_type, target_api_type);
-    (value, usage_info)
+    let output = transform_result_with_cost_and_diagnostics(data, api_type, target_api_type);
+    (output.value, output.usage_info)
 }
 
 pub fn transform_result_with_cost(
+    data: Value,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+) -> (Value, Option<UsageInfo>, Option<UsageNormalization>) {
+    let output = transform_result_with_cost_and_diagnostics(data, api_type, target_api_type);
+    (output.value, output.usage_info, output.usage_normalization)
+}
+
+#[derive(Debug, Clone)]
+pub struct ResponseTransformOutput {
+    pub value: Value,
+    pub usage_info: Option<UsageInfo>,
+    pub usage_normalization: Option<UsageNormalization>,
+    pub diagnostics: Vec<UnifiedTransformDiagnostic>,
+}
+
+pub fn transform_result_with_cost_and_diagnostics(
+    data: Value,
+    api_type: LlmApiType,
+    target_api_type: LlmApiType,
+) -> ResponseTransformOutput {
+    let ((value, usage_info, usage_normalization), diagnostics) =
+        capture_transform_diagnostics(|| {
+            transform_result_with_cost_inner(data, api_type, target_api_type)
+        });
+
+    ResponseTransformOutput {
+        value,
+        usage_info,
+        usage_normalization,
+        diagnostics,
+    }
+}
+
+fn transform_result_with_cost_inner(
     data: Value,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
@@ -4408,6 +4500,10 @@ impl StreamTransformer {
 
     pub fn parse_usage_normalization(&mut self) -> Option<UsageNormalization> {
         self.session.usage_normalization_cache.clone()
+    }
+
+    pub fn diagnostics_snapshot(&self) -> Vec<UnifiedTransformDiagnostic> {
+        self.session.diagnostics.iter().cloned().collect()
     }
 
     pub(crate) fn get_or_generate_stream_id(&mut self) -> String {

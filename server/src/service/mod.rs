@@ -1,7 +1,9 @@
 pub mod app_state;
 pub mod cache;
 pub mod redis;
+pub mod request_log_artifact;
 pub mod request_patch;
+pub mod request_replay;
 pub mod storage;
 pub mod transform;
 pub mod vertex;

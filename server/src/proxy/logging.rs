@@ -14,11 +14,18 @@ use crate::{
     service::app_state::{ApiKeyCompletionDelta, AppState},
     service::cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider},
     service::storage::{Storage, get_storage, types::PutObjectOptions},
+    service::transform::unified::{
+        UnifiedTransformDiagnostic, UnifiedTransformDiagnosticLossLevel,
+    },
     utils::{
         ID_GENERATOR,
         storage::{
             LogBodyCaptureState, REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleAttemptSection,
-            RequestLogBundleRequestSection, RequestLogBundleV2, RequestLogBundleV2Builder,
+            RequestLogBundleCandidateManifest, RequestLogBundleRequestSection,
+            RequestLogBundleRequestSnapshot, RequestLogBundleTransformDiagnosticItem,
+            RequestLogBundleTransformDiagnosticPhase, RequestLogBundleTransformDiagnostics,
+            RequestLogBundleTransformDiagnosticsSummary, RequestLogBundleV2,
+            RequestLogBundleV2Builder, RequestLogBundleV2DiagnosticAssets,
             generate_storage_path_from_id,
         },
         usage::UsageInfo,
@@ -222,6 +229,9 @@ pub struct RequestLogContext {
     pub user_response_body: Option<LoggedBody>,
     pub final_error_code: Option<String>,
     pub final_error_message: Option<String>,
+    pub request_snapshot: Option<RequestLogBundleRequestSnapshot>,
+    pub candidate_manifest: Option<RequestLogBundleCandidateManifest>,
+    pub transform_diagnostics: Vec<RequestLogBundleTransformDiagnosticItem>,
     pub(super) skipped_attempts: Vec<RequestAttemptDraft>,
     pub(super) attempts: Vec<RequestAttemptDraft>,
 }
@@ -283,6 +293,9 @@ impl RequestLogContext {
             user_response_body: None,
             final_error_code: None,
             final_error_message: None,
+            request_snapshot: None,
+            candidate_manifest: None,
+            transform_diagnostics: Vec::new(),
             skipped_attempts: Vec::new(),
             attempts: Vec::new(),
         }
@@ -351,9 +364,50 @@ impl RequestLogContext {
             user_response_body: None,
             final_error_code: None,
             final_error_message: None,
+            request_snapshot: None,
+            candidate_manifest: None,
+            transform_diagnostics: Vec::new(),
             skipped_attempts: Vec::new(),
             attempts: Vec::new(),
         }
+    }
+
+    pub(super) fn set_request_snapshot(&mut self, snapshot: RequestLogBundleRequestSnapshot) {
+        self.request_snapshot = Some(snapshot);
+    }
+
+    pub(super) fn set_candidate_manifest(&mut self, manifest: RequestLogBundleCandidateManifest) {
+        self.candidate_manifest = Some(manifest);
+    }
+
+    pub(super) fn seed_transform_diagnostics(
+        &mut self,
+        diagnostics: &[RequestLogBundleTransformDiagnosticItem],
+    ) {
+        self.transform_diagnostics = diagnostics.to_vec();
+    }
+
+    pub(super) fn append_transform_diagnostics(
+        &mut self,
+        phase: RequestLogBundleTransformDiagnosticPhase,
+        diagnostics: &[UnifiedTransformDiagnostic],
+    ) {
+        self.transform_diagnostics.extend(
+            diagnostics
+                .iter()
+                .cloned()
+                .map(|diagnostic| RequestLogBundleTransformDiagnosticItem { phase, diagnostic }),
+        );
+    }
+
+    pub(super) fn replace_transform_diagnostics_phase(
+        &mut self,
+        phase: RequestLogBundleTransformDiagnosticPhase,
+        diagnostics: &[UnifiedTransformDiagnostic],
+    ) {
+        self.transform_diagnostics
+            .retain(|item| item.phase != phase);
+        self.append_transform_diagnostics(phase, diagnostics);
     }
 
     pub(super) fn set_attempts_for_logging(
@@ -391,6 +445,26 @@ fn total_tokens_for_context(context: &RequestLogContext) -> i64 {
                 .map(|usage| i64::from(usage.total_tokens))
         })
         .unwrap_or_default()
+}
+
+fn transform_diagnostic_loss_level_rank(loss_level: &UnifiedTransformDiagnosticLossLevel) -> u8 {
+    match loss_level {
+        UnifiedTransformDiagnosticLossLevel::Lossless => 0,
+        UnifiedTransformDiagnosticLossLevel::LossyMinor => 1,
+        UnifiedTransformDiagnosticLossLevel::LossyMajor => 2,
+        UnifiedTransformDiagnosticLossLevel::Reject => 3,
+    }
+}
+
+fn transform_diagnostic_loss_level_db_str(
+    loss_level: &UnifiedTransformDiagnosticLossLevel,
+) -> &'static str {
+    match loss_level {
+        UnifiedTransformDiagnosticLossLevel::Lossless => "lossless",
+        UnifiedTransformDiagnosticLossLevel::LossyMinor => "lossy_minor",
+        UnifiedTransformDiagnosticLossLevel::LossyMajor => "lossy_major",
+        UnifiedTransformDiagnosticLossLevel::Reject => "reject",
+    }
 }
 
 pub(super) fn completion_delta_from_log_context(
@@ -595,11 +669,22 @@ impl LogManager {
                 if let Err(e) = self.sender.send(command).await {
                     self.metrics.record_enqueue_failure();
                     error!("[log_manager] failed_to_enqueue_log: {:?}", e);
+                    let LogCommand::Record(context) = e.0 else {
+                        return;
+                    };
+                    self.metrics.record_started();
+                    Self::process_log(context, &self.metrics).await;
+                    self.metrics.record_processed();
                 }
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_command)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(command)) => {
                 self.metrics.record_enqueue_failure();
                 error!("[log_manager] failed_to_enqueue_log: channel closed");
+                if let LogCommand::Record(context) = command {
+                    self.metrics.record_started();
+                    Self::process_log(context, &self.metrics).await;
+                    self.metrics.record_processed();
+                }
             }
         }
     }
@@ -1419,6 +1504,8 @@ impl LogManager {
         now: i64,
     ) -> RequestLog {
         let cost_outcome = Self::build_cost_outcome(context);
+        let transform_diagnostics =
+            Self::build_transform_diagnostics_asset(&context.transform_diagnostics);
         let bundle_storage_key = final_storage_type.as_ref().map(|storage_type| {
             generate_storage_path_from_id(context.request_received_at, context.id, storage_type)
         });
@@ -1516,6 +1603,14 @@ impl LogManager {
                 .as_ref()
                 .map(|u| (u.total_input_tokens + u.total_output_tokens) as i32)
                 .or_else(|| context.usage.as_ref().map(|u| u.total_tokens)),
+            has_transform_diagnostics: !context.transform_diagnostics.is_empty(),
+            transform_diagnostic_count: context.transform_diagnostics.len() as i32,
+            transform_diagnostic_max_loss_level: transform_diagnostics
+                .summary
+                .max_loss_level
+                .as_ref()
+                .map(transform_diagnostic_loss_level_db_str)
+                .map(str::to_string),
             bundle_version: final_storage_type
                 .as_ref()
                 .map(|_| REQUEST_LOG_BUNDLE_V2_VERSION as i32),
@@ -1670,7 +1765,47 @@ impl LogManager {
                 user_response_capture_state,
             },
             attempt_sections,
+            RequestLogBundleV2DiagnosticAssets {
+                request_snapshot: context.request_snapshot.clone(),
+                candidate_manifest: context.candidate_manifest.clone(),
+                transform_diagnostics: Some(Self::build_transform_diagnostics_asset(
+                    &context.transform_diagnostics,
+                )),
+            },
         )
+    }
+
+    fn build_transform_diagnostics_asset(
+        items: &[RequestLogBundleTransformDiagnosticItem],
+    ) -> RequestLogBundleTransformDiagnostics {
+        let mut summary = RequestLogBundleTransformDiagnosticsSummary {
+            count: items.len() as u32,
+            max_loss_level: None,
+            kinds: Vec::new(),
+            phases: Vec::new(),
+        };
+
+        for item in items {
+            if !summary.kinds.contains(&item.diagnostic.diagnostic_kind) {
+                summary.kinds.push(item.diagnostic.diagnostic_kind.clone());
+            }
+            if !summary.phases.contains(&item.phase) {
+                summary.phases.push(item.phase);
+            }
+
+            let should_replace_max = summary.max_loss_level.as_ref().map_or(true, |current| {
+                transform_diagnostic_loss_level_rank(&item.diagnostic.loss_level)
+                    > transform_diagnostic_loss_level_rank(current)
+            });
+            if should_replace_max {
+                summary.max_loss_level = Some(item.diagnostic.loss_level.clone());
+            }
+        }
+
+        RequestLogBundleTransformDiagnostics {
+            summary,
+            items: items.to_vec(),
+        }
     }
 
     fn build_cost_outcome(context: &RequestLogContext) -> CostOutcome {
@@ -1797,7 +1932,10 @@ mod tests {
     use crate::service::cache::types::{
         CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider,
     };
-    use crate::utils::storage::{LogBodyCaptureState, REQUEST_LOG_BUNDLE_V2_VERSION};
+    use crate::utils::storage::{
+        LogBodyCaptureState, REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleTransformDiagnostics,
+        RequestLogBundleTransformDiagnosticsSummary,
+    };
     use crate::utils::usage::UsageInfo;
     use bytes::Bytes;
 
@@ -1903,6 +2041,15 @@ mod tests {
         assert_eq!(
             bundle.attempt_sections[0].llm_response_capture_state,
             Some(LogBodyCaptureState::Incomplete)
+        );
+        assert_eq!(bundle.request_snapshot, None);
+        assert_eq!(bundle.candidate_manifest, None);
+        assert_eq!(
+            bundle.transform_diagnostics,
+            Some(RequestLogBundleTransformDiagnostics {
+                summary: RequestLogBundleTransformDiagnosticsSummary::default(),
+                items: Vec::new(),
+            })
         );
         assert_eq!(bundle.blob_pool.len(), 4);
         assert_eq!(request_attempts[0].llm_request_blob_id, Some(3));

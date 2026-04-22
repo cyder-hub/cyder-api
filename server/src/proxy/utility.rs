@@ -6,6 +6,7 @@ use cyder_tools::log::info;
 use super::{
     ProxyError,
     cancellation::ProxyCancellationContext,
+    core::ProxyExecutionPolicy,
     orchestrator::{UtilityOrchestrationInput, orchestrate_utility},
     prepare::ExecutionPlan,
     request::ParsedProxyRequest,
@@ -13,16 +14,17 @@ use super::{
 use crate::{
     schema::enum_def::LlmApiType,
     service::{app_state::AppState, cache::types::CacheApiKey},
+    utils::storage::RequestLogBundleRequestSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum UtilityProtocol {
+pub(crate) enum UtilityProtocol {
     OpenaiCompatible,
     GeminiCompatible,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct UtilityOperation {
+pub(crate) struct UtilityOperation {
     pub name: String,
     pub api_type: LlmApiType,
     pub protocol: UtilityProtocol,
@@ -36,6 +38,7 @@ pub(super) struct UtilityExecutionInput {
     pub execution_plan: ExecutionPlan,
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
+    pub request_snapshot: RequestLogBundleRequestSnapshot,
     pub client_ip_addr: Option<String>,
     pub start_time: i64,
     pub parsed_request: ParsedProxyRequest,
@@ -70,6 +73,7 @@ pub(super) async fn execute_utility_proxy(
         execution_plan,
         query_params,
         original_headers,
+        request_snapshot,
         client_ip_addr,
         start_time,
         parsed_request,
@@ -93,11 +97,14 @@ pub(super) async fn execute_utility_proxy(
             operation,
             execution_plan,
             query_params,
+            replay_query_params: None,
             original_headers,
+            request_snapshot,
             client_ip_addr,
             start_time,
             data,
             original_request_body,
+            execution_policy: ProxyExecutionPolicy::Normal,
         },
     )
     .await

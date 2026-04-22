@@ -28,6 +28,7 @@ pub mod provider_runtime;
 pub mod request_attempt;
 pub mod request_log;
 pub mod request_patch;
+pub mod request_replay_run;
 pub mod stat;
 pub mod system_api_key;
 //pub mod record; // Assuming this will be replaced or removed if request_log supersedes it

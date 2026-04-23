@@ -29,19 +29,16 @@ pub(super) struct AccessibleModel {
 
 pub(super) async fn get_accessible_models(
     app_state: &Arc<AppState>,
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
 ) -> Result<Vec<AccessibleModel>, ProxyError> {
-    debug!(
-        "Fetching accessible models for SystemApiKey ID: {}",
-        system_api_key.id
-    );
+    debug!("Fetching accessible models for API key ID: {}", api_key.id);
 
     let catalog = app_state.get_models_catalog().await.map_err(|store_err| {
         error!("Failed to fetch models catalog from cache: {:?}", store_err);
         ProxyError::InternalError("Failed to retrieve models catalog".to_string())
     })?;
 
-    let available_models = collect_accessible_models(catalog.as_ref(), system_api_key);
+    let available_models = collect_accessible_models(catalog.as_ref(), api_key);
 
     debug!(
         "Total accessible models (including routes and overrides): {}",
@@ -53,16 +50,17 @@ pub(super) async fn get_accessible_models(
 
 pub(super) async fn execute_models_listing(
     app_state: Arc<AppState>,
-    system_api_key: Arc<CacheApiKey>,
+    api_key: Arc<CacheApiKey>,
     api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
-    let _api_key_concurrency_guard = admit_api_key_request(&app_state, &system_api_key)
-        .await
-        .map_err(|e| {
-            error!("API key request admission failed for /models: {:?}", e);
-            e
-        })?;
-    let accessible_models = get_accessible_models(&app_state, &system_api_key).await?;
+    let _api_key_concurrency_guard =
+        admit_api_key_request(&app_state, &api_key)
+            .await
+            .map_err(|e| {
+                error!("API key request admission failed for /models: {:?}", e);
+                e
+            })?;
+    let accessible_models = get_accessible_models(&app_state, &api_key).await?;
     let response_body = render_models_response(api_type, &accessible_models)?;
 
     Ok(Response::builder()
@@ -159,7 +157,7 @@ fn render_models_response(
 
 fn collect_accessible_models(
     catalog: &CacheModelsCatalog,
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
 ) -> Vec<AccessibleModel> {
     let providers_by_id = catalog
         .providers
@@ -190,7 +188,7 @@ fn collect_accessible_models(
         provider_models.sort_by(|left, right| left.model_name.cmp(&right.model_name));
 
         for model in provider_models {
-            if is_model_allowed(system_api_key, provider, model) {
+            if is_model_allowed(api_key, provider, model) {
                 push_unique_accessible_model(
                     &mut available_models,
                     &mut seen_ids,
@@ -219,7 +217,7 @@ fn collect_accessible_models(
 
     for route in routes {
         let Some(accessible_model) =
-            build_route_accessible_model(route, &providers_by_id, &models_by_id, system_api_key)
+            build_route_accessible_model(route, &providers_by_id, &models_by_id, api_key)
         else {
             continue;
         };
@@ -234,9 +232,7 @@ fn collect_accessible_models(
     let mut overrides = catalog
         .api_key_overrides
         .iter()
-        .filter(|override_row| {
-            override_row.is_enabled && override_row.api_key_id == system_api_key.id
-        })
+        .filter(|override_row| override_row.is_enabled && override_row.api_key_id == api_key.id)
         .collect::<Vec<_>>();
     overrides.sort_by(|left, right| left.source_name.cmp(&right.source_name));
 
@@ -253,7 +249,7 @@ fn collect_accessible_models(
             route,
             &providers_by_id,
             &models_by_id,
-            system_api_key,
+            api_key,
         ) else {
             continue;
         };
@@ -289,7 +285,7 @@ fn select_first_accessible_route_candidate<'a>(
     route: &'a CacheModelRoute,
     models_by_id: &'a HashMap<i64, &'a CacheModel>,
     providers_by_id: &'a HashMap<i64, &'a CacheProvider>,
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
 ) -> Option<&'a CacheModel> {
     route
         .candidates
@@ -298,7 +294,7 @@ fn select_first_accessible_route_candidate<'a>(
         .find_map(|candidate| {
             let model = models_by_id.get(&candidate.model_id).copied()?;
             let provider = providers_by_id.get(&model.provider_id).copied()?;
-            is_model_allowed(system_api_key, provider, model).then_some(model)
+            is_model_allowed(api_key, provider, model).then_some(model)
         })
 }
 
@@ -306,14 +302,10 @@ fn build_route_accessible_model(
     route: &CacheModelRoute,
     providers_by_id: &HashMap<i64, &CacheProvider>,
     models_by_id: &HashMap<i64, &CacheModel>,
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
 ) -> Option<AccessibleModel> {
-    let model = select_first_accessible_route_candidate(
-        route,
-        models_by_id,
-        providers_by_id,
-        system_api_key,
-    )?;
+    let model =
+        select_first_accessible_route_candidate(route, models_by_id, providers_by_id, api_key)?;
     let provider = providers_by_id.get(&model.provider_id)?;
 
     Some(AccessibleModel {
@@ -328,14 +320,10 @@ fn build_override_accessible_model(
     route: &CacheModelRoute,
     providers_by_id: &HashMap<i64, &CacheProvider>,
     models_by_id: &HashMap<i64, &CacheModel>,
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
 ) -> Option<AccessibleModel> {
-    let model = select_first_accessible_route_candidate(
-        route,
-        models_by_id,
-        providers_by_id,
-        system_api_key,
-    )?;
+    let model =
+        select_first_accessible_route_candidate(route, models_by_id, providers_by_id, api_key)?;
     let provider = providers_by_id.get(&model.provider_id)?;
 
     Some(AccessibleModel {
@@ -345,15 +333,11 @@ fn build_override_accessible_model(
     })
 }
 
-fn is_model_allowed(
-    system_api_key: &CacheApiKey,
-    provider: &CacheProvider,
-    model: &CacheModel,
-) -> bool {
+fn is_model_allowed(api_key: &CacheApiKey, provider: &CacheProvider, model: &CacheModel) -> bool {
     match ACL_EVALUATOR.authorize(
-        &system_api_key.name,
-        &system_api_key.default_action,
-        &system_api_key.acl_rules,
+        &api_key.name,
+        &api_key.default_action,
+        &api_key.acl_rules,
         provider.id,
         model.id,
     ) {
@@ -361,7 +345,7 @@ fn is_model_allowed(
         Err(reason) => {
             debug!(
                 "Model {}/{} denied for ApiKey ID {}. Reason: {}",
-                provider.provider_key, model.model_name, system_api_key.id, reason
+                provider.provider_key, model.model_name, api_key.id, reason
             );
             false
         }
@@ -486,7 +470,7 @@ mod tests {
             routes: vec![],
             api_key_overrides: vec![],
         };
-        let system_api_key = api_key(
+        let api_key = api_key(
             Action::Deny,
             vec![CacheApiKeyAclRule {
                 id: 1,
@@ -500,7 +484,7 @@ mod tests {
             }],
         );
 
-        let models = collect_accessible_models(&catalog, &system_api_key);
+        let models = collect_accessible_models(&catalog, &api_key);
         let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
         assert_eq!(ids, vec!["provider/allowed".to_string()]);
     }
@@ -649,7 +633,7 @@ mod tests {
             }],
             api_key_overrides: vec![],
         };
-        let system_api_key = api_key(
+        let api_key = api_key(
             Action::Deny,
             vec![CacheApiKeyAclRule {
                 id: 1,
@@ -663,7 +647,7 @@ mod tests {
             }],
         );
 
-        let models = collect_accessible_models(&catalog, &system_api_key);
+        let models = collect_accessible_models(&catalog, &api_key);
         let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
         assert_eq!(
             ids,
@@ -714,9 +698,9 @@ mod tests {
                 is_enabled: true,
             }],
         };
-        let system_api_key = api_key(Action::Deny, vec![]);
+        let api_key = api_key(Action::Deny, vec![]);
 
-        let models = collect_accessible_models(&catalog, &system_api_key);
+        let models = collect_accessible_models(&catalog, &api_key);
         let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
         assert!(ids.is_empty());
     }
@@ -758,7 +742,7 @@ mod tests {
                 is_enabled: true,
             }],
         };
-        let system_api_key = api_key(
+        let api_key = api_key(
             Action::Deny,
             vec![CacheApiKeyAclRule {
                 id: 1,
@@ -772,7 +756,7 @@ mod tests {
             }],
         );
 
-        let models = collect_accessible_models(&catalog, &system_api_key);
+        let models = collect_accessible_models(&catalog, &api_key);
         let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
         assert_eq!(
             ids,

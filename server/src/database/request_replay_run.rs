@@ -171,23 +171,10 @@ fn map_request_replay_run_read_error(replay_run_id: i64, err: diesel::result::Er
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diesel::Connection;
     use diesel::connection::SimpleConnection;
-    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-    use tempfile::tempdir;
-
-    const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 
     fn sqlite_connection() -> (tempfile::TempDir, diesel::SqliteConnection) {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("request-replay-run.sqlite");
-        std::fs::File::create(&db_path).expect("db file should be created");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let mut conn = diesel::SqliteConnection::establish(&db_url)
-            .expect("sqlite connection should be established");
-        conn.run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("migrations should run");
-        (temp_dir, conn)
+        crate::database::open_test_sqlite_connection_with_migrations("request-replay-run.sqlite")
     }
 
     fn seed_source_request(conn: &mut diesel::SqliteConnection) {

@@ -145,15 +145,15 @@ pub async fn authenticate_ollama_request(
 
 // Checks if the request is allowed by the API key's embedded ACL snapshot.
 pub async fn check_access_control(
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
     provider: &CacheProvider,
     model: &CacheModel,
     _app_state: &Arc<AppState>,
 ) -> Result<(), ProxyError> {
     if let Err(reason) = ACL_EVALUATOR.authorize(
-        &system_api_key.name,
-        &system_api_key.default_action,
-        &system_api_key.acl_rules,
+        &api_key.name,
+        &api_key.default_action,
+        &api_key.acl_rules,
         provider.id,
         model.id,
     ) {
@@ -168,14 +168,14 @@ pub async fn check_access_control(
 
 pub async fn admit_api_key_request(
     app_state: &Arc<AppState>,
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
 ) -> Result<Option<ApiKeyConcurrencyGuard>, ProxyError> {
-    match app_state.try_begin_api_key_request(system_api_key).await {
+    match app_state.try_begin_api_key_request(api_key).await {
         Ok(guard) => Ok(guard),
         Err(ApiKeyGovernanceAdmissionError::Internal(message)) => {
             crate::error_event!(
                 "auth.governance_state_error",
-                api_key_id = system_api_key.id,
+                api_key_id = api_key.id,
                 error = message,
             );
             Err(ProxyError::InternalError(
@@ -185,31 +185,31 @@ pub async fn admit_api_key_request(
         Err(ApiKeyGovernanceAdmissionError::RateLimited { limit, current }) => {
             Err(ProxyError::RateLimited(format!(
                 "API key '{}' exceeded rate_limit_rpm={} (current_window_requests={})",
-                system_api_key.name, limit, current
+                api_key.name, limit, current
             )))
         }
         Err(ApiKeyGovernanceAdmissionError::ConcurrencyLimited { limit, current }) => {
             Err(ProxyError::ConcurrencyLimited(format!(
                 "API key '{}' exceeded max_concurrent_requests={} (current={})",
-                system_api_key.name, limit, current
+                api_key.name, limit, current
             )))
         }
         Err(ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded { limit, current }) => {
             Err(ProxyError::QuotaExhausted(format!(
                 "API key '{}' exhausted daily request quota {} (current={})",
-                system_api_key.name, limit, current
+                api_key.name, limit, current
             )))
         }
         Err(ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded { limit, current }) => {
             Err(ProxyError::QuotaExhausted(format!(
                 "API key '{}' exhausted daily token quota {} (current={})",
-                system_api_key.name, limit, current
+                api_key.name, limit, current
             )))
         }
         Err(ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded { limit, current }) => {
             Err(ProxyError::QuotaExhausted(format!(
                 "API key '{}' exhausted monthly token quota {} (current={})",
-                system_api_key.name, limit, current
+                api_key.name, limit, current
             )))
         }
         Err(ApiKeyGovernanceAdmissionError::DailyBudgetExceeded {
@@ -218,7 +218,7 @@ pub async fn admit_api_key_request(
             current_nanos,
         }) => Err(ProxyError::BudgetExhausted(format!(
             "API key '{}' exhausted daily budget {} {} (current={})",
-            system_api_key.name, currency, limit_nanos, current_nanos
+            api_key.name, currency, limit_nanos, current_nanos
         ))),
         Err(ApiKeyGovernanceAdmissionError::MonthlyBudgetExceeded {
             currency,
@@ -226,7 +226,7 @@ pub async fn admit_api_key_request(
             current_nanos,
         }) => Err(ProxyError::BudgetExhausted(format!(
             "API key '{}' exhausted monthly budget {} {} (current={})",
-            system_api_key.name, currency, limit_nanos, current_nanos
+            api_key.name, currency, limit_nanos, current_nanos
         ))),
     }
 }

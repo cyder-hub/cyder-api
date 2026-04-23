@@ -6,6 +6,7 @@ use diesel::{
 };
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use sha2::{Digest, Sha256};
+use std::error::Error as StdError;
 use std::fs::File;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -13,15 +14,22 @@ use std::sync::LazyLock;
 use crate::{config::CONFIG, controller::BaseError};
 use serde::Serialize;
 
-pub mod access_control;
+#[cfg(test)]
+use std::{
+    cell::RefCell,
+    future::Future,
+    panic::{AssertUnwindSafe, resume_unwind},
+    sync::Arc,
+};
+
+#[cfg(test)]
+use tempfile::TempDir;
+
 pub mod api_key;
 pub mod api_key_acl_rule;
 pub mod api_key_rollup;
 pub mod cost;
 pub mod model;
-// Legacy data-access helper for the historical `model_alias` table.
-// Keep this private so new code uses `model_route` and `api_key_model_override`.
-mod model_alias;
 pub mod model_route;
 pub mod provider;
 pub mod provider_runtime;
@@ -30,7 +38,6 @@ pub mod request_log;
 pub mod request_patch;
 pub mod request_replay_run;
 pub mod stat;
-pub mod system_api_key;
 //pub mod record; // Assuming this will be replaced or removed if request_log supersedes it
 
 pub enum DbType {
@@ -43,13 +50,34 @@ pub enum DbPool {
     Sqlite(Pool<ConnectionManager<SqliteConnection>>),
 }
 
+impl Clone for DbPool {
+    fn clone(&self) -> Self {
+        match self {
+            DbPool::Postgres(pool) => DbPool::Postgres(pool.clone()),
+            DbPool::Sqlite(pool) => DbPool::Sqlite(pool.clone()),
+        }
+    }
+}
+
 pub enum DbConnection {
     Postgres(PooledConnection<ConnectionManager<PgConnection>>),
     Sqlite(PooledConnection<ConnectionManager<SqliteConnection>>),
 }
 
 pub fn get_connection() -> DbResult<DbConnection> {
-    match &*DB_POOL {
+    #[cfg(test)]
+    {
+        return get_connection_from_pool(&current_test_db_pool());
+    }
+
+    #[cfg(not(test))]
+    {
+        get_connection_from_pool(&DB_POOL)
+    }
+}
+
+fn get_connection_from_pool(pool: &DbPool) -> DbResult<DbConnection> {
+    match pool {
         DbPool::Postgres(pool) => {
             let conn = pool.get().map_err(|e| {
                 BaseError::DatabaseFatal(Some(format!("Postgres pool error: {}", e)))
@@ -60,9 +88,164 @@ pub fn get_connection() -> DbResult<DbConnection> {
             let conn = pool
                 .get()
                 .map_err(|e| BaseError::DatabaseFatal(Some(format!("Sqlite pool error: {}", e))))?;
+            #[cfg(test)]
+            let mut conn = conn;
+            #[cfg(test)]
+            apply_test_sqlite_pragmas(&mut conn).map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!("Sqlite pragma error: {}", e)))
+            })?;
             Ok(DbConnection::Sqlite(conn))
         }
     }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static ACTIVE_TEST_DB_POOL: DbPool;
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DB_SCOPE_STACK: RefCell<Vec<DbPool>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+static DEFAULT_TEST_DB_DIR: LazyLock<TempDir> =
+    LazyLock::new(|| tempfile::tempdir().expect("default test sqlite dir should be created"));
+
+#[cfg(test)]
+static DEFAULT_TEST_DB_POOL: LazyLock<DbPool> = LazyLock::new(|| {
+    let db_url = DEFAULT_TEST_DB_DIR
+        .path()
+        .join("server-unit-tests.sqlite")
+        .to_string_lossy()
+        .into_owned();
+    DbPool::establish_for_url(&db_url)
+});
+
+#[cfg(test)]
+fn current_test_db_pool() -> DbPool {
+    ACTIVE_TEST_DB_POOL
+        .try_with(Clone::clone)
+        .ok()
+        .or_else(|| TEST_DB_SCOPE_STACK.with(|stack| stack.borrow().last().cloned()))
+        .unwrap_or_else(|| DEFAULT_TEST_DB_POOL.clone())
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct TestDbContext {
+    inner: Arc<TestDbContextInner>,
+}
+
+#[cfg(test)]
+struct TestDbContextInner {
+    _temp_dir: TempDir,
+    pool: DbPool,
+}
+
+#[cfg(test)]
+struct TestDbScopeGuard;
+
+#[cfg(test)]
+impl Drop for TestDbScopeGuard {
+    fn drop(&mut self) {
+        TEST_DB_SCOPE_STACK.with(|stack| {
+            let popped = stack.borrow_mut().pop();
+            debug_assert!(popped.is_some(), "test db scope stack should not underflow");
+        });
+    }
+}
+
+#[cfg(test)]
+impl TestDbContext {
+    pub(crate) fn new_sqlite(file_name: &str) -> Self {
+        let temp_dir = tempfile::tempdir().expect("test sqlite temp dir should be created");
+        let db_url = temp_dir
+            .path()
+            .join(file_name)
+            .to_string_lossy()
+            .into_owned();
+        let pool = DbPool::establish_for_url(&db_url);
+
+        Self {
+            inner: Arc::new(TestDbContextInner {
+                _temp_dir: temp_dir,
+                pool,
+            }),
+        }
+    }
+
+    pub(crate) fn run_sync<R>(&self, operation: impl FnOnce() -> R) -> R {
+        let _guard = self.enter_scope();
+        match std::panic::catch_unwind(AssertUnwindSafe(operation)) {
+            Ok(result) => result,
+            Err(panic_payload) => resume_unwind(panic_payload),
+        }
+    }
+
+    pub(crate) async fn run_async<F>(&self, future: F) -> F::Output
+    where
+        F: Future,
+    {
+        ACTIVE_TEST_DB_POOL
+            .scope(self.inner.pool.clone(), future)
+            .await
+    }
+
+    pub(crate) fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        tokio::spawn(ACTIVE_TEST_DB_POOL.scope(self.inner.pool.clone(), future))
+    }
+
+    fn enter_scope(&self) -> TestDbScopeGuard {
+        TEST_DB_SCOPE_STACK.with(|stack| {
+            stack.borrow_mut().push(self.inner.pool.clone());
+        });
+        TestDbScopeGuard
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn open_test_sqlite_connection(file_name: &str) -> (TempDir, SqliteConnection) {
+    let (temp_dir, db_url) = create_test_sqlite_db(file_name);
+    let mut connection =
+        SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
+    apply_test_sqlite_pragmas(&mut connection).expect("sqlite test pragmas should apply");
+    (temp_dir, connection)
+}
+
+#[cfg(test)]
+pub(crate) fn open_test_sqlite_connection_with_migrations(
+    file_name: &str,
+) -> (TempDir, SqliteConnection) {
+    let (temp_dir, mut connection) = open_test_sqlite_connection(file_name);
+    run_sqlite_migrations(&mut connection).expect("sqlite migrations should run");
+    (temp_dir, connection)
+}
+
+#[cfg(test)]
+pub(crate) fn open_test_sqlite_pooled_connection_with_migrations(
+    file_name: &str,
+) -> (
+    TempDir,
+    PooledConnection<ConnectionManager<SqliteConnection>>,
+) {
+    let (temp_dir, db_url) = create_test_sqlite_db(file_name);
+    let manager = ConnectionManager::<SqliteConnection>::new(db_url);
+    let pool = Pool::builder()
+        .max_size(test_sqlite_pool_size())
+        .build(manager)
+        .expect("sqlite pool should be created");
+    let mut connection = pool
+        .get()
+        .expect("sqlite pooled connection should be checked out");
+    apply_test_sqlite_pragmas(&mut connection).expect("sqlite test pragmas should apply");
+    run_sqlite_migrations(&mut connection).expect("sqlite migrations should run");
+    (temp_dir, connection)
 }
 
 fn parse_db_type(db_url: &str) -> DbType {
@@ -75,7 +258,10 @@ fn parse_db_type(db_url: &str) -> DbType {
 
 impl DbPool {
     pub fn establish() -> Self {
-        let db_url = &CONFIG.db_url;
+        Self::establish_for_url(&CONFIG.db_url)
+    }
+
+    fn establish_for_url(db_url: &str) -> Self {
         let db_type = parse_db_type(db_url);
         match db_type {
             DbType::Postgres => {
@@ -173,9 +359,55 @@ macro_rules! db_execute {
     };
 }
 
+#[cfg_attr(test, allow(dead_code))]
 static DB_POOL: LazyLock<DbPool> = LazyLock::new(DbPool::establish);
-const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
-const POSTGRES_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
+const SQLITE_UPGRADE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
+const POSTGRES_UPGRADE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
+const SQLITE_CLEAN_BASELINE_MIGRATIONS: EmbeddedMigrations =
+    embed_migrations!("migrations/sqlite_clean");
+const POSTGRES_CLEAN_BASELINE_MIGRATIONS: EmbeddedMigrations =
+    embed_migrations!("migrations/postgres_clean");
+
+#[cfg(test)]
+const SQLITE_CLEAN_BASELINE_VERSION: &str = "20260423180000";
+
+const SQLITE_ARCHIVED_UPGRADE_VERSIONS: &[&str] = &[
+    "20250320062357",
+    "20250702140210",
+    "20260128233111",
+    "20260203230221",
+    "20260408090000",
+    "20260410120000",
+    "20260414090000",
+    "20260417100000",
+    "20260417120000",
+    "20260417130000",
+    "20260420120000",
+    "20260421090000",
+    "20260422120000",
+    "20260423120000",
+];
+
+const POSTGRES_ARCHIVED_UPGRADE_VERSIONS: &[&str] = &[
+    "20250320062357",
+    "20250702140210",
+    "20250710221420",
+    "20250923220412",
+    "20260128233111",
+    "20260203230221",
+    "20260408083622",
+    "20260410120000",
+    "20260414090000",
+    "20260417100000",
+    "20260417120000",
+    "20260417130000",
+    "20260420120000",
+    "20260421090000",
+    "20260422120000",
+    "20260423120000",
+];
+
+type MigrationBootstrapResult = Result<(), Box<dyn StdError + Send + Sync>>;
 
 #[derive(QueryableByName)]
 struct SqliteTableInfoRow {
@@ -189,6 +421,12 @@ struct ApiKeyBackfillRow {
     id: i64,
     #[diesel(sql_type = Text)]
     api_key: String,
+}
+
+#[derive(QueryableByName)]
+struct DbCountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
 }
 
 fn sqlite_table_has_column(
@@ -291,7 +529,85 @@ fn backfill_api_key_shadow_postgres(
     Ok(())
 }
 
-fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
+fn sqlite_user_table_count(
+    connection: &mut SqliteConnection,
+) -> Result<i64, diesel::result::Error> {
+    diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM sqlite_master
+         WHERE type = 'table'
+           AND name NOT LIKE 'sqlite_%'
+           AND name <> '__diesel_schema_migrations'",
+    )
+    .get_result::<DbCountRow>(connection)
+    .map(|row| row.count)
+}
+
+fn postgres_user_table_count(connection: &mut PgConnection) -> Result<i64, diesel::result::Error> {
+    diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.tables
+         WHERE table_schema = current_schema()
+           AND table_type = 'BASE TABLE'
+           AND table_name <> '__diesel_schema_migrations'",
+    )
+    .get_result::<DbCountRow>(connection)
+    .map(|row| row.count)
+}
+
+fn record_sqlite_migration_versions(
+    connection: &mut SqliteConnection,
+    versions: &[&str],
+) -> MigrationBootstrapResult {
+    for version in versions {
+        diesel::sql_query("INSERT OR IGNORE INTO __diesel_schema_migrations (version) VALUES (?)")
+            .bind::<Text, _>(*version)
+            .execute(connection)?;
+    }
+
+    Ok(())
+}
+
+fn record_postgres_migration_versions(
+    connection: &mut PgConnection,
+    versions: &[&str],
+) -> MigrationBootstrapResult {
+    for version in versions {
+        diesel::sql_query(
+            "INSERT INTO __diesel_schema_migrations (version)
+             VALUES ($1)
+             ON CONFLICT (version) DO NOTHING",
+        )
+        .bind::<Text, _>(*version)
+        .execute(connection)?;
+    }
+
+    Ok(())
+}
+
+fn run_sqlite_migrations(connection: &mut SqliteConnection) -> MigrationBootstrapResult {
+    repair_legacy_sqlite_schema(connection)?;
+
+    if sqlite_user_table_count(connection)? == 0 {
+        connection.run_pending_migrations(SQLITE_CLEAN_BASELINE_MIGRATIONS)?;
+        record_sqlite_migration_versions(connection, SQLITE_ARCHIVED_UPGRADE_VERSIONS)?;
+    }
+
+    connection.run_pending_migrations(SQLITE_UPGRADE_MIGRATIONS)?;
+    Ok(())
+}
+
+fn run_postgres_migrations(connection: &mut PgConnection) -> MigrationBootstrapResult {
+    if postgres_user_table_count(connection)? == 0 {
+        connection.run_pending_migrations(POSTGRES_CLEAN_BASELINE_MIGRATIONS)?;
+        record_postgres_migration_versions(connection, POSTGRES_ARCHIVED_UPGRADE_VERSIONS)?;
+    }
+
+    connection.run_pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)?;
+    Ok(())
+}
+
+fn ensure_sqlite_db_file(db_url: &str) {
     let db_path = Path::new(db_url);
     if !db_path.exists() {
         if let Some(parent_dir) = db_path.parent() {
@@ -301,9 +617,45 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
         }
         File::create(db_path).expect("failed to create database file");
     }
+}
+
+#[cfg(test)]
+const SQLITE_TEST_BUSY_TIMEOUT_MS: u64 = 5_000;
+
+#[cfg(test)]
+fn test_sqlite_pool_size() -> u32 {
+    2
+}
+
+#[cfg(test)]
+fn create_test_sqlite_db(file_name: &str) -> (TempDir, String) {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let db_url = temp_dir
+        .path()
+        .join(file_name)
+        .to_string_lossy()
+        .into_owned();
+    ensure_sqlite_db_file(&db_url);
+    (temp_dir, db_url)
+}
+
+#[cfg(test)]
+fn apply_test_sqlite_pragmas(
+    connection: &mut SqliteConnection,
+) -> Result<(), diesel::result::Error> {
+    connection.batch_execute(&format!(
+        "PRAGMA journal_mode = WAL; PRAGMA busy_timeout = {SQLITE_TEST_BUSY_TIMEOUT_MS};"
+    ))
+}
+
+fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
+    ensure_sqlite_db_file(db_url);
 
     let mut connection =
         SqliteConnection::establish(db_url).expect("failed to establish migration connection");
+
+    #[cfg(test)]
+    apply_test_sqlite_pragmas(&mut connection).expect("sqlite test pragmas should apply");
 
     {
         use diesel::prelude::*;
@@ -318,19 +670,24 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
         }
     }
 
-    repair_legacy_sqlite_schema(&mut connection)
-        .expect("failed to repair legacy sqlite schema before migrations");
-
-    connection
-        .run_pending_migrations(SQLITE_MIGRATIONS)
-        .expect("failed to run migrations");
+    run_sqlite_migrations(&mut connection).expect("failed to run sqlite migrations");
     backfill_api_key_shadow_sqlite(&mut connection)
         .expect("failed to backfill api_key shadow table");
 
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);
     Pool::builder()
         .test_on_check_out(true)
-        .max_size(CONFIG.db_pool_size)
+        .max_size({
+            #[cfg(test)]
+            {
+                test_sqlite_pool_size()
+            }
+
+            #[cfg(not(test))]
+            {
+                CONFIG.db_pool_size
+            }
+        })
         .build(manager)
         .expect("Failed to create pool.")
 }
@@ -339,9 +696,7 @@ fn init_pg_pool(db_url: &str) -> Pool<ConnectionManager<PgConnection>> {
     let mut connection =
         PgConnection::establish(db_url).expect("failed to establish migration connection");
 
-    connection
-        .run_pending_migrations(POSTGRES_MIGRATIONS)
-        .expect("failed to run migrations");
+    run_postgres_migrations(&mut connection).expect("failed to run postgres migrations");
     backfill_api_key_shadow_postgres(&mut connection)
         .expect("failed to backfill api_key shadow table");
 
@@ -365,12 +720,34 @@ pub struct ListResult<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     fn apply_sql(connection: &mut SqliteConnection, sql_text: &str) {
         if let Err(err) = connection.batch_execute(sql_text) {
             panic!("sql should execute successfully: {err}\n{sql_text}");
         }
+    }
+
+    fn provider_exists(connection: &mut SqliteConnection, provider_id: i64) -> bool {
+        diesel::sql_query("SELECT COUNT(*) AS count FROM provider WHERE id = ?")
+            .bind::<diesel::sql_types::BigInt, _>(provider_id)
+            .get_result::<DbCountRow>(connection)
+            .map(|row| row.count > 0)
+            .expect("provider existence query should succeed")
+    }
+
+    fn insert_provider_marker(connection: &mut SqliteConnection, provider_id: i64) {
+        diesel::sql_query(
+            "INSERT INTO provider (
+                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
+                updated_at, provider_type, provider_api_key_mode
+            ) VALUES (?, ?, ?, ?, 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE')",
+        )
+        .bind::<diesel::sql_types::BigInt, _>(provider_id)
+        .bind::<diesel::sql_types::Text, _>(format!("provider-{provider_id}"))
+        .bind::<diesel::sql_types::Text, _>(format!("Provider {provider_id}"))
+        .bind::<diesel::sql_types::Text, _>("https://example.com")
+        .execute(connection)
+        .expect("provider marker should insert");
     }
 
     fn mark_sqlite_migration_applied(connection: &mut SqliteConnection, version: &str) {
@@ -398,11 +775,7 @@ mod tests {
 
     #[test]
     fn sqlite_cost_foundation_migration_tolerates_legacy_model_billing_plan_id() {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("legacy.sqlite");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let mut connection =
-            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
+        let (_temp_dir, mut connection) = open_test_sqlite_connection("legacy.sqlite");
 
         apply_sql(
             &mut connection,
@@ -464,9 +837,7 @@ mod tests {
             );",
         );
 
-        connection
-            .run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("remaining migrations should succeed");
+        run_sqlite_migrations(&mut connection).expect("remaining sqlite migrations should succeed");
 
         let migrated_cost_catalog_id =
             diesel::sql_query("SELECT cost_catalog_id FROM model WHERE id = 10")
@@ -484,7 +855,7 @@ mod tests {
     }
 
     #[derive(QueryableByName)]
-    struct ApiKeyMigrationRow {
+    struct ApiKeyShadowRow {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
         id: i64,
         #[diesel(sql_type = diesel::sql_types::Text)]
@@ -497,66 +868,10 @@ mod tests {
         default_action: String,
     }
 
-    #[derive(QueryableByName)]
-    struct CostCatalogVersionFreezeRow {
-        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
-        first_used_at: Option<i64>,
-        #[diesel(sql_type = diesel::sql_types::Bool)]
-        is_archived: bool,
-    }
-
     #[test]
-    fn sqlite_api_key_governance_migration_preserves_ids_and_request_log_links() {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("api-key-governance.sqlite");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let mut connection =
-            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
-
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!(
-                "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
-            ),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-04-10-120000_cost_schema_foundation/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!(
-                "../../migrations/sqlite/2026-04-14-090000_cost_catalog_version_freeze_flags/up.sql"
-            ),
-        );
-
-        for version in [
-            "20250320062357",
-            "20250702140210",
-            "20260128233111",
-            "20260203230221",
-            "20260408090000",
-            "20260410120000",
-            "20260414090000",
-        ] {
-            mark_sqlite_migration_applied(&mut connection, version);
-        }
+    fn sqlite_api_key_shadow_backfill_populates_hash_and_request_log_links() {
+        let (_temp_dir, mut connection) =
+            open_test_sqlite_connection_with_migrations("api-key-shadow.sqlite");
 
         apply_sql(
             &mut connection,
@@ -565,14 +880,6 @@ mod tests {
                 updated_at, provider_type, provider_api_key_mode
             ) VALUES (
                 1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider_api_key (
-                id, provider_id, api_key, description, deleted_at, is_enabled, created_at, updated_at
-            ) VALUES (
-                2, 1, 'provider-secret', NULL, NULL, 1, 1, 1
             );",
         );
         apply_sql(
@@ -586,79 +893,67 @@ mod tests {
         );
         apply_sql(
             &mut connection,
-            "INSERT INTO access_control_policy (
-                id, name, description, default_action, created_at, updated_at, deleted_at
+            "INSERT INTO api_key (
+                id, api_key, api_key_hash, key_prefix, key_last4, name, description,
+                default_action, is_enabled, expires_at, rate_limit_rpm, max_concurrent_requests,
+                quota_daily_requests, quota_daily_tokens, quota_monthly_tokens,
+                budget_daily_nanos, budget_daily_currency, budget_monthly_nanos,
+                budget_monthly_currency, deleted_at, created_at, updated_at
             ) VALUES (
-                30, 'policy', NULL, 'ALLOW', 1, 1, NULL
+                3, 'cyder-abcdefghijklmnopqrstuvwxyz', NULL, 'cyder-abcdef', 'wxyz', 'demo', NULL,
+                'ALLOW', 1, NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                NULL, NULL, 1, 1
             );",
         );
         apply_sql(
             &mut connection,
-            "INSERT INTO access_control_rule (
-                id, policy_id, rule_type, priority, scope, provider_id, model_id, is_enabled,
+            "INSERT INTO api_key_acl_rule (
+                id, api_key_id, effect, scope, provider_id, model_id, priority, is_enabled,
                 description, created_at, updated_at, deleted_at
             ) VALUES (
-                31, 30, 'DENY', 5, 'MODEL', 1, 10, 1, 'deny demo model', 1, 1, NULL
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO system_api_key (
-                id, api_key, name, description, access_control_policy_id, is_enabled, deleted_at,
-                created_at, updated_at
-            ) VALUES (
-                3, 'cyder-abcdefghijklmnopqrstuvwxyz', 'demo', NULL, 30, 1, NULL, 1, 1
+                31, 3, 'DENY', 'MODEL', 1, 10, 5, 1, 'deny demo model', 1, 1, NULL
             );",
         );
         apply_sql(
             &mut connection,
             "INSERT INTO request_log (
-                id, system_api_key_id, provider_id, model_id, provider_api_key_id, model_name,
-                real_model_name, request_received_at, llm_request_sent_at,
-                llm_response_first_chunk_at, llm_response_completed_at, client_ip,
-                llm_request_uri, llm_response_status, status, is_stream, estimated_cost_nanos,
-                estimated_cost_currency, cost_catalog_id, cost_catalog_version_id,
-                cost_snapshot_json, created_at, updated_at, total_input_tokens,
-                total_output_tokens, input_text_tokens, output_text_tokens, input_image_tokens,
-                output_image_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                total_tokens, storage_type, user_request_body, llm_request_body,
-                llm_response_body, user_response_body, user_api_type, llm_api_type
+                id, api_key_id, requested_model_name, resolved_name_scope, user_api_type,
+                overall_status, attempt_count, retry_count, fallback_count, request_received_at,
+                created_at, updated_at, has_transform_diagnostics, transform_diagnostic_count
             ) VALUES (
-                20, 3, 1, 10, 2, 'demo-model', 'demo-model', 123456, 123456, NULL, NULL, NULL,
-                NULL, 200, 'SUCCESS', 0, 10, 'USD', NULL, NULL, NULL, 123456, 123456, 1, 1,
-                NULL, NULL, 0, 0, 0, 0, 0, 2, NULL, NULL, NULL, NULL, NULL, 'OPENAI', 'OPENAI'
+                20, 3, 'demo-model', 'direct', 'OPENAI',
+                'SUCCESS', 1, 0, 0, 123456,
+                123456, 123456, 0, 0
             );",
         );
 
-        connection
-            .run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("remaining migrations should succeed");
         backfill_api_key_shadow_sqlite(&mut connection)
             .expect("api_key shadow backfill should succeed");
 
-        let migrated_key = diesel::sql_query(
+        let api_key = diesel::sql_query(
             "SELECT id, api_key_hash, key_prefix, key_last4, default_action
              FROM api_key
              WHERE id = 3",
         )
-        .get_result::<ApiKeyMigrationRow>(&mut connection)
-        .expect("migrated api_key row should be readable");
+        .get_result::<ApiKeyShadowRow>(&mut connection)
+        .expect("api_key row should be readable");
 
-        assert_eq!(migrated_key.id, 3);
+        assert_eq!(api_key.id, 3);
         assert_eq!(
-            migrated_key.api_key_hash,
+            api_key.api_key_hash,
             compute_api_key_hash("cyder-abcdefghijklmnopqrstuvwxyz")
         );
-        assert_eq!(migrated_key.key_prefix, "cyder-abcdef");
-        assert_eq!(migrated_key.key_last4, "wxyz");
-        assert_eq!(migrated_key.default_action, "ALLOW");
+        assert_eq!(api_key.key_prefix, "cyder-abcdef");
+        assert_eq!(api_key.key_last4, "wxyz");
+        assert_eq!(api_key.default_action, "ALLOW");
 
         let acl_rule_count = diesel::sql_query(
             "SELECT COUNT(*) AS count
              FROM api_key_acl_rule
              WHERE api_key_id = 3
-               AND scope = 'MODEL'
-               AND model_id = 10",
+               AND scope = 'MODEL'",
         )
         .get_result::<CountRow>(&mut connection)
         .expect("api_key_acl_rule count should be readable")
@@ -680,340 +975,187 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_cost_catalog_version_freeze_migration_backfills_first_used_at() {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("cost-version-freeze.sqlite");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let mut connection =
-            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
+    fn sqlite_fresh_install_bootstraps_clean_baseline_and_marks_upgrade_history_applied() {
+        let (_temp_dir, mut connection) = open_test_sqlite_connection("clean-baseline.sqlite");
+        let legacy_tables = [
+            ["system", "_api_key"].concat(),
+            ["access", "_control_rule"].concat(),
+            ["access", "_control_policy"].concat(),
+            ["model", "_alias"].concat(),
+        ];
 
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!(
-                "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
-            ),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-04-10-120000_cost_schema_foundation/up.sql"),
-        );
+        run_sqlite_migrations(&mut connection)
+            .expect("fresh install should bootstrap the clean baseline");
 
-        for version in [
-            "20250320062357",
-            "20250702140210",
-            "20260128233111",
-            "20260203230221",
-            "20260408090000",
-            "20260410120000",
+        for table_name in [
+            "api_key",
+            "request_log",
+            "request_attempt",
+            "request_patch_rule",
         ] {
-            mark_sqlite_migration_applied(&mut connection, version);
+            assert!(
+                sqlite_table_exists(&mut connection, table_name),
+                "{table_name} should exist after clean baseline bootstrap"
+            );
         }
 
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
-                updated_at, provider_type, provider_api_key_mode
-            ) VALUES (
-                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider_api_key (
-                id, provider_id, api_key, description, deleted_at, is_enabled, created_at, updated_at
-            ) VALUES (
-                2, 1, 'secret', NULL, NULL, 1, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO system_api_key (
-                id, api_key, name, description, access_control_policy_id, is_enabled, deleted_at,
-                created_at, updated_at
-            ) VALUES (
-                3, 'system-secret', 'demo', NULL, NULL, 1, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO cost_catalogs (
-                id, name, description, created_at, updated_at, deleted_at
-            ) VALUES (
-                100, 'demo-catalog', NULL, 1, 1, NULL
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO model (
-                id, provider_id, cost_catalog_id, model_name, real_model_name, is_enabled,
-                deleted_at, created_at, updated_at
-            ) VALUES (
-                10, 1, 100, 'demo-model', NULL, 1, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO cost_catalog_versions (
-                id, catalog_id, version, currency, source, effective_from, effective_until,
-                is_enabled, created_at, updated_at
-            ) VALUES (
-                101, 100, 'v1', 'USD', NULL, 1, NULL, 1, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO request_log (
-                id, system_api_key_id, provider_id, model_id, provider_api_key_id, model_name,
-                real_model_name, request_received_at, llm_request_sent_at,
-                llm_response_first_chunk_at, llm_response_completed_at, client_ip,
-                llm_request_uri, llm_response_status, status, is_stream, estimated_cost_nanos,
-                estimated_cost_currency, cost_catalog_id, cost_catalog_version_id,
-                cost_snapshot_json, created_at, updated_at, total_input_tokens,
-                total_output_tokens, input_text_tokens, output_text_tokens, input_image_tokens,
-                output_image_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                total_tokens, storage_type, user_request_body, llm_request_body,
-                llm_response_body, user_response_body, user_api_type, llm_api_type
-            ) VALUES (
-                200, 3, 1, 10, 2, 'demo-model', 'demo-model', 123456, 123456, NULL, NULL, NULL,
-                NULL, 200, 'SUCCESS', 0, 10, 'USD', 100, 101, NULL, 123456, 123456, 1, 1, NULL,
-                NULL, NULL, NULL, 0, NULL, 0, 2, NULL, NULL, NULL, NULL, NULL, 'OPENAI', 'OPENAI'
-            );",
-        );
-
-        connection
-            .run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("remaining migrations should succeed");
-
-        let row = diesel::sql_query(
-            "SELECT first_used_at, is_archived FROM cost_catalog_versions WHERE id = 101",
-        )
-        .get_result::<CostCatalogVersionFreezeRow>(&mut connection)
-        .expect("cost catalog version should be readable after migration");
-
-        assert_eq!(row.first_used_at, Some(123456));
-        assert!(!row.is_archived);
-    }
-
-    #[test]
-    fn sqlite_cost_foundation_migration_filters_request_logs_with_orphan_foreign_keys() {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("legacy-request-log.sqlite");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let mut connection =
-            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
-
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!(
-                "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
-            ),
-        );
-
-        for version in [
-            "20250320062357",
-            "20250702140210",
-            "20260128233111",
-            "20260203230221",
-            "20260408090000",
-        ] {
-            mark_sqlite_migration_applied(&mut connection, version);
+        for table_name in &legacy_tables {
+            assert!(
+                !sqlite_table_exists(&mut connection, table_name.as_str()),
+                "{table_name} should not exist after clean baseline bootstrap"
+            );
         }
 
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
-                updated_at, provider_type, provider_api_key_mode
-            ) VALUES (
-                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider_api_key (
-                id, provider_id, api_key, description, deleted_at, is_enabled, created_at, updated_at
-            ) VALUES (
-                2, 1, 'secret', NULL, NULL, 1, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO system_api_key (
-                id, api_key, name, description, access_control_policy_id, is_enabled, deleted_at,
-                created_at, updated_at
-            ) VALUES (
-                3, 'system-secret', 'demo', NULL, NULL, 1, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO model (
-                id, provider_id, billing_plan_id, model_name, real_model_name, is_enabled,
-                deleted_at, created_at, updated_at
-            ) VALUES (
-                10, 1, NULL, 'demo-model', NULL, 1, NULL, 1, 1
-            );",
-        );
-        apply_sql(&mut connection, "PRAGMA foreign_keys=off;");
-        apply_sql(
-            &mut connection,
-            "INSERT INTO request_log (
-                id, system_api_key_id, provider_id, model_id, provider_api_key_id, model_name,
-                real_model_name, request_received_at, llm_request_sent_at,
-                llm_response_first_chunk_at, llm_response_completed_at, client_ip,
-                llm_request_uri, llm_response_status, status, is_stream, calculated_cost,
-                cost_currency, created_at, updated_at, input_tokens, output_tokens,
-                reasoning_tokens, total_tokens, storage_type, user_request_body,
-                llm_request_body, llm_response_body, user_response_body, cached_tokens,
-                input_image_tokens, output_image_tokens, user_api_type, llm_api_type
-            ) VALUES (
-                20, 3, 1, 999, 2, 'demo-model', 'demo-model', 1, 1, NULL, NULL, NULL,
-                NULL, 200, 'SUCCESS', 0, 10, 'USD', 1, 1, 1, 1, 0, 2, NULL, NULL, NULL,
-                NULL, NULL, 0, 0, 0, 'OPENAI', 'OPENAI'
-            );",
-        );
-        apply_sql(&mut connection, "PRAGMA foreign_keys=on;");
+        let baseline_count = diesel::sql_query(format!(
+            "SELECT COUNT(*) AS count
+             FROM __diesel_schema_migrations
+             WHERE version = '{SQLITE_CLEAN_BASELINE_VERSION}'"
+        ))
+        .get_result::<CountRow>(&mut connection)
+        .expect("clean baseline migration count should be readable")
+        .count;
+        assert_eq!(baseline_count, 1);
 
-        connection
-            .run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("remaining migrations should succeed");
-
-        let request_log_count = diesel::sql_query("SELECT COUNT(*) AS count FROM request_log")
-            .get_result::<CountRow>(&mut connection)
-            .expect("request_log count should be readable")
-            .count;
-
-        assert_eq!(request_log_count, 0);
-    }
-
-    #[test]
-    fn sqlite_cost_foundation_migration_preserves_model_alias_references() {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("legacy-model-alias.sqlite");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let mut connection =
-            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
-
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!(
-                "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
-            ),
-        );
-
-        for version in [
-            "20250320062357",
-            "20250702140210",
-            "20260128233111",
-            "20260203230221",
-            "20260408090000",
-        ] {
-            mark_sqlite_migration_applied(&mut connection, version);
-        }
-
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
-                updated_at, provider_type, provider_api_key_mode
-            ) VALUES (
-                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO model (
-                id, provider_id, billing_plan_id, model_name, real_model_name, is_enabled,
-                deleted_at, created_at, updated_at
-            ) VALUES (
-                10, 1, NULL, 'demo-model', NULL, 1, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO model_alias (
-                id, alias_name, target_model_id, description, priority, is_enabled, deleted_at,
-                created_at, updated_at
-            ) VALUES (
-                30, 'demo-alias', 10, NULL, 0, 1, NULL, 1, 1
-            );",
-        );
-
-        connection
-            .run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("remaining migrations should succeed");
-
-        let alias_target_count = diesel::sql_query(
-            "SELECT COUNT(*) AS count FROM model_alias WHERE id = 30 AND target_model_id = 10",
+        let archived_upgrade_count = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM __diesel_schema_migrations
+             WHERE version = '20250702140210'
+                OR version = '20260423120000'",
         )
         .get_result::<CountRow>(&mut connection)
-        .expect("model_alias row should be readable")
+        .expect("archived upgrade migration count should be readable")
         .count;
+        assert_eq!(archived_upgrade_count, 2);
+    }
 
-        assert_eq!(alias_target_count, 1);
+    fn sqlite_table_exists(connection: &mut SqliteConnection, table_name: &str) -> bool {
+        super::sqlite_table_has_column(connection, table_name, "id")
+            .expect("table existence should be readable")
+            .unwrap_or(false)
+    }
+
+    fn apply_sqlite_migrations_through_request_diagnostics_replay(
+        connection: &mut SqliteConnection,
+    ) {
+        for (version, sql_text) in [
+            (
+                "20250320062357",
+                include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
+            ),
+            (
+                "20250702140210",
+                include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
+            ),
+            (
+                "20260128233111",
+                include_str!(
+                    "../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"
+                ),
+            ),
+            (
+                "20260203230221",
+                include_str!(
+                    "../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"
+                ),
+            ),
+            (
+                "20260408090000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
+                ),
+            ),
+            (
+                "20260410120000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-10-120000_cost_schema_foundation/up.sql"
+                ),
+            ),
+            (
+                "20260414090000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-14-090000_cost_catalog_version_freeze_flags/up.sql"
+                ),
+            ),
+            (
+                "20260417100000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-17-100000_model_route_foundation/up.sql"
+                ),
+            ),
+            (
+                "20260417120000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-17-120000_api_key_governance_foundation/up.sql"
+                ),
+            ),
+            (
+                "20260417130000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-17-130000_request_log_route_trace/up.sql"
+                ),
+            ),
+            (
+                "20260420120000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-20-120000_request_patch_rule_foundation/up.sql"
+                ),
+            ),
+            (
+                "20260421090000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-21-090000_routing_resilience_foundation/up.sql"
+                ),
+            ),
+            (
+                "20260422120000",
+                include_str!(
+                    "../../migrations/sqlite/2026-04-22-120000_request_diagnostics_replay_foundation/up.sql"
+                ),
+            ),
+        ] {
+            apply_sql(connection, sql_text);
+            mark_sqlite_migration_applied(connection, version);
+        }
+    }
+
+    #[test]
+    fn sqlite_drop_legacy_tables_migration_removes_legacy_tables_on_existing_schema() {
+        let (_temp_dir, mut connection) = open_test_sqlite_connection("drop-legacy.sqlite");
+        let legacy_tables = [
+            ["system", "_api_key"].concat(),
+            ["access", "_control_rule"].concat(),
+            ["access", "_control_policy"].concat(),
+            ["model", "_alias"].concat(),
+        ];
+
+        apply_sqlite_migrations_through_request_diagnostics_replay(&mut connection);
+
+        for table_name in &legacy_tables {
+            assert!(
+                sqlite_table_exists(&mut connection, table_name.as_str()),
+                "{table_name} should exist before the drop migration runs"
+            );
+        }
+
+        run_sqlite_migrations(&mut connection)
+            .expect("drop migration should succeed on the current sqlite schema");
+
+        for table_name in &legacy_tables {
+            assert!(
+                !sqlite_table_exists(&mut connection, table_name.as_str()),
+                "{table_name} should be removed by the drop migration"
+            );
+        }
+
+        assert!(sqlite_table_exists(&mut connection, "api_key"));
+        assert!(sqlite_table_exists(&mut connection, "request_log"));
     }
 
     #[test]
     fn sqlite_request_patch_rule_migration_replaces_legacy_tables_and_adds_request_log_trace_columns()
      {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("request-patch-rule.sqlite");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let mut connection =
-            SqliteConnection::establish(&db_url).expect("sqlite connection should be established");
-
-        connection
-            .run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("migrations should run");
+        let (_temp_dir, mut connection) =
+            open_test_sqlite_connection_with_migrations("request-patch-rule.sqlite");
 
         let request_patch_table_count = diesel::sql_query(
             "SELECT COUNT(*) AS count
@@ -1141,5 +1283,98 @@ mod tests {
                 .is_err(),
             "invalid json payload should be rejected"
         );
+    }
+
+    #[test]
+    fn test_db_context_run_sync_uses_scoped_pool_and_restores_default_after_exit() {
+        let scoped = TestDbContext::new_sqlite("scoped-run-sync.sqlite");
+        let marker_id = 991_001;
+
+        scoped.run_sync(|| {
+            let DbConnection::Sqlite(mut connection) =
+                get_connection().expect("scoped sqlite connection should be available")
+            else {
+                panic!("expected sqlite connection");
+            };
+            insert_provider_marker(&mut connection, marker_id);
+            assert!(provider_exists(&mut connection, marker_id));
+        });
+
+        let DbConnection::Sqlite(mut default_connection) =
+            get_connection().expect("default sqlite connection should be available")
+        else {
+            panic!("expected sqlite connection");
+        };
+        assert!(!provider_exists(&mut default_connection, marker_id));
+    }
+
+    #[tokio::test]
+    async fn test_db_context_run_async_uses_scoped_pool() {
+        let scoped = TestDbContext::new_sqlite("scoped-run-async.sqlite");
+        let marker_id = 991_002;
+
+        scoped
+            .run_async(async {
+                let DbConnection::Sqlite(mut connection) =
+                    get_connection().expect("scoped sqlite connection should be available")
+                else {
+                    panic!("expected sqlite connection");
+                };
+                insert_provider_marker(&mut connection, marker_id);
+                assert!(provider_exists(&mut connection, marker_id));
+            })
+            .await;
+
+        let DbConnection::Sqlite(mut default_connection) =
+            get_connection().expect("default sqlite connection should be available")
+        else {
+            panic!("expected sqlite connection");
+        };
+        assert!(!provider_exists(&mut default_connection, marker_id));
+    }
+
+    #[test]
+    fn nested_test_db_context_scopes_restore_outer_pool() {
+        let outer = TestDbContext::new_sqlite("outer-scope.sqlite");
+        let inner = TestDbContext::new_sqlite("inner-scope.sqlite");
+        let outer_marker = 991_003;
+        let inner_marker = 991_004;
+
+        outer.run_sync(|| {
+            let DbConnection::Sqlite(mut outer_connection) =
+                get_connection().expect("outer sqlite connection should be available")
+            else {
+                panic!("expected sqlite connection");
+            };
+            insert_provider_marker(&mut outer_connection, outer_marker);
+            assert!(provider_exists(&mut outer_connection, outer_marker));
+            assert!(!provider_exists(&mut outer_connection, inner_marker));
+            drop(outer_connection);
+
+            inner.run_sync(|| {
+                let DbConnection::Sqlite(mut inner_connection) =
+                    get_connection().expect("inner sqlite connection should be available")
+                else {
+                    panic!("expected sqlite connection");
+                };
+                insert_provider_marker(&mut inner_connection, inner_marker);
+                assert!(provider_exists(&mut inner_connection, inner_marker));
+                assert!(!provider_exists(&mut inner_connection, outer_marker));
+            });
+
+            let DbConnection::Sqlite(mut restored_outer_connection) =
+                get_connection().expect("outer sqlite connection should be restored")
+            else {
+                panic!("expected sqlite connection");
+            };
+            assert!(provider_exists(
+                &mut restored_outer_connection,
+                outer_marker
+            ));
+            assert!(!provider_exists(
+                &mut restored_outer_connection,
+                inner_marker
+            ));
+        });
     }
 }

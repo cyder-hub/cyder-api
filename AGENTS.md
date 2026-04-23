@@ -203,7 +203,7 @@ Do not claim storage-related verification unless you actually ran it in a valid 
 
 - Be conservative with existing behavior, especially proxy and logging paths.
 - Prefer best-practice end-state design over preserving already-known weak abstractions.
-- Do not keep expanding legacy `system_api_key` semantics for new governance work; prefer the newer `api_key` aggregate direction.
-- Outside explicit database compatibility boundaries, business-layer naming should use `api_key` and must not expose new `system_api_key` DTO or UI fields.
+- Do not keep expanding legacy API key compatibility semantics for new governance work; prefer the newer `api_key` aggregate direction.
+- Outside explicit database compatibility boundaries, business-layer naming should use `api_key` and must not expose new legacy API key DTO or UI fields.
 - Use clear error handling and preserve operator-facing diagnostic value.
 - When in doubt, improve debuggability.

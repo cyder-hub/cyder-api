@@ -37,7 +37,6 @@ use flate2::{Compression, write::GzEncoder};
 use reqwest::StatusCode;
 use rmp_serde::to_vec_named;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{env, io::Write, path::PathBuf, time::Duration};
 use tokio::{
@@ -46,6 +45,9 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::sleep,
 };
+
+#[cfg(test)]
+use crate::database::TestDbContext;
 
 #[derive(Debug, Clone)]
 pub enum LoggedBody {
@@ -237,7 +239,7 @@ pub struct RequestLogContext {
 
 impl RequestLogContext {
     pub fn new(
-        system_api_key: &CacheApiKey,
+        api_key: &CacheApiKey,
         provider: &CacheProvider,
         model: &CacheModel,
         provider_api_key_id: Option<i64>,
@@ -258,7 +260,7 @@ impl RequestLogContext {
 
         Self {
             id: ID_GENERATOR.generate_id(),
-            api_key_id: system_api_key.id,
+            api_key_id: api_key.id,
             provider_id: provider.id,
             provider_key: provider.provider_key.clone(),
             provider_name: provider.name.clone(),
@@ -301,7 +303,7 @@ impl RequestLogContext {
     }
 
     pub(super) fn new_for_skipped_candidates(
-        system_api_key: &CacheApiKey,
+        api_key: &CacheApiKey,
         requested_model_name: &str,
         resolved_name_scope: &str,
         resolved_route_id: Option<i64>,
@@ -313,7 +315,7 @@ impl RequestLogContext {
     ) -> Self {
         Self {
             id: ID_GENERATOR.generate_id(),
-            api_key_id: system_api_key.id,
+            api_key_id: api_key.id,
             provider_id: first_skipped_attempt
                 .provider_id
                 .expect("skipped capability attempts should carry provider_id"),
@@ -495,12 +497,13 @@ pub(super) async fn record_request_completion_and_log(
         );
     }
 
-    get_log_manager().log(context).await;
+    app_state.log_manager().log(context).await;
 }
 
 pub struct LogManager {
     sender: mpsc::Sender<LogCommand>,
     metrics: LogManagerMetrics,
+    runtime: LogManagerRuntime,
 }
 
 enum LogCommand {
@@ -518,6 +521,26 @@ enum LogProcessingStage {
     MetadataPersistFailed,
     Completed,
     NeedsCompensation,
+}
+
+#[derive(Clone)]
+enum LogManagerRuntime {
+    Global,
+    #[cfg(test)]
+    Test(TestDbContext),
+}
+
+impl LogManagerRuntime {
+    async fn run<F>(&self, future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        match self {
+            Self::Global => future.await,
+            #[cfg(test)]
+            Self::Test(test_db_context) => test_db_context.run_async(future).await,
+        }
+    }
 }
 
 fn log_processing_stage_name(stage: LogProcessingStage) -> &'static str {
@@ -642,17 +665,29 @@ impl LogManagerMetrics {
 }
 
 impl LogManager {
-    fn new() -> Self {
+    pub fn new() -> Self {
+        Self::new_with_runtime(LogManagerRuntime::Global)
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test(test_db_context: TestDbContext) -> Self {
+        Self::new_with_runtime(LogManagerRuntime::Test(test_db_context))
+    }
+
+    fn new_with_runtime(runtime: LogManagerRuntime) -> Self {
         let (sender, mut receiver) = mpsc::channel::<LogCommand>(100);
         let metrics = LogManagerMetrics::new();
         let worker_metrics = metrics.clone();
+        let worker_runtime = runtime.clone();
 
         tokio::spawn(async move {
             while let Some(command) = receiver.recv().await {
                 match command {
                     LogCommand::Record(context) => {
                         worker_metrics.record_started();
-                        Self::process_log(context, &worker_metrics).await;
+                        worker_runtime
+                            .run(Self::process_log(context, &worker_metrics))
+                            .await;
                         worker_metrics.record_processed();
                     }
                     LogCommand::Flush(done) => {
@@ -664,7 +699,11 @@ impl LogManager {
             }
         });
 
-        Self { sender, metrics }
+        Self {
+            sender,
+            metrics,
+            runtime,
+        }
     }
 
     pub async fn log(&self, context: RequestLogContext) {
@@ -700,7 +739,9 @@ impl LogManager {
                         in_flight = snapshot.in_flight,
                     );
                     self.metrics.record_started();
-                    Self::process_log(context, &self.metrics).await;
+                    self.runtime
+                        .run(Self::process_log(context, &self.metrics))
+                        .await;
                     self.metrics.record_processed();
                 }
             }
@@ -716,7 +757,9 @@ impl LogManager {
                         in_flight = snapshot.in_flight,
                     );
                     self.metrics.record_started();
-                    Self::process_log(context, &self.metrics).await;
+                    self.runtime
+                        .run(Self::process_log(context, &self.metrics))
+                        .await;
                     self.metrics.record_processed();
                 }
             }
@@ -2006,12 +2049,6 @@ fn log_body_capture_state_from_db_str(value: &str) -> Option<LogBodyCaptureState
     }
 }
 
-static LOG_MANAGER: LazyLock<LogManager> = LazyLock::new(LogManager::new);
-
-pub fn get_log_manager() -> &'static LogManager {
-    &LOG_MANAGER
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2037,7 +2074,7 @@ mod tests {
     use bytes::Bytes;
 
     fn make_log_context() -> RequestLogContext {
-        let system_api_key = CacheApiKey {
+        let api_key = CacheApiKey {
             id: 1,
             api_key_hash: "hash".to_string(),
             key_prefix: "cyder-prefix".to_string(),
@@ -2084,7 +2121,7 @@ mod tests {
         };
 
         RequestLogContext::new(
-            &system_api_key,
+            &api_key,
             &provider,
             &model,
             Some(4),
@@ -2707,5 +2744,24 @@ mod tests {
         manager.flush().await;
         let snapshot = manager.metrics();
         assert_eq!(snapshot.pending, 0);
+    }
+
+    #[tokio::test]
+    async fn log_manager_instances_keep_metrics_isolated() {
+        let first = LogManager::new();
+        let second = LogManager::new();
+
+        let mut context = make_log_context();
+        context.request_url = Some("https://example.com/v1/chat/completions".to_string());
+        context.overall_status = RequestStatus::Success;
+        context.completion_ts = Some(2_000);
+
+        first.log(context).await;
+        first.flush().await;
+        second.flush().await;
+
+        assert_eq!(first.metrics().enqueued, 1);
+        assert_eq!(second.metrics().enqueued, 0);
+        assert_eq!(second.metrics().processed, 0);
     }
 }

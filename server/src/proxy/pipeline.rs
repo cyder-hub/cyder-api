@@ -76,7 +76,7 @@ pub(super) enum ProxyOperation {
 
 pub(super) struct ProxyPipelineContext {
     pub app_state: Arc<AppState>,
-    pub system_api_key: Arc<CacheApiKey>,
+    pub api_key: Arc<CacheApiKey>,
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub request_snapshot: RequestLogBundleRequestSnapshot,
@@ -182,12 +182,12 @@ impl OperationAdapter {
             query_param_count = query_params.len(),
         );
 
-        let system_api_key = self
+        let api_key = self
             .authenticate(&app_state, &original_headers, &query_params)
             .await?;
         let context = ProxyPipelineContext {
             app_state,
-            system_api_key,
+            api_key,
             query_params,
             original_headers,
             request_snapshot,
@@ -204,12 +204,7 @@ impl OperationAdapter {
                 execute_utility_operation(context, cancellation, operation, request).await
             }
             ProxyOperation::Models(operation) => {
-                execute_models_listing(
-                    context.app_state,
-                    context.system_api_key,
-                    operation.api_type,
-                )
-                .await
+                execute_models_listing(context.app_state, context.api_key, operation.api_type).await
             }
         }
     }
@@ -261,20 +256,17 @@ async fn execute_generation_operation(
     let parsed_request = parse_json_request(request).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
     let is_stream = resolve_stream_mode(operation.stream_mode, &parsed_request.data);
-    let execution_plan = build_execution_plan(
-        &context.app_state,
-        context.system_api_key.id,
-        &requested_model,
-    )
-    .await
-    .map_err(|e| {
-        crate::debug_event!(
-            "proxy.execution_plan_build_failed",
-            requested_model = &requested_model,
-            error = &e,
-        );
-        ProxyError::BadRequest(e)
-    })?;
+    let execution_plan =
+        build_execution_plan(&context.app_state, context.api_key.id, &requested_model)
+            .await
+            .map_err(|e| {
+                crate::debug_event!(
+                    "proxy.execution_plan_build_failed",
+                    requested_model = &requested_model,
+                    error = &e,
+                );
+                ProxyError::BadRequest(e)
+            })?;
     debug!(
         "Built execution plan for '{}': {}",
         requested_model,
@@ -285,7 +277,7 @@ async fn execute_generation_operation(
         context.app_state,
         GenerationExecutionInput {
             cancellation,
-            system_api_key: context.system_api_key,
+            api_key: context.api_key,
             api_type: operation.api_type,
             execution_plan,
             is_stream,
@@ -308,20 +300,17 @@ async fn execute_utility_operation(
 ) -> Result<Response<Body>, ProxyError> {
     let parsed_request = parse_json_request(request).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
-    let execution_plan = build_execution_plan(
-        &context.app_state,
-        context.system_api_key.id,
-        &requested_model,
-    )
-    .await
-    .map_err(|e| {
-        crate::debug_event!(
-            "proxy.execution_plan_build_failed",
-            requested_model = &requested_model,
-            error = &e,
-        );
-        ProxyError::BadRequest(e)
-    })?;
+    let execution_plan =
+        build_execution_plan(&context.app_state, context.api_key.id, &requested_model)
+            .await
+            .map_err(|e| {
+                crate::debug_event!(
+                    "proxy.execution_plan_build_failed",
+                    requested_model = &requested_model,
+                    error = &e,
+                );
+                ProxyError::BadRequest(e)
+            })?;
     debug!(
         "Built utility execution plan for '{}': {}",
         requested_model,
@@ -332,7 +321,7 @@ async fn execute_utility_operation(
         context.app_state,
         UtilityExecutionInput {
             cancellation,
-            system_api_key: context.system_api_key,
+            api_key: context.api_key,
             operation: operation.operation,
             execution_plan,
             query_params: context.query_params,

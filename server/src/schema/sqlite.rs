@@ -2,42 +2,6 @@
 
 diesel::table! {
     use crate::schema::enum_def::ActionMapping;
-    use diesel::sql_types::{BigInt, Text, Nullable};
-
-    access_control_policy (id) {
-        id -> BigInt,
-        name -> Text,
-        description -> Nullable<Text>,
-        default_action -> ActionMapping,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-        deleted_at -> Nullable<BigInt>,
-    }
-}
-
-diesel::table! {
-    use crate::schema::enum_def::ActionMapping;
-    use crate::schema::enum_def::RuleScopeMapping;
-    use diesel::sql_types::{Integer, BigInt, Bool, Text, Nullable};
-
-    access_control_rule (id) {
-        id -> BigInt,
-        policy_id -> BigInt,
-        rule_type -> ActionMapping,
-        priority -> Integer,
-        scope -> RuleScopeMapping,
-        provider_id -> Nullable<BigInt>,
-        model_id -> Nullable<BigInt>,
-        is_enabled -> Bool,
-        description -> Nullable<Text>,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-        deleted_at -> Nullable<BigInt>,
-    }
-}
-
-diesel::table! {
-    use crate::schema::enum_def::ActionMapping;
     use diesel::sql_types::{Integer, BigInt, Bool, Text, Nullable};
 
     api_key (id) {
@@ -204,20 +168,6 @@ diesel::table! {
         supports_image_input -> Bool,
         supports_embeddings -> Bool,
         supports_rerank -> Bool,
-        is_enabled -> Bool,
-        deleted_at -> Nullable<BigInt>,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-    }
-}
-
-diesel::table! {
-    model_alias (id) {
-        id -> BigInt,
-        alias_name -> Text,
-        target_model_id -> BigInt,
-        description -> Nullable<Text>,
-        priority -> Nullable<Integer>,
         is_enabled -> Bool,
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
@@ -460,21 +410,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    system_api_key (id) {
-        id -> BigInt,
-        api_key -> Text,
-        name -> Text,
-        description -> Nullable<Text>,
-        access_control_policy_id -> Nullable<BigInt>,
-        usage_limit_policy_id -> Nullable<BigInt>,
-        is_enabled -> Bool,
-        deleted_at -> Nullable<BigInt>,
-        created_at -> BigInt,
-        updated_at -> BigInt,
-    }
-}
-
-diesel::table! {
     use crate::schema::enum_def::RequestPatchOperationMapping;
     use crate::schema::enum_def::RequestPatchPlacementMapping;
     use diesel::sql_types::{BigInt, Bool, Nullable, Text};
@@ -495,9 +430,6 @@ diesel::table! {
     }
 }
 
-diesel::joinable!(access_control_rule -> access_control_policy (policy_id));
-diesel::joinable!(access_control_rule -> model (model_id));
-diesel::joinable!(access_control_rule -> provider (provider_id));
 diesel::joinable!(api_key_acl_rule -> api_key (api_key_id));
 diesel::joinable!(api_key_model_override -> api_key (api_key_id));
 diesel::joinable!(api_key_model_override -> model_route (target_route_id));
@@ -509,7 +441,6 @@ diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
 diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
-diesel::joinable!(model_alias -> model (target_model_id));
 diesel::joinable!(model_route_candidate -> model (model_id));
 diesel::joinable!(model_route_candidate -> model_route (route_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
@@ -528,11 +459,8 @@ diesel::joinable!(request_replay_run -> request_attempt (source_attempt_id));
 diesel::joinable!(request_replay_run -> request_log (source_request_log_id));
 diesel::joinable!(request_patch_rule -> model (model_id));
 diesel::joinable!(request_patch_rule -> provider (provider_id));
-diesel::joinable!(system_api_key -> access_control_policy (access_control_policy_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
-    access_control_policy,
-    access_control_rule,
     api_key,
     api_key_acl_rule,
     api_key_model_override,
@@ -542,7 +470,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     cost_catalog_versions,
     cost_components,
     model,
-    model_alias,
     model_route,
     model_route_candidate,
     provider,
@@ -551,5 +478,4 @@ diesel::allow_tables_to_appear_in_same_query!(
     request_log,
     request_replay_run,
     request_patch_rule,
-    system_api_key,
 );

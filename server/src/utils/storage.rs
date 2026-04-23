@@ -11,22 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-
-pub const REQUEST_LOG_BUNDLE_V1_VERSION: u32 = 1;
 pub const REQUEST_LOG_BUNDLE_V2_VERSION: u32 = 2;
-
-#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
-pub struct LogBundle {
-    pub version: u32,
-    pub log_id: i64,
-    pub created_at: i64,
-    pub user_request_body: Option<Bytes>,
-    pub llm_request_body: Option<Bytes>,
-    pub llm_response_body: Option<Bytes>,
-    pub llm_response_capture_state: Option<LogBodyCaptureState>,
-    pub user_response_body: Option<Bytes>,
-    pub user_response_capture_state: Option<LogBodyCaptureState>,
-}
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 pub struct RequestLogBundleV2 {
@@ -486,8 +471,7 @@ pub fn generate_replay_artifact_storage_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        LogBodyCaptureState, LogBundle, REQUEST_LOG_BUNDLE_V1_VERSION,
-        REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleAttemptSection,
+        LogBodyCaptureState, REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleAttemptSection,
         RequestLogBundleCandidateManifest, RequestLogBundleCandidateManifestItem,
         RequestLogBundleHttpHeader, RequestLogBundleQueryParam, RequestLogBundleRequestSection,
         RequestLogBundleRequestSnapshot, RequestLogBundleTransformDiagnosticItem,
@@ -505,30 +489,6 @@ mod tests {
     use bytes::Bytes;
     use serde::Serialize;
     use serde_json::{Value, json};
-
-    #[test]
-    fn log_bundle_stores_response_capture_state() {
-        let bundle = LogBundle {
-            version: REQUEST_LOG_BUNDLE_V1_VERSION,
-            log_id: 42,
-            created_at: 1_744_100_800_000,
-            user_request_body: Some(Bytes::from_static(b"user request")),
-            llm_request_body: Some(Bytes::from_static(b"llm request")),
-            llm_response_body: Some(Bytes::from_static(b"llm response")),
-            llm_response_capture_state: Some(LogBodyCaptureState::Incomplete),
-            user_response_body: Some(Bytes::from_static(b"user response")),
-            user_response_capture_state: Some(LogBodyCaptureState::Complete),
-        };
-
-        assert_eq!(
-            bundle.llm_response_capture_state,
-            Some(LogBodyCaptureState::Incomplete)
-        );
-        assert_eq!(
-            bundle.user_response_capture_state,
-            Some(LogBodyCaptureState::Complete)
-        );
-    }
 
     #[test]
     fn request_log_bundle_v2_assigns_stable_blob_ids_and_reuses_body_blobs() {

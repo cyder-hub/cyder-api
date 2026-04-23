@@ -2,6 +2,7 @@ use rand::{Rng, rng};
 use reqwest::{Client, Proxy};
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +19,11 @@ use crate::database::model::Model;
 use crate::database::model_route::{ApiKeyModelOverride, ModelRoute};
 use crate::database::provider::{Provider, ProviderApiKey};
 use crate::database::request_patch::RequestPatchRule;
+use crate::proxy::logging::LogManager;
 use crate::schema::enum_def::ProviderApiKeyMode;
+
+#[cfg(test)]
+use crate::database::TestDbContext;
 
 use super::cache::repository::{CacheRepository, DynCacheRepo};
 use super::cache::types::{
@@ -770,15 +775,47 @@ pub struct AppState {
 
     // In-process provider governance state for circuit-open / half-open decisions.
     provider_health_state: Arc<tokio::sync::Mutex<HashMap<i64, ProviderHealthState>>>,
+
+    // Instance-owned proxy log manager.
+    log_manager: Arc<LogManager>,
+
+    #[cfg(test)]
+    test_db_context: Option<TestDbContext>,
 }
 
 impl AppState {
+    #[cfg(not(test))]
     pub async fn new() -> Self {
+        Self::new_with_test_db_context().await
+    }
+
+    #[cfg(test)]
+    pub async fn new() -> Self {
+        Self::new_with_test_db_context(None).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_for_test(test_db_context: TestDbContext) -> Self {
+        Self::new_with_test_db_context(Some(test_db_context)).await
+    }
+
+    async fn new_with_test_db_context(#[cfg(test)] test_db_context: Option<TestDbContext>) -> Self {
         let negative_cache_ttl = CONFIG.cache.negative_ttl();
         let ttl = Some(CONFIG.cache.ttl());
 
-        let redis_pool = redis::get_pool().await;
-        let use_redis = CONFIG.cache.backend == CacheBackendType::Redis && redis_pool.is_some();
+        #[cfg(test)]
+        let force_memory_cache = test_db_context.is_some();
+        #[cfg(not(test))]
+        let force_memory_cache = false;
+
+        let redis_pool = if force_memory_cache {
+            None
+        } else {
+            redis::get_pool().await
+        };
+        let use_redis = !force_memory_cache
+            && CONFIG.cache.backend == CacheBackendType::Redis
+            && redis_pool.is_some();
 
         if use_redis {
             crate::info_event!(
@@ -787,7 +824,14 @@ impl AppState {
                 effective_backend = "redis",
             );
         } else {
-            if CONFIG.cache.backend == CacheBackendType::Redis {
+            if force_memory_cache {
+                crate::info_event!(
+                    "cache.backend_selected",
+                    configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
+                    effective_backend = "memory",
+                    fallback_reason = "test_isolation",
+                );
+            } else if CONFIG.cache.backend == CacheBackendType::Redis {
                 crate::info_event!(
                     "cache.backend_selected",
                     configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
@@ -809,6 +853,21 @@ impl AppState {
 
         let proxy_client = Self::build_http_client(true);
 
+        let log_manager = Arc::new({
+            #[cfg(test)]
+            {
+                match test_db_context.clone() {
+                    Some(test_db_context) => LogManager::new_for_test(test_db_context),
+                    None => LogManager::new(),
+                }
+            }
+
+            #[cfg(not(test))]
+            {
+                LogManager::new()
+            }
+        });
+
         Self {
             api_key_cache: Self::create_repo(ttl, pool),
             model_route_cache: Self::create_repo(ttl, pool),
@@ -827,6 +886,9 @@ impl AppState {
             provider_key_queue_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             api_key_governance_store: ApiKeyGovernanceStore::default(),
             provider_health_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            log_manager,
+            #[cfg(test)]
+            test_db_context,
         }
     }
 
@@ -899,6 +961,27 @@ impl AppState {
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
         format!("{:x}", hasher.finalize())
+    }
+
+    pub(crate) fn log_manager(&self) -> &LogManager {
+        self.log_manager.as_ref()
+    }
+
+    pub async fn flush_proxy_logs(&self) {
+        self.log_manager.flush().await;
+    }
+
+    pub(crate) fn spawn_background_task<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        #[cfg(test)]
+        if let Some(test_db_context) = &self.test_db_context {
+            return test_db_context.spawn(future);
+        }
+
+        tokio::spawn(future)
     }
 
     fn load_cache_api_key(row: ApiKey) -> Result<CacheApiKey, AppStoreError> {
@@ -1533,11 +1616,6 @@ impl AppState {
 
     pub async fn invalidate_api_key(&self, key: &str) -> Result<(), AppStoreError> {
         self.invalidate_api_key_hash(&Self::hash_api_key(key)).await
-    }
-
-    // Legacy compatibility shim. Task 4 no longer keeps standalone ACL cache.
-    pub async fn invalidate_access_control_policy(&self, _id: i64) -> Result<(), AppStoreError> {
-        Ok(())
     }
 
     pub async fn get_model_route_by_id(
@@ -2463,7 +2541,16 @@ impl From<CacheError> for AppStoreError {
 }
 
 pub async fn create_app_state() -> Arc<AppState> {
-    let app_state = Arc::new(AppState::new().await);
+    create_configured_app_state(AppState::new().await).await
+}
+
+#[cfg(test)]
+pub(crate) async fn create_test_app_state(test_db_context: TestDbContext) -> Arc<AppState> {
+    create_configured_app_state(AppState::new_for_test(test_db_context).await).await
+}
+
+async fn create_configured_app_state(app_state: AppState) -> Arc<AppState> {
+    let app_state = Arc::new(app_state);
     app_state.clear_cache().await;
     app_state.reload().await;
     app_state
@@ -2483,6 +2570,7 @@ mod tests {
         GroupItemSelectionStrategy, ProviderHealthState, ProviderHealthStatus,
     };
     use crate::config::ProviderGovernanceConfig;
+    use crate::proxy::logging::LogManager;
     use crate::schema::enum_def::{Action, ProviderApiKeyMode};
     use crate::service::cache::types::{
         CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModelRoute, CacheModelRouteCandidate,
@@ -2553,6 +2641,8 @@ mod tests {
             provider_key_queue_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             api_key_governance_store: super::ApiKeyGovernanceStore::default(),
             provider_health_state: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            log_manager: Arc::new(LogManager::new()),
+            test_db_context: None,
         }
     }
 

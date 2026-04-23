@@ -92,6 +92,7 @@ impl CacheConfig {
 // --- START PROXY REQUEST CONFIG ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProxyRequestConfig {
     #[serde(default = "default_proxy_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
@@ -99,8 +100,6 @@ pub struct ProxyRequestConfig {
     pub first_byte_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub total_timeout_seconds: Option<u64>,
-    #[serde(default, skip_serializing)]
-    pub timeout_seconds: Option<u64>,
 }
 
 impl Default for ProxyRequestConfig {
@@ -109,7 +108,6 @@ impl Default for ProxyRequestConfig {
             connect_timeout_seconds: default_proxy_connect_timeout_seconds(),
             first_byte_timeout_seconds: default_proxy_first_byte_timeout_seconds(),
             total_timeout_seconds: None,
-            timeout_seconds: None,
         }
     }
 }
@@ -124,9 +122,7 @@ impl ProxyRequestConfig {
     }
 
     pub fn total_timeout(&self) -> Option<Duration> {
-        self.total_timeout_seconds
-            .or(self.timeout_seconds)
-            .map(Duration::from_secs)
+        self.total_timeout_seconds.map(Duration::from_secs)
     }
 }
 
@@ -588,8 +584,10 @@ routing_resilience:
     }
 
     #[test]
-    fn final_config_deserializes_legacy_timeout_field_as_total_timeout() {
-        let yaml = r#"
+    fn final_config_rejects_legacy_proxy_request_timeout_field() {
+        let legacy_field = ["timeout", "_seconds"].concat();
+        let yaml = format!(
+            r#"
 host: 0.0.0.0
 port: 8000
 base_path: /ai
@@ -604,18 +602,17 @@ timezone: null
 max_body_size: 104857600
 db_pool_size: 5
 proxy_request:
-  timeout_seconds: 123
-"#;
+  {legacy_field}: 123
+"#
+        );
 
-        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
-        assert_eq!(config.proxy_request.timeout_seconds, Some(123));
-        assert_eq!(config.proxy_request.total_timeout_seconds, None);
-        assert_eq!(
-            config
-                .proxy_request
-                .total_timeout()
-                .map(|value| value.as_secs()),
-            Some(123)
+        let error =
+            serde_yaml::from_str::<FinalConfig>(&yaml).expect_err("legacy timeout field must fail");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unknown field `{legacy_field}`")),
+            "unexpected error: {error}"
         );
     }
 }

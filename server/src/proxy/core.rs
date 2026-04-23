@@ -157,12 +157,13 @@ impl Drop for RequestLogContextGuard {
         {
             let app_state = Arc::clone(&self.app_state);
             let context_clone = Arc::clone(&self.context);
-            tokio::spawn(async move {
+            let task_app_state = Arc::clone(&app_state);
+            app_state.spawn_background_task(async move {
                 let mut context = context_clone.lock().await;
                 crate::debug_event!("proxy.client_cancelled", log_id = context.id);
                 context.overall_status = RequestStatus::Cancelled;
                 context.completion_ts = Some(Utc::now().timestamp_millis());
-                record_request_completion_and_log(&app_state, context.clone()).await;
+                record_request_completion_and_log(&task_app_state, context.clone()).await;
             });
         }
     }
@@ -221,9 +222,10 @@ impl Drop for ResponseStreamCancellationGuard {
             let url = self.url.clone();
             let status_code = self.status_code;
             let cost_catalog_version = self.cost_catalog_version.clone();
-            tokio::spawn(async move {
+            let task_app_state = Arc::clone(&app_state);
+            app_state.spawn_background_task(async move {
                 finalize_cancelled_log_context(
-                    &app_state,
+                    &task_app_state,
                     &context,
                     &url,
                     Some(status_code),
@@ -1404,7 +1406,6 @@ mod tests {
     };
     use crate::{
         cost::UsageNormalization,
-        proxy::logging::get_log_manager,
         proxy::logging::{LoggedBody, RequestLogContext},
         proxy::{ProxyError, cancellation::ProxyCancellationContext},
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus},
@@ -1433,7 +1434,7 @@ mod tests {
     }
 
     fn make_log_context() -> RequestLogContext {
-        let system_api_key = CacheApiKey {
+        let api_key = CacheApiKey {
             id: 1,
             api_key_hash: "hash".to_string(),
             key_prefix: "cyder-prefix".to_string(),
@@ -1480,7 +1481,7 @@ mod tests {
         };
 
         RequestLogContext::new(
-            &system_api_key,
+            &api_key,
             &provider,
             &model,
             Some(4),
@@ -1771,7 +1772,7 @@ mod tests {
         )
         .await;
 
-        get_log_manager().flush().await;
+        app_state.flush_proxy_logs().await;
 
         let context = log_context.lock().await;
         assert_eq!(context.overall_status, RequestStatus::Cancelled);
@@ -1840,7 +1841,7 @@ mod tests {
         )
         .await;
 
-        get_log_manager().flush().await;
+        app_state.flush_proxy_logs().await;
 
         let context = log_context.lock().await;
         assert_eq!(context.overall_status, RequestStatus::Cancelled);

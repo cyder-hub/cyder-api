@@ -561,12 +561,7 @@ mod tests {
     use crate::database::model_route::{NewModelRoute, NewModelRouteCandidate};
     use crate::database::provider::NewProvider;
     use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
-    use diesel::Connection;
-    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
     use serde_json::Value;
-    use tempfile::tempdir;
-
-    const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 
     struct TestSqliteDb {
         _temp_dir: tempfile::TempDir,
@@ -574,14 +569,8 @@ mod tests {
     }
 
     fn sqlite_connection() -> TestSqliteDb {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("model-summary.sqlite");
-        std::fs::File::create(&db_path).expect("db file should be created");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let mut conn = diesel::SqliteConnection::establish(&db_url)
-            .expect("sqlite connection should be established");
-        conn.run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("migrations should run");
+        let (temp_dir, conn) =
+            crate::database::open_test_sqlite_connection_with_migrations("model-summary.sqlite");
         TestSqliteDb {
             _temp_dir: temp_dir,
             conn,

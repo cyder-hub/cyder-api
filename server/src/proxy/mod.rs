@@ -5,7 +5,7 @@ mod error;
 mod gemini;
 mod generation;
 mod handlers;
-pub(super) mod logging;
+pub(crate) mod logging;
 mod models;
 mod orchestrator;
 mod pipeline;
@@ -40,7 +40,3 @@ pub(crate) use prepare::{
 };
 pub use router::create_proxy_router;
 pub(crate) use utility::{UtilityOperation, UtilityProtocol};
-
-pub async fn flush_proxy_logs() {
-    logging::get_log_manager().flush().await;
-}

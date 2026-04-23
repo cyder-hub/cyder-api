@@ -608,6 +608,7 @@ export const zhDict = {
         noAttemptBody: "本次尝试未捕获 LLM 请求体或响应体。",
         responseCaptureSentence: "响应捕获：{state}。",
         bundleEmpty: "当前请求没有可用的载荷包。",
+        unsupportedBundleVersion: "当前仅支持读取 V2 request bundle，检测到版本 {version}。",
         fetchError: "获取或解码请求内容失败：{error}",
         patchMissing: "无法应用 JSON Patch，因为目标 blob 缺失。",
         patchFailed: "无法应用 JSON Patch：{error}",

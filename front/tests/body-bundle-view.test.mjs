@@ -1,34 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  buildLegacyPatchInfo,
-  buildV2AttemptRows,
-  decodeBundleView,
-} from "../src/components/record/bodyBundleView.ts";
+import { buildV2AttemptRows, decodeBundleView } from "../src/components/record/bodyBundleView.ts";
 
 const encoder = new TextEncoder();
 const bytes = (value) => encoder.encode(value);
 
-test("legacy request log bundle stays readable and detects JSON patch request bodies", () => {
-  const view = decodeBundleView({
-    version: 1,
-    user_request_body: bytes('{"model":"route","input":"hello"}'),
-    llm_request_body: bytes('[{"op":"replace","path":"/model","value":"direct"}]'),
-    llm_response_body: bytes('{"ok":true}'),
-    user_response_body: bytes('{"ok":true}'),
-  });
-
-  assert.equal(view.kind, "legacy");
-  assert.equal(view.userRequestBody, '{"model":"route","input":"hello"}');
-  assert.equal(view.llmResponseBody, '{"ok":true}');
-
-  const patchInfo = buildLegacyPatchInfo(view);
-  assert.equal(patchInfo.isPatch, true);
-  assert.deepEqual(JSON.parse(patchInfo.patchedContent), {
-    model: "direct",
-    input: "hello",
-  });
+test("request log bundle view rejects non-v2 bundle versions", () => {
+  assert.throws(
+    () =>
+      decodeBundleView({
+        version: 1,
+        user_request_body: bytes('{"model":"route","input":"hello"}'),
+      }),
+    /unsupported_request_log_bundle_version:1/,
+  );
 });
 
 test("v2 request log bundle reconstructs attempt request body from blob and patch pools", () => {

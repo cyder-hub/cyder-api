@@ -16,7 +16,7 @@ proxy: http://10.0.0.2:1081
 proxy_request:
   connect_timeout_seconds: 10
   # LLM 流式/长生成请求可能持续很久，因此默认建议留空关闭整体超时。
-  # timeout_seconds: 1800
+  # total_timeout_seconds: 1800
 routing_resilience:
   same_candidate_max_retries: 1
   max_candidates_per_request: 2

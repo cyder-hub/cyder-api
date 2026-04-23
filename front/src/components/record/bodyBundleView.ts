@@ -2,16 +2,7 @@ import jsonPatch from "fast-json-patch";
 import type { RecordAttempt } from "../../store/types";
 
 const { applyPatch } = jsonPatch;
-
-export type LegacyBodies = {
-  kind: "legacy";
-  version: number;
-  userRequestBody: string | null;
-  llmRequestBody: string | null;
-  llmRequestPatchBaseBody: string | null;
-  userResponseBody: string | null;
-  llmResponseBody: string | null;
-};
+const UNSUPPORTED_BUNDLE_VERSION_PREFIX = "unsupported_request_log_bundle_version:";
 
 export type V2RequestBodies = {
   userRequestBody: string | null;
@@ -100,12 +91,7 @@ export type V2Bodies = {
   transformDiagnostics: V2TransformDiagnostics | null;
 };
 
-export type BundleView = LegacyBodies | V2Bodies;
-
-export type LegacyPatchInfo = {
-  isPatch: boolean;
-  patchedContent: string | null;
-};
+export type BundleView = V2Bodies;
 
 const decodeBytes = (value: unknown, textDecoder: TextDecoder) => {
   if (value == null) return null;
@@ -144,19 +130,6 @@ const decodeNameValues = (value: unknown): BundleNameValue[] =>
       }
       return item;
     });
-
-export const decodeLegacyBundle = (
-  decoded: Record<string, unknown>,
-  textDecoder: TextDecoder,
-): LegacyBodies => ({
-  kind: "legacy",
-  version: asNumber(decoded.version) ?? 1,
-  userRequestBody: decodeBytes(decoded.user_request_body, textDecoder),
-  llmRequestBody: decodeBytes(decoded.llm_request_body, textDecoder),
-  llmRequestPatchBaseBody: null,
-  userResponseBody: decodeBytes(decoded.user_response_body, textDecoder),
-  llmResponseBody: decodeBytes(decoded.llm_response_body, textDecoder),
-});
 
 export const buildPatchedRequestContent = (
   baseContent: string | null,
@@ -347,10 +320,15 @@ export const decodeV2Bundle = (
 export const decodeBundleView = (
   decoded: Record<string, unknown>,
   textDecoder = new TextDecoder(),
-): BundleView =>
-  decoded?.version === 2
-    ? decodeV2Bundle(decoded, textDecoder)
-    : decodeLegacyBundle(decoded, textDecoder);
+): BundleView => {
+  const version = asNumber(decoded?.version);
+  if (version !== 2) {
+    throw new Error(
+      `${UNSUPPORTED_BUNDLE_VERSION_PREFIX}${version == null ? "unknown" : String(version)}`,
+    );
+  }
+  return decodeV2Bundle(decoded, textDecoder);
+};
 
 type BuildV2AttemptRowsOptions = {
   unknownProvider?: string;
@@ -429,24 +407,4 @@ export const buildV2AttemptRows = (
   }
 
   return rows.sort((left, right) => left.attemptIndex - right.attemptIndex);
-};
-
-export const buildLegacyPatchInfo = (bodies: LegacyBodies | null): LegacyPatchInfo => {
-  const userContent = bodies?.llmRequestPatchBaseBody ?? bodies?.userRequestBody;
-  const llmContent = bodies?.llmRequestBody;
-  if (!userContent || !llmContent || userContent === llmContent) {
-    return { isPatch: false, patchedContent: null };
-  }
-  try {
-    const userJson = JSON.parse(userContent);
-    const patch = JSON.parse(llmContent);
-    if (Array.isArray(patch) && patch.every((op) => "op" in op && "path" in op)) {
-      const { newDocument } = applyPatch(userJson, patch, true, false);
-      return {
-        isPatch: true,
-        patchedContent: JSON.stringify(newDocument, null, 2),
-      };
-    }
-  } catch (e) {}
-  return { isPatch: false, patchedContent: null };
 };

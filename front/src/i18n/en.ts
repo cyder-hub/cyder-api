@@ -625,6 +625,8 @@ export const enDict = {
           "No LLM request or response body was captured for this attempt.",
         responseCaptureSentence: "Response capture: {state}.",
         bundleEmpty: "No payload bundle is available for this request.",
+        unsupportedBundleVersion:
+          "Only request log bundle version 2 is supported. Found version {version}.",
         fetchError: "Failed to fetch or decode body content: {error}",
         patchMissing:
           "Unable to apply JSON patch because the target blob is missing.",

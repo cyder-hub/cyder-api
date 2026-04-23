@@ -1,9 +1,6 @@
 use crate::config::CONFIG;
 use crate::database::model::Model;
 use crate::database::provider::{Provider, ProviderApiKey};
-// The legacy table still backs administrator-issued API keys. Keep the storage
-// name isolated here and expose canonical api_key fields at return boundaries.
-use crate::database::system_api_key::SystemApiKey as FullSystemApiKey;
 use crate::database::{DbConnection, DbResult, get_connection};
 use crate::{db_execute, db_object};
 use chrono::{TimeZone, Utc};
@@ -18,8 +15,8 @@ use std::collections::HashMap;
 
 db_object! {
     #[derive(Queryable, Selectable, Identifiable, Debug)]
-    #[diesel(table_name = system_api_key)]
-    pub struct SystemApiKey {
+    #[diesel(table_name = api_key)]
+    pub struct StatApiKeyRow {
         pub id: i64,
     }
 }
@@ -410,9 +407,8 @@ pub fn get_dashboard_overview_stats() -> DbResult<DashboardOverviewStats> {
     let providers = Provider::list_all()?;
     let models = Model::list_all()?;
     let provider_keys = ProviderApiKey::list_all()?;
-    // Legacy table read stays isolated here; returned counts are renamed to
-    // canonical `api_key_*` fields below.
-    let legacy_api_keys = FullSystemApiKey::list_all()?;
+    let conn = &mut get_connection()?;
+    let (api_key_count, enabled_api_key_count) = load_dashboard_api_key_counts(conn)?;
 
     Ok(DashboardOverviewStats {
         provider_count: providers.len() as i64,
@@ -422,11 +418,8 @@ pub fn get_dashboard_overview_stats() -> DbResult<DashboardOverviewStats> {
         provider_key_count: provider_keys.len() as i64,
         enabled_provider_key_count: provider_keys.iter().filter(|item| item.is_enabled).count()
             as i64,
-        api_key_count: legacy_api_keys.len() as i64,
-        enabled_api_key_count: legacy_api_keys
-            .iter()
-            .filter(|item| item.is_enabled)
-            .count() as i64,
+        api_key_count,
+        enabled_api_key_count,
     })
 }
 
@@ -696,13 +689,37 @@ fn usage_group_sql(group_by: UsageStatsGroupBy) -> (&'static str, &'static str, 
              CAST(NULL AS TEXT) AS provider_key,
              CAST(NULL AS TEXT) AS model_name,
              CAST(NULL AS TEXT) AS real_model_name,
-             sak.name AS api_key_name,
-             COALESCE(sak.name, '') AS group_label,
-             sak.api_key AS group_detail",
-            "rl.api_key_id, sak.name, sak.api_key",
+             ak.name AS api_key_name,
+             COALESCE(ak.name, '') AS group_label,
+             CASE
+                 WHEN ak.id IS NULL THEN NULL
+                 ELSE ak.key_prefix || '***' || ak.key_last4
+             END AS group_detail",
+            "rl.api_key_id, ak.id, ak.name, ak.key_prefix, ak.key_last4",
             "rl.api_key_id",
         ),
     }
+}
+
+fn load_dashboard_api_key_counts(conn: &mut DbConnection) -> DbResult<(i64, i64)> {
+    let api_key_count = db_execute!(conn, {
+        api_key::table
+            .filter(api_key::dsl::deleted_at.is_null())
+            .select(count_star())
+            .first(conn)
+    })?;
+    let enabled_api_key_count = db_execute!(conn, {
+        api_key::table
+            .filter(
+                api_key::dsl::deleted_at
+                    .is_null()
+                    .and(api_key::dsl::is_enabled.eq(true)),
+            )
+            .select(count_star())
+            .first(conn)
+    })?;
+
+    Ok((api_key_count, enabled_api_key_count))
 }
 
 fn usage_bucket_sql_postgres(interval: &str) -> &'static str {
@@ -783,7 +800,7 @@ fn load_usage_stats_base_rows(
                  FROM request_log rl \
                  LEFT JOIN provider p ON p.id = rl.final_provider_id \
                  LEFT JOIN model m ON m.id = rl.final_model_id \
-                 LEFT JOIN system_api_key sak ON sak.id = rl.api_key_id \
+                 LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
                  WHERE rl.request_received_at >= $1 \
                    AND rl.request_received_at < $2 \
                    AND {group_id_sql} IS NOT NULL \
@@ -834,7 +851,7 @@ fn load_usage_stats_base_rows(
                  FROM request_log rl \
                  LEFT JOIN provider p ON p.id = rl.final_provider_id \
                  LEFT JOIN model m ON m.id = rl.final_model_id \
-                 LEFT JOIN system_api_key sak ON sak.id = rl.api_key_id \
+                 LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
                  WHERE rl.request_received_at >= ? \
                    AND rl.request_received_at < ? \
                    AND {group_id_sql} IS NOT NULL \
@@ -892,7 +909,7 @@ fn load_usage_stats_cost_rows(
                  FROM request_log rl \
                  LEFT JOIN provider p ON p.id = rl.final_provider_id \
                  LEFT JOIN model m ON m.id = rl.final_model_id \
-                 LEFT JOIN system_api_key sak ON sak.id = rl.api_key_id \
+                 LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
                  WHERE rl.request_received_at >= $1 \
                    AND rl.request_received_at < $2 \
                    AND {group_id_sql} IS NOT NULL \
@@ -931,7 +948,7 @@ fn load_usage_stats_cost_rows(
                  FROM request_log rl \
                  LEFT JOIN provider p ON p.id = rl.final_provider_id \
                  LEFT JOIN model m ON m.id = rl.final_model_id \
-                 LEFT JOIN system_api_key sak ON sak.id = rl.api_key_id \
+                 LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
                  WHERE rl.request_received_at >= ? \
                    AND rl.request_received_at < ? \
                    AND {group_id_sql} IS NOT NULL \
@@ -1295,17 +1312,13 @@ fn load_dashboard_top_model_cost_rows(
 mod tests {
     use super::{
         CostByCurrencyRow, TodayRequestLogSummaryRow, UsageStatsGroupBy, calculate_success_rate,
-        load_dashboard_today_aggregate, load_dashboard_top_model_base_rows,
-        load_dashboard_top_model_cost_rows, load_usage_stats_base_rows, load_usage_stats_cost_rows,
+        load_dashboard_api_key_counts, load_dashboard_today_aggregate,
+        load_dashboard_top_model_base_rows, load_dashboard_top_model_cost_rows,
+        load_usage_stats_base_rows, load_usage_stats_cost_rows,
     };
     use crate::database::DbConnection;
     use diesel::connection::SimpleConnection;
-    use diesel::r2d2::{ConnectionManager, Pool};
     use diesel::sqlite::SqliteConnection;
-    use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-    use tempfile::tempdir;
-
-    const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 
     #[test]
     fn today_summary_row_maps_missing_sums_to_zero() {
@@ -1371,10 +1384,26 @@ mod tests {
     #[test]
     fn dashboard_stat_queries_keep_database_side_aggregation_guards() {
         let source = include_str!("stat.rs");
+        let legacy_api_key_type = ["Full", "System", "Api", "Key"].join("");
+        let legacy_api_key_name = ["system", "_api_key"].concat();
+        let legacy_api_key_join = [
+            "LEFT JOIN",
+            legacy_api_key_name.as_str(),
+            "sak ON sak.id = rl.api_key_id",
+        ]
+        .join(" ");
 
         assert!(
             source.contains("GROUP BY estimated_cost_currency"),
             "today cost aggregation should stay grouped in SQL",
+        );
+        assert!(
+            !source.contains(&legacy_api_key_type) && !source.contains(&legacy_api_key_join),
+            "dashboard and usage stats should not depend on legacy {legacy_api_key_name} queries",
+        );
+        assert!(
+            source.contains("ak.key_prefix || '***' || ak.key_last4"),
+            "api key grouping should expose masked key detail instead of the raw secret",
         );
         assert!(
             source.contains("CAST(COUNT(*) AS BIGINT) AS request_count")
@@ -1391,33 +1420,15 @@ mod tests {
     }
 
     fn sqlite_stat_connection() -> (tempfile::TempDir, DbConnection) {
-        let temp_dir = tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("stat.sqlite");
-        std::fs::File::create(&db_path).expect("db file should be created");
-        let db_url = db_path.to_string_lossy().into_owned();
-        let manager = ConnectionManager::<SqliteConnection>::new(db_url);
-        let pool = Pool::builder()
-            .max_size(1)
-            .build(manager)
-            .expect("sqlite pool should be created");
-        let mut conn = pool.get().expect("sqlite connection should be checked out");
-        conn.run_pending_migrations(SQLITE_MIGRATIONS)
-            .expect("migrations should run");
+        let (temp_dir, mut conn) =
+            crate::database::open_test_sqlite_pooled_connection_with_migrations("stat.sqlite");
         seed_stat_rows(&mut conn);
         (temp_dir, DbConnection::Sqlite(conn))
     }
 
     fn seed_stat_rows(conn: &mut SqliteConnection) {
         conn.batch_execute(
-            "INSERT INTO system_api_key (
-                id, api_key, name, description, access_control_policy_id,
-                usage_limit_policy_id, is_enabled, deleted_at, created_at, updated_at
-            ) VALUES (
-                1, 'ck-test', 'Ops key', NULL, NULL,
-                NULL, 1, NULL, 1, 1
-            );
-
-            INSERT INTO api_key (
+            "INSERT INTO api_key (
                 id, api_key, api_key_hash, key_prefix, key_last4, name, description,
                 default_action, is_enabled, expires_at, rate_limit_rpm, max_concurrent_requests,
                 quota_daily_requests, quota_daily_tokens, quota_monthly_tokens,
@@ -1508,6 +1519,17 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_dashboard_overview_counts_api_key_table_rows() {
+        let (_temp_dir, mut conn) = sqlite_stat_connection();
+
+        let (api_key_count, enabled_api_key_count) =
+            load_dashboard_api_key_counts(&mut conn).expect("api key counts should load");
+
+        assert_eq!(api_key_count, 1);
+        assert_eq!(enabled_api_key_count, 1);
+    }
+
+    #[test]
     fn sqlite_usage_stats_queries_request_log_aggregate_columns() {
         let (_temp_dir, mut conn) = sqlite_stat_connection();
 
@@ -1549,6 +1571,52 @@ mod tests {
         .expect("usage stats cost rows should load");
         assert_eq!(costs.len(), 1);
         assert_eq!(costs[0].group_id, 10);
+        assert_eq!(costs[0].currency, "USD");
+        assert_eq!(costs[0].total_cost_nanos, 800);
+    }
+
+    #[test]
+    fn sqlite_usage_stats_group_by_api_key_uses_masked_api_key_fields() {
+        let (_temp_dir, mut conn) = sqlite_stat_connection();
+
+        let rows = load_usage_stats_base_rows(
+            &mut conn,
+            0,
+            10_000,
+            "day",
+            UsageStatsGroupBy::ApiKey,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("usage stats api key rows should load");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.group_id, 1);
+        assert_eq!(row.api_key_id, Some(1));
+        assert_eq!(row.api_key_name.as_deref(), Some("Ops key"));
+        assert_eq!(row.group_label.as_deref(), Some("Ops key"));
+        assert_eq!(row.group_detail.as_deref(), Some("ck-test***test"));
+        assert_eq!(row.request_count, 3);
+        assert_eq!(row.success_count, 2);
+        assert_eq!(row.error_count, 1);
+        assert_eq!(row.total_tokens, 60);
+
+        let costs = load_usage_stats_cost_rows(
+            &mut conn,
+            0,
+            10_000,
+            "day",
+            UsageStatsGroupBy::ApiKey,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("usage stats api key cost rows should load");
+        assert_eq!(costs.len(), 1);
+        assert_eq!(costs[0].group_id, 1);
         assert_eq!(costs[0].currency, "USD");
         assert_eq!(costs[0].total_cost_nanos, 800);
     }

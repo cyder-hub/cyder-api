@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use cyder_api::config::CONFIG;
 use cyder_api::controller::{create_manager_router, create_system_router, handle_404};
 use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
-use cyder_api::proxy::{create_proxy_router, flush_proxy_logs};
+use cyder_api::proxy::create_proxy_router;
 use cyder_api::service::app_state::{create_app_state, create_state_router};
 
 async fn shutdown_signal() {
@@ -57,6 +57,7 @@ async fn main() {
         .map(|addr| addr.to_string())
         .unwrap_or(addr.clone());
     let app_state = create_app_state().await;
+    let shutdown_app_state = std::sync::Arc::clone(&app_state);
     cyder_api::info_event!(
         "startup.server_started",
         target_addr = &target_addr,
@@ -85,7 +86,7 @@ async fn main() {
         "startup.server_shutdown_waiting",
         background_task = "proxy_logs_flush",
     );
-    flush_proxy_logs().await;
+    shutdown_app_state.flush_proxy_logs().await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     cyder_api::info_event!(
         "startup.server_shutdown_complete",

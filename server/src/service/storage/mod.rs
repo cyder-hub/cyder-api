@@ -7,6 +7,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::OnceCell;
 
+#[cfg(test)]
+use std::sync::LazyLock;
+#[cfg(test)]
+use tempfile::TempDir;
+
 pub mod local;
 pub mod s3;
 pub mod types;
@@ -37,9 +42,23 @@ static STORAGE: OnceCell<Box<dyn Storage>> = OnceCell::const_new();
 static LOCAL_STORAGE: OnceCell<LocalStorage> = OnceCell::const_new();
 static S3_STORAGE: OnceCell<Option<S3Storage>> = OnceCell::const_new();
 
+#[cfg(test)]
+static TEST_LOCAL_STORAGE_DIR: LazyLock<TempDir> =
+    LazyLock::new(|| tempfile::tempdir().expect("test local storage dir should be created"));
+
+#[cfg(test)]
+fn local_storage_root() -> String {
+    TEST_LOCAL_STORAGE_DIR.path().to_string_lossy().into_owned()
+}
+
+#[cfg(not(test))]
+fn local_storage_root() -> String {
+    CONFIG.storage.local.root.clone()
+}
+
 pub async fn get_local_storage() -> &'static LocalStorage {
     LOCAL_STORAGE
-        .get_or_init(|| async { LocalStorage::new(&CONFIG.storage.local.root) })
+        .get_or_init(|| async { LocalStorage::new(&local_storage_root()) })
         .await
 }
 
@@ -66,6 +85,13 @@ pub async fn get_storage() -> &'static Box<dyn Storage> {
 }
 
 pub async fn new_storage(config: &StorageConfig) -> Box<dyn Storage> {
+    #[cfg(test)]
+    {
+        let _ = config;
+        return Box::new(LocalStorage::new(&local_storage_root()));
+    }
+
+    #[cfg(not(test))]
     match config.driver {
         crate::config::StorageDriver::Local => Box::new(LocalStorage::new(&config.local.root)),
         crate::config::StorageDriver::S3 => {

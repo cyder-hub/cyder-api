@@ -19,7 +19,7 @@ use crate::{
 
 pub(super) struct GenerationExecutionInput {
     pub cancellation: ProxyCancellationContext,
-    pub system_api_key: Arc<CacheApiKey>,
+    pub api_key: Arc<CacheApiKey>,
     pub api_type: LlmApiType,
     pub execution_plan: ExecutionPlan,
     pub is_stream: bool,
@@ -43,7 +43,7 @@ pub(super) async fn execute_generation_proxy(
 ) -> Result<Response<Body>, ProxyError> {
     let GenerationExecutionInput {
         cancellation,
-        system_api_key,
+        api_key,
         api_type,
         execution_plan,
         is_stream,
@@ -64,7 +64,7 @@ pub(super) async fn execute_generation_proxy(
         app_state,
         GenerationOrchestrationInput {
             cancellation,
-            system_api_key,
+            api_key,
             api_type,
             execution_plan,
             is_stream,

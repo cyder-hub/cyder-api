@@ -16,8 +16,7 @@ use crate::{
         transform::unified::UnifiedTransformDiagnostic,
     },
     utils::storage::{
-        LogBodyCaptureState, LogBundle, REQUEST_LOG_BUNDLE_V1_VERSION,
-        REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleCandidateManifest,
+        LogBodyCaptureState, REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleCandidateManifest,
         RequestLogBundleRequestSnapshot, RequestLogBundleTransformDiagnostics, RequestLogBundleV2,
     },
 };
@@ -133,32 +132,6 @@ pub struct ReplayKindCapabilitySummary {
     pub attempt_ids: Vec<i64>,
 }
 
-pub(crate) enum DecodedRequestLogBundle {
-    Legacy(LogBundle),
-    V2(RequestLogBundleV2),
-}
-
-impl DecodedRequestLogBundle {
-    pub(crate) fn as_v2(&self) -> Option<&RequestLogBundleV2> {
-        match self {
-            Self::V2(bundle) => Some(bundle),
-            Self::Legacy(_) => None,
-        }
-    }
-
-    pub(crate) fn as_legacy(&self) -> Option<&LogBundle> {
-        match self {
-            Self::Legacy(bundle) => Some(bundle),
-            Self::V2(_) => None,
-        }
-    }
-}
-
-enum RequestLogBundleCapabilityView<'a> {
-    Legacy(&'a LogBundle),
-    V2(&'a RequestLogBundleV2),
-}
-
 #[derive(Deserialize)]
 struct BundleHeader {
     version: u32,
@@ -180,7 +153,7 @@ pub async fn get_request_log_artifacts(
 
 pub(crate) async fn load_request_log_bundle(
     record: &RequestLogRecord,
-) -> Result<Option<DecodedRequestLogBundle>, BaseError> {
+) -> Result<Option<RequestLogBundleV2>, BaseError> {
     let Some(storage_type) = record.bundle_storage_type.clone() else {
         return Ok(None);
     };
@@ -217,15 +190,10 @@ pub(crate) async fn load_request_log_bundle(
 fn build_request_log_artifact_response(
     record: &RequestLogRecord,
     attempts: &[RequestAttemptDetail],
-    bundle: Option<&DecodedRequestLogBundle>,
+    bundle: Option<&RequestLogBundleV2>,
 ) -> RequestLogArtifactResponse {
     match bundle {
-        Some(DecodedRequestLogBundle::V2(bundle)) => {
-            build_v2_artifact_response(record, attempts, bundle)
-        }
-        Some(DecodedRequestLogBundle::Legacy(bundle)) => {
-            build_legacy_artifact_response(record, attempts, bundle)
-        }
+        Some(bundle) => build_v2_artifact_response(record, attempts, bundle),
         None => build_empty_artifact_response(record, attempts),
     }
 }
@@ -245,45 +213,6 @@ fn build_empty_artifact_response(
     }
 }
 
-fn build_legacy_artifact_response(
-    record: &RequestLogRecord,
-    attempts: &[RequestAttemptDetail],
-    bundle: &LogBundle,
-) -> RequestLogArtifactResponse {
-    RequestLogArtifactResponse {
-        payload_manifest: PayloadManifestResponse {
-            bundle_version: Some(bundle.version),
-            log_id: bundle.log_id,
-            created_at: Some(bundle.created_at),
-            request: PayloadRequestManifestResponse {
-                has_user_request_body: bundle.user_request_body.is_some(),
-                has_user_response_body: bundle.user_response_body.is_some(),
-                user_response_capture_state: bundle
-                    .user_response_capture_state
-                    .as_ref()
-                    .map(capture_state_response),
-                ..Default::default()
-            },
-            attempts: Vec::new(),
-            blob_count: [
-                bundle.user_request_body.as_ref(),
-                bundle.llm_request_body.as_ref(),
-                bundle.llm_response_body.as_ref(),
-                bundle.user_response_body.as_ref(),
-            ]
-            .into_iter()
-            .filter(|body| body.is_some())
-            .count(),
-            patch_count: 0,
-        },
-        replay_capability: build_replay_capability(
-            Some(RequestLogBundleCapabilityView::Legacy(bundle)),
-            attempts,
-        ),
-        ..build_empty_artifact_response(record, attempts)
-    }
-}
-
 fn build_v2_artifact_response(
     _record: &RequestLogRecord,
     attempts: &[RequestAttemptDetail],
@@ -299,10 +228,7 @@ fn build_v2_artifact_response(
         transform_diagnostics: transform_diagnostics_response(
             bundle.transform_diagnostics.as_ref(),
         ),
-        replay_capability: build_replay_capability(
-            Some(RequestLogBundleCapabilityView::V2(bundle)),
-            attempts,
-        ),
+        replay_capability: build_replay_capability(Some(bundle), attempts),
     }
 }
 
@@ -440,11 +366,11 @@ fn transform_diagnostics_response(
 }
 
 fn build_replay_capability(
-    bundle: Option<RequestLogBundleCapabilityView<'_>>,
+    bundle: Option<&RequestLogBundleV2>,
     attempts: &[RequestAttemptDetail],
 ) -> ReplayCapabilitySummary {
-    let attempt_upstream = build_attempt_upstream_capability(bundle.as_ref(), attempts);
-    let gateway_request = build_gateway_request_capability(bundle.as_ref());
+    let attempt_upstream = build_attempt_upstream_capability(bundle, attempts);
+    let gateway_request = build_gateway_request_capability(bundle);
 
     ReplayCapabilitySummary {
         attempt_upstream,
@@ -453,7 +379,7 @@ fn build_replay_capability(
 }
 
 fn build_attempt_upstream_capability(
-    bundle: Option<&RequestLogBundleCapabilityView<'_>>,
+    bundle: Option<&RequestLogBundleV2>,
     attempts: &[RequestAttemptDetail],
 ) -> ReplayKindCapabilitySummary {
     let Some(bundle) = bundle else {
@@ -482,9 +408,9 @@ fn build_attempt_upstream_capability(
 }
 
 fn build_gateway_request_capability(
-    bundle: Option<&RequestLogBundleCapabilityView<'_>>,
+    bundle: Option<&RequestLogBundleV2>,
 ) -> ReplayKindCapabilitySummary {
-    let Some(RequestLogBundleCapabilityView::V2(bundle)) = bundle else {
+    let Some(bundle) = bundle else {
         return unavailable("request_snapshot_missing");
     };
 
@@ -512,31 +438,26 @@ fn build_gateway_request_capability(
 }
 
 fn attempt_request_body_available(
-    bundle: &RequestLogBundleCapabilityView<'_>,
+    bundle: &RequestLogBundleV2,
     attempt: &RequestAttemptDetail,
 ) -> bool {
-    match bundle {
-        RequestLogBundleCapabilityView::Legacy(bundle) => {
-            bundle.llm_request_body.is_some() && attempt.attempt_index == 1
-        }
-        RequestLogBundleCapabilityView::V2(bundle) => bundle
-            .attempt_sections
-            .iter()
-            .find(|section| {
-                section
-                    .attempt_id
-                    .is_some_and(|attempt_id| attempt_id == attempt.id)
-                    || section.attempt_index == attempt.attempt_index
-            })
-            .is_some_and(|section| {
-                section
-                    .llm_request_blob_id
-                    .is_some_and(|blob_id| blob_exists(bundle, blob_id))
-                    && section
-                        .llm_request_patch_id
-                        .is_none_or(|patch_id| patch_exists(bundle, patch_id))
-            }),
-    }
+    bundle
+        .attempt_sections
+        .iter()
+        .find(|section| {
+            section
+                .attempt_id
+                .is_some_and(|attempt_id| attempt_id == attempt.id)
+                || section.attempt_index == attempt.attempt_index
+        })
+        .is_some_and(|section| {
+            section
+                .llm_request_blob_id
+                .is_some_and(|blob_id| blob_exists(bundle, blob_id))
+                && section
+                    .llm_request_patch_id
+                    .is_none_or(|patch_id| patch_exists(bundle, patch_id))
+        })
 }
 
 fn blob_exists(bundle: &RequestLogBundleV2, blob_id: i32) -> bool {
@@ -562,8 +483,11 @@ fn has_non_empty(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty())
 }
 
-fn decode_request_log_bundle(bytes: &[u8]) -> Result<DecodedRequestLogBundle, String> {
+fn decode_request_log_bundle(bytes: &[u8]) -> Result<RequestLogBundleV2, String> {
     decode_request_log_bundle_inner(bytes).or_else(|first_error| {
+        if first_error.contains("only version 2") {
+            return Err(first_error);
+        }
         let mut decoder = GzDecoder::new(bytes);
         let mut decompressed = Vec::new();
         decoder
@@ -583,17 +507,20 @@ fn decode_request_log_bundle(bytes: &[u8]) -> Result<DecodedRequestLogBundle, St
     })
 }
 
-fn decode_request_log_bundle_inner(bytes: &[u8]) -> Result<DecodedRequestLogBundle, String> {
+fn decode_request_log_bundle_inner(bytes: &[u8]) -> Result<RequestLogBundleV2, String> {
     let header: BundleHeader = rmp_serde::from_slice(bytes)
         .map_err(|err| format!("bundle header decode failed: {}", err))?;
     match header.version {
-        REQUEST_LOG_BUNDLE_V1_VERSION => rmp_serde::from_slice::<LogBundle>(bytes)
-            .map(DecodedRequestLogBundle::Legacy)
-            .map_err(|err| format!("bundle v1 decode failed: {}", err)),
         REQUEST_LOG_BUNDLE_V2_VERSION => rmp_serde::from_slice::<RequestLogBundleV2>(bytes)
-            .map(DecodedRequestLogBundle::V2)
             .map_err(|err| format!("bundle v2 decode failed: {}", err)),
-        other => Err(format!("unsupported request log bundle version {}", other)),
+        1 => Err(
+            "request log bundle version 1 is no longer supported; only version 2 can be read"
+                .to_string(),
+        ),
+        other => Err(format!(
+            "unsupported request log bundle version {}; only version 2 is supported",
+            other
+        )),
     }
 }
 
@@ -627,6 +554,7 @@ where
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use serde::Serialize;
 
     use crate::{
         database::{request_attempt::RequestAttemptDetail, request_log::RequestLogRecord},
@@ -645,9 +573,7 @@ mod tests {
         },
     };
 
-    use super::{
-        DecodedRequestLogBundle, build_request_log_artifact_response, decode_request_log_bundle,
-    };
+    use super::{build_request_log_artifact_response, decode_request_log_bundle};
 
     fn record() -> RequestLogRecord {
         RequestLogRecord {
@@ -762,9 +688,8 @@ mod tests {
         let record = record();
         let attempt = attempt();
         let bundle = bundle();
-        let decoded = DecodedRequestLogBundle::V2(bundle);
 
-        let response = build_request_log_artifact_response(&record, &[attempt], Some(&decoded));
+        let response = build_request_log_artifact_response(&record, &[attempt], Some(&bundle));
 
         assert_eq!(response.payload_manifest.bundle_version, Some(2));
         assert!(response.payload_manifest.blob_count >= 2);
@@ -795,9 +720,8 @@ mod tests {
     fn artifact_response_reports_gateway_replay_unavailable_without_request_snapshot() {
         let mut bundle = bundle();
         bundle.request_snapshot = None;
-        let decoded = DecodedRequestLogBundle::V2(bundle);
 
-        let response = build_request_log_artifact_response(&record(), &[attempt()], Some(&decoded));
+        let response = build_request_log_artifact_response(&record(), &[attempt()], Some(&bundle));
 
         assert!(response.replay_capability.attempt_upstream.available);
         assert!(!response.replay_capability.gateway_request.available);
@@ -811,9 +735,8 @@ mod tests {
     fn artifact_response_reports_gateway_replay_unavailable_without_user_body() {
         let mut bundle = bundle();
         bundle.request_section.user_request_blob_id = None;
-        let decoded = DecodedRequestLogBundle::V2(bundle);
 
-        let response = build_request_log_artifact_response(&record(), &[attempt()], Some(&decoded));
+        let response = build_request_log_artifact_response(&record(), &[attempt()], Some(&bundle));
 
         assert!(response.replay_capability.attempt_upstream.available);
         assert!(!response.replay_capability.gateway_request.available);
@@ -827,9 +750,8 @@ mod tests {
     fn artifact_response_reports_attempt_replay_unavailable_without_attempt_body() {
         let mut bundle = bundle();
         bundle.attempt_sections[0].llm_request_blob_id = None;
-        let decoded = DecodedRequestLogBundle::V2(bundle);
 
-        let response = build_request_log_artifact_response(&record(), &[attempt()], Some(&decoded));
+        let response = build_request_log_artifact_response(&record(), &[attempt()], Some(&bundle));
 
         assert!(!response.replay_capability.attempt_upstream.available);
         assert_eq!(
@@ -865,12 +787,23 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         let decoded = decode_request_log_bundle(&compressed).unwrap();
-        match decoded {
-            DecodedRequestLogBundle::V2(bundle) => {
-                assert_eq!(bundle.version, 2);
-                assert!(bundle.request_snapshot.is_some());
-            }
-            DecodedRequestLogBundle::Legacy(_) => panic!("expected v2 bundle"),
+        assert_eq!(decoded.version, 2);
+        assert!(decoded.request_snapshot.is_some());
+    }
+
+    #[test]
+    fn request_log_bundle_decode_rejects_v1_bundle() {
+        #[derive(Serialize)]
+        struct LegacyBundleHeaderOnly {
+            version: u32,
         }
+
+        let encoded = rmp_serde::to_vec_named(&LegacyBundleHeaderOnly { version: 1 }).unwrap();
+        let err = decode_request_log_bundle(&encoded).unwrap_err();
+
+        assert_eq!(
+            err,
+            "request log bundle version 1 is no longer supported; only version 2 can be read"
+        );
     }
 }

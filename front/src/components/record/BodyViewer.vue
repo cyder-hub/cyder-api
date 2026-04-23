@@ -23,70 +23,7 @@
       </Badge>
     </div>
 
-    <template v-if="legacyBodies">
-      <div
-        v-if="
-          legacyBodies.userRequestBody !== legacyBodies.llmRequestBody &&
-          legacyBodies.userRequestBody &&
-          legacyBodies.llmRequestBody
-        "
-        class="grid grid-cols-1 gap-4 md:grid-cols-2"
-      >
-        <SingleRequestBodyContent
-          :content="legacyBodies.userRequestBody"
-          :title="$t('recordPage.detailDialog.payloadViewer.userRequestBody')"
-        />
-        <SingleRequestBodyContent :content="legacyLlmContent" :title="legacyLlmTitle">
-          <template v-if="legacyPatchInfo.isPatch" #action>
-            <Button
-              size="sm"
-              variant="ghost"
-              class="h-8 px-2 text-[11px]"
-              @click="showLegacyPatched = !showLegacyPatched"
-            >
-              {{
-                showLegacyPatched
-                  ? $t("recordPage.detailDialog.payloadViewer.showRawPatch")
-                  : $t("recordPage.detailDialog.payloadViewer.showPatchedBody")
-              }}
-            </Button>
-          </template>
-        </SingleRequestBodyContent>
-      </div>
-      <SingleRequestBodyContent
-        v-else
-        :content="legacyBodies.userRequestBody || legacyBodies.llmRequestBody"
-        :title="$t('recordPage.detailDialog.payloadViewer.requestBody')"
-      />
-
-      <div
-        v-if="
-          legacyBodies.userResponseBody !== legacyBodies.llmResponseBody &&
-          legacyBodies.userResponseBody &&
-          legacyBodies.llmResponseBody
-        "
-        class="grid grid-cols-1 gap-4 md:grid-cols-2"
-      >
-        <SingleResponseBodyContent
-          :content="legacyBodies.llmResponseBody"
-          :title="$t('recordPage.detailDialog.payloadViewer.llmResponseBody')"
-          :status="status"
-        />
-        <SingleResponseBodyContent
-          :content="legacyBodies.userResponseBody"
-          :title="$t('recordPage.detailDialog.payloadViewer.userResponseBody')"
-          :status="status"
-        />
-      </div>
-      <SingleResponseBodyContent
-        v-else
-        :content="legacyBodies.userResponseBody || legacyBodies.llmResponseBody"
-        :title="$t('recordPage.detailDialog.payloadViewer.responseBody')"
-        :status="status"
-      />
-    </template>
-
-    <template v-else-if="v2Bodies">
+    <template v-if="v2Bodies">
       <section class="space-y-3">
         <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <h4 class="text-sm font-semibold text-gray-900">
@@ -245,7 +182,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { RecordAttempt } from "@/store/types";
 import {
-  buildLegacyPatchInfo,
   buildV2AttemptRows,
   decodeBundleView,
   type BundleView,
@@ -264,9 +200,9 @@ const props = defineProps<{
 const bundleView = ref<BundleView | null>(null);
 const isLoadingBodies = ref(false);
 const bodyError = ref<string | null>(null);
-const showLegacyPatched = ref(true);
 const rawPatchByAttempt = ref<Record<string, boolean>>({});
 const { t: $t } = useI18n();
+const UNSUPPORTED_BUNDLE_VERSION_PREFIX = "unsupported_request_log_bundle_version:";
 
 const fetchAndDecodeBody = async () => {
   if (!props.storageType || !props.recordId) return;
@@ -274,7 +210,6 @@ const fetchAndDecodeBody = async () => {
   bodyError.value = null;
   bundleView.value = null;
   rawPatchByAttempt.value = {};
-  showLegacyPatched.value = true;
 
   try {
     const buffer = await Api.getRecordContent(props.recordId);
@@ -282,21 +217,13 @@ const fetchAndDecodeBody = async () => {
     bundleView.value = decodeBundleView(decoded);
   } catch (error) {
     console.error("Failed to fetch or decode body content:", error);
-    bodyError.value = $t("recordPage.detailDialog.payloadViewer.fetchError", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+    bodyError.value = formatBodyError(error);
   } finally {
     isLoadingBodies.value = false;
   }
 };
 
-const legacyBodies = computed(() =>
-  bundleView.value?.kind === "legacy" ? bundleView.value : null,
-);
-
-const v2Bodies = computed(() =>
-  bundleView.value?.kind === "v2" ? bundleView.value : null,
-);
+const v2Bodies = computed(() => bundleView.value);
 
 const hasRequestLevelPayload = computed(
   () =>
@@ -311,24 +238,18 @@ const v2AttemptRows = computed<V2AttemptRow[]>(() => {
   });
 });
 
-const legacyPatchInfo = computed(() => {
-  return buildLegacyPatchInfo(legacyBodies.value);
-});
-
-const legacyLlmContent = computed(() => {
-  return legacyPatchInfo.value.isPatch && showLegacyPatched.value
-    ? legacyPatchInfo.value.patchedContent
-    : legacyBodies.value?.llmRequestBody ?? null;
-});
-
-const legacyLlmTitle = computed(() => {
-  if (!legacyPatchInfo.value.isPatch) {
-    return $t("recordPage.detailDialog.payloadViewer.llmRequestBody");
+const formatBodyError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.startsWith(UNSUPPORTED_BUNDLE_VERSION_PREFIX)) {
+    const version = message.slice(UNSUPPORTED_BUNDLE_VERSION_PREFIX.length) || "unknown";
+    return $t("recordPage.detailDialog.payloadViewer.unsupportedBundleVersion", {
+      version,
+    });
   }
-  return showLegacyPatched.value
-    ? $t("recordPage.detailDialog.payloadViewer.llmRequestBodyPatched")
-    : $t("recordPage.detailDialog.payloadViewer.llmRequestBodyRawPatch");
-});
+  return $t("recordPage.detailDialog.payloadViewer.fetchError", {
+    error: message,
+  });
+};
 
 const getStatusBadgeVariant = (status: string | null) => {
   switch (status) {

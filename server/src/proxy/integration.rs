@@ -1,8 +1,8 @@
-use super::{create_proxy_router, flush_proxy_logs};
+use super::create_proxy_router;
 use crate::{
     config::CONFIG,
     database::{
-        access_control::{AccessControlPolicy, ApiCreateAccessControlPolicyPayload},
+        TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
         model::Model,
         model_route::{CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput},
@@ -17,7 +17,7 @@ use crate::{
         RequestStatus, SchedulerAction,
     },
     service::{
-        app_state::{AppState, ProviderHealthStatus, create_app_state},
+        app_state::{AppState, ProviderHealthStatus, create_test_app_state},
         request_log_artifact::get_request_log_artifacts,
         request_replay::{
             GatewayReplayExecuteParams, GatewayReplayPreviewParams, execute_gateway_replay,
@@ -42,53 +42,40 @@ use flate2::{Compression, write::GzEncoder};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use std::{
+    future::Future,
     io::{ErrorKind, Write},
     net::SocketAddr,
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
-use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
     sync::{Mutex as AsyncMutex, oneshot},
 };
 use tower::util::ServiceExt;
 
-/// Shared runtime for all integration tests so the static `LogManager` worker
-/// task survives across tests (each `#[tokio::test]` would create and destroy
-/// its own runtime, killing the worker spawned during the first test).
-static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
+fn run_integration_test<F, Fut, T>(test: F) -> T
+where
+    F: FnOnce(TestDbContext) -> Fut,
+    Fut: Future<Output = T> + 'static,
+    T: 'static,
+{
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("integration test runtime should build")
-});
+        .expect("integration test runtime should build");
+    let test_db_context = TestDbContext::new_sqlite(&format!(
+        "proxy-integration-{}.sqlite",
+        ID_GENERATOR.generate_id()
+    ));
 
-/// Serialize all integration tests to avoid SQLite "database is locked" errors.
-static DB_LOCK: std::sync::LazyLock<AsyncMutex<()>> =
-    std::sync::LazyLock::new(|| AsyncMutex::new(()));
-
-/// Keep the temp directory alive for the full test process so SQLite can keep
-/// using the database file after the initial setup.
-static TEST_DB_DIR: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
-
-fn ensure_test_database() -> &'static Path {
-    TEST_DB_DIR
-        .get_or_init(|| {
-            let temp_dir =
-                tempfile::tempdir().expect("proxy integration temp dir should be created");
-            let db_path = temp_dir.path().join("proxy-integration.sqlite");
-            let db_url = db_path.to_string_lossy().into_owned();
-            unsafe {
-                std::env::set_var("DB_URL", &db_url);
-            }
-            temp_dir
-        })
-        .path()
+    runtime.block_on(async move {
+        let test = std::pin::Pin::from(Box::new(test(test_db_context.clone())));
+        test_db_context.run_async(test).await
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -281,16 +268,23 @@ impl Drop for TestUpstream {
 
 struct TestFixture {
     app_state: Arc<AppState>,
-    system_api_key: TestApiKey,
+    api_key: TestApiKey,
     provider: Provider,
     provider_api_key: ProviderApiKey,
     model: Model,
-    access_control_policy_id: Option<i64>,
 }
 
 struct TestApiKey {
     id: i64,
     api_key: String,
+}
+
+#[derive(Debug)]
+struct IntegrationDbSnapshot {
+    provider_ids: Vec<i64>,
+    model_ids: Vec<i64>,
+    request_log_ids: Vec<i64>,
+    request_attempt_count: usize,
 }
 
 fn create_provider_model(
@@ -319,22 +313,19 @@ fn create_provider_model(
 
 impl TestFixture {
     async fn new(
+        test_db_context: TestDbContext,
         provider_type: ProviderType,
         endpoint: String,
-        access_control_policy_id: Option<i64>,
+        api_key_default_action: Option<Action>,
         real_model_name: Option<String>,
     ) -> Self {
         let (provider, provider_api_key, model) =
             create_provider_model(provider_type, endpoint, real_model_name);
-        let system_key_nonce = ID_GENERATOR.generate_id();
+        let api_key_nonce = ID_GENERATOR.generate_id();
         let created_api_key = ApiKey::create(&CreateApiKeyPayload {
-            name: format!("proxy-int-system-{system_key_nonce}"),
+            name: format!("proxy-int-api-key-{api_key_nonce}"),
             description: Some("proxy integration test".to_string()),
-            default_action: Some(if access_control_policy_id.is_some() {
-                Action::Deny
-            } else {
-                Action::Allow
-            }),
+            default_action: Some(api_key_default_action.unwrap_or(Action::Allow)),
             is_enabled: Some(true),
             expires_at: None,
             rate_limit_rpm: None,
@@ -349,20 +340,52 @@ impl TestFixture {
             acl_rules: None,
         })
         .expect("api key should be created");
-        let system_api_key = TestApiKey {
+        let api_key = TestApiKey {
             id: created_api_key.detail.id,
             api_key: created_api_key.reveal.api_key,
         };
 
-        let app_state = create_app_state().await;
+        let app_state = create_test_app_state(test_db_context).await;
+        assert!(
+            app_state
+                .get_api_key(&api_key.api_key)
+                .await
+                .expect("api key lookup should succeed")
+                .is_some(),
+            "fixture api key should be visible to app state"
+        );
+        assert!(
+            app_state
+                .get_provider_by_key(&provider.provider_key)
+                .await
+                .expect("provider lookup should succeed")
+                .is_some(),
+            "fixture provider should be visible to app state"
+        );
+        assert!(
+            app_state
+                .get_model_by_name(&provider.provider_key, &model.model_name)
+                .await
+                .expect("model lookup should succeed")
+                .is_some(),
+            "fixture model should be visible to app state"
+        );
+        assert_eq!(
+            app_state
+                .get_provider_api_keys(provider.id)
+                .await
+                .expect("provider api key lookup should succeed")
+                .len(),
+            1,
+            "fixture provider api key should be visible to app state"
+        );
 
         Self {
             app_state,
-            system_api_key,
+            api_key,
             provider,
             provider_api_key,
             model,
-            access_control_policy_id,
         }
     }
 
@@ -379,7 +402,7 @@ impl TestFixture {
     }
 
     async fn list_logs(&self) -> Vec<RequestLogRecord> {
-        flush_proxy_logs().await;
+        self.app_state.flush_proxy_logs().await;
         RequestLog::list_full(RequestLogQueryPayload {
             provider_id: Some(self.provider.id),
             model_id: Some(self.model.id),
@@ -389,6 +412,36 @@ impl TestFixture {
         })
         .expect("request logs should be queryable")
         .list
+    }
+
+    async fn all_logs(&self) -> Vec<RequestLogRecord> {
+        self.app_state.flush_proxy_logs().await;
+        RequestLog::list_full(RequestLogQueryPayload {
+            page: Some(1),
+            page_size: Some(200),
+            ..Default::default()
+        })
+        .expect("all request logs should be queryable")
+        .list
+    }
+
+    async fn snapshot_db_state(&self) -> IntegrationDbSnapshot {
+        let providers = Provider::list_all().expect("providers should be queryable");
+        let models = Model::list_all().expect("models should be queryable");
+        let logs = self.all_logs().await;
+        let mut request_attempt_count = 0usize;
+        for log in &logs {
+            request_attempt_count += RequestAttempt::list_by_request_log_id(log.id)
+                .expect("request attempts should be queryable")
+                .len();
+        }
+
+        IntegrationDbSnapshot {
+            provider_ids: providers.into_iter().map(|provider| provider.id).collect(),
+            model_ids: models.into_iter().map(|model| model.id).collect(),
+            request_log_ids: logs.into_iter().map(|log| log.id).collect(),
+            request_attempt_count,
+        }
     }
 
     async fn latest_log(&self) -> RequestLogRecord {
@@ -418,7 +471,7 @@ impl TestFixture {
         const RETRY_DELAY_MS: u64 = 100;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            flush_proxy_logs().await;
+            self.app_state.flush_proxy_logs().await;
             let mut logs = RequestLog::list_full(RequestLogQueryPayload {
                 provider_id: Some(provider_id),
                 page: Some(1),
@@ -441,7 +494,7 @@ impl TestFixture {
     }
 
     async fn attempts_for_log(&self, log_id: i64) -> Vec<RequestAttempt> {
-        flush_proxy_logs().await;
+        self.app_state.flush_proxy_logs().await;
         RequestAttempt::list_by_request_log_id(log_id)
             .expect("request attempts should be queryable")
     }
@@ -463,14 +516,11 @@ impl TestFixture {
     }
 
     async fn cleanup(&self) {
-        flush_proxy_logs().await;
+        self.app_state.flush_proxy_logs().await;
         let _ = Model::delete(self.model.id);
         let _ = ProviderApiKey::delete(self.provider_api_key.id);
         let _ = Provider::delete(self.provider.id);
-        let _ = ApiKey::delete(self.system_api_key.id);
-        if let Some(policy_id) = self.access_control_policy_id {
-            let _ = AccessControlPolicy::delete(policy_id);
-        }
+        let _ = ApiKey::delete(self.api_key.id);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -570,22 +620,18 @@ async fn response_body_bytes(response: Response<Body>) -> Bytes {
         .expect("response body should be readable")
 }
 
-fn deny_all_policy() -> i64 {
-    AccessControlPolicy::create(ApiCreateAccessControlPolicyPayload {
-        name: format!("deny-all-{}", ID_GENERATOR.generate_id()),
-        description: Some("deny all integration test policy".to_string()),
-        default_action: Action::Deny,
-        rules: None,
-    })
-    .expect("access control policy should be created")
-    .id
+#[derive(Debug)]
+struct ParallelIsolationResult {
+    provider_id: i64,
+    model_id: i64,
+    request_log_id: i64,
+    assistant_text: String,
+    snapshot: IntegrationDbSnapshot,
 }
 
 #[test]
 fn openai_generation_handles_gzip_response_and_persists_log() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(request.path, "/v1/chat/completions");
             assert_eq!(request.method, Method::POST);
@@ -626,6 +672,7 @@ fn openai_generation_handles_gzip_response_and_persists_log() {
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", upstream.base_url),
             None,
@@ -637,7 +684,7 @@ fn openai_generation_handles_gzip_response_and_persists_log() {
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": fixture.requested_model(),
@@ -646,7 +693,15 @@ fn openai_generation_handles_gzip_response_and_persists_log() {
         );
 
         let response = fixture.send(request).await;
-        assert_eq!(response.status(), StatusCode::OK);
+        if response.status() != StatusCode::OK {
+            let status = response.status();
+            let body = response_body_bytes(response).await;
+            panic!(
+                "expected 200, got {} with body {}",
+                status,
+                String::from_utf8_lossy(&body)
+            );
+        }
         assert!(response.headers().get(CONTENT_ENCODING).is_none());
         let body: Value =
             serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
@@ -664,10 +719,118 @@ fn openai_generation_handles_gzip_response_and_persists_log() {
 }
 
 #[test]
+fn integration_fixtures_run_in_parallel_without_cross_db_visibility() {
+    fn run_parallel_case(
+        label: &'static str,
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    ) -> ParallelIsolationResult {
+        run_integration_test(|test_db_context| async move {
+            let Some(upstream) = spawn_test_upstream_or_skip(move |request| {
+                assert_eq!(request.path, "/v1/chat/completions");
+                let body: Value = serde_json::from_slice(&request.body)
+                    .expect("upstream request body should be json");
+                assert_eq!(body["model"], "parallel-openai-model");
+
+                UpstreamReply::json(
+                    StatusCode::OK,
+                    json!({
+                        "id": format!("chatcmpl-{label}"),
+                        "object": "chat.completion",
+                        "model": "parallel-openai-model",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant", "content": format!("{label} ok")},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 2,
+                            "completion_tokens": 2,
+                            "total_tokens": 4
+                        }
+                    }),
+                )
+            })
+            .await
+            else {
+                panic!("parallel integration regression requires mock upstream");
+            };
+
+            let fixture = TestFixture::new(
+                test_db_context.clone(),
+                ProviderType::Openai,
+                format!("{}/v1", upstream.base_url),
+                None,
+                Some("parallel-openai-model".to_string()),
+            )
+            .await;
+
+            barrier.wait();
+
+            let request = build_json_request(
+                "/openai/v1/chat/completions",
+                &[(
+                    "authorization",
+                    format!("Bearer {}", fixture.api_key.api_key),
+                )],
+                json!({
+                    "model": fixture.requested_model(),
+                    "messages": [{"role": "user", "content": format!("hello {label}")}]
+                }),
+            );
+
+            let response = fixture.send(request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let response_json: Value = serde_json::from_slice(&response_body_bytes(response).await)
+                .expect("parallel proxy body should be json");
+            let assistant_text = response_json["choices"][0]["message"]["content"]
+                .as_str()
+                .expect("assistant text should exist")
+                .to_string();
+
+            let log = fixture.latest_log().await;
+            let snapshot = fixture.snapshot_db_state().await;
+
+            let result = ParallelIsolationResult {
+                provider_id: fixture.provider.id,
+                model_id: fixture.model.id,
+                request_log_id: log.id,
+                assistant_text,
+                snapshot,
+            };
+
+            fixture.cleanup().await;
+            result
+        })
+    }
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let left_barrier = std::sync::Arc::clone(&barrier);
+    let right_barrier = std::sync::Arc::clone(&barrier);
+
+    let left = std::thread::spawn(move || run_parallel_case("left", left_barrier));
+    let right = std::thread::spawn(move || run_parallel_case("right", right_barrier));
+
+    let left = left.join().expect("left parallel case should join");
+    let right = right.join().expect("right parallel case should join");
+
+    assert_eq!(left.assistant_text, "left ok");
+    assert_eq!(right.assistant_text, "right ok");
+    assert_ne!(left.provider_id, right.provider_id);
+    assert_ne!(left.model_id, right.model_id);
+    assert_ne!(left.request_log_id, right.request_log_id);
+    assert_eq!(left.snapshot.provider_ids, vec![left.provider_id]);
+    assert_eq!(right.snapshot.provider_ids, vec![right.provider_id]);
+    assert_eq!(left.snapshot.model_ids, vec![left.model_id]);
+    assert_eq!(right.snapshot.model_ids, vec![right.model_id]);
+    assert_eq!(left.snapshot.request_log_ids, vec![left.request_log_id]);
+    assert_eq!(right.snapshot.request_log_ids, vec![right.request_log_id]);
+    assert_eq!(left.snapshot.request_attempt_count, 1);
+    assert_eq!(right.snapshot.request_attempt_count, 1);
+}
+
+#[test]
 fn gemini_generation_routes_to_native_endpoint_and_logs_success() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(
                 request.path,
@@ -711,6 +874,7 @@ fn gemini_generation_routes_to_native_endpoint_and_logs_success() {
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Gemini,
             format!("{}/v1beta/models", upstream.base_url),
             None,
@@ -722,7 +886,7 @@ fn gemini_generation_routes_to_native_endpoint_and_logs_success() {
             &format!(
                 "/gemini/v1beta/models/{}:generateContent?foo=bar&key={}",
                 fixture.requested_model(),
-                fixture.system_api_key.api_key
+                fixture.api_key.api_key
             ),
             &[],
             json!({
@@ -762,9 +926,7 @@ fn gemini_generation_routes_to_native_endpoint_and_logs_success() {
 
 #[test]
 fn gateway_replay_dry_run_persists_artifact_without_upstream_and_preserves_query_flags() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(
                 request.path,
@@ -801,6 +963,7 @@ fn gateway_replay_dry_run_persists_artifact_without_upstream_and_preserves_query
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Gemini,
             format!("{}/v1beta/models", upstream.base_url),
             None,
@@ -812,7 +975,7 @@ fn gateway_replay_dry_run_persists_artifact_without_upstream_and_preserves_query
             &format!(
                 "/gemini/v1beta/models/{}:generateContent?foo=bar&tag=a&tag=b&verbose&mode=&q=a%20b&key={}",
                 fixture.requested_model(),
-                fixture.system_api_key.api_key
+                fixture.api_key.api_key
             ),
             &[],
             json!({
@@ -836,10 +999,9 @@ fn gateway_replay_dry_run_persists_artifact_without_upstream_and_preserves_query
                 .execution_preview
                 .final_request_uri
                 .as_deref()
-                .is_some_and(|uri| uri.ends_with(&format!(
-                    ":generateContent{}",
-                    expected_replay_query
-                )))
+                .is_some_and(
+                    |uri| uri.ends_with(&format!(":generateContent{}", expected_replay_query))
+                )
         );
 
         let upstream_count_before = upstream.captured_requests().await.len();
@@ -871,14 +1033,9 @@ fn gateway_replay_dry_run_persists_artifact_without_upstream_and_preserves_query
         assert_eq!(run.status, RequestReplayStatus::Success);
         assert_eq!(run.http_status, None);
         assert_eq!(run.first_byte_at, None);
-        assert!(
-            run.downstream_request_uri
-                .as_deref()
-                .is_some_and(|uri| uri.ends_with(&format!(
-                    ":generateContent{}",
-                    expected_replay_query
-                )))
-        );
+        assert!(run.downstream_request_uri.as_deref().is_some_and(|uri| {
+            uri.ends_with(&format!(":generateContent{}", expected_replay_query))
+        }));
 
         let artifact = load_replay_artifact_for_run(&run)
             .await
@@ -903,10 +1060,9 @@ fn gateway_replay_dry_run_persists_artifact_without_upstream_and_preserves_query
                 .execution_preview
                 .as_ref()
                 .and_then(|preview| preview.final_request_uri.as_deref())
-                .is_some_and(|uri| uri.ends_with(&format!(
-                    ":generateContent{}",
-                    expected_replay_query
-                )))
+                .is_some_and(
+                    |uri| uri.ends_with(&format!(":generateContent{}", expected_replay_query))
+                )
         );
         assert_eq!(
             upstream.captured_requests().await.len(),
@@ -954,9 +1110,7 @@ fn gateway_replay_dry_run_persists_artifact_without_upstream_and_preserves_query
 
 #[test]
 fn gateway_replay_large_response_keeps_success_with_incomplete_capture() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let limit = CONFIG.replay_response_capture_max_bytes;
         let Some(upstream) = spawn_test_upstream_or_skip(move |request| {
             assert_eq!(request.path, "/v1/chat/completions");
@@ -971,6 +1125,7 @@ fn gateway_replay_large_response_keeps_success_with_incomplete_capture() {
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", upstream.base_url),
             None,
@@ -982,7 +1137,7 @@ fn gateway_replay_large_response_keeps_success_with_incomplete_capture() {
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": fixture.requested_model(),
@@ -1045,9 +1200,7 @@ fn gateway_replay_large_response_keeps_success_with_incomplete_capture() {
 
 #[test]
 fn request_diagnostics_assets_capture_snapshot_manifest_and_request_transform_summary() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(request.path, "/v1/chat/completions");
             assert!(
@@ -1097,6 +1250,7 @@ fn request_diagnostics_assets_capture_snapshot_manifest_and_request_transform_su
         };
 
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", upstream.base_url),
             None,
@@ -1107,7 +1261,7 @@ fn request_diagnostics_assets_capture_snapshot_manifest_and_request_transform_su
         let request = build_json_request(
             "/anthropic/v1/messages?trace=1&verbose&key=should-redact",
             &[
-                ("x-api-key", fixture.system_api_key.api_key.clone()),
+                ("x-api-key", fixture.api_key.api_key.clone()),
                 ("anthropic-version", "2023-06-01".to_string()),
                 ("x-trace-id", "req-123".to_string()),
             ],
@@ -1274,9 +1428,7 @@ fn request_diagnostics_assets_capture_snapshot_manifest_and_request_transform_su
 
 #[test]
 fn utility_requests_share_proxy_lifecycle_and_write_logs() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(request.path, "/v1/embeddings");
             assert_eq!(request.query, None);
@@ -1316,6 +1468,7 @@ fn utility_requests_share_proxy_lifecycle_and_write_logs() {
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", upstream.base_url),
             None,
@@ -1327,7 +1480,7 @@ fn utility_requests_share_proxy_lifecycle_and_write_logs() {
             "/openai/v1/embeddings",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": fixture.requested_model(),
@@ -1391,9 +1544,7 @@ fn utility_requests_share_proxy_lifecycle_and_write_logs() {
 
 #[test]
 fn gemini_utility_requests_capture_attempt_materials_and_usage() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(
                 request.path,
@@ -1425,6 +1576,7 @@ fn gemini_utility_requests_capture_attempt_materials_and_usage() {
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Gemini,
             format!("{}/v1beta/models", upstream.base_url),
             None,
@@ -1436,7 +1588,7 @@ fn gemini_utility_requests_capture_attempt_materials_and_usage() {
             &format!(
                 "/gemini/v1beta/models/{}:countTokens?foo=bar&key={}",
                 fixture.requested_model(),
-                fixture.system_api_key.api_key
+                fixture.api_key.api_key
             ),
             &[],
             json!({
@@ -1499,10 +1651,8 @@ fn gemini_utility_requests_capture_attempt_materials_and_usage() {
 
 #[test]
 fn sse_streaming_requests_are_forwarded_and_logged() {
-    RUNTIME.block_on(async {
-    let _ = ensure_test_database();
-    let _guard = DB_LOCK.lock().await;
-    let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+    run_integration_test(|test_db_context| async move {
+        let Some(upstream) = spawn_test_upstream_or_skip(|request| {
         assert_eq!(request.path, "/v1/chat/completions");
         let body: Value =
             serde_json::from_slice(&request.body).expect("upstream request body should be json");
@@ -1526,62 +1676,63 @@ data: [DONE]
     else {
         return;
     };
-    let fixture = TestFixture::new(
-        ProviderType::Openai,
-        format!("{}/v1", upstream.base_url),
-        None,
-        Some("upstream-stream-model".to_string()),
-    )
-    .await;
+        let fixture = TestFixture::new(
+            test_db_context.clone(),
+            ProviderType::Openai,
+            format!("{}/v1", upstream.base_url),
+            None,
+            Some("upstream-stream-model".to_string()),
+        )
+        .await;
 
-    let request = build_json_request(
-        "/openai/v1/chat/completions",
-        &[(
-            "authorization",
-            format!("Bearer {}", fixture.system_api_key.api_key),
-        )],
-        json!({
-            "model": fixture.requested_model(),
-            "stream": true,
-            "messages": [{"role": "user", "content": "hi"}]
-        }),
-    );
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
 
-    let response = fixture.send(request).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(CONTENT_TYPE)
-            .expect("sse content type"),
-        "text/event-stream"
-    );
-    let body_text = String::from_utf8(response_body_bytes(response).await.to_vec())
-        .expect("sse response should be utf8");
-    assert!(body_text.contains("stream ok"));
-    assert!(body_text.contains("data: [DONE]"));
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .expect("sse content type"),
+            "text/event-stream"
+        );
+        let body_text = String::from_utf8(response_body_bytes(response).await.to_vec())
+            .expect("sse response should be utf8");
+        assert!(body_text.contains("stream ok"));
+        assert!(body_text.contains("data: [DONE]"));
 
-    let log = fixture.latest_log().await;
-    assert_eq!(log.overall_status, RequestStatus::Success);
-    assert_eq!(log.attempt_count, 1);
-    assert!(log.response_started_to_client_at.is_some());
-    assert_eq!(log.total_tokens, Some(5));
-    assert!(log.bundle_storage_key.is_some());
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.attempt_count, 1);
+        assert!(log.response_started_to_client_at.is_some());
+        assert_eq!(log.total_tokens, Some(5));
+        assert!(log.bundle_storage_key.is_some());
 
-    let attempts = fixture.attempts_for_log(log.id).await;
-    assert_eq!(attempts.len(), 1);
-    let response_headers: Value = serde_json::from_str(
-        attempts[0]
-            .response_headers_json
-            .as_deref()
-            .expect("streaming attempt response headers"),
-    )
-    .expect("response headers json");
-    assert_eq!(response_headers["content-type"], "text/event-stream");
-    assert_eq!(response_headers["x-request-id"], "stream-req-1");
-    assert!(response_headers.get("set-cookie").is_none());
-    assert!(response_headers.get("content-length").is_none());
-    assert!(response_headers.get("transfer-encoding").is_none());
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        let response_headers: Value = serde_json::from_str(
+            attempts[0]
+                .response_headers_json
+                .as_deref()
+                .expect("streaming attempt response headers"),
+        )
+        .expect("response headers json");
+        assert_eq!(response_headers["content-type"], "text/event-stream");
+        assert_eq!(response_headers["x-request-id"], "stream-req-1");
+        assert!(response_headers.get("set-cookie").is_none());
+        assert!(response_headers.get("content-length").is_none());
+        assert!(response_headers.get("transfer-encoding").is_none());
 
         fixture.cleanup().await;
     });
@@ -1589,9 +1740,7 @@ data: [DONE]
 
 #[test]
 fn streaming_transform_diagnostics_are_persisted_in_bundle_and_summary_fields() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(
                 request.path,
@@ -1616,6 +1765,7 @@ fn streaming_transform_diagnostics_are_persisted_in_bundle_and_summary_fields() 
         };
 
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Gemini,
             format!("{}/v1beta/models", upstream.base_url),
             None,
@@ -1627,7 +1777,7 @@ fn streaming_transform_diagnostics_are_persisted_in_bundle_and_summary_fields() 
             "/openai/v1/chat/completions?trace=stream",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": fixture.requested_model(),
@@ -1660,20 +1810,24 @@ fn streaming_transform_diagnostics_are_persisted_in_bundle_and_summary_fields() 
         let diagnostics = bundle
             .transform_diagnostics
             .expect("transform diagnostics should be persisted");
-        assert_eq!(diagnostics.summary.count, log.transform_diagnostic_count as u32);
-        assert!(diagnostics
-            .summary
-            .phases
-            .iter()
-            .any(|phase| matches!(phase, crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream)));
-        assert!(diagnostics
-            .items
-            .iter()
-            .any(|item| matches!(item.phase, crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream)));
-        assert!(diagnostics
-            .items
-            .iter()
-            .any(|item| item.diagnostic.semantic_unit == "ImageDelta"));
+        assert_eq!(
+            diagnostics.summary.count,
+            log.transform_diagnostic_count as u32
+        );
+        assert!(diagnostics.summary.phases.iter().any(|phase| matches!(
+            phase,
+            crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream
+        )));
+        assert!(diagnostics.items.iter().any(|item| matches!(
+            item.phase,
+            crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream
+        )));
+        assert!(
+            diagnostics
+                .items
+                .iter()
+                .any(|item| item.diagnostic.semantic_unit == "ImageDelta")
+        );
 
         fixture.cleanup().await;
     });
@@ -1681,9 +1835,7 @@ fn streaming_transform_diagnostics_are_persisted_in_bundle_and_summary_fields() 
 
 #[test]
 fn streaming_raw_chunk_without_visible_output_keeps_response_started_null_on_error() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(request.path, "/v1/chat/completions");
             UpstreamReply::erroring_sse(
@@ -1698,6 +1850,7 @@ fn streaming_raw_chunk_without_visible_output_keeps_response_started_null_on_err
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", upstream.base_url),
             None,
@@ -1709,7 +1862,7 @@ fn streaming_raw_chunk_without_visible_output_keeps_response_started_null_on_err
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": fixture.requested_model(),
@@ -1764,10 +1917,9 @@ fn streaming_raw_chunk_without_visible_output_keeps_response_started_null_on_err
 
 #[test]
 fn streaming_request_without_upstream_response_keeps_attempt_response_headers_null() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             "http://127.0.0.1:9/v1".to_string(),
             None,
@@ -1779,7 +1931,7 @@ fn streaming_request_without_upstream_response_keeps_attempt_response_headers_nu
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": fixture.requested_model(),
@@ -1809,10 +1961,8 @@ fn streaming_request_without_upstream_response_keeps_attempt_response_headers_nu
 
 #[test]
 fn streaming_visible_chunk_before_upstream_error_marks_attempt_visible_without_retry() {
-    RUNTIME.block_on(async {
-    let _ = ensure_test_database();
-    let _guard = DB_LOCK.lock().await;
-    let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+    run_integration_test(|test_db_context| async move {
+        let Some(upstream) = spawn_test_upstream_or_skip(|request| {
         assert_eq!(request.path, "/v1/chat/completions");
         UpstreamReply::erroring_sse(
             vec![(
@@ -1828,70 +1978,69 @@ fn streaming_visible_chunk_before_upstream_error_marks_attempt_visible_without_r
     else {
         return;
     };
-    let fixture = TestFixture::new(
-        ProviderType::Openai,
-        format!("{}/v1", upstream.base_url),
-        None,
-        Some("upstream-stream-model".to_string()),
-    )
-    .await;
+        let fixture = TestFixture::new(
+            test_db_context.clone(),
+            ProviderType::Openai,
+            format!("{}/v1", upstream.base_url),
+            None,
+            Some("upstream-stream-model".to_string()),
+        )
+        .await;
 
-    let request = build_json_request(
-        "/openai/v1/chat/completions",
-        &[(
-            "authorization",
-            format!("Bearer {}", fixture.system_api_key.api_key),
-        )],
-        json!({
-            "model": fixture.requested_model(),
-            "stream": true,
-            "messages": [{"role": "user", "content": "hi"}]
-        }),
-    );
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
 
-    let response = fixture.send(request).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let mut stream = response.into_body().into_data_stream();
-    let first_chunk = stream
-        .next()
-        .await
-        .expect("expected first streamed chunk")
-        .expect("first streamed chunk should succeed");
-    assert!(String::from_utf8_lossy(&first_chunk).contains("hel"));
-    let second_item = stream
-        .next()
-        .await
-        .expect("expected upstream failure after visible chunk");
-    assert!(second_item.is_err());
-    assert!(stream.next().await.is_none());
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let first_chunk = stream
+            .next()
+            .await
+            .expect("expected first streamed chunk")
+            .expect("first streamed chunk should succeed");
+        assert!(String::from_utf8_lossy(&first_chunk).contains("hel"));
+        let second_item = stream
+            .next()
+            .await
+            .expect("expected upstream failure after visible chunk");
+        assert!(second_item.is_err());
+        assert!(stream.next().await.is_none());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let log = fixture.latest_log().await;
-    assert_eq!(log.overall_status, RequestStatus::Error);
-    assert_eq!(log.attempt_count, 1);
-    assert_eq!(log.retry_count, 0);
-    assert_eq!(log.fallback_count, 0);
-    assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
-    assert!(log.response_started_to_client_at.is_some());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Error);
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(log.retry_count, 0);
+        assert_eq!(log.fallback_count, 0);
+        assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+        assert!(log.response_started_to_client_at.is_some());
 
-    let attempts = fixture.attempts_for_log(log.id).await;
-    assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Error);
-    assert_eq!(attempts[0].scheduler_action, SchedulerAction::FailFast);
-    assert_eq!(attempts[0].error_code.as_deref(), Some("upstream_error"));
-    assert!(attempts[0].response_started_to_client);
-    assert_eq!(upstream.captured_requests().await.len(), 1);
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Error);
+        assert_eq!(attempts[0].scheduler_action, SchedulerAction::FailFast);
+        assert_eq!(attempts[0].error_code.as_deref(), Some("upstream_error"));
+        assert!(attempts[0].response_started_to_client);
+        assert_eq!(upstream.captured_requests().await.len(), 1);
 
-    fixture.cleanup().await;
+        fixture.cleanup().await;
     });
 }
 
 #[test]
 fn streaming_client_disconnect_marks_log_cancelled() {
-    RUNTIME.block_on(async {
-    let _ = ensure_test_database();
-    let _guard = DB_LOCK.lock().await;
-    let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+    run_integration_test(|test_db_context| async move {
+        let Some(upstream) = spawn_test_upstream_or_skip(|request| {
         assert_eq!(request.path, "/v1/chat/completions");
         UpstreamReply::delayed_sse(vec![
             (0, br#"data: {"id":"chunk-1","object":"chat.completion.chunk","created":1,"model":"upstream-stream-model","choices":[{"index":0,"delta":{"content":"hel"},"finish_reason":null}],"usage":null}
@@ -1907,52 +2056,51 @@ fn streaming_client_disconnect_marks_log_cancelled() {
     else {
         return;
     };
-    let fixture = TestFixture::new(
-        ProviderType::Openai,
-        format!("{}/v1", upstream.base_url),
-        None,
-        Some("upstream-stream-model".to_string()),
-    )
-    .await;
+        let fixture = TestFixture::new(
+            test_db_context.clone(),
+            ProviderType::Openai,
+            format!("{}/v1", upstream.base_url),
+            None,
+            Some("upstream-stream-model".to_string()),
+        )
+        .await;
 
-    let request = build_json_request(
-        "/openai/v1/chat/completions",
-        &[(
-            "authorization",
-            format!("Bearer {}", fixture.system_api_key.api_key),
-        )],
-        json!({
-            "model": fixture.requested_model(),
-            "stream": true,
-            "messages": [{"role": "user", "content": "disconnect me"}]
-        }),
-    );
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "stream": true,
+                "messages": [{"role": "user", "content": "disconnect me"}]
+            }),
+        );
 
-    let response = fixture.send(request).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let mut stream = response.into_body().into_data_stream();
-    let first_chunk = stream
-        .next()
-        .await
-        .expect("expected first streamed chunk")
-        .expect("first streamed chunk should succeed");
-    assert!(String::from_utf8_lossy(&first_chunk).contains("hel"));
-    drop(stream);
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let first_chunk = stream
+            .next()
+            .await
+            .expect("expected first streamed chunk")
+            .expect("first streamed chunk should succeed");
+        assert!(String::from_utf8_lossy(&first_chunk).contains("hel"));
+        drop(stream);
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let log = fixture.latest_log().await;
-    assert_eq!(log.overall_status, RequestStatus::Cancelled);
-    assert!(log.bundle_storage_key.is_some());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Cancelled);
+        assert!(log.bundle_storage_key.is_some());
 
-    fixture.cleanup().await;
+        fixture.cleanup().await;
     });
 }
 
 #[test]
 fn acl_denials_short_circuit_before_upstream_and_persist_route_trace_logs() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|_| {
             panic!("upstream should not be called when ACL denies the request");
         })
@@ -1961,9 +2109,10 @@ fn acl_denials_short_circuit_before_upstream_and_persist_route_trace_logs() {
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", upstream.base_url),
-            Some(deny_all_policy()),
+            Some(Action::Deny),
             Some("upstream-denied-model".to_string()),
         )
         .await;
@@ -1974,7 +2123,7 @@ fn acl_denials_short_circuit_before_upstream_and_persist_route_trace_logs() {
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": route_name.clone(),
@@ -2022,9 +2171,7 @@ fn acl_denials_short_circuit_before_upstream_and_persist_route_trace_logs() {
 
 #[test]
 fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream_call() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         if !CONFIG.provider_governance.is_enabled() {
             eprintln!("skipping provider governance integration scenario: governance disabled");
             return;
@@ -2067,6 +2214,7 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
         };
 
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", skipped_upstream.base_url),
             None,
@@ -2115,7 +2263,7 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": route_name.clone(),
@@ -2175,9 +2323,7 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
 
 #[test]
 fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without_upstream_call() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         if !CONFIG.provider_governance.is_enabled() {
             eprintln!("skipping gateway replay preview governance scenario: governance disabled");
             return;
@@ -2220,6 +2366,7 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
         };
 
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", skipped_upstream.base_url),
             None,
@@ -2271,7 +2418,7 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": route_name.clone(),
@@ -2373,10 +2520,7 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
 
 #[test]
 fn gateway_replay_execute_persists_final_fallback_attempt_target() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
-
+    run_integration_test(|test_db_context| async move {
         let primary_should_fail = Arc::new(AtomicBool::new(false));
         let Some(primary_upstream) = spawn_test_upstream_or_skip({
             let primary_should_fail = Arc::clone(&primary_should_fail);
@@ -2440,6 +2584,7 @@ fn gateway_replay_execute_persists_final_fallback_attempt_target() {
         };
 
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", primary_upstream.base_url),
             None,
@@ -2480,7 +2625,7 @@ fn gateway_replay_execute_persists_final_fallback_attempt_target() {
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": route_name.clone(),
@@ -2592,9 +2737,7 @@ fn gateway_replay_execute_persists_final_fallback_attempt_target() {
 
 #[test]
 fn request_patch_conflict_uses_stable_error_code_in_attempt_and_request_log() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|_| {
             UpstreamReply::json(
                 StatusCode::OK,
@@ -2614,6 +2757,7 @@ fn request_patch_conflict_uses_stable_error_code_in_attempt_and_request_log() {
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", upstream.base_url),
             None,
@@ -2661,7 +2805,7 @@ fn request_patch_conflict_uses_stable_error_code_in_attempt_and_request_log() {
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": fixture.requested_model(),
@@ -2706,9 +2850,7 @@ fn request_patch_conflict_uses_stable_error_code_in_attempt_and_request_log() {
 
 #[test]
 fn upstream_errors_are_mapped_and_persisted_in_request_logs() {
-    RUNTIME.block_on(async {
-        let _ = ensure_test_database();
-        let _guard = DB_LOCK.lock().await;
+    run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
             assert_eq!(request.path, "/v1/chat/completions");
             UpstreamReply::json(
@@ -2725,6 +2867,7 @@ fn upstream_errors_are_mapped_and_persisted_in_request_logs() {
             return;
         };
         let fixture = TestFixture::new(
+            test_db_context.clone(),
             ProviderType::Openai,
             format!("{}/v1", upstream.base_url),
             None,
@@ -2736,7 +2879,7 @@ fn upstream_errors_are_mapped_and_persisted_in_request_logs() {
             "/openai/v1/chat/completions",
             &[(
                 "authorization",
-                format!("Bearer {}", fixture.system_api_key.api_key),
+                format!("Bearer {}", fixture.api_key.api_key),
             )],
             json!({
                 "model": fixture.requested_model(),

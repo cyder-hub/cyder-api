@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unit Test"
+  short_description: "Repository-specific unit test workflows"
+  default_prompt: "Use $unittest to add or update tests for the current backend or frontend change."

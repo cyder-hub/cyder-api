@@ -32,7 +32,7 @@ pub(crate) struct UtilityOperation {
 
 pub(super) struct UtilityExecutionInput {
     pub cancellation: ProxyCancellationContext,
-    pub system_api_key: Arc<CacheApiKey>,
+    pub api_key: Arc<CacheApiKey>,
     pub operation: UtilityOperation,
     pub execution_plan: ExecutionPlan,
     pub query_params: HashMap<String, String>,
@@ -67,7 +67,7 @@ pub(super) async fn execute_utility_proxy(
 ) -> Result<Response<Body>, ProxyError> {
     let UtilityExecutionInput {
         cancellation,
-        system_api_key,
+        api_key,
         operation,
         execution_plan,
         query_params,
@@ -87,7 +87,7 @@ pub(super) async fn execute_utility_proxy(
         app_state,
         UtilityOrchestrationInput {
             cancellation,
-            system_api_key,
+            api_key,
             operation,
             execution_plan,
             query_params,

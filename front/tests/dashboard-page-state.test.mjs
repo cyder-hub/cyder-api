@@ -49,7 +49,7 @@ function buildResourcesSection(overrides = {}) {
       ...buildEmptyDashboardResourcesSection().today,
       active_provider_count: 3,
       active_model_count: 7,
-      active_system_api_key_count: 2,
+      active_api_key_count: 2,
       ...overrides.today,
     },
     runtime: {

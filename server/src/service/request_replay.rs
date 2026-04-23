@@ -47,7 +47,7 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheProvider},
-        request_log_artifact::{DecodedRequestLogBundle, load_request_log_bundle},
+        request_log_artifact::load_request_log_bundle,
         storage::{
             Storage, get_local_storage, get_s3_storage, get_storage,
             types::{GetObjectOptions, PutObjectOptions},
@@ -59,7 +59,7 @@ use crate::{
         ID_GENERATOR,
         sse::SseParser,
         storage::{
-            LogBodyCaptureState, RequestLogBundleRequestSnapshot,
+            LogBodyCaptureState, RequestLogBundleRequestSnapshot, RequestLogBundleV2,
             generate_replay_artifact_storage_path,
         },
     },
@@ -543,7 +543,7 @@ struct GatewayReplaySource {
     user_request_body: DecodedBundleBody,
     baseline_user_response_body: Option<DecodedBundleBody>,
     baseline_final_attempt: Option<RequestAttemptDetail>,
-    system_api_key: Arc<CacheApiKey>,
+    api_key: Arc<CacheApiKey>,
     requested_model_name: String,
     kind: GatewayReplayAttemptKind,
 }
@@ -819,11 +819,6 @@ async fn load_gateway_replay_source(request_log_id: i64) -> Result<GatewayReplay
                 request_log_id
             )))
         })?;
-    let DecodedRequestLogBundle::V2(bundle) = bundle else {
-        return Err(BaseError::ParamInvalid(Some(
-            "Gateway replay requires a v2 request log bundle with request snapshot".to_string(),
-        )));
-    };
     let request_snapshot = bundle.request_snapshot.clone().ok_or_else(|| {
         BaseError::ParamInvalid(Some(format!(
             "Request log {} is missing request snapshot",
@@ -849,7 +844,7 @@ async fn load_gateway_replay_source(request_log_id: i64) -> Result<GatewayReplay
         })?;
     let (requested_model_name, kind) =
         gateway_replay_kind_from_snapshot(&request_log, &request_snapshot, &request_value)?;
-    let system_api_key = Arc::new(load_cache_api_key_by_id(request_log.api_key_id)?);
+    let api_key = Arc::new(load_cache_api_key_by_id(request_log.api_key_id)?);
     let original_headers = header_map_from_snapshot(&request_snapshot)?;
 
     Ok(GatewayReplaySource {
@@ -859,7 +854,7 @@ async fn load_gateway_replay_source(request_log_id: i64) -> Result<GatewayReplay
         user_request_body,
         baseline_user_response_body,
         baseline_final_attempt,
-        system_api_key,
+        api_key,
         requested_model_name,
         kind,
     })
@@ -890,7 +885,7 @@ fn load_gateway_baseline_final_attempt(
 
 fn gateway_replay_input_from_source(source: &GatewayReplaySource) -> GatewayReplayInput {
     GatewayReplayInput {
-        system_api_key: Arc::clone(&source.system_api_key),
+        api_key: Arc::clone(&source.api_key),
         requested_model_name: source.requested_model_name.clone(),
         query_params: source.request_snapshot.query_params.clone(),
         original_headers: source.original_headers.clone(),
@@ -2793,86 +2788,46 @@ fn parse_gemini_model_action_from_path(path: &str) -> Result<(String, String), B
 }
 
 fn extract_attempt_request_body(
-    bundle: &DecodedRequestLogBundle,
+    bundle: &RequestLogBundleV2,
     attempt: &RequestAttemptDetail,
 ) -> Result<DecodedBundleBody, BaseError> {
-    match bundle {
-        DecodedRequestLogBundle::Legacy(bundle) => {
-            if attempt.attempt_index != 1 {
-                return Err(BaseError::ParamInvalid(Some(format!(
-                    "Legacy request bundle cannot replay attempt {} because only the first attempt body was captured",
-                    attempt.id
-                ))));
-            }
-            let bytes = bundle.llm_request_body.clone().ok_or_else(|| {
-                BaseError::ParamInvalid(Some(format!(
-                    "Attempt {} is missing historical downstream request body",
-                    attempt.id
-                )))
-            })?;
-            Ok(DecodedBundleBody {
-                bytes,
-                media_type: Some("application/json".to_string()),
-                capture_state: Some("complete".to_string()),
-            })
-        }
-        DecodedRequestLogBundle::V2(bundle) => {
-            let section = bundle_attempt_section(bundle, attempt).ok_or_else(|| {
-                BaseError::ParamInvalid(Some(format!(
-                    "Attempt {} is missing bundle section",
-                    attempt.id
-                )))
-            })?;
-            reconstruct_request_body_from_v2_bundle(
-                bundle,
-                section.llm_request_blob_id,
-                section.llm_request_patch_id,
-            )
-            .ok_or_else(|| {
-                BaseError::ParamInvalid(Some(format!(
-                    "Attempt {} is missing historical downstream request body",
-                    attempt.id
-                )))
-            })
-        }
-    }
+    let section = bundle_attempt_section(bundle, attempt).ok_or_else(|| {
+        BaseError::ParamInvalid(Some(format!(
+            "Attempt {} is missing bundle section",
+            attempt.id
+        )))
+    })?;
+    reconstruct_request_body_from_v2_bundle(
+        bundle,
+        section.llm_request_blob_id,
+        section.llm_request_patch_id,
+    )
+    .ok_or_else(|| {
+        BaseError::ParamInvalid(Some(format!(
+            "Attempt {} is missing historical downstream request body",
+            attempt.id
+        )))
+    })
 }
 
 fn extract_attempt_response_body(
-    bundle: &DecodedRequestLogBundle,
+    bundle: &RequestLogBundleV2,
     attempt: &RequestAttemptDetail,
 ) -> Result<Option<DecodedBundleBody>, BaseError> {
-    match bundle {
-        DecodedRequestLogBundle::Legacy(bundle) => {
-            Ok(bundle
-                .llm_response_body
-                .clone()
-                .map(|bytes| DecodedBundleBody {
-                    bytes,
-                    media_type: Some("application/json".to_string()),
-                    capture_state: bundle
-                        .llm_response_capture_state
-                        .as_ref()
-                        .map(log_capture_state_to_string),
-                }))
-        }
-        DecodedRequestLogBundle::V2(bundle) => {
-            let Some(section) = bundle_attempt_section(bundle, attempt) else {
-                return Ok(None);
-            };
-            Ok(section
-                .llm_response_blob_id
-                .and_then(|blob_id| bundle.blob_pool.iter().find(|blob| blob.blob_id == blob_id))
-                .map(|blob| DecodedBundleBody {
-                    bytes: blob.body.clone(),
-                    media_type: Some(blob.media_type.clone()),
-                    capture_state: section
-                        .llm_response_capture_state
-                        .as_ref()
-                        .map(log_capture_state_to_string),
-                }))
-        }
-    }
+    let Some(section) = bundle_attempt_section(bundle, attempt) else {
+        return Ok(None);
+    };
+    Ok(section
+        .llm_response_blob_id
+        .and_then(|blob_id| bundle.blob_pool.iter().find(|blob| blob.blob_id == blob_id))
+        .map(|blob| DecodedBundleBody {
+            bytes: blob.body.clone(),
+            media_type: Some(blob.media_type.clone()),
+            capture_state: section
+                .llm_response_capture_state
+                .as_ref()
+                .map(log_capture_state_to_string),
+        }))
 }
 
 fn bundle_attempt_section<'a>(
@@ -4844,7 +4799,7 @@ mod tests {
                 capture_state: Some("complete".to_string()),
             }),
             baseline_final_attempt,
-            system_api_key: Arc::new(CacheApiKey {
+            api_key: Arc::new(CacheApiKey {
                 id: 7,
                 api_key_hash: "hash".to_string(),
                 key_prefix: "ck-test".to_string(),

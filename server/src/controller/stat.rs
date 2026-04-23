@@ -1099,8 +1099,9 @@ mod tests {
             Some("gateway-key")
         );
         let legacy_api_key_id_field = ["system", "api", "key", "id"].join("_");
+        let legacy_api_key_name_field = ["system", "api", "key", "name"].join("_");
         assert!(value.get(&legacy_api_key_id_field).is_none());
-        assert!(value.get("system_api_key_name").is_none());
+        assert!(value.get(&legacy_api_key_name_field).is_none());
     }
 
     #[test]
@@ -1122,7 +1123,10 @@ mod tests {
             value.get("enabled_api_key_count").and_then(|v| v.as_i64()),
             Some(3)
         );
-        assert!(value.get("system_api_key_count").is_none());
-        assert!(value.get("enabled_system_api_key_count").is_none());
+        let legacy_api_key_count_field = ["system", "api", "key", "count"].join("_");
+        let legacy_enabled_api_key_count_field =
+            ["enabled", "system", "api", "key", "count"].join("_");
+        assert!(value.get(&legacy_api_key_count_field).is_none());
+        assert!(value.get(&legacy_enabled_api_key_count_field).is_none());
     }
 }

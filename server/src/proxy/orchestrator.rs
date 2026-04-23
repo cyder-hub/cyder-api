@@ -328,7 +328,7 @@ pub(super) enum AttemptExecutionKind {
 
 pub(super) struct AttemptExecutionInput {
     pub cancellation: ProxyCancellationContext,
-    pub system_api_key: Arc<CacheApiKey>,
+    pub api_key: Arc<CacheApiKey>,
     pub candidate: ExecutionCandidate,
     pub requested_model_name: String,
     pub resolved_name_scope: String,
@@ -936,7 +936,7 @@ pub(super) async fn execute_attempt(
 ) -> AttemptExecutionResult {
     let AttemptExecutionInput {
         cancellation,
-        system_api_key,
+        api_key,
         candidate,
         requested_model_name,
         resolved_name_scope,
@@ -968,7 +968,7 @@ pub(super) async fn execute_attempt(
         AttemptExecutionKind::Utility { operation, .. } => operation.api_type,
     };
     let mut log_context = RequestLogContext::new(
-        &system_api_key,
+        &api_key,
         &candidate.provider,
         &candidate.model,
         None,
@@ -1050,13 +1050,8 @@ pub(super) async fn execute_attempt(
         }
     }
 
-    if let Err(proxy_error) = check_access_control(
-        &system_api_key,
-        &candidate.provider,
-        &candidate.model,
-        &app_state,
-    )
-    .await
+    if let Err(proxy_error) =
+        check_access_control(&api_key, &candidate.provider, &candidate.model, &app_state).await
     {
         attempt.completed_at = Some(Utc::now().timestamp_millis());
         classify_attempt_failure(
@@ -1256,7 +1251,7 @@ pub(super) async fn execute_attempt(
     log_context.set_attempts_for_logging(&skipped_attempts_for_log, Some(attempt.clone()));
 
     let api_key_concurrency_guard = if execution_policy.admits_api_key_requests() {
-        match admit_api_key_request(&app_state, &system_api_key).await {
+        match admit_api_key_request(&app_state, &api_key).await {
             Ok(guard) => guard,
             Err(proxy_error) => {
                 attempt.completed_at = Some(Utc::now().timestamp_millis());
@@ -1401,7 +1396,7 @@ pub(super) async fn execute_attempt(
 
 pub(super) struct GenerationOrchestrationInput {
     pub cancellation: ProxyCancellationContext,
-    pub system_api_key: Arc<CacheApiKey>,
+    pub api_key: Arc<CacheApiKey>,
     pub api_type: LlmApiType,
     pub execution_plan: ExecutionPlan,
     pub is_stream: bool,
@@ -1419,7 +1414,7 @@ pub(super) struct GenerationOrchestrationInput {
 
 pub(super) struct UtilityOrchestrationInput {
     pub cancellation: ProxyCancellationContext,
-    pub system_api_key: Arc<CacheApiKey>,
+    pub api_key: Arc<CacheApiKey>,
     pub operation: UtilityOperation,
     pub execution_plan: ExecutionPlan,
     pub query_params: HashMap<String, String>,
@@ -1449,7 +1444,7 @@ pub(crate) enum GatewayReplayAttemptKind {
 
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayReplayInput {
-    pub system_api_key: Arc<CacheApiKey>,
+    pub api_key: Arc<CacheApiKey>,
     pub requested_model_name: String,
     pub query_params: Vec<RequestLogBundleQueryParam>,
     pub original_headers: HeaderMap,
@@ -1671,13 +1666,10 @@ pub(crate) async fn preview_gateway_replay_request(
     input: GatewayReplayInput,
 ) -> Result<GatewayReplayPreparedRequest, ProxyError> {
     debug_assert!(!ProxyExecutionPolicy::ReplayDryRun.admits_api_key_requests());
-    let execution_plan = build_execution_plan(
-        &app_state,
-        input.system_api_key.id,
-        &input.requested_model_name,
-    )
-    .await
-    .map_err(ProxyError::BadRequest)?;
+    let execution_plan =
+        build_execution_plan(&app_state, input.api_key.id, &input.requested_model_name)
+            .await
+            .map_err(ProxyError::BadRequest)?;
     materialize_gateway_replay_request(app_state, input, execution_plan).await
 }
 
@@ -1685,13 +1677,12 @@ pub(crate) async fn execute_gateway_replay_request(
     app_state: Arc<AppState>,
     input: GatewayReplayInput,
 ) -> Result<GatewayReplayExecutionSuccess, GatewayReplayExecutionFailure> {
-    let execution_plan = build_execution_plan(
-        &app_state,
-        input.system_api_key.id,
-        &input.requested_model_name,
-    )
-    .await
-    .map_err(|err| GatewayReplayExecutionFailure::without_attempt(ProxyError::BadRequest(err)))?;
+    let execution_plan =
+        build_execution_plan(&app_state, input.api_key.id, &input.requested_model_name)
+            .await
+            .map_err(|err| {
+                GatewayReplayExecutionFailure::without_attempt(ProxyError::BadRequest(err))
+            })?;
 
     match input.kind {
         GatewayReplayAttemptKind::Generation {
@@ -1704,7 +1695,7 @@ pub(crate) async fn execute_gateway_replay_request(
                 app_state,
                 GenerationOrchestrationInput {
                     cancellation: ProxyCancellationContext::new(),
-                    system_api_key: input.system_api_key,
+                    api_key: input.api_key,
                     api_type,
                     execution_plan,
                     is_stream,
@@ -1727,7 +1718,7 @@ pub(crate) async fn execute_gateway_replay_request(
                 app_state,
                 UtilityOrchestrationInput {
                     cancellation: ProxyCancellationContext::new(),
-                    system_api_key: input.system_api_key,
+                    api_key: input.api_key,
                     operation,
                     execution_plan,
                     query_params: replay_query_params_to_map(&input.query_params),
@@ -1905,7 +1896,7 @@ async fn materialize_gateway_replay_candidate(
     }
 
     if let Err(proxy_error) = check_access_control(
-        &input.system_api_key,
+        &input.api_key,
         &candidate.provider,
         &candidate.model,
         app_state,
@@ -2068,7 +2059,7 @@ async fn materialize_gateway_replay_candidate(
 
 async fn record_no_candidate_generation_failure(
     app_state: &Arc<AppState>,
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
     execution_plan: &ExecutionPlan,
     skipped_attempts: Vec<RequestAttemptDraft>,
     api_type: LlmApiType,
@@ -2085,7 +2076,7 @@ async fn record_no_candidate_generation_failure(
     };
 
     let mut log_context = RequestLogContext::new_for_skipped_candidates(
-        system_api_key,
+        api_key,
         &execution_plan.requested_name,
         execution_plan.resolved_scope.as_str(),
         execution_plan.resolved_route_id,
@@ -2116,7 +2107,7 @@ async fn record_no_candidate_generation_failure(
 
 async fn record_no_candidate_utility_failure(
     app_state: &Arc<AppState>,
-    system_api_key: &CacheApiKey,
+    api_key: &CacheApiKey,
     execution_plan: &ExecutionPlan,
     skipped_attempts: Vec<RequestAttemptDraft>,
     operation: &UtilityOperation,
@@ -2133,7 +2124,7 @@ async fn record_no_candidate_utility_failure(
     };
 
     let mut log_context = RequestLogContext::new_for_skipped_candidates(
-        system_api_key,
+        api_key,
         &execution_plan.requested_name,
         execution_plan.resolved_scope.as_str(),
         execution_plan.resolved_route_id,
@@ -2178,7 +2169,7 @@ pub(super) async fn orchestrate_generation_with_outcome(
 ) -> Result<GatewayReplayExecutionSuccess, GatewayReplayExecutionFailure> {
     let GenerationOrchestrationInput {
         cancellation,
-        system_api_key,
+        api_key,
         api_type,
         execution_plan,
         is_stream,
@@ -2205,7 +2196,7 @@ pub(super) async fn orchestrate_generation_with_outcome(
         let message = no_candidate_error_message(&requirement);
         record_no_candidate_generation_failure(
             &app_state,
-            &system_api_key,
+            &api_key,
             &execution_plan,
             prior_attempts.clone(),
             api_type,
@@ -2243,7 +2234,7 @@ pub(super) async fn orchestrate_generation_with_outcome(
                 Arc::clone(&app_state),
                 AttemptExecutionInput {
                     cancellation: cancellation.clone(),
-                    system_api_key: Arc::clone(&system_api_key),
+                    api_key: Arc::clone(&api_key),
                     candidate: candidate.clone(),
                     requested_model_name: requested_model_name.clone(),
                     resolved_name_scope: resolved_name_scope.clone(),
@@ -2348,7 +2339,7 @@ pub(super) async fn orchestrate_generation_with_outcome(
     let message = no_candidate_error_message(&requirement);
     let _ = record_no_candidate_generation_failure(
         &app_state,
-        &system_api_key,
+        &api_key,
         &execution_plan,
         prior_attempts.clone(),
         api_type,
@@ -2383,7 +2374,7 @@ pub(super) async fn orchestrate_utility_with_outcome(
 ) -> Result<GatewayReplayExecutionSuccess, GatewayReplayExecutionFailure> {
     let UtilityOrchestrationInput {
         cancellation,
-        system_api_key,
+        api_key,
         operation,
         execution_plan,
         query_params,
@@ -2408,7 +2399,7 @@ pub(super) async fn orchestrate_utility_with_outcome(
         let message = no_candidate_error_message(&requirement);
         record_no_candidate_utility_failure(
             &app_state,
-            &system_api_key,
+            &api_key,
             &execution_plan,
             prior_attempts.clone(),
             &operation,
@@ -2446,7 +2437,7 @@ pub(super) async fn orchestrate_utility_with_outcome(
                 Arc::clone(&app_state),
                 AttemptExecutionInput {
                     cancellation: cancellation.clone(),
-                    system_api_key: Arc::clone(&system_api_key),
+                    api_key: Arc::clone(&api_key),
                     candidate: candidate.clone(),
                     requested_model_name: requested_model_name.clone(),
                     resolved_name_scope: resolved_name_scope.clone(),
@@ -2549,7 +2540,7 @@ pub(super) async fn orchestrate_utility_with_outcome(
     let message = no_candidate_error_message(&requirement);
     let _ = record_no_candidate_utility_failure(
         &app_state,
-        &system_api_key,
+        &api_key,
         &execution_plan,
         prior_attempts.clone(),
         &operation,

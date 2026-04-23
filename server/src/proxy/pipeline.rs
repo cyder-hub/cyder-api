@@ -7,7 +7,7 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
-use cyder_tools::log::{debug, warn};
+use cyder_tools::log::debug;
 
 use super::{
     ProxyError,
@@ -175,7 +175,12 @@ impl OperationAdapter {
             request_uri_query.as_deref(),
             &original_headers,
         );
-        debug!("{} --- {:?}", &request_uri_path, &query_params);
+        crate::debug_event!(
+            "proxy.request_received",
+            request_path = &request_uri_path,
+            operation_kind = &operation_kind,
+            query_param_count = query_params.len(),
+        );
 
         let system_api_key = self
             .authenticate(&app_state, &original_headers, &query_params)
@@ -263,9 +268,10 @@ async fn execute_generation_operation(
     )
     .await
     .map_err(|e| {
-        warn!(
-            "Failed to build execution plan for '{}': {}",
-            requested_model, e
+        crate::debug_event!(
+            "proxy.execution_plan_build_failed",
+            requested_model = &requested_model,
+            error = &e,
         );
         ProxyError::BadRequest(e)
     })?;
@@ -309,9 +315,10 @@ async fn execute_utility_operation(
     )
     .await
     .map_err(|e| {
-        warn!(
-            "Failed to build execution plan for '{}': {}",
-            requested_model, e
+        crate::debug_event!(
+            "proxy.execution_plan_build_failed",
+            requested_model = &requested_model,
+            error = &e,
         );
         ProxyError::BadRequest(e)
     })?;

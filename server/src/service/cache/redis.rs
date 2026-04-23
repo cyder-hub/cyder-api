@@ -194,11 +194,6 @@ where
                 pipe.del(key);
             }
             pipe.query_async::<()>(&mut *conn).await?;
-            cyder_tools::log::info!(
-                "Cleared {} keys from Redis cache with prefix '{}'",
-                keys_to_delete.len(),
-                self.key_prefix
-            );
         }
 
         Ok(())

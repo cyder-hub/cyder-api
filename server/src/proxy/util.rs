@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use axum::{body::Body, extract::Request};
 use cyder_tools::log::debug;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::ProxyError;
 use crate::{
@@ -37,12 +38,6 @@ fn serialize_headers_for_log(
     serde_json::to_string(&header_map_simplified).ok()
 }
 
-pub(super) fn serialize_reqwest_headers_for_debug(
-    headers: &reqwest::header::HeaderMap,
-) -> Option<String> {
-    serialize_headers_for_log(headers, REDACTED_REQUEST_HEADER_NAMES)
-}
-
 pub(super) fn serialize_downstream_request_headers_for_log(
     headers: &reqwest::header::HeaderMap,
 ) -> Option<String> {
@@ -56,6 +51,25 @@ pub(super) fn serialize_upstream_response_headers_for_log(
         headers,
         &["set-cookie", "transfer-encoding", "content-length"],
     )
+}
+
+pub(super) fn sha256_hex(body: impl AsRef<[u8]>) -> String {
+    format!("{:x}", Sha256::digest(body.as_ref()))
+}
+
+pub(super) fn top_level_json_field_count(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => map.len(),
+        Value::Array(items) => items.len(),
+        Value::Null => 0,
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => 1,
+    }
+}
+
+pub(super) fn json_top_level_field_count_from_bytes(body: impl AsRef<[u8]>) -> Option<usize> {
+    serde_json::from_slice::<Value>(body.as_ref())
+        .ok()
+        .map(|value| top_level_json_field_count(&value))
 }
 
 pub(super) fn build_request_snapshot(
@@ -268,9 +282,11 @@ pub(super) fn format_model_str(provider: &CacheProvider, model: &CacheModel) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_request_snapshot, determine_target_api_type, parse_request_query_params_for_snapshot,
-        parse_utility_usage_normalization, sanitize_original_request_headers_for_snapshot,
+        build_request_snapshot, determine_target_api_type, json_top_level_field_count_from_bytes,
+        parse_request_query_params_for_snapshot, parse_utility_usage_normalization,
+        sanitize_original_request_headers_for_snapshot,
         serialize_downstream_request_headers_for_log, serialize_upstream_response_headers_for_log,
+        sha256_hex, top_level_json_field_count,
     };
     use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::CacheProvider;
@@ -435,5 +451,31 @@ mod tests {
         assert_eq!(openai_usage.total_output_tokens, 0);
         assert_eq!(gemini_usage.total_input_tokens, 9);
         assert_eq!(gemini_usage.total_output_tokens, 0);
+    }
+
+    #[test]
+    fn json_top_level_field_count_helpers_handle_objects_arrays_and_scalars() {
+        assert_eq!(
+            top_level_json_field_count(&serde_json::json!({"a": 1, "b": 2})),
+            2
+        );
+        assert_eq!(
+            top_level_json_field_count(&serde_json::json!(["a", "b"])),
+            2
+        );
+        assert_eq!(top_level_json_field_count(&serde_json::json!("value")), 1);
+        assert_eq!(top_level_json_field_count(&Value::Null), 0);
+        assert_eq!(
+            json_top_level_field_count_from_bytes(br#"{"stream":true,"model":"m"}"#),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn sha256_hex_is_stable_for_logged_payload_summaries() {
+        assert_eq!(
+            sha256_hex(br#"{"hello":"world"}"#),
+            "93a23971a914e5eacbf0a8d25154cda309c3c1c72fbb9914d47c60f3cb681588"
+        );
     }
 }

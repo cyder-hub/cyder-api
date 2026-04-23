@@ -551,6 +551,33 @@ impl ProviderApiKey {
         })
     }
 
+    /// Soft deletes all provider API keys for a provider.
+    pub fn soft_delete_by_provider_id(provider_id_value: i64) -> DbResult<usize> {
+        let conn = &mut get_connection()?;
+        let current_time = Utc::now().timestamp_millis();
+        db_execute!(conn, {
+            diesel::update(
+                provider_api_key::table.filter(
+                    provider_api_key::dsl::provider_id
+                        .eq(provider_id_value)
+                        .and(provider_api_key::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                provider_api_key::dsl::deleted_at.eq(current_time),
+                provider_api_key::dsl::is_enabled.eq(false),
+                provider_api_key::dsl::updated_at.eq(current_time),
+            ))
+            .execute(conn)
+            .map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to delete provider API keys for provider {}: {}",
+                    provider_id_value, e
+                )))
+            })
+        })
+    }
+
     /// Retrieves a provider API key by its ID.
     pub fn get_by_id(key_id: i64) -> DbResult<ProviderApiKey> {
         let conn = &mut get_connection()?;
@@ -627,6 +654,7 @@ impl ProviderApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::_sqlite_schema::provider_api_key;
     use diesel::Connection;
     use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
     use serde_json::Value;
@@ -694,8 +722,6 @@ mod tests {
     }
 
     fn provider_key_count(conn: &mut diesel::SqliteConnection, provider_id: i64) -> i64 {
-        use crate::database::_sqlite_schema::*;
-
         provider_api_key::table
             .filter(provider_api_key::dsl::provider_id.eq(provider_id))
             .count()

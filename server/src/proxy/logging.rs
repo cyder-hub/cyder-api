@@ -33,7 +33,6 @@ use crate::{
 };
 use bytes::Bytes;
 use chrono::{Datelike, TimeZone, Utc};
-use cyder_tools::log::{debug, error};
 use flate2::{Compression, write::GzEncoder};
 use reqwest::StatusCode;
 use rmp_serde::to_vec_named;
@@ -488,9 +487,11 @@ pub(super) async fn record_request_completion_and_log(
         .record_api_key_completion(&completion_delta_from_log_context(&context))
         .await
     {
-        error!(
-            "Failed to record api key completion delta for key {}: {}",
-            context.api_key_id, err
+        crate::error_event!(
+            "logging.api_key_completion_record_failed",
+            log_id = context.id,
+            api_key_id = context.api_key_id,
+            error = err,
         );
     }
 
@@ -517,6 +518,19 @@ enum LogProcessingStage {
     MetadataPersistFailed,
     Completed,
     NeedsCompensation,
+}
+
+fn log_processing_stage_name(stage: LogProcessingStage) -> &'static str {
+    match stage {
+        LogProcessingStage::Accepted => "accepted",
+        LogProcessingStage::BodyPersisting => "body_persisting",
+        LogProcessingStage::BodyPersisted => "body_persisted",
+        LogProcessingStage::BodyPersistFailed => "body_persist_failed",
+        LogProcessingStage::MetadataPersisted => "metadata_persisted",
+        LogProcessingStage::MetadataPersistFailed => "metadata_persist_failed",
+        LogProcessingStage::Completed => "completed",
+        LogProcessingStage::NeedsCompensation => "needs_compensation",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -643,7 +657,7 @@ impl LogManager {
                     }
                     LogCommand::Flush(done) => {
                         if done.send(()).is_err() {
-                            error!("[log_manager] flush waiter dropped before completion");
+                            crate::debug_event!("logging.flush_waiter_dropped");
                         }
                     }
                 }
@@ -655,23 +669,36 @@ impl LogManager {
 
     pub async fn log(&self, context: RequestLogContext) {
         self.metrics.record_enqueued();
-        let command = LogCommand::Record(context);
-        match self.sender.try_send(command) {
+        let log_id = context.id;
+        match self.sender.try_send(LogCommand::Record(context)) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(command)) => {
+                let LogCommand::Record(context) = command else {
+                    return;
+                };
                 self.metrics.record_channel_full();
-                error!(
-                    "[log_manager] stage={:?} reason=channel_full pending={} in_flight={}",
-                    LogProcessingStage::Accepted,
-                    self.metrics.snapshot().pending,
-                    self.metrics.snapshot().in_flight
+                let snapshot = self.metrics.snapshot();
+                crate::warn_event!(
+                    "logging.queue_saturated",
+                    log_id = log_id,
+                    stage = log_processing_stage_name(LogProcessingStage::Accepted),
+                    reason = "channel_full",
+                    pending = snapshot.pending,
+                    in_flight = snapshot.in_flight,
                 );
-                if let Err(e) = self.sender.send(command).await {
+                if let Err(e) = self.sender.send(LogCommand::Record(context)).await {
                     self.metrics.record_enqueue_failure();
-                    error!("[log_manager] failed_to_enqueue_log: {:?}", e);
                     let LogCommand::Record(context) = e.0 else {
                         return;
                     };
+                    let snapshot = self.metrics.snapshot();
+                    crate::warn_event!(
+                        "logging.enqueue_fallback",
+                        log_id = log_id,
+                        reason = "channel_closed_after_full",
+                        pending = snapshot.pending,
+                        in_flight = snapshot.in_flight,
+                    );
                     self.metrics.record_started();
                     Self::process_log(context, &self.metrics).await;
                     self.metrics.record_processed();
@@ -679,8 +706,15 @@ impl LogManager {
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(command)) => {
                 self.metrics.record_enqueue_failure();
-                error!("[log_manager] failed_to_enqueue_log: channel closed");
                 if let LogCommand::Record(context) = command {
+                    let snapshot = self.metrics.snapshot();
+                    crate::warn_event!(
+                        "logging.enqueue_fallback",
+                        log_id = log_id,
+                        reason = "channel_closed",
+                        pending = snapshot.pending,
+                        in_flight = snapshot.in_flight,
+                    );
                     self.metrics.record_started();
                     Self::process_log(context, &self.metrics).await;
                     self.metrics.record_processed();
@@ -692,11 +726,11 @@ impl LogManager {
     pub async fn flush(&self) {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.sender.send(LogCommand::Flush(tx)).await {
-            error!("[log_manager] failed_to_enqueue_flush: {:?}", e);
+            crate::warn_event!("logging.flush_enqueue_failed", error = format!("{e:?}"),);
             return;
         }
         if let Err(e) = rx.await {
-            error!("[log_manager] flush_wait_failed: {:?}", e);
+            crate::warn_event!("logging.flush_wait_failed", error = format!("{e:?}"),);
         }
     }
 
@@ -711,18 +745,61 @@ impl LogManager {
         detail: &str,
     ) {
         let snapshot = metrics.snapshot();
-        error!(
-            "[log_manager] log_id={} stage={:?} detail={} pending={} in_flight={} retries={} storage_failures={} db_failures={} compensation_needed={}",
-            log_id,
-            stage,
-            detail,
-            snapshot.pending,
-            snapshot.in_flight,
-            snapshot.retries,
-            snapshot.storage_failures,
-            snapshot.db_failures,
-            snapshot.compensation_needed
-        );
+        match stage {
+            LogProcessingStage::BodyPersisting
+            | LogProcessingStage::BodyPersisted
+            | LogProcessingStage::MetadataPersisted
+            | LogProcessingStage::Completed => crate::debug_event!(
+                "logging.log_stage_debug",
+                log_id = log_id,
+                stage = log_processing_stage_name(stage),
+                detail = detail,
+                pending = snapshot.pending,
+                in_flight = snapshot.in_flight,
+                retries = snapshot.retries,
+                storage_failures = snapshot.storage_failures,
+                db_failures = snapshot.db_failures,
+                compensation_needed = snapshot.compensation_needed,
+            ),
+            LogProcessingStage::BodyPersistFailed | LogProcessingStage::MetadataPersistFailed => {
+                crate::error_event!(
+                    "logging.persist_failed",
+                    log_id = log_id,
+                    stage = log_processing_stage_name(stage),
+                    detail = detail,
+                    pending = snapshot.pending,
+                    in_flight = snapshot.in_flight,
+                    retries = snapshot.retries,
+                    storage_failures = snapshot.storage_failures,
+                    db_failures = snapshot.db_failures,
+                    compensation_needed = snapshot.compensation_needed,
+                )
+            }
+            LogProcessingStage::NeedsCompensation => crate::error_event!(
+                "logging.compensation_needed",
+                log_id = log_id,
+                stage = log_processing_stage_name(stage),
+                detail = detail,
+                pending = snapshot.pending,
+                in_flight = snapshot.in_flight,
+                retries = snapshot.retries,
+                storage_failures = snapshot.storage_failures,
+                db_failures = snapshot.db_failures,
+                compensation_needed = snapshot.compensation_needed,
+            ),
+            LogProcessingStage::Accepted => crate::debug_event!(
+                "logging.log_stage_debug",
+                log_id = log_id,
+                stage = log_processing_stage_name(stage),
+                detail = detail,
+                pending = snapshot.pending,
+                in_flight = snapshot.in_flight,
+                retries = snapshot.retries,
+                storage_failures = snapshot.storage_failures,
+                db_failures = snapshot.db_failures,
+                compensation_needed = snapshot.compensation_needed,
+            ),
+        }
     }
 
     async fn put_object_with_retry(
@@ -871,39 +948,59 @@ impl LogManager {
         false
     }
 
-    fn gzip_bytes(data: &[u8]) -> Option<Bytes> {
+    fn gzip_bytes(data: &[u8], log_id: i64) -> Option<Bytes> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         if let Err(e) = encoder.write_all(data) {
-            error!("Failed to gzip log artifact bytes: {:?}", e);
+            crate::error_event!(
+                "logging.bundle_gzip_failed",
+                log_id = log_id,
+                stage = "write",
+                error = format!("{e:?}"),
+            );
             return None;
         };
 
         match encoder.finish() {
             Ok(v) => Some(Bytes::from(v)),
             Err(e) => {
-                error!("Failed to finish gzip log artifact bytes: {:?}", e);
+                crate::error_event!(
+                    "logging.bundle_gzip_failed",
+                    log_id = log_id,
+                    stage = "finish",
+                    error = format!("{e:?}"),
+                );
                 None
             }
         }
     }
 
-    async fn read_logged_body(body: &LoggedBody) -> Option<Bytes> {
+    async fn read_logged_body(body: &LoggedBody, log_id: i64) -> Option<Bytes> {
         match body {
             LoggedBody::InMemory { bytes, .. } => Some(bytes.clone()),
             LoggedBody::Spooled { path, .. } => match fs::read(path).await {
                 Ok(bytes) => Some(Bytes::from(bytes)),
                 Err(e) => {
-                    error!("Failed to read spooled body {:?}: {:?}", path, e);
+                    crate::error_event!(
+                        "logging.spooled_body_read_failed",
+                        log_id = log_id,
+                        path = path.display().to_string(),
+                        error = format!("{e:?}"),
+                    );
                     None
                 }
             },
         }
     }
 
-    async fn cleanup_logged_body(body: &LoggedBody) {
+    async fn cleanup_logged_body(body: &LoggedBody, log_id: i64) {
         if let LoggedBody::Spooled { path, .. } = body {
             if let Err(e) = fs::remove_file(path).await {
-                error!("Failed to remove spooled body {:?}: {:?}", path, e);
+                crate::warn_event!(
+                    "logging.spooled_body_cleanup_failed",
+                    log_id = log_id,
+                    path = path.display().to_string(),
+                    error = format!("{e:?}"),
+                );
             }
         }
     }
@@ -929,7 +1026,7 @@ impl LogManager {
             }
         };
 
-        let compressed_body = match Self::gzip_bytes(&serialized_body) {
+        let compressed_body = match Self::gzip_bytes(&serialized_body, id) {
             Some(body) => body,
             None => {
                 metrics.record_storage_failure();
@@ -943,7 +1040,7 @@ impl LogManager {
             }
         };
 
-        debug!("Storing log bundle for log_id {}: {:?}", id, key);
+        crate::debug_event!("logging.bundle_store_debug", log_id = id, storage_key = key,);
 
         Self::put_object_with_retry(
             storage,
@@ -1286,7 +1383,7 @@ impl LogManager {
         let storage = get_storage().await;
         let storage_type = storage.get_storage_type();
         let user_request_body = match context.user_request_body.as_ref() {
-            Some(body) => match Self::read_logged_body(body).await {
+            Some(body) => match Self::read_logged_body(body, log_id).await {
                 Some(bytes) => Some(bytes),
                 None => {
                     metrics.record_storage_failure();
@@ -1302,7 +1399,7 @@ impl LogManager {
             None => None,
         };
         let llm_request_body = match context.llm_request_body.as_ref() {
-            Some(body) => match Self::read_logged_body(body).await {
+            Some(body) => match Self::read_logged_body(body, log_id).await {
                 Some(bytes) => Some(bytes),
                 None => {
                     metrics.record_storage_failure();
@@ -1319,7 +1416,7 @@ impl LogManager {
         };
         let llm_response_body = match context.llm_response_body.as_ref() {
             Some(body) if !skip_response_body_persistence => {
-                match Self::read_logged_body(body).await {
+                match Self::read_logged_body(body, log_id).await {
                     Some(bytes) => Some(bytes),
                     None => {
                         metrics.record_storage_failure();
@@ -1337,7 +1434,7 @@ impl LogManager {
         };
         let user_response_body = match context.user_response_body.as_ref() {
             Some(body) if !skip_response_body_persistence => {
-                match Self::read_logged_body(body).await {
+                match Self::read_logged_body(body, log_id).await {
                     Some(bytes) => Some(bytes),
                     None => {
                         metrics.record_storage_failure();
@@ -1410,7 +1507,7 @@ impl LogManager {
                     LoggedBody::Spooled { path, .. } => Some(path.clone()),
                     _ => None,
                 };
-                Self::cleanup_logged_body(body).await;
+                Self::cleanup_logged_body(body, log_id).await;
                 if let Some(path) = path {
                     if fs::metadata(path).await.is_ok() {
                         metrics.record_cleanup_failure();
@@ -1424,7 +1521,7 @@ impl LogManager {
                     LoggedBody::Spooled { path, .. } => Some(path.clone()),
                     _ => None,
                 };
-                Self::cleanup_logged_body(body).await;
+                Self::cleanup_logged_body(body, log_id).await;
                 if let Some(path) = path {
                     if fs::metadata(path).await.is_ok() {
                         metrics.record_cleanup_failure();
@@ -1438,7 +1535,7 @@ impl LogManager {
                     LoggedBody::Spooled { path, .. } => Some(path.clone()),
                     _ => None,
                 };
-                Self::cleanup_logged_body(body).await;
+                Self::cleanup_logged_body(body, log_id).await;
                 if let Some(path) = path {
                     if fs::metadata(path).await.is_ok() {
                         metrics.record_cleanup_failure();
@@ -1452,7 +1549,7 @@ impl LogManager {
                     LoggedBody::Spooled { path, .. } => Some(path.clone()),
                     _ => None,
                 };
-                Self::cleanup_logged_body(body).await;
+                Self::cleanup_logged_body(body, log_id).await;
                 if let Some(path) = path {
                     if fs::metadata(path).await.is_ok() {
                         metrics.record_cleanup_failure();
@@ -2553,11 +2650,13 @@ mod tests {
             .finish(LogBodyCaptureState::Incomplete)
             .await
             .unwrap();
-        let body_bytes = LogManager::read_logged_body(&logged_body).await.unwrap();
+        let body_bytes = LogManager::read_logged_body(&logged_body, 42)
+            .await
+            .unwrap();
         assert_eq!(body_bytes, Bytes::from_static(b"hello world"));
         assert_eq!(logged_body.capture_state(), LogBodyCaptureState::Incomplete);
 
-        LogManager::cleanup_logged_body(&logged_body).await;
+        LogManager::cleanup_logged_body(&logged_body, 42).await;
     }
 
     #[tokio::test]
@@ -2568,7 +2667,7 @@ mod tests {
         let snapshot = writer.snapshot(LogBodyCaptureState::Incomplete);
         writer.abort().await.unwrap();
 
-        assert!(LogManager::read_logged_body(&snapshot).await.is_none());
+        assert!(LogManager::read_logged_body(&snapshot, 43).await.is_none());
     }
 
     #[test]

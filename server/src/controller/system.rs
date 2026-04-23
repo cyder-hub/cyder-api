@@ -29,7 +29,11 @@ async fn health_handler() -> impl IntoResponse {
 async fn ready_handler() -> impl IntoResponse {
     let mut db_status = "ok";
     if let Err(e) = crate::database::get_connection() {
-        cyder_tools::log::error!("Readiness check: Database connection failed: {:?}", e);
+        crate::warn_event!(
+            "system.readiness_degraded",
+            component = "database",
+            error = format!("{e:?}"),
+        );
         db_status = "error";
     }
 
@@ -42,12 +46,20 @@ async fn ready_handler() -> impl IntoResponse {
                     .query_async::<()>(&mut *conn)
                     .await
                 {
-                    cyder_tools::log::error!("Readiness check: Redis PING failed: {}", e);
+                    crate::warn_event!(
+                        "system.readiness_degraded",
+                        component = "redis_ping",
+                        error = e,
+                    );
                     redis_status = Some("error".to_string());
                 }
             }
             Err(e) => {
-                cyder_tools::log::error!("Readiness check: Failed to get Redis connection: {}", e);
+                crate::warn_event!(
+                    "system.readiness_degraded",
+                    component = "redis_connection",
+                    error = e,
+                );
                 redis_status = Some("error".to_string());
             }
         }

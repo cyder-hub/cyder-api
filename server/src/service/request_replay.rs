@@ -7,7 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use chrono::Utc;
-use cyder_tools::log::{debug, info};
+use cyder_tools::log::debug;
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures::{Stream, StreamExt};
 use reqwest::{
@@ -73,6 +73,40 @@ const REPLAY_BODY_CAPTURE_COMPLETE: &str = "complete";
 const REPLAY_BODY_CAPTURE_INCOMPLETE: &str = "incomplete";
 const REPLAY_BODY_CAPTURE_NOT_CAPTURED: &str = "not_captured";
 const REPLAY_BODY_CAPTURE_NOT_EXECUTED: &str = "not_executed";
+
+fn log_replay_run_started(run: &RequestReplayRunRecord) {
+    crate::info_event!(
+        "replay.run_started",
+        replay_run_id = run.id,
+        request_log_id = run.source_request_log_id,
+        attempt_id = run.source_attempt_id,
+        replay_kind = request_replay_kind_label(&run.replay_kind),
+        replay_mode = request_replay_mode_label(&run.replay_mode),
+    );
+}
+
+fn log_replay_run_finished(run: &RequestReplayRunRecord) {
+    let duration_ms = run
+        .started_at
+        .zip(run.completed_at)
+        .map(|(started_at, completed_at)| completed_at.saturating_sub(started_at));
+    crate::info_event!(
+        "replay.run_finished",
+        replay_run_id = run.id,
+        request_log_id = run.source_request_log_id,
+        attempt_id = run.source_attempt_id,
+        replay_kind = request_replay_kind_label(&run.replay_kind),
+        replay_mode = request_replay_mode_label(&run.replay_mode),
+        status = request_replay_status_label(&run.status),
+        http_status = run.http_status,
+        error_code = run.error_code.as_deref(),
+        route_id = run.executed_route_id,
+        route_name = run.executed_route_name.as_deref(),
+        provider_id = run.executed_provider_id,
+        model_id = run.executed_model_id,
+        duration_ms = duration_ms,
+    );
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RequestReplayArtifact {
@@ -1251,6 +1285,7 @@ async fn execute_attempt_replay_with_storage(
         updated_at: created_at,
         ..Default::default()
     })?;
+    log_replay_run_started(&run);
 
     let artifact_source = RequestReplayArtifactSource {
         request_log_id: source.request_log_id,
@@ -1290,7 +1325,9 @@ async fn execute_attempt_replay_with_storage(
         };
         let locator = store_replay_artifact_for_run(storage, &mut run, &artifact).await?;
         set_replay_artifact_locator(&mut run, &locator);
-        return RequestReplayRun::update(&run);
+        let persisted = RequestReplayRun::update(&run)?;
+        log_replay_run_finished(&persisted);
+        return Ok(persisted);
     }
 
     if !confirm_live_request {
@@ -1335,7 +1372,9 @@ async fn execute_attempt_replay_with_storage(
         };
         let locator = store_replay_artifact_for_run(storage, &mut run, &artifact).await?;
         set_replay_artifact_locator(&mut run, &locator);
-        return RequestReplayRun::update(&run);
+        let persisted = RequestReplayRun::update(&run)?;
+        log_replay_run_finished(&persisted);
+        return Ok(persisted);
     }
 
     let started_at = Utc::now().timestamp_millis();
@@ -1393,7 +1432,9 @@ async fn execute_attempt_replay_with_storage(
     run.updated_at = completed_at;
     let locator = store_replay_artifact_for_run(storage, &mut run, &artifact).await?;
     set_replay_artifact_locator(&mut run, &locator);
-    RequestReplayRun::update(&run)
+    let persisted = RequestReplayRun::update(&run)?;
+    log_replay_run_finished(&persisted);
+    Ok(persisted)
 }
 
 async fn execute_gateway_replay_with_storage(
@@ -1418,6 +1459,7 @@ async fn execute_gateway_replay_with_storage(
         updated_at: created_at,
         ..Default::default()
     })?;
+    log_replay_run_started(&run);
 
     let artifact_source = RequestReplayArtifactSource {
         request_log_id: source.request_log.id,
@@ -1454,7 +1496,9 @@ async fn execute_gateway_replay_with_storage(
         };
         let locator = store_replay_artifact_for_run(storage, &mut run, &artifact).await?;
         set_replay_artifact_locator(&mut run, &locator);
-        return RequestReplayRun::update(&run);
+        let persisted = RequestReplayRun::update(&run)?;
+        log_replay_run_finished(&persisted);
+        return Ok(persisted);
     }
 
     if !confirm_live_request {
@@ -1493,7 +1537,9 @@ async fn execute_gateway_replay_with_storage(
         };
         let locator = store_replay_artifact_for_run(storage, &mut run, &artifact).await?;
         set_replay_artifact_locator(&mut run, &locator);
-        return RequestReplayRun::update(&run);
+        let persisted = RequestReplayRun::update(&run)?;
+        log_replay_run_finished(&persisted);
+        return Ok(persisted);
     }
 
     let started_at = Utc::now().timestamp_millis();
@@ -1546,7 +1592,9 @@ async fn execute_gateway_replay_with_storage(
     run.updated_at = completed_at;
     let locator = store_replay_artifact_for_run(storage, &mut run, &artifact).await?;
     set_replay_artifact_locator(&mut run, &locator);
-    RequestReplayRun::update(&run)
+    let persisted = RequestReplayRun::update(&run)?;
+    log_replay_run_finished(&persisted);
+    Ok(persisted)
 }
 
 fn fill_gateway_run_target(run: &mut RequestReplayRun, prepared: &GatewayReplayPreparedRequest) {
@@ -1807,10 +1855,6 @@ async fn perform_attempt_replay_execution(
         &app_state.client
     };
 
-    info!(
-        "Executing attempt replay for request_log {} attempt {} via provider {}",
-        source.request_log_id, source.attempt.id, source.provider.name
-    );
     let cancellation = ProxyCancellationContext::new();
     let response = match send_with_first_byte_timeout(
         &cancellation,
@@ -2124,10 +2168,6 @@ async fn perform_gateway_replay_execution(
     app_state: &Arc<AppState>,
     source: &GatewayReplaySource,
 ) -> GatewayReplayLiveOutcome {
-    info!(
-        "Executing gateway replay for request_log {}",
-        source.request_log.id
-    );
     let execution = match execute_gateway_replay_request(
         Arc::clone(app_state),
         gateway_replay_input_from_source(source),

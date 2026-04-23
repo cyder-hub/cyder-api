@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use axum::Router;
 use chrono::{Datelike, TimeZone, Utc};
-use cyder_tools::log::{debug, error, info};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -136,6 +135,48 @@ impl<'a> CacheKey<'a> {
             CacheKey::CostCatalogVersion(id) => format_compact!("cost_catalog_version:id:{}", id),
         }
     }
+}
+
+fn cache_backend_name(backend: CacheBackendType) -> &'static str {
+    match backend {
+        CacheBackendType::Memory => "memory",
+        CacheBackendType::Redis => "redis",
+    }
+}
+
+fn duration_to_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn optional_duration_to_millis(duration: Option<Duration>) -> Option<u64> {
+    duration.map(duration_to_millis)
+}
+
+fn increment_failure_counter(failures: &mut HashMap<&'static str, usize>, section: &'static str) {
+    *failures.entry(section).or_default() += 1;
+}
+
+fn summarize_failures(failures: &HashMap<&'static str, usize>) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+
+    let mut sections = failures
+        .iter()
+        .map(|(section, count)| format!("{section}={count}"))
+        .collect::<Vec<_>>();
+    sections.sort();
+    Some(sections.join(","))
+}
+
+fn summarize_repo_names(names: &[&'static str]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+
+    let mut names = names.to_vec();
+    names.sort_unstable();
+    Some(names.join(","))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -740,14 +781,25 @@ impl AppState {
         let use_redis = CONFIG.cache.backend == CacheBackendType::Redis && redis_pool.is_some();
 
         if use_redis {
-            info!("Using Redis cache backend.");
+            crate::info_event!(
+                "cache.backend_selected",
+                configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
+                effective_backend = "redis",
+            );
         } else {
             if CONFIG.cache.backend == CacheBackendType::Redis {
-                info!(
-                    "Redis is configured, but connection failed. Falling back to in-memory cache."
+                crate::info_event!(
+                    "cache.backend_selected",
+                    configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
+                    effective_backend = "memory",
+                    fallback_reason = "redis_unavailable",
                 );
             } else {
-                info!("Using in-memory cache backend.");
+                crate::info_event!(
+                    "cache.backend_selected",
+                    configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
+                    effective_backend = "memory",
+                );
             }
         }
 
@@ -796,12 +848,14 @@ impl AppState {
             }
         }
 
-        info!(
-            "Building reqwest client (use_proxy: {}, connect_timeout: {:?}, first_byte_timeout: {:?}, total_timeout: {:?})",
-            use_proxy,
-            connect_timeout,
-            proxy_request_config.first_byte_timeout(),
-            total_timeout
+        crate::info_event!(
+            "startup.http_client_built",
+            client_kind = if use_proxy { "proxy" } else { "default" },
+            use_proxy = use_proxy,
+            connect_timeout_ms = duration_to_millis(connect_timeout),
+            first_byte_timeout_ms =
+                optional_duration_to_millis(proxy_request_config.first_byte_timeout()),
+            total_timeout_ms = optional_duration_to_millis(total_timeout),
         );
 
         builder.build().unwrap_or_else(|err| {
@@ -895,156 +949,190 @@ impl AppState {
     }
 
     pub async fn reload(&self) {
-        info!("Reloading AppState: Starting cache refresh...");
-        let mut stats: HashMap<&'static str, usize> = HashMap::new();
+        crate::info_event!("cache.reload_started");
+        let mut failure_counts: HashMap<&'static str, usize> = HashMap::new();
         let mut catalog_providers = Vec::new();
         let mut catalog_models = Vec::new();
         let mut catalog_routes = Vec::new();
         let mut catalog_api_key_overrides = Vec::new();
+        let mut api_key_count = 0usize;
+        let mut provider_count = 0usize;
+        let mut model_count = 0usize;
+        let mut model_route_count = 0usize;
+        let mut api_key_override_count = 0usize;
+        let mut provider_api_key_count = 0usize;
+        let mut provider_api_key_group_count = 0usize;
+        let mut request_patch_rule_count = 0usize;
+        let mut provider_request_patch_group_count = 0usize;
+        let mut model_request_patch_group_count = 0usize;
+        let mut model_effective_request_patch_group_count = 0usize;
+        let mut cost_catalog_version_count = 0usize;
 
         // 1. API keys with embedded ACL snapshots
-        if let Ok(keys) = ApiKey::list_all_active() {
-            stats.insert("API Keys", keys.len());
-            let now = chrono::Utc::now().timestamp_millis();
-            for key in keys {
-                match Self::load_cache_api_key(key) {
-                    Ok(cache_item) if cache_item.is_active_at(now) => {
-                        let api_key_cache_key =
-                            CacheKey::ApiKeyHash(&cache_item.api_key_hash).to_compact_string();
-                        let _ = self
-                            .api_key_cache
-                            .set_positive(&api_key_cache_key, &cache_item)
-                            .await;
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        error!("Failed to preload api key cache snapshot: {}", err);
+        match ApiKey::list_all_active() {
+            Ok(keys) => {
+                api_key_count = keys.len();
+                let now = chrono::Utc::now().timestamp_millis();
+                for key in keys {
+                    match Self::load_cache_api_key(key) {
+                        Ok(cache_item) if cache_item.is_active_at(now) => {
+                            let api_key_cache_key =
+                                CacheKey::ApiKeyHash(&cache_item.api_key_hash).to_compact_string();
+                            let _ = self
+                                .api_key_cache
+                                .set_positive(&api_key_cache_key, &cache_item)
+                                .await;
+                        }
+                        Ok(_) => {}
+                        Err(_) => {
+                            increment_failure_counter(&mut failure_counts, "api_key_snapshot");
+                        }
                     }
                 }
+            }
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "api_key_list");
             }
         }
 
         // 3, 4. Providers
         let mut provider_id_to_key: HashMap<i64, String> = HashMap::new();
-        if let Ok(providers) = Provider::list_all() {
-            stats.insert("Providers", providers.len());
-            for provider in providers {
-                provider_id_to_key.insert(provider.id, provider.provider_key.clone());
-                let cache_item = CacheProvider::from(provider);
-                catalog_providers.push(cache_item.clone());
-                let _ = self
-                    .provider_cache
-                    .set_positive(
-                        &CacheKey::ProviderById(cache_item.id).to_compact_string(),
-                        &cache_item,
-                    )
-                    .await;
-                let _ = self
-                    .provider_cache
-                    .set_positive(
-                        &CacheKey::ProviderByKey(&cache_item.provider_key).to_compact_string(),
-                        &cache_item,
-                    )
-                    .await;
-            }
-        }
-
-        // 5. Models
-        if let Ok(models) = Model::list_all() {
-            stats.insert("Models", models.len());
-            for model in models {
-                let cache_item = CacheModel::from(model);
-                catalog_models.push(cache_item.clone());
-                let _ = self
-                    .model_cache
-                    .set_positive(
-                        &CacheKey::ModelById(cache_item.id).to_compact_string(),
-                        &cache_item,
-                    )
-                    .await;
-                if let Some(provider_key) = provider_id_to_key.get(&cache_item.provider_id) {
+        match Provider::list_all() {
+            Ok(providers) => {
+                provider_count = providers.len();
+                for provider in providers {
+                    provider_id_to_key.insert(provider.id, provider.provider_key.clone());
+                    let cache_item = CacheProvider::from(provider);
+                    catalog_providers.push(cache_item.clone());
                     let _ = self
-                        .model_cache
+                        .provider_cache
                         .set_positive(
-                            &CacheKey::ModelByName(provider_key, &cache_item.model_name)
-                                .to_compact_string(),
+                            &CacheKey::ProviderById(cache_item.id).to_compact_string(),
+                            &cache_item,
+                        )
+                        .await;
+                    let _ = self
+                        .provider_cache
+                        .set_positive(
+                            &CacheKey::ProviderByKey(&cache_item.provider_key).to_compact_string(),
                             &cache_item,
                         )
                         .await;
                 }
             }
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "provider_list");
+            }
         }
 
-        // 2. Logical model routes
-        if let Ok(routes) = ModelRoute::list_summary() {
-            stats.insert("Model Routes", routes.len());
-            for route_item in routes {
-                match ModelRoute::get_detail(route_item.route.id) {
-                    Ok(route_detail) => {
-                        let cache_item = CacheModelRoute::from_detail(&route_detail);
-                        catalog_routes.push(cache_item.clone());
+        // 5. Models
+        match Model::list_all() {
+            Ok(models) => {
+                model_count = models.len();
+                for model in models {
+                    let cache_item = CacheModel::from(model);
+                    catalog_models.push(cache_item.clone());
+                    let _ = self
+                        .model_cache
+                        .set_positive(
+                            &CacheKey::ModelById(cache_item.id).to_compact_string(),
+                            &cache_item,
+                        )
+                        .await;
+                    if let Some(provider_key) = provider_id_to_key.get(&cache_item.provider_id) {
                         let _ = self
-                            .model_route_cache
+                            .model_cache
                             .set_positive(
-                                &CacheKey::ModelRouteById(cache_item.id).to_compact_string(),
-                                &cache_item,
-                            )
-                            .await;
-                        let _ = self
-                            .model_route_cache
-                            .set_positive(
-                                &CacheKey::ModelRouteByName(&cache_item.route_name)
+                                &CacheKey::ModelByName(provider_key, &cache_item.model_name)
                                     .to_compact_string(),
                                 &cache_item,
                             )
                             .await;
                     }
-                    Err(err) => {
-                        error!(
-                            "Failed to preload model route {} into cache: {:?}",
-                            route_item.route.id, err
-                        );
+                }
+            }
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "model_list");
+            }
+        }
+
+        // 2. Logical model routes
+        match ModelRoute::list_summary() {
+            Ok(routes) => {
+                model_route_count = routes.len();
+                for route_item in routes {
+                    match ModelRoute::get_detail(route_item.route.id) {
+                        Ok(route_detail) => {
+                            let cache_item = CacheModelRoute::from_detail(&route_detail);
+                            catalog_routes.push(cache_item.clone());
+                            let _ = self
+                                .model_route_cache
+                                .set_positive(
+                                    &CacheKey::ModelRouteById(cache_item.id).to_compact_string(),
+                                    &cache_item,
+                                )
+                                .await;
+                            let _ = self
+                                .model_route_cache
+                                .set_positive(
+                                    &CacheKey::ModelRouteByName(&cache_item.route_name)
+                                        .to_compact_string(),
+                                    &cache_item,
+                                )
+                                .await;
+                        }
+                        Err(_) => {
+                            increment_failure_counter(&mut failure_counts, "model_route_detail");
+                        }
                     }
                 }
+            }
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "model_route_list");
             }
         }
 
         // 2a. API key scoped overrides
-        if let Ok(overrides) = ApiKeyModelOverride::list_all() {
-            stats.insert("API Key Model Overrides", overrides.len());
-            for override_row in overrides {
-                catalog_api_key_overrides
-                    .push(CacheApiKeyModelOverride::from(override_row.clone()));
+        match ApiKeyModelOverride::list_all() {
+            Ok(overrides) => {
+                api_key_override_count = overrides.len();
+                for override_row in overrides {
+                    catalog_api_key_overrides
+                        .push(CacheApiKeyModelOverride::from(override_row.clone()));
 
-                if !override_row.is_enabled {
-                    continue;
-                }
+                    if !override_row.is_enabled {
+                        continue;
+                    }
 
-                match self
-                    .get_model_route_by_id(override_row.target_route_id)
-                    .await
-                {
-                    Ok(Some(route)) => {
-                        let _ = self
-                            .api_key_override_route_cache
-                            .set_positive(
-                                &CacheKey::ApiKeyModelOverride(
-                                    override_row.api_key_id,
-                                    &override_row.source_name,
+                    match self
+                        .get_model_route_by_id(override_row.target_route_id)
+                        .await
+                    {
+                        Ok(Some(route)) => {
+                            let _ = self
+                                .api_key_override_route_cache
+                                .set_positive(
+                                    &CacheKey::ApiKeyModelOverride(
+                                        override_row.api_key_id,
+                                        &override_row.source_name,
+                                    )
+                                    .to_compact_string(),
+                                    route.as_ref(),
                                 )
-                                .to_compact_string(),
-                                route.as_ref(),
-                            )
-                            .await;
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        error!(
-                            "Failed to preload api key model override {} into cache: {}",
-                            override_row.id, err
-                        );
+                                .await;
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            increment_failure_counter(
+                                &mut failure_counts,
+                                "api_key_model_override_route",
+                            );
+                        }
                     }
                 }
+            }
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "api_key_model_override_list");
             }
         }
 
@@ -1063,167 +1151,270 @@ impl AppState {
             .await;
 
         // 6. Provider API Keys
-        if let Ok(keys) = ProviderApiKey::list_all() {
-            stats.insert("Provider API Keys", keys.len());
-            let mut by_provider: HashMap<i64, Vec<CacheProviderKey>> = HashMap::new();
-            for key in keys {
-                by_provider
-                    .entry(key.provider_id)
-                    .or_default()
-                    .push(CacheProviderKey::from(key));
+        match ProviderApiKey::list_all() {
+            Ok(keys) => {
+                provider_api_key_count = keys.len();
+                let mut by_provider: HashMap<i64, Vec<CacheProviderKey>> = HashMap::new();
+                for key in keys {
+                    by_provider
+                        .entry(key.provider_id)
+                        .or_default()
+                        .push(CacheProviderKey::from(key));
+                }
+                provider_api_key_group_count = by_provider.len();
+                for (provider_id, provider_keys) in by_provider {
+                    let _ = self
+                        .provider_api_keys_cache
+                        .set_positive(
+                            &CacheKey::ProviderApiKeys(provider_id).to_compact_string(),
+                            &provider_keys,
+                        )
+                        .await;
+                }
             }
-            stats.insert("Provider API Key Groups", by_provider.len());
-            for (provider_id, provider_keys) in by_provider {
-                let _ = self
-                    .provider_api_keys_cache
-                    .set_positive(
-                        &CacheKey::ProviderApiKeys(provider_id).to_compact_string(),
-                        &provider_keys,
-                    )
-                    .await;
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "provider_api_key_list");
             }
         }
 
         // 7, 8, 9. Request patch direct/effective caches
-        if let Ok(all_rules) = RequestPatchRule::list_all() {
-            stats.insert("Request Patch Rules", all_rules.len());
+        match RequestPatchRule::list_all() {
+            Ok(all_rules) => {
+                request_patch_rule_count = all_rules.len();
 
-            let mut provider_rules_by_id: HashMap<i64, Vec<CacheRequestPatchRule>> = HashMap::new();
-            let mut model_rules_by_id: HashMap<i64, Vec<CacheRequestPatchRule>> = HashMap::new();
+                let mut provider_rules_by_id: HashMap<i64, Vec<CacheRequestPatchRule>> =
+                    HashMap::new();
+                let mut model_rules_by_id: HashMap<i64, Vec<CacheRequestPatchRule>> =
+                    HashMap::new();
 
-            match Self::cache_request_patch_rules(all_rules) {
-                Ok(cache_rules) => {
-                    for rule in cache_rules {
-                        if let Some(provider_id) = rule.provider_id {
-                            provider_rules_by_id
-                                .entry(provider_id)
-                                .or_default()
-                                .push(rule.clone());
-                        }
-                        if let Some(model_id) = rule.model_id {
-                            model_rules_by_id.entry(model_id).or_default().push(rule);
+                match Self::cache_request_patch_rules(all_rules) {
+                    Ok(cache_rules) => {
+                        for rule in cache_rules {
+                            if let Some(provider_id) = rule.provider_id {
+                                provider_rules_by_id
+                                    .entry(provider_id)
+                                    .or_default()
+                                    .push(rule.clone());
+                            }
+                            if let Some(model_id) = rule.model_id {
+                                model_rules_by_id.entry(model_id).or_default().push(rule);
+                            }
                         }
                     }
+                    Err(_) => {
+                        increment_failure_counter(&mut failure_counts, "request_patch_materialize");
+                    }
                 }
-                Err(err) => {
-                    error!("Failed to preload request patch rules into cache: {}", err);
+
+                provider_request_patch_group_count = provider_rules_by_id.len();
+                for provider in &catalog_providers {
+                    let rules = provider_rules_by_id
+                        .get(&provider.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let _ = self
+                        .provider_request_patch_rules_cache
+                        .set_positive(
+                            &CacheKey::ProviderRequestPatchRules(provider.id).to_compact_string(),
+                            &rules,
+                        )
+                        .await;
                 }
-            }
 
-            stats.insert("Provider Request Patch Groups", provider_rules_by_id.len());
-            for provider in &catalog_providers {
-                let rules = provider_rules_by_id
-                    .get(&provider.id)
-                    .cloned()
-                    .unwrap_or_default();
-                let _ = self
-                    .provider_request_patch_rules_cache
-                    .set_positive(
-                        &CacheKey::ProviderRequestPatchRules(provider.id).to_compact_string(),
+                model_request_patch_group_count = model_rules_by_id.len();
+                for model in &catalog_models {
+                    let rules = model_rules_by_id.remove(&model.id).unwrap_or_default();
+                    let _ = self
+                        .model_request_patch_rules_cache
+                        .set_positive(
+                            &CacheKey::ModelRequestPatchRules(model.id).to_compact_string(),
+                            &rules,
+                        )
+                        .await;
+
+                    let resolved = resolve_effective_request_patches(
+                        model.provider_id,
+                        model.id,
+                        provider_rules_by_id
+                            .get(&model.provider_id)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
                         &rules,
-                    )
-                    .await;
+                    );
+                    let _ = self
+                        .model_effective_request_patches_cache
+                        .set_positive(
+                            &CacheKey::ModelEffectiveRequestPatches(model.id).to_compact_string(),
+                            &resolved,
+                        )
+                        .await;
+                }
+                model_effective_request_patch_group_count = catalog_models.len();
             }
-
-            stats.insert("Model Request Patch Groups", model_rules_by_id.len());
-            for model in &catalog_models {
-                let rules = model_rules_by_id.remove(&model.id).unwrap_or_default();
-                let _ = self
-                    .model_request_patch_rules_cache
-                    .set_positive(
-                        &CacheKey::ModelRequestPatchRules(model.id).to_compact_string(),
-                        &rules,
-                    )
-                    .await;
-
-                let resolved = resolve_effective_request_patches(
-                    model.provider_id,
-                    model.id,
-                    provider_rules_by_id
-                        .get(&model.provider_id)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]),
-                    &rules,
-                );
-                let _ = self
-                    .model_effective_request_patches_cache
-                    .set_positive(
-                        &CacheKey::ModelEffectiveRequestPatches(model.id).to_compact_string(),
-                        &resolved,
-                    )
-                    .await;
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "request_patch_list");
             }
-            stats.insert("Model Effective Request Patch Groups", catalog_models.len());
         }
 
         // 10. Cost Catalog Versions
-        if let Ok(versions) = CostCatalogVersion::list_all() {
-            stats.insert("Cost Catalog Versions", versions.len());
-            let mut components_by_version: HashMap<i64, Vec<CostComponent>> = HashMap::new();
-            for component in CostComponent::list_all().unwrap_or_default() {
-                components_by_version
-                    .entry(component.catalog_version_id)
-                    .or_default()
-                    .push(component);
-            }
+        match CostCatalogVersion::list_all() {
+            Ok(versions) => {
+                cost_catalog_version_count = versions.len();
+                let mut components_by_version: HashMap<i64, Vec<CostComponent>> = HashMap::new();
+                match CostComponent::list_all() {
+                    Ok(components) => {
+                        for component in components {
+                            components_by_version
+                                .entry(component.catalog_version_id)
+                                .or_default()
+                                .push(component);
+                        }
+                    }
+                    Err(_) => {
+                        increment_failure_counter(&mut failure_counts, "cost_component_list");
+                    }
+                }
 
-            for version in versions {
-                let components = components_by_version
-                    .remove(&version.id)
-                    .unwrap_or_default();
-                let cache_item =
-                    CacheCostCatalogVersion::from_db_with_components(version, components);
-                let _ = self
-                    .cost_catalog_version_cache
-                    .set_positive(
-                        &CacheKey::CostCatalogVersion(cache_item.id).to_compact_string(),
-                        &cache_item,
-                    )
-                    .await;
+                for version in versions {
+                    let components = components_by_version
+                        .remove(&version.id)
+                        .unwrap_or_default();
+                    let cache_item =
+                        CacheCostCatalogVersion::from_db_with_components(version, components);
+                    let _ = self
+                        .cost_catalog_version_cache
+                        .set_positive(
+                            &CacheKey::CostCatalogVersion(cache_item.id).to_compact_string(),
+                            &cache_item,
+                        )
+                        .await;
+                }
+            }
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "cost_catalog_version_list");
             }
         }
 
-        info!(
-            "AppState reloaded successfully. Cache details:\n{:#?}",
-            stats
-        );
+        let failure_summary = summarize_failures(&failure_counts);
+        if failure_counts.is_empty() {
+            crate::info_event!(
+                "cache.reload_finished",
+                status = "success",
+                api_key_count = api_key_count,
+                provider_count = provider_count,
+                model_count = model_count,
+                model_route_count = model_route_count,
+                api_key_override_count = api_key_override_count,
+                provider_api_key_count = provider_api_key_count,
+                provider_api_key_group_count = provider_api_key_group_count,
+                request_patch_rule_count = request_patch_rule_count,
+                provider_request_patch_group_count = provider_request_patch_group_count,
+                model_request_patch_group_count = model_request_patch_group_count,
+                model_effective_request_patch_group_count =
+                    model_effective_request_patch_group_count,
+                cost_catalog_version_count = cost_catalog_version_count,
+                failed_group_count = 0usize,
+            );
+        } else {
+            crate::warn_event!(
+                "cache.reload_finished",
+                status = "partial_failure",
+                api_key_count = api_key_count,
+                provider_count = provider_count,
+                model_count = model_count,
+                model_route_count = model_route_count,
+                api_key_override_count = api_key_override_count,
+                provider_api_key_count = provider_api_key_count,
+                provider_api_key_group_count = provider_api_key_group_count,
+                request_patch_rule_count = request_patch_rule_count,
+                provider_request_patch_group_count = provider_request_patch_group_count,
+                model_request_patch_group_count = model_request_patch_group_count,
+                model_effective_request_patch_group_count =
+                    model_effective_request_patch_group_count,
+                cost_catalog_version_count = cost_catalog_version_count,
+                failed_group_count = failure_counts.len(),
+                failed_groups = failure_summary.as_deref(),
+            );
+        }
     }
 
     pub async fn clear_cache(&self) {
-        info!("Clearing app cache...");
-        // Since all redis keys share the same prefix, we only need to clear one of the repos
-        // to clear all of them. For memory cache, each repo is a separate instance.
-        if let Err(e) = self.api_key_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear api_key_cache: {}", e);
+        crate::info_event!("cache.clear_started");
+
+        let mut failed_repos = Vec::new();
+
+        if self.api_key_cache.clear().await.is_err() {
+            failed_repos.push("api_key_cache");
         }
-        if let Err(e) = self.models_catalog_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear models_catalog_cache: {}", e);
+        if self.model_route_cache.clear().await.is_err() {
+            failed_repos.push("model_route_cache");
         }
-        if let Err(e) = self.provider_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear provider_cache: {}", e);
+        if self.api_key_override_route_cache.clear().await.is_err() {
+            failed_repos.push("api_key_override_route_cache");
         }
-        if let Err(e) = self.model_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear model_cache: {}", e);
+        if self.models_catalog_cache.clear().await.is_err() {
+            failed_repos.push("models_catalog_cache");
         }
-        if let Err(e) = self.provider_api_keys_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear provider_api_keys_cache: {}", e);
+        if self.provider_cache.clear().await.is_err() {
+            failed_repos.push("provider_cache");
         }
-        if let Err(e) = self.provider_request_patch_rules_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear provider_request_patch_rules_cache: {}", e);
+        if self.model_cache.clear().await.is_err() {
+            failed_repos.push("model_cache");
         }
-        if let Err(e) = self.model_request_patch_rules_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear model_request_patch_rules_cache: {}", e);
+        if self.provider_api_keys_cache.clear().await.is_err() {
+            failed_repos.push("provider_api_keys_cache");
         }
-        if let Err(e) = self.model_effective_request_patches_cache.clear().await {
-            cyder_tools::log::error!(
-                "Failed to clear model_effective_request_patches_cache: {}",
-                e
+        if self
+            .provider_request_patch_rules_cache
+            .clear()
+            .await
+            .is_err()
+        {
+            failed_repos.push("provider_request_patch_rules_cache");
+        }
+        if self.model_request_patch_rules_cache.clear().await.is_err() {
+            failed_repos.push("model_request_patch_rules_cache");
+        }
+        if self
+            .model_effective_request_patches_cache
+            .clear()
+            .await
+            .is_err()
+        {
+            failed_repos.push("model_effective_request_patches_cache");
+        }
+        if self.cost_catalog_version_cache.clear().await.is_err() {
+            failed_repos.push("cost_catalog_version_cache");
+        }
+
+        let total_repo_count = 11usize;
+        let failed_repo_count = failed_repos.len();
+        let failed_repo_summary = summarize_repo_names(&failed_repos);
+
+        if failed_repo_count == 0 {
+            crate::info_event!(
+                "cache.clear_finished",
+                status = "success",
+                repo_count = total_repo_count,
+                failed_repo_count = failed_repo_count,
+            );
+        } else if failed_repo_count < total_repo_count {
+            crate::warn_event!(
+                "cache.clear_finished",
+                status = "partial_failure",
+                repo_count = total_repo_count,
+                failed_repo_count = failed_repo_count,
+                failed_repos = failed_repo_summary.as_deref(),
+            );
+        } else {
+            crate::error_event!(
+                "cache.clear_finished",
+                status = "failed",
+                repo_count = total_repo_count,
+                failed_repo_count = failed_repo_count,
+                failed_repos = failed_repo_summary.as_deref(),
             );
         }
-        if let Err(e) = self.cost_catalog_version_cache.clear().await {
-            cyder_tools::log::error!("Failed to clear cost_catalog_version_cache: {}", e);
-        }
-        info!("App cache cleared.");
     }
 
     async fn get_or_load<T, F, Fut>(
@@ -1239,18 +1430,11 @@ impl AppState {
     {
         if let Some(entry) = cache.get_entry(key).await? {
             return match &*entry {
-                CacheEntry::Positive(value) => {
-                    debug!("cache hit (positive): {}", key);
-                    Ok(Some(value.clone()))
-                }
-                CacheEntry::Negative => {
-                    debug!("cache hit (negative): {}", key);
-                    Ok(None)
-                }
+                CacheEntry::Positive(value) => Ok(Some(value.clone())),
+                CacheEntry::Negative => Ok(None),
             };
         }
 
-        debug!("cache miss: {}", key);
         match loader().await {
             Ok(Some(item)) => {
                 let arc_item = Arc::new(item);
@@ -1291,7 +1475,6 @@ impl AppState {
                 return Ok(Some(api_key));
             }
 
-            debug!("api key cache entry expired in memory: {}", cache_key);
             self.api_key_cache.delete(&cache_key).await?;
             return Ok(None);
         }
@@ -1324,7 +1507,6 @@ impl AppState {
                 return Ok(Some(api_key));
             }
 
-            debug!("api key cache entry expired in memory: {}", cache_key);
             self.api_key_cache.delete(&cache_key).await?;
             return Ok(None);
         }
@@ -1334,7 +1516,6 @@ impl AppState {
 
     pub async fn invalidate_api_key_hash(&self, api_key_hash: &str) -> Result<(), AppStoreError> {
         let cache_key_to_find = CacheKey::ApiKeyHash(api_key_hash).to_compact_string();
-        debug!("invalidate: {}", &cache_key_to_find);
         self.api_key_cache.delete(&cache_key_to_find).await?;
         Ok(())
     }
@@ -1452,7 +1633,6 @@ impl AppState {
 
     pub async fn invalidate_model_route_by_name(&self, name: &str) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ModelRouteByName(name).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         Ok(self.model_route_cache.delete(&cache_key).await?)
     }
 
@@ -1462,7 +1642,6 @@ impl AppState {
         source_name: &str,
     ) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ApiKeyModelOverride(api_key_id, source_name).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         self.invalidate_models_catalog().await?;
         Ok(self.api_key_override_route_cache.delete(&cache_key).await?)
     }
@@ -1495,10 +1674,6 @@ impl AppState {
         route_id: i64,
         route_name: Option<&str>,
     ) -> Result<(), AppStoreError> {
-        debug!(
-            "invalidate model route: id={}, name={:?}",
-            route_id, route_name
-        );
         self.invalidate_models_catalog().await?;
         if let Some(name) = route_name {
             let _ = self.invalidate_model_route_by_name(name).await;
@@ -1563,7 +1738,6 @@ impl AppState {
 
     pub async fn invalidate_models_catalog(&self) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ModelsCatalog.to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         Ok(self.models_catalog_cache.delete(&cache_key).await?)
     }
 
@@ -1595,7 +1769,6 @@ impl AppState {
 
     pub async fn invalidate_provider_by_id(&self, id: i64) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ProviderById(id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         if let Some(provider) = self.get_provider_by_id(id).await? {
             let _ = self
                 .invalidate_provider_by_key(&provider.provider_key)
@@ -1632,7 +1805,6 @@ impl AppState {
 
     pub async fn invalidate_provider_by_key(&self, key: &str) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ProviderByKey(key).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         Ok(self.provider_cache.delete(&cache_key).await?)
     }
 
@@ -1641,7 +1813,6 @@ impl AppState {
         id: i64,
         key: Option<&str>,
     ) -> Result<(), AppStoreError> {
-        debug!("invalidate provider: id={}, key={:?}", id, key);
         self.invalidate_models_catalog().await?;
         let _ = self.invalidate_model_routes_for_provider(id).await;
         let _ = self.invalidate_provider_request_patch_rules(id).await;
@@ -1713,12 +1884,10 @@ impl AppState {
         model_name: &str,
     ) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ModelByName(provider_key, model_name).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         Ok(self.model_cache.delete(&cache_key).await?)
     }
 
     pub async fn invalidate_model(&self, id: i64, name: Option<&str>) -> Result<(), AppStoreError> {
-        debug!("invalidate model: id={}, name={:?}", id, name);
         self.invalidate_models_catalog().await?;
         let _ = self.invalidate_model_routes_for_model(id).await;
         let _ = self.invalidate_model_request_patch_rules(id).await;
@@ -1792,7 +1961,6 @@ impl AppState {
         provider_id: i64,
     ) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         self.provider_key_queue_state
             .lock()
             .await
@@ -1802,12 +1970,7 @@ impl AppState {
 
     async fn next_queue_index(&self, provider_id: i64, key_count: usize) -> usize {
         let mut state = self.provider_key_queue_state.lock().await;
-        let index = Self::advance_queue_cursor(&mut state, provider_id, key_count);
-        debug!(
-            "Selected provider API key by queue strategy: provider_id={}, key_count={}, index={}",
-            provider_id, key_count, index
-        );
-        index
+        Self::advance_queue_cursor(&mut state, provider_id, key_count)
     }
 
     fn advance_queue_cursor(
@@ -2076,7 +2239,6 @@ impl AppState {
         provider_id: i64,
     ) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ProviderRequestPatchRules(provider_id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         self.provider_request_patch_rules_cache
             .delete(&cache_key)
             .await?;
@@ -2129,7 +2291,6 @@ impl AppState {
         model_id: i64,
     ) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ModelRequestPatchRules(model_id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         self.model_request_patch_rules_cache
             .delete(&cache_key)
             .await?;
@@ -2159,7 +2320,6 @@ impl AppState {
         model_id: i64,
     ) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ModelEffectiveRequestPatches(model_id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         Ok(self
             .model_effective_request_patches_cache
             .delete(&cache_key)
@@ -2229,7 +2389,6 @@ impl AppState {
 
     pub async fn invalidate_cost_catalog_version(&self, id: i64) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::CostCatalogVersion(id).to_compact_string();
-        debug!("invalidate: {}", &cache_key);
         Ok(self.cost_catalog_version_cache.delete(&cache_key).await?)
     }
 

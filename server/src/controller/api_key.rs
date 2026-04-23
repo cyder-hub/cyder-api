@@ -124,6 +124,67 @@ struct UpdateApiKeyRequest {
     pub model_overrides: Vec<ApiKeyModelOverridePayload>,
 }
 
+fn log_api_key_audit(
+    action: &'static str,
+    api_key_id: i64,
+    api_key_name: &str,
+    is_enabled: Option<bool>,
+) {
+    match action {
+        "create" => crate::info_event!(
+            "manager.api_key_created",
+            action = action,
+            api_key_id = api_key_id,
+            api_key_name = api_key_name,
+            is_enabled = is_enabled,
+        ),
+        "update" => crate::info_event!(
+            "manager.api_key_updated",
+            action = action,
+            api_key_id = api_key_id,
+            api_key_name = api_key_name,
+            is_enabled = is_enabled,
+        ),
+        "rotate" => crate::info_event!(
+            "manager.api_key_rotated",
+            action = action,
+            api_key_id = api_key_id,
+            api_key_name = api_key_name,
+            is_enabled = is_enabled,
+        ),
+        "reveal" => crate::info_event!(
+            "manager.api_key_revealed",
+            action = action,
+            api_key_id = api_key_id,
+            api_key_name = api_key_name,
+            is_enabled = is_enabled,
+        ),
+        "delete" => crate::info_event!(
+            "manager.api_key_deleted",
+            action = action,
+            api_key_id = api_key_id,
+            api_key_name = api_key_name,
+            is_enabled = is_enabled,
+        ),
+        _ => unreachable!("unsupported api key audit action: {action}"),
+    }
+}
+
+fn log_api_key_override_replace_audit(
+    api_key_id: i64,
+    api_key_name: &str,
+    overrides: &[ApiKeyModelOverrideResponse],
+) {
+    crate::info_event!(
+        "manager.api_key_model_overrides_replaced",
+        action = "replace",
+        api_key_id = api_key_id,
+        api_key_name = api_key_name,
+        override_count = overrides.len(),
+        enabled_override_count = overrides.iter().filter(|item| item.is_enabled).count(),
+    );
+}
+
 fn load_api_key_model_override_responses(
     api_key_id: i64,
 ) -> Result<Vec<ApiKeyModelOverrideResponse>, BaseError> {
@@ -212,6 +273,14 @@ async fn create_api_key(
         replace_api_key_model_overrides(&app_state, created.detail.id, &payload.model_overrides)
             .await?;
 
+    log_api_key_audit(
+        "create",
+        created.detail.id,
+        &created.detail.name,
+        Some(created.detail.is_enabled),
+    );
+    log_api_key_override_replace_audit(created.detail.id, &created.detail.name, &overrides);
+
     Ok(HttpResult::new(ApiKeyDetailWithSecretResponse {
         detail: ApiKeyDetailResponse {
             detail: created.detail,
@@ -247,6 +316,14 @@ async fn update_api_key(
         );
     }
 
+    log_api_key_audit(
+        "update",
+        updated.id,
+        &updated.name,
+        Some(updated.is_enabled),
+    );
+    log_api_key_override_replace_audit(updated.id, &updated.name, &overrides);
+
     Ok(HttpResult::new(ApiKeyDetailResponse {
         detail: updated,
         model_overrides: overrides,
@@ -271,11 +348,26 @@ async fn rotate_api_key(
         warn!("Failed to invalidate rotated api key {}: {:?}", id, err);
     }
 
+    log_api_key_audit(
+        "rotate",
+        rotated.id,
+        &rotated.name,
+        Some(existing.is_enabled),
+    );
+
     Ok(HttpResult::new(rotated))
 }
 
 async fn reveal_api_key(Path(id): Path<i64>) -> Result<HttpResult<ApiKeyReveal>, BaseError> {
-    Ok(HttpResult::new(ApiKey::reveal_key(id)?))
+    let existing = ApiKey::get_by_id(id)?;
+    let revealed = ApiKey::reveal_key(id)?;
+    log_api_key_audit(
+        "reveal",
+        revealed.id,
+        &revealed.name,
+        Some(existing.is_enabled),
+    );
+    Ok(HttpResult::new(revealed))
 }
 
 async fn delete_api_key(
@@ -307,6 +399,13 @@ async fn delete_api_key(
     if let Err(err) = app_state.invalidate_api_key_hash(&api_key_hash).await {
         warn!("Failed to invalidate deleted api key {}: {:?}", id, err);
     }
+
+    log_api_key_audit(
+        "delete",
+        existing.id,
+        &existing.name,
+        Some(existing.is_enabled),
+    );
 
     Ok(HttpResult::new(()))
 }
@@ -344,10 +443,10 @@ async fn replace_api_key_model_override_routes(
     Path(id): Path<i64>,
     Json(payload): Json<Vec<ApiKeyModelOverridePayload>>,
 ) -> Result<HttpResult<Vec<ApiKeyModelOverrideResponse>>, BaseError> {
-    ApiKey::get_by_id(id)?;
-    Ok(HttpResult::new(
-        replace_api_key_model_overrides(&app_state, id, &payload).await?,
-    ))
+    let api_key = ApiKey::get_by_id(id)?;
+    let overrides = replace_api_key_model_overrides(&app_state, id, &payload).await?;
+    log_api_key_override_replace_audit(id, &api_key.name, &overrides);
+    Ok(HttpResult::new(overrides))
 }
 
 pub fn create_api_key_management_router() -> StateRouter {

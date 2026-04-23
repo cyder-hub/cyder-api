@@ -900,6 +900,60 @@ impl RequestPatchRule {
         })
     }
 
+    pub fn soft_delete_by_provider_id(provider_id: i64) -> DbResult<usize> {
+        let now = Utc::now().timestamp_millis();
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            diesel::update(
+                request_patch_rule::table.filter(
+                    request_patch_rule::dsl::provider_id
+                        .eq(provider_id)
+                        .and(request_patch_rule::dsl::model_id.is_null())
+                        .and(request_patch_rule::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                request_patch_rule::dsl::deleted_at.eq(now),
+                request_patch_rule::dsl::is_enabled.eq(false),
+                request_patch_rule::dsl::updated_at.eq(now),
+            ))
+            .execute(conn)
+            .map_err(|err| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to delete provider request patch rules for {}: {}",
+                    provider_id, err
+                )))
+            })
+        })
+    }
+
+    pub fn soft_delete_by_model_id(model_id: i64) -> DbResult<usize> {
+        let now = Utc::now().timestamp_millis();
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            diesel::update(
+                request_patch_rule::table.filter(
+                    request_patch_rule::dsl::model_id
+                        .eq(model_id)
+                        .and(request_patch_rule::dsl::provider_id.is_null())
+                        .and(request_patch_rule::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                request_patch_rule::dsl::deleted_at.eq(now),
+                request_patch_rule::dsl::is_enabled.eq(false),
+                request_patch_rule::dsl::updated_at.eq(now),
+            ))
+            .execute(conn)
+            .map_err(|err| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to delete model request patch rules for {}: {}",
+                    model_id, err
+                )))
+            })
+        })
+    }
+
     pub fn list_by_provider_id(provider_id: i64) -> DbResult<Vec<RequestPatchRuleResponse>> {
         Self::list_by_scope(RequestPatchScope::Provider(provider_id))
     }

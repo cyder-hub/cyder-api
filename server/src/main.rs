@@ -5,7 +5,6 @@ use cyder_api::controller::{create_manager_router, create_system_router, handle_
 use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
 use cyder_api::proxy::{create_proxy_router, flush_proxy_logs};
 use cyder_api::service::app_state::{create_app_state, create_state_router};
-use cyder_tools::log::info;
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -29,7 +28,10 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    cyder_tools::log::info!("Received shutdown signal, starting graceful shutdown...");
+    cyder_api::info_event!(
+        "startup.shutdown_signal_received",
+        action = "graceful_shutdown"
+    );
 }
 
 #[tokio::main]
@@ -41,14 +43,26 @@ async fn main() {
         "debug" | "trace"
     ) && std::env::var(THIRD_PARTY_DEBUG_ENV).is_err()
     {
-        info!(
-            "Third-party debug logs are muted; set {}=1 to enable dependency debug output.",
-            THIRD_PARTY_DEBUG_ENV
+        cyder_api::info_event!(
+            "startup.third_party_debug_muted",
+            env = THIRD_PARTY_DEBUG_ENV,
+            log_level = &CONFIG.log_level,
         );
     }
-    info!("server start at {}", &addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("failed to bind server listener");
+    let target_addr = listener
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or(addr.clone());
     let app_state = create_app_state().await;
+    cyder_api::info_event!(
+        "startup.server_started",
+        target_addr = &target_addr,
+        base_path = &CONFIG.base_path,
+        log_level = &CONFIG.log_level,
+    );
     axum::serve(
         listener,
         create_state_router()
@@ -67,8 +81,14 @@ async fn main() {
     .await
     .expect("failed to start server");
 
-    cyder_tools::log::info!("Server shut down. Waiting for background tasks to finish...");
+    cyder_api::info_event!(
+        "startup.server_shutdown_waiting",
+        background_task = "proxy_logs_flush",
+    );
     flush_proxy_logs().await;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    cyder_tools::log::info!("Shutdown complete.");
+    cyder_api::info_event!(
+        "startup.server_shutdown_complete",
+        background_task = "proxy_logs_flush",
+    );
 }

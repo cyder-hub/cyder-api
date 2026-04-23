@@ -1,5 +1,6 @@
-use cyder_tools::log::{debug, error, warn};
+use cyder_tools::log::{debug, warn};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, VecDeque},
@@ -1076,6 +1077,84 @@ fn protocol_name(protocol: TransformProtocol) -> String {
     }
 }
 
+fn sha256_hex(body: impl AsRef<[u8]>) -> String {
+    format!("{:x}", Sha256::digest(body.as_ref()))
+}
+
+fn top_level_json_field_count(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => map.len(),
+        Value::Array(items) => items.len(),
+        Value::Null => 0,
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => 1,
+    }
+}
+
+fn json_value_log_summary(value: &Value) -> (usize, String, usize) {
+    let serialized = serde_json::to_vec(value).unwrap_or_default();
+    (
+        serialized.len(),
+        sha256_hex(&serialized),
+        top_level_json_field_count(value),
+    )
+}
+
+fn raw_payload_summary(raw_data: &str) -> String {
+    let mut summary = format!("bytes={} sha256={}", raw_data.len(), sha256_hex(raw_data));
+    if let Ok(value) = serde_json::from_str::<Value>(raw_data) {
+        summary.push_str(&format!(
+            " json_top_level_fields={}",
+            top_level_json_field_count(&value)
+        ));
+    }
+    summary
+}
+
+fn log_transform_diagnostic(diagnostic: &UnifiedTransformDiagnostic) {
+    let diagnostic_kind = format!("{:?}", diagnostic.diagnostic_kind);
+    let loss_level = format!("{:?}", diagnostic.loss_level);
+    let action = format!("{:?}", diagnostic.action);
+    let stage = diagnostic.stage.as_deref();
+    let stream_id = diagnostic.stream_id.as_deref();
+
+    match diagnostic.loss_level {
+        UnifiedTransformDiagnosticLossLevel::Lossless => crate::debug_event!(
+            "transform.diagnostic",
+            diagnostic_kind = diagnostic_kind,
+            loss_level = loss_level,
+            source_api = &diagnostic.source,
+            target_api = &diagnostic.target,
+            semantic_unit = &diagnostic.semantic_unit,
+            action = action,
+            stage = stage,
+            stream_id = stream_id,
+        ),
+        UnifiedTransformDiagnosticLossLevel::LossyMinor
+        | UnifiedTransformDiagnosticLossLevel::LossyMajor => crate::warn_event!(
+            "transform.diagnostic",
+            diagnostic_kind = diagnostic_kind,
+            loss_level = loss_level,
+            source_api = &diagnostic.source,
+            target_api = &diagnostic.target,
+            semantic_unit = &diagnostic.semantic_unit,
+            action = action,
+            stage = stage,
+            stream_id = stream_id,
+        ),
+        UnifiedTransformDiagnosticLossLevel::Reject => crate::error_event!(
+            "transform.diagnostic",
+            diagnostic_kind = diagnostic_kind,
+            loss_level = loss_level,
+            source_api = &diagnostic.source,
+            target_api = &diagnostic.target,
+            semantic_unit = &diagnostic.semantic_unit,
+            action = action,
+            stage = stage,
+            stream_id = stream_id,
+        ),
+    }
+}
+
 fn build_transform_diagnostic(
     diagnostic_kind_value: TransformDiagnosticKind,
     source: TransformProtocol,
@@ -1158,15 +1237,7 @@ pub(crate) fn apply_transform_policy(
             Some(decision.reason.to_string()),
         );
         record_captured_transform_diagnostic(&diagnostic);
-        let diagnostic_json =
-            serde_json::to_string(&diagnostic).unwrap_or_else(|_| "{}".to_string());
-        match decision.level {
-            TransformLossLevel::LossyMinor | TransformLossLevel::LossyMajor => {
-                warn!("[transform][diagnostic] {}", diagnostic_json)
-            }
-            TransformLossLevel::Reject => error!("[transform][diagnostic] {}", diagnostic_json),
-            TransformLossLevel::Lossless => {}
-        }
+        log_transform_diagnostic(&diagnostic);
     }
 
     matches!(decision.action, TransformAction::Send)
@@ -1198,14 +1269,8 @@ pub(super) fn build_stream_diagnostic_sse(
     let diagnostic_json = serde_json::to_string(&diagnostic).unwrap_or_else(|_| {
         "{\"type\":\"transform_diagnostic\",\"message\":\"serialization failure\"}".to_string()
     });
+    log_transform_diagnostic(&diagnostic);
     transformer.session.record_diagnostic(diagnostic);
-    match decision.level {
-        TransformLossLevel::LossyMinor | TransformLossLevel::LossyMajor => {
-            warn!("[transform][diagnostic] {}", diagnostic_json)
-        }
-        TransformLossLevel::Reject => error!("[transform][diagnostic] {}", diagnostic_json),
-        TransformLossLevel::Lossless => debug!("[transform][diagnostic] {}", diagnostic_json),
-    }
 
     SseEvent {
         event: Some("transform_diagnostic".to_string()),
@@ -1279,9 +1344,15 @@ fn transform_request_data_inner(
         return data;
     }
 
-    debug!(
-        "[transform] API type mismatch. Incoming: {:?}, Target: {:?}. Transforming request body.",
-        api_type, target_api_type
+    let (request_body_bytes, request_body_sha256, json_top_level_fields) =
+        json_value_log_summary(&data);
+    crate::debug_event!(
+        "transform.request_reencode_started",
+        source_api = format!("{api_type:?}"),
+        target_api = format!("{target_api_type:?}"),
+        request_body_bytes = request_body_bytes,
+        request_body_sha256 = request_body_sha256,
+        json_top_level_fields = json_top_level_fields,
     );
 
     let source_adapter = adapter_for(api_type);
@@ -1290,9 +1361,11 @@ fn transform_request_data_inner(
     let mut unified_request: UnifiedRequest = match (source_adapter.request.decode)(data.clone()) {
         Ok(payload) => payload,
         Err(e) => {
-            error!(
-                "[transform] Failed to deserialize {} request: {}. Returning original data.",
-                source_adapter.name, e
+            crate::error_event!(
+                "transform.request_decode_failed",
+                source_api = source_adapter.name,
+                target_api = target_adapter.name,
+                error = e,
             );
             return data;
         }
@@ -1321,22 +1394,28 @@ fn transform_request_data_inner(
         );
     }
 
-    debug!("[transform] unified request: {:?}", unified_request);
-
     let target_payload_result = (target_adapter.request.encode)(unified_request);
 
     match target_payload_result {
         Ok(value) => {
-            debug!(
-                "[transform] Transformation complete. Result: {}",
-                serde_json::to_string(&value).unwrap_or_default()
+            let (request_body_bytes, request_body_sha256, json_top_level_fields) =
+                json_value_log_summary(&value);
+            crate::debug_event!(
+                "transform.request_reencode_completed",
+                source_api = source_adapter.name,
+                target_api = target_adapter.name,
+                request_body_bytes = request_body_bytes,
+                request_body_sha256 = request_body_sha256,
+                json_top_level_fields = json_top_level_fields,
             );
             value
         }
         Err(e) => {
-            error!(
-                "[transform] Failed to serialize to target request format: {}. Returning original data.",
-                e
+            crate::error_event!(
+                "transform.request_encode_failed",
+                source_api = source_adapter.name,
+                target_api = target_adapter.name,
+                error = e,
             );
             data
         }
@@ -4199,6 +4278,12 @@ mod tests {
         assert_eq!(payload["loss_level"], "reject");
         assert_eq!(payload["semantic_unit"], "StreamError");
         assert!(payload["recovery_hint"].is_string());
+        assert!(
+            payload["raw_data_summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("bytes=") && summary.contains("sha256="))
+        );
+        assert_ne!(payload["raw_data_summary"], "{not-json}");
         assert!(transformer.session.last_error.is_some());
         assert_eq!(transformer.session.diagnostics.len(), 1);
     }
@@ -4308,9 +4393,11 @@ fn transform_result_with_cost_inner(
     let unified_response = match unified_response_result {
         Ok(ur) => ur,
         Err(e) => {
-            error!(
-                "[transform_result] Failed to deserialize to UnifiedResponse from {:?}: {}. Returning original data.",
-                source_adapter.api_type, e
+            crate::error_event!(
+                "transform.response_decode_failed",
+                source_api = format!("{:?}", source_adapter.api_type),
+                target_api = format!("{target_api_type:?}"),
+                error = e,
             );
             return (data, None, None);
         }
@@ -4325,9 +4412,15 @@ fn transform_result_with_cost_inner(
         return (data, usage_info, usage_normalization);
     }
 
-    debug!(
-        "[transform_result] API type mismatch. Incoming: {:?}, Target: {:?}. Transforming response body.",
-        api_type, target_api_type
+    let (response_body_bytes, response_body_sha256, json_top_level_fields) =
+        json_value_log_summary(&data);
+    crate::debug_event!(
+        "transform.response_reencode_started",
+        source_api = format!("{api_type:?}"),
+        target_api = format!("{target_api_type:?}"),
+        response_body_bytes = response_body_bytes,
+        response_body_sha256 = response_body_sha256,
+        json_top_level_fields = json_top_level_fields,
     );
 
     // Step 2: Serialize from UnifiedResponse to target format
@@ -4335,16 +4428,24 @@ fn transform_result_with_cost_inner(
 
     match target_payload_result {
         Ok(value) => {
-            debug!(
-                "[transform_result] Transformation complete. Result: {}",
-                serde_json::to_string(&value).unwrap_or_default()
+            let (response_body_bytes, response_body_sha256, json_top_level_fields) =
+                json_value_log_summary(&value);
+            crate::debug_event!(
+                "transform.response_reencode_completed",
+                source_api = format!("{:?}", source_adapter.api_type),
+                target_api = format!("{:?}", target_adapter.api_type),
+                response_body_bytes = response_body_bytes,
+                response_body_sha256 = response_body_sha256,
+                json_top_level_fields = json_top_level_fields,
             );
             (value, usage_info, usage_normalization)
         }
         Err(e) => {
-            error!(
-                "[transform_result] Failed to serialize to target response format: {}. Returning original data.",
-                e
+            crate::error_event!(
+                "transform.response_encode_failed",
+                source_api = format!("{:?}", source_adapter.api_type),
+                target_api = format!("{:?}", target_adapter.api_type),
+                error = e,
             );
             (data, usage_info, usage_normalization)
         }
@@ -4707,11 +4808,7 @@ impl StreamTransformer {
         message: String,
         raw_data: &str,
     ) -> Value {
-        let raw_summary = if raw_data.len() > 256 {
-            format!("{}...", &raw_data[..256])
-        } else {
-            raw_data.to_string()
-        };
+        let raw_summary = raw_payload_summary(raw_data);
         let decision = PolicyDecision {
             diagnostic_kind: TransformDiagnosticKind::FatalTransformError,
             level: TransformLossLevel::Reject,
@@ -4727,7 +4824,7 @@ impl StreamTransformer {
             self.session.stream_id.clone(),
             Some(stage),
             Some(&message),
-            Some(raw_summary),
+            Some(raw_summary.clone()),
             Some(
                 "Inspect the raw summary and recent stream diagnostics to recover context."
                     .to_string(),
@@ -4741,7 +4838,7 @@ impl StreamTransformer {
                 "target": format!("{:?}", self.target_api_type),
                 "stream_id": self.session.stream_id,
                 "message": message,
-                "raw_data_summary": raw_data
+                "raw_data_summary": raw_summary
             })
         })
     }
@@ -4757,6 +4854,7 @@ impl StreamTransformer {
         if let Ok(diagnostic) =
             serde_json::from_value::<UnifiedTransformDiagnostic>(payload.clone())
         {
+            log_transform_diagnostic(&diagnostic);
             self.session.record_diagnostic(diagnostic);
         }
         vec![SseEvent {
@@ -5023,30 +5121,23 @@ impl StreamTransformer {
         }
 
         if self.api_type == LlmApiType::Responses && self.target_api_type == LlmApiType::Openai {
-            let transformed = match serde_json::from_str::<responses::ResponsesChunkResponse>(
-                &event.data,
-            ) {
-                Ok(chunk) => responses::transform_responses_chunk_to_openai_events(chunk, self),
-                Err(e) => {
-                    error!(
-                        "[StreamTransformer::transform_event] Failed to deserialize chunk from {:?}: {}. Data: '{}'",
-                        LlmApiType::Responses,
-                        e,
-                        event.data
-                    );
-                    let events = self.controlled_error_sse(
-                        "deserialize_source_chunk",
-                        format!(
-                            "failed to deserialize {:?} chunk: {}",
-                            LlmApiType::Responses,
-                            e
-                        ),
-                        &event.data,
-                    );
-                    self.record_transformed_events(&events);
-                    return Some(events);
-                }
-            };
+            let transformed =
+                match serde_json::from_str::<responses::ResponsesChunkResponse>(&event.data) {
+                    Ok(chunk) => responses::transform_responses_chunk_to_openai_events(chunk, self),
+                    Err(e) => {
+                        let events = self.controlled_error_sse(
+                            "deserialize_source_chunk",
+                            format!(
+                                "failed to deserialize {:?} chunk: {}",
+                                LlmApiType::Responses,
+                                e
+                            ),
+                            &event.data,
+                        );
+                        self.record_transformed_events(&events);
+                        return Some(events);
+                    }
+                };
 
             if let Some(events) = &transformed {
                 self.record_transformed_events(events);
@@ -5070,10 +5161,6 @@ impl StreamTransformer {
                 (target_adapter.stream.encode_legacy_chunk)(unified_chunk, self)
             }
             Err(e) => {
-                error!(
-                    "[StreamTransformer::transform_event] Failed to deserialize chunk from {:?}: {}. Data: '{}'",
-                    source_adapter.api_type, e, event.data
-                );
                 let events = self.controlled_error_sse(
                     "deserialize_source_chunk",
                     format!(

@@ -348,10 +348,16 @@ impl ModelRoute {
             for route in routes {
                 let route = route.from_db();
                 let candidate_count = model_route_candidate::table
+                    .inner_join(
+                        model::table.on(model_route_candidate::dsl::model_id.eq(model::dsl::id)),
+                    )
+                    .inner_join(provider::table.on(model::dsl::provider_id.eq(provider::dsl::id)))
                     .filter(
                         model_route_candidate::dsl::route_id
                             .eq(route.id)
-                            .and(model_route_candidate::dsl::deleted_at.is_null()),
+                            .and(model_route_candidate::dsl::deleted_at.is_null())
+                            .and(model::dsl::deleted_at.is_null())
+                            .and(provider::dsl::deleted_at.is_null()),
                     )
                     .count()
                     .get_result::<i64>(conn)
@@ -439,7 +445,9 @@ impl ModelRoute {
                 .filter(
                     model_route_candidate::dsl::route_id
                         .eq(route_id_value)
-                        .and(model_route_candidate::dsl::deleted_at.is_null()),
+                        .and(model_route_candidate::dsl::deleted_at.is_null())
+                        .and(model::dsl::deleted_at.is_null())
+                        .and(provider::dsl::deleted_at.is_null()),
                 )
                 .order((
                     model_route_candidate::dsl::priority.asc(),
@@ -498,6 +506,73 @@ impl ModelRoute {
         let route = Self::get_by_id(id_value)?;
         let candidates = Self::list_candidate_details(id_value)?;
         Ok(ModelRouteDetail { route, candidates })
+    }
+
+    pub fn soft_delete_candidates_for_model(model_id_value: i64) -> DbResult<usize> {
+        let now = Utc::now().timestamp_millis();
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            diesel::update(
+                model_route_candidate::table.filter(
+                    model_route_candidate::dsl::model_id
+                        .eq(model_id_value)
+                        .and(model_route_candidate::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                model_route_candidate::dsl::deleted_at.eq(Some(now)),
+                model_route_candidate::dsl::is_enabled.eq(false),
+                model_route_candidate::dsl::updated_at.eq(now),
+            ))
+            .execute(conn)
+            .map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to delete model route candidates for model {}: {}",
+                    model_id_value, e
+                )))
+            })
+        })
+    }
+
+    pub fn soft_delete_candidates_for_provider(provider_id_value: i64) -> DbResult<usize> {
+        let now = Utc::now().timestamp_millis();
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let model_ids = model::table
+                .filter(model::dsl::provider_id.eq(provider_id_value))
+                .select(model::dsl::id)
+                .load::<i64>(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list models for provider {} while deleting route candidates: {}",
+                        provider_id_value, e
+                    )))
+                })?;
+
+            if model_ids.is_empty() {
+                return Ok(0);
+            }
+
+            diesel::update(
+                model_route_candidate::table.filter(
+                    model_route_candidate::dsl::model_id
+                        .eq_any(model_ids)
+                        .and(model_route_candidate::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                model_route_candidate::dsl::deleted_at.eq(Some(now)),
+                model_route_candidate::dsl::is_enabled.eq(false),
+                model_route_candidate::dsl::updated_at.eq(now),
+            ))
+            .execute(conn)
+            .map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to delete model route candidates for provider {}: {}",
+                    provider_id_value, e
+                )))
+            })
+        })
     }
 
     pub fn create(payload: &CreateModelRoutePayload) -> DbResult<ModelRouteDetail> {

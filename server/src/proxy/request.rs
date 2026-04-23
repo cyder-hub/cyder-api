@@ -1,8 +1,10 @@
-use super::{ProxyError, classify_request_body_error};
+use super::{
+    ProxyError, classify_request_body_error,
+    util::{sha256_hex, top_level_json_field_count},
+};
 use crate::config::CONFIG;
 use axum::{body::Body, extract::Request};
 use bytes::Bytes;
-use cyder_tools::log::debug;
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -21,9 +23,12 @@ pub(super) async fn parse_json_request(
     let data: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::BadRequest(format!("Failed to parse request body: {}", e)))?;
 
-    debug!(
-        "[proxy] original request data: {}",
-        serde_json::to_string(&data).unwrap_or_default()
+    crate::debug_event!(
+        "proxy.request_parsed",
+        request_body_bytes = body_bytes.len(),
+        request_body_sha256 = sha256_hex(&body_bytes),
+        json_top_level_fields = top_level_json_field_count(&data),
+        stream = data.get("stream").and_then(Value::as_bool),
     );
 
     Ok(ParsedProxyRequest {

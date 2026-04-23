@@ -8,6 +8,13 @@ use std::fmt;
 
 pub(crate) const REQUEST_PATCH_CONFLICT_ERROR: &str = "request_patch_conflict_error";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProxyLogLevel {
+    Debug,
+    Warn,
+    Error,
+}
+
 /// Structured error type for the proxy module.
 ///
 /// All proxy errors are serialized to a flat JSON format:
@@ -63,6 +70,34 @@ pub enum ProxyError {
 }
 
 impl ProxyError {
+    pub(crate) fn operator_log_level(&self) -> ProxyLogLevel {
+        match self {
+            ProxyError::Unauthorized(_)
+            | ProxyError::KeyDisabled(_)
+            | ProxyError::KeyExpired(_)
+            | ProxyError::BadRequest(_)
+            | ProxyError::Forbidden(_)
+            | ProxyError::RateLimited(_)
+            | ProxyError::ConcurrencyLimited(_)
+            | ProxyError::QuotaExhausted(_)
+            | ProxyError::BudgetExhausted(_)
+            | ProxyError::PayloadTooLarge(_)
+            | ProxyError::ClientCancelled(_) => ProxyLogLevel::Debug,
+            ProxyError::ProviderOpenSkipped(_) | ProxyError::ProviderHalfOpenProbeInFlight(_) => {
+                ProxyLogLevel::Warn
+            }
+            ProxyError::RequestPatchConflict(_)
+            | ProxyError::InternalError(_)
+            | ProxyError::ProtocolTransformError(_)
+            | ProxyError::UpstreamBadRequest(_)
+            | ProxyError::UpstreamRateLimited(_)
+            | ProxyError::UpstreamAuthentication(_)
+            | ProxyError::BadGateway(_)
+            | ProxyError::UpstreamService(_)
+            | ProxyError::UpstreamTimeout(_) => ProxyLogLevel::Error,
+        }
+    }
+
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
             ProxyError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
@@ -275,7 +310,8 @@ impl IntoResponse for ProxyError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProxyError, classify_request_body_error, classify_upstream_status, protocol_transform_error,
+        ProxyError, ProxyLogLevel, classify_request_body_error, classify_upstream_status,
+        protocol_transform_error,
     };
     use axum::response::IntoResponse;
     use reqwest::StatusCode;
@@ -355,5 +391,100 @@ mod tests {
             ProxyError::RequestPatchConflict("conflict".to_string()).to_string(),
             "[request_patch_conflict_error] conflict"
         );
+    }
+
+    #[test]
+    fn operator_log_level_explicitly_maps_every_proxy_error_variant() {
+        let cases = vec![
+            (
+                ProxyError::Unauthorized("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::KeyDisabled("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::KeyExpired("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::BadRequest("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (ProxyError::Forbidden("x".to_string()), ProxyLogLevel::Debug),
+            (
+                ProxyError::RateLimited("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::ConcurrencyLimited("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::QuotaExhausted("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::BudgetExhausted("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::ProviderOpenSkipped("x".to_string()),
+                ProxyLogLevel::Warn,
+            ),
+            (
+                ProxyError::ProviderHalfOpenProbeInFlight("x".to_string()),
+                ProxyLogLevel::Warn,
+            ),
+            (
+                ProxyError::PayloadTooLarge("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::ClientCancelled("x".to_string()),
+                ProxyLogLevel::Debug,
+            ),
+            (
+                ProxyError::RequestPatchConflict("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+            (
+                ProxyError::InternalError("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+            (
+                ProxyError::ProtocolTransformError("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+            (
+                ProxyError::UpstreamBadRequest("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+            (
+                ProxyError::UpstreamRateLimited("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+            (
+                ProxyError::UpstreamAuthentication("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+            (
+                ProxyError::BadGateway("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+            (
+                ProxyError::UpstreamService("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+            (
+                ProxyError::UpstreamTimeout("x".to_string()),
+                ProxyLogLevel::Error,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.operator_log_level(), expected);
+        }
     }
 }

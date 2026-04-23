@@ -77,7 +77,10 @@ where
         });
 
         if removed_count > 0 {
-            cyder_tools::log::debug!("Cleaned up {} expired cache entries", removed_count);
+            crate::debug_event!(
+                "cache.memory_cleanup_expired",
+                removed_count = removed_count,
+            );
         }
     }
 
@@ -136,7 +139,6 @@ where
 
     async fn clear(&self) -> Result<(), Self::Error> {
         self.data.clear();
-        cyder_tools::log::info!("In-memory cache cleared.");
         Ok(())
     }
 

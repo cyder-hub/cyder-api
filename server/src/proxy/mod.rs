@@ -21,6 +21,8 @@ mod utility;
 
 #[cfg(test)]
 mod integration;
+#[cfg(test)]
+mod log_regression;
 
 pub(crate) use cancellation::ProxyCancellationContext;
 pub(crate) use core::{process_success_response_body, send_with_first_byte_timeout};

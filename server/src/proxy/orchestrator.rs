@@ -6,7 +6,6 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
-use cyder_tools::log::{error, info, warn};
 use reqwest::header::RETRY_AFTER;
 use serde_json::Value;
 use tokio::time::sleep;
@@ -18,6 +17,7 @@ use super::{
     core::{
         ProxyExecutionPolicy, ProxyLogMode, ProxyRequestFailure, ProxyResponseMode, proxy_request,
     },
+    error::ProxyLogLevel,
     load_runtime_request_patch_trace,
     logging::{LoggedBody, RequestLogContext, record_request_completion_and_log},
     prepare::{
@@ -599,6 +599,206 @@ fn sync_attempt_from_proxy_failure(
     attempt.response_started_to_client = failure.log_context.first_chunk_ts.is_some();
 }
 
+fn scheduler_action_name(action: SchedulerAction) -> &'static str {
+    match action {
+        SchedulerAction::ReturnSuccess => "return_success",
+        SchedulerAction::FailFast => "fail_fast",
+        SchedulerAction::RetrySameCandidate => "retry_same_candidate",
+        SchedulerAction::FallbackNextCandidate => "fallback_next_candidate",
+    }
+}
+
+fn request_latency_ms(log_context: &RequestLogContext) -> i64 {
+    log_context
+        .completion_ts
+        .unwrap_or(log_context.request_received_at)
+        .saturating_sub(log_context.request_received_at)
+}
+
+struct RequestEventBase<'a> {
+    log_id: i64,
+    requested_model: &'a str,
+    resolved_scope: &'a str,
+    route_id: Option<i64>,
+    route_name: Option<&'a str>,
+    upstream_status: Option<u16>,
+    provider_id: i64,
+    provider_key: &'a str,
+    model_id: i64,
+    model_name: &'a str,
+    latency_ms: i64,
+    candidate_position: Option<i32>,
+    scheduler_action: Option<&'static str>,
+    error_code: Option<&'a str>,
+}
+
+fn request_event_base<'a>(
+    log_context: &'a RequestLogContext,
+    attempt: Option<&'a RequestAttemptDraft>,
+) -> RequestEventBase<'a> {
+    RequestEventBase {
+        log_id: log_context.id,
+        requested_model: &log_context.requested_model_name,
+        resolved_scope: &log_context.resolved_name_scope,
+        route_id: log_context.resolved_route_id,
+        route_name: log_context.resolved_route_name.as_deref(),
+        upstream_status: log_context.llm_status.map(|status| status.as_u16()),
+        provider_id: log_context.provider_id,
+        provider_key: &log_context.provider_key,
+        model_id: log_context.model_id,
+        model_name: &log_context.model_name,
+        latency_ms: request_latency_ms(log_context),
+        candidate_position: attempt.map(|attempt| attempt.candidate_position),
+        scheduler_action: attempt.map(|attempt| scheduler_action_name(attempt.scheduler_action)),
+        error_code: attempt
+            .and_then(|attempt| attempt.error_code.as_deref())
+            .or(log_context.final_error_code.as_deref()),
+    }
+}
+
+fn log_retry_scheduled(
+    log_context: &RequestLogContext,
+    attempt: &RequestAttemptDraft,
+    proxy_error: &ProxyError,
+) {
+    let event = request_event_base(log_context, Some(attempt));
+    crate::warn_event!(
+        "proxy.retry_scheduled",
+        log_id = event.log_id,
+        requested_model = event.requested_model,
+        resolved_scope = event.resolved_scope,
+        route_id = event.route_id,
+        route_name = event.route_name,
+        upstream_status = event.upstream_status,
+        provider_id = event.provider_id,
+        provider_key = event.provider_key,
+        model_id = event.model_id,
+        model_name = event.model_name,
+        latency_ms = event.latency_ms,
+        candidate_position = event.candidate_position,
+        scheduler_action = event.scheduler_action,
+        error_code = event.error_code,
+        reason = proxy_error.error_code(),
+        backoff_ms = attempt.backoff_ms,
+    );
+}
+
+fn log_fallback_next_candidate(
+    log_context: &RequestLogContext,
+    attempt: &RequestAttemptDraft,
+    proxy_error: &ProxyError,
+) {
+    let event = request_event_base(log_context, Some(attempt));
+    crate::warn_event!(
+        "proxy.fallback_next_candidate",
+        log_id = event.log_id,
+        requested_model = event.requested_model,
+        resolved_scope = event.resolved_scope,
+        route_id = event.route_id,
+        route_name = event.route_name,
+        upstream_status = event.upstream_status,
+        provider_id = event.provider_id,
+        provider_key = event.provider_key,
+        model_id = event.model_id,
+        model_name = event.model_name,
+        latency_ms = event.latency_ms,
+        candidate_position = event.candidate_position,
+        scheduler_action = event.scheduler_action,
+        error_code = event.error_code,
+        reason = proxy_error.error_code(),
+    );
+}
+
+fn log_provider_skipped(
+    log_context: &RequestLogContext,
+    attempt: &RequestAttemptDraft,
+    proxy_error: &ProxyError,
+) {
+    let event = request_event_base(log_context, Some(attempt));
+    crate::warn_event!(
+        "proxy.provider_skipped",
+        log_id = event.log_id,
+        requested_model = event.requested_model,
+        resolved_scope = event.resolved_scope,
+        route_id = event.route_id,
+        route_name = event.route_name,
+        upstream_status = event.upstream_status,
+        provider_id = event.provider_id,
+        provider_key = event.provider_key,
+        model_id = event.model_id,
+        model_name = event.model_name,
+        latency_ms = event.latency_ms,
+        candidate_position = event.candidate_position,
+        scheduler_action = event.scheduler_action,
+        error_code = event.error_code,
+        reason = proxy_error.error_code(),
+    );
+}
+
+fn log_request_failed(
+    log_context: &RequestLogContext,
+    attempt: Option<&RequestAttemptDraft>,
+    proxy_error: &ProxyError,
+) {
+    let event = request_event_base(log_context, attempt);
+    match proxy_error.operator_log_level() {
+        ProxyLogLevel::Debug => crate::debug_event!(
+            "proxy.request_failed",
+            log_id = event.log_id,
+            requested_model = event.requested_model,
+            resolved_scope = event.resolved_scope,
+            route_id = event.route_id,
+            route_name = event.route_name,
+            upstream_status = event.upstream_status,
+            provider_id = event.provider_id,
+            provider_key = event.provider_key,
+            model_id = event.model_id,
+            model_name = event.model_name,
+            latency_ms = event.latency_ms,
+            candidate_position = event.candidate_position,
+            scheduler_action = event.scheduler_action,
+            error_code = event.error_code,
+            reason = proxy_error.error_code(),
+        ),
+        ProxyLogLevel::Warn => crate::warn_event!(
+            "proxy.request_failed",
+            log_id = event.log_id,
+            requested_model = event.requested_model,
+            resolved_scope = event.resolved_scope,
+            route_id = event.route_id,
+            route_name = event.route_name,
+            upstream_status = event.upstream_status,
+            provider_id = event.provider_id,
+            provider_key = event.provider_key,
+            model_id = event.model_id,
+            model_name = event.model_name,
+            latency_ms = event.latency_ms,
+            candidate_position = event.candidate_position,
+            scheduler_action = event.scheduler_action,
+            error_code = event.error_code,
+            reason = proxy_error.error_code(),
+        ),
+        ProxyLogLevel::Error => crate::error_event!(
+            "proxy.request_failed",
+            log_id = event.log_id,
+            requested_model = event.requested_model,
+            resolved_scope = event.resolved_scope,
+            route_id = event.route_id,
+            route_name = event.route_name,
+            upstream_status = event.upstream_status,
+            provider_id = event.provider_id,
+            provider_key = event.provider_key,
+            model_id = event.model_id,
+            model_name = event.model_name,
+            latency_ms = event.latency_ms,
+            candidate_position = event.candidate_position,
+            scheduler_action = event.scheduler_action,
+            error_code = event.error_code,
+            reason = proxy_error.error_code(),
+        ),
+    }
+}
+
 fn log_body_capture_state_as_str(capture_state: LogBodyCaptureState) -> &'static str {
     match capture_state {
         LogBodyCaptureState::Complete => "COMPLETE",
@@ -762,10 +962,6 @@ pub(super) async fn execute_attempt(
 
     let mut attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
     let skipped_attempts_for_log = skipped_attempts.clone();
-    info!(
-        "Executing candidate {} for request model '{}'",
-        candidate.candidate_position, requested_model_name
-    );
 
     let user_api_type_for_log = match &kind {
         AttemptExecutionKind::Generation { user_api_type, .. } => *user_api_type,
@@ -795,10 +991,6 @@ pub(super) async fn execute_attempt(
         match resolve_provider_credentials(&candidate.provider, &app_state).await {
             Ok(credentials) => credentials,
             Err(proxy_error) => {
-                warn!(
-                    "Failed to resolve provider credentials for provider {}: {:?}",
-                    candidate.provider.id, proxy_error
-                );
                 attempt.completed_at = Some(Utc::now().timestamp_millis());
                 classify_attempt_failure(
                     &mut attempt,
@@ -866,7 +1058,6 @@ pub(super) async fn execute_attempt(
     )
     .await
     {
-        warn!("Access control check failed: {:?}", proxy_error);
         attempt.completed_at = Some(Utc::now().timestamp_millis());
         classify_attempt_failure(
             &mut attempt,
@@ -902,10 +1093,6 @@ pub(super) async fn execute_attempt(
     {
         Ok(trace) => trace,
         Err(proxy_error) => {
-            warn!(
-                "Failed to load request patch trace for model {}: {:?}",
-                candidate.model.id, proxy_error
-            );
             attempt.completed_at = Some(Utc::now().timestamp_millis());
             classify_attempt_failure(
                 &mut attempt,
@@ -987,10 +1174,6 @@ pub(super) async fn execute_attempt(
             {
                 Ok(materialized) => materialized,
                 Err(proxy_error) => {
-                    error!(
-                        "Failed to prepare generation request for target {:?}: {:?}",
-                        candidate.llm_api_type, proxy_error
-                    );
                     attempt.completed_at = Some(Utc::now().timestamp_millis());
                     classify_attempt_failure(
                         &mut attempt,
@@ -1032,10 +1215,6 @@ pub(super) async fn execute_attempt(
         {
             Ok(materialized) => materialized,
             Err(proxy_error) => {
-                error!(
-                    "Failed to prepare utility request '{}': {:?}",
-                    operation.name, proxy_error
-                );
                 attempt.completed_at = Some(Utc::now().timestamp_millis());
                 classify_attempt_failure(
                     &mut attempt,
@@ -1080,7 +1259,6 @@ pub(super) async fn execute_attempt(
         match admit_api_key_request(&app_state, &system_api_key).await {
             Ok(guard) => guard,
             Err(proxy_error) => {
-                warn!("API key request admission failed: {:?}", proxy_error);
                 attempt.completed_at = Some(Utc::now().timestamp_millis());
                 classify_attempt_failure(
                     &mut attempt,
@@ -1119,12 +1297,6 @@ pub(super) async fn execute_attempt(
     .await
     {
         let completed_at = Utc::now().timestamp_millis();
-        warn!(
-            "Provider governance skipped candidate {} for request model '{}': {}",
-            candidate.candidate_position,
-            requested_model_name,
-            rejection.error_code()
-        );
         attempt.completed_at = Some(completed_at);
         attempt.started_at = None;
         attempt.provider_api_key_id = None;
@@ -1157,6 +1329,7 @@ pub(super) async fn execute_attempt(
             execution_policy,
         )
         .await;
+        log_provider_skipped(&log_context, &attempt, &proxy_error);
         return AttemptExecutionResult {
             attempt,
             response: Err(proxy_error),
@@ -1930,6 +2103,11 @@ async fn record_no_candidate_generation_failure(
     log_context.final_error_code = Some(NO_CANDIDATE_AVAILABLE_ERROR.to_string());
     log_context.final_error_message = Some(message.to_string());
     log_context.set_attempts_for_logging(&skipped_attempts, None);
+    log_request_failed(
+        &log_context,
+        skipped_attempts.last(),
+        &ProxyError::BadRequest(message.to_string()),
+    );
     if execution_policy.records_request_log() {
         record_request_completion_and_log(app_state, log_context.clone()).await;
     }
@@ -1973,6 +2151,11 @@ async fn record_no_candidate_utility_failure(
     log_context.final_error_code = Some(NO_CANDIDATE_AVAILABLE_ERROR.to_string());
     log_context.final_error_message = Some(message.to_string());
     log_context.set_attempts_for_logging(&skipped_attempts, None);
+    log_request_failed(
+        &log_context,
+        skipped_attempts.last(),
+        &ProxyError::BadRequest(message.to_string()),
+    );
     if execution_policy.records_request_log() {
         record_request_completion_and_log(app_state, log_context.clone()).await;
     }
@@ -2056,14 +2239,6 @@ pub(super) async fn orchestrate_generation_with_outcome(
         loop {
             let next_candidate_available = candidate_index + 1 < execution_plan.candidates.len()
                 && candidate_index + 1 < candidate_budget;
-            info!(
-                "Orchestrating generation request model '{}' via {} candidate {} retry {}",
-                requested_model_name,
-                resolved_name_scope,
-                candidate.candidate_position,
-                same_candidate_retry_count
-            );
-
             let result = execute_attempt(
                 Arc::clone(&app_state),
                 AttemptExecutionInput {
@@ -2121,6 +2296,7 @@ pub(super) async fn orchestrate_generation_with_outcome(
                 }
                 Err(error) => match attempt.scheduler_action {
                     SchedulerAction::RetrySameCandidate => {
+                        log_retry_scheduled(&log_context, &attempt, &error);
                         let backoff_ms = attempt.backoff_ms.unwrap_or_default().max(0) as u64;
                         prior_transform_diagnostics = log_context.transform_diagnostics.clone();
                         prior_attempts.push(attempt);
@@ -2133,12 +2309,20 @@ pub(super) async fn orchestrate_generation_with_outcome(
                         if candidate_index + 1 < execution_plan.candidates.len()
                             && candidate_index + 1 < candidate_budget =>
                     {
+                        if !matches!(
+                            error,
+                            ProxyError::ProviderOpenSkipped(_)
+                                | ProxyError::ProviderHalfOpenProbeInFlight(_)
+                        ) {
+                            log_fallback_next_candidate(&log_context, &attempt, &error);
+                        }
                         prior_transform_diagnostics = log_context.transform_diagnostics.clone();
                         prior_attempts.push(attempt);
                         candidate_index += 1;
                         break;
                     }
                     _ => {
+                        log_request_failed(&log_context, Some(&attempt), &error);
                         let metadata = gateway_replay_execution_metadata(
                             resolved_route_id,
                             resolved_route_name.clone(),
@@ -2162,6 +2346,21 @@ pub(super) async fn orchestrate_generation_with_outcome(
     }
 
     let message = no_candidate_error_message(&requirement);
+    let _ = record_no_candidate_generation_failure(
+        &app_state,
+        &system_api_key,
+        &execution_plan,
+        prior_attempts.clone(),
+        api_type,
+        request_snapshot,
+        candidate_manifest,
+        original_request_body,
+        start_time,
+        &client_ip_addr,
+        &message,
+        execution_policy,
+    )
+    .await;
     Err(GatewayReplayExecutionFailure::with_decisions(
         ProxyError::BadRequest(message),
         gateway_replay_candidate_decisions(&prior_attempts, None),
@@ -2243,15 +2442,6 @@ pub(super) async fn orchestrate_utility_with_outcome(
         loop {
             let next_candidate_available = candidate_index + 1 < execution_plan.candidates.len()
                 && candidate_index + 1 < candidate_budget;
-            info!(
-                "Orchestrating utility request '{}' model '{}' via {} candidate {} retry {}",
-                operation.name,
-                requested_model_name,
-                resolved_name_scope,
-                candidate.candidate_position,
-                same_candidate_retry_count
-            );
-
             let result = execute_attempt(
                 Arc::clone(&app_state),
                 AttemptExecutionInput {
@@ -2307,6 +2497,7 @@ pub(super) async fn orchestrate_utility_with_outcome(
                 }
                 Err(error) => match attempt.scheduler_action {
                     SchedulerAction::RetrySameCandidate => {
+                        log_retry_scheduled(&log_context, &attempt, &error);
                         let backoff_ms = attempt.backoff_ms.unwrap_or_default().max(0) as u64;
                         prior_transform_diagnostics = log_context.transform_diagnostics.clone();
                         prior_attempts.push(attempt);
@@ -2319,12 +2510,20 @@ pub(super) async fn orchestrate_utility_with_outcome(
                         if candidate_index + 1 < execution_plan.candidates.len()
                             && candidate_index + 1 < candidate_budget =>
                     {
+                        if !matches!(
+                            error,
+                            ProxyError::ProviderOpenSkipped(_)
+                                | ProxyError::ProviderHalfOpenProbeInFlight(_)
+                        ) {
+                            log_fallback_next_candidate(&log_context, &attempt, &error);
+                        }
                         prior_transform_diagnostics = log_context.transform_diagnostics.clone();
                         prior_attempts.push(attempt);
                         candidate_index += 1;
                         break;
                     }
                     _ => {
+                        log_request_failed(&log_context, Some(&attempt), &error);
                         let metadata = gateway_replay_execution_metadata(
                             resolved_route_id,
                             resolved_route_name.clone(),
@@ -2348,6 +2547,21 @@ pub(super) async fn orchestrate_utility_with_outcome(
     }
 
     let message = no_candidate_error_message(&requirement);
+    let _ = record_no_candidate_utility_failure(
+        &app_state,
+        &system_api_key,
+        &execution_plan,
+        prior_attempts.clone(),
+        &operation,
+        request_snapshot,
+        candidate_manifest,
+        original_request_body,
+        start_time,
+        &client_ip_addr,
+        &message,
+        execution_policy,
+    )
+    .await;
     Err(GatewayReplayExecutionFailure::with_decisions(
         ProxyError::BadRequest(message),
         gateway_replay_candidate_decisions(&prior_attempts, None),

@@ -1,5 +1,3 @@
-use cyder_tools::log::debug;
-
 use crate::schema::enum_def::{Action, RuleScope};
 use crate::service::cache::types::CacheApiKeyAclRule;
 
@@ -19,9 +17,11 @@ impl AclEvaluator {
                 RuleScope::Model => match rule.model_id {
                     Some(rule_model_id) => rule_model_id == model_id,
                     None => {
-                        debug!(
-                            "Model-scoped rule ID {} has no model_id, will not match specific model.",
-                            rule.id
+                        crate::debug_event!(
+                            "acl.rule_misconfigured",
+                            rule_id = rule.id,
+                            scope = "model",
+                            missing = "model_id",
                         );
                         false
                     }
@@ -29,9 +29,11 @@ impl AclEvaluator {
                 RuleScope::Provider => match rule.provider_id {
                     Some(rule_provider_id) => rule_provider_id == provider_id,
                     None => {
-                        debug!(
-                            "Provider-scoped rule ID {} has no provider_id, will not match specific provider.",
-                            rule.id
+                        crate::debug_event!(
+                            "acl.rule_misconfigured",
+                            rule_id = rule.id,
+                            scope = "provider",
+                            missing = "provider_id",
                         );
                         false
                     }
@@ -43,17 +45,15 @@ impl AclEvaluator {
             }
 
             match rule.effect {
-                Action::Allow => {
-                    debug!(
-                        "Request allowed by ACL rule ID {} (Priority {}, Scope: {:?}) for api key '{}'",
-                        rule.id, rule.priority, rule.scope, label
-                    );
-                    return Ok(());
-                }
+                Action::Allow => return Ok(()),
                 Action::Deny => {
-                    debug!(
-                        "Request denied by ACL rule ID {} (Priority {}, Scope: {:?}) for api key '{}'",
-                        rule.id, rule.priority, rule.scope, label
+                    crate::debug_event!(
+                        "acl.request_denied",
+                        rule_id = rule.id,
+                        scope = format!("{:?}", rule.scope),
+                        api_key_label = label,
+                        provider_id = provider_id,
+                        model_id = model_id,
                     );
                     return Err(format!(
                         "request denied by ACL rule (ID: {}, ApiKey: '{}', Scope: {:?}, Type: {:?})",
@@ -64,17 +64,13 @@ impl AclEvaluator {
         }
 
         match default_action {
-            Action::Allow => {
-                debug!(
-                    "Request allowed by default ACL action of api key '{}'",
-                    label
-                );
-                Ok(())
-            }
+            Action::Allow => Ok(()),
             Action::Deny => {
-                debug!(
-                    "Request denied by default ACL action of api key '{}'",
-                    label
+                crate::debug_event!(
+                    "acl.default_deny",
+                    api_key_label = label,
+                    provider_id = provider_id,
+                    model_id = model_id,
                 );
                 Err(format!(
                     "request denied by default api key ACL action from '{}'",

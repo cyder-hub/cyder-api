@@ -4,6 +4,8 @@ use crate::{
     database::model::{
         Model, ModelCapabilityFlags, ModelDetail, ModelSummaryItem, UpdateModelData,
     },
+    database::model_route::ModelRoute,
+    database::request_patch::RequestPatchRule,
     utils::HttpResult, // Import HttpResult
 };
 use axum::{
@@ -16,6 +18,39 @@ use std::sync::Arc; // Added Arc
 
 fn default_true() -> bool {
     true
+}
+
+fn log_model_audit(action: &'static str, model: &Model) {
+    match action {
+        "create" => crate::info_event!(
+            "manager.model_created",
+            action = action,
+            model_id = model.id,
+            provider_id = model.provider_id,
+            model_name = &model.model_name,
+            real_model_name = model.real_model_name.as_deref(),
+            is_enabled = model.is_enabled,
+        ),
+        "update" => crate::info_event!(
+            "manager.model_updated",
+            action = action,
+            model_id = model.id,
+            provider_id = model.provider_id,
+            model_name = &model.model_name,
+            real_model_name = model.real_model_name.as_deref(),
+            is_enabled = model.is_enabled,
+        ),
+        "delete" => crate::info_event!(
+            "manager.model_deleted",
+            action = action,
+            model_id = model.id,
+            provider_id = model.provider_id,
+            model_name = &model.model_name,
+            real_model_name = model.real_model_name.as_deref(),
+            is_enabled = model.is_enabled,
+        ),
+        _ => unreachable!("unsupported model audit action: {action}"),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +100,8 @@ async fn insert_model(
         );
     }
 
+    log_model_audit("create", &created_model);
+
     Ok(HttpResult::new(created_model))
 }
 
@@ -72,9 +109,37 @@ async fn delete_model(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<()>, BaseError> {
+    let model = Model::get_by_id(id)?;
+    let affected_routes = ModelRoute::list_by_model_id(id)?;
     let num_deleted = Model::delete(id)?;
 
     if num_deleted > 0 {
+        if let Err(err) = ModelRoute::soft_delete_candidates_for_model(id) {
+            warn!(
+                "Failed to delete model route candidates for deleted model {}: {:?}",
+                id, err
+            );
+        }
+
+        if let Err(err) = RequestPatchRule::soft_delete_by_model_id(id) {
+            warn!(
+                "Failed to delete model request patch rules for deleted model {}: {:?}",
+                id, err
+            );
+        }
+
+        for route in &affected_routes {
+            if let Err(store_err) = app_state
+                .invalidate_model_route(route.id, Some(&route.route_name))
+                .await
+            {
+                warn!(
+                    "Failed to invalidate model route {} after model delete {}: {:?}",
+                    route.id, id, store_err
+                );
+            }
+        }
+
         // Invalidate from cache
         if let Err(store_err) = app_state.invalidate_model(id, None).await {
             warn!(
@@ -82,6 +147,8 @@ async fn delete_model(
                 id, store_err
             );
         }
+
+        log_model_audit("delete", &model);
     }
     Ok(HttpResult::new(()))
 }
@@ -127,6 +194,8 @@ async fn update_model(
             id, store_err
         );
     }
+
+    log_model_audit("update", &updated_model);
 
     Ok(HttpResult::new(updated_model))
 }

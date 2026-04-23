@@ -1,7 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use axum::{body::Body, extract::Request, response::Response};
-use cyder_tools::log::error;
 
 use super::{
     ProxyError,
@@ -45,7 +44,11 @@ pub async fn handle_gemini_request(
             "Invalid action: '{}'. Must be one of 'generateContent', 'streamGenerateContent', 'countMessageTokens', 'countTextTokens', or 'countTokens'.",
             action
         );
-        error!("[gemini_models_handler] {}", err_msg);
+        crate::debug_event!(
+            "proxy.gemini_bad_request",
+            reason = "invalid_action",
+            path_segment = &path_segment,
+        );
         return Err(ProxyError::BadRequest(err_msg));
     };
 
@@ -61,7 +64,11 @@ fn parse_gemini_model_action(path_segment: &str) -> Result<(&str, &str), ProxyEr
             "Invalid model_action_segment format: '{}'. Expected 'model_name:action'.",
             path_segment
         );
-        error!("[gemini_models_handler] {}", err_msg);
+        crate::debug_event!(
+            "proxy.gemini_bad_request",
+            reason = "invalid_model_action_segment",
+            path_segment = path_segment,
+        );
         return Err(ProxyError::BadRequest(err_msg));
     }
 

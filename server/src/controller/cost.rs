@@ -101,11 +101,171 @@ struct ImportedCostTemplateResponse {
     imported: ImportedCostCatalogTemplate,
 }
 
+fn log_cost_catalog_audit(action: &'static str, catalog: &CostCatalog) {
+    match action {
+        "create" => crate::info_event!(
+            "manager.cost_catalog_created",
+            action = action,
+            cost_catalog_id = catalog.id,
+            cost_catalog_name = &catalog.name,
+        ),
+        "update" => crate::info_event!(
+            "manager.cost_catalog_updated",
+            action = action,
+            cost_catalog_id = catalog.id,
+            cost_catalog_name = &catalog.name,
+        ),
+        "delete" => crate::info_event!(
+            "manager.cost_catalog_deleted",
+            action = action,
+            cost_catalog_id = catalog.id,
+            cost_catalog_name = &catalog.name,
+        ),
+        _ => unreachable!("unsupported cost catalog audit action: {action}"),
+    }
+}
+
+fn log_cost_version_audit(
+    action: &'static str,
+    version: &CostCatalogVersion,
+    reconciled_version_count: Option<usize>,
+) {
+    match action {
+        "create" => crate::info_event!(
+            "manager.cost_catalog_version_created",
+            action = action,
+            cost_catalog_version_id = version.id,
+            cost_catalog_id = version.catalog_id,
+            version = &version.version,
+            currency = &version.currency,
+            is_enabled = version.is_enabled,
+            is_archived = version.is_archived,
+            reconciled_version_count = reconciled_version_count,
+        ),
+        "delete" => crate::info_event!(
+            "manager.cost_catalog_version_deleted",
+            action = action,
+            cost_catalog_version_id = version.id,
+            cost_catalog_id = version.catalog_id,
+            version = &version.version,
+            currency = &version.currency,
+            is_enabled = version.is_enabled,
+            is_archived = version.is_archived,
+            reconciled_version_count = reconciled_version_count,
+        ),
+        "enable" => crate::info_event!(
+            "manager.cost_catalog_version_enabled",
+            action = action,
+            cost_catalog_version_id = version.id,
+            cost_catalog_id = version.catalog_id,
+            version = &version.version,
+            currency = &version.currency,
+            is_enabled = version.is_enabled,
+            is_archived = version.is_archived,
+            reconciled_version_count = reconciled_version_count,
+        ),
+        "disable" => crate::info_event!(
+            "manager.cost_catalog_version_disabled",
+            action = action,
+            cost_catalog_version_id = version.id,
+            cost_catalog_id = version.catalog_id,
+            version = &version.version,
+            currency = &version.currency,
+            is_enabled = version.is_enabled,
+            is_archived = version.is_archived,
+            reconciled_version_count = reconciled_version_count,
+        ),
+        "archive" => crate::info_event!(
+            "manager.cost_catalog_version_archived",
+            action = action,
+            cost_catalog_version_id = version.id,
+            cost_catalog_id = version.catalog_id,
+            version = &version.version,
+            currency = &version.currency,
+            is_enabled = version.is_enabled,
+            is_archived = version.is_archived,
+            reconciled_version_count = reconciled_version_count,
+        ),
+        "unarchive" => crate::info_event!(
+            "manager.cost_catalog_version_unarchived",
+            action = action,
+            cost_catalog_version_id = version.id,
+            cost_catalog_id = version.catalog_id,
+            version = &version.version,
+            currency = &version.currency,
+            is_enabled = version.is_enabled,
+            is_archived = version.is_archived,
+            reconciled_version_count = reconciled_version_count,
+        ),
+        "duplicate" => crate::info_event!(
+            "manager.cost_catalog_version_duplicated",
+            action = action,
+            cost_catalog_version_id = version.id,
+            cost_catalog_id = version.catalog_id,
+            version = &version.version,
+            currency = &version.currency,
+            is_enabled = version.is_enabled,
+            is_archived = version.is_archived,
+            reconciled_version_count = reconciled_version_count,
+        ),
+        _ => unreachable!("unsupported cost version audit action: {action}"),
+    }
+}
+
+fn log_cost_component_audit(action: &'static str, component: &CostComponent) {
+    match action {
+        "create" => crate::info_event!(
+            "manager.cost_component_created",
+            action = action,
+            cost_component_id = component.id,
+            cost_catalog_version_id = component.catalog_version_id,
+            meter_key = &component.meter_key,
+            charge_kind = &component.charge_kind,
+            priority = component.priority,
+        ),
+        "update" => crate::info_event!(
+            "manager.cost_component_updated",
+            action = action,
+            cost_component_id = component.id,
+            cost_catalog_version_id = component.catalog_version_id,
+            meter_key = &component.meter_key,
+            charge_kind = &component.charge_kind,
+            priority = component.priority,
+        ),
+        "delete" => crate::info_event!(
+            "manager.cost_component_deleted",
+            action = action,
+            cost_component_id = component.id,
+            cost_catalog_version_id = component.catalog_version_id,
+            meter_key = &component.meter_key,
+            charge_kind = &component.charge_kind,
+            priority = component.priority,
+        ),
+        _ => unreachable!("unsupported cost component audit action: {action}"),
+    }
+}
+
+fn log_cost_template_import_audit(template_key: &str, imported: &ImportedCostCatalogTemplate) {
+    crate::info_event!(
+        "manager.cost_template_imported",
+        action = "import",
+        template_key = template_key,
+        cost_catalog_id = imported.catalog.id,
+        cost_catalog_name = &imported.catalog.name,
+        cost_catalog_version_id = imported.version.id,
+        version = &imported.version.version,
+        component_count = imported.components.len(),
+        created_catalog = imported.created_catalog,
+    );
+}
+
 async fn create_catalog(
     Json(payload): Json<NewCostCatalogPayload>,
 ) -> DbResult<HttpResult<CostCatalog>> {
     validate_catalog_payload(&payload)?;
-    Ok(HttpResult::new(CostCatalog::create(&payload)?))
+    let created = CostCatalog::create(&payload)?;
+    log_cost_catalog_audit("create", &created);
+    Ok(HttpResult::new(created))
 }
 
 async fn update_catalog(
@@ -117,11 +277,13 @@ async fn update_catalog(
         name: payload.name,
         description: payload.description,
     };
-    Ok(HttpResult::new(CostCatalog::update(id, &update_data)?))
+    let updated = CostCatalog::update(id, &update_data)?;
+    log_cost_catalog_audit("update", &updated);
+    Ok(HttpResult::new(updated))
 }
 
 async fn delete_catalog(Path(id): Path<i64>) -> DbResult<HttpResult<()>> {
-    CostCatalog::get_by_id(id)?;
+    let catalog = CostCatalog::get_by_id(id)?;
     let versions = CostCatalogVersion::list_by_catalog_id(id)?;
     if !versions.is_empty() {
         return Err(BaseError::ParamInvalid(Some(
@@ -130,6 +292,7 @@ async fn delete_catalog(Path(id): Path<i64>) -> DbResult<HttpResult<()>> {
     }
 
     CostCatalog::delete(id)?;
+    log_cost_catalog_audit("delete", &catalog);
     Ok(HttpResult::new(()))
 }
 
@@ -175,10 +338,12 @@ async fn create_catalog_version(
     } else {
         Vec::new()
     };
-    for version in disabled_versions {
+    for version in &disabled_versions {
         invalidate_cost_catalog_version_cache(&app_state, version.id).await;
     }
     invalidate_cost_catalog_version_cache(&app_state, created.id).await;
+
+    log_cost_version_audit("create", &created, Some(disabled_versions.len()));
 
     Ok(HttpResult::new(created))
 }
@@ -201,6 +366,7 @@ async fn delete_version(
 
     CostCatalogVersion::delete(id)?;
     invalidate_cost_catalog_version_cache(&app_state, id).await;
+    log_cost_version_audit("delete", &version, None);
     Ok(HttpResult::new(()))
 }
 
@@ -223,10 +389,11 @@ async fn enable_version(
     } else {
         Vec::new()
     };
-    for version in disabled_versions {
+    for version in &disabled_versions {
         invalidate_cost_catalog_version_cache(&app_state, version.id).await;
     }
     invalidate_cost_catalog_version_cache(&app_state, id).await;
+    log_cost_version_audit("enable", &updated, Some(disabled_versions.len()));
     Ok(HttpResult::new(updated))
 }
 
@@ -246,6 +413,7 @@ async fn disable_version(
     )?;
 
     invalidate_cost_catalog_version_cache(&app_state, id).await;
+    log_cost_version_audit("disable", &updated, None);
     Ok(HttpResult::new(updated))
 }
 
@@ -265,6 +433,7 @@ async fn archive_version(
     )?;
 
     invalidate_cost_catalog_version_cache(&app_state, id).await;
+    log_cost_version_audit("archive", &updated, None);
     Ok(HttpResult::new(updated))
 }
 
@@ -285,6 +454,7 @@ async fn unarchive_version(
     )?;
 
     invalidate_cost_catalog_version_cache(&app_state, id).await;
+    log_cost_version_audit("unarchive", &updated, None);
     Ok(HttpResult::new(updated))
 }
 
@@ -305,6 +475,7 @@ async fn duplicate_version(
 
     let duplicated = CostCatalogVersion::duplicate_as_draft(id, requested_version)?;
     invalidate_cost_catalog_version_cache(&app_state, duplicated.id).await;
+    log_cost_version_audit("duplicate", &duplicated, None);
     Ok(HttpResult::new(duplicated))
 }
 
@@ -324,6 +495,7 @@ async fn create_component(
 
     let created = CostComponent::create(&payload)?;
     invalidate_cost_catalog_version_cache(&app_state, version.id).await;
+    log_cost_component_audit("create", &created);
     Ok(HttpResult::new(created))
 }
 
@@ -370,6 +542,7 @@ async fn update_component(
 
     let updated = CostComponent::update(id, &update_data)?;
     invalidate_cost_catalog_version_cache(&app_state, version.id).await;
+    log_cost_component_audit("update", &updated);
     Ok(HttpResult::new(updated))
 }
 
@@ -382,6 +555,7 @@ async fn delete_component(
 
     CostComponent::delete(id)?;
     invalidate_cost_catalog_version_cache(&app_state, version.id).await;
+    log_cost_component_audit("delete", &component);
     Ok(HttpResult::new(()))
 }
 
@@ -501,6 +675,7 @@ async fn import_cost_template(
     }
 
     let imported = import_cost_catalog_template(&import_payload)?;
+    log_cost_template_import_audit(payload.template_key.trim(), &imported);
 
     Ok(HttpResult::new(ImportedCostTemplateResponse {
         template: template.summary_at(now),

@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::{body::Body, http::HeaderMap, response::Response};
-use cyder_tools::log::info;
 
 use super::{
     ProxyError,
@@ -83,11 +82,6 @@ pub(super) async fn execute_utility_proxy(
         original_request_body,
         ..
     } = parsed_request;
-
-    info!(
-        "Processing {:?} utility request ({}) for model: {}",
-        operation.api_type, operation.name, execution_plan.requested_name
-    );
 
     orchestrate_utility(
         app_state,

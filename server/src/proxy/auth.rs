@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use axum::http::HeaderMap;
 use reqwest::header::AUTHORIZATION;
 
-use super::ProxyError;
+use super::{ProxyError, error::ProxyLogLevel};
 use crate::{
     database::api_key::{ApiKey, hash_api_key},
     service::app_state::{
@@ -12,7 +12,6 @@ use crate::{
     service::cache::types::{CacheApiKey, CacheModel, CacheProvider},
     utils::acl::ACL_EVALUATOR,
 };
-use cyder_tools::log::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiKeyPosition {
@@ -27,19 +26,50 @@ pub struct ApiKeyCheckResult {
     pub position: ApiKeyPosition,
 }
 
+fn log_auth_request_rejected(
+    protocol: &'static str,
+    source: Option<&'static str>,
+    proxy_error: &ProxyError,
+) {
+    match proxy_error.operator_log_level() {
+        ProxyLogLevel::Debug => crate::debug_event!(
+            "auth.request_rejected",
+            protocol = protocol,
+            error_code = proxy_error.error_code(),
+            source = source,
+        ),
+        ProxyLogLevel::Warn => crate::warn_event!(
+            "auth.request_rejected",
+            protocol = protocol,
+            error_code = proxy_error.error_code(),
+            source = source,
+        ),
+        ProxyLogLevel::Error => crate::error_event!(
+            "auth.request_rejected",
+            protocol = protocol,
+            error_code = proxy_error.error_code(),
+            source = source,
+        ),
+    }
+}
+
 // Authenticates an OpenAI-style request (Bearer token or query param).
 pub async fn authenticate_openai_request(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, ProxyError> {
-    debug!("Authenticating OpenAI request");
     let (system_api_key_str, position) =
         parse_token_from_request(headers, params).map_err(|err_msg| {
-            warn!("OpenAI auth failed: {}", err_msg);
-            ProxyError::Unauthorized(err_msg)
+            let proxy_error = ProxyError::Unauthorized(err_msg);
+            log_auth_request_rejected("openai", None, &proxy_error);
+            proxy_error
         })?;
-    check_system_api_key(app_state, &system_api_key_str, position).await
+    let result = check_system_api_key(app_state, &system_api_key_str, position).await;
+    if let Err(proxy_error) = &result {
+        log_auth_request_rejected("openai", None, proxy_error);
+    }
+    result
 }
 
 // Authenticates a Gemini-style request (X-Goog-Api-Key header or 'key' query param).
@@ -48,28 +78,33 @@ pub async fn authenticate_gemini_request(
     params: &HashMap<String, String>,
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, ProxyError> {
-    debug!("Authenticating Gemini request");
     let (system_api_key_str, position) = match headers.get("X-Goog-Api-Key") {
         Some(header_value) => match header_value.to_str() {
             Ok(key) => (key.to_string(), ApiKeyPosition::XGoogApiKeyHeader),
             Err(_) => {
-                warn!("Invalid characters in X-Goog-Api-Key header");
-                return Err(ProxyError::BadRequest(
+                let proxy_error = ProxyError::BadRequest(
                     "Invalid characters in X-Goog-Api-Key header".to_string(),
-                ));
+                );
+                log_auth_request_rejected("gemini", Some("x-goog-api-key"), &proxy_error);
+                return Err(proxy_error);
             }
         },
         None => match params.get("key") {
             Some(key) => (key.clone(), ApiKeyPosition::KeyQuery),
             None => {
-                warn!("Missing API key for Gemini request");
-                return Err(ProxyError::Unauthorized(
+                let proxy_error = ProxyError::Unauthorized(
                     "Missing API key. Provide it in 'X-Goog-Api-Key' header or 'key' query parameter.".to_string()
-                ));
+                );
+                log_auth_request_rejected("gemini", Some("key_or_x-goog-api-key"), &proxy_error);
+                return Err(proxy_error);
             }
         },
     };
-    check_system_api_key(app_state, &system_api_key_str, position).await
+    let result = check_system_api_key(app_state, &system_api_key_str, position).await;
+    if let Err(proxy_error) = &result {
+        log_auth_request_rejected("gemini", None, proxy_error);
+    }
+    result
 }
 
 // Authenticates an Anthropic-style request (x-api-key header).
@@ -77,17 +112,16 @@ pub async fn authenticate_anthropic_request(
     headers: &HeaderMap,
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, ProxyError> {
-    debug!(
-        "Authenticating Anthropic request: x-api-key={}, authorization={}",
-        headers.contains_key("x-api-key"),
-        headers.contains_key(AUTHORIZATION)
-    );
     let (system_api_key_str, position) =
         parse_anthropic_api_key_from_headers(headers).map_err(|err| {
-            warn!("Anthropic auth failed: {}", err);
+            log_auth_request_rejected("anthropic", None, &err);
             err
         })?;
-    check_system_api_key(app_state, &system_api_key_str, position).await
+    let result = check_system_api_key(app_state, &system_api_key_str, position).await;
+    if let Err(proxy_error) = &result {
+        log_auth_request_rejected("anthropic", None, proxy_error);
+    }
+    result
 }
 
 // Authenticates an Ollama-style request (Bearer token or query param, same as OpenAI).
@@ -96,13 +130,17 @@ pub async fn authenticate_ollama_request(
     params: &HashMap<String, String>,
     app_state: &Arc<AppState>,
 ) -> Result<ApiKeyCheckResult, ProxyError> {
-    debug!("Authenticating Ollama request");
     let (system_api_key_str, position) =
         parse_token_from_request(headers, params).map_err(|err_msg| {
-            warn!("Ollama auth failed: {}", err_msg);
-            ProxyError::Unauthorized(err_msg)
+            let proxy_error = ProxyError::Unauthorized(err_msg);
+            log_auth_request_rejected("ollama", None, &proxy_error);
+            proxy_error
         })?;
-    check_system_api_key(app_state, &system_api_key_str, position).await
+    let result = check_system_api_key(app_state, &system_api_key_str, position).await;
+    if let Err(proxy_error) = &result {
+        log_auth_request_rejected("ollama", None, proxy_error);
+    }
+    result
 }
 
 // Checks if the request is allowed by the API key's embedded ACL snapshot.
@@ -119,10 +157,6 @@ pub async fn check_access_control(
         provider.id,
         model.id,
     ) {
-        info!(
-            "Access denied for ApiKey ID {}, Provider ID {}, Model ID {}. Reason: {}",
-            system_api_key.id, provider.id, model.id, reason
-        );
         return Err(ProxyError::Forbidden(format!(
             "Access denied by api key access control: {}",
             reason,
@@ -139,7 +173,11 @@ pub async fn admit_api_key_request(
     match app_state.try_begin_api_key_request(system_api_key).await {
         Ok(guard) => Ok(guard),
         Err(ApiKeyGovernanceAdmissionError::Internal(message)) => {
-            error!("API key governance state error: {}", message);
+            crate::error_event!(
+                "auth.governance_state_error",
+                api_key_id = system_api_key.id,
+                error = message,
+            );
             Err(ProxyError::InternalError(
                 "Internal server error while evaluating API key governance".to_string(),
             ))
@@ -263,13 +301,13 @@ pub async fn check_system_api_key(
             Ok(Some(api_key)) => Ok(ApiKeyCheckResult { api_key, position }),
             Ok(None) => classify_missing_active_api_key(key_str),
             Err(AppStoreError::LockError(e)) => {
-                error!("AppState lock error: {}", e);
+                crate::error_event!("auth.app_state_lock_error", error = e);
                 Err(ProxyError::InternalError(
                     "Internal server error while checking API key".to_string(),
                 ))
             }
             Err(e) => {
-                error!("AppState error: {:?}", e);
+                crate::error_event!("auth.app_state_error", error = format!("{e:?}"));
                 Err(ProxyError::InternalError(
                     "Internal server error while checking API key".to_string(),
                 ))
@@ -292,9 +330,9 @@ fn classify_missing_active_api_key(key_str: &str) -> Result<ApiKeyCheckResult, P
             ));
         }
         Err(err) => {
-            error!(
-                "Database error while classifying api key auth failure: {:?}",
-                err
+            crate::error_event!(
+                "auth.database_classification_error",
+                error = format!("{err:?}")
             );
             return Err(ProxyError::InternalError(
                 "Internal server error while checking API key".to_string(),

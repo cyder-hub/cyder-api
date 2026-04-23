@@ -29,7 +29,7 @@ use crate::{
     },
     utils::storage::RequestLogBundleQueryParam,
 };
-use cyder_tools::log::{debug, error};
+use cyder_tools::log::{debug, error, warn};
 
 use super::util::determine_target_api_type;
 
@@ -1118,20 +1118,32 @@ fn build_route_execution_plan(
         ));
     }
 
-    let candidates = enabled_candidates
-        .iter()
-        .enumerate()
-        .map(|(index, route_candidate)| {
-            build_candidate(
-                catalog,
-                requested_name,
-                Some(route),
-                Some(route_candidate),
-                route_candidate.model_id,
-                index + 1,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut candidates = Vec::with_capacity(enabled_candidates.len());
+    for route_candidate in enabled_candidates {
+        match build_candidate(
+            catalog,
+            requested_name,
+            Some(route),
+            Some(route_candidate),
+            route_candidate.model_id,
+            candidates.len() + 1,
+        ) {
+            Ok(candidate) => candidates.push(candidate),
+            Err(error) => {
+                warn!(
+                    "Skipping stale execution candidate for route '{}' model_id {}: {}",
+                    route.route_name, route_candidate.model_id, error
+                );
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(format!(
+            "Model route '{}' does not have any valid candidates.",
+            route.route_name
+        ));
+    }
 
     Ok(ExecutionPlan {
         requested_name: requested_name.to_string(),
@@ -1861,5 +1873,25 @@ mod tests {
         assert_eq!(plan.candidates[0].candidate_position, 1);
         assert_eq!(plan.candidates[0].llm_api_type, LlmApiType::Gemini);
         assert_eq!(plan.candidates[1].candidate_position, 2);
+    }
+
+    #[test]
+    fn build_execution_plan_skips_stale_route_candidates_and_keeps_valid_order() {
+        let mut catalog = catalog();
+        catalog.routes[0] = route_with_candidates(
+            100,
+            "smart-route",
+            &[(999, 5, true), (10, 10, true), (30, 30, true)],
+        );
+
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "smart-route")
+            .expect("route should skip stale candidates");
+
+        assert_eq!(plan.resolved_scope, ResolvedNameScope::GlobalRoute);
+        assert_eq!(plan.candidate_model_ids(), vec![10, 30]);
+        assert_eq!(plan.candidates[0].candidate_position, 1);
+        assert_eq!(plan.candidates[0].route_candidate_priority, Some(10));
+        assert_eq!(plan.candidates[1].candidate_position, 2);
+        assert_eq!(plan.candidates[1].route_candidate_priority, Some(30));
     }
 }

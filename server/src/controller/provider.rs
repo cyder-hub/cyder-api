@@ -1,11 +1,12 @@
 use crate::database::{
     DbResult,
     model::{Model, ModelDetail},
+    model_route::ModelRoute,
     provider::{
         BootstrapProviderInput, BootstrapProviderResult, NewProvider, NewProviderApiKey, Provider,
         ProviderApiKey, ProviderSummaryItem, UpdateProviderApiKeyData, UpdateProviderData,
     },
-    request_patch::RequestPatchRuleResponse,
+    request_patch::{RequestPatchRule, RequestPatchRuleResponse},
 };
 use crate::proxy::{ProxyError, apply_request_patches, load_runtime_request_patch_trace};
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
@@ -71,6 +72,85 @@ struct BootstrapProviderResponse {
     check_result: Option<BootstrapCheckResult>,
 }
 
+fn log_provider_audit(action: &'static str, provider: &Provider) {
+    match action {
+        "create" => crate::info_event!(
+            "manager.provider_created",
+            action = action,
+            provider_id = provider.id,
+            provider_key = &provider.provider_key,
+            provider_name = &provider.name,
+            is_enabled = provider.is_enabled,
+        ),
+        "update" => crate::info_event!(
+            "manager.provider_updated",
+            action = action,
+            provider_id = provider.id,
+            provider_key = &provider.provider_key,
+            provider_name = &provider.name,
+            is_enabled = provider.is_enabled,
+        ),
+        "delete" => crate::info_event!(
+            "manager.provider_deleted",
+            action = action,
+            provider_id = provider.id,
+            provider_key = &provider.provider_key,
+            provider_name = &provider.name,
+            is_enabled = provider.is_enabled,
+        ),
+        _ => unreachable!("unsupported provider audit action: {action}"),
+    }
+}
+
+fn log_provider_api_key_audit(action: &'static str, key: &ProviderApiKey) {
+    match action {
+        "create" => crate::info_event!(
+            "manager.provider_api_key_created",
+            action = action,
+            provider_id = key.provider_id,
+            provider_api_key_id = key.id,
+            is_enabled = key.is_enabled,
+            description_present = key.description.is_some(),
+        ),
+        "update" => crate::info_event!(
+            "manager.provider_api_key_updated",
+            action = action,
+            provider_id = key.provider_id,
+            provider_api_key_id = key.id,
+            is_enabled = key.is_enabled,
+            description_present = key.description.is_some(),
+        ),
+        "delete" => crate::info_event!(
+            "manager.provider_api_key_deleted",
+            action = action,
+            provider_id = key.provider_id,
+            provider_api_key_id = key.id,
+            is_enabled = key.is_enabled,
+            description_present = key.description.is_some(),
+        ),
+        _ => unreachable!("unsupported provider api key audit action: {action}"),
+    }
+}
+
+fn log_provider_bootstrap_audit(
+    created: &BootstrapProviderResult,
+    check_result: Option<&BootstrapCheckResult>,
+) {
+    crate::info_event!(
+        "manager.provider_bootstrapped",
+        action = "bootstrap",
+        provider_id = created.provider.id,
+        provider_key = &created.provider.provider_key,
+        provider_name = &created.provider.name,
+        is_enabled = created.provider.is_enabled,
+        provider_api_key_id = created.created_key.id,
+        model_id = created.created_model.id,
+        model_name = &created.created_model.model_name,
+        check_performed = check_result.is_some(),
+        check_success = check_result.map(|result| result.success),
+    );
+}
+
 async fn list() -> DbResult<HttpResult<Vec<Provider>>> {
     let result = Provider::list_all()?;
     Ok(HttpResult::new(result))
@@ -121,6 +201,8 @@ async fn insert(
         );
     }
 
+    log_provider_audit("create", &created_provider);
+
     Ok(HttpResult::new(created_provider))
 }
 
@@ -155,6 +237,8 @@ async fn update_provider(
         warn!("Failed to invalidate Provider id {} in cache: {:?}", id, e);
     }
 
+    log_provider_audit("update", &updated_provider);
+
     Ok(HttpResult::new(updated_provider))
 }
 
@@ -165,12 +249,46 @@ async fn delete_provider(
     // Fetch provider details before deleting to get the key for store removal
     // Fetch provider details to ensure it exists before DB delete.
     // Not strictly needed for cache operation if ID is the only thing used, but good practice.
-    let _provider_to_delete_from_db = Provider::get_by_id(id)?;
+    let provider_to_delete_from_db = Provider::get_by_id(id)?;
+    let affected_routes = ModelRoute::list_by_provider_id(id)?;
 
     match Provider::delete(id) {
         // This is DB soft-delete
         Ok(num_deleted_db) => {
             if num_deleted_db > 0 {
+                if let Err(err) = ModelRoute::soft_delete_candidates_for_provider(id) {
+                    warn!(
+                        "Failed to delete model route candidates for deleted provider {}: {:?}",
+                        id, err
+                    );
+                }
+
+                for route in &affected_routes {
+                    if let Err(store_err) = app_state
+                        .invalidate_model_route(route.id, Some(&route.route_name))
+                        .await
+                    {
+                        warn!(
+                            "Failed to invalidate model route {} after provider delete {}: {:?}",
+                            route.id, id, store_err
+                        );
+                    }
+                }
+
+                if let Err(err) = ProviderApiKey::soft_delete_by_provider_id(id) {
+                    warn!(
+                        "Failed to delete provider API keys for deleted provider {}: {:?}",
+                        id, err
+                    );
+                }
+
+                if let Err(err) = RequestPatchRule::soft_delete_by_provider_id(id) {
+                    warn!(
+                        "Failed to delete provider request patch rules for deleted provider {}: {:?}",
+                        id, err
+                    );
+                }
+
                 // Invalidate provider cache (key not available after delete, so pass None)
                 if let Err(e) = app_state.invalidate_provider(id, None).await {
                     warn!(
@@ -186,6 +304,8 @@ async fn delete_provider(
                         id, e
                     );
                 }
+
+                log_provider_audit("delete", &provider_to_delete_from_db);
             }
             Ok(HttpResult::new(())) // Success if DB operation was successful
         }
@@ -802,6 +922,8 @@ async fn bootstrap_provider(
         None
     };
 
+    log_provider_bootstrap_audit(&created, check_result.as_ref());
+
     Ok(HttpResult::new(build_bootstrap_response(
         created,
         provider_name,
@@ -953,6 +1075,8 @@ async fn add_provider_api_key(
         );
     }
 
+    log_provider_api_key_audit("create", &created_key);
+
     Ok(HttpResult::new(created_key))
 }
 
@@ -1015,6 +1139,8 @@ async fn update_provider_api_key(
         );
     }
 
+    log_provider_api_key_audit("update", &updated_key);
+
     Ok(HttpResult::new(updated_key))
 }
 
@@ -1042,6 +1168,8 @@ async fn delete_provider_api_key(
             provider_id, e
         );
     }
+
+    log_provider_api_key_audit("delete", &key_to_delete_from_db);
 
     Ok(HttpResult::new(()))
 }

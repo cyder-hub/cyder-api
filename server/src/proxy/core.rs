@@ -1,9 +1,10 @@
+use super::error::ProxyLogLevel;
 use super::logging::{
     LogBodyKind, LoggedBody, RequestLogContext, StreamingBodyWriter,
     record_request_completion_and_log,
 };
 use super::util::{
-    serialize_reqwest_headers_for_debug, serialize_upstream_response_headers_for_log,
+    json_top_level_field_count_from_bytes, serialize_upstream_response_headers_for_log, sha256_hex,
 };
 use super::{
     ProxyError,
@@ -32,7 +33,7 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
-use cyder_tools::log::{debug, error, info, warn};
+use cyder_tools::log::{debug, error};
 use flate2::read::GzDecoder;
 use futures::StreamExt;
 use reqwest::{
@@ -158,10 +159,7 @@ impl Drop for RequestLogContextGuard {
             let context_clone = Arc::clone(&self.context);
             tokio::spawn(async move {
                 let mut context = context_clone.lock().await;
-                warn!(
-                    "Request for log_id {} was cancelled by the client.",
-                    context.id
-                );
+                crate::debug_event!("proxy.client_cancelled", log_id = context.id);
                 context.overall_status = RequestStatus::Cancelled;
                 context.completion_ts = Some(Utc::now().timestamp_millis());
                 record_request_completion_and_log(&app_state, context.clone()).await;
@@ -239,8 +237,37 @@ impl Drop for ResponseStreamCancellationGuard {
     }
 }
 
+fn log_simple_request_failed(url: &str, stage: Option<&str>, proxy_error: &ProxyError) {
+    match proxy_error.operator_log_level() {
+        ProxyLogLevel::Debug => crate::debug_event!(
+            "proxy.simple_request_failed",
+            url = url,
+            error_code = proxy_error.error_code(),
+            stage = stage,
+        ),
+        ProxyLogLevel::Warn => crate::warn_event!(
+            "proxy.simple_request_failed",
+            url = url,
+            error_code = proxy_error.error_code(),
+            stage = stage,
+        ),
+        ProxyLogLevel::Error => crate::error_event!(
+            "proxy.simple_request_failed",
+            url = url,
+            error_code = proxy_error.error_code(),
+            stage = stage,
+        ),
+    }
+}
+
 fn should_forward_response_header(name: &HeaderName) -> bool {
     name != CONTENT_LENGTH && name != CONTENT_ENCODING && name != TRANSFER_ENCODING
+}
+
+fn response_content_type(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
 }
 
 pub(super) fn build_response_builder(
@@ -316,10 +343,12 @@ pub(crate) fn process_success_response_body(
             )
         }
         Err(e) => {
-            debug!(
-                "Response body is not valid JSON, cannot parse usage or transform: {}. Body: {:?}",
-                e,
-                String::from_utf8_lossy(decompressed_body)
+            crate::debug_event!(
+                "proxy.response_non_json_passthrough",
+                response_body_bytes = decompressed_body.len(),
+                response_body_sha256 = sha256_hex(decompressed_body),
+                parse_error = e,
+                json_top_level_fields = json_top_level_field_count_from_bytes(decompressed_body),
             );
             (decompressed_body.clone(), None, None, Vec::new())
         }
@@ -472,11 +501,14 @@ pub(super) async fn simple_proxy_request(
         &app_state.client
     };
 
-    debug!(
-        "[simple_proxy_request] request header: {:?}",
-        serialize_reqwest_headers_for_debug(&headers)
+    crate::debug_event!(
+        "proxy.simple_request_dispatch",
+        url = &url,
+        request_header_count = headers.len(),
+        request_body_bytes = data.len(),
+        request_body_sha256 = sha256_hex(data.as_bytes()),
+        json_top_level_fields = json_top_level_field_count_from_bytes(data.as_bytes()),
     );
-    debug!("[simple_proxy_request] request data: {}", &data);
 
     let response = match send_with_first_byte_timeout(
         &cancellation,
@@ -490,7 +522,7 @@ pub(super) async fn simple_proxy_request(
     {
         Ok(resp) => resp,
         Err(proxy_error) => {
-            error!("{}", proxy_error);
+            log_simple_request_failed(&url, None, &proxy_error);
             return Err(proxy_error);
         }
     };
@@ -519,7 +551,7 @@ pub(super) async fn simple_proxy_request(
             Ok(b) => b,
             Err(e) => {
                 let proxy_error = classify_reqwest_error("Reading upstream response body", &e);
-                error!("[simple_proxy_request] {}", proxy_error);
+                log_simple_request_failed(&url, Some("read_response_body"), &proxy_error);
                 return Err(proxy_error);
             }
         };
@@ -548,10 +580,6 @@ pub(super) async fn proxy_request(
     execution_policy: ProxyExecutionPolicy,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let provider_id = log_context.provider_id;
-    info!(
-        "Starting proxy request for log_id {}, model {}",
-        log_context.id, model_str
-    );
     let log_context = Arc::new(TokioMutex::new(log_context));
 
     // 1. Get HTTP client from AppState, with proxy if configured
@@ -591,7 +619,6 @@ pub(super) async fn proxy_request(
         Err(proxy_error) => {
             drop_cancellation_guard.disarm();
             cancellation_guard.disarm();
-            error!("{}", proxy_error);
             if execution_policy.records_provider_runtime()
                 && !matches!(proxy_error, ProxyError::ClientCancelled(_))
             {
@@ -708,9 +735,11 @@ async fn handle_non_streaming_response(
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
-    debug!(
-        "[handle_non_streaming_response] response headers: {:?}",
-        response_headers
+    crate::debug_event!(
+        "proxy.response_headers_received",
+        status_code = status_code.as_u16(),
+        response_header_count = response_headers.len(),
+        content_type = response_content_type(&response_headers),
     );
     let is_gzip = response_headers
         .get(CONTENT_ENCODING)
@@ -727,7 +756,6 @@ async fn handle_non_streaming_response(
     {
         Ok(b) => b,
         Err(proxy_error) => {
-            error!("[handle_non_streaming_response] {}", proxy_error);
             if execution_policy.records_provider_runtime()
                 && !matches!(proxy_error, ProxyError::ClientCancelled(_))
             {
@@ -805,10 +833,13 @@ async fn handle_non_streaming_response(
         if execution_policy.records_provider_runtime() {
             record_provider_success(app_state, provider_id, &model_str).await;
         }
-
-        info!(
-            "{}: Non-SSE request completed for log_id {}.",
-            model_str, context.id
+        crate::debug_event!(
+            "proxy.request_succeeded_debug",
+            log_id = context.id,
+            model = &model_str,
+            status_code = status_code.as_u16(),
+            is_stream = false,
+            latency_ms = llm_response_completed_at.saturating_sub(context.request_received_at),
         );
 
         let response = response_builder.body(Body::from(final_body)).unwrap();
@@ -817,11 +848,15 @@ async fn handle_non_streaming_response(
             log_context: context.clone(),
         })
     } else {
-        let error_body_str = String::from_utf8_lossy(&decompressed_body).into_owned();
         let mut context = log_context.lock().await;
-        error!(
-            "LLM request failed with status {} for log_id {}: {}",
-            status_code, context.id, &error_body_str
+        crate::error_event!(
+            "proxy.upstream_error_body",
+            status_code = status_code.as_u16(),
+            log_id = context.id,
+            response_body_bytes = decompressed_body.len(),
+            response_body_sha256 = sha256_hex(&decompressed_body),
+            json_top_level_fields = json_top_level_field_count_from_bytes(&decompressed_body),
+            content_type = response_content_type(&response_headers),
         );
 
         finalize_non_streaming_log_context(
@@ -1293,17 +1328,28 @@ async fn handle_streaming_response(
                 RequestLogBundleTransformDiagnosticPhase::Stream,
                 &transformer.diagnostics_snapshot(),
             );
-            if context.usage.is_none() {
-                info!("{}: SSE stream completed without usage info.", model_str);
-            }
-
             if log_mode.should_record_streaming() && execution_policy.records_request_log() {
                 record_request_completion_and_log(&app_state_clone, context.clone()).await;
             }
             if execution_policy.records_provider_runtime() {
                 record_provider_success(&app_state_clone, provider_id, &model_str).await;
             }
-            info!("{}: SSE stream completed.", model_str);
+            if context.usage.is_none() {
+                crate::debug_event!(
+                    "proxy.stream_usage_missing_debug",
+                    log_id = context.id,
+                    model = &model_str,
+                    status_code = status_code.as_u16(),
+                );
+            }
+            crate::debug_event!(
+                "proxy.request_succeeded_debug",
+                log_id = context.id,
+                model = &model_str,
+                status_code = status_code.as_u16(),
+                is_stream = true,
+                latency_ms = llm_response_completed_at.saturating_sub(context.request_received_at),
+            );
             response_drop_guard.disarm();
         } else { // !status_code.is_success()
             let mut context = log_context_clone.lock().await;

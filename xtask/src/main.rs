@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
@@ -30,6 +31,7 @@ fn main() -> Result<()> {
         "dev-front" => cmd_dev_front()?,
         "build-front" => cmd_build_front()?,
         "install-front-deps" => cmd_install_front_deps()?, // Add this line
+        "log-lint" => cmd_log_lint()?,
         "test" => {
             cmd_test(args)?;
             return Ok(());
@@ -70,10 +72,382 @@ Commands:
   dev-front            Installs deps and runs the frontend development server using 'npm run dev' in './front'.
   build-front          Installs deps and builds the frontend project using 'npm run build' in './front'.
   install-front-deps   Installs frontend dependencies using 'npm install' in './front'.
+  log-lint             Scans server runtime code for forbidden logging patterns.
   test                 Runs backend tests, with optional test name and arguments.
   default              Runs the 'dev' command.
 "#
     );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LintViolation {
+    path: PathBuf,
+    line: usize,
+    reason: &'static str,
+    excerpt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MacroInvocation {
+    line: usize,
+    snippet: String,
+}
+
+fn cmd_log_lint() -> Result<()> {
+    println!("🔎 Running log regression lint...");
+    let root = project_root();
+    let violations = collect_log_lint_violations(&root)?;
+
+    if violations.is_empty() {
+        println!("✅ Log lint passed.");
+        return Ok(());
+    }
+
+    eprintln!("❌ Log lint failed with {} violation(s):", violations.len());
+    for violation in &violations {
+        let display_path = violation
+            .path
+            .strip_prefix(&root)
+            .unwrap_or(&violation.path)
+            .display();
+        eprintln!(
+            "  {}:{}: {} :: {}",
+            display_path, violation.line, violation.reason, violation.excerpt
+        );
+    }
+
+    bail!("log lint failed");
+}
+
+fn collect_log_lint_violations(root: &Path) -> Result<Vec<LintViolation>> {
+    let server_src = root.join("server").join("src");
+    let mut files = Vec::new();
+    collect_rust_files(&server_src, &mut files)?;
+
+    let mut violations = Vec::new();
+    for path in files {
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read source file {}", path.display()))?;
+        violations.extend(scan_builder_usage(root, &path, &contents));
+        violations.extend(scan_log_invocations(&path, &contents));
+    }
+
+    violations.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.line.cmp(&right.line))
+            .then(left.reason.cmp(right.reason))
+    });
+
+    Ok(violations)
+}
+
+fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in
+        fs::read_dir(dir).with_context(|| format!("Failed to read directory {}", dir.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("Failed to iterate directory {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_files(&path, files)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_business_logging_file(root: &Path, path: &Path) -> bool {
+    let controller = root.join("server").join("src").join("controller");
+    let proxy = root.join("server").join("src").join("proxy");
+    let service = root.join("server").join("src").join("service");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    (path.starts_with(controller) || path.starts_with(proxy) || path.starts_with(service))
+        && file_name != "integration.rs"
+        && file_name != "log_regression.rs"
+}
+
+fn scan_builder_usage(root: &Path, path: &Path, contents: &str) -> Vec<LintViolation> {
+    if !is_business_logging_file(root, path)
+        || path == root.join("server").join("src").join("logging.rs")
+    {
+        return Vec::new();
+    }
+
+    let mut violations = Vec::new();
+    for (needle, reason) in [
+        (
+            "event_message(",
+            "business code must not call event_message directly",
+        ),
+        (
+            ".field(",
+            "business code must not use chained .field(...) logging",
+        ),
+    ] {
+        violations.extend(find_substring_violations(path, contents, needle, reason));
+    }
+
+    violations
+}
+
+fn scan_log_invocations(path: &Path, contents: &str) -> Vec<LintViolation> {
+    let mut violations = Vec::new();
+    for invocation in extract_log_invocations(contents) {
+        if contains_any(
+            &invocation.snippet,
+            &[
+                "original request data",
+                "request data:",
+                "Body:",
+                "Data: '",
+                "unified request:",
+                "Transformation complete. Result",
+                "[transform][diagnostic]",
+            ],
+        ) {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "raw payload logging pattern is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
+
+        let query_param_normalized = invocation.snippet.replace("query_params.len()", "");
+        if query_param_normalized.contains("query_params") {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "direct query_params logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
+
+        if logs_auth_header_value(&invocation.snippet) {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "auth header/value logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
+    }
+
+    violations
+}
+
+fn find_substring_violations(
+    path: &Path,
+    contents: &str,
+    needle: &str,
+    reason: &'static str,
+) -> Vec<LintViolation> {
+    let mut violations = Vec::new();
+    let mut offset = 0usize;
+    while let Some(found) = contents[offset..].find(needle) {
+        let index = offset + found;
+        violations.push(LintViolation {
+            path: path.to_path_buf(),
+            line: line_number(contents, index),
+            reason,
+            excerpt: line_excerpt(contents, index),
+        });
+        offset = index + needle.len();
+    }
+    violations
+}
+
+fn logs_auth_header_value(snippet: &str) -> bool {
+    let has_auth_literal = contains_any(
+        snippet,
+        &[
+            "Authorization",
+            "AUTHORIZATION",
+            "\"x-api-key\"",
+            "\"x-goog-api-key\"",
+        ],
+    );
+    let has_value_signal = contains_any(
+        snippet,
+        &[
+            "headers",
+            "header_value",
+            ".get(",
+            "request_headers",
+            "original_headers",
+            "value =",
+        ],
+    );
+    has_auth_literal && has_value_signal
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn extract_log_invocations(contents: &str) -> Vec<MacroInvocation> {
+    const LOG_MACROS: [&str; 8] = [
+        "debug!",
+        "info!",
+        "warn!",
+        "error!",
+        "debug_event!",
+        "info_event!",
+        "warn_event!",
+        "error_event!",
+    ];
+
+    let bytes = contents.as_bytes();
+    let mut invocations = Vec::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let matched = LOG_MACROS
+            .iter()
+            .find(|candidate| starts_with_macro(contents, index, candidate));
+        let Some(macro_name) = matched else {
+            index += 1;
+            continue;
+        };
+
+        let mut cursor = index + macro_name.len();
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+
+        if cursor >= bytes.len() || bytes[cursor] != b'(' {
+            index += 1;
+            continue;
+        }
+
+        if let Some(end) = find_invocation_end(contents, cursor) {
+            invocations.push(MacroInvocation {
+                line: line_number(contents, index),
+                snippet: contents[index..end].to_string(),
+            });
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+
+    invocations
+}
+
+fn starts_with_macro(contents: &str, index: usize, macro_name: &str) -> bool {
+    contents.as_bytes()[index..].starts_with(macro_name.as_bytes())
+        && (index == 0
+            || (!contents.as_bytes()[index - 1].is_ascii_alphanumeric()
+                && contents.as_bytes()[index - 1] != b'_'))
+}
+
+fn find_invocation_end(contents: &str, open_paren_index: usize) -> Option<usize> {
+    let bytes = contents.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open_paren_index;
+    let mut in_string = false;
+    let mut string_delimiter = b'"';
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment_depth = 0usize;
+
+    while index < bytes.len() {
+        let current = bytes[index];
+
+        if line_comment {
+            if current == b'\n' {
+                line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if block_comment_depth > 0 {
+            if current == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                block_comment_depth += 1;
+                index += 2;
+                continue;
+            }
+            if current == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                block_comment_depth -= 1;
+                index += 2;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if current == b'\\' {
+                escaped = true;
+            } else if current == string_delimiter {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if current == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            line_comment = true;
+            index += 2;
+            continue;
+        }
+        if current == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            block_comment_depth += 1;
+            index += 2;
+            continue;
+        }
+
+        if current == b'"' || current == b'\'' {
+            in_string = true;
+            string_delimiter = current;
+            index += 1;
+            continue;
+        }
+
+        if current == b'(' {
+            depth += 1;
+        } else if current == b')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(index + 1);
+            }
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
+fn line_number(contents: &str, index: usize) -> usize {
+    contents[..index]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
+fn line_excerpt(contents: &str, index: usize) -> String {
+    let line = contents[index..].lines().next().unwrap_or_default();
+    compact_excerpt(line)
+}
+
+fn compact_excerpt(value: &str) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_LEN: usize = 160;
+    if compact.len() <= MAX_LEN {
+        compact
+    } else {
+        format!("{}...", &compact[..MAX_LEN])
+    }
 }
 
 // New combined dev command
@@ -259,4 +633,57 @@ fn run_npm(npm_command: &str, args: &[&str], directory: &Path) -> Result<ExitSta
     }
 
     Ok(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        collect_log_lint_violations, compact_excerpt, extract_log_invocations,
+        logs_auth_header_value, project_root,
+    };
+
+    #[test]
+    fn extract_log_invocations_handles_multiline_event_macros() {
+        let invocations = extract_log_invocations(
+            r#"
+            fn sample() {
+                crate::warn_event!(
+                    "proxy.request_failed",
+                    log_id = 42,
+                );
+            }
+            "#,
+        );
+
+        assert_eq!(invocations.len(), 1);
+        assert!(invocations[0].snippet.contains("proxy.request_failed"));
+    }
+
+    #[test]
+    fn auth_header_detection_requires_value_signals() {
+        assert!(logs_auth_header_value(
+            r#"debug!("bad auth {:?}", headers.get("x-api-key"));"#
+        ));
+        assert!(!logs_auth_header_value(
+            r#"crate::debug_event!("auth.request_rejected", source = "x-goog-api-key");"#
+        ));
+    }
+
+    #[test]
+    fn compact_excerpt_collapses_whitespace() {
+        assert_eq!(
+            compact_excerpt("  alpha\n beta\tgamma "),
+            "alpha beta gamma"
+        );
+    }
+
+    #[test]
+    fn repository_log_lint_passes() {
+        let root = project_root();
+        let violations = collect_log_lint_violations(&root).expect("log lint should scan repo");
+        assert!(
+            violations.is_empty(),
+            "unexpected violations: {violations:#?}"
+        );
+    }
 }

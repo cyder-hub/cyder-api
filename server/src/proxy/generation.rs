@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use axum::{body::Body, http::HeaderMap, response::Response};
-use cyder_tools::log::info;
 use serde_json::Value;
 
 use super::{
@@ -60,11 +59,6 @@ pub(super) async fn execute_generation_proxy(
         original_request_value,
         original_request_body,
     } = parsed_request;
-
-    info!(
-        "Processing {:?} request for model: {}",
-        api_type, execution_plan.requested_name
-    );
 
     orchestrate_generation(
         app_state,

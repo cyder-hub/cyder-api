@@ -55,6 +55,7 @@ async fn create_model_route(
 ) -> Result<HttpResult<ModelRouteDetail>, BaseError> {
     let detail = ModelRoute::create(&payload)?;
     if let Err(err) = app_state
+        .catalog
         .invalidate_model_route(detail.route.id, Some(&detail.route.route_name))
         .await
     {
@@ -85,6 +86,7 @@ async fn update_model_route(
     let detail = ModelRoute::update(id, &payload)?;
 
     if let Err(err) = app_state
+        .catalog
         .invalidate_model_route_by_name(&original_route.route_name)
         .await
     {
@@ -94,6 +96,7 @@ async fn update_model_route(
         );
     }
     if let Err(err) = app_state
+        .catalog
         .invalidate_model_route(detail.route.id, Some(&detail.route.route_name))
         .await
     {
@@ -120,6 +123,7 @@ async fn delete_model_route(
         let source_name = override_row.source_name.clone();
         ApiKeyModelOverride::delete(override_row.id)?;
         if let Err(err) = app_state
+            .catalog
             .invalidate_api_key_model_override(override_row.api_key_id, &source_name)
             .await
         {
@@ -131,6 +135,7 @@ async fn delete_model_route(
     }
 
     if let Err(err) = app_state
+        .catalog
         .invalidate_model_route(id, Some(&route.route_name))
         .await
     {

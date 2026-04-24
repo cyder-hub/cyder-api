@@ -564,6 +564,7 @@ async fn preview_cost(
     Json(payload): Json<CostPreviewRequest>,
 ) -> DbResult<HttpResult<CostPreviewResponse>> {
     let version = app_state
+        .catalog
         .get_cost_catalog_version_by_id(payload.catalog_version_id)
         .await?
         .ok_or_else(|| {
@@ -932,7 +933,11 @@ fn intervals_overlap(
 }
 
 async fn invalidate_cost_catalog_version_cache(app_state: &AppState, version_id: i64) {
-    if let Err(err) = app_state.invalidate_cost_catalog_version(version_id).await {
+    if let Err(err) = app_state
+        .catalog
+        .invalidate_cost_catalog_version(version_id)
+        .await
+    {
         warn!(
             "Failed to invalidate cost catalog version {} cache: {:?}",
             version_id, err

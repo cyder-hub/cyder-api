@@ -16,8 +16,9 @@ use super::{
 use crate::config::CONFIG;
 use crate::cost::UsageNormalization;
 use crate::schema::enum_def::{LlmApiType, RequestStatus};
-use crate::service::app_state::{ApiKeyConcurrencyGuard, AppState};
+use crate::service::app_state::AppState;
 use crate::service::cache::types::CacheCostCatalogVersion;
+use crate::service::runtime::ApiKeyConcurrencyGuard;
 use crate::service::transform::{
     StreamTransformer, transform_result_with_cost_and_diagnostics,
     unified::UnifiedTransformDiagnostic,
@@ -158,7 +159,7 @@ impl Drop for RequestLogContextGuard {
             let app_state = Arc::clone(&self.app_state);
             let context_clone = Arc::clone(&self.context);
             let task_app_state = Arc::clone(&app_state);
-            app_state.spawn_background_task(async move {
+            app_state.infra.spawn_background_task(async move {
                 let mut context = context_clone.lock().await;
                 crate::debug_event!("proxy.client_cancelled", log_id = context.id);
                 context.overall_status = RequestStatus::Cancelled;
@@ -223,7 +224,7 @@ impl Drop for ResponseStreamCancellationGuard {
             let status_code = self.status_code;
             let cost_catalog_version = self.cost_catalog_version.clone();
             let task_app_state = Arc::clone(&app_state);
-            app_state.spawn_background_task(async move {
+            app_state.infra.spawn_background_task(async move {
                 finalize_cancelled_log_context(
                     &task_app_state,
                     &context,
@@ -498,9 +499,9 @@ pub(super) async fn simple_proxy_request(
 ) -> Result<Response<Body>, ProxyError> {
     let cancellation = ProxyCancellationContext::new();
     let client = if use_proxy {
-        &app_state.proxy_client
+        app_state.infra.proxy_client()
     } else {
-        &app_state.client
+        app_state.infra.client()
     };
 
     crate::debug_event!(
@@ -584,11 +585,11 @@ pub(super) async fn proxy_request(
     let provider_id = log_context.provider_id;
     let log_context = Arc::new(TokioMutex::new(log_context));
 
-    // 1. Get HTTP client from AppState, with proxy if configured
+    // 1. Get the configured HTTP client from AppInfra.
     let client = if use_proxy {
-        &app_state.proxy_client
+        app_state.infra.proxy_client()
     } else {
-        &app_state.client
+        app_state.infra.client()
     };
 
     let mut cancellation_guard = RequestLogContextGuard::new(

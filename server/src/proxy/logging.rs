@@ -11,8 +11,9 @@ use crate::{
     schema::enum_def::{
         LlmApiType, RequestAttemptStatus, RequestStatus, SchedulerAction, StorageType,
     },
-    service::app_state::{ApiKeyCompletionDelta, AppState},
+    service::app_state::AppState,
     service::cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider},
+    service::runtime::ApiKeyCompletionDelta,
     service::storage::{Storage, get_storage, types::PutObjectOptions},
     service::transform::unified::{
         UnifiedTransformDiagnostic, UnifiedTransformDiagnosticLossLevel,
@@ -486,6 +487,7 @@ pub(super) async fn record_request_completion_and_log(
     context: RequestLogContext,
 ) {
     if let Err(err) = app_state
+        .api_key_governance
         .record_api_key_completion(&completion_delta_from_log_context(&context))
         .await
     {
@@ -497,7 +499,7 @@ pub(super) async fn record_request_completion_and_log(
         );
     }
 
-    app_state.log_manager().log(context).await;
+    app_state.infra.log_manager().log(context).await;
 }
 
 pub struct LogManager {

@@ -194,7 +194,7 @@ async fn insert(
     };
     let created_provider = Provider::create(&new_provider_data)?;
 
-    if let Err(e) = app_state.invalidate_models_catalog().await {
+    if let Err(e) = app_state.catalog.invalidate_models_catalog().await {
         warn!(
             "Failed to invalidate models catalog after provider create {}: {:?}",
             created_provider.id, e
@@ -231,6 +231,7 @@ async fn update_provider(
 
     // Invalidate cache - next read will load fresh data from database
     if let Err(e) = app_state
+        .catalog
         .invalidate_provider(id, Some(&updated_provider.provider_key))
         .await
     {
@@ -265,6 +266,7 @@ async fn delete_provider(
 
                 for route in &affected_routes {
                     if let Err(store_err) = app_state
+                        .catalog
                         .invalidate_model_route(route.id, Some(&route.route_name))
                         .await
                     {
@@ -290,7 +292,7 @@ async fn delete_provider(
                 }
 
                 // Invalidate provider cache (key not available after delete, so pass None)
-                if let Err(e) = app_state.invalidate_provider(id, None).await {
+                if let Err(e) = app_state.catalog.invalidate_provider(id, None).await {
                     warn!(
                         "Provider id {} successfully deleted from DB, but failed to invalidate cache: {:?}",
                         id, e
@@ -298,7 +300,7 @@ async fn delete_provider(
                 }
 
                 // Invalidate associated API keys cache
-                if let Err(e) = app_state.invalidate_provider_api_keys(id).await {
+                if let Err(e) = app_state.catalog.invalidate_provider_api_keys(id).await {
                     warn!(
                         "Error invalidating provider API keys cache for provider {}: {:?}",
                         id, e
@@ -813,9 +815,9 @@ async fn check_provider(
     let provider = Provider::get_by_id(id)?;
 
     let client = if provider.use_proxy {
-        &app_state.proxy_client
+        app_state.infra.proxy_client()
     } else {
-        &app_state.client
+        app_state.infra.client()
     };
 
     perform_provider_check(
@@ -858,7 +860,7 @@ async fn bootstrap_provider(
 
     let created = Provider::bootstrap(&provider_input)?;
 
-    if let Err(e) = app_state.invalidate_models_catalog().await {
+    if let Err(e) = app_state.catalog.invalidate_models_catalog().await {
         warn!(
             "Failed to invalidate models catalog after bootstrap provider {}: {:?}",
             created.provider.id, e
@@ -866,6 +868,7 @@ async fn bootstrap_provider(
     }
 
     if let Err(e) = app_state
+        .catalog
         .invalidate_provider(created.provider.id, Some(&created.provider.provider_key))
         .await
     {
@@ -876,6 +879,7 @@ async fn bootstrap_provider(
     }
 
     if let Err(e) = app_state
+        .catalog
         .invalidate_provider_api_keys(created.provider.id)
         .await
     {
@@ -887,9 +891,9 @@ async fn bootstrap_provider(
 
     let check_result = if payload.save_and_test {
         let client = if created.provider.use_proxy {
-            &app_state.proxy_client
+            app_state.infra.proxy_client()
         } else {
-            &app_state.client
+            app_state.infra.client()
         };
         let model_name_to_check = created
             .created_model
@@ -944,9 +948,9 @@ async fn get_remote_models(
     })?;
 
     let client = if provider.use_proxy {
-        &app_state.proxy_client
+        app_state.infra.proxy_client()
     } else {
-        &app_state.client
+        app_state.infra.client()
     };
 
     let response = if provider.provider_type == ProviderType::Gemini {
@@ -1068,7 +1072,11 @@ async fn add_provider_api_key(
 
     // No need to manually update cache - it will be loaded on first read
     // Also invalidate the provider's key list cache
-    if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
+    if let Err(e) = app_state
+        .catalog
+        .invalidate_provider_api_keys(provider_id)
+        .await
+    {
         warn!(
             "Failed to invalidate provider API keys cache for provider {}: {:?}",
             provider_id, e
@@ -1132,7 +1140,11 @@ async fn update_provider_api_key(
     let updated_key = ProviderApiKey::update(key_id, &update_data)?;
 
     // Also invalidate the provider's key list
-    if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
+    if let Err(e) = app_state
+        .catalog
+        .invalidate_provider_api_keys(provider_id)
+        .await
+    {
         warn!(
             "Failed to invalidate provider API keys cache for provider {}: {:?}",
             provider_id, e
@@ -1162,7 +1174,11 @@ async fn delete_provider_api_key(
     ProviderApiKey::delete(key_id)?; // DB soft-delete
 
     // Also invalidate the provider's key list
-    if let Err(e) = app_state.invalidate_provider_api_keys(provider_id).await {
+    if let Err(e) = app_state
+        .catalog
+        .invalidate_provider_api_keys(provider_id)
+        .await
+    {
         warn!(
             "Failed to invalidate provider API keys cache for provider {}: {:?}",
             provider_id, e

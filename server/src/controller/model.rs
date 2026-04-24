@@ -93,7 +93,7 @@ async fn insert_model(
         },
     )?;
 
-    if let Err(store_err) = app_state.invalidate_models_catalog().await {
+    if let Err(store_err) = app_state.catalog.invalidate_models_catalog().await {
         warn!(
             "Failed to invalidate models catalog after model create {}: {:?}",
             created_model.id, store_err
@@ -130,6 +130,7 @@ async fn delete_model(
 
         for route in &affected_routes {
             if let Err(store_err) = app_state
+                .catalog
                 .invalidate_model_route(route.id, Some(&route.route_name))
                 .await
             {
@@ -141,7 +142,7 @@ async fn delete_model(
         }
 
         // Invalidate from cache
-        if let Err(store_err) = app_state.invalidate_model(id, None).await {
+        if let Err(store_err) = app_state.catalog.invalidate_model(id, None).await {
             warn!(
                 "Failed to invalidate model from cache after DB delete {}: {:?}",
                 id, store_err
@@ -188,7 +189,7 @@ async fn update_model(
     let updated_model = Model::update(id, &update_data)?;
 
     // Invalidate from cache
-    if let Err(store_err) = app_state.invalidate_model(id, None).await {
+    if let Err(store_err) = app_state.catalog.invalidate_model(id, None).await {
         warn!(
             "Failed to invalidate model in cache after DB update {}: {:?}",
             id, store_err

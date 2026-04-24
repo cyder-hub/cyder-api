@@ -16,8 +16,8 @@ use crate::database::provider_runtime::{
     ProviderRuntimeAggregate, get_provider_runtime_aggregates_in_range,
 };
 use crate::schema::enum_def::ProviderType;
-use crate::service::app_state::{AppState, ProviderHealthSnapshot, ProviderHealthStatus};
-use crate::service::app_state::{StateRouter, create_state_router};
+use crate::service::app_state::{AppState, StateRouter, create_state_router};
+use crate::service::runtime::{ProviderHealthSnapshot, ProviderHealthStatus};
 use crate::utils::HttpResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,7 +370,10 @@ pub(crate) async fn build_provider_runtime_items(
 
     let mut items = Vec::with_capacity(providers.len());
     for provider in providers {
-        let health_snapshot = app_state.get_provider_health_snapshot(provider.id).await;
+        let health_snapshot = app_state
+            .provider_circuit
+            .get_provider_health_snapshot(provider.id)
+            .await;
         let runtime_aggregate =
             aggregate_map
                 .get(&provider.id)
@@ -571,7 +574,7 @@ mod tests {
     use crate::database::provider_runtime::{
         ProviderRuntimeAggregate, ProviderRuntimeStatusCodeCount,
     };
-    use crate::service::app_state::{ProviderHealthSnapshot, ProviderHealthStatus};
+    use crate::service::runtime::{ProviderHealthSnapshot, ProviderHealthStatus};
 
     #[test]
     fn provider_runtime_enums_serialize_to_stable_contract_values() {

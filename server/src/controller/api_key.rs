@@ -14,8 +14,8 @@ use crate::{
         UpdateApiKeyMetadataPayload, hash_api_key,
     },
     database::model_route::{ApiKeyModelOverride, CreateApiKeyModelOverridePayload, ModelRoute},
-    service::app_state::{ApiKeyBilledAmountSnapshot, ApiKeyGovernanceSnapshot, AppState},
-    service::app_state::{StateRouter, create_state_router},
+    service::app_state::{AppState, StateRouter, create_state_router},
+    service::runtime::{ApiKeyBilledAmountSnapshot, ApiKeyGovernanceSnapshot},
     utils::HttpResult,
 };
 
@@ -224,6 +224,7 @@ async fn replace_api_key_model_overrides(
         let source_name = override_row.source_name.clone();
         ApiKeyModelOverride::delete(override_row.id)?;
         if let Err(err) = app_state
+            .catalog
             .invalidate_api_key_model_override(api_key_id, &source_name)
             .await
         {
@@ -244,6 +245,7 @@ async fn replace_api_key_model_overrides(
         })?;
 
         if let Err(err) = app_state
+            .catalog
             .invalidate_api_key_model_override(api_key_id, &payload.source_name)
             .await
         {
@@ -254,7 +256,7 @@ async fn replace_api_key_model_overrides(
         }
     }
 
-    if let Err(err) = app_state.invalidate_models_catalog().await {
+    if let Err(err) = app_state.catalog.invalidate_models_catalog().await {
         warn!(
             "Failed to invalidate models catalog after api key override replace {}: {:?}",
             api_key_id, err
@@ -309,7 +311,7 @@ async fn update_api_key(
     let overrides =
         replace_api_key_model_overrides(&app_state, id, &payload.model_overrides).await?;
 
-    if let Err(err) = app_state.invalidate_api_key_id(id).await {
+    if let Err(err) = app_state.catalog.invalidate_api_key_id(id).await {
         warn!(
             "Failed to invalidate api key {} after update: {:?}",
             id, err
@@ -338,13 +340,13 @@ async fn rotate_api_key(
     let old_hash = hash_api_key(&existing.api_key);
     let rotated = ApiKey::rotate_key(id)?;
 
-    if let Err(err) = app_state.invalidate_api_key_hash(&old_hash).await {
+    if let Err(err) = app_state.catalog.invalidate_api_key_hash(&old_hash).await {
         warn!(
             "Failed to invalidate old api key hash for rotated key {}: {:?}",
             id, err
         );
     }
-    if let Err(err) = app_state.invalidate_api_key_id(id).await {
+    if let Err(err) = app_state.catalog.invalidate_api_key_id(id).await {
         warn!("Failed to invalidate rotated api key {}: {:?}", id, err);
     }
 
@@ -386,6 +388,7 @@ async fn delete_api_key(
         let source_name = override_row.source_name.clone();
         ApiKeyModelOverride::delete(override_row.id)?;
         if let Err(err) = app_state
+            .catalog
             .invalidate_api_key_model_override(id, &source_name)
             .await
         {
@@ -396,7 +399,11 @@ async fn delete_api_key(
         }
     }
 
-    if let Err(err) = app_state.invalidate_api_key_hash(&api_key_hash).await {
+    if let Err(err) = app_state
+        .catalog
+        .invalidate_api_key_hash(&api_key_hash)
+        .await
+    {
         warn!("Failed to invalidate deleted api key {}: {:?}", id, err);
     }
 
@@ -416,7 +423,9 @@ async fn get_api_key_runtime_snapshot(
 ) -> Result<HttpResult<ApiKeyRuntimeSnapshotResponse>, BaseError> {
     // Validate key existence so deleted/nonexistent IDs return 404 instead of an empty snapshot.
     ApiKey::get_by_id(id)?;
-    let snapshot = app_state.get_api_key_governance_snapshot(id)?;
+    let snapshot = app_state
+        .api_key_governance
+        .get_api_key_governance_snapshot(id)?;
     Ok(HttpResult::new(snapshot.into()))
 }
 
@@ -424,6 +433,7 @@ async fn list_api_key_runtime_snapshots(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<Vec<ApiKeyRuntimeSnapshotResponse>>, BaseError> {
     let snapshots = app_state
+        .api_key_governance
         .list_api_key_governance_snapshots()?
         .into_iter()
         .map(Into::into)

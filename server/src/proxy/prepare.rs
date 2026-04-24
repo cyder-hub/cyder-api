@@ -17,13 +17,14 @@ use crate::{
         LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
     },
     service::{
-        app_state::{AppState, GroupItemSelectionStrategy},
+        app_state::AppState,
         cache::types::{
             CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
             CacheModelsCatalog, CacheProvider, CacheRequestPatchConflict,
             CacheRequestPatchExplainEntry, CacheResolvedRequestPatch,
         },
         request_patch::resolve_effective_request_patches,
+        runtime::GroupItemSelectionStrategy,
         transform::finalize_request_data,
         vertex::get_vertex_token,
     },
@@ -209,6 +210,7 @@ pub(super) async fn resolve_provider_credentials(
 ) -> Result<ProviderCredentials, ProxyError> {
     let strategy = GroupItemSelectionStrategy::from(provider.provider_api_key_mode.clone());
     let selected_key = app_state
+        .provider_key_selector
         .get_one_provider_api_key_by_provider(provider.id, strategy)
         .await
         .map_err(|e| {
@@ -230,7 +232,7 @@ pub(super) async fn resolve_provider_credentials(
 
     let request_key = match provider.provider_type {
         ProviderType::Vertex | ProviderType::VertexOpenai => get_vertex_token(
-            &app_state.proxy_client,
+            app_state.infra.proxy_client(),
             selected_key.id,
             &selected_key.api_key,
         )
@@ -740,6 +742,7 @@ pub(crate) async fn load_runtime_request_patch_trace(
 ) -> Result<RuntimeRequestPatchTrace, ProxyError> {
     if let Some(model) = model {
         let resolved = app_state
+            .catalog
             .get_model_effective_request_patches(model.id)
             .await
             .map_err(|err| {
@@ -770,6 +773,7 @@ pub(crate) async fn load_runtime_request_patch_trace(
     }
 
     let provider_rules = app_state
+        .catalog
         .get_provider_request_patch_rules(provider.id)
         .await
         .map_err(|err| {
@@ -1265,7 +1269,7 @@ pub async fn build_execution_plan(
     api_key_id: i64,
     requested_name: &str,
 ) -> Result<ExecutionPlan, String> {
-    let catalog = app_state.get_models_catalog().await.map_err(|e| {
+    let catalog = app_state.catalog.get_models_catalog().await.map_err(|e| {
         error!(
             "Error loading models catalog while resolving '{}': {:?}",
             requested_name, e

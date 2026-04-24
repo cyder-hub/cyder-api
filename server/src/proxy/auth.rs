@@ -6,10 +6,9 @@ use reqwest::header::AUTHORIZATION;
 use super::{ProxyError, error::ProxyLogLevel};
 use crate::{
     database::api_key::{ApiKey, hash_api_key},
-    service::app_state::{
-        ApiKeyConcurrencyGuard, ApiKeyGovernanceAdmissionError, AppState, AppStoreError,
-    },
+    service::app_state::{AppState, AppStoreError},
     service::cache::types::{CacheApiKey, CacheModel, CacheProvider},
+    service::runtime::{ApiKeyConcurrencyGuard, ApiKeyGovernanceAdmissionError},
     utils::acl::ACL_EVALUATOR,
 };
 
@@ -170,7 +169,11 @@ pub async fn admit_api_key_request(
     app_state: &Arc<AppState>,
     api_key: &CacheApiKey,
 ) -> Result<Option<ApiKeyConcurrencyGuard>, ProxyError> {
-    match app_state.try_begin_api_key_request(api_key).await {
+    match app_state
+        .api_key_governance
+        .try_begin_api_key_request(api_key)
+        .await
+    {
         Ok(guard) => Ok(guard),
         Err(ApiKeyGovernanceAdmissionError::Internal(message)) => {
             crate::error_event!(
@@ -297,7 +300,7 @@ pub async fn check_system_api_key(
     position: ApiKeyPosition,
 ) -> Result<ApiKeyCheckResult, ProxyError> {
     if key_str.starts_with("cyder-") {
-        match app_state.get_api_key(key_str).await {
+        match app_state.catalog.get_api_key(key_str).await {
             Ok(Some(api_key)) => Ok(ApiKeyCheckResult { api_key, position }),
             Ok(None) => classify_missing_active_api_key(key_str),
             Err(AppStoreError::LockError(e)) => {

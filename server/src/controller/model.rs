@@ -1,56 +1,21 @@
-use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use crate::{
     controller::BaseError,
-    database::model::{
-        Model, ModelCapabilityFlags, ModelDetail, ModelSummaryItem, UpdateModelData,
+    database::model::{Model, ModelCapabilityFlags, ModelDetail, ModelSummaryItem},
+    service::{
+        admin::model::{CreateModelInput, UpdateModelInput},
+        app_state::{AppState, StateRouter, create_state_router},
     },
-    database::model_route::ModelRoute,
-    database::request_patch::RequestPatchRule,
     utils::HttpResult, // Import HttpResult
 };
 use axum::{
     extract::{Json, Path, State}, // Added State
     routing::{delete, get, post, put},
 };
-use cyder_tools::log::warn;
 use serde::Deserialize;
 use std::sync::Arc; // Added Arc
 
 fn default_true() -> bool {
     true
-}
-
-fn log_model_audit(action: &'static str, model: &Model) {
-    match action {
-        "create" => crate::info_event!(
-            "manager.model_created",
-            action = action,
-            model_id = model.id,
-            provider_id = model.provider_id,
-            model_name = &model.model_name,
-            real_model_name = model.real_model_name.as_deref(),
-            is_enabled = model.is_enabled,
-        ),
-        "update" => crate::info_event!(
-            "manager.model_updated",
-            action = action,
-            model_id = model.id,
-            provider_id = model.provider_id,
-            model_name = &model.model_name,
-            real_model_name = model.real_model_name.as_deref(),
-            is_enabled = model.is_enabled,
-        ),
-        "delete" => crate::info_event!(
-            "manager.model_deleted",
-            action = action,
-            model_id = model.id,
-            provider_id = model.provider_id,
-            model_name = &model.model_name,
-            real_model_name = model.real_model_name.as_deref(),
-            is_enabled = model.is_enabled,
-        ),
-        _ => unreachable!("unsupported model audit action: {action}"),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,29 +43,24 @@ async fn insert_model(
     State(app_state): State<Arc<AppState>>,
     Json(request): Json<InsertModelRequest>,
 ) -> Result<HttpResult<Model>, BaseError> {
-    let created_model = Model::create(
-        request.provider_id,
-        &request.model_name,
-        request.real_model_name.as_deref(),
-        request.is_enabled,
-        ModelCapabilityFlags {
-            supports_streaming: request.supports_streaming,
-            supports_tools: request.supports_tools,
-            supports_reasoning: request.supports_reasoning,
-            supports_image_input: request.supports_image_input,
-            supports_embeddings: request.supports_embeddings,
-            supports_rerank: request.supports_rerank,
-        },
-    )?;
-
-    if let Err(store_err) = app_state.catalog.invalidate_models_catalog().await {
-        warn!(
-            "Failed to invalidate models catalog after model create {}: {:?}",
-            created_model.id, store_err
-        );
-    }
-
-    log_model_audit("create", &created_model);
+    let created_model = app_state
+        .admin
+        .model
+        .create_model(CreateModelInput {
+            provider_id: request.provider_id,
+            model_name: request.model_name,
+            real_model_name: request.real_model_name,
+            is_enabled: request.is_enabled,
+            capabilities: ModelCapabilityFlags {
+                supports_streaming: request.supports_streaming,
+                supports_tools: request.supports_tools,
+                supports_reasoning: request.supports_reasoning,
+                supports_image_input: request.supports_image_input,
+                supports_embeddings: request.supports_embeddings,
+                supports_rerank: request.supports_rerank,
+            },
+        })
+        .await?;
 
     Ok(HttpResult::new(created_model))
 }
@@ -109,48 +69,7 @@ async fn delete_model(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<()>, BaseError> {
-    let model = Model::get_by_id(id)?;
-    let affected_routes = ModelRoute::list_by_model_id(id)?;
-    let num_deleted = Model::delete(id)?;
-
-    if num_deleted > 0 {
-        if let Err(err) = ModelRoute::soft_delete_candidates_for_model(id) {
-            warn!(
-                "Failed to delete model route candidates for deleted model {}: {:?}",
-                id, err
-            );
-        }
-
-        if let Err(err) = RequestPatchRule::soft_delete_by_model_id(id) {
-            warn!(
-                "Failed to delete model request patch rules for deleted model {}: {:?}",
-                id, err
-            );
-        }
-
-        for route in &affected_routes {
-            if let Err(store_err) = app_state
-                .catalog
-                .invalidate_model_route(route.id, Some(&route.route_name))
-                .await
-            {
-                warn!(
-                    "Failed to invalidate model route {} after model delete {}: {:?}",
-                    route.id, id, store_err
-                );
-            }
-        }
-
-        // Invalidate from cache
-        if let Err(store_err) = app_state.catalog.invalidate_model(id, None).await {
-            warn!(
-                "Failed to invalidate model from cache after DB delete {}: {:?}",
-                id, store_err
-            );
-        }
-
-        log_model_audit("delete", &model);
-    }
+    app_state.admin.model.delete_model(id).await?;
     Ok(HttpResult::new(()))
 }
 
@@ -174,29 +93,25 @@ async fn update_model(
     Path(id): Path<i64>,
     Json(request): Json<UpdateModelRequest>,
 ) -> Result<HttpResult<Model>, BaseError> {
-    let update_data = UpdateModelData {
-        model_name: Some(request.model_name),
-        real_model_name: Some(request.real_model_name),
-        is_enabled: Some(request.is_enabled),
-        cost_catalog_id: Some(request.cost_catalog_id),
-        supports_streaming: request.supports_streaming,
-        supports_tools: request.supports_tools,
-        supports_reasoning: request.supports_reasoning,
-        supports_image_input: request.supports_image_input,
-        supports_embeddings: request.supports_embeddings,
-        supports_rerank: request.supports_rerank,
-    };
-    let updated_model = Model::update(id, &update_data)?;
-
-    // Invalidate from cache
-    if let Err(store_err) = app_state.catalog.invalidate_model(id, None).await {
-        warn!(
-            "Failed to invalidate model in cache after DB update {}: {:?}",
-            id, store_err
-        );
-    }
-
-    log_model_audit("update", &updated_model);
+    let updated_model = app_state
+        .admin
+        .model
+        .update_model(
+            id,
+            UpdateModelInput {
+                model_name: request.model_name,
+                real_model_name: request.real_model_name,
+                is_enabled: request.is_enabled,
+                cost_catalog_id: request.cost_catalog_id,
+                supports_streaming: request.supports_streaming,
+                supports_tools: request.supports_tools,
+                supports_reasoning: request.supports_reasoning,
+                supports_image_input: request.supports_image_input,
+                supports_embeddings: request.supports_embeddings,
+                supports_rerank: request.supports_rerank,
+            },
+        )
+        .await?;
 
     Ok(HttpResult::new(updated_model))
 }
@@ -236,9 +151,115 @@ pub fn create_model_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
-    use crate::database::model::ModelSummaryItem;
+    use std::sync::Arc;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use tower::util::ServiceExt;
+
+    use crate::database::TestDbContext;
+    use crate::database::model::{Model, ModelCapabilityFlags, ModelSummaryItem};
+    use crate::database::model_route::{
+        CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput,
+    };
+    use crate::database::provider::{NewProvider, Provider};
+    use crate::database::request_patch::{CreateRequestPatchPayload, RequestPatchRule};
+    use crate::schema::enum_def::{
+        ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
+    };
+    use crate::service::app_state::{AppState, create_test_app_state};
     use crate::utils::HttpResult;
     use std::collections::BTreeSet;
+
+    use super::create_model_router;
+
+    fn seed_provider(id: i64, provider_key: &str) -> Provider {
+        Provider::create(&NewProvider {
+            id,
+            provider_key: provider_key.to_string(),
+            name: provider_key.to_string(),
+            endpoint: "https://api.example.com/v1".to_string(),
+            use_proxy: false,
+            is_enabled: true,
+            created_at: 1,
+            updated_at: 1,
+            provider_type: ProviderType::Openai,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        })
+        .expect("provider seed should succeed")
+    }
+
+    fn seed_model_for_provider(provider_id: i64, model_name: &str) -> Model {
+        Model::create(
+            provider_id,
+            model_name,
+            None,
+            true,
+            ModelCapabilityFlags {
+                supports_streaming: true,
+                supports_tools: true,
+                supports_reasoning: true,
+                supports_image_input: true,
+                supports_embeddings: true,
+                supports_rerank: true,
+            },
+        )
+        .expect("model seed should succeed")
+    }
+
+    fn seed_route(route_name: &str, model_id: i64) -> ModelRoute {
+        ModelRoute::create(&CreateModelRoutePayload {
+            route_name: route_name.to_string(),
+            description: Some("seed route".to_string()),
+            is_enabled: Some(true),
+            expose_in_models: Some(true),
+            candidates: vec![ModelRouteCandidateInput {
+                model_id,
+                priority: 0,
+                is_enabled: Some(true),
+            }],
+        })
+        .expect("route seed should succeed")
+        .route
+    }
+
+    fn create_request_patch_payload() -> CreateRequestPatchPayload {
+        CreateRequestPatchPayload {
+            placement: RequestPatchPlacement::Body,
+            target: "/temperature".to_string(),
+            operation: RequestPatchOperation::Set,
+            value_json: Some(Some(json!(0.2))),
+            description: Some("patch".to_string()),
+            is_enabled: Some(true),
+            confirm_dangerous_target: None,
+        }
+    }
+
+    async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
+        create_model_router()
+            .with_state(Arc::clone(app_state))
+            .oneshot(request)
+            .await
+            .expect("model router should respond")
+    }
+
+    fn empty_request(method: Method, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request should build")
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&body).expect("response should be json")
+    }
 
     #[test]
     fn model_summary_api_contract_includes_provider_context() {
@@ -296,5 +317,63 @@ mod tests {
         assert_eq!(item["is_enabled"], true);
         assert!(item.get("model").is_none());
         assert!(item.get("custom_fields").is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_model_http_endpoint_updates_response_and_runtime_state() {
+        let test_db_context = TestDbContext::new_sqlite("controller-model-delete-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let provider = seed_provider(20101, "openai");
+                let model = seed_model_for_provider(provider.id, "gpt-4o-mini");
+                let route = seed_route("shared-gpt-4o-mini", model.id);
+                RequestPatchRule::create_for_model(model.id, &create_request_patch_payload())
+                    .expect("request patch seed should succeed");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let cached_route = app_state
+                    .catalog
+                    .get_model_route_by_id(route.id)
+                    .await
+                    .expect("route cache should load")
+                    .expect("route should exist");
+                let effective_before = app_state
+                    .catalog
+                    .get_model_effective_request_patches(model.id)
+                    .await
+                    .expect("effective patch cache should load")
+                    .expect("effective patch should exist");
+                assert_eq!(cached_route.candidates.len(), 1);
+                assert_eq!(effective_before.effective_rules.len(), 1);
+
+                let response = send(
+                    &app_state,
+                    empty_request(Method::DELETE, &format!("/model/{}", model.id)),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response_json(response).await;
+
+                assert_eq!(body["code"], 0);
+                assert!(body["data"].is_null());
+                assert!(Model::get_by_id(model.id).is_err());
+
+                let cached_route_after = app_state
+                    .catalog
+                    .get_model_route_by_id(route.id)
+                    .await
+                    .expect("route cache should reload")
+                    .expect("route should still exist");
+                let effective_after = app_state
+                    .catalog
+                    .get_model_effective_request_patches(model.id)
+                    .await
+                    .expect("effective patch cache should reload");
+
+                assert!(cached_route_after.candidates.is_empty());
+                assert!(effective_after.is_none());
+            })
+            .await;
     }
 }

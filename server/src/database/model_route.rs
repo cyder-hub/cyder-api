@@ -732,6 +732,10 @@ impl ModelRoute {
     }
 
     pub fn delete(id_value: i64) -> DbResult<usize> {
+        Self::delete_with_dependents(id_value)
+    }
+
+    pub fn delete_with_dependents(id_value: i64) -> DbResult<usize> {
         let now = Utc::now().timestamp_millis();
         let conn = &mut get_connection()?;
         db_execute!(conn, {
@@ -779,6 +783,26 @@ impl ModelRoute {
                 .map_err(|e| {
                     BaseError::DatabaseFatal(Some(format!(
                         "Failed to delete model route candidates for {}: {}",
+                        id_value, e
+                    )))
+                })?;
+
+                diesel::update(
+                    api_key_model_override::table.filter(
+                        api_key_model_override::dsl::target_route_id
+                            .eq(id_value)
+                            .and(api_key_model_override::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    api_key_model_override::dsl::deleted_at.eq(Some(now)),
+                    api_key_model_override::dsl::is_enabled.eq(false),
+                    api_key_model_override::dsl::updated_at.eq(now),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete api key model overrides for route {}: {}",
                         id_value, e
                     )))
                 })?;

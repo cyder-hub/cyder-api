@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod app_state;
 pub mod cache;
 pub mod catalog;

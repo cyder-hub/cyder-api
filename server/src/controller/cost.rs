@@ -5,27 +5,26 @@ use axum::{
     extract::{Path, State},
     routing::{get, post, put},
 };
-use chrono::Utc;
-use cyder_tools::log::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     controller::BaseError,
     cost::{
         CostLedger, CostRatingContext, CostRatingResult, CostTemplateSummary, UsageNormalization,
-        find_template, list_templates, rate_cost, validate_component_config,
+        list_templates, rate_cost,
     },
     database::{
         DbResult,
         cost::{
-            CostCatalog, CostCatalogVersion, CostComponent, EnabledVersionResolution,
-            ImportedCostCatalogTemplate, NewCostCatalogPayload, NewCostCatalogVersionPayload,
-            NewCostComponentPayload, UpdateCostCatalogData, UpdateCostCatalogVersionData,
-            UpdateCostComponentData, import_cost_catalog_template,
-            reconcile_enabled_version_conflicts,
+            CostCatalog, CostCatalogVersion, CostComponent, ImportedCostCatalogTemplate,
+            NewCostCatalogPayload, NewCostCatalogVersionPayload, NewCostComponentPayload,
+            UpdateCostCatalogData, UpdateCostComponentData,
         },
     },
-    service::app_state::{AppState, StateRouter, create_state_router},
+    service::{
+        admin::cost::{DuplicateCostCatalogVersionInput, ImportCostTemplateInput},
+        app_state::{AppState, StateRouter, create_state_router},
+    },
     utils::HttpResult,
 };
 
@@ -101,198 +100,38 @@ struct ImportedCostTemplateResponse {
     imported: ImportedCostCatalogTemplate,
 }
 
-fn log_cost_catalog_audit(action: &'static str, catalog: &CostCatalog) {
-    match action {
-        "create" => crate::info_event!(
-            "manager.cost_catalog_created",
-            action = action,
-            cost_catalog_id = catalog.id,
-            cost_catalog_name = &catalog.name,
-        ),
-        "update" => crate::info_event!(
-            "manager.cost_catalog_updated",
-            action = action,
-            cost_catalog_id = catalog.id,
-            cost_catalog_name = &catalog.name,
-        ),
-        "delete" => crate::info_event!(
-            "manager.cost_catalog_deleted",
-            action = action,
-            cost_catalog_id = catalog.id,
-            cost_catalog_name = &catalog.name,
-        ),
-        _ => unreachable!("unsupported cost catalog audit action: {action}"),
-    }
-}
-
-fn log_cost_version_audit(
-    action: &'static str,
-    version: &CostCatalogVersion,
-    reconciled_version_count: Option<usize>,
-) {
-    match action {
-        "create" => crate::info_event!(
-            "manager.cost_catalog_version_created",
-            action = action,
-            cost_catalog_version_id = version.id,
-            cost_catalog_id = version.catalog_id,
-            version = &version.version,
-            currency = &version.currency,
-            is_enabled = version.is_enabled,
-            is_archived = version.is_archived,
-            reconciled_version_count = reconciled_version_count,
-        ),
-        "delete" => crate::info_event!(
-            "manager.cost_catalog_version_deleted",
-            action = action,
-            cost_catalog_version_id = version.id,
-            cost_catalog_id = version.catalog_id,
-            version = &version.version,
-            currency = &version.currency,
-            is_enabled = version.is_enabled,
-            is_archived = version.is_archived,
-            reconciled_version_count = reconciled_version_count,
-        ),
-        "enable" => crate::info_event!(
-            "manager.cost_catalog_version_enabled",
-            action = action,
-            cost_catalog_version_id = version.id,
-            cost_catalog_id = version.catalog_id,
-            version = &version.version,
-            currency = &version.currency,
-            is_enabled = version.is_enabled,
-            is_archived = version.is_archived,
-            reconciled_version_count = reconciled_version_count,
-        ),
-        "disable" => crate::info_event!(
-            "manager.cost_catalog_version_disabled",
-            action = action,
-            cost_catalog_version_id = version.id,
-            cost_catalog_id = version.catalog_id,
-            version = &version.version,
-            currency = &version.currency,
-            is_enabled = version.is_enabled,
-            is_archived = version.is_archived,
-            reconciled_version_count = reconciled_version_count,
-        ),
-        "archive" => crate::info_event!(
-            "manager.cost_catalog_version_archived",
-            action = action,
-            cost_catalog_version_id = version.id,
-            cost_catalog_id = version.catalog_id,
-            version = &version.version,
-            currency = &version.currency,
-            is_enabled = version.is_enabled,
-            is_archived = version.is_archived,
-            reconciled_version_count = reconciled_version_count,
-        ),
-        "unarchive" => crate::info_event!(
-            "manager.cost_catalog_version_unarchived",
-            action = action,
-            cost_catalog_version_id = version.id,
-            cost_catalog_id = version.catalog_id,
-            version = &version.version,
-            currency = &version.currency,
-            is_enabled = version.is_enabled,
-            is_archived = version.is_archived,
-            reconciled_version_count = reconciled_version_count,
-        ),
-        "duplicate" => crate::info_event!(
-            "manager.cost_catalog_version_duplicated",
-            action = action,
-            cost_catalog_version_id = version.id,
-            cost_catalog_id = version.catalog_id,
-            version = &version.version,
-            currency = &version.currency,
-            is_enabled = version.is_enabled,
-            is_archived = version.is_archived,
-            reconciled_version_count = reconciled_version_count,
-        ),
-        _ => unreachable!("unsupported cost version audit action: {action}"),
-    }
-}
-
-fn log_cost_component_audit(action: &'static str, component: &CostComponent) {
-    match action {
-        "create" => crate::info_event!(
-            "manager.cost_component_created",
-            action = action,
-            cost_component_id = component.id,
-            cost_catalog_version_id = component.catalog_version_id,
-            meter_key = &component.meter_key,
-            charge_kind = &component.charge_kind,
-            priority = component.priority,
-        ),
-        "update" => crate::info_event!(
-            "manager.cost_component_updated",
-            action = action,
-            cost_component_id = component.id,
-            cost_catalog_version_id = component.catalog_version_id,
-            meter_key = &component.meter_key,
-            charge_kind = &component.charge_kind,
-            priority = component.priority,
-        ),
-        "delete" => crate::info_event!(
-            "manager.cost_component_deleted",
-            action = action,
-            cost_component_id = component.id,
-            cost_catalog_version_id = component.catalog_version_id,
-            meter_key = &component.meter_key,
-            charge_kind = &component.charge_kind,
-            priority = component.priority,
-        ),
-        _ => unreachable!("unsupported cost component audit action: {action}"),
-    }
-}
-
-fn log_cost_template_import_audit(template_key: &str, imported: &ImportedCostCatalogTemplate) {
-    crate::info_event!(
-        "manager.cost_template_imported",
-        action = "import",
-        template_key = template_key,
-        cost_catalog_id = imported.catalog.id,
-        cost_catalog_name = &imported.catalog.name,
-        cost_catalog_version_id = imported.version.id,
-        version = &imported.version.version,
-        component_count = imported.components.len(),
-        created_catalog = imported.created_catalog,
-    );
-}
-
 async fn create_catalog(
+    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<NewCostCatalogPayload>,
 ) -> DbResult<HttpResult<CostCatalog>> {
-    validate_catalog_payload(&payload)?;
-    let created = CostCatalog::create(&payload)?;
-    log_cost_catalog_audit("create", &created);
+    let created = app_state.admin.cost.create_catalog(payload).await?;
     Ok(HttpResult::new(created))
 }
 
 async fn update_catalog(
+    State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateCostCatalogRequest>,
 ) -> DbResult<HttpResult<CostCatalog>> {
-    validate_optional_catalog_payload(payload.name.as_deref(), payload.description.as_ref())?;
-    let update_data = UpdateCostCatalogData {
-        name: payload.name,
-        description: payload.description,
-    };
-    let updated = CostCatalog::update(id, &update_data)?;
-    log_cost_catalog_audit("update", &updated);
+    let updated = app_state
+        .admin
+        .cost
+        .update_catalog(
+            id,
+            UpdateCostCatalogData {
+                name: payload.name,
+                description: payload.description,
+            },
+        )
+        .await?;
     Ok(HttpResult::new(updated))
 }
 
-async fn delete_catalog(Path(id): Path<i64>) -> DbResult<HttpResult<()>> {
-    let catalog = CostCatalog::get_by_id(id)?;
-    let versions = CostCatalogVersion::list_by_catalog_id(id)?;
-    if !versions.is_empty() {
-        return Err(BaseError::ParamInvalid(Some(
-            "Cannot delete a cost catalog that still has versions".to_string(),
-        )));
-    }
-
-    CostCatalog::delete(id)?;
-    log_cost_catalog_audit("delete", &catalog);
+async fn delete_catalog(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> DbResult<HttpResult<()>> {
+    app_state.admin.cost.delete_catalog(id).await?;
     Ok(HttpResult::new(()))
 }
 
@@ -320,30 +159,19 @@ async fn create_catalog_version(
     Path(catalog_id): Path<i64>,
     Json(payload): Json<CreateCostCatalogVersionRequest>,
 ) -> DbResult<HttpResult<CostCatalogVersion>> {
-    validate_new_catalog_version(catalog_id, &payload)?;
-
-    let create_payload = NewCostCatalogVersionPayload {
-        catalog_id,
-        version: payload.version,
-        currency: payload.currency,
-        source: payload.source,
-        effective_from: payload.effective_from,
-        effective_until: payload.effective_until,
-        is_enabled: payload.is_enabled,
-    };
-
-    let created = CostCatalogVersion::create(&create_payload)?;
-    let disabled_versions = if created.is_enabled {
-        disable_other_enabled_versions(&created)?
-    } else {
-        Vec::new()
-    };
-    for version in &disabled_versions {
-        invalidate_cost_catalog_version_cache(&app_state, version.id).await;
-    }
-    invalidate_cost_catalog_version_cache(&app_state, created.id).await;
-
-    log_cost_version_audit("create", &created, Some(disabled_versions.len()));
+    let created = app_state
+        .admin
+        .cost
+        .create_catalog_version(NewCostCatalogVersionPayload {
+            catalog_id,
+            version: payload.version,
+            currency: payload.currency,
+            source: payload.source,
+            effective_from: payload.effective_from,
+            effective_until: payload.effective_until,
+            is_enabled: payload.is_enabled,
+        })
+        .await?;
 
     Ok(HttpResult::new(created))
 }
@@ -361,12 +189,7 @@ async fn delete_version(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> DbResult<HttpResult<()>> {
-    let version = CostCatalogVersion::get_by_id(id)?;
-    validate_version_can_delete(&version)?;
-
-    CostCatalogVersion::delete(id)?;
-    invalidate_cost_catalog_version_cache(&app_state, id).await;
-    log_cost_version_audit("delete", &version, None);
+    app_state.admin.cost.delete_version(id).await?;
     Ok(HttpResult::new(()))
 }
 
@@ -374,26 +197,7 @@ async fn enable_version(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> DbResult<HttpResult<CostCatalogVersion>> {
-    let original = CostCatalogVersion::get_by_id(id)?;
-    validate_version_can_enable(&original)?;
-    let updated = CostCatalogVersion::update(
-        id,
-        &UpdateCostCatalogVersionData {
-            is_enabled: Some(true),
-            ..Default::default()
-        },
-    )?;
-
-    let disabled_versions = if updated.is_enabled {
-        disable_other_enabled_versions(&updated)?
-    } else {
-        Vec::new()
-    };
-    for version in &disabled_versions {
-        invalidate_cost_catalog_version_cache(&app_state, version.id).await;
-    }
-    invalidate_cost_catalog_version_cache(&app_state, id).await;
-    log_cost_version_audit("enable", &updated, Some(disabled_versions.len()));
+    let updated = app_state.admin.cost.enable_version(id).await?;
     Ok(HttpResult::new(updated))
 }
 
@@ -401,19 +205,7 @@ async fn disable_version(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> DbResult<HttpResult<CostCatalogVersion>> {
-    let original = CostCatalogVersion::get_by_id(id)?;
-    validate_version_can_disable(&original)?;
-
-    let updated = CostCatalogVersion::update(
-        id,
-        &UpdateCostCatalogVersionData {
-            is_enabled: Some(false),
-            ..Default::default()
-        },
-    )?;
-
-    invalidate_cost_catalog_version_cache(&app_state, id).await;
-    log_cost_version_audit("disable", &updated, None);
+    let updated = app_state.admin.cost.disable_version(id).await?;
     Ok(HttpResult::new(updated))
 }
 
@@ -421,19 +213,7 @@ async fn archive_version(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> DbResult<HttpResult<CostCatalogVersion>> {
-    let original = CostCatalogVersion::get_by_id(id)?;
-    validate_version_can_archive(&original)?;
-
-    let updated = CostCatalogVersion::update(
-        id,
-        &UpdateCostCatalogVersionData {
-            is_archived: Some(true),
-            ..Default::default()
-        },
-    )?;
-
-    invalidate_cost_catalog_version_cache(&app_state, id).await;
-    log_cost_version_audit("archive", &updated, None);
+    let updated = app_state.admin.cost.archive_version(id).await?;
     Ok(HttpResult::new(updated))
 }
 
@@ -441,20 +221,7 @@ async fn unarchive_version(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> DbResult<HttpResult<CostCatalogVersion>> {
-    let original = CostCatalogVersion::get_by_id(id)?;
-    validate_version_can_unarchive(&original)?;
-
-    let updated = CostCatalogVersion::update(
-        id,
-        &UpdateCostCatalogVersionData {
-            is_archived: Some(false),
-            is_enabled: Some(false),
-            ..Default::default()
-        },
-    )?;
-
-    invalidate_cost_catalog_version_cache(&app_state, id).await;
-    log_cost_version_audit("unarchive", &updated, None);
+    let updated = app_state.admin.cost.unarchive_version(id).await?;
     Ok(HttpResult::new(updated))
 }
 
@@ -463,19 +230,16 @@ async fn duplicate_version(
     Path(id): Path<i64>,
     Json(payload): Json<DuplicateCostCatalogVersionRequest>,
 ) -> DbResult<HttpResult<CostCatalogVersion>> {
-    let requested_version = payload.version.as_deref().map(str::trim);
-
-    if let Some(version) = requested_version
-        && version.trim().is_empty()
-    {
-        return Err(BaseError::ParamInvalid(Some(
-            "version cannot be empty when provided".to_string(),
-        )));
-    }
-
-    let duplicated = CostCatalogVersion::duplicate_as_draft(id, requested_version)?;
-    invalidate_cost_catalog_version_cache(&app_state, duplicated.id).await;
-    log_cost_version_audit("duplicate", &duplicated, None);
+    let duplicated = app_state
+        .admin
+        .cost
+        .duplicate_version(
+            id,
+            DuplicateCostCatalogVersionInput {
+                version: payload.version,
+            },
+        )
+        .await?;
     Ok(HttpResult::new(duplicated))
 }
 
@@ -483,19 +247,7 @@ async fn create_component(
     State(app_state): State<Arc<AppState>>,
     Json(payload): Json<NewCostComponentPayload>,
 ) -> DbResult<HttpResult<CostComponent>> {
-    let version = ensure_mutable_version(payload.catalog_version_id)?;
-    validate_component_payload(
-        &payload.meter_key,
-        &payload.charge_kind,
-        payload.unit_price_nanos,
-        payload.flat_fee_nanos,
-        payload.tier_config_json.as_deref(),
-        payload.match_attributes_json.as_deref(),
-    )?;
-
-    let created = CostComponent::create(&payload)?;
-    invalidate_cost_catalog_version_cache(&app_state, version.id).await;
-    log_cost_component_audit("create", &created);
+    let created = app_state.admin.cost.create_component(payload).await?;
     Ok(HttpResult::new(created))
 }
 
@@ -504,45 +256,23 @@ async fn update_component(
     Path(id): Path<i64>,
     Json(payload): Json<UpdateCostComponentRequest>,
 ) -> DbResult<HttpResult<CostComponent>> {
-    let original = CostComponent::get_by_id(id)?;
-    let version = ensure_mutable_version(original.catalog_version_id)?;
-
-    validate_component_payload(
-        payload.meter_key.as_deref().unwrap_or(&original.meter_key),
-        payload
-            .charge_kind
-            .as_deref()
-            .unwrap_or(&original.charge_kind),
-        payload
-            .unit_price_nanos
-            .unwrap_or(original.unit_price_nanos),
-        payload.flat_fee_nanos.unwrap_or(original.flat_fee_nanos),
-        payload
-            .tier_config_json
-            .as_ref()
-            .map(|value| value.as_deref())
-            .unwrap_or(original.tier_config_json.as_deref()),
-        payload
-            .match_attributes_json
-            .as_ref()
-            .map(|value| value.as_deref())
-            .unwrap_or(original.match_attributes_json.as_deref()),
-    )?;
-
-    let update_data = UpdateCostComponentData {
-        meter_key: payload.meter_key,
-        charge_kind: payload.charge_kind,
-        unit_price_nanos: payload.unit_price_nanos,
-        flat_fee_nanos: payload.flat_fee_nanos,
-        tier_config_json: payload.tier_config_json,
-        match_attributes_json: payload.match_attributes_json,
-        priority: payload.priority,
-        description: payload.description,
-    };
-
-    let updated = CostComponent::update(id, &update_data)?;
-    invalidate_cost_catalog_version_cache(&app_state, version.id).await;
-    log_cost_component_audit("update", &updated);
+    let updated = app_state
+        .admin
+        .cost
+        .update_component(
+            id,
+            UpdateCostComponentData {
+                meter_key: payload.meter_key,
+                charge_kind: payload.charge_kind,
+                unit_price_nanos: payload.unit_price_nanos,
+                flat_fee_nanos: payload.flat_fee_nanos,
+                tier_config_json: payload.tier_config_json,
+                match_attributes_json: payload.match_attributes_json,
+                priority: payload.priority,
+                description: payload.description,
+            },
+        )
+        .await?;
     Ok(HttpResult::new(updated))
 }
 
@@ -550,12 +280,7 @@ async fn delete_component(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> DbResult<HttpResult<()>> {
-    let component = CostComponent::get_by_id(id)?;
-    let version = ensure_mutable_version(component.catalog_version_id)?;
-
-    CostComponent::delete(id)?;
-    invalidate_cost_catalog_version_cache(&app_state, version.id).await;
-    log_cost_component_audit("delete", &component);
+    app_state.admin.cost.delete_component(id).await?;
     Ok(HttpResult::new(()))
 }
 
@@ -612,337 +337,22 @@ async fn list_cost_templates() -> DbResult<HttpResult<Vec<CostTemplateSummary>>>
 }
 
 async fn import_cost_template(
+    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<ImportCostTemplateRequest>,
 ) -> DbResult<HttpResult<ImportedCostTemplateResponse>> {
-    if payload.template_key.trim().is_empty() {
-        return Err(BaseError::ParamInvalid(Some(
-            "template_key cannot be empty".to_string(),
-        )));
-    }
-    if let Some(catalog_name) = payload.catalog_name.as_deref()
-        && catalog_name.trim().is_empty()
-    {
-        return Err(BaseError::ParamInvalid(Some(
-            "catalog_name cannot be empty when provided".to_string(),
-        )));
-    }
-
-    let template = find_template(payload.template_key.trim()).ok_or_else(|| {
-        BaseError::ParamInvalid(Some(format!(
-            "Unknown cost template '{}'",
-            payload.template_key
-        )))
-    })?;
-
-    let now = Utc::now();
-    let import_payload = template.import_payload_at(now, payload.catalog_name.as_deref());
-    validate_catalog_payload(&NewCostCatalogPayload {
-        name: import_payload.catalog_name.clone(),
-        description: import_payload.catalog_description.clone(),
-    })?;
-    validate_catalog_version_request_fields(&CreateCostCatalogVersionRequest {
-        version: import_payload.version.clone(),
-        currency: import_payload.currency.clone(),
-        source: import_payload.source.clone(),
-        effective_from: import_payload.effective_from,
-        effective_until: import_payload.effective_until,
-        is_enabled: import_payload.is_enabled,
-    })?;
-
-    let target_catalog = CostCatalog::get_by_name(&import_payload.catalog_name)?;
-    if let Some(existing_catalog) = target_catalog {
-        validate_catalog_version_uniqueness(
-            existing_catalog.id,
-            &CreateCostCatalogVersionRequest {
-                version: import_payload.version.clone(),
-                currency: import_payload.currency.clone(),
-                source: import_payload.source.clone(),
-                effective_from: import_payload.effective_from,
-                effective_until: import_payload.effective_until,
-                is_enabled: import_payload.is_enabled,
-            },
-        )?;
-    }
-
-    for component in &import_payload.components {
-        validate_component_payload(
-            &component.meter_key,
-            &component.charge_kind,
-            component.unit_price_nanos,
-            component.flat_fee_nanos,
-            component.tier_config_json.as_deref(),
-            component.match_attributes_json.as_deref(),
-        )?;
-    }
-
-    let imported = import_cost_catalog_template(&import_payload)?;
-    log_cost_template_import_audit(payload.template_key.trim(), &imported);
+    let imported = app_state
+        .admin
+        .cost
+        .import_template(ImportCostTemplateInput {
+            template_key: payload.template_key,
+            catalog_name: payload.catalog_name,
+        })
+        .await?;
 
     Ok(HttpResult::new(ImportedCostTemplateResponse {
-        template: template.summary_at(now),
-        imported,
+        template: imported.template,
+        imported: imported.imported,
     }))
-}
-
-fn validate_catalog_payload(payload: &NewCostCatalogPayload) -> Result<(), BaseError> {
-    validate_optional_catalog_payload(Some(payload.name.as_str()), Some(&payload.description))
-}
-
-fn validate_optional_catalog_payload(
-    name: Option<&str>,
-    description: Option<&Option<String>>,
-) -> Result<(), BaseError> {
-    if let Some(name) = name
-        && name.trim().is_empty()
-    {
-        return Err(BaseError::ParamInvalid(Some(
-            "catalog name cannot be empty".to_string(),
-        )));
-    }
-
-    if let Some(Some(description)) = description
-        && description.trim().is_empty()
-    {
-        return Err(BaseError::ParamInvalid(Some(
-            "catalog description cannot be empty when provided".to_string(),
-        )));
-    }
-
-    Ok(())
-}
-
-fn validate_new_catalog_version(
-    catalog_id: i64,
-    payload: &CreateCostCatalogVersionRequest,
-) -> Result<(), BaseError> {
-    validate_catalog_version_request_fields(payload)?;
-    CostCatalog::get_by_id(catalog_id)?;
-    validate_catalog_version_uniqueness(catalog_id, payload)
-}
-
-fn validate_catalog_version_request_fields(
-    payload: &CreateCostCatalogVersionRequest,
-) -> Result<(), BaseError> {
-    if payload.version.trim().is_empty() {
-        return Err(BaseError::ParamInvalid(Some(
-            "version cannot be empty".to_string(),
-        )));
-    }
-    if payload.currency.trim().is_empty() {
-        return Err(BaseError::ParamInvalid(Some(
-            "currency cannot be empty".to_string(),
-        )));
-    }
-    if let Some(source) = &payload.source
-        && source.trim().is_empty()
-    {
-        return Err(BaseError::ParamInvalid(Some(
-            "source cannot be empty when provided".to_string(),
-        )));
-    }
-    if let Some(effective_until) = payload.effective_until
-        && effective_until <= payload.effective_from
-    {
-        return Err(BaseError::ParamInvalid(Some(
-            "effective_until must be greater than effective_from".to_string(),
-        )));
-    }
-
-    Ok(())
-}
-
-fn validate_catalog_version_uniqueness(
-    catalog_id: i64,
-    payload: &CreateCostCatalogVersionRequest,
-) -> Result<(), BaseError> {
-    let existing_versions = CostCatalogVersion::list_by_catalog_id(catalog_id)?;
-    if existing_versions
-        .iter()
-        .any(|version| version.version == payload.version)
-    {
-        return Err(BaseError::DatabaseDup(Some(format!(
-            "Version '{}' already exists for catalog {}",
-            payload.version, catalog_id
-        ))));
-    }
-
-    Ok(())
-}
-
-fn disable_other_enabled_versions(
-    active_version: &CostCatalogVersion,
-) -> Result<Vec<CostCatalogVersion>, BaseError> {
-    let versions = CostCatalogVersion::list_by_catalog_id(active_version.catalog_id)?;
-    let mut reconciled_versions = Vec::new();
-
-    for resolution in reconcile_enabled_version_conflicts(&versions, active_version) {
-        let updated = match resolution {
-            EnabledVersionResolution::Disable { version_id } => CostCatalogVersion::update(
-                version_id,
-                &UpdateCostCatalogVersionData {
-                    is_enabled: Some(false),
-                    ..Default::default()
-                },
-            )?,
-            EnabledVersionResolution::Truncate {
-                version_id,
-                effective_until,
-            } => CostCatalogVersion::update(
-                version_id,
-                &UpdateCostCatalogVersionData {
-                    effective_until: Some(Some(effective_until)),
-                    ..Default::default()
-                },
-            )?,
-        };
-        reconciled_versions.push(updated);
-    }
-
-    Ok(reconciled_versions)
-}
-
-fn ensure_mutable_version(catalog_version_id: i64) -> Result<CostCatalogVersion, BaseError> {
-    let version = CostCatalogVersion::get_by_id(catalog_version_id)?;
-    validate_version_is_mutable(&version)?;
-    Ok(version)
-}
-
-fn validate_version_is_mutable(version: &CostCatalogVersion) -> Result<(), BaseError> {
-    if version.is_archived {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is archived and cannot be modified",
-            version.id
-        ))));
-    }
-    if version.is_frozen() {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} has already been used by request logs and is read-only",
-            version.id
-        ))));
-    }
-    Ok(())
-}
-
-fn validate_version_can_enable(version: &CostCatalogVersion) -> Result<(), BaseError> {
-    if version.is_archived {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is archived and cannot be enabled",
-            version.id
-        ))));
-    }
-    if version.is_enabled {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is already enabled",
-            version.id
-        ))));
-    }
-    Ok(())
-}
-
-fn validate_version_can_disable(version: &CostCatalogVersion) -> Result<(), BaseError> {
-    if version.is_archived {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is archived and cannot be disabled",
-            version.id
-        ))));
-    }
-    if !version.is_enabled {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is already disabled",
-            version.id
-        ))));
-    }
-    Ok(())
-}
-
-fn validate_version_can_archive(version: &CostCatalogVersion) -> Result<(), BaseError> {
-    if !version.can_be_archived() {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} can only be archived after it is frozen and disabled",
-            version.id
-        ))));
-    }
-    Ok(())
-}
-
-fn validate_version_can_unarchive(version: &CostCatalogVersion) -> Result<(), BaseError> {
-    if !version.is_archived {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is not archived",
-            version.id
-        ))));
-    }
-    if !version.is_frozen() {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} must remain frozen when unarchived",
-            version.id
-        ))));
-    }
-    Ok(())
-}
-
-fn validate_version_can_delete(version: &CostCatalogVersion) -> Result<(), BaseError> {
-    if version.is_archived {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is archived and cannot be deleted",
-            version.id
-        ))));
-    }
-    if version.is_enabled {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} is enabled and cannot be deleted",
-            version.id
-        ))));
-    }
-    if version.is_frozen() {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "Cost catalog version {} has already been used by request logs and cannot be deleted",
-            version.id
-        ))));
-    }
-    Ok(())
-}
-
-fn validate_component_payload(
-    meter_key: &str,
-    charge_kind: &str,
-    unit_price_nanos: Option<i64>,
-    flat_fee_nanos: Option<i64>,
-    tier_config_json: Option<&str>,
-    match_attributes_json: Option<&str>,
-) -> Result<(), BaseError> {
-    validate_component_config(
-        meter_key,
-        charge_kind,
-        unit_price_nanos,
-        flat_fee_nanos,
-        tier_config_json,
-        match_attributes_json,
-    )
-}
-
-fn intervals_overlap(
-    left_start: i64,
-    left_end: Option<i64>,
-    right_start: i64,
-    right_end: Option<i64>,
-) -> bool {
-    let left_end = left_end.unwrap_or(i64::MAX);
-    let right_end = right_end.unwrap_or(i64::MAX);
-    left_start < right_end && right_start < left_end
-}
-
-async fn invalidate_cost_catalog_version_cache(app_state: &AppState, version_id: i64) {
-    if let Err(err) = app_state
-        .catalog
-        .invalidate_cost_catalog_version(version_id)
-        .await
-    {
-        warn!(
-            "Failed to invalidate cost catalog version {} cache: {:?}",
-            version_id, err
-        );
-    }
 }
 
 pub fn create_cost_router() -> StateRouter {
@@ -972,33 +382,82 @@ pub fn create_cost_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CreateCostCatalogVersionRequest, DuplicateCostCatalogVersionRequest, create_cost_router,
-        intervals_overlap, validate_new_catalog_version, validate_version_can_archive,
-        validate_version_can_delete, validate_version_can_disable, validate_version_can_enable,
-        validate_version_can_unarchive, validate_version_is_mutable,
-    };
-    use crate::database::cost::CostCatalogVersion;
+    use std::sync::Arc;
 
-    fn version_for_mutability_tests(
-        id: i64,
-        first_used_at: Option<i64>,
-        is_archived: bool,
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header::CONTENT_TYPE},
+    };
+    use serde_json::{Value, json};
+    use tower::util::ServiceExt;
+
+    use crate::database::TestDbContext;
+    use crate::database::cost::{
+        CostCatalog, CostCatalogVersion, NewCostCatalogPayload, NewCostCatalogVersionPayload,
+    };
+    use crate::service::app_state::{AppState, create_test_app_state};
+
+    use super::{DuplicateCostCatalogVersionRequest, create_cost_router};
+
+    fn seed_catalog(name: &str) -> CostCatalog {
+        CostCatalog::create(&NewCostCatalogPayload {
+            name: name.to_string(),
+            description: Some("seed".to_string()),
+        })
+        .expect("catalog seed should succeed")
+    }
+
+    fn seed_version(
+        catalog_id: i64,
+        version: &str,
+        effective_from: i64,
+        effective_until: Option<i64>,
+        is_enabled: bool,
     ) -> CostCatalogVersion {
-        CostCatalogVersion {
-            id,
-            catalog_id: 1,
-            version: format!("v{}", id),
+        CostCatalogVersion::create(&NewCostCatalogVersionPayload {
+            catalog_id,
+            version: version.to_string(),
             currency: "USD".to_string(),
-            source: None,
-            effective_from: 0,
-            effective_until: None,
-            first_used_at,
-            is_archived,
-            is_enabled: false,
-            created_at: 0,
-            updated_at: 0,
-        }
+            source: Some("seed".to_string()),
+            effective_from,
+            effective_until,
+            is_enabled,
+        })
+        .expect("version seed should succeed")
+    }
+
+    async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
+        create_cost_router()
+            .with_state(Arc::clone(app_state))
+            .oneshot(request)
+            .await
+            .expect("cost router should respond")
+    }
+
+    fn empty_request(method: Method, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request should build")
+    }
+
+    fn json_request(method: Method, uri: &str, payload: Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&payload).expect("payload should serialize"),
+            ))
+            .expect("request should build")
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&body).expect("response should be json")
     }
 
     #[test]
@@ -1007,180 +466,134 @@ mod tests {
     }
 
     #[test]
-    fn intervals_overlap_uses_half_open_ranges() {
-        assert!(!intervals_overlap(0, Some(100), 100, Some(200)));
-        assert!(intervals_overlap(0, Some(101), 100, Some(200)));
-    }
-
-    #[test]
-    fn version_validation_rejects_empty_fields_before_db_work() {
-        let err = validate_new_catalog_version(
-            1,
-            &CreateCostCatalogVersionRequest {
-                version: " ".to_string(),
-                currency: "".to_string(),
-                source: None,
-                effective_from: 100,
-                effective_until: None,
-                is_enabled: false,
-            },
-        )
-        .expect_err("empty version should fail");
-
-        assert!(matches!(
-            err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("version cannot be empty")
-        ));
-    }
-
-    #[test]
-    fn mutable_version_validation_rejects_frozen_versions() {
-        let err = validate_version_is_mutable(&version_for_mutability_tests(1, Some(100), false))
-            .expect_err("frozen version should be read-only");
-
-        assert!(matches!(
-            err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("read-only")
-        ));
-    }
-
-    #[test]
-    fn mutable_version_validation_rejects_archived_versions() {
-        let err = validate_version_is_mutable(&version_for_mutability_tests(1, None, true))
-            .expect_err("archived version should be read-only");
-
-        assert!(matches!(
-            err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("archived")
-        ));
-    }
-
-    #[test]
-    fn enable_validation_rejects_archived_versions() {
-        let mut version = version_for_mutability_tests(1, None, true);
-        version.is_enabled = false;
-        let err =
-            validate_version_can_enable(&version).expect_err("archived version cannot be enabled");
-
-        assert!(matches!(
-            err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("archived")
-        ));
-    }
-
-    #[test]
-    fn disable_validation_rejects_disabled_versions() {
-        let version = version_for_mutability_tests(1, None, false);
-        let err =
-            validate_version_can_disable(&version).expect_err("disabled version cannot disable");
-
-        assert!(matches!(
-            err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("already disabled")
-        ));
-    }
-
-    #[test]
-    fn archive_validation_requires_frozen_disabled_version() {
-        let err = validate_version_can_archive(&version_for_mutability_tests(1, Some(100), false))
-            .expect("frozen disabled version should archive");
-        assert_eq!(err, ());
-
-        let mut enabled_version = version_for_mutability_tests(2, Some(100), false);
-        enabled_version.is_enabled = true;
-        let archive_err = validate_version_can_archive(&enabled_version)
-            .expect_err("enabled version cannot archive");
-
-        assert!(matches!(
-            archive_err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("frozen and disabled")
-        ));
-    }
-
-    #[test]
-    fn unarchive_validation_requires_archived_frozen_version() {
-        let err = validate_version_can_unarchive(&version_for_mutability_tests(1, Some(100), true))
-            .expect("archived frozen version should unarchive");
-        assert_eq!(err, ());
-
-        let not_archived = version_for_mutability_tests(2, Some(100), false);
-        let unarchive_err = validate_version_can_unarchive(&not_archived)
-            .expect_err("non-archived version cannot unarchive");
-
-        assert!(matches!(
-            unarchive_err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("not archived")
-        ));
-    }
-
-    #[test]
-    fn delete_validation_allows_only_draft_versions() {
-        validate_version_can_delete(&version_for_mutability_tests(1, None, false))
-            .expect("draft version should be deletable");
-
-        let mut enabled = version_for_mutability_tests(2, None, false);
-        enabled.is_enabled = true;
-        let enabled_err =
-            validate_version_can_delete(&enabled).expect_err("enabled version cannot be deleted");
-        assert!(matches!(
-            enabled_err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("enabled")
-        ));
-
-        let frozen = version_for_mutability_tests(3, Some(100), false);
-        let frozen_err =
-            validate_version_can_delete(&frozen).expect_err("frozen version cannot be deleted");
-        assert!(matches!(
-            frozen_err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("request logs")
-        ));
-
-        let archived = version_for_mutability_tests(4, Some(100), true);
-        let archived_err =
-            validate_version_can_delete(&archived).expect_err("archived version cannot be deleted");
-        assert!(matches!(
-            archived_err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("archived")
-        ));
-    }
-
-    #[test]
     fn duplicate_version_request_allows_missing_name_override() {
         let payload = DuplicateCostCatalogVersionRequest::default();
         assert!(payload.version.is_none());
     }
 
-    #[test]
-    fn duplicate_version_request_rejects_blank_name_override() {
-        let payload = DuplicateCostCatalogVersionRequest {
-            version: Some("   ".to_string()),
-        };
+    #[tokio::test]
+    async fn enable_version_http_endpoint_updates_response_and_cache() {
+        let test_db_context = TestDbContext::new_sqlite("controller-cost-enable-http.sqlite");
 
-        let err = if let Some(version) = payload.version.as_deref()
-            && version.trim().is_empty()
-        {
-            Err(crate::controller::BaseError::ParamInvalid(Some(
-                "version cannot be empty when provided".to_string(),
-            )))
-        } else {
-            Ok(())
-        }
-        .expect_err("blank override should fail");
+        test_db_context
+            .run_async(async {
+                let catalog = seed_catalog("OpenAI / GPT");
+                let existing = seed_version(catalog.id, "2026-04-01", 0, None, true);
+                let draft = seed_version(catalog.id, "2026-05-01", 2_000, None, false);
+                let app_state = create_test_app_state(test_db_context.clone()).await;
 
-        assert!(matches!(
-            err,
-            crate::controller::BaseError::ParamInvalid(Some(message))
-                if message.contains("cannot be empty")
-        ));
+                let existing_cached_before = app_state
+                    .catalog
+                    .get_cost_catalog_version_by_id(existing.id)
+                    .await
+                    .expect("existing version cache should load")
+                    .expect("existing version should exist");
+                assert_eq!(existing_cached_before.effective_until, None);
+
+                let response = send(
+                    &app_state,
+                    empty_request(Method::POST, &format!("/cost/version/{}/enable", draft.id)),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response_json(response).await;
+
+                assert_eq!(body["code"], 0);
+                assert_eq!(body["data"]["id"], draft.id);
+                assert_eq!(body["data"]["is_enabled"], true);
+
+                let draft_cached = app_state
+                    .catalog
+                    .get_cost_catalog_version_by_id(draft.id)
+                    .await
+                    .expect("draft cache should load")
+                    .expect("draft version should exist");
+                let existing_cached_after = app_state
+                    .catalog
+                    .get_cost_catalog_version_by_id(existing.id)
+                    .await
+                    .expect("existing cache should reload")
+                    .expect("existing version should exist");
+
+                assert!(draft_cached.is_enabled);
+                assert_eq!(existing_cached_after.effective_until, Some(2_000));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn import_cost_template_http_endpoint_updates_response_and_version_cache() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-cost-template-import-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let catalog = seed_catalog("Google / Gemini 2.5 Pro");
+                let existing = seed_version(catalog.id, "2026-04-01", 0, None, true);
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let existing_cached_before = app_state
+                    .catalog
+                    .get_cost_catalog_version_by_id(existing.id)
+                    .await
+                    .expect("existing version cache should load")
+                    .expect("existing version should exist");
+                assert_eq!(existing_cached_before.effective_until, None);
+
+                let response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/cost/template/import",
+                        json!({
+                            "template_key": "google.gemini-2.5-pro.text"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response_json(response).await;
+
+                let imported_version_id = body["data"]["imported"]["version"]["id"]
+                    .as_i64()
+                    .expect("imported version id should exist");
+                let imported_effective_from = body["data"]["imported"]["version"]["effective_from"]
+                    .as_i64()
+                    .expect("imported effective_from should exist");
+
+                assert_eq!(body["code"], 0);
+                assert_eq!(
+                    body["data"]["template"]["key"],
+                    "google.gemini-2.5-pro.text"
+                );
+                assert!(
+                    body["data"]["imported"]["components"]
+                        .as_array()
+                        .expect("components should be an array")
+                        .len()
+                        > 0
+                );
+
+                let imported_cached = app_state
+                    .catalog
+                    .get_cost_catalog_version_by_id(imported_version_id)
+                    .await
+                    .expect("imported version cache should load")
+                    .expect("imported version should exist");
+                let existing_cached_after = app_state
+                    .catalog
+                    .get_cost_catalog_version_by_id(existing.id)
+                    .await
+                    .expect("existing version cache should reload")
+                    .expect("existing version should exist");
+
+                assert_eq!(imported_cached.id, imported_version_id);
+                assert!(!imported_cached.components.is_empty());
+                assert_eq!(
+                    existing_cached_after.effective_until,
+                    Some(imported_effective_from)
+                );
+            })
+            .await;
     }
 }

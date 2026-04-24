@@ -193,6 +193,85 @@ pub struct ImportedCostCatalogTemplate {
     pub version: CostCatalogVersion,
     pub components: Vec<CostComponent>,
     pub created_catalog: bool,
+    #[serde(skip_serializing)]
+    pub reconciled_versions: Vec<CostCatalogVersion>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CostCatalogVersionWriteResult {
+    pub version: CostCatalogVersion,
+    pub reconciled_versions: Vec<CostCatalogVersion>,
+}
+
+macro_rules! reconcile_enabled_version_conflicts_in_tx {
+    ($conn:ident, $active_version:expr, $now:expr, $context:expr) => {{
+        let active_version = $active_version;
+        if !active_version.is_enabled || active_version.is_archived {
+            Ok::<Vec<CostCatalogVersion>, BaseError>(Vec::new())
+        } else {
+            let existing_enabled_versions = cost_catalog_versions::table
+                .filter(
+                    cost_catalog_versions::dsl::catalog_id
+                        .eq(active_version.catalog_id)
+                        .and(cost_catalog_versions::dsl::is_enabled.eq(true)),
+                )
+                .select(CostCatalogVersionDb::as_select())
+                .load::<CostCatalogVersionDb>($conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to load enabled cost catalog versions {}: {}",
+                        $context, e
+                    )))
+                })?
+                .into_iter()
+                .map(CostCatalogVersionDb::from_db)
+                .collect::<Vec<_>>();
+            let mut reconciled_versions = Vec::new();
+
+            for resolution in
+                reconcile_enabled_version_conflicts(&existing_enabled_versions, active_version)
+            {
+                let reconciled = match resolution {
+                    EnabledVersionResolution::Disable { version_id } => {
+                        diesel::update(cost_catalog_versions::table.find(version_id))
+                            .set((
+                                cost_catalog_versions::dsl::is_enabled.eq(false),
+                                cost_catalog_versions::dsl::updated_at.eq($now),
+                            ))
+                            .returning(CostCatalogVersionDb::as_returning())
+                            .get_result::<CostCatalogVersionDb>($conn)
+                            .map_err(|e| {
+                                BaseError::DatabaseFatal(Some(format!(
+                                    "Failed to disable conflicting cost catalog version {} {}: {}",
+                                    version_id, $context, e
+                                )))
+                            })?
+                            .from_db()
+                    }
+                    EnabledVersionResolution::Truncate {
+                        version_id,
+                        effective_until,
+                    } => diesel::update(cost_catalog_versions::table.find(version_id))
+                        .set((
+                            cost_catalog_versions::dsl::effective_until.eq(Some(effective_until)),
+                            cost_catalog_versions::dsl::updated_at.eq($now),
+                        ))
+                        .returning(CostCatalogVersionDb::as_returning())
+                        .get_result::<CostCatalogVersionDb>($conn)
+                        .map_err(|e| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to truncate conflicting cost catalog version {} {}: {}",
+                                version_id, $context, e
+                            )))
+                        })?
+                        .from_db(),
+                };
+                reconciled_versions.push(reconciled);
+            }
+
+            Ok::<Vec<CostCatalogVersion>, BaseError>(reconciled_versions)
+        }
+    }};
 }
 
 impl CostCatalog {
@@ -325,20 +404,7 @@ impl CostCatalog {
 impl CostCatalogVersion {
     pub fn create(data: &NewCostCatalogVersionPayload) -> DbResult<CostCatalogVersion> {
         let now = Utc::now().timestamp_millis();
-        let new_version = NewCostCatalogVersion {
-            id: ID_GENERATOR.generate_id(),
-            catalog_id: data.catalog_id,
-            version: data.version.clone(),
-            currency: data.currency.clone(),
-            source: data.source.clone(),
-            effective_from: data.effective_from,
-            effective_until: data.effective_until,
-            first_used_at: None,
-            is_archived: false,
-            is_enabled: data.is_enabled,
-            created_at: now,
-            updated_at: now,
-        };
+        let new_version = new_cost_catalog_version_from_payload(data, now);
 
         let conn = &mut get_connection()?;
         db_execute!(conn, {
@@ -353,6 +419,41 @@ impl CostCatalogVersion {
                     )))
                 })?;
             Ok(inserted.from_db())
+        })
+    }
+
+    pub fn create_with_enabled_reconciliation(
+        data: &NewCostCatalogVersionPayload,
+    ) -> DbResult<CostCatalogVersionWriteResult> {
+        let now = Utc::now().timestamp_millis();
+        let new_version = new_cost_catalog_version_from_payload(data, now);
+        let conn = &mut get_connection()?;
+
+        db_execute!(conn, {
+            conn.transaction::<CostCatalogVersionWriteResult, BaseError, _>(|conn| {
+                let version = diesel::insert_into(cost_catalog_versions::table)
+                    .values(NewCostCatalogVersionDb::to_db(&new_version))
+                    .returning(CostCatalogVersionDb::as_returning())
+                    .get_result::<CostCatalogVersionDb>(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to create cost catalog version: {}",
+                            e
+                        )))
+                    })?
+                    .from_db();
+                let reconciled_versions = reconcile_enabled_version_conflicts_in_tx!(
+                    conn,
+                    &version,
+                    now,
+                    "while creating enabled cost catalog version"
+                )?;
+
+                Ok(CostCatalogVersionWriteResult {
+                    version,
+                    reconciled_versions,
+                })
+            })
         })
     }
 
@@ -398,6 +499,43 @@ impl CostCatalogVersion {
                     )))
                 })?;
             Ok(updated.from_db())
+        })
+    }
+
+    pub fn enable_with_conflict_reconciliation(
+        id_value: i64,
+    ) -> DbResult<CostCatalogVersionWriteResult> {
+        let conn = &mut get_connection()?;
+        let now = Utc::now().timestamp_millis();
+
+        db_execute!(conn, {
+            conn.transaction::<CostCatalogVersionWriteResult, BaseError, _>(|conn| {
+                let version = diesel::update(cost_catalog_versions::table.find(id_value))
+                    .set((
+                        cost_catalog_versions::dsl::is_enabled.eq(true),
+                        cost_catalog_versions::dsl::updated_at.eq(now),
+                    ))
+                    .returning(CostCatalogVersionDb::as_returning())
+                    .get_result::<CostCatalogVersionDb>(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to enable cost catalog version {}: {}",
+                            id_value, e
+                        )))
+                    })?
+                    .from_db();
+                let reconciled_versions = reconcile_enabled_version_conflicts_in_tx!(
+                    conn,
+                    &version,
+                    now,
+                    "while enabling cost catalog version"
+                )?;
+
+                Ok(CostCatalogVersionWriteResult {
+                    version,
+                    reconciled_versions,
+                })
+            })
         })
     }
 
@@ -637,6 +775,26 @@ pub fn reconcile_enabled_version_conflicts(
         .collect()
 }
 
+fn new_cost_catalog_version_from_payload(
+    data: &NewCostCatalogVersionPayload,
+    now: i64,
+) -> NewCostCatalogVersion {
+    NewCostCatalogVersion {
+        id: ID_GENERATOR.generate_id(),
+        catalog_id: data.catalog_id,
+        version: data.version.clone(),
+        currency: data.currency.clone(),
+        source: data.source.clone(),
+        effective_from: data.effective_from,
+        effective_until: data.effective_until,
+        first_used_at: None,
+        is_archived: false,
+        is_enabled: data.is_enabled,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 impl CostComponent {
     pub fn create(data: &NewCostComponentPayload) -> DbResult<CostComponent> {
         let now = Utc::now().timestamp_millis();
@@ -866,64 +1024,12 @@ pub fn import_cost_catalog_template(
                 })?
                 .from_db();
 
-            if version.is_enabled {
-                let existing_enabled_versions = cost_catalog_versions::table
-                    .filter(
-                        cost_catalog_versions::dsl::catalog_id
-                            .eq(catalog.id)
-                            .and(cost_catalog_versions::dsl::is_enabled.eq(true)),
-                    )
-                    .select(CostCatalogVersionDb::as_select())
-                    .load::<CostCatalogVersionDb>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to load enabled cost catalog versions during template import: {}",
-                            e
-                        )))
-                    })?
-                    .into_iter()
-                    .map(CostCatalogVersionDb::from_db)
-                    .collect::<Vec<_>>();
-
-                for resolution in
-                    reconcile_enabled_version_conflicts(&existing_enabled_versions, &version)
-                {
-                    match resolution {
-                        EnabledVersionResolution::Disable { version_id } => {
-                            diesel::update(cost_catalog_versions::table.find(version_id))
-                                .set((
-                                    cost_catalog_versions::dsl::is_enabled.eq(false),
-                                    cost_catalog_versions::dsl::updated_at.eq(now),
-                                ))
-                                .execute(conn)
-                                .map_err(|e| {
-                                    BaseError::DatabaseFatal(Some(format!(
-                                        "Failed to disable conflicting cost catalog version {} during template import: {}",
-                                        version_id, e
-                                    )))
-                                })?;
-                        }
-                        EnabledVersionResolution::Truncate {
-                            version_id,
-                            effective_until,
-                        } => {
-                            diesel::update(cost_catalog_versions::table.find(version_id))
-                                .set((
-                                    cost_catalog_versions::dsl::effective_until
-                                        .eq(Some(effective_until)),
-                                    cost_catalog_versions::dsl::updated_at.eq(now),
-                                ))
-                                .execute(conn)
-                                .map_err(|e| {
-                                    BaseError::DatabaseFatal(Some(format!(
-                                        "Failed to truncate conflicting cost catalog version {} during template import: {}",
-                                        version_id, e
-                                    )))
-                                })?;
-                        }
-                    }
-                }
-            }
+            let reconciled_versions = reconcile_enabled_version_conflicts_in_tx!(
+                conn,
+                &version,
+                now,
+                "during template import"
+            )?;
 
             let mut components = Vec::with_capacity(data.components.len());
             for component in &data.components {
@@ -959,6 +1065,7 @@ pub fn import_cost_catalog_template(
                 version,
                 components,
                 created_catalog,
+                reconciled_versions,
             })
         })
     })

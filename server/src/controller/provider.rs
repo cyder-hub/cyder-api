@@ -1,21 +1,21 @@
 use crate::database::{
     DbResult,
     model::{Model, ModelDetail},
-    model_route::ModelRoute,
     provider::{
-        BootstrapProviderInput, BootstrapProviderResult, NewProvider, NewProviderApiKey, Provider,
-        ProviderApiKey, ProviderSummaryItem, UpdateProviderApiKeyData, UpdateProviderData,
+        BootstrapProviderInput, BootstrapProviderResult, Provider, ProviderApiKey,
+        ProviderSummaryItem,
     },
-    request_patch::{RequestPatchRule, RequestPatchRuleResponse},
+    request_patch::RequestPatchRuleResponse,
 };
 use crate::proxy::{ProxyError, apply_request_patches, load_runtime_request_patch_trace};
+use crate::service::admin::provider::{
+    CreateProviderApiKeyInput, ProviderUpsertInput, UpdateProviderApiKeyInput,
+};
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use axum::{
     extract::{Json, Path, State}, // Added State
     routing::{delete, get, post, put},
 };
-use chrono::Utc;
-use cyder_tools::log::warn;
 use reqwest::{
     StatusCode, Url,
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
@@ -72,85 +72,6 @@ struct BootstrapProviderResponse {
     check_result: Option<BootstrapCheckResult>,
 }
 
-fn log_provider_audit(action: &'static str, provider: &Provider) {
-    match action {
-        "create" => crate::info_event!(
-            "manager.provider_created",
-            action = action,
-            provider_id = provider.id,
-            provider_key = &provider.provider_key,
-            provider_name = &provider.name,
-            is_enabled = provider.is_enabled,
-        ),
-        "update" => crate::info_event!(
-            "manager.provider_updated",
-            action = action,
-            provider_id = provider.id,
-            provider_key = &provider.provider_key,
-            provider_name = &provider.name,
-            is_enabled = provider.is_enabled,
-        ),
-        "delete" => crate::info_event!(
-            "manager.provider_deleted",
-            action = action,
-            provider_id = provider.id,
-            provider_key = &provider.provider_key,
-            provider_name = &provider.name,
-            is_enabled = provider.is_enabled,
-        ),
-        _ => unreachable!("unsupported provider audit action: {action}"),
-    }
-}
-
-fn log_provider_api_key_audit(action: &'static str, key: &ProviderApiKey) {
-    match action {
-        "create" => crate::info_event!(
-            "manager.provider_api_key_created",
-            action = action,
-            provider_id = key.provider_id,
-            provider_api_key_id = key.id,
-            is_enabled = key.is_enabled,
-            description_present = key.description.is_some(),
-        ),
-        "update" => crate::info_event!(
-            "manager.provider_api_key_updated",
-            action = action,
-            provider_id = key.provider_id,
-            provider_api_key_id = key.id,
-            is_enabled = key.is_enabled,
-            description_present = key.description.is_some(),
-        ),
-        "delete" => crate::info_event!(
-            "manager.provider_api_key_deleted",
-            action = action,
-            provider_id = key.provider_id,
-            provider_api_key_id = key.id,
-            is_enabled = key.is_enabled,
-            description_present = key.description.is_some(),
-        ),
-        _ => unreachable!("unsupported provider api key audit action: {action}"),
-    }
-}
-
-fn log_provider_bootstrap_audit(
-    created: &BootstrapProviderResult,
-    check_result: Option<&BootstrapCheckResult>,
-) {
-    crate::info_event!(
-        "manager.provider_bootstrapped",
-        action = "bootstrap",
-        provider_id = created.provider.id,
-        provider_key = &created.provider.provider_key,
-        provider_name = &created.provider.name,
-        is_enabled = created.provider.is_enabled,
-        provider_api_key_id = created.created_key.id,
-        model_id = created.created_model.id,
-        model_name = &created.created_model.model_name,
-        check_performed = check_result.is_some(),
-        check_success = check_result.map(|result| result.success),
-    );
-}
-
 async fn list() -> DbResult<HttpResult<Vec<Provider>>> {
     let result = Provider::list_all()?;
     Ok(HttpResult::new(result))
@@ -175,33 +96,18 @@ async fn insert(
     State(app_state): State<Arc<AppState>>,
     Json(payload): Json<InserPayload>,
 ) -> DbResult<HttpResult<Provider>> {
-    let current_time = Utc::now().timestamp_millis();
-    let new_provider_data = NewProvider {
-        id: ID_GENERATOR.generate_id(),
-        provider_key: payload.key,
-        name: payload.name,
-        endpoint: payload.endpoint,
-        use_proxy: payload.use_proxy,
-        is_enabled: true, // Default for new providers
-        created_at: current_time,
-        updated_at: current_time,
-        provider_type: payload
-            .provider_type
-            .unwrap_or_else(|| ProviderType::Openai),
-        provider_api_key_mode: payload
-            .provider_api_key_mode
-            .unwrap_or_else(|| ProviderApiKeyMode::Queue),
-    };
-    let created_provider = Provider::create(&new_provider_data)?;
-
-    if let Err(e) = app_state.catalog.invalidate_models_catalog().await {
-        warn!(
-            "Failed to invalidate models catalog after provider create {}: {:?}",
-            created_provider.id, e
-        );
-    }
-
-    log_provider_audit("create", &created_provider);
+    let created_provider = app_state
+        .admin
+        .provider
+        .create_provider(ProviderUpsertInput {
+            name: payload.name,
+            key: payload.key,
+            endpoint: payload.endpoint,
+            use_proxy: payload.use_proxy,
+            provider_type: payload.provider_type,
+            provider_api_key_mode: payload.provider_api_key_mode,
+        })
+        .await?;
 
     Ok(HttpResult::new(created_provider))
 }
@@ -217,28 +123,21 @@ async fn update_provider(
     Path(id): Path<i64>,
     Json(payload): Json<InserPayload>,
 ) -> Result<HttpResult<Provider>, BaseError> {
-    let update_data = UpdateProviderData {
-        provider_key: Some(payload.key),
-        name: Some(payload.name),
-        endpoint: Some(payload.endpoint),
-        use_proxy: Some(payload.use_proxy),
-        is_enabled: None, // InserPayload doesn't have is_enabled. Set to None to not change it unless specified.
-        provider_type: payload.provider_type,
-        provider_api_key_mode: payload.provider_api_key_mode,
-    };
-    // Note: payload.api_keys, payload.omit_config, payload.limit_model are not used by Provider::update.
-    let updated_provider = Provider::update(id, &update_data)?;
-
-    // Invalidate cache - next read will load fresh data from database
-    if let Err(e) = app_state
-        .catalog
-        .invalidate_provider(id, Some(&updated_provider.provider_key))
-        .await
-    {
-        warn!("Failed to invalidate Provider id {} in cache: {:?}", id, e);
-    }
-
-    log_provider_audit("update", &updated_provider);
+    let updated_provider = app_state
+        .admin
+        .provider
+        .update_provider(
+            id,
+            ProviderUpsertInput {
+                name: payload.name,
+                key: payload.key,
+                endpoint: payload.endpoint,
+                use_proxy: payload.use_proxy,
+                provider_type: payload.provider_type,
+                provider_api_key_mode: payload.provider_api_key_mode,
+            },
+        )
+        .await?;
 
     Ok(HttpResult::new(updated_provider))
 }
@@ -247,72 +146,8 @@ async fn delete_provider(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<()>, BaseError> {
-    // Fetch provider details before deleting to get the key for store removal
-    // Fetch provider details to ensure it exists before DB delete.
-    // Not strictly needed for cache operation if ID is the only thing used, but good practice.
-    let provider_to_delete_from_db = Provider::get_by_id(id)?;
-    let affected_routes = ModelRoute::list_by_provider_id(id)?;
-
-    match Provider::delete(id) {
-        // This is DB soft-delete
-        Ok(num_deleted_db) => {
-            if num_deleted_db > 0 {
-                if let Err(err) = ModelRoute::soft_delete_candidates_for_provider(id) {
-                    warn!(
-                        "Failed to delete model route candidates for deleted provider {}: {:?}",
-                        id, err
-                    );
-                }
-
-                for route in &affected_routes {
-                    if let Err(store_err) = app_state
-                        .catalog
-                        .invalidate_model_route(route.id, Some(&route.route_name))
-                        .await
-                    {
-                        warn!(
-                            "Failed to invalidate model route {} after provider delete {}: {:?}",
-                            route.id, id, store_err
-                        );
-                    }
-                }
-
-                if let Err(err) = ProviderApiKey::soft_delete_by_provider_id(id) {
-                    warn!(
-                        "Failed to delete provider API keys for deleted provider {}: {:?}",
-                        id, err
-                    );
-                }
-
-                if let Err(err) = RequestPatchRule::soft_delete_by_provider_id(id) {
-                    warn!(
-                        "Failed to delete provider request patch rules for deleted provider {}: {:?}",
-                        id, err
-                    );
-                }
-
-                // Invalidate provider cache (key not available after delete, so pass None)
-                if let Err(e) = app_state.catalog.invalidate_provider(id, None).await {
-                    warn!(
-                        "Provider id {} successfully deleted from DB, but failed to invalidate cache: {:?}",
-                        id, e
-                    );
-                }
-
-                // Invalidate associated API keys cache
-                if let Err(e) = app_state.catalog.invalidate_provider_api_keys(id).await {
-                    warn!(
-                        "Error invalidating provider API keys cache for provider {}: {:?}",
-                        id, e
-                    );
-                }
-
-                log_provider_audit("delete", &provider_to_delete_from_db);
-            }
-            Ok(HttpResult::new(())) // Success if DB operation was successful
-        }
-        Err(err) => Err(err), // DB operation failed
-    }
+    app_state.admin.provider.delete_provider(id).await?;
+    Ok(HttpResult::new(()))
 }
 
 async fn get_provider_detail(
@@ -858,36 +693,11 @@ async fn bootstrap_provider(
         real_model_name: normalize_optional_text(payload.real_model_name.clone()),
     };
 
-    let created = Provider::bootstrap(&provider_input)?;
-
-    if let Err(e) = app_state.catalog.invalidate_models_catalog().await {
-        warn!(
-            "Failed to invalidate models catalog after bootstrap provider {}: {:?}",
-            created.provider.id, e
-        );
-    }
-
-    if let Err(e) = app_state
-        .catalog
-        .invalidate_provider(created.provider.id, Some(&created.provider.provider_key))
-        .await
-    {
-        warn!(
-            "Failed to invalidate provider cache after bootstrap provider {}: {:?}",
-            created.provider.id, e
-        );
-    }
-
-    if let Err(e) = app_state
-        .catalog
-        .invalidate_provider_api_keys(created.provider.id)
-        .await
-    {
-        warn!(
-            "Failed to invalidate provider API keys cache after bootstrap provider {}: {:?}",
-            created.provider.id, e
-        );
-    }
+    let created = app_state
+        .admin
+        .provider
+        .bootstrap_provider_persist(provider_input)
+        .await?;
 
     let check_result = if payload.save_and_test {
         let client = if created.provider.use_proxy {
@@ -926,7 +736,11 @@ async fn bootstrap_provider(
         None
     };
 
-    log_provider_bootstrap_audit(&created, check_result.as_ref());
+    app_state
+        .admin
+        .provider
+        .record_bootstrap_audit(&created, check_result.as_ref().map(|result| result.success))
+        .await;
 
     Ok(HttpResult::new(build_bootstrap_response(
         created,
@@ -1054,36 +868,18 @@ async fn add_provider_api_key(
     Path(provider_id): Path<i64>,
     Json(payload): Json<CreateProviderApiKeyPayload>,
 ) -> Result<HttpResult<ProviderApiKey>, BaseError> {
-    // Ensure the provider exists to associate the key with.
-    let _provider = Provider::get_by_id(provider_id)?; // Or use app_state.provider_store.get_by_id(provider_id)
-
-    let current_time = Utc::now().timestamp_millis();
-    let new_key_data = NewProviderApiKey {
-        id: ID_GENERATOR.generate_id(),
-        provider_id,
-        api_key: payload.api_key,
-        description: payload.description,
-        is_enabled: payload.is_enabled.unwrap_or(true), // Default to true if not specified
-        created_at: current_time,
-        updated_at: current_time,
-    };
-
-    let created_key = ProviderApiKey::insert(&new_key_data)?;
-
-    // No need to manually update cache - it will be loaded on first read
-    // Also invalidate the provider's key list cache
-    if let Err(e) = app_state
-        .catalog
-        .invalidate_provider_api_keys(provider_id)
-        .await
-    {
-        warn!(
-            "Failed to invalidate provider API keys cache for provider {}: {:?}",
-            provider_id, e
-        );
-    }
-
-    log_provider_api_key_audit("create", &created_key);
+    let created_key = app_state
+        .admin
+        .provider
+        .create_provider_api_key(
+            provider_id,
+            CreateProviderApiKeyInput {
+                api_key: payload.api_key,
+                description: payload.description,
+                is_enabled: payload.is_enabled,
+            },
+        )
+        .await?;
 
     Ok(HttpResult::new(created_key))
 }
@@ -1120,38 +916,19 @@ async fn update_provider_api_key(
     Path((provider_id, key_id)): Path<(i64, i64)>,
     Json(payload): Json<UpdateProviderApiKeyPayload>,
 ) -> Result<HttpResult<ProviderApiKey>, BaseError> {
-    // Ensure the provider exists
-    let _provider = Provider::get_by_id(provider_id)?; // Or use app_state.provider_store.get_by_id(provider_id)
-    // Fetch the key to ensure it belongs to the provider before updating
-    let key_to_update = ProviderApiKey::get_by_id(key_id)?; // Or use app_state.provider_api_key_store.get_by_id(key_id)
-    if key_to_update.provider_id != provider_id {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "API key {} does not belong to provider {}",
-            key_id, provider_id
-        ))));
-    }
-
-    let update_data = UpdateProviderApiKeyData {
-        api_key: payload.api_key,
-        description: payload.description, // Consider how to handle clearing: Option<Option<String>> or specific value
-        is_enabled: payload.is_enabled,
-    };
-
-    let updated_key = ProviderApiKey::update(key_id, &update_data)?;
-
-    // Also invalidate the provider's key list
-    if let Err(e) = app_state
-        .catalog
-        .invalidate_provider_api_keys(provider_id)
-        .await
-    {
-        warn!(
-            "Failed to invalidate provider API keys cache for provider {}: {:?}",
-            provider_id, e
-        );
-    }
-
-    log_provider_api_key_audit("update", &updated_key);
+    let updated_key = app_state
+        .admin
+        .provider
+        .update_provider_api_key(
+            provider_id,
+            key_id,
+            UpdateProviderApiKeyInput {
+                api_key: payload.api_key,
+                description: payload.description,
+                is_enabled: payload.is_enabled,
+            },
+        )
+        .await?;
 
     Ok(HttpResult::new(updated_key))
 }
@@ -1160,32 +937,11 @@ async fn delete_provider_api_key(
     State(app_state): State<Arc<AppState>>, // Added AppState
     Path((provider_id, key_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<()>, BaseError> {
-    // Ensure the provider exists
-    let _provider = Provider::get_by_id(provider_id)?; // Or use app_state.provider_store.get_by_id(provider_id)
-    // Fetch the key to ensure it belongs to the provider before deleting
-    let key_to_delete_from_db = ProviderApiKey::get_by_id(key_id)?; // Or use app_state.provider_api_key_store.get_by_id(key_id)
-    if key_to_delete_from_db.provider_id != provider_id {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "API key {} does not belong to provider {}",
-            key_id, provider_id
-        ))));
-    }
-
-    ProviderApiKey::delete(key_id)?; // DB soft-delete
-
-    // Also invalidate the provider's key list
-    if let Err(e) = app_state
-        .catalog
-        .invalidate_provider_api_keys(provider_id)
-        .await
-    {
-        warn!(
-            "Failed to invalidate provider API keys cache for provider {}: {:?}",
-            provider_id, e
-        );
-    }
-
-    log_provider_api_key_audit("delete", &key_to_delete_from_db);
+    app_state
+        .admin
+        .provider
+        .delete_provider_api_key(provider_id, key_id)
+        .await?;
 
     Ok(HttpResult::new(()))
 }
@@ -1220,16 +976,27 @@ pub fn create_provider_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::header_value;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header::CONTENT_TYPE},
+    };
+    use serde_json::{Value, json};
+    use tower::util::ServiceExt;
+
+    use super::{create_provider_router, header_value};
+    use crate::database::TestDbContext;
     use crate::database::model::Model;
-    use crate::database::provider::Provider;
     use crate::database::provider::ProviderSummaryItem;
+    use crate::database::provider::{Provider, ProviderApiKey};
     use crate::schema::enum_def::{
         ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
     };
+    use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::cache::types::{CacheResolvedRequestPatch, RequestPatchRuleOrigin};
     use crate::utils::HttpResult;
-    use std::collections::BTreeSet;
 
     fn request_patch(
         id: i64,
@@ -1248,6 +1015,40 @@ mod tests {
             overridden_rule_ids: Vec::new(),
             description: None,
         }
+    }
+
+    async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
+        create_provider_router()
+            .with_state(Arc::clone(app_state))
+            .oneshot(request)
+            .await
+            .expect("provider router should respond")
+    }
+
+    fn empty_request(method: Method, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request should build")
+    }
+
+    fn json_request(method: Method, uri: &str, payload: Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&payload).expect("payload should serialize"),
+            ))
+            .expect("request should build")
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&body).expect("response should be json")
     }
 
     #[tokio::test]
@@ -1529,6 +1330,141 @@ mod tests {
         assert!(item.get("models").is_none());
         assert!(item.get("provider_keys").is_none());
         assert!(item.get("custom_fields").is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_http_write_paths_update_response_database_and_cache() {
+        let test_db_context = TestDbContext::new_sqlite("controller-provider-write-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let create_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider",
+                        json!({
+                            "name": "HTTP Provider",
+                            "key": "http-provider",
+                            "endpoint": "https://api.example.com/v1",
+                            "use_proxy": false,
+                            "provider_type": "OPENAI",
+                            "provider_api_key_mode": "QUEUE"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(create_response.status(), StatusCode::OK);
+                let create_body = response_json(create_response).await;
+                assert_eq!(create_body["code"], 0);
+                assert_eq!(create_body["data"]["provider_key"], "http-provider");
+
+                let provider_id = create_body["data"]["id"]
+                    .as_i64()
+                    .expect("provider id should be returned");
+                let provider = Provider::get_by_id(provider_id).expect("provider should persist");
+                assert_eq!(provider.name, "HTTP Provider");
+
+                let provider_cached = app_state
+                    .catalog
+                    .get_provider_by_id(provider_id)
+                    .await
+                    .expect("provider cache should load")
+                    .expect("provider should exist in cache");
+                assert_eq!(provider_cached.provider_key, "http-provider");
+
+                let key_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/provider_key"),
+                        json!({
+                            "api_key": "sk-http-provider",
+                            "description": "primary",
+                            "is_enabled": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(key_response.status(), StatusCode::OK);
+                let key_body = response_json(key_response).await;
+                assert_eq!(key_body["code"], 0);
+                assert_eq!(key_body["data"]["provider_id"], provider_id);
+                assert_eq!(key_body["data"]["description"], "primary");
+
+                let key_id = key_body["data"]["id"]
+                    .as_i64()
+                    .expect("provider key id should be returned");
+                let provider_keys_cached = app_state
+                    .catalog
+                    .get_provider_api_keys(provider_id)
+                    .await
+                    .expect("provider key cache should load");
+                assert_eq!(provider_keys_cached.len(), 1);
+                assert_eq!(provider_keys_cached[0].id, key_id);
+
+                let update_key_response = send(
+                    &app_state,
+                    json_request(
+                        Method::PUT,
+                        &format!("/provider/{provider_id}/provider_key/{key_id}"),
+                        json!({
+                            "api_key": "sk-http-provider-updated",
+                            "description": "rotated",
+                            "is_enabled": false
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(update_key_response.status(), StatusCode::OK);
+                let update_key_body = response_json(update_key_response).await;
+                assert_eq!(update_key_body["data"]["description"], "rotated");
+                assert_eq!(update_key_body["data"]["is_enabled"], false);
+
+                let updated_key =
+                    ProviderApiKey::get_by_id(key_id).expect("updated key should persist");
+                assert_eq!(updated_key.api_key, "sk-http-provider-updated");
+                assert!(!updated_key.is_enabled);
+
+                let provider_keys_after_update = app_state
+                    .catalog
+                    .get_provider_api_keys(provider_id)
+                    .await
+                    .expect("provider key cache should reload");
+                assert_eq!(provider_keys_after_update.len(), 1);
+                assert_eq!(
+                    provider_keys_after_update[0].api_key,
+                    "sk-http-provider-updated"
+                );
+
+                let delete_response = send(
+                    &app_state,
+                    empty_request(Method::DELETE, &format!("/provider/{provider_id}")),
+                )
+                .await;
+                assert_eq!(delete_response.status(), StatusCode::OK);
+                let delete_body = response_json(delete_response).await;
+                assert_eq!(delete_body["code"], 0);
+                assert!(delete_body["data"].is_null());
+
+                assert!(Provider::get_by_id(provider_id).is_err());
+                assert!(ProviderApiKey::get_by_id(key_id).is_err());
+                let provider_after_delete = app_state
+                    .catalog
+                    .get_provider_by_id(provider_id)
+                    .await
+                    .expect("provider cache should reload");
+                let provider_keys_after_delete = app_state
+                    .catalog
+                    .get_provider_api_keys(provider_id)
+                    .await
+                    .expect("provider key cache should reload after provider delete");
+                assert!(provider_after_delete.is_none());
+                assert!(provider_keys_after_delete.is_empty());
+            })
+            .await;
     }
 
     fn sample_bootstrap_result() -> super::BootstrapProviderResult {

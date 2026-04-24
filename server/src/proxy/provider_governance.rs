@@ -3,7 +3,7 @@ use cyder_tools::log::{info, warn};
 use super::{ProxyError, retry_policy::ProviderGovernanceRejection};
 use crate::{
     config::CONFIG,
-    service::app_state::{AppState, ProviderHealthStatus},
+    service::{app_state::AppState, runtime::ProviderHealthStatus},
 };
 
 pub(super) async fn ensure_provider_request_allowed(
@@ -11,7 +11,11 @@ pub(super) async fn ensure_provider_request_allowed(
     provider_id: i64,
     provider_label: &str,
 ) -> Result<(), ProviderGovernanceRejection> {
-    match app_state.allow_provider_request(provider_id).await {
+    match app_state
+        .provider_circuit
+        .allow_provider_request(provider_id)
+        .await
+    {
         Ok(snapshot) => {
             if snapshot.status == ProviderHealthStatus::HalfOpen {
                 info!(
@@ -34,7 +38,10 @@ pub(super) async fn preview_provider_request_allowed(
         return Ok(());
     }
 
-    let snapshot = app_state.get_provider_health_snapshot(provider_id).await;
+    let snapshot = app_state
+        .provider_circuit
+        .get_provider_health_snapshot(provider_id)
+        .await;
     match snapshot.status {
         ProviderHealthStatus::Healthy => Ok(()),
         ProviderHealthStatus::Open => {
@@ -66,7 +73,10 @@ pub(super) async fn record_provider_success(
     provider_id: i64,
     provider_label: &str,
 ) {
-    let snapshot = app_state.record_provider_success(provider_id).await;
+    let snapshot = app_state
+        .provider_circuit
+        .record_provider_success(provider_id)
+        .await;
     if snapshot.status == ProviderHealthStatus::Healthy && snapshot.consecutive_failures == 0 {
         info!(
             "Provider governance marked provider healthy: provider_id={}, provider={}",
@@ -86,6 +96,7 @@ pub(super) async fn record_provider_failure(
     }
 
     let snapshot = app_state
+        .provider_circuit
         .record_provider_failure(provider_id, error.to_string())
         .await;
     if snapshot.status == ProviderHealthStatus::Open {

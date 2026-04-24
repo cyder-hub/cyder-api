@@ -17,12 +17,13 @@ use crate::{
         RequestStatus, SchedulerAction,
     },
     service::{
-        app_state::{AppState, ProviderHealthStatus, create_test_app_state},
+        app_state::{AppState, create_test_app_state},
         request_log_artifact::get_request_log_artifacts,
         request_replay::{
             GatewayReplayExecuteParams, GatewayReplayPreviewParams, execute_gateway_replay,
             load_replay_artifact_for_run, preview_gateway_replay,
         },
+        runtime::ProviderHealthStatus,
         storage::{get_storage, types::GetObjectOptions},
     },
     utils::{ID_GENERATOR, storage::RequestLogBundleV2},
@@ -348,6 +349,7 @@ impl TestFixture {
         let app_state = create_test_app_state(test_db_context).await;
         assert!(
             app_state
+                .catalog
                 .get_api_key(&api_key.api_key)
                 .await
                 .expect("api key lookup should succeed")
@@ -356,6 +358,7 @@ impl TestFixture {
         );
         assert!(
             app_state
+                .catalog
                 .get_provider_by_key(&provider.provider_key)
                 .await
                 .expect("provider lookup should succeed")
@@ -364,6 +367,7 @@ impl TestFixture {
         );
         assert!(
             app_state
+                .catalog
                 .get_model_by_name(&provider.provider_key, &model.model_name)
                 .await
                 .expect("model lookup should succeed")
@@ -372,6 +376,7 @@ impl TestFixture {
         );
         assert_eq!(
             app_state
+                .catalog
                 .get_provider_api_keys(provider.id)
                 .await
                 .expect("provider api key lookup should succeed")
@@ -512,7 +517,7 @@ impl TestFixture {
             }],
         })
         .expect("model route should be created");
-        self.app_state.reload().await;
+        self.app_state.catalog.reload().await;
     }
 
     async fn cleanup(&self) {
@@ -2246,7 +2251,7 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
             ],
         })
         .expect("model route should be created");
-        fixture.app_state.reload().await;
+        fixture.app_state.catalog.reload().await;
 
         for _ in 0..CONFIG
             .provider_governance
@@ -2255,6 +2260,7 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
         {
             fixture
                 .app_state
+                .provider_circuit
                 .record_provider_failure(fixture.provider.id, "forced test failure".to_string())
                 .await;
         }
@@ -2401,7 +2407,7 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
             ],
         })
         .expect("model route should be created");
-        fixture.app_state.reload().await;
+        fixture.app_state.catalog.reload().await;
 
         for _ in 0..CONFIG
             .provider_governance
@@ -2410,6 +2416,7 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
         {
             fixture
                 .app_state
+                .provider_circuit
                 .record_provider_failure(fixture.provider.id, "forced test failure".to_string())
                 .await;
         }
@@ -2434,6 +2441,7 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
         assert_eq!(fallback_upstream.captured_requests().await.len(), 1);
         let skipped_health_before = fixture
             .app_state
+            .provider_circuit
             .get_provider_health_snapshot(fixture.provider.id)
             .await;
         assert_eq!(skipped_health_before.status, ProviderHealthStatus::Open);
@@ -2492,6 +2500,7 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
         assert_eq!(fallback_upstream.captured_requests().await.len(), 1);
         let skipped_health_after = fixture
             .app_state
+            .provider_circuit
             .get_provider_health_snapshot(fixture.provider.id)
             .await;
         assert_eq!(skipped_health_after.status, skipped_health_before.status);
@@ -2619,7 +2628,7 @@ fn gateway_replay_execute_persists_final_fallback_attempt_target() {
             ],
         })
         .expect("model route should be created");
-        fixture.app_state.reload().await;
+        fixture.app_state.catalog.reload().await;
 
         let request = build_json_request(
             "/openai/v1/chat/completions",
@@ -2799,7 +2808,7 @@ fn request_patch_conflict_uses_stable_error_code_in_attempt_and_request_log() {
             model_rule,
             RequestPatchMutationOutcome::Saved { .. }
         ));
-        fixture.app_state.reload().await;
+        fixture.app_state.catalog.reload().await;
 
         let request = build_json_request(
             "/openai/v1/chat/completions",

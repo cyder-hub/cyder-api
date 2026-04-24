@@ -136,6 +136,7 @@ async fn create_provider_request_patch(
     let outcome = RequestPatchRule::create_for_provider(provider_id, &payload)?;
     if let RequestPatchMutationOutcome::Saved { rule } = &outcome {
         if let Err(err) = app_state
+            .catalog
             .invalidate_provider_request_patch_rules(provider_id)
             .await
         {
@@ -159,6 +160,7 @@ async fn update_provider_request_patch(
     let outcome = RequestPatchRule::update_for_provider(provider_id, rule_id, &payload)?;
     if let RequestPatchMutationOutcome::Saved { rule } = &outcome {
         if let Err(err) = app_state
+            .catalog
             .invalidate_provider_request_patch_rules(provider_id)
             .await
         {
@@ -181,6 +183,7 @@ async fn delete_provider_request_patch(
     let rule = RequestPatchRule::get_provider_rule(provider_id, rule_id)?;
     RequestPatchRule::delete_for_provider(provider_id, rule_id)?;
     if let Err(err) = app_state
+        .catalog
         .invalidate_provider_request_patch_rules(provider_id)
         .await
     {
@@ -211,6 +214,7 @@ async fn create_model_request_patch(
     let outcome = RequestPatchRule::create_for_model(model_id, &payload)?;
     if let RequestPatchMutationOutcome::Saved { rule } = &outcome {
         if let Err(err) = app_state
+            .catalog
             .invalidate_model_request_patch_rules(model_id)
             .await
         {
@@ -234,6 +238,7 @@ async fn update_model_request_patch(
     let outcome = RequestPatchRule::update_for_model(model_id, rule_id, &payload)?;
     if let RequestPatchMutationOutcome::Saved { rule } = &outcome {
         if let Err(err) = app_state
+            .catalog
             .invalidate_model_request_patch_rules(model_id)
             .await
         {
@@ -256,6 +261,7 @@ async fn delete_model_request_patch(
     let rule = RequestPatchRule::get_model_rule(model_id, rule_id)?;
     RequestPatchRule::delete_for_model(model_id, rule_id)?;
     if let Err(err) = app_state
+        .catalog
         .invalidate_model_request_patch_rules(model_id)
         .await
     {
@@ -276,6 +282,7 @@ async fn get_model_request_patch_effective(
 ) -> Result<HttpResult<ModelRequestPatchEffectiveResponse>, BaseError> {
     let model = Model::get_by_id(model_id)?;
     let Some(resolved) = app_state
+        .catalog
         .get_model_effective_request_patches(model_id)
         .await?
     else {
@@ -300,6 +307,7 @@ async fn get_model_request_patch_explain(
 ) -> Result<HttpResult<ModelRequestPatchExplainResponse>, BaseError> {
     let model = Model::get_by_id(model_id)?;
     let Some(resolved) = app_state
+        .catalog
         .get_model_effective_request_patches(model_id)
         .await?
     else {

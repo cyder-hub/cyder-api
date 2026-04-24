@@ -740,10 +740,12 @@ async fn load_attempt_replay_source(
     };
 
     let provider = app_state
+        .catalog
         .get_provider_by_id(provider_id)
         .await?
         .ok_or_else(|| BaseError::NotFound(Some(format!("Provider {} not found", provider_id))))?;
     let model = app_state
+        .catalog
         .get_model_by_id(model_id)
         .await?
         .ok_or_else(|| BaseError::NotFound(Some(format!("Model {} not found", model_id))))?;
@@ -780,10 +782,12 @@ async fn load_attempt_replay_source(
 
     let cost_catalog_version = match attempt.cost_catalog_version_id {
         Some(cost_catalog_version_id) => app_state
+            .catalog
             .get_cost_catalog_version_by_id(cost_catalog_version_id)
             .await?
             .map(|version| (*version).clone()),
         None => app_state
+            .catalog
             .get_cost_catalog_version_by_model(model.id, Utc::now().timestamp_millis())
             .await?
             .map(|version| (*version).clone()),
@@ -1845,9 +1849,9 @@ async fn perform_attempt_replay_execution(
         }
     };
     let client = if source.provider.use_proxy {
-        &app_state.proxy_client
+        app_state.infra.proxy_client()
     } else {
-        &app_state.client
+        app_state.infra.client()
     };
 
     let cancellation = ProxyCancellationContext::new();
@@ -2258,6 +2262,7 @@ async fn perform_gateway_replay_execution(
 
     let cost_catalog_version = match execution.metadata.final_attempt.model_id {
         Some(model_id) => app_state
+            .catalog
             .get_cost_catalog_version_by_model(model_id, Utc::now().timestamp_millis())
             .await
             .ok()
@@ -2357,7 +2362,7 @@ async fn resolve_replay_provider_credentials(
 
     let request_key = match provider.provider_type {
         ProviderType::Vertex | ProviderType::VertexOpenai => get_vertex_token(
-            &app_state.proxy_client,
+            app_state.infra.proxy_client(),
             selected_key.id,
             &selected_key.api_key,
         )

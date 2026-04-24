@@ -192,6 +192,7 @@ pub(super) async fn get_cost_catalog_version(
     );
     if model.cost_catalog_id.is_some() {
         app_state
+            .catalog
             .get_cost_catalog_version_by_model(model.id, chrono::Utc::now().timestamp_millis())
             .await
             .ok()

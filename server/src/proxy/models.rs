@@ -33,10 +33,14 @@ pub(super) async fn get_accessible_models(
 ) -> Result<Vec<AccessibleModel>, ProxyError> {
     debug!("Fetching accessible models for API key ID: {}", api_key.id);
 
-    let catalog = app_state.get_models_catalog().await.map_err(|store_err| {
-        error!("Failed to fetch models catalog from cache: {:?}", store_err);
-        ProxyError::InternalError("Failed to retrieve models catalog".to_string())
-    })?;
+    let catalog = app_state
+        .catalog
+        .get_models_catalog()
+        .await
+        .map_err(|store_err| {
+            error!("Failed to fetch models catalog from cache: {:?}", store_err);
+            ProxyError::InternalError("Failed to retrieve models catalog".to_string())
+        })?;
 
     let available_models = collect_accessible_models(catalog.as_ref(), api_key);
 

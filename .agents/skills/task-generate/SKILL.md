@@ -97,6 +97,22 @@ Default to a self-contained document. The final task doc should be understandabl
 
 If earlier task docs contain useful context, absorb the needed conclusions into the new file instead of making the new file depend on them.
 
+For execution-oriented task docs, add a short self-explanatory maintenance contract near the top of the file. Put it after the “适用前提” block unless the user requests another location. This contract should make clear that:
+
+- the document is a living implementation guide, not a one-time analysis memo
+- when a future user asks to complete one or more tasks from the document, the executor should actually complete the specified tasks rather than only restating the plan
+- after implementation, the executor must update the document with real progress and completion information
+- partial completion must be marked explicitly rather than silently treated as complete
+- if implementation diverges from the original plan, the document must be updated to match the landed code
+
+For this maintenance contract, require the document to tell future executors to update at least:
+
+- current status and overall progress near the top of the document when relevant
+- the status of the affected task
+- what was completed
+- what verification was actually run
+- notes, caveats, blockers, or plan deviations
+
 ## Document structure
 
 Use this structure unless the user requests otherwise:
@@ -109,6 +125,10 @@ Use this structure unless the user requests otherwise:
 适用前提：
 
 - ...
+
+## 文档执行与维护约定
+
+...
 
 ---
 
@@ -148,6 +168,7 @@ Use this structure unless the user requests otherwise:
 
 Adjust section titles when the subsystem needs it, but preserve the same high-level pattern:
 
+- execution/maintenance contract near the top for living task docs
 - conclusion
 - current-state analysis
 - target design
@@ -235,6 +256,8 @@ Do not turn the task list into a patch tutorial. The right granularity is archit
 
 - specific enough that an engineer knows where to change code and what must replace what
 - not so specific that the task doc becomes a line-by-line editing script
+
+For living implementation guides, also make the task list maintainable after execution begins. Each task should be easy to update later with real implementation progress. Prefer tasks that have a clear durable owner and a clear acceptance boundary so future executors can mark status, verification, and notes without ambiguity.
 
 ## Task splitting guidance
 

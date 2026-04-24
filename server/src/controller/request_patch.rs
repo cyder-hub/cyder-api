@@ -5,7 +5,6 @@ use axum::{
     extract::{Path, State},
     routing::{get, put},
 };
-use cyder_tools::log::warn;
 use serde::Serialize;
 
 use crate::{
@@ -48,78 +47,6 @@ struct ModelRequestPatchExplainResponse {
     has_conflicts: bool,
 }
 
-fn log_request_patch_audit(
-    action: &'static str,
-    scope_kind: &'static str,
-    scope_id: i64,
-    rule: &RequestPatchRuleResponse,
-    is_enabled: bool,
-) {
-    match (scope_kind, action) {
-        ("provider", "create") => crate::info_event!(
-            "manager.provider_request_patch_created",
-            action = action,
-            scope_kind = scope_kind,
-            scope_id = scope_id,
-            request_patch_rule_id = rule.id,
-            placement = format!("{:?}", rule.placement),
-            operation = format!("{:?}", rule.operation),
-            is_enabled = is_enabled,
-        ),
-        ("provider", "update") => crate::info_event!(
-            "manager.provider_request_patch_updated",
-            action = action,
-            scope_kind = scope_kind,
-            scope_id = scope_id,
-            request_patch_rule_id = rule.id,
-            placement = format!("{:?}", rule.placement),
-            operation = format!("{:?}", rule.operation),
-            is_enabled = is_enabled,
-        ),
-        ("provider", "delete") => crate::info_event!(
-            "manager.provider_request_patch_deleted",
-            action = action,
-            scope_kind = scope_kind,
-            scope_id = scope_id,
-            request_patch_rule_id = rule.id,
-            placement = format!("{:?}", rule.placement),
-            operation = format!("{:?}", rule.operation),
-            is_enabled = is_enabled,
-        ),
-        ("model", "create") => crate::info_event!(
-            "manager.model_request_patch_created",
-            action = action,
-            scope_kind = scope_kind,
-            scope_id = scope_id,
-            request_patch_rule_id = rule.id,
-            placement = format!("{:?}", rule.placement),
-            operation = format!("{:?}", rule.operation),
-            is_enabled = is_enabled,
-        ),
-        ("model", "update") => crate::info_event!(
-            "manager.model_request_patch_updated",
-            action = action,
-            scope_kind = scope_kind,
-            scope_id = scope_id,
-            request_patch_rule_id = rule.id,
-            placement = format!("{:?}", rule.placement),
-            operation = format!("{:?}", rule.operation),
-            is_enabled = is_enabled,
-        ),
-        ("model", "delete") => crate::info_event!(
-            "manager.model_request_patch_deleted",
-            action = action,
-            scope_kind = scope_kind,
-            scope_id = scope_id,
-            request_patch_rule_id = rule.id,
-            placement = format!("{:?}", rule.placement),
-            operation = format!("{:?}", rule.operation),
-            is_enabled = is_enabled,
-        ),
-        _ => unreachable!("unsupported request patch audit action: {scope_kind}:{action}"),
-    }
-}
-
 async fn list_provider_request_patches(
     Path(provider_id): Path<i64>,
 ) -> Result<HttpResult<Vec<RequestPatchRuleResponse>>, BaseError> {
@@ -133,22 +60,11 @@ async fn create_provider_request_patch(
     Path(provider_id): Path<i64>,
     Json(payload): Json<CreateRequestPatchPayload>,
 ) -> Result<HttpResult<RequestPatchMutationOutcome>, BaseError> {
-    let outcome = RequestPatchRule::create_for_provider(provider_id, &payload)?;
-    if let RequestPatchMutationOutcome::Saved { rule } = &outcome {
-        if let Err(err) = app_state
-            .catalog
-            .invalidate_provider_request_patch_rules(provider_id)
-            .await
-        {
-            warn!(
-                "Failed to invalidate provider request patch cache after create: {:?}",
-                err
-            );
-        }
-
-        log_request_patch_audit("create", "provider", provider_id, rule, rule.is_enabled);
-    }
-
+    let outcome = app_state
+        .admin
+        .request_patch
+        .create_provider_request_patch(provider_id, payload)
+        .await?;
     Ok(HttpResult::new(outcome))
 }
 
@@ -157,22 +73,11 @@ async fn update_provider_request_patch(
     Path((provider_id, rule_id)): Path<(i64, i64)>,
     Json(payload): Json<UpdateRequestPatchPayload>,
 ) -> Result<HttpResult<RequestPatchMutationOutcome>, BaseError> {
-    let outcome = RequestPatchRule::update_for_provider(provider_id, rule_id, &payload)?;
-    if let RequestPatchMutationOutcome::Saved { rule } = &outcome {
-        if let Err(err) = app_state
-            .catalog
-            .invalidate_provider_request_patch_rules(provider_id)
-            .await
-        {
-            warn!(
-                "Failed to invalidate provider request patch cache after update: {:?}",
-                err
-            );
-        }
-
-        log_request_patch_audit("update", "provider", provider_id, rule, rule.is_enabled);
-    }
-
+    let outcome = app_state
+        .admin
+        .request_patch
+        .update_provider_request_patch(provider_id, rule_id, payload)
+        .await?;
     Ok(HttpResult::new(outcome))
 }
 
@@ -180,21 +85,11 @@ async fn delete_provider_request_patch(
     State(app_state): State<Arc<AppState>>,
     Path((provider_id, rule_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<()>, BaseError> {
-    let rule = RequestPatchRule::get_provider_rule(provider_id, rule_id)?;
-    RequestPatchRule::delete_for_provider(provider_id, rule_id)?;
-    if let Err(err) = app_state
-        .catalog
-        .invalidate_provider_request_patch_rules(provider_id)
-        .await
-    {
-        warn!(
-            "Failed to invalidate provider request patch cache after delete: {:?}",
-            err
-        );
-    }
-
-    log_request_patch_audit("delete", "provider", provider_id, &rule, false);
-
+    app_state
+        .admin
+        .request_patch
+        .delete_provider_request_patch(provider_id, rule_id)
+        .await?;
     Ok(HttpResult::new(()))
 }
 
@@ -211,22 +106,11 @@ async fn create_model_request_patch(
     Path(model_id): Path<i64>,
     Json(payload): Json<CreateRequestPatchPayload>,
 ) -> Result<HttpResult<RequestPatchMutationOutcome>, BaseError> {
-    let outcome = RequestPatchRule::create_for_model(model_id, &payload)?;
-    if let RequestPatchMutationOutcome::Saved { rule } = &outcome {
-        if let Err(err) = app_state
-            .catalog
-            .invalidate_model_request_patch_rules(model_id)
-            .await
-        {
-            warn!(
-                "Failed to invalidate model request patch cache after create: {:?}",
-                err
-            );
-        }
-
-        log_request_patch_audit("create", "model", model_id, rule, rule.is_enabled);
-    }
-
+    let outcome = app_state
+        .admin
+        .request_patch
+        .create_model_request_patch(model_id, payload)
+        .await?;
     Ok(HttpResult::new(outcome))
 }
 
@@ -235,22 +119,11 @@ async fn update_model_request_patch(
     Path((model_id, rule_id)): Path<(i64, i64)>,
     Json(payload): Json<UpdateRequestPatchPayload>,
 ) -> Result<HttpResult<RequestPatchMutationOutcome>, BaseError> {
-    let outcome = RequestPatchRule::update_for_model(model_id, rule_id, &payload)?;
-    if let RequestPatchMutationOutcome::Saved { rule } = &outcome {
-        if let Err(err) = app_state
-            .catalog
-            .invalidate_model_request_patch_rules(model_id)
-            .await
-        {
-            warn!(
-                "Failed to invalidate model request patch cache after update: {:?}",
-                err
-            );
-        }
-
-        log_request_patch_audit("update", "model", model_id, rule, rule.is_enabled);
-    }
-
+    let outcome = app_state
+        .admin
+        .request_patch
+        .update_model_request_patch(model_id, rule_id, payload)
+        .await?;
     Ok(HttpResult::new(outcome))
 }
 
@@ -258,21 +131,11 @@ async fn delete_model_request_patch(
     State(app_state): State<Arc<AppState>>,
     Path((model_id, rule_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<()>, BaseError> {
-    let rule = RequestPatchRule::get_model_rule(model_id, rule_id)?;
-    RequestPatchRule::delete_for_model(model_id, rule_id)?;
-    if let Err(err) = app_state
-        .catalog
-        .invalidate_model_request_patch_rules(model_id)
-        .await
-    {
-        warn!(
-            "Failed to invalidate model request patch cache after delete: {:?}",
-            err
-        );
-    }
-
-    log_request_patch_audit("delete", "model", model_id, &rule, false);
-
+    app_state
+        .admin
+        .request_patch
+        .delete_model_request_patch(model_id, rule_id)
+        .await?;
     Ok(HttpResult::new(()))
 }
 
@@ -355,4 +218,288 @@ pub fn create_request_patch_router() -> StateRouter {
             "/model/{id}/request_patch/{rule_id}",
             put(update_model_request_patch).delete(delete_model_request_patch),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header::CONTENT_TYPE},
+    };
+    use serde_json::{Value, json};
+    use tower::util::ServiceExt;
+
+    use crate::database::TestDbContext;
+    use crate::database::model::{Model, ModelCapabilityFlags};
+    use crate::database::provider::{NewProvider, Provider};
+    use crate::database::request_patch::RequestPatchRule;
+    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::service::app_state::{AppState, create_test_app_state};
+
+    use super::create_request_patch_router;
+
+    fn seed_provider(id: i64, provider_key: &str) -> Provider {
+        Provider::create(&NewProvider {
+            id,
+            provider_key: provider_key.to_string(),
+            name: provider_key.to_string(),
+            endpoint: "https://api.example.com/v1".to_string(),
+            use_proxy: false,
+            is_enabled: true,
+            created_at: 1,
+            updated_at: 1,
+            provider_type: ProviderType::Openai,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        })
+        .expect("provider seed should succeed")
+    }
+
+    fn seed_model_for_provider(provider_id: i64, model_name: &str) -> Model {
+        Model::create(
+            provider_id,
+            model_name,
+            None,
+            true,
+            ModelCapabilityFlags {
+                supports_streaming: true,
+                supports_tools: true,
+                supports_reasoning: true,
+                supports_image_input: true,
+                supports_embeddings: true,
+                supports_rerank: true,
+            },
+        )
+        .expect("model seed should succeed")
+    }
+
+    async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
+        create_request_patch_router()
+            .with_state(Arc::clone(app_state))
+            .oneshot(request)
+            .await
+            .expect("request patch router should respond")
+    }
+
+    fn json_request(method: Method, uri: &str, payload: Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&payload).expect("payload should serialize"),
+            ))
+            .expect("request should build")
+    }
+
+    fn empty_request(method: Method, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request should build")
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&body).expect("response should be json")
+    }
+
+    #[test]
+    fn create_request_patch_router_registers_routes() {
+        let _router = create_request_patch_router();
+    }
+
+    #[tokio::test]
+    async fn provider_scope_request_patch_http_lifecycle_updates_effective_endpoint() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-request-patch-provider-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let provider = seed_provider(22101, "openai");
+                let model = seed_model_for_provider(provider.id, "gpt-4o-mini");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let create_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{}/request_patch", provider.id),
+                        json!({
+                            "placement": "BODY",
+                            "target": "/temperature",
+                            "operation": "SET",
+                            "value_json": 0.2,
+                            "description": "provider patch",
+                            "is_enabled": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(create_response.status(), StatusCode::OK);
+                let create_body = response_json(create_response).await;
+                let rule_id = create_body["data"]["rule"]["id"]
+                    .as_i64()
+                    .expect("saved provider rule id should exist");
+                assert_eq!(create_body["code"], 0);
+                assert_eq!(create_body["data"]["result"], "saved");
+
+                let effective_after_create = send(
+                    &app_state,
+                    empty_request(
+                        Method::GET,
+                        &format!("/model/{}/request_patch/effective", model.id),
+                    ),
+                )
+                .await;
+                assert_eq!(effective_after_create.status(), StatusCode::OK);
+                let effective_after_create_body = response_json(effective_after_create).await;
+                assert_eq!(
+                    effective_after_create_body["data"]["effective_rules"]
+                        .as_array()
+                        .expect("effective rules should be an array")
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    effective_after_create_body["data"]["effective_rules"][0]["target"],
+                    "/temperature"
+                );
+
+                let delete_response = send(
+                    &app_state,
+                    empty_request(
+                        Method::DELETE,
+                        &format!("/provider/{}/request_patch/{}", provider.id, rule_id),
+                    ),
+                )
+                .await;
+                assert_eq!(delete_response.status(), StatusCode::OK);
+                let delete_body = response_json(delete_response).await;
+                assert_eq!(delete_body["code"], 0);
+                assert!(delete_body["data"].is_null());
+
+                let effective_after_delete = send(
+                    &app_state,
+                    empty_request(
+                        Method::GET,
+                        &format!("/model/{}/request_patch/effective", model.id),
+                    ),
+                )
+                .await;
+                assert_eq!(effective_after_delete.status(), StatusCode::OK);
+                let effective_after_delete_body = response_json(effective_after_delete).await;
+                assert!(
+                    effective_after_delete_body["data"]["effective_rules"]
+                        .as_array()
+                        .expect("effective rules should be an array")
+                        .is_empty()
+                );
+                assert!(
+                    RequestPatchRule::list_by_provider_id(provider.id)
+                        .expect("provider rules should load")
+                        .is_empty()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn model_scope_request_patch_http_lifecycle_updates_effective_endpoint() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-request-patch-model-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let provider = seed_provider(22201, "openai");
+                let model = seed_model_for_provider(provider.id, "gpt-4o-mini");
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let create_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/model/{}/request_patch", model.id),
+                        json!({
+                            "placement": "BODY",
+                            "target": "/top_p",
+                            "operation": "SET",
+                            "value_json": 0.7,
+                            "description": "model patch",
+                            "is_enabled": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(create_response.status(), StatusCode::OK);
+                let create_body = response_json(create_response).await;
+                let rule_id = create_body["data"]["rule"]["id"]
+                    .as_i64()
+                    .expect("saved model rule id should exist");
+                assert_eq!(create_body["code"], 0);
+                assert_eq!(create_body["data"]["result"], "saved");
+
+                let effective_after_create = send(
+                    &app_state,
+                    empty_request(
+                        Method::GET,
+                        &format!("/model/{}/request_patch/effective", model.id),
+                    ),
+                )
+                .await;
+                assert_eq!(effective_after_create.status(), StatusCode::OK);
+                let effective_after_create_body = response_json(effective_after_create).await;
+                assert_eq!(
+                    effective_after_create_body["data"]["effective_rules"]
+                        .as_array()
+                        .expect("effective rules should be an array")
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    effective_after_create_body["data"]["effective_rules"][0]["target"],
+                    "/top_p"
+                );
+
+                let delete_response = send(
+                    &app_state,
+                    empty_request(
+                        Method::DELETE,
+                        &format!("/model/{}/request_patch/{}", model.id, rule_id),
+                    ),
+                )
+                .await;
+                assert_eq!(delete_response.status(), StatusCode::OK);
+                let delete_body = response_json(delete_response).await;
+                assert_eq!(delete_body["code"], 0);
+                assert!(delete_body["data"].is_null());
+
+                let effective_after_delete = send(
+                    &app_state,
+                    empty_request(
+                        Method::GET,
+                        &format!("/model/{}/request_patch/effective", model.id),
+                    ),
+                )
+                .await;
+                assert_eq!(effective_after_delete.status(), StatusCode::OK);
+                let effective_after_delete_body = response_json(effective_after_delete).await;
+                assert!(
+                    effective_after_delete_body["data"]["effective_rules"]
+                        .as_array()
+                        .expect("effective rules should be an array")
+                        .is_empty()
+                );
+                assert!(
+                    RequestPatchRule::list_by_model_id(model.id)
+                        .expect("model rules should load")
+                        .is_empty()
+                );
+            })
+            .await;
+    }
 }

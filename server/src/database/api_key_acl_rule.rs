@@ -82,7 +82,7 @@ fn validate_rule_input(rule: &ApiKeyAclRuleInput) -> DbResult<()> {
     Ok(())
 }
 
-fn map_rule_inputs(
+pub(crate) fn map_rule_inputs(
     api_key_id_value: i64,
     rules: &[ApiKeyAclRuleInput],
     now: i64,

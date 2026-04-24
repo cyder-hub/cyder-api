@@ -340,6 +340,106 @@ impl Provider {
         })
     }
 
+    /// Soft deletes a provider and all delete-owned dependent rows in one transaction.
+    pub fn delete_with_dependents(target_id_value: i64) -> DbResult<usize> {
+        let conn = &mut get_connection()?;
+        let current_time = Utc::now().timestamp_millis();
+
+        db_execute!(conn, {
+            conn.transaction::<usize, BaseError, _>(|conn| {
+                let updated = diesel::update(provider::table.find(target_id_value))
+                    .set((
+                        provider::dsl::deleted_at.eq(current_time),
+                        provider::dsl::is_enabled.eq(false),
+                        provider::dsl::updated_at.eq(current_time),
+                    ))
+                    .execute(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to delete provider {}: {}",
+                            target_id_value, e
+                        )))
+                    })?;
+
+                let model_ids = model::table
+                    .filter(model::dsl::provider_id.eq(target_id_value))
+                    .select(model::dsl::id)
+                    .load::<i64>(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to list models for provider {} while deleting dependents: {}",
+                            target_id_value, e
+                        )))
+                    })?;
+
+                if !model_ids.is_empty() {
+                    diesel::update(
+                        model_route_candidate::table.filter(
+                            model_route_candidate::dsl::model_id
+                                .eq_any(model_ids)
+                                .and(model_route_candidate::dsl::deleted_at.is_null()),
+                        ),
+                    )
+                    .set((
+                        model_route_candidate::dsl::deleted_at.eq(Some(current_time)),
+                        model_route_candidate::dsl::is_enabled.eq(false),
+                        model_route_candidate::dsl::updated_at.eq(current_time),
+                    ))
+                    .execute(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to delete model route candidates for provider {}: {}",
+                            target_id_value, e
+                        )))
+                    })?;
+                }
+
+                diesel::update(
+                    provider_api_key::table.filter(
+                        provider_api_key::dsl::provider_id
+                            .eq(target_id_value)
+                            .and(provider_api_key::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    provider_api_key::dsl::deleted_at.eq(current_time),
+                    provider_api_key::dsl::is_enabled.eq(false),
+                    provider_api_key::dsl::updated_at.eq(current_time),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete provider API keys for provider {}: {}",
+                        target_id_value, e
+                    )))
+                })?;
+
+                diesel::update(
+                    request_patch_rule::table.filter(
+                        request_patch_rule::dsl::provider_id
+                            .eq(target_id_value)
+                            .and(request_patch_rule::dsl::model_id.is_null())
+                            .and(request_patch_rule::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    request_patch_rule::dsl::deleted_at.eq(current_time),
+                    request_patch_rule::dsl::is_enabled.eq(false),
+                    request_patch_rule::dsl::updated_at.eq(current_time),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete provider request patch rules for {}: {}",
+                        target_id_value, e
+                    )))
+                })?;
+
+                Ok(updated)
+            })
+        })
+    }
+
     /// Retrieves a provider by its key, if it's not marked as deleted.
     pub fn get_by_key(provider_key_val: &str) -> DbResult<Option<Provider>> {
         let conn = &mut get_connection()?;

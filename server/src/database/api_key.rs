@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use chrono::Utc;
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric, rng};
@@ -6,8 +8,9 @@ use sha2::{Digest, Sha256};
 
 use super::{
     DbResult,
-    api_key_acl_rule::{ApiKeyAclRule, ApiKeyAclRuleInput},
+    api_key_acl_rule::{self as api_key_acl_repository, ApiKeyAclRule, ApiKeyAclRuleInput},
     get_connection,
+    model_route::NewApiKeyModelOverride,
 };
 use crate::controller::BaseError;
 use crate::schema::enum_def::Action;
@@ -203,6 +206,59 @@ pub struct ApiKeyDetailWithSecret {
     pub reveal: ApiKeyReveal,
 }
 
+#[derive(Debug, Clone)]
+pub struct ApiKeyModelOverrideWriteInput {
+    pub source_name: String,
+    pub target_route_id: i64,
+    pub description: Option<String>,
+    pub is_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApiKeyModelOverrideWriteSummary {
+    pub old_source_names: Vec<String>,
+    pub new_source_names: Vec<String>,
+    pub override_count: usize,
+    pub enabled_override_count: usize,
+}
+
+impl ApiKeyModelOverrideWriteSummary {
+    pub fn invalidation_source_names(&self) -> Vec<String> {
+        collect_source_names(self.old_source_names.clone(), self.new_source_names.clone())
+    }
+
+    fn from_rows(
+        old_source_names: Vec<String>,
+        rows: &[NewApiKeyModelOverride],
+    ) -> ApiKeyModelOverrideWriteSummary {
+        ApiKeyModelOverrideWriteSummary {
+            old_source_names,
+            new_source_names: rows.iter().map(|row| row.source_name.clone()).collect(),
+            override_count: rows.len(),
+            enabled_override_count: rows.iter().filter(|row| row.is_enabled).count(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateApiKeyWithOverridesResult {
+    pub created: ApiKeyDetailWithSecret,
+    pub override_summary: ApiKeyModelOverrideWriteSummary,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateApiKeyWithOverridesResult {
+    pub updated: ApiKeyDetail,
+    pub override_summary: ApiKeyModelOverrideWriteSummary,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteApiKeyWithOverridesResult {
+    pub deleted: ApiKey,
+    pub old_api_key_hash: String,
+    pub override_summary: ApiKeyModelOverrideWriteSummary,
+}
+
 fn generate_api_key_secret() -> String {
     let random_part: String = rng()
         .sample_iter(&Alphanumeric)
@@ -225,6 +281,46 @@ pub(crate) fn key_last4(secret: &str) -> String {
     last4.chars().rev().collect()
 }
 
+fn normalize_required_name(field: &str, value: &str) -> DbResult<String> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return Err(BaseError::ParamInvalid(Some(format!(
+            "{field} must not be empty"
+        ))));
+    }
+    Ok(normalized.to_string())
+}
+
+fn make_model_override_rows(
+    api_key_id: i64,
+    payloads: &[ApiKeyModelOverrideWriteInput],
+    now: i64,
+) -> DbResult<Vec<NewApiKeyModelOverride>> {
+    let mut rows = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        rows.push(NewApiKeyModelOverride {
+            id: ID_GENERATOR.generate_id(),
+            api_key_id,
+            source_name: normalize_required_name("source_name", &payload.source_name)?,
+            target_route_id: payload.target_route_id,
+            description: payload.description.clone(),
+            is_enabled: payload.is_enabled.unwrap_or(true),
+            created_at: now,
+            updated_at: now,
+        });
+    }
+    Ok(rows)
+}
+
+fn collect_source_names(existing: Vec<String>, created: Vec<String>) -> Vec<String> {
+    existing
+        .into_iter()
+        .chain(created)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn map_write_error(context: &str, e: diesel::result::Error) -> BaseError {
     match e {
         diesel::result::Error::DatabaseError(
@@ -233,6 +329,219 @@ fn map_write_error(context: &str, e: diesel::result::Error) -> BaseError {
         ) => BaseError::DatabaseDup(Some(context.to_string())),
         other => BaseError::DatabaseFatal(Some(format!("{context}: {other}"))),
     }
+}
+
+macro_rules! api_key_admin_db_execute {
+    ($conn:ident, $block:block) => {
+        match $conn {
+            crate::database::DbConnection::Postgres($conn) => {
+                #[allow(unused_imports)]
+                use self::_postgres_model::*;
+                use crate::database::_postgres_schema::*;
+                #[allow(unused_imports)]
+                use crate::database::api_key_acl_rule::_postgres_model::*;
+                #[allow(unused_imports)]
+                use crate::database::model_route::_postgres_model::*;
+                #[allow(unused_imports)]
+                use diesel::prelude::*;
+
+                $block
+            }
+            crate::database::DbConnection::Sqlite($conn) => {
+                #[allow(unused_imports)]
+                use self::_sqlite_model::*;
+                use crate::database::_sqlite_schema::*;
+                #[allow(unused_imports)]
+                use crate::database::api_key_acl_rule::_sqlite_model::*;
+                #[allow(unused_imports)]
+                use crate::database::model_route::_sqlite_model::*;
+                #[allow(unused_imports)]
+                use diesel::prelude::*;
+
+                $block
+            }
+        }
+    };
+}
+
+macro_rules! load_api_key_acl_rules_in_tx {
+    ($conn:ident, $api_key_id:expr) => {{
+        let rows = api_key_acl_rule::table
+            .filter(
+                api_key_acl_rule::dsl::api_key_id
+                    .eq($api_key_id)
+                    .and(api_key_acl_rule::dsl::deleted_at.is_null()),
+            )
+            .order((
+                api_key_acl_rule::dsl::priority.asc(),
+                api_key_acl_rule::dsl::created_at.asc(),
+                api_key_acl_rule::dsl::id.asc(),
+            ))
+            .select(ApiKeyAclRuleDb::as_select())
+            .load::<ApiKeyAclRuleDb>($conn)
+            .map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to load api key ACL rules for {}: {}",
+                    $api_key_id, e
+                )))
+            })?;
+
+        Ok::<Vec<ApiKeyAclRule>, BaseError>(
+            rows.into_iter()
+                .map(ApiKeyAclRuleDb::from_db)
+                .collect::<Vec<_>>(),
+        )
+    }};
+}
+
+macro_rules! insert_api_key_acl_rules_in_tx {
+    ($conn:ident, $api_key_id:expr, $acl_rows:expr) => {{
+        let acl_rows = $acl_rows;
+        if !acl_rows.is_empty() {
+            let db_rows: Vec<_> = acl_rows.iter().map(NewApiKeyAclRuleDb::to_db).collect();
+            diesel::insert_into(api_key_acl_rule::table)
+                .values(&db_rows)
+                .execute($conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to insert ACL rules for api key {}: {}",
+                        $api_key_id, e
+                    )))
+                })?;
+        }
+        Ok::<(), BaseError>(())
+    }};
+}
+
+macro_rules! replace_api_key_acl_rules_in_tx {
+    ($conn:ident, $api_key_id:expr, $acl_rows:expr) => {{
+        diesel::delete(
+            api_key_acl_rule::table.filter(api_key_acl_rule::dsl::api_key_id.eq($api_key_id)),
+        )
+        .execute($conn)
+        .map_err(|e| {
+            BaseError::DatabaseFatal(Some(format!(
+                "Failed to replace ACL rules for api key {}: {}",
+                $api_key_id, e
+            )))
+        })?;
+
+        insert_api_key_acl_rules_in_tx!($conn, $api_key_id, $acl_rows)?;
+        Ok::<(), BaseError>(())
+    }};
+}
+
+macro_rules! replace_api_key_model_overrides_in_tx {
+    ($conn:ident, $api_key_id:expr, $override_rows:expr, $now:expr) => {{
+        let override_rows = $override_rows;
+
+        if !override_rows.is_empty() {
+            let direct_model_names = provider::table
+                .inner_join(model::table.on(model::dsl::provider_id.eq(provider::dsl::id)))
+                .filter(
+                    provider::dsl::deleted_at
+                        .is_null()
+                        .and(provider::dsl::is_enabled.eq(true))
+                        .and(model::dsl::deleted_at.is_null())
+                        .and(model::dsl::is_enabled.eq(true)),
+                )
+                .select((provider::dsl::provider_key, model::dsl::model_name))
+                .load::<(String, String)>($conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to load active direct provider/model names: {}",
+                        e
+                    )))
+                })?;
+
+            for override_row in override_rows {
+                let source_name = &override_row.source_name;
+                if direct_model_names.iter().any(|(provider_key, model_name)| {
+                    format!("{provider_key}/{model_name}") == *source_name
+                }) {
+                    Err(BaseError::ParamInvalid(Some(format!(
+                        "name '{}' conflicts with an active direct provider/model address",
+                        source_name
+                    ))))?;
+                }
+            }
+        }
+
+        let existing_rows = api_key_model_override::table
+            .filter(
+                api_key_model_override::dsl::api_key_id
+                    .eq($api_key_id)
+                    .and(api_key_model_override::dsl::deleted_at.is_null()),
+            )
+            .order(api_key_model_override::dsl::created_at.asc())
+            .select(ApiKeyModelOverrideDb::as_select())
+            .load::<ApiKeyModelOverrideDb>($conn)
+            .map_err(|e| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to list api key model overrides for {}: {}",
+                    $api_key_id, e
+                )))
+            })?;
+        let old_source_names = existing_rows
+            .into_iter()
+            .map(ApiKeyModelOverrideDb::from_db)
+            .map(|override_row| override_row.source_name)
+            .collect::<Vec<_>>();
+
+        diesel::update(
+            api_key_model_override::table.filter(
+                api_key_model_override::dsl::api_key_id
+                    .eq($api_key_id)
+                    .and(api_key_model_override::dsl::deleted_at.is_null()),
+            ),
+        )
+        .set((
+            api_key_model_override::dsl::deleted_at.eq(Some($now)),
+            api_key_model_override::dsl::is_enabled.eq(false),
+            api_key_model_override::dsl::updated_at.eq($now),
+        ))
+        .execute($conn)
+        .map_err(|e| {
+            BaseError::DatabaseFatal(Some(format!(
+                "Failed to replace api key model overrides for {}: {}",
+                $api_key_id, e
+            )))
+        })?;
+
+        for override_row in override_rows {
+            model_route::table
+                .filter(
+                    model_route::dsl::id
+                        .eq(override_row.target_route_id)
+                        .and(model_route::dsl::deleted_at.is_null()),
+                )
+                .select(model_route::dsl::id)
+                .first::<i64>($conn)
+                .optional()
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to fetch model route {}: {}",
+                        override_row.target_route_id, e
+                    )))
+                })?
+                .ok_or_else(|| {
+                    BaseError::NotFound(Some(format!(
+                        "Model route {} not found",
+                        override_row.target_route_id
+                    )))
+                })?;
+
+            let db_row = NewApiKeyModelOverrideDb::to_db(override_row);
+            diesel::insert_into(api_key_model_override::table)
+                .values(&db_row)
+                .execute($conn)
+                .map_err(|e| map_write_error("Failed to create api key model override", e))?;
+        }
+
+        Ok::<ApiKeyModelOverrideWriteSummary, BaseError>(
+            ApiKeyModelOverrideWriteSummary::from_rows(old_source_names, override_rows),
+        )
+    }};
 }
 
 fn default_api_key_action() -> Action {
@@ -300,7 +609,10 @@ fn build_detail(row: &ApiKey, acl_rules: Vec<ApiKeyAclRule>) -> ApiKeyDetail {
 }
 
 impl ApiKey {
-    pub fn create(payload: &CreateApiKeyPayload) -> DbResult<ApiKeyDetailWithSecret> {
+    pub fn create_with_model_overrides(
+        payload: &CreateApiKeyPayload,
+        model_overrides: &[ApiKeyModelOverrideWriteInput],
+    ) -> DbResult<CreateApiKeyWithOverridesResult> {
         let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
         let secret = generate_api_key_secret();
@@ -331,25 +643,255 @@ impl ApiKey {
             created_at: now,
             updated_at: now,
         };
+        let acl_rows = match payload.acl_rules.as_ref() {
+            Some(rules) => api_key_acl_repository::map_rule_inputs(new_key.id, rules, now)?,
+            None => Vec::new(),
+        };
+        let override_rows = make_model_override_rows(new_key.id, model_overrides, now)?;
 
-        let inserted = db_execute!(conn, {
-            diesel::insert_into(api_key::table)
-                .values(NewApiKeyDb::to_db(&new_key))
-                .returning(ApiKeyDb::as_returning())
-                .get_result::<ApiKeyDb>(conn)
-                .map(ApiKeyDb::from_db)
-                .map_err(|e| map_write_error("Failed to create api key", e))
-        })?;
+        api_key_admin_db_execute!(conn, {
+            conn.transaction::<CreateApiKeyWithOverridesResult, BaseError, _>(|conn| {
+                let inserted = diesel::insert_into(api_key::table)
+                    .values(NewApiKeyDb::to_db(&new_key))
+                    .returning(ApiKeyDb::as_returning())
+                    .get_result::<ApiKeyDb>(conn)
+                    .map(ApiKeyDb::from_db)
+                    .map_err(|e| map_write_error("Failed to create api key", e))?;
 
-        if let Some(rules) = payload.acl_rules.as_ref() {
-            ApiKeyAclRule::replace_for_api_key(inserted.id, rules)?;
-        }
+                insert_api_key_acl_rules_in_tx!(conn, inserted.id, &acl_rows)?;
+                let override_summary =
+                    replace_api_key_model_overrides_in_tx!(conn, inserted.id, &override_rows, now)?;
+                let acl_rules = load_api_key_acl_rules_in_tx!(conn, inserted.id)?;
 
-        let detail = Self::get_detail(inserted.id)?;
-        Ok(ApiKeyDetailWithSecret {
-            detail,
-            reveal: build_reveal(&inserted),
+                Ok(CreateApiKeyWithOverridesResult {
+                    created: ApiKeyDetailWithSecret {
+                        detail: build_detail(&inserted, acl_rules),
+                        reveal: build_reveal(&inserted),
+                    },
+                    override_summary,
+                })
+            })
         })
+    }
+
+    pub fn update_metadata_with_model_overrides(
+        id_value: i64,
+        payload: &UpdateApiKeyMetadataPayload,
+        model_overrides: &[ApiKeyModelOverrideWriteInput],
+    ) -> DbResult<UpdateApiKeyWithOverridesResult> {
+        let conn = &mut get_connection()?;
+        let now = Utc::now().timestamp_millis();
+        let update_data = UpdateApiKeyData {
+            name: payload.name.clone(),
+            description: payload.description.clone(),
+            default_action: payload.default_action.clone(),
+            is_enabled: payload.is_enabled,
+            expires_at: payload.expires_at,
+            rate_limit_rpm: payload.rate_limit_rpm,
+            max_concurrent_requests: payload.max_concurrent_requests,
+            quota_daily_requests: payload.quota_daily_requests,
+            quota_daily_tokens: payload.quota_daily_tokens,
+            quota_monthly_tokens: payload.quota_monthly_tokens,
+            budget_daily_nanos: payload.budget_daily_nanos,
+            budget_daily_currency: payload.budget_daily_currency.clone(),
+            budget_monthly_nanos: payload.budget_monthly_nanos,
+            budget_monthly_currency: payload.budget_monthly_currency.clone(),
+        };
+        let acl_rows = match payload.acl_rules.as_ref() {
+            Some(rules) => Some(api_key_acl_repository::map_rule_inputs(
+                id_value, rules, now,
+            )?),
+            None => None,
+        };
+        let override_rows = make_model_override_rows(id_value, model_overrides, now)?;
+
+        api_key_admin_db_execute!(conn, {
+            conn.transaction::<UpdateApiKeyWithOverridesResult, BaseError, _>(|conn| {
+                let updated = diesel::update(
+                    api_key::table.filter(
+                        api_key::dsl::id
+                            .eq(id_value)
+                            .and(api_key::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    UpdateApiKeyDataDb::to_db(&update_data),
+                    api_key::dsl::updated_at.eq(now),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    map_write_error(&format!("Failed to update api key {}", id_value), e)
+                })?;
+
+                if updated == 0 {
+                    return Err(BaseError::NotFound(Some(format!(
+                        "Api key {} not found",
+                        id_value
+                    ))));
+                }
+
+                if let Some(acl_rows) = acl_rows.as_ref() {
+                    replace_api_key_acl_rules_in_tx!(conn, id_value, acl_rows)?;
+                }
+                let override_summary =
+                    replace_api_key_model_overrides_in_tx!(conn, id_value, &override_rows, now)?;
+
+                let row = api_key::table
+                    .filter(
+                        api_key::dsl::id
+                            .eq(id_value)
+                            .and(api_key::dsl::deleted_at.is_null()),
+                    )
+                    .select(ApiKeyDb::as_select())
+                    .first::<ApiKeyDb>(conn)
+                    .map(ApiKeyDb::from_db)
+                    .map_err(|e| match e {
+                        diesel::result::Error::NotFound => {
+                            BaseError::NotFound(Some(format!("Api key {} not found", id_value)))
+                        }
+                        other => BaseError::DatabaseFatal(Some(format!(
+                            "Failed to fetch api key {}: {}",
+                            id_value, other
+                        ))),
+                    })?;
+                let acl_rules = load_api_key_acl_rules_in_tx!(conn, id_value)?;
+
+                Ok(UpdateApiKeyWithOverridesResult {
+                    updated: build_detail(&row, acl_rules),
+                    override_summary,
+                })
+            })
+        })
+    }
+
+    pub fn replace_model_overrides(
+        id_value: i64,
+        model_overrides: &[ApiKeyModelOverrideWriteInput],
+    ) -> DbResult<ApiKeyModelOverrideWriteSummary> {
+        let conn = &mut get_connection()?;
+        let now = Utc::now().timestamp_millis();
+        let override_rows = make_model_override_rows(id_value, model_overrides, now)?;
+
+        api_key_admin_db_execute!(conn, {
+            conn.transaction::<ApiKeyModelOverrideWriteSummary, BaseError, _>(|conn| {
+                api_key::table
+                    .filter(
+                        api_key::dsl::id
+                            .eq(id_value)
+                            .and(api_key::dsl::deleted_at.is_null()),
+                    )
+                    .select(ApiKeyDb::as_select())
+                    .first::<ApiKeyDb>(conn)
+                    .map_err(|e| match e {
+                        diesel::result::Error::NotFound => {
+                            BaseError::NotFound(Some(format!("Api key {} not found", id_value)))
+                        }
+                        other => BaseError::DatabaseFatal(Some(format!(
+                            "Failed to fetch api key {}: {}",
+                            id_value, other
+                        ))),
+                    })?;
+
+                replace_api_key_model_overrides_in_tx!(conn, id_value, &override_rows, now)
+            })
+        })
+    }
+
+    pub fn delete_with_model_overrides(id_value: i64) -> DbResult<DeleteApiKeyWithOverridesResult> {
+        let conn = &mut get_connection()?;
+        let now = Utc::now().timestamp_millis();
+        let empty_override_rows = Vec::<NewApiKeyModelOverride>::new();
+
+        api_key_admin_db_execute!(conn, {
+            conn.transaction::<DeleteApiKeyWithOverridesResult, BaseError, _>(|conn| {
+                let existing = api_key::table
+                    .filter(
+                        api_key::dsl::id
+                            .eq(id_value)
+                            .and(api_key::dsl::deleted_at.is_null()),
+                    )
+                    .select(ApiKeyDb::as_select())
+                    .first::<ApiKeyDb>(conn)
+                    .map(ApiKeyDb::from_db)
+                    .map_err(|e| match e {
+                        diesel::result::Error::NotFound => {
+                            BaseError::NotFound(Some(format!("Api key {} not found", id_value)))
+                        }
+                        other => BaseError::DatabaseFatal(Some(format!(
+                            "Failed to fetch api key {}: {}",
+                            id_value, other
+                        ))),
+                    })?;
+                let old_api_key_hash = existing
+                    .api_key_hash
+                    .clone()
+                    .unwrap_or_else(|| hash_api_key(&existing.api_key));
+
+                let updated = diesel::update(
+                    api_key::table.filter(
+                        api_key::dsl::id
+                            .eq(id_value)
+                            .and(api_key::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    api_key::dsl::deleted_at.eq(Some(now)),
+                    api_key::dsl::is_enabled.eq(false),
+                    api_key::dsl::updated_at.eq(now),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete api key {}: {}",
+                        id_value, e
+                    )))
+                })?;
+
+                if updated == 0 {
+                    return Err(BaseError::NotFound(Some(format!(
+                        "Api key {} not found",
+                        id_value
+                    ))));
+                }
+
+                diesel::update(
+                    api_key_acl_rule::table.filter(
+                        api_key_acl_rule::dsl::api_key_id
+                            .eq(id_value)
+                            .and(api_key_acl_rule::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    api_key_acl_rule::dsl::deleted_at.eq(Some(now)),
+                    api_key_acl_rule::dsl::is_enabled.eq(false),
+                    api_key_acl_rule::dsl::updated_at.eq(now),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete ACL rules for api key {}: {}",
+                        id_value, e
+                    )))
+                })?;
+
+                let override_summary = replace_api_key_model_overrides_in_tx!(
+                    conn,
+                    id_value,
+                    &empty_override_rows,
+                    now
+                )?;
+
+                Ok(DeleteApiKeyWithOverridesResult {
+                    deleted: existing,
+                    old_api_key_hash,
+                    override_summary,
+                })
+            })
+        })
+    }
+
+    pub fn create(payload: &CreateApiKeyPayload) -> DbResult<ApiKeyDetailWithSecret> {
+        Ok(Self::create_with_model_overrides(payload, &[])?.created)
     }
 
     pub fn update_metadata(
@@ -432,61 +974,7 @@ impl ApiKey {
     }
 
     pub fn delete(id_value: i64) -> DbResult<usize> {
-        let conn = &mut get_connection()?;
-        let now = Utc::now().timestamp_millis();
-
-        db_execute!(conn, {
-            conn.transaction::<usize, BaseError, _>(|conn| {
-                let updated = diesel::update(
-                    api_key::table.filter(
-                        api_key::dsl::id
-                            .eq(id_value)
-                            .and(api_key::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    api_key::dsl::deleted_at.eq(Some(now)),
-                    api_key::dsl::is_enabled.eq(false),
-                    api_key::dsl::updated_at.eq(now),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete api key {}: {}",
-                        id_value, e
-                    )))
-                })?;
-
-                if updated == 0 {
-                    return Err(BaseError::NotFound(Some(format!(
-                        "Api key {} not found",
-                        id_value
-                    ))));
-                }
-
-                diesel::update(
-                    api_key_acl_rule::table.filter(
-                        api_key_acl_rule::dsl::api_key_id
-                            .eq(id_value)
-                            .and(api_key_acl_rule::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    api_key_acl_rule::dsl::deleted_at.eq(Some(now)),
-                    api_key_acl_rule::dsl::is_enabled.eq(false),
-                    api_key_acl_rule::dsl::updated_at.eq(now),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete ACL rules for api key {}: {}",
-                        id_value, e
-                    )))
-                })?;
-
-                Ok(updated)
-            })
-        })
+        Self::delete_with_model_overrides(id_value).map(|_| 1)
     }
 
     pub fn load_acl_rules(id_value: i64) -> DbResult<Vec<ApiKeyAclRule>> {

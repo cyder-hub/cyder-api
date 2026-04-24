@@ -228,6 +228,73 @@ impl Model {
         })
     }
 
+    /// Soft deletes a model and all delete-owned dependent rows in one transaction.
+    pub fn delete_with_dependents(id_value: i64) -> DbResult<usize> {
+        let conn = &mut get_connection()?;
+        let current_time = Utc::now().timestamp_millis();
+
+        db_execute!(conn, {
+            conn.transaction::<usize, BaseError, _>(|conn| {
+                let updated = diesel::update(model::table.find(id_value))
+                    .set((
+                        model::dsl::deleted_at.eq(current_time),
+                        model::dsl::is_enabled.eq(false),
+                        model::dsl::updated_at.eq(current_time),
+                    ))
+                    .execute(conn)
+                    .map_err(|e| {
+                        BaseError::DatabaseFatal(Some(format!(
+                            "Failed to delete model {}: {}",
+                            id_value, e
+                        )))
+                    })?;
+
+                diesel::update(
+                    model_route_candidate::table.filter(
+                        model_route_candidate::dsl::model_id
+                            .eq(id_value)
+                            .and(model_route_candidate::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    model_route_candidate::dsl::deleted_at.eq(Some(current_time)),
+                    model_route_candidate::dsl::is_enabled.eq(false),
+                    model_route_candidate::dsl::updated_at.eq(current_time),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete model route candidates for model {}: {}",
+                        id_value, e
+                    )))
+                })?;
+
+                diesel::update(
+                    request_patch_rule::table.filter(
+                        request_patch_rule::dsl::model_id
+                            .eq(id_value)
+                            .and(request_patch_rule::dsl::provider_id.is_null())
+                            .and(request_patch_rule::dsl::deleted_at.is_null()),
+                    ),
+                )
+                .set((
+                    request_patch_rule::dsl::deleted_at.eq(current_time),
+                    request_patch_rule::dsl::is_enabled.eq(false),
+                    request_patch_rule::dsl::updated_at.eq(current_time),
+                ))
+                .execute(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to delete model request patch rules for {}: {}",
+                        id_value, e
+                    )))
+                })?;
+
+                Ok(updated)
+            })
+        })
+    }
+
     /// Retrieves a model by its name and provider ID, if not deleted.
     pub fn get_by_name_and_provider_id(
         model_name_val: &str,

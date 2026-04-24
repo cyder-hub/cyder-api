@@ -8,6 +8,7 @@ use crate::service::cache::CacheError;
 #[cfg(test)]
 use crate::database::TestDbContext;
 
+use super::admin::AdminServices;
 use super::catalog::CatalogService;
 use super::infra::AppInfra;
 use super::runtime::{ApiKeyGovernanceService, ProviderCircuitService, ProviderKeySelector};
@@ -16,6 +17,7 @@ use super::runtime::{ApiKeyGovernanceService, ProviderCircuitService, ProviderKe
 pub struct AppState {
     pub infra: Arc<AppInfra>,
     pub catalog: Arc<CatalogService>,
+    pub admin: Arc<AdminServices>,
     pub provider_key_selector: Arc<ProviderKeySelector>,
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
     pub provider_circuit: Arc<ProviderCircuitService>,
@@ -53,11 +55,13 @@ impl AppState {
         let infra = Arc::new(AppInfra::new().await);
 
         let catalog = Arc::new(CatalogService::new(force_memory_cache).await);
+        let admin = Arc::new(AdminServices::new(Arc::clone(&catalog)));
         let provider_key_selector = ProviderKeySelector::new(Arc::clone(&catalog)).await;
 
         Self {
             infra,
             catalog,
+            admin,
             provider_key_selector,
             api_key_governance: Arc::new(ApiKeyGovernanceService::default()),
             provider_circuit: Arc::new(ProviderCircuitService::default()),
@@ -121,6 +125,7 @@ pub fn create_state_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
+    use super::super::admin::AdminServices;
     use super::AppState;
     use crate::service::catalog::CatalogService;
     use crate::service::infra::AppInfra;
@@ -131,11 +136,13 @@ mod tests {
 
     async fn test_app_state() -> AppState {
         let catalog = Arc::new(CatalogService::new(true).await);
+        let admin = Arc::new(AdminServices::new(Arc::clone(&catalog)));
         let provider_key_selector = ProviderKeySelector::new(Arc::clone(&catalog)).await;
 
         AppState {
             infra: Arc::new(AppInfra::new().await),
             catalog,
+            admin,
             provider_key_selector,
             api_key_governance: Arc::new(ApiKeyGovernanceService::default()),
             provider_circuit: Arc::new(ProviderCircuitService::default()),
@@ -147,7 +154,8 @@ mod tests {
         let app_state = test_app_state().await;
 
         assert_eq!(Arc::strong_count(&app_state.infra), 1);
-        assert_eq!(Arc::strong_count(&app_state.catalog), 2);
+        assert_eq!(Arc::strong_count(&app_state.catalog), 3);
+        assert_eq!(Arc::strong_count(&app_state.admin), 1);
         assert_eq!(Arc::strong_count(&app_state.provider_key_selector), 1);
         assert_eq!(Arc::strong_count(&app_state.api_key_governance), 1);
         assert_eq!(Arc::strong_count(&app_state.provider_circuit), 1);

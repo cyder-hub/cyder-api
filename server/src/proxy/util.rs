@@ -250,7 +250,7 @@ pub(super) fn parse_utility_usage_normalization(
     })
 }
 
-pub(super) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType {
+pub(crate) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType {
     match provider.provider_type {
         ProviderType::Vertex | ProviderType::Gemini => LlmApiType::Gemini,
         ProviderType::Ollama => LlmApiType::Ollama,
@@ -305,6 +305,7 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::GeminiOpenai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
+            default_reasoning_profile_id: None,
             is_enabled: true,
         };
 

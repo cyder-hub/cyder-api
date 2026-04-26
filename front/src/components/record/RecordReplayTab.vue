@@ -1099,6 +1099,22 @@ const ReplayExecutionPreview = defineComponent({
               componentProps.preview.semantic_basis,
             ],
             [
+              $t("recordPage.detailDialog.replay.labels.requestedModel"),
+              componentProps.preview.requested_model_name ?? emptyValue,
+            ],
+            [
+              $t("recordPage.detailDialog.replay.labels.baseRequestedModel"),
+              componentProps.preview.base_requested_model_name ?? emptyValue,
+            ],
+            [
+              $t("recordPage.detailDialog.replay.labels.reasoningSuffix"),
+              componentProps.preview.resolved_reasoning_suffix ?? emptyValue,
+            ],
+            [
+              $t("recordPage.detailDialog.replay.labels.reasoningPreset"),
+              componentProps.preview.resolved_reasoning_preset ?? emptyValue,
+            ],
+            [
               $t("recordPage.detailDialog.replay.labels.route"),
               componentProps.preview.resolved_route?.route_name ?? emptyValue,
             ],

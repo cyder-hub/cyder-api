@@ -14,6 +14,7 @@ use crate::database::cost::{CostCatalogVersion, CostComponent};
 use crate::database::model::Model;
 use crate::database::model_route::{ApiKeyModelOverride, ModelRoute};
 use crate::database::provider::{Provider, ProviderApiKey};
+use crate::database::reasoning_profile::ReasoningProfile;
 use crate::database::request_patch::RequestPatchRule;
 use crate::service::app_state::AppStoreError;
 use crate::service::cache::memory::MemoryCacheBackend;
@@ -21,8 +22,8 @@ use crate::service::cache::redis::RedisCacheBackend;
 use crate::service::cache::repository::{CacheRepository, DynCacheRepo};
 use crate::service::cache::types::{
     CacheApiKey, CacheApiKeyModelOverride, CacheCostCatalogVersion, CacheEntry, CacheModel,
-    CacheModelRoute, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheRequestPatchRule,
-    CacheResolvedModelRequestPatches,
+    CacheModelRoute, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheReasoningProfile,
+    CacheRequestPatchRule, CacheResolvedModelRequestPatches,
 };
 use crate::service::redis::{self, RedisPool};
 use crate::service::request_patch::resolve_effective_request_patches;
@@ -41,6 +42,7 @@ pub struct CatalogService {
     model_route_cache: CacheRepo<CacheModelRoute>,
     api_key_override_route_cache: CacheRepo<CacheModelRoute>,
     models_catalog_cache: CacheRepo<CacheModelsCatalog>,
+    reasoning_profile_cache: CacheRepo<CacheReasoningProfile>,
     provider_cache: CacheRepo<CacheProvider>,
     model_cache: CacheRepo<CacheModel>,
     provider_api_keys_cache: CacheRepo<Vec<CacheProviderKey>>,
@@ -101,6 +103,7 @@ impl CatalogService {
             model_route_cache: Self::create_repo(ttl, pool),
             api_key_override_route_cache: Self::create_repo(ttl, pool),
             models_catalog_cache: Self::create_repo(ttl, pool),
+            reasoning_profile_cache: Self::create_repo(ttl, pool),
             provider_cache: Self::create_repo(ttl, pool),
             model_cache: Self::create_repo(ttl, pool),
             provider_api_keys_cache: Self::create_repo(ttl, pool),
@@ -207,11 +210,13 @@ impl CatalogService {
         let mut catalog_models = Vec::new();
         let mut catalog_routes = Vec::new();
         let mut catalog_api_key_overrides = Vec::new();
+        let mut catalog_reasoning_profiles = Vec::new();
         let mut api_key_count = 0usize;
         let mut provider_count = 0usize;
         let mut model_count = 0usize;
         let mut model_route_count = 0usize;
         let mut api_key_override_count = 0usize;
+        let mut reasoning_profile_count = 0usize;
         let mut provider_api_key_count = 0usize;
         let mut provider_api_key_group_count = 0usize;
         let mut request_patch_rule_count = 0usize;
@@ -383,11 +388,40 @@ impl CatalogService {
             }
         }
 
+        match ReasoningProfile::list_active_with_presets() {
+            Ok(profiles) => {
+                reasoning_profile_count = profiles.len();
+                for profile in profiles {
+                    let cache_item = CacheReasoningProfile::from(profile);
+                    catalog_reasoning_profiles.push(cache_item.clone());
+                    let _ = self
+                        .reasoning_profile_cache
+                        .set_positive(
+                            &CacheKey::ReasoningProfileById(cache_item.id).to_compact_string(),
+                            &cache_item,
+                        )
+                        .await;
+                    let _ = self
+                        .reasoning_profile_cache
+                        .set_positive(
+                            &CacheKey::ReasoningProfileByKey(&cache_item.profile_key)
+                                .to_compact_string(),
+                            &cache_item,
+                        )
+                        .await;
+                }
+            }
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "reasoning_profile_list");
+            }
+        }
+
         let models_catalog = CacheModelsCatalog {
             providers: catalog_providers.clone(),
             models: catalog_models.clone(),
             routes: catalog_routes.clone(),
             api_key_overrides: catalog_api_key_overrides.clone(),
+            reasoning_profiles: catalog_reasoning_profiles.clone(),
         };
         let _ = self
             .models_catalog_cache
@@ -549,6 +583,7 @@ impl CatalogService {
                 model_count = model_count,
                 model_route_count = model_route_count,
                 api_key_override_count = api_key_override_count,
+                reasoning_profile_count = reasoning_profile_count,
                 provider_api_key_count = provider_api_key_count,
                 provider_api_key_group_count = provider_api_key_group_count,
                 request_patch_rule_count = request_patch_rule_count,
@@ -568,6 +603,7 @@ impl CatalogService {
                 model_count = model_count,
                 model_route_count = model_route_count,
                 api_key_override_count = api_key_override_count,
+                reasoning_profile_count = reasoning_profile_count,
                 provider_api_key_count = provider_api_key_count,
                 provider_api_key_group_count = provider_api_key_group_count,
                 request_patch_rule_count = request_patch_rule_count,
@@ -598,6 +634,9 @@ impl CatalogService {
         }
         if self.models_catalog_cache.clear().await.is_err() {
             failed_repos.push("models_catalog_cache");
+        }
+        if self.reasoning_profile_cache.clear().await.is_err() {
+            failed_repos.push("reasoning_profile_cache");
         }
         if self.provider_cache.clear().await.is_err() {
             failed_repos.push("provider_cache");
@@ -631,7 +670,7 @@ impl CatalogService {
             failed_repos.push("cost_catalog_version_cache");
         }
 
-        let total_repo_count = 11usize;
+        let total_repo_count = 12usize;
         let failed_repo_count = failed_repos.len();
         let failed_repo_summary = summarize_repo_names(&failed_repos);
 
@@ -975,6 +1014,138 @@ impl CatalogService {
     pub async fn invalidate_models_catalog(&self) -> Result<(), AppStoreError> {
         let cache_key = CacheKey::ModelsCatalog.to_compact_string();
         Ok(self.models_catalog_cache.delete(&cache_key).await?)
+    }
+
+    pub async fn get_reasoning_profile_by_id(
+        &self,
+        id: i64,
+    ) -> Result<Option<Arc<CacheReasoningProfile>>, AppStoreError> {
+        let cache_key = CacheKey::ReasoningProfileById(id).to_compact_string();
+
+        self.get_or_load(&self.reasoning_profile_cache, &cache_key, || async {
+            match ReasoningProfile::get_active_with_presets_by_id(id) {
+                Ok(Some(profile)) => {
+                    let cache_item = CacheReasoningProfile::from(profile);
+                    self.reasoning_profile_cache
+                        .set_positive(
+                            &CacheKey::ReasoningProfileByKey(&cache_item.profile_key)
+                                .to_compact_string(),
+                            &cache_item,
+                        )
+                        .await?;
+                    Ok(Some(cache_item))
+                }
+                Ok(None) => Ok(None),
+                Err(err) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to load reasoning profile by id {}: {:?}",
+                    id, err
+                ))),
+            }
+        })
+        .await
+    }
+
+    pub async fn get_reasoning_profile_by_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<Arc<CacheReasoningProfile>>, AppStoreError> {
+        let cache_key = CacheKey::ReasoningProfileByKey(key).to_compact_string();
+
+        self.get_or_load(&self.reasoning_profile_cache, &cache_key, || async {
+            match ReasoningProfile::list_active_with_presets() {
+                Ok(profiles) => {
+                    if let Some(profile) = profiles
+                        .into_iter()
+                        .find(|profile| profile.profile.profile_key == key)
+                    {
+                        let cache_item = CacheReasoningProfile::from(profile);
+                        self.reasoning_profile_cache
+                            .set_positive(
+                                &CacheKey::ReasoningProfileById(cache_item.id).to_compact_string(),
+                                &cache_item,
+                            )
+                            .await?;
+                        Ok(Some(cache_item))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                Err(err) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to load reasoning profile by key '{}': {:?}",
+                    key, err
+                ))),
+            }
+        })
+        .await
+    }
+
+    pub async fn invalidate_reasoning_profile(
+        &self,
+        profile_id: i64,
+        profile_key: Option<&str>,
+    ) -> Result<(), AppStoreError> {
+        self.invalidate_models_catalog().await?;
+
+        let by_id_key = CacheKey::ReasoningProfileById(profile_id).to_compact_string();
+        let cached_profile = self
+            .reasoning_profile_cache
+            .get_entry(&by_id_key)
+            .await?
+            .and_then(|entry| match &*entry {
+                CacheEntry::Positive(profile) => Some(profile.clone()),
+                CacheEntry::Negative => None,
+            });
+        self.reasoning_profile_cache.delete(&by_id_key).await?;
+
+        if let Some(key) = profile_key {
+            let _ = self
+                .reasoning_profile_cache
+                .delete(&CacheKey::ReasoningProfileByKey(key).to_compact_string())
+                .await;
+        }
+        if let Some(profile) = cached_profile {
+            let _ = self
+                .reasoning_profile_cache
+                .delete(&CacheKey::ReasoningProfileByKey(&profile.profile_key).to_compact_string())
+                .await;
+        }
+
+        for provider in ReasoningProfile::list_provider_bindings(profile_id).map_err(|err| {
+            AppStoreError::DatabaseError(format!(
+                "failed to list provider bindings for reasoning profile {}: {:?}",
+                profile_id, err
+            ))
+        })? {
+            let _ = self
+                .provider_cache
+                .delete(&CacheKey::ProviderById(provider.provider_id).to_compact_string())
+                .await;
+            let _ = self
+                .provider_cache
+                .delete(&CacheKey::ProviderByKey(&provider.provider_key).to_compact_string())
+                .await;
+        }
+
+        for model in ReasoningProfile::list_model_bindings(profile_id).map_err(|err| {
+            AppStoreError::DatabaseError(format!(
+                "failed to list model bindings for reasoning profile {}: {:?}",
+                profile_id, err
+            ))
+        })? {
+            let _ = self
+                .model_cache
+                .delete(&CacheKey::ModelById(model.model_id).to_compact_string())
+                .await;
+            let _ = self
+                .model_cache
+                .delete(
+                    &CacheKey::ModelByName(&model.provider_key, &model.model_name)
+                        .to_compact_string(),
+                )
+                .await;
+        }
+
+        Ok(())
     }
 
     pub async fn get_provider_by_id(
@@ -1385,12 +1556,20 @@ impl CatalogService {
             .into_iter()
             .map(CacheApiKeyModelOverride::from)
             .collect();
+        let reasoning_profiles = ReasoningProfile::list_active_with_presets()
+            .map_err(|e| {
+                AppStoreError::DatabaseError(format!("failed to list reasoning profiles: {e:?}"))
+            })?
+            .into_iter()
+            .map(CacheReasoningProfile::from)
+            .collect();
 
         Ok(CacheModelsCatalog {
             providers,
             models,
             routes,
             api_key_overrides,
+            reasoning_profiles,
         })
     }
 }
@@ -1398,9 +1577,16 @@ impl CatalogService {
 #[cfg(test)]
 mod tests {
     use super::CatalogService;
-    use crate::schema::enum_def::Action;
+    use crate::database::TestDbContext;
+    use crate::database::model::{Model, ModelCapabilityFlags, UpdateModelData};
+    use crate::database::provider::{NewProvider, Provider};
+    use crate::database::reasoning_profile::{
+        ReasoningPatchFamily, ReasoningPreset, ReasoningProfile, ReasoningProfilePreset,
+    };
+    use crate::schema::enum_def::{Action, ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::{
-        CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModelRoute, CacheModelRouteCandidate,
+        CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModel, CacheModelRoute,
+        CacheModelRouteCandidate, CacheModelsCatalog, CacheProvider,
     };
     use crate::service::catalog::keys::CacheKey;
     use chrono::Utc;
@@ -1427,6 +1613,39 @@ mod tests {
             budget_monthly_currency: Some("usd".to_string()),
             acl_rules: vec![],
         }
+    }
+
+    fn seed_provider_with_reasoning_profile(
+        id: i64,
+        provider_key: &str,
+        default_reasoning_profile_id: Option<i64>,
+    ) -> Provider {
+        Provider::create(&NewProvider {
+            id,
+            provider_key: provider_key.to_string(),
+            name: provider_key.to_string(),
+            endpoint: "https://api.example.com/v1".to_string(),
+            use_proxy: false,
+            is_enabled: true,
+            created_at: 1,
+            updated_at: 1,
+            provider_type: ProviderType::Openai,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+            default_reasoning_profile_id,
+        })
+        .expect("provider seed should succeed")
+    }
+
+    fn seed_model(provider_id: i64, model_name: &str) -> CacheModel {
+        let model = Model::create(
+            provider_id,
+            model_name,
+            None,
+            true,
+            ModelCapabilityFlags::default(),
+        )
+        .expect("model seed should succeed");
+        CacheModel::from(model)
     }
 
     #[tokio::test]
@@ -1545,6 +1764,226 @@ mod tests {
             .await
             .expect("read override cache after invalidate");
         assert!(cached_after.is_none());
+    }
+
+    #[tokio::test]
+    async fn reload_preheats_reasoning_profile_snapshots_and_bindings() {
+        let db = TestDbContext::new_sqlite("catalog-reasoning-profile-reload.sqlite");
+        db.run_async(async {
+            let provider_profile = ReasoningProfile::create(
+                "openai_chat",
+                "OpenAI Chat",
+                None,
+                "openai_chat_reasoning_effort",
+                true,
+            )
+            .expect("provider profile");
+            ReasoningProfilePreset::create(provider_profile.id, "high", true, true)
+                .expect("high preset");
+            ReasoningProfilePreset::create(provider_profile.id, "low", true, false)
+                .expect("disabled low preset");
+
+            let model_profile = ReasoningProfile::create(
+                "openai_responses",
+                "OpenAI Responses",
+                None,
+                "openai_responses_reasoning",
+                true,
+            )
+            .expect("model override profile");
+            ReasoningProfilePreset::create(model_profile.id, "auto", false, true)
+                .expect("auto preset");
+
+            let provider =
+                seed_provider_with_reasoning_profile(101, "openai", Some(provider_profile.id));
+            let model = Model::create(
+                provider.id,
+                "gpt-4o-mini",
+                None,
+                true,
+                ModelCapabilityFlags::default(),
+            )
+            .expect("model");
+            Model::update(
+                model.id,
+                &UpdateModelData {
+                    reasoning_profile_override_id: Some(Some(model_profile.id)),
+                    ..Default::default()
+                },
+            )
+            .expect("model override update");
+
+            let catalog = CatalogService::new(true).await;
+            catalog.reload().await;
+
+            let snapshot = catalog
+                .get_models_catalog()
+                .await
+                .expect("catalog load should succeed");
+            assert_eq!(snapshot.reasoning_profiles.len(), 2);
+            assert!(snapshot.providers.iter().any(|item| item.id == provider.id
+                && item.default_reasoning_profile_id == Some(provider_profile.id)));
+            assert!(snapshot.models.iter().any(|item| item.id == model.id
+                && item.reasoning_profile_override_id == Some(model_profile.id)));
+
+            let chat_profile = snapshot
+                .reasoning_profiles
+                .iter()
+                .find(|profile| profile.id == provider_profile.id)
+                .expect("provider profile snapshot");
+            assert_eq!(
+                chat_profile.family,
+                ReasoningPatchFamily::OpenAiChatReasoningEffort
+            );
+            assert_eq!(chat_profile.presets.len(), 1);
+            assert_eq!(chat_profile.presets[0].preset, ReasoningPreset::High);
+            assert_eq!(chat_profile.presets[0].suffix, "high");
+            assert!(chat_profile.presets[0].requires_reasoning);
+
+            let encoded = bincode::encode_to_vec(&*snapshot, bincode::config::standard())
+                .expect("catalog snapshot should bincode encode");
+            let (decoded, _): (CacheModelsCatalog, usize) =
+                bincode::decode_from_slice(&encoded, bincode::config::standard())
+                    .expect("catalog snapshot should bincode decode");
+            assert_eq!(decoded.reasoning_profiles.len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn invalidate_reasoning_profile_removes_profile_and_related_binding_snapshots() {
+        let db = TestDbContext::new_sqlite("catalog-reasoning-profile-invalidate.sqlite");
+        db.run_async(async {
+            let profile = ReasoningProfile::create(
+                "openai_chat",
+                "OpenAI Chat",
+                None,
+                "openai_chat_reasoning_effort",
+                true,
+            )
+            .expect("profile");
+            ReasoningProfilePreset::create(profile.id, "high", true, true).expect("preset");
+            let provider = seed_provider_with_reasoning_profile(201, "openai", Some(profile.id));
+            let mut model = seed_model(provider.id, "gpt-4o-mini");
+            let updated_model = Model::update(
+                model.id,
+                &UpdateModelData {
+                    reasoning_profile_override_id: Some(Some(profile.id)),
+                    ..Default::default()
+                },
+            )
+            .expect("set model override");
+            model = CacheModel::from(updated_model);
+
+            let catalog = CatalogService::new(true).await;
+            let profile_snapshot = catalog
+                .get_reasoning_profile_by_id(profile.id)
+                .await
+                .expect("profile cache load")
+                .expect("profile should exist");
+            let cached_provider = CacheProvider::from(provider.clone());
+            let empty_catalog = CacheModelsCatalog {
+                providers: vec![cached_provider.clone()],
+                models: vec![model.clone()],
+                routes: vec![],
+                api_key_overrides: vec![],
+                reasoning_profiles: vec![profile_snapshot.as_ref().clone()],
+            };
+
+            catalog
+                .models_catalog_cache
+                .set_positive(&CacheKey::ModelsCatalog.to_compact_string(), &empty_catalog)
+                .await
+                .expect("seed models catalog");
+            catalog
+                .provider_cache
+                .set_positive(
+                    &CacheKey::ProviderById(provider.id).to_compact_string(),
+                    &cached_provider,
+                )
+                .await
+                .expect("seed provider id cache");
+            catalog
+                .provider_cache
+                .set_positive(
+                    &CacheKey::ProviderByKey(&provider.provider_key).to_compact_string(),
+                    &cached_provider,
+                )
+                .await
+                .expect("seed provider key cache");
+            catalog
+                .model_cache
+                .set_positive(&CacheKey::ModelById(model.id).to_compact_string(), &model)
+                .await
+                .expect("seed model id cache");
+            catalog
+                .model_cache
+                .set_positive(
+                    &CacheKey::ModelByName(&provider.provider_key, &model.model_name)
+                        .to_compact_string(),
+                    &model,
+                )
+                .await
+                .expect("seed model name cache");
+
+            catalog
+                .invalidate_reasoning_profile(profile.id, Some(&profile.profile_key))
+                .await
+                .expect("invalidate profile");
+
+            assert!(
+                catalog
+                    .models_catalog_cache
+                    .get_entry(&CacheKey::ModelsCatalog.to_compact_string())
+                    .await
+                    .expect("models catalog cache read")
+                    .is_none()
+            );
+            assert!(
+                catalog
+                    .reasoning_profile_cache
+                    .get_entry(&CacheKey::ReasoningProfileById(profile.id).to_compact_string())
+                    .await
+                    .expect("profile id cache read")
+                    .is_none()
+            );
+            assert!(
+                catalog
+                    .provider_cache
+                    .get_entry(&CacheKey::ProviderById(provider.id).to_compact_string())
+                    .await
+                    .expect("provider id cache read")
+                    .is_none()
+            );
+            assert!(
+                catalog
+                    .provider_cache
+                    .get_entry(&CacheKey::ProviderByKey(&provider.provider_key).to_compact_string())
+                    .await
+                    .expect("provider key cache read")
+                    .is_none()
+            );
+            assert!(
+                catalog
+                    .model_cache
+                    .get_entry(&CacheKey::ModelById(model.id).to_compact_string())
+                    .await
+                    .expect("model id cache read")
+                    .is_none()
+            );
+            assert!(
+                catalog
+                    .model_cache
+                    .get_entry(
+                        &CacheKey::ModelByName(&provider.provider_key, &model.model_name)
+                            .to_compact_string(),
+                    )
+                    .await
+                    .expect("model name cache read")
+                    .is_none()
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

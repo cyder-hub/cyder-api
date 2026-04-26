@@ -204,6 +204,7 @@ test("buildProviderUpdatePayload keeps the existing provider key immutable", () 
     endpoint: "https://new.example.com/v1",
     use_proxy: true,
     provider_type: "RESPONSES",
+    default_reasoning_profile_id: null,
     omit_config: null,
     api_keys: [],
   });

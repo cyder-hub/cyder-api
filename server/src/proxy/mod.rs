@@ -11,7 +11,10 @@ mod orchestrator;
 mod pipeline;
 mod prepare;
 mod provider_governance;
+#[allow(dead_code)]
+mod reasoning_suffix;
 mod request;
+mod requested_model;
 #[allow(dead_code)]
 mod retry_policy;
 mod router;
@@ -36,7 +39,8 @@ pub(crate) use orchestrator::{
     GatewayReplayPreparedRequest, execute_gateway_replay_request, preview_gateway_replay_request,
 };
 pub(crate) use prepare::{
-    apply_provider_request_auth_header, apply_request_patches, load_runtime_request_patch_trace,
+    apply_provider_request_auth_header, apply_request_patches, candidate_supports_reasoning_preset,
+    load_runtime_request_patch_trace, resolve_route_runtime_candidates,
 };
 pub use router::create_proxy_router;
 pub(crate) use utility::{UtilityOperation, UtilityProtocol};

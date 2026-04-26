@@ -1464,6 +1464,7 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
+            default_reasoning_profile_id: None,
             is_enabled: true,
         };
         let model = CacheModel {
@@ -1472,6 +1473,7 @@ mod tests {
             model_name: "gpt-test".to_string(),
             real_model_name: None,
             cost_catalog_id: None,
+            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,

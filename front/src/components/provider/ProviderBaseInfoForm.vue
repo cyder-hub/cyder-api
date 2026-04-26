@@ -83,6 +83,31 @@
       <Checkbox id="provider_quick_start_proxy" v-model="quickStart.use_proxy" />
     </div>
 
+    <div v-if="editingData.id" class="space-y-1.5">
+      <Label class="text-gray-700">Default reasoning profile</Label>
+      <Select
+        :model-value="editingData.default_reasoning_profile_id?.toString() || 'none'"
+        @update:model-value="handleReasoningProfileChange"
+      >
+        <SelectTrigger class="w-full">
+          <SelectValue placeholder="Select reasoning profile" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">No default profile</SelectItem>
+          <SelectItem
+            v-for="option in reasoningProfileStore.profileOptions"
+            :key="option.value"
+            :value="String(option.value)"
+          >
+            {{ option.label }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
+      <p class="text-xs text-gray-500">
+        Provider defaults are inherited by models unless a model override is set.
+      </p>
+    </div>
+
     <div class="rounded-lg border border-gray-200 bg-gray-50/60 p-4">
       <div class="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
         <div class="min-w-0">
@@ -189,10 +214,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Api } from "@/services/request";
 import { useProviderStore } from "@/store/providerStore";
+import { useReasoningProfileStore } from "@/store/reasoningProfileStore";
 import { toastController } from "@/lib/toastController";
 import type { EditingProviderData } from "./types";
 import type { ProviderBootstrapResponse } from "@/store/types";
@@ -233,6 +259,7 @@ const providerTypes = [
 
 const { t: $t } = useI18n();
 const providerStore = useProviderStore();
+const reasoningProfileStore = useReasoningProfileStore();
 const editingData = defineModel<EditingProviderData>("editingData", {
   required: true,
 });
@@ -258,6 +285,12 @@ const preview = computed(() =>
     provider_key: quickStart.provider_key,
   }),
 );
+
+const handleReasoningProfileChange = (value: unknown) => {
+  const normalized = String(value || "");
+  editingData.value.default_reasoning_profile_id =
+    normalized === "none" || !normalized ? null : Number(normalized);
+};
 
 const syncHydratedIdentity = (response: ProviderBootstrapResponse) => {
   const data = editingData.value;
@@ -378,4 +411,10 @@ const handleUpdateProvider = async () => {
     pendingAction.value = null;
   }
 };
+
+onMounted(() => {
+  void reasoningProfileStore.ensureLoaded().catch((error) => {
+    console.error("Failed to load reasoning profiles:", error);
+  });
+});
 </script>

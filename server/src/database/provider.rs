@@ -33,6 +33,7 @@ db_object! {
         pub updated_at: i64,
         pub provider_type: ProviderType,
         pub provider_api_key_mode: ProviderApiKeyMode,
+        pub default_reasoning_profile_id: Option<i64>,
     }
 
 // Data structure for inserting a new provider.
@@ -51,6 +52,7 @@ db_object! {
         pub updated_at: i64,
         pub provider_type: ProviderType,
         pub provider_api_key_mode: ProviderApiKeyMode,
+        pub default_reasoning_profile_id: Option<i64>,
     }
 
 // Data structure for updating an existing provider.
@@ -64,6 +66,7 @@ db_object! {
         pub is_enabled: Option<bool>,
         pub provider_type: Option<ProviderType>,
         pub provider_api_key_mode: Option<ProviderApiKeyMode>,
+        pub default_reasoning_profile_id: Option<Option<i64>>,
     }
 
 // Define ProviderApiKey struct and its DB representations
@@ -129,6 +132,7 @@ pub struct ProviderSummaryItem {
     pub provider_key: String,
     pub name: String,
     pub is_enabled: bool,
+    pub default_reasoning_profile_id: Option<i64>,
 }
 
 macro_rules! bootstrap_transaction {
@@ -155,6 +159,7 @@ macro_rules! bootstrap_transaction {
                 updated_at: current_time,
                 provider_type: bootstrap_input.provider_type.clone(),
                 provider_api_key_mode: bootstrap_input.provider_api_key_mode.clone(),
+                default_reasoning_profile_id: None,
             };
 
             let provider_db = diesel::insert_into(provider::table)
@@ -196,6 +201,7 @@ macro_rules! bootstrap_transaction {
                 provider_id: provider.id,
                 model_name: bootstrap_input.model_name.clone(),
                 real_model_name: bootstrap_input.real_model_name.clone(),
+                reasoning_profile_override_id: None,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_reasoning: true,
@@ -527,8 +533,9 @@ impl Provider {
                     provider::dsl::provider_key,
                     provider::dsl::name,
                     provider::dsl::is_enabled,
+                    provider::dsl::default_reasoning_profile_id,
                 ))
-                .load::<(i64, String, String, bool)>(conn)
+                .load::<(i64, String, String, bool, Option<i64>)>(conn)
                 .map_err(|e| {
                     BaseError::DatabaseFatal(Some(format!(
                         "Failed to list provider summaries: {}",
@@ -538,12 +545,17 @@ impl Provider {
 
             Ok(rows
                 .into_iter()
-                .map(|(id, provider_key, name, is_enabled)| ProviderSummaryItem {
-                    id,
-                    provider_key,
-                    name,
-                    is_enabled,
-                })
+                .map(
+                    |(id, provider_key, name, is_enabled, default_reasoning_profile_id)| {
+                        ProviderSummaryItem {
+                            id,
+                            provider_key,
+                            name,
+                            is_enabled,
+                            default_reasoning_profile_id,
+                        }
+                    },
+                )
                 .collect())
         })
     }
@@ -839,17 +851,23 @@ mod tests {
                 provider::dsl::provider_key,
                 provider::dsl::name,
                 provider::dsl::is_enabled,
+                provider::dsl::default_reasoning_profile_id,
             ))
-            .load::<(i64, String, String, bool)>(conn)
+            .load::<(i64, String, String, bool, Option<i64>)>(conn)
             .expect("provider summary rows should load");
 
         rows.into_iter()
-            .map(|(id, provider_key, name, is_enabled)| ProviderSummaryItem {
-                id,
-                provider_key,
-                name,
-                is_enabled,
-            })
+            .map(
+                |(id, provider_key, name, is_enabled, default_reasoning_profile_id)| {
+                    ProviderSummaryItem {
+                        id,
+                        provider_key,
+                        name,
+                        is_enabled,
+                        default_reasoning_profile_id,
+                    }
+                },
+            )
             .collect()
     }
 
@@ -923,6 +941,7 @@ mod tests {
                 updated_at: 1,
                 provider_type: ProviderType::Openai,
                 provider_api_key_mode: ProviderApiKeyMode::Queue,
+                default_reasoning_profile_id: None,
             },
             api_keys: vec![],
             request_patches: vec![RequestPatchRuleResponse {

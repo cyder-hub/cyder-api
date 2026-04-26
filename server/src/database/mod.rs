@@ -33,6 +33,7 @@ pub mod model;
 pub mod model_route;
 pub mod provider;
 pub mod provider_runtime;
+pub mod reasoning_profile;
 pub mod request_attempt;
 pub mod request_log;
 pub mod request_patch;

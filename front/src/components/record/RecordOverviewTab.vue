@@ -222,6 +222,21 @@ const generalItems = computed(() => [
     value: props.record.requested_model_name || props.record.final_model_name_snapshot || emptyValue,
     valueClass: "font-mono text-xs",
   },
+  {
+    label: $t("recordPage.detailDialog.overview.labels.baseRequestedModel"),
+    value: props.record.base_requested_model_name || emptyValue,
+    valueClass: "font-mono text-xs",
+  },
+  {
+    label: $t("recordPage.detailDialog.overview.labels.reasoningSuffix"),
+    value: props.record.resolved_reasoning_suffix || emptyValue,
+    valueClass: "font-mono text-xs",
+  },
+  {
+    label: $t("recordPage.detailDialog.overview.labels.reasoningPreset"),
+    value: props.record.resolved_reasoning_preset || emptyValue,
+    valueClass: "font-mono text-xs",
+  },
   { label: $t("recordPage.detailDialog.overview.labels.resolvedScope"), value: formatResolvedScopeLabel(props.record.resolved_name_scope), valueClass: "" },
   { label: $t("recordPage.detailDialog.overview.labels.resolvedRoute"), value: props.record.resolved_route_name || emptyValue, valueClass: "font-mono text-xs" },
   { label: $t("recordPage.detailDialog.overview.labels.finalProvider"), value: props.providerName, valueClass: "" },

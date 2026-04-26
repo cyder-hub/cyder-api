@@ -28,6 +28,7 @@ db_object! {
         pub model_name: String,
         pub real_model_name: Option<String>,
         pub cost_catalog_id: Option<i64>,
+        pub reasoning_profile_override_id: Option<i64>,
         pub supports_streaming: bool,
         pub supports_tools: bool,
         pub supports_reasoning: bool,
@@ -47,6 +48,7 @@ pub struct NewModel {
     pub provider_id: i64,
     pub model_name: String,
     pub real_model_name: Option<String>,
+    pub reasoning_profile_override_id: Option<i64>,
     pub supports_streaming: bool,
     pub supports_tools: bool,
     pub supports_reasoning: bool,
@@ -63,6 +65,7 @@ pub struct NewModel {
 pub struct UpdateModelData {
     pub model_name: Option<String>,
     pub real_model_name: Option<Option<String>>, // Allow setting to NULL
+    pub reasoning_profile_override_id: Option<Option<i64>>,
     pub is_enabled: Option<bool>,
     pub cost_catalog_id: Option<Option<i64>>,
     pub supports_streaming: Option<bool>,
@@ -159,6 +162,7 @@ impl Model {
             provider_id: provider_id_val,
             model_name: model_name_val.to_string(),
             real_model_name: real_model_name_val.map(|s| s.to_string()),
+            reasoning_profile_override_id: None,
             supports_streaming: capabilities.supports_streaming,
             supports_tools: capabilities.supports_tools,
             supports_reasoning: capabilities.supports_reasoning,
@@ -558,6 +562,7 @@ impl Model {
                     // Update existing model
                     let update_data = UpdateModelData {
                         real_model_name: Some(real_model_name_val.map(|s| s.to_string())),
+                        reasoning_profile_override_id: None,
                         is_enabled: Some(true), // Ensure it's enabled
                         model_name: None,       // Not changing model_name itself here
                         cost_catalog_id: None,  // Do not update cost_catalog_id during upsert
@@ -594,6 +599,7 @@ impl Model {
                         provider_id: provider_id_val,
                         model_name: model_name_val.to_string(),
                         real_model_name: real_model_name_val.map(|s| s.to_string()),
+                        reasoning_profile_override_id: None,
                         supports_streaming: true,
                         supports_tools: true,
                         supports_reasoning: true,
@@ -664,6 +670,7 @@ mod tests {
             updated_at: now,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
+            default_reasoning_profile_id: None,
         };
 
         diesel::insert_into(provider::table)
@@ -688,6 +695,7 @@ mod tests {
             provider_id: provider_id_val,
             model_name: model_name_val.to_string(),
             real_model_name: real_model_name_val.map(ToString::to_string),
+            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,
@@ -851,6 +859,7 @@ mod tests {
                 model_name: "alpha-model".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
+                reasoning_profile_override_id: None,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_reasoning: true,
@@ -899,6 +908,7 @@ mod tests {
                 model_name: "alpha-model".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
+                reasoning_profile_override_id: None,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_reasoning: true,

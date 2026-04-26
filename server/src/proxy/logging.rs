@@ -202,6 +202,9 @@ pub struct RequestLogContext {
     pub model_id: i64,
     pub provider_api_key_id: Option<i64>,
     pub requested_model_name: String,
+    pub base_requested_model_name: String,
+    pub resolved_reasoning_suffix: Option<String>,
+    pub resolved_reasoning_preset: Option<String>,
     pub resolved_name_scope: String,
     pub resolved_route_id: Option<i64>,
     pub resolved_route_name: Option<String>,
@@ -268,6 +271,9 @@ impl RequestLogContext {
             model_id: model.id,
             provider_api_key_id,
             requested_model_name: requested_model_name.to_string(),
+            base_requested_model_name: requested_model_name.to_string(),
+            resolved_reasoning_suffix: None,
+            resolved_reasoning_preset: None,
             resolved_name_scope: resolved_name_scope.to_string(),
             resolved_route_id,
             resolved_route_name: resolved_route_name.map(str::to_string),
@@ -333,6 +339,9 @@ impl RequestLogContext {
                 .expect("skipped capability attempts should carry model_id"),
             provider_api_key_id: None,
             requested_model_name: requested_model_name.to_string(),
+            base_requested_model_name: requested_model_name.to_string(),
+            resolved_reasoning_suffix: None,
+            resolved_reasoning_preset: None,
             resolved_name_scope: resolved_name_scope.to_string(),
             resolved_route_id,
             resolved_route_name: resolved_route_name.map(str::to_string),
@@ -376,6 +385,17 @@ impl RequestLogContext {
 
     pub(super) fn set_request_snapshot(&mut self, snapshot: RequestLogBundleRequestSnapshot) {
         self.request_snapshot = Some(snapshot);
+    }
+
+    pub(super) fn set_model_resolution_trace(
+        &mut self,
+        base_requested_model_name: &str,
+        resolved_reasoning_suffix: Option<&str>,
+        resolved_reasoning_preset: Option<&str>,
+    ) {
+        self.base_requested_model_name = base_requested_model_name.to_string();
+        self.resolved_reasoning_suffix = resolved_reasoning_suffix.map(str::to_string);
+        self.resolved_reasoning_preset = resolved_reasoning_preset.map(str::to_string);
     }
 
     pub(super) fn set_candidate_manifest(&mut self, manifest: RequestLogBundleCandidateManifest) {
@@ -1661,6 +1681,9 @@ impl LogManager {
             id: context.id,
             api_key_id: context.api_key_id,
             requested_model_name: Some(context.requested_model_name.clone()),
+            base_requested_model_name: Some(context.base_requested_model_name.clone()),
+            resolved_reasoning_suffix: context.resolved_reasoning_suffix.clone(),
+            resolved_reasoning_preset: context.resolved_reasoning_preset.clone(),
             resolved_name_scope: Some(context.resolved_name_scope.clone()),
             resolved_route_id: context.resolved_route_id,
             resolved_route_name: context.resolved_route_name.clone(),
@@ -2105,6 +2128,7 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
+            default_reasoning_profile_id: None,
             is_enabled: true,
         };
         let model = CacheModel {
@@ -2113,6 +2137,7 @@ mod tests {
             model_name: "gpt-test".to_string(),
             real_model_name: Some("real-gpt-test".to_string()),
             cost_catalog_id: None,
+            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,
@@ -2558,6 +2583,7 @@ mod tests {
             is_enabled: true,
             components: vec![],
         });
+        context.set_model_resolution_trace("manual-smoke", Some("high"), Some("high"));
         let request_log =
             LogManager::build_request_log(&context, Some(StorageType::FileSystem), 2000);
 
@@ -2566,6 +2592,18 @@ mod tests {
         assert_eq!(
             request_log.requested_model_name.as_deref(),
             Some("manual-smoke-route")
+        );
+        assert_eq!(
+            request_log.base_requested_model_name.as_deref(),
+            Some("manual-smoke")
+        );
+        assert_eq!(
+            request_log.resolved_reasoning_suffix.as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            request_log.resolved_reasoning_preset.as_deref(),
+            Some("high")
         );
         assert_eq!(
             request_log.resolved_name_scope.as_deref(),

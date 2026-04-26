@@ -6,6 +6,8 @@ pub(super) enum CacheKey<'a> {
     ModelRouteByName(&'a str),
     ApiKeyModelOverride(i64, &'a str),
     ModelsCatalog,
+    ReasoningProfileById(i64),
+    ReasoningProfileByKey(&'a str),
     ProviderById(i64),
     ProviderByKey(&'a str),
     ModelById(i64),
@@ -27,6 +29,10 @@ impl<'a> CacheKey<'a> {
                 format_compact!("api_key_override:{}/{}", api_key_id, source_name)
             }
             CacheKey::ModelsCatalog => format_compact!("models:catalog"),
+            CacheKey::ReasoningProfileById(id) => format_compact!("reasoning_profile:id:{}", id),
+            CacheKey::ReasoningProfileByKey(key) => {
+                format_compact!("reasoning_profile:key:{}", key)
+            }
             CacheKey::ProviderById(id) => format_compact!("provider:id:{}", id),
             CacheKey::ProviderByKey(key) => format_compact!("provider:key:{}", key),
             CacheKey::ModelById(id) => format_compact!("model:id:{}", id),

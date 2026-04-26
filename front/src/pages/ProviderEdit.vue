@@ -299,6 +299,8 @@ onMounted(async () => {
           name: detail.provider.name,
           provider_key: detail.provider.provider_key,
           provider_type: detail.provider.provider_type || "OPENAI",
+          default_reasoning_profile_id:
+            detail.provider.default_reasoning_profile_id ?? null,
           endpoint: detail.provider.endpoint,
           use_proxy: detail.provider.use_proxy,
           models: detail.models.map((m) => ({

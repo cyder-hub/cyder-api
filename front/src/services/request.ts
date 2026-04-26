@@ -27,6 +27,12 @@ import type {
   ModelRouteDetail,
   ModelRoutePayload,
   ModelRouteUpdatePayload,
+  ReasoningProfileCatalog,
+  ReasoningProfileItem,
+  ReasoningProfilePayload,
+  ReasoningProfilePresetPayload,
+  ReasoningProfileUpdatePayload,
+  ReasoningRoutePreview,
   PaginatedResponse,
   CostCatalog,
   CostCatalogListItem,
@@ -186,6 +192,58 @@ export const Api = {
   },
   deleteModelRoute(id: number): Promise<void> {
     return request.delete(`/ai/manager/api/model_route/${id}`);
+  },
+  getModelRouteReasoningPreview(id: number): Promise<ReasoningRoutePreview> {
+    return request.get(`/ai/manager/api/model_route/${id}/reasoning_preview`);
+  },
+
+  // ========== Reasoning Profile ==========
+  getReasoningProfileCatalog(): Promise<ReasoningProfileCatalog> {
+    return request.get("/ai/manager/api/reasoning_profile/catalog");
+  },
+  getReasoningProfileList(): Promise<ReasoningProfileItem[]> {
+    return request.get("/ai/manager/api/reasoning_profile/list");
+  },
+  getReasoningProfile(id: number | string): Promise<ReasoningProfileItem> {
+    return request.get(`/ai/manager/api/reasoning_profile/${id}`);
+  },
+  createReasoningProfile(
+    payload: ReasoningProfilePayload,
+  ): Promise<ReasoningProfileItem> {
+    return request.post("/ai/manager/api/reasoning_profile", payload);
+  },
+  updateReasoningProfile(
+    id: number | string,
+    payload: ReasoningProfileUpdatePayload,
+  ): Promise<ReasoningProfileItem> {
+    return request.put(`/ai/manager/api/reasoning_profile/${id}`, payload);
+  },
+  deleteReasoningProfile(id: number | string): Promise<void> {
+    return request.delete(`/ai/manager/api/reasoning_profile/${id}`);
+  },
+  upsertReasoningProfilePreset(
+    id: number | string,
+    payload: ReasoningProfilePresetPayload,
+  ): Promise<ReasoningProfileItem> {
+    return request.post(`/ai/manager/api/reasoning_profile/${id}/preset`, payload);
+  },
+  updateReasoningProfilePreset(
+    profileId: number | string,
+    presetId: number | string,
+    payload: Partial<ReasoningProfilePresetPayload>,
+  ): Promise<ReasoningProfileItem> {
+    return request.put(
+      `/ai/manager/api/reasoning_profile/${profileId}/preset/${presetId}`,
+      payload,
+    );
+  },
+  deleteReasoningProfilePreset(
+    profileId: number | string,
+    presetId: number | string,
+  ): Promise<ReasoningProfileItem> {
+    return request.delete(
+      `/ai/manager/api/reasoning_profile/${profileId}/preset/${presetId}`,
+    );
   },
 
   // ========== Cost ==========

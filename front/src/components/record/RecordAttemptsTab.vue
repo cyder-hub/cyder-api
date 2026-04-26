@@ -94,6 +94,25 @@
             </div>
           </div>
 
+          <div
+            v-if="patchSourceItems(attempt).length > 0"
+            class="space-y-2 border-b border-gray-100 pb-3"
+          >
+            <div class="text-xs uppercase tracking-wide text-gray-500">
+              {{ $t("recordPage.detailDialog.attempts.patchSources.title") }}
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <Badge
+                v-for="source in patchSourceItems(attempt)"
+                :key="source"
+                variant="outline"
+                class="max-w-full font-mono text-[11px]"
+              >
+                {{ source }}
+              </Badge>
+            </div>
+          </div>
+
           <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
             <details
               v-for="block in detailBlocks(attempt)"
@@ -116,7 +135,7 @@
 import { useI18n } from "vue-i18n";
 import { CircleAlert, CircleCheckBig, CircleHelp, Clock3 } from "lucide-vue-next";
 import { Badge } from "@/components/ui/badge";
-import type { RecordAttempt } from "@/store/types";
+import type { RecordAttempt, RequestPatchSource } from "@/store/types";
 import {
   emptyValue,
   formatCompactMetrics,
@@ -133,6 +152,102 @@ defineProps<{
 }>();
 
 const { t: $t } = useI18n();
+
+type RuntimePatchRuleSummary = {
+  source?: RequestPatchSource | null;
+  overridden_sources?: RequestPatchSource[] | null;
+};
+
+type RuntimePatchConflictSummary = {
+  lower_priority_source?: RequestPatchSource | null;
+  higher_priority_source?: RequestPatchSource | null;
+};
+
+type RuntimePatchSummary = {
+  effective_rules?: RuntimePatchRuleSummary[];
+  conflicts?: RuntimePatchConflictSummary[];
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value != null && typeof value === "object" && !Array.isArray(value);
+
+const asArray = <T,>(value: T[] | null | undefined) => (Array.isArray(value) ? value : []);
+
+const parsePatchSummary = (raw: string | null | undefined): RuntimePatchSummary | null => {
+  const text = raw?.trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) ? (parsed as RuntimePatchSummary) : null;
+  } catch {
+    return null;
+  }
+};
+
+const sourceRuleId = (source: Record<string, unknown>) =>
+  typeof source.rule_id === "number" ? source.rule_id : emptyValue;
+
+const sourceStringField = (source: Record<string, unknown>, key: string) => {
+  const value = source[key];
+  return typeof value === "string" && value.trim() ? value : emptyValue;
+};
+
+const patchSourceLabel = (source: unknown) => {
+  if (!isRecord(source)) {
+    return $t("recordPage.detailDialog.attempts.patchSources.unknown", {
+      kind: emptyValue,
+    });
+  }
+
+  const kind = sourceStringField(source, "kind");
+  switch (kind) {
+    case "provider_rule":
+      return $t("recordPage.detailDialog.attempts.patchSources.providerRule", {
+        id: sourceRuleId(source),
+      });
+    case "model_rule":
+      return $t("recordPage.detailDialog.attempts.patchSources.modelRule", {
+        id: sourceRuleId(source),
+      });
+    case "reasoning_preset":
+      return $t("recordPage.detailDialog.attempts.patchSources.reasoningPreset", {
+        preset: sourceStringField(source, "preset"),
+        suffix: sourceStringField(source, "suffix"),
+        family: sourceStringField(source, "family"),
+      });
+    default:
+      return $t("recordPage.detailDialog.attempts.patchSources.unknown", {
+        kind,
+      });
+  }
+};
+
+const patchSourceItems = (attempt: RecordAttempt) => {
+  const summary = parsePatchSummary(attempt.request_patch_summary_json);
+  if (!summary) return [];
+
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  const pushSource = (source: unknown) => {
+    if (source == null) return;
+    const label = patchSourceLabel(source);
+    if (!seen.has(label)) {
+      seen.add(label);
+      labels.push(label);
+    }
+  };
+
+  asArray(summary.effective_rules).forEach((rule) => {
+    pushSource(rule.source);
+    asArray(rule.overridden_sources).forEach(pushSource);
+  });
+  asArray(summary.conflicts).forEach((conflict) => {
+    pushSource(conflict.lower_priority_source);
+    pushSource(conflict.higher_priority_source);
+  });
+
+  return labels;
+};
 
 const getStatusMeta = (status: string | null) => {
   switch (status) {

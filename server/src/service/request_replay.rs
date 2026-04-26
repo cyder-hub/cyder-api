@@ -224,6 +224,14 @@ pub struct RequestReplayModelSnapshot {
 pub struct RequestReplayExecutionPreview {
     pub semantic_basis: RequestReplaySemanticBasis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_requested_model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_reasoning_suffix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_reasoning_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_route: Option<RequestReplayResolvedRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_candidate: Option<RequestReplayResolvedCandidate>,
@@ -431,6 +439,14 @@ struct RequestReplayPreviewFingerprintInput {
     selected_provider_api_key_id: Option<i64>,
     used_provider_api_key_override: bool,
     semantic_basis: RequestReplaySemanticBasis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_requested_model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_reasoning_suffix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_reasoning_preset: Option<String>,
     input_snapshot: RequestReplayFingerprintInputSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     resolved_route: Option<RequestReplayResolvedRoute>,
@@ -522,6 +538,10 @@ pub struct AttemptReplayBaselineSummary {
 struct AttemptReplaySource {
     request_log_id: i64,
     attempt: RequestAttemptDetail,
+    requested_model_name: Option<String>,
+    base_requested_model_name: Option<String>,
+    resolved_reasoning_suffix: Option<String>,
+    resolved_reasoning_preset: Option<String>,
     resolved_route_id: Option<i64>,
     resolved_route_name: Option<String>,
     provider: Arc<CacheProvider>,
@@ -799,6 +819,10 @@ async fn load_attempt_replay_source(
     Ok(AttemptReplaySource {
         request_log_id,
         attempt,
+        requested_model_name: request_log.requested_model_name,
+        base_requested_model_name: request_log.base_requested_model_name,
+        resolved_reasoning_suffix: request_log.resolved_reasoning_suffix,
+        resolved_reasoning_preset: request_log.resolved_reasoning_preset,
         resolved_route_id: request_log.resolved_route_id,
         resolved_route_name: request_log.resolved_route_name,
         provider,
@@ -953,6 +977,10 @@ fn execution_preview_from_gateway_prepared(
 ) -> RequestReplayExecutionPreview {
     RequestReplayExecutionPreview {
         semantic_basis: RequestReplaySemanticBasis::HistoricalRequestSnapshotWithCurrentConfig,
+        requested_model_name: Some(prepared.requested_model_name.clone()),
+        base_requested_model_name: Some(prepared.base_requested_model_name.clone()),
+        resolved_reasoning_suffix: prepared.resolved_reasoning_suffix.clone(),
+        resolved_reasoning_preset: prepared.resolved_reasoning_preset.clone(),
         resolved_route: Some(RequestReplayResolvedRoute {
             route_id: prepared.resolved_route_id,
             route_name: prepared.resolved_route_name.clone(),
@@ -1027,6 +1055,10 @@ fn build_attempt_replay_preview(
         },
         execution_preview: RequestReplayExecutionPreview {
             semantic_basis: RequestReplaySemanticBasis::HistoricalAttemptSnapshot,
+            requested_model_name: source.requested_model_name.clone(),
+            base_requested_model_name: source.base_requested_model_name.clone(),
+            resolved_reasoning_suffix: source.resolved_reasoning_suffix.clone(),
+            resolved_reasoning_preset: source.resolved_reasoning_preset.clone(),
             resolved_route: Some(RequestReplayResolvedRoute {
                 route_id: source.resolved_route_id,
                 route_name: source.resolved_route_name.clone(),
@@ -1081,6 +1113,10 @@ fn attempt_replay_preview_fingerprint(
         selected_provider_api_key_id: Some(credential.provider_api_key_id),
         used_provider_api_key_override: credential.used_override,
         semantic_basis: response.semantic_basis,
+        requested_model_name: response.execution_preview.requested_model_name.clone(),
+        base_requested_model_name: response.execution_preview.base_requested_model_name.clone(),
+        resolved_reasoning_suffix: response.execution_preview.resolved_reasoning_suffix.clone(),
+        resolved_reasoning_preset: response.execution_preview.resolved_reasoning_preset.clone(),
         input_snapshot: RequestReplayFingerprintInputSnapshot::AttemptUpstream {
             request_uri: canonical_uri_for_fingerprint(&source.request_uri),
             sanitized_request_headers: canonical_name_values(
@@ -1129,6 +1165,10 @@ fn gateway_replay_preview_fingerprint(
         selected_provider_api_key_id: Some(prepared.provider_api_key_id),
         used_provider_api_key_override: false,
         semantic_basis: response.semantic_basis,
+        requested_model_name: response.execution_preview.requested_model_name.clone(),
+        base_requested_model_name: response.execution_preview.base_requested_model_name.clone(),
+        resolved_reasoning_suffix: response.execution_preview.resolved_reasoning_suffix.clone(),
+        resolved_reasoning_preset: response.execution_preview.resolved_reasoning_preset.clone(),
         input_snapshot: RequestReplayFingerprintInputSnapshot::GatewayRequest {
             request_path: source.request_snapshot.request_path.clone(),
             query_params: replay_query_params_from_snapshot(&source.request_snapshot.query_params),
@@ -2058,6 +2098,10 @@ fn execution_preview_from_gateway_metadata(
     let final_attempt = &metadata.final_attempt;
     RequestReplayExecutionPreview {
         semantic_basis: RequestReplaySemanticBasis::HistoricalRequestSnapshotWithCurrentConfig,
+        requested_model_name: Some(metadata.requested_model_name.clone()),
+        base_requested_model_name: Some(metadata.base_requested_model_name.clone()),
+        resolved_reasoning_suffix: metadata.resolved_reasoning_suffix.clone(),
+        resolved_reasoning_preset: metadata.resolved_reasoning_preset.clone(),
         resolved_route: Some(RequestReplayResolvedRoute {
             route_id: metadata.resolved_route_id,
             route_name: metadata.resolved_route_name.clone(),
@@ -2097,6 +2141,10 @@ fn execution_preview_from_gateway_failure(
         .map(execution_preview_from_gateway_metadata)
         .unwrap_or_else(|| RequestReplayExecutionPreview {
             semantic_basis: RequestReplaySemanticBasis::HistoricalRequestSnapshotWithCurrentConfig,
+            requested_model_name: None,
+            base_requested_model_name: None,
+            resolved_reasoning_suffix: None,
+            resolved_reasoning_preset: None,
             resolved_route: None,
             resolved_candidate: None,
             candidate_decisions: gateway_candidate_decisions_from_execution(
@@ -3856,6 +3904,10 @@ mod tests {
             }),
             execution_preview: Some(RequestReplayExecutionPreview {
                 semantic_basis: RequestReplaySemanticBasis::HistoricalAttemptSnapshot,
+                requested_model_name: None,
+                base_requested_model_name: None,
+                resolved_reasoning_suffix: None,
+                resolved_reasoning_preset: None,
                 resolved_route: None,
                 resolved_candidate: Some(RequestReplayResolvedCandidate {
                     candidate_position: Some(1),
@@ -4102,6 +4154,10 @@ mod tests {
                 estimated_cost_currency: Some("USD".to_string()),
                 ..Default::default()
             },
+            requested_model_name: Some("primary-high".to_string()),
+            base_requested_model_name: Some("primary".to_string()),
+            resolved_reasoning_suffix: Some("high".to_string()),
+            resolved_reasoning_preset: Some("high".to_string()),
             resolved_route_id: Some(8),
             resolved_route_name: Some("primary".to_string()),
             provider: Arc::new(CacheProvider {
@@ -4112,6 +4168,7 @@ mod tests {
                 use_proxy: false,
                 provider_type,
                 provider_api_key_mode: ProviderApiKeyMode::Queue,
+                default_reasoning_profile_id: None,
                 is_enabled: true,
             }),
             llm_api_type,
@@ -4698,6 +4755,9 @@ mod tests {
             id: 42,
             api_key_id: 7,
             requested_model_name: Some("gpt-test".to_string()),
+            base_requested_model_name: Some("gpt-test".to_string()),
+            resolved_reasoning_suffix: None,
+            resolved_reasoning_preset: None,
             resolved_name_scope: Some("direct".to_string()),
             resolved_route_id: Some(8),
             resolved_route_name: Some("primary".to_string()),
@@ -4838,6 +4898,10 @@ mod tests {
     fn gateway_execution_preview() -> RequestReplayExecutionPreview {
         RequestReplayExecutionPreview {
             semantic_basis: RequestReplaySemanticBasis::HistoricalRequestSnapshotWithCurrentConfig,
+            requested_model_name: Some("gpt-test".to_string()),
+            base_requested_model_name: Some("gpt-test".to_string()),
+            resolved_reasoning_suffix: None,
+            resolved_reasoning_preset: None,
             resolved_route: Some(RequestReplayResolvedRoute {
                 route_id: Some(8),
                 route_name: Some("primary".to_string()),
@@ -5016,7 +5080,10 @@ mod tests {
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk-live"));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let prepared = GatewayReplayPreparedRequest {
-            requested_model_name: "gpt-test".to_string(),
+            requested_model_name: "smart-chat-high".to_string(),
+            base_requested_model_name: "smart-chat".to_string(),
+            resolved_reasoning_suffix: Some("high".to_string()),
+            resolved_reasoning_preset: Some("high".to_string()),
             resolved_name_scope: "direct".to_string(),
             resolved_route_id: Some(8),
             resolved_route_name: Some("primary".to_string()),
@@ -5035,6 +5102,17 @@ mod tests {
         };
 
         let preview = execution_preview_from_gateway_prepared(&prepared);
+
+        assert_eq!(
+            preview.requested_model_name.as_deref(),
+            Some("smart-chat-high")
+        );
+        assert_eq!(
+            preview.base_requested_model_name.as_deref(),
+            Some("smart-chat")
+        );
+        assert_eq!(preview.resolved_reasoning_suffix.as_deref(), Some("high"));
+        assert_eq!(preview.resolved_reasoning_preset.as_deref(), Some("high"));
 
         let authorization = preview
             .final_request_headers

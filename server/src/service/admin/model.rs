@@ -4,6 +4,7 @@ use crate::controller::BaseError;
 use crate::database::model::{Model, ModelCapabilityFlags, UpdateModelData};
 use crate::database::model_route::ModelRoute;
 use crate::database::provider::Provider;
+use crate::database::reasoning_profile::validate_active_reasoning_profile_id;
 
 use super::audit::{AdminAuditEvent, AdminAuditField};
 use super::mutation::{
@@ -32,6 +33,7 @@ pub struct UpdateModelInput {
     pub supports_image_input: Option<bool>,
     pub supports_embeddings: Option<bool>,
     pub supports_rerank: Option<bool>,
+    pub reasoning_profile_override_id: Option<i64>,
 }
 
 pub struct ModelAdminService {
@@ -74,6 +76,10 @@ impl ModelAdminService {
     pub async fn update_model(&self, id: i64, input: UpdateModelInput) -> Result<Model, BaseError> {
         let existing = Model::get_by_id(id)?;
         let provider = Provider::get_by_id(existing.provider_id)?;
+        validate_active_reasoning_profile_id(
+            "reasoning_profile_override_id",
+            input.reasoning_profile_override_id,
+        )?;
         let updated = Model::update(
             id,
             &UpdateModelData {
@@ -87,6 +93,7 @@ impl ModelAdminService {
                 supports_image_input: input.supports_image_input,
                 supports_embeddings: input.supports_embeddings,
                 supports_rerank: input.supports_rerank,
+                reasoning_profile_override_id: Some(input.reasoning_profile_override_id),
             },
         )?;
 
@@ -184,11 +191,13 @@ mod tests {
 
     use diesel::connection::SimpleConnection;
 
+    use crate::controller::BaseError;
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::model_route::{
         CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput,
     };
     use crate::database::provider::{NewProvider, Provider};
+    use crate::database::reasoning_profile::ReasoningProfile;
     use crate::database::request_patch::{CreateRequestPatchPayload, RequestPatchRule};
     use crate::database::{DbConnection, TestDbContext, get_connection};
     use crate::schema::enum_def::{
@@ -211,6 +220,7 @@ mod tests {
             updated_at: 1,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
+            default_reasoning_profile_id: None,
         })
         .expect("provider seed should succeed")
     }
@@ -218,6 +228,29 @@ mod tests {
     fn seed_model_for_provider(provider_id: i64, model_name: &str) -> Model {
         Model::create(provider_id, model_name, None, true, default_capabilities())
             .expect("model seed should succeed")
+    }
+
+    fn seed_reasoning_profile(profile_key: &str, is_enabled: bool) -> ReasoningProfile {
+        ReasoningProfile::create(
+            profile_key,
+            profile_key,
+            None,
+            "openai_chat_reasoning_effort",
+            is_enabled,
+        )
+        .expect("reasoning profile seed should succeed")
+    }
+
+    fn assert_param_invalid_contains(err: BaseError, expected: &[&str]) {
+        let BaseError::ParamInvalid(Some(message)) = err else {
+            panic!("expected ParamInvalid with message, got {err:?}");
+        };
+        for needle in expected {
+            assert!(
+                message.contains(needle),
+                "expected error message '{message}' to contain '{needle}'"
+            );
+        }
     }
 
     fn seed_route(route_name: &str, model_id: i64) -> ModelRoute {
@@ -300,6 +333,7 @@ mod tests {
             supports_image_input: Some(true),
             supports_embeddings: Some(true),
             supports_rerank: Some(true),
+            reasoning_profile_override_id: None,
         }
     }
 
@@ -396,6 +430,133 @@ mod tests {
                 assert!(old_name_after.is_none());
                 assert_eq!(new_name_after.id, model.id);
                 assert_eq!(cached_by_id.model_name, "gpt-4.1-mini");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn update_model_validates_and_clears_reasoning_profile_override_binding() {
+        let test_db_context = TestDbContext::new_sqlite("admin-model-reasoning-update.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let provider = seed_provider(10211, "openai");
+                let model = seed_model_for_provider(provider.id, "gpt-4o-mini");
+                let disabled_profile =
+                    seed_reasoning_profile("model_update_disabled_profile", false);
+                let deleted_profile = seed_reasoning_profile("model_update_deleted_profile", true);
+                ReasoningProfile::delete(deleted_profile.id).expect("delete profile");
+                let active_profile = seed_reasoning_profile("model_update_active_profile", true);
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+
+                let model_before = app_state
+                    .catalog
+                    .get_model_by_id(model.id)
+                    .await
+                    .expect("model cache should load")
+                    .expect("model should exist");
+                let catalog_before = app_state
+                    .catalog
+                    .get_models_catalog()
+                    .await
+                    .expect("catalog should load");
+                assert!(model_before.reasoning_profile_override_id.is_none());
+                assert!(catalog_before.models.iter().any(|item| {
+                    item.id == model.id && item.reasoning_profile_override_id.is_none()
+                }));
+
+                let mut missing_input = update_input("gpt-4o-mini");
+                missing_input.reasoning_profile_override_id = Some(9_002_001);
+                let missing_err = service(&app_state)
+                    .update_model(model.id, missing_input)
+                    .await
+                    .expect_err("missing reasoning profile should be rejected");
+                assert_param_invalid_contains(
+                    missing_err,
+                    &["reasoning_profile_override_id", "9002001"],
+                );
+
+                let mut disabled_input = update_input("gpt-4o-mini");
+                disabled_input.reasoning_profile_override_id = Some(disabled_profile.id);
+                let disabled_err = service(&app_state)
+                    .update_model(model.id, disabled_input)
+                    .await
+                    .expect_err("disabled reasoning profile should be rejected");
+                assert_param_invalid_contains(
+                    disabled_err,
+                    &[
+                        "reasoning_profile_override_id",
+                        &disabled_profile.id.to_string(),
+                    ],
+                );
+
+                let mut deleted_input = update_input("gpt-4o-mini");
+                deleted_input.reasoning_profile_override_id = Some(deleted_profile.id);
+                let deleted_err = service(&app_state)
+                    .update_model(model.id, deleted_input)
+                    .await
+                    .expect_err("deleted reasoning profile should be rejected");
+                assert_param_invalid_contains(
+                    deleted_err,
+                    &[
+                        "reasoning_profile_override_id",
+                        &deleted_profile.id.to_string(),
+                    ],
+                );
+
+                let mut active_input = update_input("gpt-4o-mini");
+                active_input.reasoning_profile_override_id = Some(active_profile.id);
+                let updated = service(&app_state)
+                    .update_model(model.id, active_input)
+                    .await
+                    .expect("active reasoning profile should be accepted");
+
+                let model_after_bind = app_state
+                    .catalog
+                    .get_model_by_id(model.id)
+                    .await
+                    .expect("model cache should reload")
+                    .expect("model should exist");
+                let catalog_after_bind = app_state
+                    .catalog
+                    .get_models_catalog()
+                    .await
+                    .expect("catalog should reload");
+                assert_eq!(
+                    updated.reasoning_profile_override_id,
+                    Some(active_profile.id)
+                );
+                assert_eq!(
+                    model_after_bind.reasoning_profile_override_id,
+                    Some(active_profile.id)
+                );
+                assert!(catalog_after_bind.models.iter().any(|item| {
+                    item.id == model.id
+                        && item.reasoning_profile_override_id == Some(active_profile.id)
+                }));
+
+                let cleared = service(&app_state)
+                    .update_model(model.id, update_input("gpt-4o-mini"))
+                    .await
+                    .expect("null reasoning profile should clear binding");
+
+                let model_after_clear = app_state
+                    .catalog
+                    .get_model_by_id(model.id)
+                    .await
+                    .expect("model cache should reload after clear")
+                    .expect("model should exist");
+                let catalog_after_clear = app_state
+                    .catalog
+                    .get_models_catalog()
+                    .await
+                    .expect("catalog should reload after clear");
+
+                assert!(cleared.reasoning_profile_override_id.is_none());
+                assert!(model_after_clear.reasoning_profile_override_id.is_none());
+                assert!(catalog_after_clear.models.iter().any(|item| {
+                    item.id == model.id && item.reasoning_profile_override_id.is_none()
+                }));
             })
             .await;
     }

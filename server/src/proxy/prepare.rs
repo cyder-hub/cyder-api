@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 
 use super::ProxyError;
 use crate::{
+    database::reasoning_profile::{ReasoningPatchFamily, ReasoningPreset},
     schema::enum_def::{
         LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
     },
@@ -21,7 +22,8 @@ use crate::{
         cache::types::{
             CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
             CacheModelsCatalog, CacheProvider, CacheRequestPatchConflict,
-            CacheRequestPatchExplainEntry, CacheResolvedRequestPatch,
+            CacheRequestPatchExplainEntry, CacheResolvedRequestPatch, RequestPatchSource,
+            RuntimeRequestPatchConflict, RuntimeResolvedRequestPatch,
         },
         request_patch::resolve_effective_request_patches,
         runtime::GroupItemSelectionStrategy,
@@ -32,7 +34,16 @@ use crate::{
 };
 use cyder_tools::log::{debug, error, warn};
 
-use super::util::determine_target_api_type;
+use super::{
+    reasoning_suffix::{
+        GeneratedReasoningPatch, ReasoningPatchContext, generate_reasoning_patches,
+    },
+    requested_model::{
+        RequestedModelParseStatus, ResolvedRequestedModelName, enabled_reasoning_suffixes,
+        parse_reasoning_suffix,
+    },
+    util::determine_target_api_type,
+};
 
 /// Unified downstream request payload for generation operations.
 pub struct PreparedGenerationRequest {
@@ -44,8 +55,8 @@ pub struct PreparedGenerationRequest {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeRequestPatchTrace {
-    pub applied_rules: Vec<CacheResolvedRequestPatch>,
-    pub conflicts: Vec<CacheRequestPatchConflict>,
+    pub applied_rules: Vec<RuntimeResolvedRequestPatch>,
+    pub conflicts: Vec<RuntimeRequestPatchConflict>,
     pub has_conflicts: bool,
     pub applied_request_patch_ids_json: Option<String>,
     pub request_patch_summary_json: Option<String>,
@@ -55,9 +66,9 @@ pub(crate) struct RuntimeRequestPatchTrace {
 struct RequestPatchTraceSummary {
     provider_id: i64,
     model_id: Option<i64>,
-    effective_rules: Vec<CacheResolvedRequestPatch>,
+    effective_rules: Vec<RuntimeResolvedRequestPatch>,
     explain: Vec<CacheRequestPatchExplainEntry>,
-    conflicts: Vec<CacheRequestPatchConflict>,
+    conflicts: Vec<RuntimeRequestPatchConflict>,
     has_conflicts: bool,
 }
 
@@ -108,11 +119,60 @@ pub struct ExecutionCandidate {
     pub model: Arc<CacheModel>,
     pub llm_api_type: LlmApiType,
     pub provider_api_key_mode: ProviderApiKeyMode,
+    pub reasoning_profile_id: Option<i64>,
+    pub reasoning_profile_key: Option<String>,
+    pub reasoning_profile_preset_id: Option<i64>,
+    pub reasoning_family: Option<ReasoningPatchFamily>,
+    pub reasoning_preset: Option<ReasoningPreset>,
+    pub reasoning_suffix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExecutionCandidateReasoningBinding {
+    pub profile_id: i64,
+    pub profile_key: String,
+    pub profile_preset_id: i64,
+    pub family: ReasoningPatchFamily,
+    pub preset: ReasoningPreset,
+    pub suffix: String,
+}
+
+impl ExecutionCandidate {
+    fn apply_reasoning_binding(&mut self, binding: ExecutionCandidateReasoningBinding) {
+        self.reasoning_profile_id = Some(binding.profile_id);
+        self.reasoning_profile_key = Some(binding.profile_key);
+        self.reasoning_profile_preset_id = Some(binding.profile_preset_id);
+        self.reasoning_family = Some(binding.family);
+        self.reasoning_preset = Some(binding.preset);
+        self.reasoning_suffix = Some(binding.suffix);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RouteCandidateRuntimeResolution {
+    pub route_candidate_position: usize,
+    pub route_candidate: CacheModelRouteCandidate,
+    pub candidate: Option<ExecutionCandidate>,
+    pub stale_reason: Option<String>,
+}
+
+impl RouteCandidateRuntimeResolution {
+    pub(crate) fn runtime_status_key(&self) -> &'static str {
+        if self.candidate.is_some() {
+            "valid"
+        } else {
+            "stale_skipped"
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ExecutionPlan {
     pub requested_name: String,
+    pub base_requested_name: String,
+    pub resolved_reasoning_suffix: Option<String>,
+    pub resolved_reasoning_preset: Option<ReasoningPreset>,
+    pub requested_model_parse_status: RequestedModelParseStatus,
     pub resolved_scope: ResolvedNameScope,
     pub resolved_route_id: Option<i64>,
     pub resolved_route_name: Option<String>,
@@ -142,7 +202,7 @@ impl ExecutionPlan {
             .iter()
             .map(|candidate| {
                 format!(
-                    "#{} route={:?}/{} priority={:?} provider={}/{} model={}/{} llm_api={:?} key_mode={:?}",
+                    "#{} route={:?}/{} priority={:?} provider={}/{} model={}/{} llm_api={:?} key_mode={:?} reasoning_profile={:?}/{} reasoning_preset_row={:?} reasoning_family={:?} reasoning_preset={:?} reasoning_suffix={:?}",
                     candidate.candidate_position,
                     candidate.route_id,
                     candidate.route_name.as_deref().unwrap_or("direct"),
@@ -152,17 +212,34 @@ impl ExecutionPlan {
                     candidate.model.id,
                     candidate.model.model_name,
                     candidate.llm_api_type,
-                    candidate.provider_api_key_mode
+                    candidate.provider_api_key_mode,
+                    candidate.reasoning_profile_id,
+                    candidate.reasoning_profile_key.as_deref().unwrap_or("none"),
+                    candidate.reasoning_profile_preset_id,
+                    candidate.reasoning_family,
+                    candidate.reasoning_preset,
+                    candidate.reasoning_suffix
                 )
             })
             .collect::<Vec<_>>()
             .join(", ");
 
         format!(
-            "model_ids={:?}; {}",
+            "base_name={}; reasoning_suffix={:?}; reasoning_preset={:?}; model_ids={:?}; {}",
+            self.base_requested_name,
+            self.resolved_reasoning_suffix,
+            self.resolved_reasoning_preset,
             self.candidate_model_ids(),
             candidate_details
         )
+    }
+
+    fn apply_resolved_requested_model_name(&mut self, resolved: ResolvedRequestedModelName) {
+        self.requested_name = resolved.original_requested_name;
+        self.base_requested_name = resolved.base_requested_name;
+        self.resolved_reasoning_suffix = resolved.requested_suffix;
+        self.resolved_reasoning_preset = resolved.requested_preset;
+        self.requested_model_parse_status = resolved.parse_status;
     }
 }
 
@@ -316,18 +393,19 @@ fn describe_json_kind(value: &Value) -> &'static str {
     }
 }
 
-fn parse_request_patch_value(rule: &CacheResolvedRequestPatch) -> Result<Value, ProxyError> {
+fn parse_request_patch_value(rule: &RuntimeResolvedRequestPatch) -> Result<Value, ProxyError> {
     let raw = rule.value_json.as_ref().ok_or_else(|| {
         ProxyError::InternalError(format!(
-            "request patch rule {} is missing value_json for SET",
-            rule.source_rule_id
+            "{} is missing value_json for SET",
+            rule.source_label()
         ))
     })?;
 
     serde_json::from_str(raw).map_err(|err| {
         ProxyError::InternalError(format!(
-            "request patch rule {} has invalid value_json: {}",
-            rule.source_rule_id, err
+            "{} has invalid value_json: {}",
+            rule.source_label(),
+            err
         ))
     })
 }
@@ -495,7 +573,7 @@ fn remove_body_pointer_value(
     }
 }
 
-fn scalar_request_patch_value(rule: &CacheResolvedRequestPatch) -> Result<String, ProxyError> {
+fn scalar_request_patch_value(rule: &RuntimeResolvedRequestPatch) -> Result<String, ProxyError> {
     let value = parse_request_patch_value(rule)?;
     match value {
         Value::String(text) => Ok(text),
@@ -513,7 +591,7 @@ fn scalar_request_patch_value(rule: &CacheResolvedRequestPatch) -> Result<String
 
 fn apply_query_request_patch(
     url: &mut Url,
-    rule: &CacheResolvedRequestPatch,
+    rule: &RuntimeResolvedRequestPatch,
 ) -> Result<(), ProxyError> {
     let mut existing_pairs: Vec<(String, String)> = url
         .query_pairs()
@@ -538,7 +616,7 @@ pub(crate) fn rebuild_gemini_url_query_from_snapshot(
     final_url: &str,
     snapshot_query_params: &[RequestLogBundleQueryParam],
     is_stream: bool,
-    request_patches: &[CacheResolvedRequestPatch],
+    request_patches: &[RuntimeResolvedRequestPatch],
 ) -> Result<String, ProxyError> {
     let mut url = Url::parse(final_url)
         .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
@@ -622,12 +700,14 @@ fn percent_encode_query_component(value: &str) -> String {
 
 fn apply_header_request_patch(
     headers: &mut HeaderMap,
-    rule: &CacheResolvedRequestPatch,
+    rule: &RuntimeResolvedRequestPatch,
 ) -> Result<(), ProxyError> {
     let header_name = HeaderName::from_bytes(rule.target.as_bytes()).map_err(|err| {
         ProxyError::InternalError(format!(
-            "request patch rule {} has invalid header target '{}': {}",
-            rule.source_rule_id, rule.target, err
+            "{} has invalid header target '{}': {}",
+            rule.source_label(),
+            rule.target,
+            err
         ))
     })?;
 
@@ -640,8 +720,10 @@ fn apply_header_request_patch(
             let header_value = ReqwestHeaderValue::from_str(&scalar_request_patch_value(rule)?)
                 .map_err(|err| {
                     ProxyError::InternalError(format!(
-                        "request patch rule {} has invalid header value for '{}': {}",
-                        rule.source_rule_id, rule.target, err
+                        "{} has invalid header value for '{}': {}",
+                        rule.source_label(),
+                        rule.target,
+                        err
                     ))
                 })?;
             headers.insert(header_name, header_value);
@@ -654,12 +736,14 @@ pub(crate) fn apply_request_patches(
     data: &mut Value,
     url: &mut Url,
     headers: &mut HeaderMap,
-    request_patches: &[CacheResolvedRequestPatch],
+    request_patches: &[RuntimeResolvedRequestPatch],
 ) -> Result<(), ProxyError> {
     for rule in request_patches {
         debug!(
             "Applying request patch {} to {:?} '{}'",
-            rule.source_rule_id, rule.placement, rule.target
+            rule.source_label(),
+            rule.placement,
+            rule.target
         );
         match rule.placement {
             RequestPatchPlacement::Header => apply_header_request_patch(headers, rule)?,
@@ -689,17 +773,35 @@ fn build_runtime_request_patch_trace(
     explain: Vec<CacheRequestPatchExplainEntry>,
     conflicts: Vec<CacheRequestPatchConflict>,
     has_conflicts: bool,
+    generated_rules: Vec<RuntimeResolvedRequestPatch>,
 ) -> Result<RuntimeRequestPatchTrace, ProxyError> {
+    let mut runtime_rules = effective_rules
+        .into_iter()
+        .map(RuntimeResolvedRequestPatch::from)
+        .collect::<Vec<_>>();
+    let mut runtime_conflicts = conflicts
+        .into_iter()
+        .map(RuntimeRequestPatchConflict::from)
+        .collect::<Vec<_>>();
+
+    if !has_conflicts {
+        let (merged_rules, generated_conflicts) =
+            merge_runtime_request_patches(runtime_rules, generated_rules);
+        runtime_rules = merged_rules;
+        runtime_conflicts.extend(generated_conflicts);
+    }
+
+    let has_conflicts = has_conflicts || !runtime_conflicts.is_empty();
     let applied_rules = if has_conflicts {
         Vec::new()
     } else {
-        effective_rules.clone()
+        runtime_rules.clone()
     };
 
     let applied_request_patch_ids_json = serde_json::to_string(
         &applied_rules
             .iter()
-            .map(|rule| rule.source_rule_id)
+            .filter_map(|rule| rule.source.rule_id())
             .collect::<Vec<_>>(),
     )
     .map(Some)
@@ -713,9 +815,9 @@ fn build_runtime_request_patch_trace(
     let request_patch_summary_json = serde_json::to_string(&RequestPatchTraceSummary {
         provider_id,
         model_id,
-        effective_rules,
+        effective_rules: runtime_rules,
         explain,
-        conflicts: conflicts.clone(),
+        conflicts: runtime_conflicts.clone(),
         has_conflicts,
     })
     .map(Some)
@@ -728,18 +830,268 @@ fn build_runtime_request_patch_trace(
 
     Ok(RuntimeRequestPatchTrace {
         applied_rules,
-        conflicts,
+        conflicts: runtime_conflicts,
         has_conflicts,
         applied_request_patch_ids_json,
         request_patch_summary_json,
     })
 }
 
+impl From<CacheRequestPatchConflict> for RuntimeRequestPatchConflict {
+    fn from(conflict: CacheRequestPatchConflict) -> Self {
+        Self {
+            placement: conflict.placement,
+            lower_priority_source: RequestPatchSource::ProviderRule {
+                rule_id: conflict.provider_rule_id,
+            },
+            higher_priority_source: RequestPatchSource::ModelRule {
+                rule_id: conflict.model_rule_id,
+            },
+            lower_priority_target: conflict.provider_target,
+            higher_priority_target: conflict.model_target,
+            reason: conflict.reason,
+        }
+    }
+}
+
+fn request_patch_source_priority(source: &RequestPatchSource) -> u8 {
+    match source {
+        RequestPatchSource::ProviderRule { .. } => 0,
+        RequestPatchSource::ModelRule { .. } => 1,
+        RequestPatchSource::ReasoningPreset { .. } => 2,
+    }
+}
+
+fn request_patch_placement_rank(placement: RequestPatchPlacement) -> u8 {
+    match placement {
+        RequestPatchPlacement::Header => 0,
+        RequestPatchPlacement::Query => 1,
+        RequestPatchPlacement::Body => 2,
+    }
+}
+
+fn stable_sort_runtime_request_patches(rules: &mut [RuntimeResolvedRequestPatch]) {
+    rules.sort_by(|left, right| {
+        request_patch_placement_rank(left.placement)
+            .cmp(&request_patch_placement_rank(right.placement))
+            .then_with(|| left.target.cmp(&right.target))
+            .then_with(|| {
+                request_patch_source_priority(&left.source)
+                    .cmp(&request_patch_source_priority(&right.source))
+            })
+            .then_with(|| left.source_label().cmp(&right.source_label()))
+    });
+}
+
+fn request_patch_target_matches_body_prefix(target: &str, prefix: &str) -> bool {
+    target == prefix || target.starts_with(&format!("{prefix}/"))
+}
+
+fn runtime_body_targets_conflict(left_target: &str, right_target: &str) -> bool {
+    left_target != right_target
+        && (request_patch_target_matches_body_prefix(left_target, right_target)
+            || request_patch_target_matches_body_prefix(right_target, left_target))
+}
+
+fn is_runtime_body_conflict(
+    left: &RuntimeResolvedRequestPatch,
+    right: &RuntimeResolvedRequestPatch,
+) -> bool {
+    left.placement == RequestPatchPlacement::Body
+        && right.placement == RequestPatchPlacement::Body
+        && runtime_body_targets_conflict(&left.target, &right.target)
+}
+
+fn runtime_request_patch_conflict(
+    left: &RuntimeResolvedRequestPatch,
+    right: &RuntimeResolvedRequestPatch,
+) -> RuntimeRequestPatchConflict {
+    let left_priority = request_patch_source_priority(&left.source);
+    let right_priority = request_patch_source_priority(&right.source);
+    let (lower, higher) = if left_priority <= right_priority {
+        (left, right)
+    } else {
+        (right, left)
+    };
+
+    RuntimeRequestPatchConflict {
+        placement: RequestPatchPlacement::Body,
+        lower_priority_source: lower.source.clone(),
+        higher_priority_source: higher.source.clone(),
+        lower_priority_target: lower.target.clone(),
+        higher_priority_target: higher.target.clone(),
+        reason: format!(
+            "{} BODY target '{}' conflicts with higher-priority {} BODY target '{}'",
+            lower.source_label(),
+            lower.target,
+            higher.source_label(),
+            higher.target
+        ),
+    }
+}
+
+fn push_unique_source(sources: &mut Vec<RequestPatchSource>, source: RequestPatchSource) {
+    if !sources.contains(&source) {
+        sources.push(source);
+    }
+}
+
+fn push_unique_rule_id(rule_ids: &mut Vec<i64>, rule_id: i64) {
+    if !rule_ids.contains(&rule_id) {
+        rule_ids.push(rule_id);
+    }
+}
+
+fn record_overridden_runtime_patch(
+    overriding_rule: &mut RuntimeResolvedRequestPatch,
+    overridden_rule: &RuntimeResolvedRequestPatch,
+) {
+    push_unique_source(
+        &mut overriding_rule.overridden_sources,
+        overridden_rule.source.clone(),
+    );
+    if let Some(rule_id) = overridden_rule.source.rule_id() {
+        push_unique_rule_id(&mut overriding_rule.overridden_rule_ids, rule_id);
+    }
+    for source in &overridden_rule.overridden_sources {
+        push_unique_source(&mut overriding_rule.overridden_sources, source.clone());
+    }
+    for rule_id in &overridden_rule.overridden_rule_ids {
+        push_unique_rule_id(&mut overriding_rule.overridden_rule_ids, *rule_id);
+    }
+}
+
+fn merge_runtime_request_patches(
+    mut base_rules: Vec<RuntimeResolvedRequestPatch>,
+    generated_rules: Vec<RuntimeResolvedRequestPatch>,
+) -> (
+    Vec<RuntimeResolvedRequestPatch>,
+    Vec<RuntimeRequestPatchConflict>,
+) {
+    let mut conflicts = Vec::new();
+
+    for mut generated_rule in generated_rules {
+        let mut retained_rules = Vec::with_capacity(base_rules.len());
+        for existing_rule in base_rules {
+            if is_runtime_body_conflict(&existing_rule, &generated_rule) {
+                conflicts.push(runtime_request_patch_conflict(
+                    &existing_rule,
+                    &generated_rule,
+                ));
+                retained_rules.push(existing_rule);
+                continue;
+            }
+
+            if existing_rule.placement == generated_rule.placement
+                && existing_rule.target == generated_rule.target
+            {
+                record_overridden_runtime_patch(&mut generated_rule, &existing_rule);
+                continue;
+            }
+
+            retained_rules.push(existing_rule);
+        }
+
+        retained_rules.push(generated_rule);
+        base_rules = retained_rules;
+    }
+
+    stable_sort_runtime_request_patches(&mut base_rules);
+    conflicts.sort_by(|left, right| {
+        left.lower_priority_target
+            .cmp(&right.lower_priority_target)
+            .then_with(|| {
+                left.higher_priority_target
+                    .cmp(&right.higher_priority_target)
+            })
+            .then_with(|| {
+                left.lower_priority_source
+                    .label()
+                    .cmp(&right.lower_priority_source.label())
+            })
+            .then_with(|| {
+                left.higher_priority_source
+                    .label()
+                    .cmp(&right.higher_priority_source.label())
+            })
+    });
+
+    (base_rules, conflicts)
+}
+
+fn generated_reasoning_patch_to_runtime(
+    candidate: &ExecutionCandidate,
+    patch: GeneratedReasoningPatch,
+) -> Result<RuntimeResolvedRequestPatch, ProxyError> {
+    let profile_id = candidate.reasoning_profile_id.ok_or_else(|| {
+        ProxyError::InternalError(format!(
+            "candidate provider '{}' model '{}' is missing reasoning_profile_id for generated patch",
+            candidate.provider.provider_key, candidate.model.model_name
+        ))
+    })?;
+    let profile_preset_id = candidate.reasoning_profile_preset_id.ok_or_else(|| {
+        ProxyError::InternalError(format!(
+            "candidate provider '{}' model '{}' is missing reasoning_profile_preset_id for generated patch",
+            candidate.provider.provider_key, candidate.model.model_name
+        ))
+    })?;
+
+    Ok(RuntimeResolvedRequestPatch {
+        placement: patch.placement,
+        target: patch.target,
+        operation: patch.operation,
+        value_json: patch.value_json,
+        source: RequestPatchSource::ReasoningPreset {
+            profile_id,
+            profile_preset_id,
+            family: patch.family,
+            preset: patch.preset,
+            suffix: patch.suffix,
+        },
+        source_rule_id: None,
+        source_origin: None,
+        overridden_rule_ids: Vec::new(),
+        overridden_sources: Vec::new(),
+        description: patch.description,
+    })
+}
+
+fn generate_candidate_reasoning_request_patches(
+    candidate: Option<&ExecutionCandidate>,
+) -> Result<Vec<RuntimeResolvedRequestPatch>, ProxyError> {
+    let Some(candidate) = candidate else {
+        return Ok(Vec::new());
+    };
+
+    let Some(family) = candidate.reasoning_family else {
+        return Ok(Vec::new());
+    };
+    let preset = candidate.reasoning_preset.ok_or_else(|| {
+        ProxyError::InternalError(format!(
+            "candidate provider '{}' model '{}' has reasoning family but no preset",
+            candidate.provider.provider_key, candidate.model.model_name
+        ))
+    })?;
+
+    generate_reasoning_patches(
+        family,
+        preset,
+        ReasoningPatchContext::for_model(candidate.llm_api_type, &candidate.model),
+    )
+    .map_err(|err| ProxyError::BadRequest(err.to_string()))?
+    .into_iter()
+    .map(|patch| generated_reasoning_patch_to_runtime(candidate, patch))
+    .collect()
+}
+
 pub(crate) async fn load_runtime_request_patch_trace(
     provider: &CacheProvider,
     model: Option<&CacheModel>,
+    candidate: Option<&ExecutionCandidate>,
     app_state: &Arc<AppState>,
 ) -> Result<RuntimeRequestPatchTrace, ProxyError> {
+    let generated_rules = generate_candidate_reasoning_request_patches(candidate)?;
+
     if let Some(model) = model {
         let resolved = app_state
             .catalog
@@ -769,6 +1121,7 @@ pub(crate) async fn load_runtime_request_patch_trace(
             resolved.explain.clone(),
             resolved.conflicts.clone(),
             resolved.has_conflicts,
+            generated_rules,
         );
     }
 
@@ -795,6 +1148,7 @@ pub(crate) async fn load_runtime_request_patch_trace(
         resolved.explain,
         resolved.conflicts,
         resolved.has_conflicts,
+        generated_rules,
     )
 }
 
@@ -894,7 +1248,7 @@ pub async fn prepare_llm_request(
     model: &CacheModel,
     mut data: Value, // Takes ownership of data
     original_headers: &HeaderMap,
-    request_patches: &[CacheResolvedRequestPatch],
+    request_patches: &[RuntimeResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
     path: &str,
 ) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
@@ -930,7 +1284,7 @@ pub async fn prepare_generation_request(
     model: &CacheModel,
     data: Value,
     original_headers: &HeaderMap,
-    request_patches: &[CacheResolvedRequestPatch],
+    request_patches: &[RuntimeResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
     target_api_type: LlmApiType,
     is_stream: bool,
@@ -987,7 +1341,7 @@ pub async fn prepare_simple_gemini_request(
     model: &CacheModel,
     mut data: Value,
     original_headers: &HeaderMap,
-    request_patches: &[CacheResolvedRequestPatch],
+    request_patches: &[RuntimeResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
     action: &str,
     params: &HashMap<String, String>,
@@ -1015,7 +1369,7 @@ pub async fn prepare_gemini_llm_request(
     model: &CacheModel,
     mut data: Value,
     original_headers: &HeaderMap,
-    request_patches: &[CacheResolvedRequestPatch],
+    request_patches: &[RuntimeResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
     is_stream: bool,
     params: &HashMap<String, String>,
@@ -1097,6 +1451,12 @@ fn build_candidate(
         model: Arc::new(model),
         llm_api_type,
         provider_api_key_mode,
+        reasoning_profile_id: None,
+        reasoning_profile_key: None,
+        reasoning_profile_preset_id: None,
+        reasoning_family: None,
+        reasoning_preset: None,
+        reasoning_suffix: None,
     })
 }
 
@@ -1106,6 +1466,37 @@ fn build_route_execution_plan(
     resolved_scope: ResolvedNameScope,
     route: &CacheModelRoute,
 ) -> Result<ExecutionPlan, String> {
+    let runtime_candidates = resolve_route_runtime_candidates(catalog, requested_name, route)?;
+    let candidates = runtime_candidates
+        .into_iter()
+        .filter_map(|runtime_candidate| runtime_candidate.candidate)
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return Err(format!(
+            "Model route '{}' does not have any valid candidates.",
+            route.route_name
+        ));
+    }
+
+    Ok(ExecutionPlan {
+        requested_name: requested_name.to_string(),
+        base_requested_name: requested_name.to_string(),
+        resolved_reasoning_suffix: None,
+        resolved_reasoning_preset: None,
+        requested_model_parse_status: RequestedModelParseStatus::Exact,
+        resolved_scope,
+        resolved_route_id: Some(route.id),
+        resolved_route_name: Some(route.route_name.clone()),
+        candidates,
+    })
+}
+
+pub(crate) fn resolve_route_runtime_candidates(
+    catalog: &CacheModelsCatalog,
+    requested_name: &str,
+    route: &CacheModelRoute,
+) -> Result<Vec<RouteCandidateRuntimeResolution>, String> {
     if !route.is_enabled {
         return Err(format!("Model route '{}' is disabled.", route.route_name));
     }
@@ -1122,40 +1513,42 @@ fn build_route_execution_plan(
         ));
     }
 
-    let mut candidates = Vec::with_capacity(enabled_candidates.len());
-    for route_candidate in enabled_candidates {
+    let mut resolutions = Vec::with_capacity(enabled_candidates.len());
+    let mut valid_candidate_position = 1usize;
+    for (index, route_candidate) in enabled_candidates.into_iter().enumerate() {
         match build_candidate(
             catalog,
             requested_name,
             Some(route),
             Some(route_candidate),
             route_candidate.model_id,
-            candidates.len() + 1,
+            valid_candidate_position,
         ) {
-            Ok(candidate) => candidates.push(candidate),
+            Ok(candidate) => {
+                valid_candidate_position += 1;
+                resolutions.push(RouteCandidateRuntimeResolution {
+                    route_candidate_position: index + 1,
+                    route_candidate: route_candidate.clone(),
+                    candidate: Some(candidate),
+                    stale_reason: None,
+                });
+            }
             Err(error) => {
                 warn!(
                     "Skipping stale execution candidate for route '{}' model_id {}: {}",
                     route.route_name, route_candidate.model_id, error
                 );
+                resolutions.push(RouteCandidateRuntimeResolution {
+                    route_candidate_position: index + 1,
+                    route_candidate: route_candidate.clone(),
+                    candidate: None,
+                    stale_reason: Some(error),
+                });
             }
         }
     }
 
-    if candidates.is_empty() {
-        return Err(format!(
-            "Model route '{}' does not have any valid candidates.",
-            route.route_name
-        ));
-    }
-
-    Ok(ExecutionPlan {
-        requested_name: requested_name.to_string(),
-        resolved_scope,
-        resolved_route_id: Some(route.id),
-        resolved_route_name: Some(route.route_name.clone()),
-        candidates,
-    })
+    Ok(resolutions)
 }
 
 fn build_direct_execution_plan(
@@ -1193,6 +1586,10 @@ fn build_direct_execution_plan(
 
     Ok(ExecutionPlan {
         requested_name: requested_name.to_string(),
+        base_requested_name: requested_name.to_string(),
+        resolved_reasoning_suffix: None,
+        resolved_reasoning_preset: None,
+        requested_model_parse_status: RequestedModelParseStatus::Exact,
         resolved_scope: ResolvedNameScope::Direct,
         resolved_route_id: None,
         resolved_route_name: None,
@@ -1212,7 +1609,7 @@ fn find_enabled_override<'a>(
     })
 }
 
-fn build_execution_plan_from_catalog(
+fn build_exact_execution_plan_from_catalog(
     catalog: &CacheModelsCatalog,
     api_key_id: i64,
     requested_name: &str,
@@ -1264,6 +1661,200 @@ fn build_execution_plan_from_catalog(
     build_direct_execution_plan(catalog, requested_name)
 }
 
+pub(crate) fn candidate_supports_reasoning_preset(
+    catalog: &CacheModelsCatalog,
+    candidate: &ExecutionCandidate,
+    preset: ReasoningPreset,
+) -> Result<ExecutionCandidateReasoningBinding, String> {
+    let profile_id = candidate
+        .model
+        .reasoning_profile_override_id
+        .or(candidate.provider.default_reasoning_profile_id)
+        .ok_or_else(|| {
+            format!(
+                "provider '{}' model '{}' does not have an enabled reasoning profile",
+                candidate.provider.provider_key, candidate.model.model_name
+            )
+        })?;
+
+    let profile = catalog
+        .reasoning_profiles
+        .iter()
+        .find(|profile| profile.id == profile_id && profile.is_enabled)
+        .ok_or_else(|| {
+            format!(
+                "reasoning profile {} for provider '{}' model '{}' is missing or disabled",
+                profile_id, candidate.provider.provider_key, candidate.model.model_name
+            )
+        })?;
+
+    let profile_preset = profile
+        .presets
+        .iter()
+        .find(|profile_preset| profile_preset.preset == preset && profile_preset.is_enabled)
+        .ok_or_else(|| {
+            format!(
+                "reasoning profile '{}' does not enable preset '{}'",
+                profile.profile_key, preset
+            )
+        })?;
+
+    generate_reasoning_patches(
+        profile.family,
+        preset,
+        ReasoningPatchContext::for_model(candidate.llm_api_type, &candidate.model),
+    )
+    .map_err(|err| err.to_string())?;
+
+    Ok(ExecutionCandidateReasoningBinding {
+        profile_id: profile.id,
+        profile_key: profile.profile_key.clone(),
+        profile_preset_id: profile_preset.id,
+        family: profile.family,
+        preset,
+        suffix: preset.canonical_suffix().to_string(),
+    })
+}
+
+pub(crate) fn route_supports_reasoning_preset(
+    catalog: &CacheModelsCatalog,
+    route: &CacheModelRoute,
+    preset: ReasoningPreset,
+) -> Result<Vec<ExecutionCandidateReasoningBinding>, String> {
+    let plan = build_route_execution_plan(
+        catalog,
+        &route.route_name,
+        ResolvedNameScope::GlobalRoute,
+        route,
+    )?;
+
+    let mut bindings = Vec::with_capacity(plan.candidates.len());
+    for candidate in &plan.candidates {
+        let binding = candidate_supports_reasoning_preset(catalog, candidate, preset).map_err(
+            |reason| {
+                format!(
+                    "route '{}' candidate provider '{}' model '{}' does not support preset '{}': {}",
+                    route.route_name,
+                    candidate.provider.provider_key,
+                    candidate.model.model_name,
+                    preset,
+                    reason
+                )
+            },
+        )?;
+        bindings.push(binding);
+    }
+
+    Ok(bindings)
+}
+
+fn reasoning_bindings_for_execution_plan(
+    catalog: &CacheModelsCatalog,
+    plan: &ExecutionPlan,
+    preset: ReasoningPreset,
+) -> Result<Vec<ExecutionCandidateReasoningBinding>, String> {
+    if let Some(route_id) = plan.resolved_route_id {
+        let route = catalog
+            .routes
+            .iter()
+            .find(|route| route.id == route_id)
+            .ok_or_else(|| {
+                format!(
+                    "resolved route {} for '{}' was not found while binding reasoning preset '{}'",
+                    route_id, plan.base_requested_name, preset
+                )
+            })?;
+        return route_supports_reasoning_preset(catalog, route, preset);
+    }
+
+    plan.candidates
+        .iter()
+        .map(|candidate| {
+            candidate_supports_reasoning_preset(catalog, candidate, preset).map_err(|reason| {
+                format!(
+                    "direct candidate provider '{}' model '{}' does not support preset '{}': {}",
+                    candidate.provider.provider_key, candidate.model.model_name, preset, reason
+                )
+            })
+        })
+        .collect()
+}
+
+fn bind_execution_plan_reasoning_preset(
+    catalog: &CacheModelsCatalog,
+    plan: &mut ExecutionPlan,
+    suffix: &str,
+    preset: ReasoningPreset,
+) -> Result<(), String> {
+    let bindings =
+        reasoning_bindings_for_execution_plan(catalog, plan, preset).map_err(|reason| {
+            format!(
+                "Reasoning suffix '{}' (preset '{}') is not supported by base model '{}': {}",
+                suffix, preset, plan.base_requested_name, reason
+            )
+        })?;
+
+    if bindings.len() != plan.candidates.len() {
+        return Err(format!(
+            "Reasoning suffix '{}' (preset '{}') resolved {} bindings for {} candidates on base model '{}'.",
+            suffix,
+            preset,
+            bindings.len(),
+            plan.candidates.len(),
+            plan.base_requested_name
+        ));
+    }
+
+    for (candidate, binding) in plan.candidates.iter_mut().zip(bindings) {
+        candidate.apply_reasoning_binding(binding);
+    }
+
+    Ok(())
+}
+
+fn build_execution_plan_from_catalog(
+    catalog: &CacheModelsCatalog,
+    api_key_id: i64,
+    requested_name: &str,
+) -> Result<ExecutionPlan, String> {
+    match build_exact_execution_plan_from_catalog(catalog, api_key_id, requested_name) {
+        Ok(plan) => return Ok(plan),
+        Err(exact_error) => {
+            let suffixes = enabled_reasoning_suffixes(catalog);
+            let Some(resolved_name) = parse_reasoning_suffix(requested_name, &suffixes) else {
+                return Err(exact_error);
+            };
+
+            let mut plan = build_exact_execution_plan_from_catalog(
+                catalog,
+                api_key_id,
+                &resolved_name.base_requested_name,
+            )
+            .map_err(|base_error| {
+                format!(
+                    "Model '{}' uses known reasoning suffix '{}' (preset '{}'), but base model '{}' could not be resolved: {}",
+                    resolved_name.original_requested_name,
+                    resolved_name.requested_suffix.as_deref().unwrap_or(""),
+                    resolved_name
+                        .requested_preset
+                        .map(|preset| preset.as_key())
+                        .unwrap_or(""),
+                    resolved_name.base_requested_name,
+                    base_error
+                )
+            })?;
+
+            let suffix = resolved_name.requested_suffix.clone().unwrap_or_default();
+            let preset = resolved_name
+                .requested_preset
+                .expect("reasoning suffix parse should include preset");
+            bind_execution_plan_reasoning_preset(catalog, &mut plan, &suffix, preset)?;
+            plan.apply_resolved_requested_model_name(resolved_name);
+            Ok(plan)
+        }
+    }
+}
+
 pub async fn build_execution_plan(
     app_state: &Arc<AppState>,
     api_key_id: i64,
@@ -1287,17 +1878,21 @@ pub async fn build_execution_plan(
 mod tests {
     use super::{
         ResolvedNameScope, apply_request_patches, build_execution_plan_from_catalog,
-        parse_provider_model, rebuild_gemini_url_query_from_snapshot, resolve_real_model_name,
-        select_generation_prepare_kind,
+        build_runtime_request_patch_trace, parse_provider_model,
+        rebuild_gemini_url_query_from_snapshot, resolve_real_model_name,
+        route_supports_reasoning_preset, select_generation_prepare_kind,
     };
     use crate::{
+        database::reasoning_profile::{ReasoningPatchFamily, ReasoningPreset},
         schema::enum_def::{
             LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation,
             RequestPatchPlacement,
         },
         service::cache::types::{
             CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
-            CacheModelsCatalog, CacheProvider, CacheResolvedRequestPatch, RequestPatchRuleOrigin,
+            CacheModelsCatalog, CacheProvider, CacheReasoningProfile, CacheReasoningProfilePreset,
+            CacheResolvedRequestPatch, RequestPatchRuleOrigin, RequestPatchSource,
+            RuntimeResolvedRequestPatch,
         },
         utils::storage::RequestLogBundleQueryParam,
     };
@@ -1314,7 +1909,37 @@ mod tests {
             use_proxy: false,
             provider_type,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
+            default_reasoning_profile_id: None,
             is_enabled: true,
+        }
+    }
+
+    fn reasoning_profile(
+        id: i64,
+        profile_key: &str,
+        family: ReasoningPatchFamily,
+        presets: &[ReasoningPreset],
+    ) -> CacheReasoningProfile {
+        CacheReasoningProfile {
+            id,
+            profile_key: profile_key.to_string(),
+            name: profile_key.to_string(),
+            description: None,
+            family,
+            is_enabled: true,
+            presets: presets
+                .iter()
+                .enumerate()
+                .map(|(index, preset)| CacheReasoningProfilePreset {
+                    id: id * 10 + index as i64,
+                    profile_id: id,
+                    preset: *preset,
+                    suffix: preset.canonical_suffix().to_string(),
+                    requires_reasoning: preset.requires_reasoning(),
+                    expose_in_models: true,
+                    is_enabled: true,
+                })
+                .collect(),
         }
     }
 
@@ -1330,6 +1955,7 @@ mod tests {
             model_name: model_name.to_string(),
             real_model_name: real_model_name.map(str::to_string),
             cost_catalog_id: None,
+            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,
@@ -1397,7 +2023,30 @@ mod tests {
                 description: None,
                 is_enabled: true,
             }],
+            reasoning_profiles: vec![],
         }
+    }
+
+    fn catalog_with_openai_high_reasoning() -> CacheModelsCatalog {
+        let mut catalog = catalog();
+        catalog.providers[0].default_reasoning_profile_id = Some(900);
+        catalog.reasoning_profiles.push(reasoning_profile(
+            900,
+            "openai-chat",
+            ReasoningPatchFamily::OpenAiChatReasoningEffort,
+            &[ReasoningPreset::High],
+        ));
+        catalog
+    }
+
+    fn add_gemini_high_reasoning(catalog: &mut CacheModelsCatalog) {
+        catalog.providers[1].default_reasoning_profile_id = Some(901);
+        catalog.reasoning_profiles.push(reasoning_profile(
+            901,
+            "gemini-budget",
+            ReasoningPatchFamily::Gemini25ThinkingBudget,
+            &[ReasoningPreset::High],
+        ));
     }
 
     fn request_patch(
@@ -1406,16 +2055,58 @@ mod tests {
         target: &str,
         operation: RequestPatchOperation,
         value: Option<Value>,
-    ) -> CacheResolvedRequestPatch {
-        CacheResolvedRequestPatch {
+    ) -> RuntimeResolvedRequestPatch {
+        RuntimeResolvedRequestPatch {
             placement,
             target: target.to_string(),
             operation,
             value_json: value.map(|item| serde_json::to_string(&item).unwrap()),
+            source: RequestPatchSource::ProviderRule { rule_id: id },
+            source_rule_id: Some(id),
+            source_origin: Some(RequestPatchRuleOrigin::ProviderDirect),
+            overridden_rule_ids: Vec::new(),
+            overridden_sources: Vec::new(),
+            description: None,
+        }
+    }
+
+    fn cache_request_patch(
+        id: i64,
+        origin: RequestPatchRuleOrigin,
+        placement: RequestPatchPlacement,
+        target: &str,
+        value: Option<Value>,
+    ) -> CacheResolvedRequestPatch {
+        CacheResolvedRequestPatch {
+            placement,
+            target: target.to_string(),
+            operation: RequestPatchOperation::Set,
+            value_json: value.map(|item| serde_json::to_string(&item).unwrap()),
             source_rule_id: id,
-            source_origin: RequestPatchRuleOrigin::ProviderDirect,
+            source_origin: origin,
             overridden_rule_ids: Vec::new(),
             description: None,
+        }
+    }
+
+    fn reasoning_runtime_patch(target: &str, value: Value) -> RuntimeResolvedRequestPatch {
+        RuntimeResolvedRequestPatch {
+            placement: RequestPatchPlacement::Body,
+            target: target.to_string(),
+            operation: RequestPatchOperation::Set,
+            value_json: Some(serde_json::to_string(&value).unwrap()),
+            source: RequestPatchSource::ReasoningPreset {
+                profile_id: 900,
+                profile_preset_id: 9000,
+                family: ReasoningPatchFamily::OpenAiChatReasoningEffort,
+                preset: ReasoningPreset::High,
+                suffix: "high".to_string(),
+            },
+            source_rule_id: None,
+            source_origin: None,
+            overridden_rule_ids: Vec::new(),
+            overridden_sources: Vec::new(),
+            description: Some("generated test reasoning patch".to_string()),
         }
     }
 
@@ -1758,6 +2449,117 @@ mod tests {
     }
 
     #[test]
+    fn runtime_trace_merges_reasoning_patch_after_provider_model_patches() {
+        let base_rules = vec![cache_request_patch(
+            11,
+            RequestPatchRuleOrigin::ProviderDirect,
+            RequestPatchPlacement::Body,
+            "/reasoning_effort",
+            Some(json!("low")),
+        )];
+        let generated_rules = vec![reasoning_runtime_patch("/reasoning_effort", json!("high"))];
+
+        let trace = build_runtime_request_patch_trace(
+            1,
+            Some(10),
+            base_rules,
+            Vec::new(),
+            Vec::new(),
+            false,
+            generated_rules,
+        )
+        .expect("runtime trace should build");
+
+        assert!(!trace.has_conflicts);
+        assert_eq!(trace.applied_rules.len(), 1);
+        let applied = &trace.applied_rules[0];
+        assert!(matches!(
+            &applied.source,
+            RequestPatchSource::ReasoningPreset { .. }
+        ));
+        assert_eq!(applied.source_rule_id, None);
+        assert_eq!(applied.source_origin, None);
+        assert_eq!(applied.overridden_rule_ids, vec![11]);
+        assert!(matches!(
+            applied.overridden_sources.as_slice(),
+            [RequestPatchSource::ProviderRule { rule_id: 11 }]
+        ));
+        assert_eq!(trace.applied_request_patch_ids_json.as_deref(), Some("[]"));
+
+        let summary: Value = serde_json::from_str(
+            trace
+                .request_patch_summary_json
+                .as_deref()
+                .expect("summary should serialize"),
+        )
+        .expect("summary should be json");
+        assert_eq!(
+            summary["effective_rules"][0]["source"]["kind"],
+            "reasoning_preset"
+        );
+        assert_eq!(summary["effective_rules"][0]["source_rule_id"], Value::Null);
+        assert_eq!(
+            summary["effective_rules"][0]["overridden_sources"][0]["kind"],
+            "provider_rule"
+        );
+
+        let mut data = json!({ "reasoning_effort": "client" });
+        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
+        let mut headers = HeaderMap::new();
+        apply_request_patches(&mut data, &mut url, &mut headers, &trace.applied_rules)
+            .expect("merged runtime patch should apply");
+        assert_eq!(data["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn runtime_trace_reports_reasoning_body_ancestor_conflict() {
+        let base_rules = vec![cache_request_patch(
+            11,
+            RequestPatchRuleOrigin::ProviderDirect,
+            RequestPatchPlacement::Body,
+            "/reasoning",
+            Some(json!({ "effort": "low" })),
+        )];
+        let generated_rules = vec![reasoning_runtime_patch("/reasoning/effort", json!("high"))];
+
+        let trace = build_runtime_request_patch_trace(
+            1,
+            Some(10),
+            base_rules,
+            Vec::new(),
+            Vec::new(),
+            false,
+            generated_rules,
+        )
+        .expect("runtime trace should build");
+
+        assert!(trace.has_conflicts);
+        assert!(trace.applied_rules.is_empty());
+        assert_eq!(trace.applied_request_patch_ids_json.as_deref(), Some("[]"));
+        assert_eq!(trace.conflicts.len(), 1);
+        assert!(matches!(
+            &trace.conflicts[0].lower_priority_source,
+            RequestPatchSource::ProviderRule { rule_id: 11 }
+        ));
+        assert!(matches!(
+            &trace.conflicts[0].higher_priority_source,
+            RequestPatchSource::ReasoningPreset { .. }
+        ));
+        assert!(
+            trace.conflicts[0].reason.contains("reasoning preset patch"),
+            "{:?}",
+            trace.conflicts[0]
+        );
+        let err = trace
+            .conflict_error("gpt-primary")
+            .expect("conflict should become proxy error");
+        assert!(matches!(
+            err,
+            crate::proxy::ProxyError::RequestPatchConflict(_)
+        ));
+    }
+
+    #[test]
     fn parse_provider_model_splits_only_on_first_separator() {
         assert_eq!(
             parse_provider_model("openai/gpt-4.1"),
@@ -1836,6 +2638,10 @@ mod tests {
         let plan = build_execution_plan_from_catalog(&catalog, 42, "openai/gpt-primary")
             .expect("direct model should resolve");
 
+        assert_eq!(plan.requested_name, "openai/gpt-primary");
+        assert_eq!(plan.base_requested_name, "openai/gpt-primary");
+        assert_eq!(plan.resolved_reasoning_suffix, None);
+        assert_eq!(plan.resolved_reasoning_preset, None);
         assert_eq!(plan.resolved_scope, ResolvedNameScope::Direct);
         assert_eq!(plan.resolved_route_id, None);
         assert_eq!(plan.candidate_model_ids(), vec![10]);
@@ -1861,6 +2667,226 @@ mod tests {
         assert_eq!(plan.candidates[0].route_candidate_priority, Some(10));
         assert_eq!(plan.candidates[1].candidate_position, 2);
         assert_eq!(plan.candidates[1].route_candidate_priority, Some(30));
+    }
+
+    #[test]
+    fn build_execution_plan_keeps_exact_route_before_reasoning_suffix_parse() {
+        let mut catalog = catalog_with_openai_high_reasoning();
+        catalog.routes.push(route_with_candidates(
+            300,
+            "smart-route-high",
+            &[(10, 10, true)],
+        ));
+
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "smart-route-high")
+            .expect("exact route should win");
+
+        assert_eq!(plan.requested_name, "smart-route-high");
+        assert_eq!(plan.base_requested_name, "smart-route-high");
+        assert_eq!(plan.resolved_reasoning_suffix, None);
+        assert_eq!(plan.resolved_reasoning_preset, None);
+        assert_eq!(plan.resolved_scope, ResolvedNameScope::GlobalRoute);
+        assert_eq!(plan.resolved_route_id, Some(300));
+    }
+
+    #[test]
+    fn build_execution_plan_resolves_direct_reasoning_suffix_after_exact_miss() {
+        let catalog = catalog_with_openai_high_reasoning();
+
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "openai/gpt-primary-high")
+            .expect("direct model reasoning suffix should resolve");
+
+        assert_eq!(plan.requested_name, "openai/gpt-primary-high");
+        assert_eq!(plan.base_requested_name, "openai/gpt-primary");
+        assert_eq!(plan.resolved_reasoning_suffix.as_deref(), Some("high"));
+        assert_eq!(plan.resolved_reasoning_preset, Some(ReasoningPreset::High));
+        assert_eq!(plan.resolved_scope, ResolvedNameScope::Direct);
+        assert_eq!(plan.candidate_model_ids(), vec![10]);
+        let candidate = plan.primary_candidate().unwrap();
+        assert_eq!(candidate.reasoning_profile_id, Some(900));
+        assert_eq!(
+            candidate.reasoning_profile_key.as_deref(),
+            Some("openai-chat")
+        );
+        assert_eq!(candidate.reasoning_profile_preset_id, Some(9000));
+        assert_eq!(
+            candidate.reasoning_family,
+            Some(ReasoningPatchFamily::OpenAiChatReasoningEffort)
+        );
+        assert_eq!(candidate.reasoning_preset, Some(ReasoningPreset::High));
+        assert_eq!(candidate.reasoning_suffix.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn build_execution_plan_resolves_route_reasoning_suffix_after_exact_miss() {
+        let catalog = catalog_with_openai_high_reasoning();
+
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "smart-route-high")
+            .expect("route reasoning suffix should resolve");
+
+        assert_eq!(plan.requested_name, "smart-route-high");
+        assert_eq!(plan.base_requested_name, "smart-route");
+        assert_eq!(plan.resolved_reasoning_suffix.as_deref(), Some("high"));
+        assert_eq!(plan.resolved_reasoning_preset, Some(ReasoningPreset::High));
+        assert_eq!(plan.resolved_scope, ResolvedNameScope::GlobalRoute);
+        assert_eq!(plan.candidate_model_ids(), vec![10, 30]);
+        assert!(plan.candidates.iter().all(|candidate| {
+            candidate.reasoning_family == Some(ReasoningPatchFamily::OpenAiChatReasoningEffort)
+                && candidate.reasoning_preset == Some(ReasoningPreset::High)
+                && candidate.reasoning_suffix.as_deref() == Some("high")
+        }));
+        let summary = plan.candidate_summary_for_log();
+        assert!(summary.contains("base_name=smart-route"), "{summary}");
+        assert!(
+            summary.contains("reasoning_family=Some(OpenAiChatReasoningEffort)"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("reasoning_suffix=Some(\"high\")"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn route_reasoning_suffix_allows_different_families_with_same_preset() {
+        let mut catalog = catalog_with_openai_high_reasoning();
+        add_gemini_high_reasoning(&mut catalog);
+        catalog.routes[0].candidates[1].is_enabled = true;
+
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "smart-route-high")
+            .expect("route should allow different families when preset is stable");
+
+        assert_eq!(plan.candidate_model_ids(), vec![10, 20, 30]);
+        assert_eq!(
+            plan.candidates[0].reasoning_family,
+            Some(ReasoningPatchFamily::OpenAiChatReasoningEffort)
+        );
+        assert_eq!(
+            plan.candidates[1].reasoning_family,
+            Some(ReasoningPatchFamily::Gemini25ThinkingBudget)
+        );
+        assert_eq!(
+            plan.candidates
+                .iter()
+                .map(|candidate| candidate.reasoning_preset)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(ReasoningPreset::High),
+                Some(ReasoningPreset::High),
+                Some(ReasoningPreset::High)
+            ]
+        );
+    }
+
+    #[test]
+    fn build_execution_plan_resolves_override_reasoning_suffix_after_exact_miss() {
+        let mut catalog = catalog_with_openai_high_reasoning();
+        catalog.api_key_overrides.push(CacheApiKeyModelOverride {
+            id: 501,
+            api_key_id: 7,
+            source_name: "operator-alias".to_string(),
+            target_route_id: 100,
+            description: None,
+            is_enabled: true,
+        });
+
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "operator-alias-high")
+            .expect("override reasoning suffix should resolve through the base override");
+
+        assert_eq!(plan.requested_name, "operator-alias-high");
+        assert_eq!(plan.base_requested_name, "operator-alias");
+        assert_eq!(plan.resolved_reasoning_suffix.as_deref(), Some("high"));
+        assert_eq!(plan.resolved_reasoning_preset, Some(ReasoningPreset::High));
+        assert_eq!(plan.resolved_scope, ResolvedNameScope::ApiKeyOverride);
+        assert_eq!(plan.candidate_model_ids(), vec![10, 30]);
+    }
+
+    #[test]
+    fn build_execution_plan_returns_clear_error_when_reasoning_suffix_base_is_missing() {
+        let catalog = catalog_with_openai_high_reasoning();
+
+        let err = build_execution_plan_from_catalog(&catalog, 7, "openai/missing-high")
+            .expect_err("known suffix with missing base should be rejected");
+
+        assert!(err.contains("known reasoning suffix 'high'"), "{err}");
+        assert!(err.contains("base model 'openai/missing'"), "{err}");
+    }
+
+    #[test]
+    fn build_execution_plan_does_not_downgrade_unknown_suffix_to_base_model() {
+        let catalog = catalog_with_openai_high_reasoning();
+
+        let err = build_execution_plan_from_catalog(&catalog, 7, "openai/gpt-primary-ultra")
+            .expect_err("unknown suffix should stay an exact miss");
+
+        assert!(err.contains("openai/gpt-primary-ultra"), "{err}");
+        assert!(!err.contains("known reasoning suffix"), "{err}");
+    }
+
+    #[test]
+    fn build_execution_plan_rejects_suffix_when_base_candidate_lacks_profile() {
+        let mut catalog = catalog_with_openai_high_reasoning();
+        catalog.providers[0].default_reasoning_profile_id = None;
+
+        let err = build_execution_plan_from_catalog(&catalog, 7, "openai/gpt-primary-high")
+            .expect_err("base without profile should not support suffix");
+
+        assert!(err.contains("Reasoning suffix 'high'"), "{err}");
+        assert!(
+            err.contains("does not have an enabled reasoning profile"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_execution_plan_rejects_route_suffix_when_any_valid_candidate_lacks_preset() {
+        let mut catalog = catalog_with_openai_high_reasoning();
+        catalog.routes[0].candidates[1].is_enabled = true;
+
+        let err = build_execution_plan_from_catalog(&catalog, 7, "smart-route-high")
+            .expect_err("route suffix should fail when one valid candidate lacks high");
+
+        assert!(err.contains("Reasoning suffix 'high'"), "{err}");
+        assert!(err.contains("candidate provider 'gemini'"), "{err}");
+        assert!(
+            err.contains("does not have an enabled reasoning profile"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn route_supports_reasoning_preset_skips_stale_candidates() {
+        let mut catalog = catalog_with_openai_high_reasoning();
+        catalog.routes[0] =
+            route_with_candidates(100, "smart-route", &[(999, 1, true), (10, 10, true)]);
+        let route = &catalog.routes[0];
+
+        let bindings = route_supports_reasoning_preset(&catalog, route, ReasoningPreset::High)
+            .expect("stale candidate should be skipped before stability check");
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].profile_id, 900);
+        assert_eq!(bindings[0].profile_preset_id, 9000);
+        assert_eq!(bindings[0].preset, ReasoningPreset::High);
+    }
+
+    #[test]
+    fn same_suffix_with_different_preset_key_does_not_pass_route_stability() {
+        let mut catalog = catalog_with_openai_high_reasoning();
+        catalog.reasoning_profiles.push(reasoning_profile(
+            901,
+            "openai-medium",
+            ReasoningPatchFamily::OpenAiChatReasoningEffort,
+            &[ReasoningPreset::Medium],
+        ));
+        catalog.reasoning_profiles[1].presets[0].suffix = "high".to_string();
+        catalog.models[2].reasoning_profile_override_id = Some(901);
+
+        let err = build_execution_plan_from_catalog(&catalog, 7, "smart-route-high")
+            .expect_err("suffix must resolve to the same preset key for every candidate");
+
+        assert!(err.contains("preset 'high'"), "{err}");
+        assert!(err.contains("does not enable preset 'high'"), "{err}");
     }
 
     #[test]

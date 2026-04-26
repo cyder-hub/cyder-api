@@ -82,6 +82,15 @@
             variant="ghost"
             size="sm"
             class="w-full justify-center"
+            @click="handleOpenReasoningPreview(item.route.id)"
+          >
+            <BrainCircuit class="mr-1 h-3.5 w-3.5" />
+            Reasoning
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full justify-center"
             @click="handleOpenEditModal(item.route.id)"
           >
             <Pencil class="mr-1 h-3.5 w-3.5" />
@@ -116,6 +125,9 @@
             <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
               {{ $t("modelRoutePage.table.enabled") }}
             </TableHead>
+            <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
+              Reasoning
+            </TableHead>
             <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
               {{ $t("common.actions") }}
             </TableHead>
@@ -143,6 +155,12 @@
                 :model-value="item.route.is_enabled"
                 @update:model-value="(value) => handleToggleEnabled(item, value === true)"
               />
+            </TableCell>
+            <TableCell>
+              <Button variant="ghost" size="sm" @click="handleOpenReasoningPreview(item.route.id)">
+                <BrainCircuit class="mr-1 h-3.5 w-3.5" />
+                Preview
+              </Button>
             </TableCell>
             <TableCell class="text-right">
               <Button variant="ghost" size="sm" @click="handleOpenEditModal(item.route.id)">
@@ -355,6 +373,109 @@
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog :open="showReasoningPreviewModal" @update:open="(open) => (showReasoningPreviewModal = open)">
+        <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-5xl">
+          <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
+            <DialogTitle class="text-lg font-semibold text-gray-900">
+              Reasoning suffix preview
+              <span v-if="reasoningPreview" class="font-mono text-sm font-normal text-gray-500">
+                {{ reasoningPreview.route_name }}
+              </span>
+            </DialogTitle>
+          </DialogHeader>
+
+          <div class="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
+            <div v-if="isReasoningPreviewLoading" class="flex items-center justify-center py-16 text-gray-400">
+              <Loader2 class="mr-2 h-5 w-5 animate-spin" />
+              <span class="text-sm">Loading preview</span>
+            </div>
+
+            <div
+              v-else-if="reasoningPreviewError"
+              class="rounded-lg border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-600"
+            >
+              {{ reasoningPreviewError }}
+            </div>
+
+            <div v-else-if="reasoningPreview" class="space-y-4">
+              <div class="space-y-3">
+                <div
+                  v-for="preset in reasoningPreview.presets"
+                  :key="preset.preset_key"
+                  class="rounded-lg border border-gray-200 bg-white"
+                >
+                  <div class="flex flex-col gap-2 border-b border-gray-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="min-w-0">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="font-mono text-sm font-semibold text-gray-900">
+                          {{ preset.preset_key }} -{{ preset.suffix }}
+                        </span>
+                        <Badge :variant="preset.stable ? 'secondary' : 'outline'" class="font-mono text-[11px]">
+                          {{ preset.stable ? "stable" : "incomplete" }}
+                        </Badge>
+                        <Badge :variant="preset.requires_reasoning ? 'secondary' : 'outline'" class="font-mono text-[11px]">
+                          reasoning: {{ preset.requires_reasoning ? "yes" : "no" }}
+                        </Badge>
+                      </div>
+                      <p v-if="preset.reason" class="mt-1 text-xs text-gray-500">
+                        {{ preset.reason }}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div class="divide-y divide-gray-100">
+                    <div
+                      v-for="candidate in preset.candidates"
+                      :key="`${preset.preset_key}-${candidate.candidate_position}`"
+                      class="grid grid-cols-1 gap-2 px-4 py-3 text-sm md:grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] md:items-center"
+                    >
+                      <div class="flex flex-wrap items-center gap-1">
+                        <Badge :variant="candidate.supported ? 'secondary' : 'outline'" class="w-fit font-mono text-[11px]">
+                          #{{ candidate.candidate_position }}
+                        </Badge>
+                        <Badge
+                          :variant="candidate.runtime_status === 'stale_skipped' ? 'outline' : candidate.supported ? 'secondary' : 'outline'"
+                          class="w-fit font-mono text-[11px]"
+                        >
+                          {{ candidate.runtime_status === "stale_skipped" ? "stale skipped" : candidate.supported ? "supported" : "unsupported" }}
+                        </Badge>
+                      </div>
+                      <div class="min-w-0">
+                        <p class="break-all font-mono text-xs text-gray-700">
+                          {{ candidate.provider_key || "missing-provider" }}/{{ candidate.model_name || candidate.model_id }}
+                        </p>
+                      </div>
+                      <div class="min-w-0">
+                        <p class="break-all font-mono text-xs text-gray-600">
+                          {{ candidate.reasoning_profile_key || "no-profile" }}
+                        </p>
+                        <p v-if="candidate.reasoning_family" class="mt-0.5 break-all font-mono text-[11px] text-gray-500">
+                          {{ candidate.reasoning_family }}
+                        </p>
+                      </div>
+                      <div class="min-w-0">
+                        <p
+                          class="text-xs"
+                          :class="candidate.runtime_status === 'stale_skipped' ? 'text-amber-700' : candidate.supported ? 'text-gray-600' : 'text-red-600'"
+                        >
+                          {{ candidate.runtime_status === "stale_skipped" ? candidate.reason : candidate.supported ? "Supported" : candidate.reason }}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
+            <Button variant="ghost" class="w-full text-gray-600 sm:w-auto" @click="showReasoningPreviewModal = false">
+              {{ $t("common.close") }}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </template>
   </CrudPageLayout>
 </template>
@@ -371,6 +492,7 @@ import type {
   ModelRouteListItem,
   ModelRoutePayload,
   ModelRouteUpdatePayload,
+  ReasoningRoutePreview,
 } from "@/store/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -407,6 +529,7 @@ import {
   AlertCircle,
   ArrowDown,
   ArrowUp,
+  BrainCircuit,
   Inbox,
   Loader2,
   Pencil,
@@ -438,6 +561,10 @@ const routes = ref<ModelRouteListItem[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
 const showEditModal = ref(false);
+const showReasoningPreviewModal = ref(false);
+const reasoningPreview = ref<ReasoningRoutePreview | null>(null);
+const isReasoningPreviewLoading = ref(false);
+const reasoningPreviewError = ref<string | null>(null);
 
 const createCandidate = (): EditingCandidate => ({
   local_id: `${Date.now()}-${Math.random()}`,
@@ -572,6 +699,21 @@ const handleOpenEditModal = async (id: number) => {
   } catch (err: unknown) {
     console.error("Failed to fetch model route detail:", err);
     toastController.error($t("modelRoutePage.alert.loadDetailFailed"));
+  }
+};
+
+const handleOpenReasoningPreview = async (id: number) => {
+  showReasoningPreviewModal.value = true;
+  isReasoningPreviewLoading.value = true;
+  reasoningPreviewError.value = null;
+  reasoningPreview.value = null;
+
+  try {
+    reasoningPreview.value = await Api.getModelRouteReasoningPreview(id);
+  } catch (err: unknown) {
+    reasoningPreviewError.value = normalizeError(err, $t("common.unknownError")).message;
+  } finally {
+    isReasoningPreviewLoading.value = false;
   }
 };
 

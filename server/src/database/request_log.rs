@@ -14,6 +14,9 @@ db_object! {
         pub id: i64,
         pub api_key_id: i64,
         pub requested_model_name: Option<String>,
+        pub base_requested_model_name: Option<String>,
+        pub resolved_reasoning_suffix: Option<String>,
+        pub resolved_reasoning_preset: Option<String>,
         pub resolved_name_scope: Option<String>,
         pub resolved_route_id: Option<i64>,
         pub resolved_route_name: Option<String>,
@@ -80,6 +83,9 @@ db_object! {
         pub id: i64,
         pub api_key_id: i64,
         pub requested_model_name: Option<String>,
+        pub base_requested_model_name: Option<String>,
+        pub resolved_reasoning_suffix: Option<String>,
+        pub resolved_reasoning_preset: Option<String>,
         pub resolved_name_scope: Option<String>,
         pub resolved_route_name: Option<String>,
         #[diesel(column_name = status)]
@@ -489,6 +495,27 @@ impl RequestLog {
                                 .assume_not_null()
                                 .like(pattern.clone()),
                         ))
+                        .or(request_log::dsl::base_requested_model_name
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::base_requested_model_name
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
+                        .or(request_log::dsl::resolved_reasoning_suffix
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::resolved_reasoning_suffix
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
+                        .or(request_log::dsl::resolved_reasoning_preset
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::resolved_reasoning_preset
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
                         .or(request_log::dsl::resolved_route_name.is_not_null().and(
                             request_log::dsl::resolved_route_name
                                 .assume_not_null()
@@ -689,6 +716,27 @@ impl RequestLog {
                                 .assume_not_null()
                                 .like(pattern.clone()),
                         ))
+                        .or(request_log::dsl::base_requested_model_name
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::base_requested_model_name
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
+                        .or(request_log::dsl::resolved_reasoning_suffix
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::resolved_reasoning_suffix
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
+                        .or(request_log::dsl::resolved_reasoning_preset
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::resolved_reasoning_preset
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
                         .or(request_log::dsl::resolved_route_name.is_not_null().and(
                             request_log::dsl::resolved_route_name
                                 .assume_not_null()

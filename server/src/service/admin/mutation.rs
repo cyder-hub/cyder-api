@@ -54,6 +54,10 @@ pub enum AdminCatalogInvalidation {
     ProviderRequestPatchRules {
         provider_id: i64,
     },
+    ReasoningProfile {
+        id: i64,
+        key: Option<String>,
+    },
     Model {
         id: i64,
         name: Option<AdminModelCacheName>,
@@ -90,6 +94,7 @@ impl AdminCatalogInvalidation {
             Self::Provider { .. } => "provider",
             Self::ProviderApiKeys { .. } => "provider_api_keys",
             Self::ProviderRequestPatchRules { .. } => "provider_request_patch_rules",
+            Self::ReasoningProfile { .. } => "reasoning_profile",
             Self::Model { .. } => "model",
             Self::ModelRoute { .. } => "model_route",
             Self::ModelRoutes(_) => "model_routes",
@@ -190,6 +195,11 @@ impl AdminMutationRunner {
             AdminCatalogInvalidation::ProviderRequestPatchRules { provider_id } => {
                 self.catalog
                     .invalidate_provider_request_patch_rules(*provider_id)
+                    .await
+            }
+            AdminCatalogInvalidation::ReasoningProfile { id, key } => {
+                self.catalog
+                    .invalidate_reasoning_profile(*id, key.as_deref())
                     .await
             }
             AdminCatalogInvalidation::Model {
@@ -330,6 +340,12 @@ mod tests {
                     ),
                     AdminMutationEffect::catalog_invalidation(
                         AdminCatalogInvalidation::ProviderRequestPatchRules { provider_id: 11 },
+                    ),
+                    AdminMutationEffect::catalog_invalidation(
+                        AdminCatalogInvalidation::ReasoningProfile {
+                            id: 61,
+                            key: Some("profile-a".to_string()),
+                        },
                     ),
                     AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Model {
                         id: 21,

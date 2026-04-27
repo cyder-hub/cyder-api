@@ -1,4 +1,3 @@
-use super::error::ProxyLogLevel;
 use super::logging::{
     LogBodyKind, LoggedBody, RequestLogContext, StreamingBodyWriter,
     record_request_completion_and_log,
@@ -240,29 +239,6 @@ impl Drop for ResponseStreamCancellationGuard {
     }
 }
 
-fn log_simple_request_failed(url: &str, stage: Option<&str>, proxy_error: &ProxyError) {
-    match proxy_error.operator_log_level() {
-        ProxyLogLevel::Debug => crate::debug_event!(
-            "proxy.simple_request_failed",
-            url = url,
-            error_code = proxy_error.error_code(),
-            stage = stage,
-        ),
-        ProxyLogLevel::Warn => crate::warn_event!(
-            "proxy.simple_request_failed",
-            url = url,
-            error_code = proxy_error.error_code(),
-            stage = stage,
-        ),
-        ProxyLogLevel::Error => crate::error_event!(
-            "proxy.simple_request_failed",
-            url = url,
-            error_code = proxy_error.error_code(),
-            stage = stage,
-        ),
-    }
-}
-
 fn should_forward_response_header(name: &HeaderName) -> bool {
     name != CONTENT_LENGTH && name != CONTENT_ENCODING && name != TRANSFER_ENCODING
 }
@@ -485,84 +461,6 @@ fn next_stream_chunk_timeout_duration(first_chunk_received_at_proxy: i64) -> Opt
         CONFIG.proxy_request.first_byte_timeout()
     } else {
         None
-    }
-}
-
-// A simple proxy that sends a request and returns the response, handling streaming and gzip.
-// It does not perform logging or response transformation.
-pub(super) async fn simple_proxy_request(
-    app_state: &AppState,
-    url: String,
-    data: String,
-    headers: reqwest::header::HeaderMap,
-    use_proxy: bool,
-) -> Result<Response<Body>, ProxyError> {
-    let cancellation = ProxyCancellationContext::new();
-    let client = if use_proxy {
-        app_state.infra.proxy_client()
-    } else {
-        app_state.infra.client()
-    };
-
-    crate::debug_event!(
-        "proxy.simple_request_dispatch",
-        url = &url,
-        request_header_count = headers.len(),
-        request_body_bytes = data.len(),
-        request_body_sha256 = sha256_hex(data.as_bytes()),
-        json_top_level_fields = json_top_level_field_count_from_bytes(data.as_bytes()),
-    );
-
-    let response = match send_with_first_byte_timeout(
-        &cancellation,
-        client
-            .request(Method::POST, &url)
-            .headers(headers)
-            .body(data),
-        "LLM request",
-    )
-    .await
-    {
-        Ok(resp) => resp,
-        Err(proxy_error) => {
-            log_simple_request_failed(&url, None, &proxy_error);
-            return Err(proxy_error);
-        }
-    };
-
-    let status_code = response.status();
-    let response_headers = response.headers().clone();
-    let response_builder = build_response_builder(status_code, &response_headers);
-
-    let is_sse = response_headers.get(CONTENT_TYPE).map_or(false, |value| {
-        value.to_str().unwrap_or("").contains("text/event-stream")
-    });
-
-    if is_sse {
-        let body = Body::from_stream(
-            response
-                .bytes_stream()
-                .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
-        );
-        Ok(response_builder.body(body).unwrap())
-    } else {
-        let is_gzip = response_headers
-            .get(CONTENT_ENCODING)
-            .map_or(false, |value| value.to_str().unwrap_or("").contains("gzip"));
-
-        let body_bytes = match response.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                let proxy_error = classify_reqwest_error("Reading upstream response body", &e);
-                log_simple_request_failed(&url, Some("read_response_body"), &proxy_error);
-                return Err(proxy_error);
-            }
-        };
-
-        let decompressed_body = decode_response_body(body_bytes, is_gzip);
-        Ok(response_builder
-            .body(Body::from(decompressed_body))
-            .unwrap())
     }
 }
 
@@ -1640,9 +1538,7 @@ mod tests {
     #[tokio::test]
     async fn send_with_first_byte_timeout_returns_client_cancelled_when_cancelled() {
         let cancellation = ProxyCancellationContext::new();
-        cancellation
-            .cancel("client hung up before upstream responded")
-            .await;
+        cancellation.cancel_now("client hung up before upstream responded");
 
         let client = reqwest::Client::new();
         let result = send_with_first_byte_timeout(

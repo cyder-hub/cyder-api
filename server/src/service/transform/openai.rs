@@ -18,17 +18,6 @@ pub(crate) enum OpenAiVariant {
     OtherCompat,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum RewriteAction {
-    Remove,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct FieldRewriteRule {
-    field: &'static str,
-    action: RewriteAction,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct DefaultInjectionRule {
     field: &'static str,
@@ -39,12 +28,12 @@ pub(crate) struct DefaultInjectionRule {
 pub(crate) struct ChannelSchemaPolicy {
     allowed_top_level_fields: &'static [&'static str],
     forbidden_top_level_fields: &'static [&'static str],
-    rewrite_rules: &'static [FieldRewriteRule],
     default_injections: &'static [DefaultInjectionRule],
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct OpenAiVariantPolicy {
+    #[cfg(test)]
     variant: OpenAiVariant,
     schema: ChannelSchemaPolicy,
 }
@@ -81,7 +70,6 @@ const GEMINI_COMPAT_ALLOWED_FIELDS: &[&str] = &[
 ];
 
 const EMPTY_FIELDS: &[&str] = &[];
-const EMPTY_REWRITE_RULES: &[FieldRewriteRule] = &[];
 const EMPTY_DEFAULT_INJECTIONS: &[DefaultInjectionRule] = &[];
 
 impl ChannelSchemaPolicy {
@@ -89,7 +77,6 @@ impl ChannelSchemaPolicy {
         Self {
             allowed_top_level_fields: EMPTY_FIELDS,
             forbidden_top_level_fields: EMPTY_FIELDS,
-            rewrite_rules: EMPTY_REWRITE_RULES,
             default_injections: EMPTY_DEFAULT_INJECTIONS,
         }
     }
@@ -98,7 +85,6 @@ impl ChannelSchemaPolicy {
         Self {
             allowed_top_level_fields: GEMINI_COMPAT_ALLOWED_FIELDS,
             forbidden_top_level_fields: EMPTY_FIELDS,
-            rewrite_rules: EMPTY_REWRITE_RULES,
             default_injections: EMPTY_DEFAULT_INJECTIONS,
         }
     }
@@ -116,11 +102,13 @@ impl ChannelSchemaPolicy {
 impl OpenAiVariantPolicy {
     pub(crate) fn for_variant(variant: OpenAiVariant) -> Self {
         Self {
+            #[cfg(test)]
             variant,
             schema: ChannelSchemaPolicy::for_variant(variant),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn variant(&self) -> OpenAiVariant {
         self.variant
     }
@@ -131,16 +119,6 @@ impl OpenAiVariantPolicy {
         let Some(obj) = payload.as_object_mut() else {
             return report;
         };
-
-        for rule in policy.rewrite_rules {
-            match rule.action {
-                RewriteAction::Remove => {
-                    if obj.remove(rule.field).is_some() {
-                        report.removed_fields.push(rule.field.to_string());
-                    }
-                }
-            }
-        }
 
         if !policy.forbidden_top_level_fields.is_empty() {
             for field in policy.forbidden_top_level_fields {
@@ -191,6 +169,7 @@ pub(crate) fn determine_openai_variant(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_openai_variant_policy(
     provider_type: &ProviderType,
     downstream_path: &str,
@@ -203,9 +182,9 @@ pub(crate) fn finalize_openai_compatible_request_payload(
     provider_type: &ProviderType,
     downstream_path: &str,
 ) -> (OpenAiVariant, OpenAiSanitizeReport) {
-    let policy = resolve_openai_variant_policy(provider_type, downstream_path);
-    let report = policy.sanitize_request_payload(payload);
-    (policy.variant(), report)
+    let variant = determine_openai_variant(provider_type, downstream_path);
+    let report = sanitize_openai_request_payload(payload, variant);
+    (variant, report)
 }
 
 pub(crate) fn sanitize_openai_request_payload(

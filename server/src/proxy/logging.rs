@@ -58,7 +58,6 @@ pub enum LoggedBody {
     },
     Spooled {
         path: PathBuf,
-        size_bytes: usize,
         capture_state: LogBodyCaptureState,
     },
 }
@@ -68,13 +67,6 @@ impl LoggedBody {
         Self::InMemory {
             bytes,
             capture_state: LogBodyCaptureState::Complete,
-        }
-    }
-
-    pub fn from_bytes_with_state(bytes: Bytes, capture_state: LogBodyCaptureState) -> Self {
-        Self::InMemory {
-            bytes,
-            capture_state,
         }
     }
 
@@ -89,8 +81,6 @@ impl LoggedBody {
 
 #[derive(Debug, Clone, Copy)]
 pub enum LogBodyKind {
-    UserRequest,
-    LlmRequest,
     LlmResponse,
     UserResponse,
 }
@@ -98,8 +88,6 @@ pub enum LogBodyKind {
 impl LogBodyKind {
     fn as_path_segment(self) -> &'static str {
         match self {
-            Self::UserRequest => "user_request",
-            Self::LlmRequest => "llm_request",
             Self::LlmResponse => "llm_response",
             Self::UserResponse => "user_response",
         }
@@ -146,7 +134,6 @@ impl StreamingBodyWriter {
     pub fn snapshot(&self, capture_state: LogBodyCaptureState) -> LoggedBody {
         LoggedBody::Spooled {
             path: self.path.clone(),
-            size_bytes: self.size_bytes,
             capture_state,
         }
     }
@@ -161,7 +148,6 @@ impl StreamingBodyWriter {
 
         Ok(LoggedBody::Spooled {
             path: self.path.clone(),
-            size_bytes: self.size_bytes,
             capture_state,
         })
     }
@@ -799,6 +785,7 @@ impl LogManager {
         }
     }
 
+    #[cfg(test)]
     pub fn metrics(&self) -> LogManagerMetricsSnapshot {
         self.metrics.snapshot()
     }
@@ -819,11 +806,16 @@ impl LogManager {
                 log_id = log_id,
                 stage = log_processing_stage_name(stage),
                 detail = detail,
+                enqueued = snapshot.enqueued,
+                processed = snapshot.processed,
                 pending = snapshot.pending,
                 in_flight = snapshot.in_flight,
                 retries = snapshot.retries,
+                channel_full_events = snapshot.channel_full_events,
+                enqueue_failures = snapshot.enqueue_failures,
                 storage_failures = snapshot.storage_failures,
                 db_failures = snapshot.db_failures,
+                cleanup_failures = snapshot.cleanup_failures,
                 compensation_needed = snapshot.compensation_needed,
             ),
             LogProcessingStage::BodyPersistFailed | LogProcessingStage::MetadataPersistFailed => {
@@ -832,11 +824,16 @@ impl LogManager {
                     log_id = log_id,
                     stage = log_processing_stage_name(stage),
                     detail = detail,
+                    enqueued = snapshot.enqueued,
+                    processed = snapshot.processed,
                     pending = snapshot.pending,
                     in_flight = snapshot.in_flight,
                     retries = snapshot.retries,
+                    channel_full_events = snapshot.channel_full_events,
+                    enqueue_failures = snapshot.enqueue_failures,
                     storage_failures = snapshot.storage_failures,
                     db_failures = snapshot.db_failures,
+                    cleanup_failures = snapshot.cleanup_failures,
                     compensation_needed = snapshot.compensation_needed,
                 )
             }
@@ -845,11 +842,16 @@ impl LogManager {
                 log_id = log_id,
                 stage = log_processing_stage_name(stage),
                 detail = detail,
+                enqueued = snapshot.enqueued,
+                processed = snapshot.processed,
                 pending = snapshot.pending,
                 in_flight = snapshot.in_flight,
                 retries = snapshot.retries,
+                channel_full_events = snapshot.channel_full_events,
+                enqueue_failures = snapshot.enqueue_failures,
                 storage_failures = snapshot.storage_failures,
                 db_failures = snapshot.db_failures,
+                cleanup_failures = snapshot.cleanup_failures,
                 compensation_needed = snapshot.compensation_needed,
             ),
             LogProcessingStage::Accepted => crate::debug_event!(
@@ -857,11 +859,16 @@ impl LogManager {
                 log_id = log_id,
                 stage = log_processing_stage_name(stage),
                 detail = detail,
+                enqueued = snapshot.enqueued,
+                processed = snapshot.processed,
                 pending = snapshot.pending,
                 in_flight = snapshot.in_flight,
                 retries = snapshot.retries,
+                channel_full_events = snapshot.channel_full_events,
+                enqueue_failures = snapshot.enqueue_failures,
                 storage_failures = snapshot.storage_failures,
                 db_failures = snapshot.db_failures,
+                cleanup_failures = snapshot.cleanup_failures,
                 compensation_needed = snapshot.compensation_needed,
             ),
         }

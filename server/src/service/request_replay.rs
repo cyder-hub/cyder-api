@@ -59,7 +59,8 @@ use crate::{
         ID_GENERATOR,
         sse::SseParser,
         storage::{
-            LogBodyCaptureState, RequestLogBundleRequestSnapshot, RequestLogBundleV2,
+            LogBodyCaptureState, RequestLogBundleCandidateManifest,
+            RequestLogBundleRequestSnapshot, RequestLogBundleV2,
             generate_replay_artifact_storage_path,
         },
     },
@@ -451,7 +452,11 @@ struct RequestReplayPreviewFingerprintInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     resolved_route: Option<RequestReplayResolvedRoute>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_name_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     resolved_candidate: Option<RequestReplayResolvedCandidate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_manifest: Option<RequestLogBundleCandidateManifest>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     candidate_decisions: Vec<RequestReplayCandidateDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1131,7 +1136,9 @@ fn attempt_replay_preview_fingerprint(
             )),
         },
         resolved_route: response.execution_preview.resolved_route.clone(),
+        resolved_name_scope: None,
         resolved_candidate: response.execution_preview.resolved_candidate.clone(),
+        candidate_manifest: None,
         candidate_decisions: response.execution_preview.candidate_decisions.clone(),
         applied_request_patch_summary: response
             .execution_preview
@@ -1187,7 +1194,10 @@ fn gateway_replay_preview_fingerprint(
             user_request_body: Some(body_digest_from_decoded_body(&source.user_request_body)),
         },
         resolved_route: response.execution_preview.resolved_route.clone(),
+        resolved_name_scope: Some(prepared.resolved_name_scope.clone()),
         resolved_candidate: response.execution_preview.resolved_candidate.clone(),
+        candidate_manifest: (!prepared.candidate_manifest.items.is_empty())
+            .then_some(prepared.candidate_manifest.clone()),
         candidate_decisions: response.execution_preview.candidate_decisions.clone(),
         applied_request_patch_summary: response
             .execution_preview

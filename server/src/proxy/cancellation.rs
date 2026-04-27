@@ -17,10 +17,6 @@ impl ProxyCancellationContext {
         }
     }
 
-    pub(super) async fn cancel(&self, reason: impl Into<String>) {
-        self.cancel_now(reason);
-    }
-
     pub(super) fn cancel_now(&self, reason: impl Into<String>) {
         let mut guard = self
             .reason
@@ -88,7 +84,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_context_returns_client_cancelled_error() {
         let cancellation = ProxyCancellationContext::new();
-        cancellation.cancel("client closed socket").await;
+        cancellation.cancel_now("client closed socket");
 
         assert!(matches!(
             cancellation.cancellation_error().await,

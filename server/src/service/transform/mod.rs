@@ -663,7 +663,7 @@ pub(crate) enum AnthropicActiveBlockKind {
 
 #[derive(Debug, Clone)]
 pub struct AnthropicActiveBlockState {
-    pub kind: AnthropicActiveBlockKind,
+    pub(crate) kind: AnthropicActiveBlockKind,
     pub text: String,
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,

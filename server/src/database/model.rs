@@ -625,7 +625,6 @@ impl Model {
 mod tests {
     use super::*;
     use crate::database::_sqlite_schema::*;
-    use crate::database::model_route::{NewModelRoute, NewModelRouteCandidate};
     use crate::database::provider::NewProvider;
     use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
     use serde_json::Value;
@@ -776,46 +775,6 @@ mod tests {
                 },
             )
             .collect()
-    }
-
-    fn seed_model_route(
-        conn: &mut diesel::SqliteConnection,
-        route_id: i64,
-        model_id_val: i64,
-        route_name_val: &str,
-    ) {
-        use crate::database::model_route::_sqlite_model::*;
-
-        let now = 1_000_000;
-        let route = NewModelRoute {
-            id: route_id,
-            route_name: route_name_val.to_string(),
-            description: Some("route description".to_string()),
-            is_enabled: true,
-            expose_in_models: true,
-            created_at: now,
-            updated_at: now,
-        };
-
-        diesel::insert_into(model_route::table)
-            .values(NewModelRouteDb::to_db(&route))
-            .execute(conn)
-            .expect("model route seed should succeed");
-
-        let candidate = NewModelRouteCandidate {
-            id: route_id + 1000,
-            route_id,
-            model_id: model_id_val,
-            priority: 0,
-            is_enabled: true,
-            created_at: now,
-            updated_at: now,
-        };
-
-        diesel::insert_into(model_route_candidate::table)
-            .values(NewModelRouteCandidateDb::to_db(&candidate))
-            .execute(conn)
-            .expect("model route candidate seed should succeed");
     }
 
     #[test]

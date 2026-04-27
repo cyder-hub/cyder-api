@@ -94,6 +94,25 @@
             </div>
           </div>
 
+          <div
+            v-if="patchSourceItems(attempt).length > 0"
+            class="space-y-2 border-b border-gray-100 pb-3"
+          >
+            <div class="text-xs uppercase tracking-wide text-gray-500">
+              {{ $t("recordPage.detailDialog.attempts.patchSources.title") }}
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <Badge
+                v-for="source in patchSourceItems(attempt)"
+                :key="source"
+                variant="outline"
+                class="max-w-full font-mono text-[11px]"
+              >
+                {{ source }}
+              </Badge>
+            </div>
+          </div>
+
           <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
             <details
               v-for="block in detailBlocks(attempt)"
@@ -127,12 +146,17 @@ import {
   getStatusBadgeVariant,
   hasText,
 } from "./recordFormat";
+import { patchSourceItemsFromRaw } from "./recordPatchSummary";
 
 defineProps<{
   attempts: RecordAttempt[];
 }>();
 
 const { t: $t } = useI18n();
+
+const patchSourceItems = (attempt: RecordAttempt) => {
+  return patchSourceItemsFromRaw(attempt.request_patch_summary_json, $t);
+};
 
 const getStatusMeta = (status: string | null) => {
   switch (status) {

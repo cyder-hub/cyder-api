@@ -36,6 +36,13 @@
       <template v-else-if="editingData">
         <div class="space-y-5 sm:space-y-6">
           <ProviderBaseInfoForm v-model:editingData="editingData" />
+          <ReasoningConfigPanel
+            v-if="editingData.id"
+            owner-kind="provider"
+            :owner-id="editingData.id"
+            :provider-type="editingData.provider_type"
+            @saved="handleReasoningConfigSaved"
+          />
           <div class="space-y-3 pt-1">
             <div class="border-t border-gray-200 pt-5">
               <h2 class="text-base font-semibold text-gray-900">
@@ -188,6 +195,7 @@ import { Api } from "@/services/request";
 import type {
   ProviderListItem,
 } from "@/store/types";
+import { useProviderStore } from "@/store/providerStore";
 import { toastController } from "@/lib/toastController";
 import { Button } from "@/components/ui/button";
 import {
@@ -220,10 +228,12 @@ import ProviderBaseInfoForm from "@/components/provider/ProviderBaseInfoForm.vue
 import ProviderModelList from "@/components/provider/ProviderModelList.vue";
 import ProviderApiKeyList from "@/components/provider/ProviderApiKeyList.vue";
 import ProviderRequestPatchPanel from "@/components/provider/ProviderRequestPatchPanel.vue";
+import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
 
 const { t: $t } = useI18n();
 const route = useRoute();
 const router = useRouter();
+const providerStore = useProviderStore();
 
 const providerId = computed(() => {
   const id = route.params.id;
@@ -286,6 +296,12 @@ const fetchProviderDetail = async (
 const getEmptyProvider = (): EditingProviderData => ({
   ...createEmptyEditingProviderData(),
 });
+
+const handleReasoningConfigSaved = () => {
+  void providerStore.fetchProviders().catch((error) => {
+    console.error("Failed to refresh providers after reasoning config save:", error);
+  });
+};
 
 onMounted(async () => {
   isLoading.value = true;

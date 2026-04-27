@@ -250,7 +250,7 @@ pub(super) fn parse_utility_usage_normalization(
     })
 }
 
-pub(super) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType {
+pub(crate) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType {
     match provider.provider_type {
         ProviderType::Vertex | ProviderType::Gemini => LlmApiType::Gemini,
         ProviderType::Ollama => LlmApiType::Ollama,

@@ -4,6 +4,10 @@ use bincode::{Decode, Encode};
 // reducing memory footprint and improving cache performance.
 
 use crate::database::model_route::{ApiKeyModelOverride, ModelRouteDetail};
+use crate::database::reasoning_config::{
+    ReasoningConfigMode, ReasoningConfigScope, ReasoningConfigWithPresets, ReasoningPatchFamily,
+    ReasoningPreset,
+};
 use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::schema::enum_def::{
     Action, ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
@@ -76,6 +80,31 @@ pub struct CacheProvider {
     pub is_enabled: bool,
 }
 
+/// Cached provider/model-scoped reasoning config and active presets.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CacheReasoningConfig {
+    pub id: i64,
+    pub scope_kind: ReasoningConfigScope,
+    pub provider_id: Option<i64>,
+    pub model_id: Option<i64>,
+    pub mode: ReasoningConfigMode,
+    pub family: Option<ReasoningPatchFamily>,
+    pub presets: Vec<CacheReasoningConfigPreset>,
+}
+
+/// Cached enabled preset metadata derived from the built-in preset key.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CacheReasoningConfigPreset {
+    pub id: i64,
+    pub config_id: i64,
+    pub preset: ReasoningPreset,
+    pub suffix: String,
+    pub requires_reasoning: bool,
+    pub allowed_operation_kinds: Vec<String>,
+    pub expose_in_models: bool,
+    pub is_enabled: bool,
+}
+
 /// Cached model route candidate ordered by runtime priority.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheModelRouteCandidate {
@@ -115,6 +144,7 @@ pub struct CacheModelsCatalog {
     pub models: Vec<CacheModel>,
     pub routes: Vec<CacheModelRoute>,
     pub api_key_overrides: Vec<CacheApiKeyModelOverride>,
+    pub reasoning_configs: Vec<CacheReasoningConfig>,
 }
 
 /// Cached provider API key
@@ -142,6 +172,59 @@ pub struct CacheApiKeyAclRule {
 pub enum RequestPatchRuleOrigin {
     ProviderDirect,
     ModelDirect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RequestPatchSource {
+    ProviderRule {
+        rule_id: i64,
+    },
+    ModelRule {
+        rule_id: i64,
+    },
+    ReasoningPreset {
+        config_id: i64,
+        config_scope: ReasoningConfigScope,
+        config_preset_id: i64,
+        family: ReasoningPatchFamily,
+        preset: ReasoningPreset,
+        suffix: String,
+    },
+}
+
+impl RequestPatchSource {
+    pub fn rule_id(&self) -> Option<i64> {
+        match self {
+            Self::ProviderRule { rule_id } | Self::ModelRule { rule_id } => Some(*rule_id),
+            Self::ReasoningPreset { .. } => None,
+        }
+    }
+
+    pub fn legacy_origin(&self) -> Option<RequestPatchRuleOrigin> {
+        match self {
+            Self::ProviderRule { .. } => Some(RequestPatchRuleOrigin::ProviderDirect),
+            Self::ModelRule { .. } => Some(RequestPatchRuleOrigin::ModelDirect),
+            Self::ReasoningPreset { .. } => None,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::ProviderRule { rule_id } => format!("provider request patch rule {rule_id}"),
+            Self::ModelRule { rule_id } => format!("model request patch rule {rule_id}"),
+            Self::ReasoningPreset {
+                config_id,
+                config_scope,
+                config_preset_id,
+                family,
+                preset,
+                suffix,
+            } => format!(
+                "reasoning preset patch config={config_scope}/{config_id} preset_row={config_preset_id} family={family} preset={preset} suffix={suffix}"
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
@@ -184,6 +267,70 @@ pub struct CacheResolvedRequestPatch {
     pub source_origin: RequestPatchRuleOrigin,
     pub overridden_rule_ids: Vec<i64>,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct RuntimeResolvedRequestPatch {
+    pub placement: RequestPatchPlacement,
+    pub target: String,
+    pub operation: RequestPatchOperation,
+    pub value_json: Option<String>,
+    pub source: RequestPatchSource,
+    pub source_rule_id: Option<i64>,
+    pub source_origin: Option<RequestPatchRuleOrigin>,
+    pub overridden_rule_ids: Vec<i64>,
+    pub overridden_sources: Vec<RequestPatchSource>,
+    pub description: Option<String>,
+}
+
+impl RuntimeResolvedRequestPatch {
+    pub fn source_label(&self) -> String {
+        self.source.label()
+    }
+}
+
+impl From<CacheResolvedRequestPatch> for RuntimeResolvedRequestPatch {
+    fn from(rule: CacheResolvedRequestPatch) -> Self {
+        let source = match rule.source_origin {
+            RequestPatchRuleOrigin::ProviderDirect => RequestPatchSource::ProviderRule {
+                rule_id: rule.source_rule_id,
+            },
+            RequestPatchRuleOrigin::ModelDirect => RequestPatchSource::ModelRule {
+                rule_id: rule.source_rule_id,
+            },
+        };
+        let overridden_sources = match rule.source_origin {
+            RequestPatchRuleOrigin::ProviderDirect => Vec::new(),
+            RequestPatchRuleOrigin::ModelDirect => rule
+                .overridden_rule_ids
+                .iter()
+                .map(|rule_id| RequestPatchSource::ProviderRule { rule_id: *rule_id })
+                .collect(),
+        };
+
+        Self {
+            placement: rule.placement,
+            target: rule.target,
+            operation: rule.operation,
+            value_json: rule.value_json,
+            source_rule_id: Some(rule.source_rule_id),
+            source_origin: Some(rule.source_origin),
+            source,
+            overridden_rule_ids: rule.overridden_rule_ids,
+            overridden_sources,
+            description: rule.description,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
+pub struct RuntimeRequestPatchConflict {
+    pub placement: RequestPatchPlacement,
+    pub lower_priority_source: RequestPatchSource,
+    pub higher_priority_source: RequestPatchSource,
+    pub lower_priority_target: String,
+    pub higher_priority_target: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
@@ -355,6 +502,33 @@ impl From<crate::database::provider::Provider> for CacheProvider {
             provider_type: db.provider_type,
             provider_api_key_mode: db.provider_api_key_mode,
             is_enabled: db.is_enabled,
+        }
+    }
+}
+
+impl From<ReasoningConfigWithPresets> for CacheReasoningConfig {
+    fn from(db: ReasoningConfigWithPresets) -> Self {
+        Self {
+            id: db.config.id,
+            scope_kind: db.scope,
+            provider_id: db.config.provider_id,
+            model_id: db.config.model_id,
+            mode: db.mode,
+            family: db.family,
+            presets: db
+                .presets
+                .into_iter()
+                .map(|preset| CacheReasoningConfigPreset {
+                    id: preset.preset.id,
+                    config_id: preset.preset.config_id,
+                    preset: preset.preset_key,
+                    suffix: preset.suffix,
+                    requires_reasoning: preset.requires_reasoning,
+                    allowed_operation_kinds: preset.allowed_operation_kinds,
+                    expose_in_models: preset.preset.expose_in_models,
+                    is_enabled: preset.preset.is_enabled,
+                })
+                .collect(),
         }
     }
 }

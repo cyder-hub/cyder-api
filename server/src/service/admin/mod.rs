@@ -8,6 +8,7 @@ use self::model::ModelAdminService;
 use self::model_route::ModelRouteAdminService;
 use self::mutation::AdminMutationRunner;
 use self::provider::ProviderAdminService;
+use self::reasoning_config::ReasoningConfigAdminService;
 use self::request_patch::RequestPatchAdminService;
 
 pub mod api_key;
@@ -17,6 +18,7 @@ pub mod model;
 pub mod model_route;
 pub mod mutation;
 pub mod provider;
+pub mod reasoning_config;
 pub mod request_patch;
 
 // Management write paths must be owned here. Controllers may parse HTTP payloads and
@@ -29,6 +31,7 @@ pub struct AdminServices {
     pub model_route: Arc<ModelRouteAdminService>,
     pub request_patch: Arc<RequestPatchAdminService>,
     pub cost: Arc<CostAdminService>,
+    pub reasoning_config: Arc<ReasoningConfigAdminService>,
 }
 
 impl AdminServices {
@@ -42,6 +45,9 @@ impl AdminServices {
             model_route: Arc::new(ModelRouteAdminService::new(Arc::clone(&mutation_runner))),
             request_patch: Arc::new(RequestPatchAdminService::new(Arc::clone(&mutation_runner))),
             cost: Arc::new(CostAdminService::new(Arc::clone(&mutation_runner))),
+            reasoning_config: Arc::new(ReasoningConfigAdminService::new(Arc::clone(
+                &mutation_runner,
+            ))),
         }
     }
 }
@@ -78,6 +84,10 @@ mod tests {
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
             services.cost.mutation_runner(),
+        ));
+        assert!(Arc::ptr_eq(
+            services.provider.mutation_runner(),
+            services.reasoning_config.mutation_runner(),
         ));
         assert_eq!(Arc::strong_count(&catalog), 2);
     }

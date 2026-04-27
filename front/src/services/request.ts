@@ -27,6 +27,13 @@ import type {
   ModelRouteDetail,
   ModelRoutePayload,
   ModelRouteUpdatePayload,
+  ModelReasoningConfigPayload,
+  ProviderReasoningConfigPayload,
+  ProviderReasoningConfigPreviewPayload,
+  ReasoningConfigCatalog,
+  ReasoningConfigPreview,
+  ReasoningConfigResponse,
+  ReasoningRoutePreview,
   PaginatedResponse,
   CostCatalog,
   CostCatalogListItem,
@@ -186,6 +193,79 @@ export const Api = {
   },
   deleteModelRoute(id: number): Promise<void> {
     return request.delete(`/ai/manager/api/model_route/${id}`);
+  },
+  getModelRouteReasoningPreview(id: number): Promise<ReasoningRoutePreview> {
+    return request.get(`/ai/manager/api/model_route/${id}/reasoning_preview`);
+  },
+
+  // ========== Reasoning Config ==========
+  getReasoningConfigCatalog(): Promise<ReasoningConfigCatalog> {
+    return request.get("/ai/manager/api/reasoning_config/catalog");
+  },
+  getProviderReasoningConfig(
+    providerId: number | string,
+  ): Promise<ReasoningConfigResponse> {
+    return request.get(`/ai/manager/api/provider/${providerId}/reasoning_config`);
+  },
+  updateProviderReasoningConfig(
+    providerId: number | string,
+    payload: ProviderReasoningConfigPayload,
+  ): Promise<ReasoningConfigResponse> {
+    return request.put(
+      `/ai/manager/api/provider/${providerId}/reasoning_config`,
+      payload,
+    );
+  },
+  deleteProviderReasoningConfig(providerId: number | string): Promise<void> {
+    return request.delete(
+      `/ai/manager/api/provider/${providerId}/reasoning_config`,
+    );
+  },
+  previewProviderReasoningConfig(
+    providerId: number | string,
+  ): Promise<ReasoningConfigPreview> {
+    return request.get(
+      `/ai/manager/api/provider/${providerId}/reasoning_config/preview`,
+    );
+  },
+  previewProviderReasoningConfigDraft(
+    providerId: number | string,
+    payload: ProviderReasoningConfigPreviewPayload,
+  ): Promise<ReasoningConfigPreview> {
+    return request.post(
+      `/ai/manager/api/provider/${providerId}/reasoning_config/preview`,
+      payload,
+    );
+  },
+  getModelReasoningConfig(
+    modelId: number | string,
+  ): Promise<ReasoningConfigResponse> {
+    return request.get(`/ai/manager/api/model/${modelId}/reasoning_config`);
+  },
+  updateModelReasoningConfig(
+    modelId: number | string,
+    payload: ModelReasoningConfigPayload,
+  ): Promise<ReasoningConfigResponse> {
+    return request.put(`/ai/manager/api/model/${modelId}/reasoning_config`, payload);
+  },
+  deleteModelReasoningConfig(modelId: number | string): Promise<void> {
+    return request.delete(`/ai/manager/api/model/${modelId}/reasoning_config`);
+  },
+  previewModelReasoningConfig(
+    modelId: number | string,
+  ): Promise<ReasoningConfigPreview> {
+    return request.get(
+      `/ai/manager/api/model/${modelId}/reasoning_config/preview`,
+    );
+  },
+  previewModelReasoningConfigDraft(
+    modelId: number | string,
+    payload: ModelReasoningConfigPayload,
+  ): Promise<ReasoningConfigPreview> {
+    return request.post(
+      `/ai/manager/api/model/${modelId}/reasoning_config/preview`,
+      payload,
+    );
   },
 
   // ========== Cost ==========

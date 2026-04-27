@@ -27,6 +27,7 @@ use super::{
     },
     protocol_transform_error,
     provider_governance::{ensure_provider_request_allowed, preview_provider_request_allowed},
+    reasoning_suffix::{ReasoningOperationKind, reasoning_preset_runtime_metadata},
     retry_policy::{
         ProviderGovernanceRejection, RetryDecision, RetryFailureKind, RetryPolicyContext,
         decide_retry,
@@ -40,7 +41,7 @@ use super::{
 use crate::{
     config::CONFIG,
     cost::UsageNormalization,
-    database::request_attempt::RequestAttempt,
+    database::{reasoning_config::ReasoningPreset, request_attempt::RequestAttempt},
     schema::enum_def::{LlmApiType, RequestAttemptStatus, RequestStatus, SchedulerAction},
     service::{
         app_state::AppState,
@@ -331,6 +332,9 @@ pub(super) struct AttemptExecutionInput {
     pub api_key: Arc<CacheApiKey>,
     pub candidate: ExecutionCandidate,
     pub requested_model_name: String,
+    pub base_requested_model_name: String,
+    pub resolved_reasoning_suffix: Option<String>,
+    pub resolved_reasoning_preset: Option<String>,
     pub resolved_name_scope: String,
     pub resolved_route_id: Option<i64>,
     pub resolved_route_name: Option<String>,
@@ -816,7 +820,7 @@ async fn materialize_generation_attempt(
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
     replay_query_params: Option<&[RequestLogBundleQueryParam]>,
-    request_patches: &[crate::service::cache::types::CacheResolvedRequestPatch],
+    request_patches: &[crate::service::cache::types::RuntimeResolvedRequestPatch],
     provider_credentials: &super::prepare::ProviderCredentials,
 ) -> Result<MaterializedAttemptRequest, ProxyError> {
     let target_api_type = candidate.llm_api_type;
@@ -874,7 +878,7 @@ async fn materialize_utility_attempt(
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
     replay_query_params: Option<&[RequestLogBundleQueryParam]>,
-    request_patches: &[crate::service::cache::types::CacheResolvedRequestPatch],
+    request_patches: &[crate::service::cache::types::RuntimeResolvedRequestPatch],
     provider_credentials: &super::prepare::ProviderCredentials,
 ) -> Result<MaterializedAttemptRequest, ProxyError> {
     let (final_url, final_headers, final_body_value, provider_api_key_id) = match operation.protocol
@@ -939,6 +943,9 @@ pub(super) async fn execute_attempt(
         api_key,
         candidate,
         requested_model_name,
+        base_requested_model_name,
+        resolved_reasoning_suffix,
+        resolved_reasoning_preset,
         resolved_name_scope,
         resolved_route_id,
         resolved_route_name,
@@ -980,6 +987,11 @@ pub(super) async fn execute_attempt(
         &client_ip_addr,
         user_api_type_for_log,
         candidate.llm_api_type,
+    );
+    log_context.set_model_resolution_trace(
+        &base_requested_model_name,
+        resolved_reasoning_suffix.as_deref(),
+        resolved_reasoning_preset.as_deref(),
     );
     log_context.set_request_snapshot(request_snapshot.clone());
     log_context.set_candidate_manifest(candidate_manifest);
@@ -1082,6 +1094,7 @@ pub(super) async fn execute_attempt(
     let request_patch_trace = match load_runtime_request_patch_trace(
         &candidate.provider,
         Some(&candidate.model),
+        Some(&candidate),
         &app_state,
     )
     .await
@@ -1458,6 +1471,9 @@ pub(crate) struct GatewayReplayInput {
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayReplayPreparedRequest {
     pub requested_model_name: String,
+    pub base_requested_model_name: String,
+    pub resolved_reasoning_suffix: Option<String>,
+    pub resolved_reasoning_preset: Option<String>,
     pub resolved_name_scope: String,
     pub resolved_route_id: Option<i64>,
     pub resolved_route_name: Option<String>,
@@ -1522,6 +1538,10 @@ impl GatewayReplayExecutionFailure {
 
 #[derive(Debug, Clone)]
 pub(crate) struct GatewayReplayExecutionMetadata {
+    pub requested_model_name: String,
+    pub base_requested_model_name: String,
+    pub resolved_reasoning_suffix: Option<String>,
+    pub resolved_reasoning_preset: Option<String>,
     pub resolved_route_id: Option<i64>,
     pub resolved_route_name: Option<String>,
     pub final_attempt: GatewayReplayFinalAttempt,
@@ -1620,6 +1640,10 @@ fn gateway_replay_execution_metadata(
     let candidate_decisions =
         gateway_replay_candidate_decisions(prior_attempts, Some(terminal_attempt));
     GatewayReplayExecutionMetadata {
+        requested_model_name: log_context.requested_model_name.clone(),
+        base_requested_model_name: log_context.base_requested_model_name.clone(),
+        resolved_reasoning_suffix: log_context.resolved_reasoning_suffix.clone(),
+        resolved_reasoning_preset: log_context.resolved_reasoning_preset.clone(),
         resolved_route_id,
         resolved_route_name,
         final_attempt: GatewayReplayFinalAttempt {
@@ -1749,8 +1773,25 @@ async fn materialize_gateway_replay_request(
             is_stream,
             data,
             ..
-        } => derive_generation_requirement(data, *api_type, *is_stream),
+        } => {
+            ensure_reasoning_preset_allows_operation(
+                &execution_plan,
+                RequestedOperationKind::Generation,
+                "generation",
+            )?;
+            derive_generation_requirement(
+                data,
+                *api_type,
+                *is_stream,
+                execution_plan.resolved_reasoning_preset,
+            )
+        }
         GatewayReplayAttemptKind::Utility { operation, data } => {
+            ensure_reasoning_preset_allows_operation(
+                &execution_plan,
+                RequestedOperationKind::Utility,
+                &operation.name,
+            )?;
             derive_utility_requirement(&operation.name, data)
         }
     };
@@ -1915,6 +1956,7 @@ async fn materialize_gateway_replay_candidate(
     let request_patch_trace = match load_runtime_request_patch_trace(
         &candidate.provider,
         Some(&candidate.model),
+        Some(candidate),
         app_state,
     )
     .await
@@ -2034,6 +2076,11 @@ async fn materialize_gateway_replay_candidate(
     Ok(GatewayReplayCandidateMaterialization::Ready {
         prepared: GatewayReplayPreparedRequest {
             requested_model_name: execution_plan.requested_name.clone(),
+            base_requested_model_name: execution_plan.base_requested_name.clone(),
+            resolved_reasoning_suffix: execution_plan.resolved_reasoning_suffix.clone(),
+            resolved_reasoning_preset: execution_plan
+                .resolved_reasoning_preset
+                .map(|preset| preset.as_key().to_string()),
             resolved_name_scope: execution_plan.resolved_scope.as_str().to_string(),
             resolved_route_id: execution_plan.resolved_route_id,
             resolved_route_name: execution_plan.resolved_route_name.clone(),
@@ -2086,6 +2133,13 @@ async fn record_no_candidate_generation_failure(
         api_type,
         first_skipped_attempt,
     );
+    log_context.set_model_resolution_trace(
+        &execution_plan.base_requested_name,
+        execution_plan.resolved_reasoning_suffix.as_deref(),
+        execution_plan
+            .resolved_reasoning_preset
+            .map(|preset| preset.as_key()),
+    );
     log_context.set_request_snapshot(request_snapshot);
     log_context.set_candidate_manifest(candidate_manifest);
     log_context.user_request_body = Some(LoggedBody::from_bytes(original_request_body));
@@ -2133,6 +2187,13 @@ async fn record_no_candidate_utility_failure(
         client_ip_addr,
         operation.api_type,
         first_skipped_attempt,
+    );
+    log_context.set_model_resolution_trace(
+        &execution_plan.base_requested_name,
+        execution_plan.resolved_reasoning_suffix.as_deref(),
+        execution_plan
+            .resolved_reasoning_preset
+            .map(|preset| preset.as_key()),
     );
     log_context.set_request_snapshot(request_snapshot);
     log_context.set_candidate_manifest(candidate_manifest);
@@ -2186,7 +2247,19 @@ pub(super) async fn orchestrate_generation_with_outcome(
     } = input;
 
     let candidate_manifest = build_candidate_manifest(&execution_plan);
-    let requirement = derive_generation_requirement(&data, api_type, is_stream);
+    if let Err(error) = ensure_reasoning_preset_allows_operation(
+        &execution_plan,
+        RequestedOperationKind::Generation,
+        "generation",
+    ) {
+        return Err(GatewayReplayExecutionFailure::without_attempt(error));
+    }
+    let requirement = derive_generation_requirement(
+        &data,
+        api_type,
+        is_stream,
+        execution_plan.resolved_reasoning_preset,
+    );
     let prefiltered_plan = prefilter_execution_plan(execution_plan, &requirement);
     let execution_plan = prefiltered_plan.execution_plan;
     let mut prior_attempts = prefiltered_plan.skipped_attempts;
@@ -2216,6 +2289,11 @@ pub(super) async fn orchestrate_generation_with_outcome(
     }
 
     let requested_model_name = execution_plan.requested_name.clone();
+    let base_requested_model_name = execution_plan.base_requested_name.clone();
+    let resolved_reasoning_suffix = execution_plan.resolved_reasoning_suffix.clone();
+    let resolved_reasoning_preset = execution_plan
+        .resolved_reasoning_preset
+        .map(|preset| preset.as_key().to_string());
     let resolved_name_scope = execution_plan.resolved_scope.as_str().to_string();
     let resolved_route_id = execution_plan.resolved_route_id;
     let resolved_route_name = execution_plan.resolved_route_name.clone();
@@ -2237,6 +2315,9 @@ pub(super) async fn orchestrate_generation_with_outcome(
                     api_key: Arc::clone(&api_key),
                     candidate: candidate.clone(),
                     requested_model_name: requested_model_name.clone(),
+                    base_requested_model_name: base_requested_model_name.clone(),
+                    resolved_reasoning_suffix: resolved_reasoning_suffix.clone(),
+                    resolved_reasoning_preset: resolved_reasoning_preset.clone(),
                     resolved_name_scope: resolved_name_scope.clone(),
                     resolved_route_id,
                     resolved_route_name: resolved_route_name.clone(),
@@ -2389,6 +2470,13 @@ pub(super) async fn orchestrate_utility_with_outcome(
     } = input;
 
     let candidate_manifest = build_candidate_manifest(&execution_plan);
+    if let Err(error) = ensure_reasoning_preset_allows_operation(
+        &execution_plan,
+        RequestedOperationKind::Utility,
+        &operation.name,
+    ) {
+        return Err(GatewayReplayExecutionFailure::without_attempt(error));
+    }
     let requirement = derive_utility_requirement(&operation.name, &data);
     let prefiltered_plan = prefilter_execution_plan(execution_plan, &requirement);
     let execution_plan = prefiltered_plan.execution_plan;
@@ -2419,6 +2507,11 @@ pub(super) async fn orchestrate_utility_with_outcome(
     }
 
     let requested_model_name = execution_plan.requested_name.clone();
+    let base_requested_model_name = execution_plan.base_requested_name.clone();
+    let resolved_reasoning_suffix = execution_plan.resolved_reasoning_suffix.clone();
+    let resolved_reasoning_preset = execution_plan
+        .resolved_reasoning_preset
+        .map(|preset| preset.as_key().to_string());
     let resolved_name_scope = execution_plan.resolved_scope.as_str().to_string();
     let resolved_route_id = execution_plan.resolved_route_id;
     let resolved_route_name = execution_plan.resolved_route_name.clone();
@@ -2440,6 +2533,9 @@ pub(super) async fn orchestrate_utility_with_outcome(
                     api_key: Arc::clone(&api_key),
                     candidate: candidate.clone(),
                     requested_model_name: requested_model_name.clone(),
+                    base_requested_model_name: base_requested_model_name.clone(),
+                    resolved_reasoning_suffix: resolved_reasoning_suffix.clone(),
+                    resolved_reasoning_preset: resolved_reasoning_preset.clone(),
                     resolved_name_scope: resolved_name_scope.clone(),
                     resolved_route_id,
                     resolved_route_name: resolved_route_name.clone(),
@@ -2565,15 +2661,71 @@ pub(super) struct PrefilteredExecutionPlan {
     pub skipped_attempts: Vec<RequestAttemptDraft>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedOperationKind {
+    Generation,
+    Utility,
+}
+
+impl RequestedOperationKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Generation => "generation",
+            Self::Utility => "utility",
+        }
+    }
+
+    fn is_allowed_by(self, allowed: &[ReasoningOperationKind]) -> bool {
+        match self {
+            Self::Generation => allowed.contains(&ReasoningOperationKind::Generation),
+            Self::Utility => false,
+        }
+    }
+}
+
+fn ensure_reasoning_preset_allows_operation(
+    execution_plan: &ExecutionPlan,
+    operation_kind: RequestedOperationKind,
+    operation_name: &str,
+) -> Result<(), ProxyError> {
+    let Some(preset) = execution_plan.resolved_reasoning_preset else {
+        return Ok(());
+    };
+
+    let metadata = reasoning_preset_runtime_metadata(preset);
+    if operation_kind.is_allowed_by(&metadata.allowed_operation_kinds) {
+        return Ok(());
+    }
+
+    let suffix = execution_plan
+        .resolved_reasoning_suffix
+        .as_deref()
+        .unwrap_or(metadata.suffix.as_str());
+    Err(ProxyError::BadRequest(format!(
+        "Reasoning suffix '{}' (preset '{}') on model '{}' is only supported for generation requests; '{}' is a {} operation.",
+        suffix,
+        preset,
+        execution_plan.requested_name,
+        operation_name,
+        operation_kind.label()
+    )))
+}
+
 pub(super) fn derive_generation_requirement(
     data: &Value,
     _user_api_type: LlmApiType,
     is_stream: bool,
+    resolved_reasoning_preset: Option<ReasoningPreset>,
 ) -> ExecutionRequirement {
+    let preset_requires_reasoning = resolved_reasoning_preset
+        .map(reasoning_preset_runtime_metadata)
+        .map(|metadata| metadata.requires_reasoning)
+        .unwrap_or(false);
+
     ExecutionRequirement {
         requires_streaming: is_stream,
         requires_tools: request_uses_tools(data),
-        requires_reasoning: request_uses_reasoning(data),
+        requires_reasoning: request_uses_reasoning(data) || preset_requires_reasoning,
         requires_image_input: request_uses_image_input(data),
         requires_embeddings: false,
         requires_rerank: false,
@@ -2617,6 +2769,10 @@ pub(super) fn prefilter_execution_plan(
     PrefilteredExecutionPlan {
         execution_plan: ExecutionPlan {
             requested_name: execution_plan.requested_name,
+            base_requested_name: execution_plan.base_requested_name,
+            resolved_reasoning_suffix: execution_plan.resolved_reasoning_suffix,
+            resolved_reasoning_preset: execution_plan.resolved_reasoning_preset,
+            requested_model_parse_status: execution_plan.requested_model_parse_status,
             resolved_scope: execution_plan.resolved_scope,
             resolved_route_id: execution_plan.resolved_route_id,
             resolved_route_name: execution_plan.resolved_route_name,
@@ -2704,6 +2860,8 @@ fn request_uses_reasoning(value: &Value) -> bool {
                     | "thinking"
                     | "thinking_config"
                     | "thinkingConfig"
+                    | "enable_thinking"
+                    | "enableThinking"
                     | "include_reasoning"
                     | "includeReasoning"
             ) {
@@ -2787,6 +2945,15 @@ mod tests {
     }
 
     fn model(id: i64, supports_tools: bool, supports_image_input: bool) -> Arc<CacheModel> {
+        model_with_reasoning(id, supports_tools, true, supports_image_input)
+    }
+
+    fn model_with_reasoning(
+        id: i64,
+        supports_tools: bool,
+        supports_reasoning: bool,
+        supports_image_input: bool,
+    ) -> Arc<CacheModel> {
         Arc::new(CacheModel {
             id,
             provider_id: id,
@@ -2795,7 +2962,7 @@ mod tests {
             cost_catalog_id: None,
             supports_streaming: true,
             supports_tools,
-            supports_reasoning: true,
+            supports_reasoning,
             supports_image_input,
             supports_embeddings: true,
             supports_rerank: true,
@@ -2817,12 +2984,24 @@ mod tests {
             model: model(position as i64, supports_tools, supports_image_input),
             llm_api_type: LlmApiType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
+            reasoning_config_id: None,
+            reasoning_config_scope: None,
+            reasoning_config_source: None,
+            reasoning_config_preset_id: None,
+            reasoning_family: None,
+            reasoning_preset: None,
+            reasoning_suffix: None,
         }
     }
 
     fn plan() -> ExecutionPlan {
         ExecutionPlan {
             requested_name: "route".to_string(),
+            base_requested_name: "route".to_string(),
+            resolved_reasoning_suffix: None,
+            resolved_reasoning_preset: None,
+            requested_model_parse_status:
+                crate::proxy::requested_model::RequestedModelParseStatus::Exact,
             resolved_scope: ResolvedNameScope::GlobalRoute,
             resolved_route_id: Some(1),
             resolved_route_name: Some("route".to_string()),
@@ -2844,6 +3023,7 @@ mod tests {
             }),
             LlmApiType::Openai,
             true,
+            None,
         );
 
         assert!(requirement.requires_streaming);
@@ -2855,6 +3035,78 @@ mod tests {
     }
 
     #[test]
+    fn derive_generation_requirement_uses_resolved_reasoning_preset_metadata() {
+        let high = derive_generation_requirement(
+            &json!({ "messages": [{ "role": "user", "content": "hello" }] }),
+            LlmApiType::Openai,
+            false,
+            Some(ReasoningPreset::High),
+        );
+        assert!(high.requires_reasoning);
+
+        let disabled = derive_generation_requirement(
+            &json!({ "messages": [{ "role": "user", "content": "hello" }] }),
+            LlmApiType::Openai,
+            false,
+            Some(ReasoningPreset::Disabled),
+        );
+        assert!(!disabled.requires_reasoning);
+    }
+
+    #[test]
+    fn derive_generation_requirement_detects_siliconflow_enable_thinking() {
+        let enabled = derive_generation_requirement(
+            &json!({
+                "messages": [{ "role": "user", "content": "hello" }],
+                "enable_thinking": true,
+            }),
+            LlmApiType::Openai,
+            false,
+            None,
+        );
+        assert!(enabled.requires_reasoning);
+
+        let disabled = derive_generation_requirement(
+            &json!({
+                "messages": [{ "role": "user", "content": "hello" }],
+                "enable_thinking": false,
+            }),
+            LlmApiType::Openai,
+            false,
+            None,
+        );
+        assert!(!disabled.requires_reasoning);
+    }
+
+    #[test]
+    fn reasoning_suffix_generation_requirement_skips_non_reasoning_candidates() {
+        let mut execution_plan = plan();
+        execution_plan.resolved_reasoning_suffix = Some("high".to_string());
+        execution_plan.resolved_reasoning_preset = Some(ReasoningPreset::High);
+        execution_plan.candidates[0].model = model_with_reasoning(1, true, false, true);
+        execution_plan.candidates[1].model = model_with_reasoning(2, true, true, true);
+
+        let requirement = derive_generation_requirement(
+            &json!({ "messages": [{ "role": "user", "content": "hello" }] }),
+            LlmApiType::Openai,
+            false,
+            execution_plan.resolved_reasoning_preset,
+        );
+        let prefiltered = prefilter_execution_plan(execution_plan, &requirement);
+
+        assert_eq!(prefiltered.execution_plan.candidate_model_ids(), vec![2]);
+        assert_eq!(prefiltered.skipped_attempts.len(), 1);
+        assert_eq!(
+            prefiltered.skipped_attempts[0].error_code.as_deref(),
+            Some(CAPABILITY_MISMATCH_SKIPPED_ERROR)
+        );
+        assert_eq!(
+            prefiltered.skipped_attempts[0].scheduler_action,
+            SchedulerAction::FallbackNextCandidate
+        );
+    }
+
+    #[test]
     fn derive_utility_requirement_detects_embeddings_and_rerank() {
         let embeddings = derive_utility_requirement("embeddings", &json!({ "input": "hello" }));
         let rerank = derive_utility_requirement("rerank", &json!({ "query": "hello" }));
@@ -2862,6 +3114,30 @@ mod tests {
         assert!(embeddings.requires_embeddings);
         assert!(!embeddings.requires_rerank);
         assert!(rerank.requires_rerank);
+    }
+
+    #[test]
+    fn reasoning_suffix_rejects_utility_operation_kind() {
+        let mut execution_plan = plan();
+        execution_plan.requested_name = "route-high".to_string();
+        execution_plan.resolved_reasoning_suffix = Some("high".to_string());
+        execution_plan.resolved_reasoning_preset = Some(ReasoningPreset::High);
+
+        let error = ensure_reasoning_preset_allows_operation(
+            &execution_plan,
+            RequestedOperationKind::Utility,
+            "embeddings",
+        )
+        .unwrap_err();
+
+        match error {
+            ProxyError::BadRequest(message) => {
+                assert!(message.contains("Reasoning suffix 'high'"));
+                assert!(message.contains("generation requests"));
+                assert!(message.contains("embeddings"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 
     #[test]

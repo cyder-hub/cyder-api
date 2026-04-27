@@ -1,0 +1,2 @@
+ALTER TABLE request_log
+ADD COLUMN is_stream BOOLEAN NOT NULL DEFAULT 0;

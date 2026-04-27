@@ -6,6 +6,7 @@ import { Api } from "@/services/request";
 import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
 import { useProviderStore } from "@/store/providerStore";
+import { useModelStore } from "@/store/modelStore";
 import type {
   CostCatalogVersion,
   ModelDetailResponse,
@@ -43,6 +44,7 @@ import CostTemplateDialog from "./cost/CostTemplateDialog.vue";
 import CostVersionDialog from "./cost/CostVersionDialog.vue";
 import { useCostPage } from "./cost/useCostPage";
 import ModelRequestPatchPanel from "@/components/model/ModelRequestPatchPanel.vue";
+import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
 
 interface EditingModelData {
   id: number;
@@ -64,6 +66,7 @@ const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const providerStore = useProviderStore();
+const modelStore = useModelStore();
 
 const modelId = parseInt(route.params.id as string);
 const isLoading = ref(true);
@@ -177,6 +180,15 @@ const handleSaveModel = async () => {
       }),
     );
   }
+};
+
+const handleReasoningConfigSaved = () => {
+  void Promise.all([
+    providerStore.fetchProviders(),
+    modelStore.fetchModels(),
+  ]).catch((error) => {
+    console.error("Failed to refresh stores after reasoning config save:", error);
+  });
 };
 
 const handleNavigateToModels = () => {
@@ -433,6 +445,13 @@ onMounted(() => {
           </div>
         </CardContent>
       </Card>
+
+      <ReasoningConfigPanel
+        owner-kind="model"
+        :owner-id="editingData.id"
+        :model-supports-reasoning="editingData.supports_reasoning"
+        @saved="handleReasoningConfigSaved"
+      />
 
       <!-- Cost Catalog Section -->
       <Card>

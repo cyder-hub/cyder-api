@@ -156,6 +156,33 @@ diesel::table! {
 }
 
 diesel::table! {
+    reasoning_config (id) {
+        id -> Int8,
+        scope_kind -> Text,
+        provider_id -> Nullable<Int8>,
+        model_id -> Nullable<Int8>,
+        mode -> Text,
+        family_key -> Nullable<Text>,
+        deleted_at -> Nullable<Int8>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    reasoning_config_preset (id) {
+        id -> Int8,
+        config_id -> Int8,
+        preset_key -> Text,
+        expose_in_models -> Bool,
+        is_enabled -> Bool,
+        deleted_at -> Nullable<Int8>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
     model (id) {
         id -> Int8,
         provider_id -> Int8,
@@ -246,6 +273,9 @@ diesel::table! {
         id -> Int8,
         api_key_id -> Int8,
         requested_model_name -> Nullable<Text>,
+        base_requested_model_name -> Nullable<Text>,
+        resolved_reasoning_suffix -> Nullable<Text>,
+        resolved_reasoning_preset -> Nullable<Text>,
         resolved_name_scope -> Nullable<Text>,
         resolved_route_id -> Nullable<Int8>,
         resolved_route_name -> Nullable<Text>,
@@ -256,6 +286,7 @@ diesel::table! {
         llm_response_first_chunk_at -> Nullable<Int8>,
         #[sql_name = "completed_at"]
         llm_response_completed_at -> Nullable<Int8>,
+        is_stream -> Bool,
         client_ip -> Nullable<Text>,
         #[sql_name = "final_attempt_id"]
         final_attempt_id -> Nullable<Int8>,
@@ -444,6 +475,7 @@ diesel::joinable!(model -> provider (provider_id));
 diesel::joinable!(model_route_candidate -> model (model_id));
 diesel::joinable!(model_route_candidate -> model_route (route_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
+diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
 diesel::joinable!(request_attempt -> cost_catalog_versions (cost_catalog_version_id));
 diesel::joinable!(request_attempt -> model (model_id));
 diesel::joinable!(request_attempt -> provider (provider_id));
@@ -474,6 +506,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     model_route_candidate,
     provider,
     provider_api_key,
+    reasoning_config,
+    reasoning_config_preset,
     request_attempt,
     request_log,
     request_replay_run,

@@ -531,6 +531,7 @@ import {
   getStatusBadgeVariant,
   summarizeReplayBody,
 } from "./recordFormat";
+import { patchSourceItemsFromRaw } from "./recordPatchSummary";
 
 const props = defineProps<{
   recordId: number;
@@ -1084,8 +1085,13 @@ const ReplayExecutionPreview = defineComponent({
     },
   },
   setup(componentProps) {
-    return () =>
-      h("div", { class: "space-y-3" }, [
+    return () => {
+      const patchSources = patchSourceItemsFromRaw(
+        componentProps.preview.applied_request_patch_summary,
+        $t,
+      );
+
+      return h("div", { class: "space-y-3" }, [
         h(
           "h4",
           { class: "text-sm font-semibold text-gray-900" },
@@ -1097,6 +1103,22 @@ const ReplayExecutionPreview = defineComponent({
             [
               $t("recordPage.detailDialog.replay.labels.semanticBasis"),
               componentProps.preview.semantic_basis,
+            ],
+            [
+              $t("recordPage.detailDialog.replay.labels.requestedModel"),
+              componentProps.preview.requested_model_name ?? emptyValue,
+            ],
+            [
+              $t("recordPage.detailDialog.replay.labels.baseRequestedModel"),
+              componentProps.preview.base_requested_model_name ?? emptyValue,
+            ],
+            [
+              $t("recordPage.detailDialog.replay.labels.reasoningSuffix"),
+              componentProps.preview.resolved_reasoning_suffix ?? emptyValue,
+            ],
+            [
+              $t("recordPage.detailDialog.replay.labels.reasoningPreset"),
+              componentProps.preview.resolved_reasoning_preset ?? emptyValue,
             ],
             [
               $t("recordPage.detailDialog.replay.labels.route"),
@@ -1194,6 +1216,32 @@ const ReplayExecutionPreview = defineComponent({
               ),
             ])
           : null,
+        patchSources.length
+          ? h("div", { class: "space-y-2" }, [
+              h(
+                "h5",
+                {
+                  class:
+                    "text-xs font-semibold uppercase tracking-wide text-gray-500",
+                },
+                $t("recordPage.detailDialog.attempts.patchSources.title"),
+              ),
+              h(
+                "div",
+                { class: "flex flex-wrap gap-2" },
+                patchSources.map((source) =>
+                  h(
+                    Badge,
+                    {
+                      variant: "outline",
+                      class: "max-w-full font-mono text-[11px]",
+                    },
+                    () => source,
+                  ),
+                ),
+              ),
+            ])
+          : null,
         componentProps.preview.applied_request_patch_summary != null
           ? h(PreBlock, {
               title: $t(
@@ -1205,6 +1253,7 @@ const ReplayExecutionPreview = defineComponent({
             })
           : null,
       ]);
+    };
   },
 });
 

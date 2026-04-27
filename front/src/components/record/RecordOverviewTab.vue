@@ -93,14 +93,14 @@
         </div>
 
         <div
-          v-if="parsedCostSnapshot.detail_lines.length === 0"
+          v-if="costDetailLines.length === 0"
           class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
         >
           {{ $t("recordPage.detailDialog.overview.noCostDetailLines") }}
         </div>
         <div v-else class="overflow-hidden border-y border-gray-100">
           <div
-            v-for="(line, index) in parsedCostSnapshot.detail_lines"
+            v-for="(line, index) in costDetailLines"
             :key="`${line.meter_key}-${index}`"
             class="grid grid-cols-1 gap-2 border-t border-gray-100 px-4 py-3 first:border-t-0 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
           >
@@ -151,7 +151,7 @@
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
-import type { CostSnapshot, RecordRequest } from "@/store/types";
+import type { RecordRequest } from "@/store/types";
 import {
   emptyValue,
   formatDate,
@@ -159,6 +159,11 @@ import {
   formatPrice,
   formatUnitPrice,
 } from "./recordFormat";
+import {
+  costSnapshotDetailLines,
+  costSnapshotIssueCount,
+  type RuntimeCostSnapshot,
+} from "./recordCostSnapshot";
 
 const props = defineProps<{
   record: RecordRequest;
@@ -168,21 +173,22 @@ const props = defineProps<{
 
 const { t: $t } = useI18n();
 
-const parsedCostSnapshot = computed<CostSnapshot | null>(() => {
+const parsedCostSnapshot = computed<RuntimeCostSnapshot | null>(() => {
   const raw = props.record.cost_snapshot_json;
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as CostSnapshot;
+    return JSON.parse(raw) as RuntimeCostSnapshot;
   } catch {
     return null;
   }
 });
 
-const costIssueCount = computed(() => {
-  const snapshot = parsedCostSnapshot.value;
-  if (!snapshot) return 0;
-  return snapshot.warnings?.length ?? 0 + snapshot.unmatched_items.length;
-});
+const costDetailLines = computed(() =>
+  costSnapshotDetailLines(parsedCostSnapshot.value),
+);
+const costIssueCount = computed(() =>
+  costSnapshotIssueCount(parsedCostSnapshot.value),
+);
 
 const formatResolvedScopeLabel = (scope: string | null | undefined) => {
   switch (scope) {
@@ -220,6 +226,21 @@ const generalItems = computed(() => [
   {
     label: $t("recordPage.detailDialog.overview.labels.requestedModel"),
     value: props.record.requested_model_name || props.record.final_model_name_snapshot || emptyValue,
+    valueClass: "font-mono text-xs",
+  },
+  {
+    label: $t("recordPage.detailDialog.overview.labels.baseRequestedModel"),
+    value: props.record.base_requested_model_name || emptyValue,
+    valueClass: "font-mono text-xs",
+  },
+  {
+    label: $t("recordPage.detailDialog.overview.labels.reasoningSuffix"),
+    value: props.record.resolved_reasoning_suffix || emptyValue,
+    valueClass: "font-mono text-xs",
+  },
+  {
+    label: $t("recordPage.detailDialog.overview.labels.reasoningPreset"),
+    value: props.record.resolved_reasoning_preset || emptyValue,
     valueClass: "font-mono text-xs",
   },
   { label: $t("recordPage.detailDialog.overview.labels.resolvedScope"), value: formatResolvedScopeLabel(props.record.resolved_name_scope), valueClass: "" },

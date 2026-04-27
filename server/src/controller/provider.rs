@@ -29,7 +29,7 @@ use crate::utils::{HttpResult, ID_GENERATOR};
 
 use super::BaseError;
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
-use crate::service::cache::types::{CacheModel, CacheProvider, CacheResolvedRequestPatch};
+use crate::service::cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch};
 
 #[derive(Serialize)]
 struct ProviderDetailResponse {
@@ -217,12 +217,13 @@ async fn resolve_provider_check_request_patches(
     app_state: &Arc<AppState>,
     provider: &Provider,
     model: Option<&Model>,
-) -> Result<Vec<CacheResolvedRequestPatch>, BaseError> {
+) -> Result<Vec<RuntimeResolvedRequestPatch>, BaseError> {
     let cache_provider = CacheProvider::from(provider.clone());
     let cache_model = model.cloned().map(CacheModel::from);
-    let trace = load_runtime_request_patch_trace(&cache_provider, cache_model.as_ref(), app_state)
-        .await
-        .map_err(provider_check_patch_error)?;
+    let trace =
+        load_runtime_request_patch_trace(&cache_provider, cache_model.as_ref(), None, app_state)
+            .await
+            .map_err(provider_check_patch_error)?;
     if let Some(model) = model {
         if let Some(conflict_error) = trace.conflict_error(&model.model_name) {
             return Err(provider_check_patch_error(conflict_error));
@@ -238,7 +239,7 @@ async fn build_provider_check_request(
     provider_api_key_id: i64,
     api_key: &str,
     model_name: &str,
-    request_patches: &[CacheResolvedRequestPatch],
+    request_patches: &[RuntimeResolvedRequestPatch],
 ) -> Result<ProviderCheckRequest, BaseError> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -995,7 +996,9 @@ mod tests {
         ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
     };
     use crate::service::app_state::{AppState, create_test_app_state};
-    use crate::service::cache::types::{CacheResolvedRequestPatch, RequestPatchRuleOrigin};
+    use crate::service::cache::types::{
+        RequestPatchRuleOrigin, RequestPatchSource, RuntimeResolvedRequestPatch,
+    };
     use crate::utils::HttpResult;
 
     fn request_patch(
@@ -1004,15 +1007,17 @@ mod tests {
         target: &str,
         operation: RequestPatchOperation,
         value: Option<serde_json::Value>,
-    ) -> CacheResolvedRequestPatch {
-        CacheResolvedRequestPatch {
+    ) -> RuntimeResolvedRequestPatch {
+        RuntimeResolvedRequestPatch {
             placement,
             target: target.to_string(),
             operation,
             value_json: value.map(|item| serde_json::to_string(&item).unwrap()),
-            source_rule_id: id,
-            source_origin: RequestPatchRuleOrigin::ProviderDirect,
+            source: RequestPatchSource::ProviderRule { rule_id: id },
+            source_rule_id: Some(id),
+            source_origin: Some(RequestPatchRuleOrigin::ProviderDirect),
             overridden_rule_ids: Vec::new(),
+            overridden_sources: Vec::new(),
             description: None,
         }
     }

@@ -33,6 +33,7 @@ pub mod model;
 pub mod model_route;
 pub mod provider;
 pub mod provider_runtime;
+pub mod reasoning_config;
 pub mod request_attempt;
 pub mod request_log;
 pub mod request_patch;
@@ -1149,6 +1150,85 @@ mod tests {
 
         assert!(sqlite_table_exists(&mut connection, "api_key"));
         assert!(sqlite_table_exists(&mut connection, "request_log"));
+    }
+
+    #[test]
+    fn sqlite_reasoning_profile_cleanup_preserves_model_acl_rules() {
+        let (_temp_dir, mut connection) =
+            open_test_sqlite_connection("reasoning-cleanup-acl-rule.sqlite");
+
+        apply_sqlite_migrations_through_request_diagnostics_replay(&mut connection);
+        apply_sql(
+            &mut connection,
+            "INSERT INTO provider (
+                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
+                updated_at, provider_type, provider_api_key_mode
+            ) VALUES (
+                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO model (
+                id, provider_id, cost_catalog_id, model_name, real_model_name, is_enabled,
+                deleted_at, created_at, updated_at
+            ) VALUES (
+                10, 1, NULL, 'demo-model', 'demo-model', 1, NULL, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO api_key (
+                id, api_key, api_key_hash, key_prefix, key_last4, name, description,
+                default_action, is_enabled, expires_at, rate_limit_rpm, max_concurrent_requests,
+                quota_daily_requests, quota_daily_tokens, quota_monthly_tokens,
+                budget_daily_nanos, budget_daily_currency, budget_monthly_nanos,
+                budget_monthly_currency, deleted_at, created_at, updated_at
+            ) VALUES (
+                3, 'cyder-abcdefghijklmnopqrstuvwxyz', NULL, 'cyder-abcdef', 'wxyz', 'demo', NULL,
+                'ALLOW', 1, NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                NULL, NULL, NULL,
+                NULL, NULL, 1, 1
+            );",
+        );
+        apply_sql(
+            &mut connection,
+            "INSERT INTO api_key_acl_rule (
+                id, api_key_id, effect, scope, provider_id, model_id, priority, is_enabled,
+                description, created_at, updated_at, deleted_at
+            ) VALUES (
+                31, 3, 'DENY', 'MODEL', 1, 10, 5, 1, 'deny demo model', 1, 1, NULL
+            );",
+        );
+
+        run_sqlite_migrations(&mut connection)
+            .expect("reasoning cleanup should not corrupt API key ACL rule FKs");
+
+        let acl_rule_count = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM api_key_acl_rule
+             WHERE id = 31
+               AND api_key_id = 3
+               AND scope = 'MODEL'
+               AND provider_id = 1
+               AND model_id = 10",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("api_key_acl_rule count should be readable")
+        .count;
+        assert_eq!(acl_rule_count, 1);
+
+        assert!(
+            !sqlite_table_has_column(&mut connection, "provider", "default_reasoning_profile_id")
+                .expect("provider columns should be readable")
+                .unwrap_or(false)
+        );
+        assert!(
+            !sqlite_table_has_column(&mut connection, "model", "reasoning_profile_override_id")
+                .expect("model columns should be readable")
+                .unwrap_or(false)
+        );
     }
 
     #[test]

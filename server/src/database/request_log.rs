@@ -14,6 +14,9 @@ db_object! {
         pub id: i64,
         pub api_key_id: i64,
         pub requested_model_name: Option<String>,
+        pub base_requested_model_name: Option<String>,
+        pub resolved_reasoning_suffix: Option<String>,
+        pub resolved_reasoning_preset: Option<String>,
         pub resolved_name_scope: Option<String>,
         pub resolved_route_id: Option<i64>,
         pub resolved_route_name: Option<String>,
@@ -32,6 +35,7 @@ db_object! {
         pub response_started_to_client_at: Option<i64>,
         #[diesel(column_name = llm_response_completed_at)]
         pub completed_at: Option<i64>,
+        pub is_stream: bool,
         pub client_ip: Option<String>,
         pub final_attempt_id: Option<i64>,
         #[diesel(column_name = provider_id)]
@@ -80,6 +84,9 @@ db_object! {
         pub id: i64,
         pub api_key_id: i64,
         pub requested_model_name: Option<String>,
+        pub base_requested_model_name: Option<String>,
+        pub resolved_reasoning_suffix: Option<String>,
+        pub resolved_reasoning_preset: Option<String>,
         pub resolved_name_scope: Option<String>,
         pub resolved_route_name: Option<String>,
         #[diesel(column_name = status)]
@@ -94,6 +101,7 @@ db_object! {
         pub response_started_to_client_at: Option<i64>,
         #[diesel(column_name = llm_response_completed_at)]
         pub completed_at: Option<i64>,
+        pub is_stream: bool,
         #[diesel(column_name = provider_id)]
         pub final_provider_id: Option<i64>,
         pub final_provider_name_snapshot: Option<String>,
@@ -107,6 +115,7 @@ db_object! {
         pub estimated_cost_currency: Option<String>,
         pub total_input_tokens: Option<i32>,
         pub total_output_tokens: Option<i32>,
+        pub output_text_tokens: Option<i32>,
         pub reasoning_tokens: Option<i32>,
         pub total_tokens: Option<i32>,
         pub has_transform_diagnostics: bool,
@@ -489,6 +498,27 @@ impl RequestLog {
                                 .assume_not_null()
                                 .like(pattern.clone()),
                         ))
+                        .or(request_log::dsl::base_requested_model_name
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::base_requested_model_name
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
+                        .or(request_log::dsl::resolved_reasoning_suffix
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::resolved_reasoning_suffix
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
+                        .or(request_log::dsl::resolved_reasoning_preset
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::resolved_reasoning_preset
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
                         .or(request_log::dsl::resolved_route_name.is_not_null().and(
                             request_log::dsl::resolved_route_name
                                 .assume_not_null()
@@ -689,6 +719,27 @@ impl RequestLog {
                                 .assume_not_null()
                                 .like(pattern.clone()),
                         ))
+                        .or(request_log::dsl::base_requested_model_name
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::base_requested_model_name
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
+                        .or(request_log::dsl::resolved_reasoning_suffix
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::resolved_reasoning_suffix
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
+                        .or(request_log::dsl::resolved_reasoning_preset
+                            .is_not_null()
+                            .and(
+                                request_log::dsl::resolved_reasoning_preset
+                                    .assume_not_null()
+                                    .like(pattern.clone()),
+                            ))
                         .or(request_log::dsl::resolved_route_name.is_not_null().and(
                             request_log::dsl::resolved_route_name
                                 .assume_not_null()

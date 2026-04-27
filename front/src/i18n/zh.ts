@@ -291,6 +291,7 @@ export const zhDict = {
     header: "AI网关管理器",
     footer: "© 2025 AI网关管理器. 版权所有.",
     toggleSidebar: "切换侧边栏",
+    logout: "退出登录",
   },
   language: {
     english: "英文",

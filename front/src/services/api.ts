@@ -1,6 +1,12 @@
 import axios from "axios";
 import { useAuthStore } from "@/store/authStore";
 import router from "@/router";
+import type { AuthTokenPair } from "@/store/types";
+import {
+  clearStoredRefreshTokenIfCurrent,
+  persistAuthTokenPair,
+  readStoredRefreshToken,
+} from "./authTokens";
 
 const apiClient = axios.create({
   headers: {
@@ -12,7 +18,7 @@ apiClient.interceptors.request.use(
   (config) => {
     const authStore = useAuthStore();
     const token = authStore.accessToken;
-    if (token) {
+    if (token && !config.headers.Authorization) {
       config.headers.Authorization = `Bearer ${token}`;
     }
     return config;
@@ -79,7 +85,7 @@ apiClient.interceptors.response.use(
       originalRequest._retry = true;
       isRefreshing = true;
 
-      const refreshToken = localStorage.getItem("auth_token");
+      const refreshToken = readStoredRefreshToken();
       if (!refreshToken) {
         // Handle logout
         return Promise.reject(error);
@@ -93,7 +99,8 @@ apiClient.interceptors.response.use(
             headers: { Authorization: `Bearer ${refreshToken}` },
           },
         );
-        const newAccessToken = response.data.data;
+        const tokenPair = response.data.data as AuthTokenPair;
+        const newAccessToken = persistAuthTokenPair(tokenPair);
         authStore.setAccessToken(newAccessToken);
         originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
         processQueue(null, newAccessToken);
@@ -101,9 +108,10 @@ apiClient.interceptors.response.use(
       } catch (refreshError: any) {
         processQueue(refreshError, null);
         if (refreshError.response?.status === 401) {
-          authStore.setAccessToken(null);
-          localStorage.removeItem("auth_token");
-          router.push({ name: "Login" });
+          if (clearStoredRefreshTokenIfCurrent(refreshToken)) {
+            authStore.setAccessToken(null);
+            router.push({ name: "Login" });
+          }
         }
         return Promise.reject(refreshError);
       } finally {

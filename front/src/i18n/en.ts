@@ -296,6 +296,7 @@ export const enDict = {
     header: "AI Gateway Manager",
     footer: "© 2025 AI Gateway Manager. All rights reserved.",
     toggleSidebar: "Toggle Sidebar",
+    logout: "Log out",
   },
   language: {
     english: "English",

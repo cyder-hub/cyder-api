@@ -156,6 +156,22 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::{Int8, Text, Nullable};
+
+    manager_auth_instance (id) {
+        id -> Int8,
+        manager_id -> Int8,
+        manager_subject -> Text,
+        current_refresh_jti -> Text,
+        created_at -> Int8,
+        last_rotated_at -> Int8,
+        expires_at -> Int8,
+        revoked_at -> Nullable<Int8>,
+        revoked_reason -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     reasoning_config (id) {
         id -> Int8,
         scope_kind -> Text,
@@ -501,6 +517,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     cost_catalogs,
     cost_catalog_versions,
     cost_components,
+    manager_auth_instance,
     model,
     model_route,
     model_route_candidate,

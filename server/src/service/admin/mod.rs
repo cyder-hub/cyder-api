@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::service::catalog::CatalogService;
 
 use self::api_key::ApiKeyAdminService;
+use self::auth::ManagerAuthService;
 use self::cost::CostAdminService;
 use self::model::ModelAdminService;
 use self::model_route::ModelRouteAdminService;
@@ -13,6 +14,7 @@ use self::request_patch::RequestPatchAdminService;
 
 pub mod api_key;
 pub mod audit;
+pub mod auth;
 pub mod cost;
 pub mod model;
 pub mod model_route;
@@ -25,6 +27,7 @@ pub mod request_patch;
 // shape responses, but cache invalidation, audit emission, and write orchestration
 // must stay inside service/admin to avoid owner drift back into handlers.
 pub struct AdminServices {
+    pub auth: Arc<ManagerAuthService>,
     pub provider: Arc<ProviderAdminService>,
     pub api_key: Arc<ApiKeyAdminService>,
     pub model: Arc<ModelAdminService>,
@@ -39,6 +42,7 @@ impl AdminServices {
         let mutation_runner = Arc::new(AdminMutationRunner::new(catalog));
 
         Self {
+            auth: Arc::new(ManagerAuthService::new()),
             provider: Arc::new(ProviderAdminService::new(Arc::clone(&mutation_runner))),
             api_key: Arc::new(ApiKeyAdminService::new(Arc::clone(&mutation_runner))),
             model: Arc::new(ModelAdminService::new(Arc::clone(&mutation_runner))),

@@ -1,8 +1,14 @@
 import { useAuthStore } from "@/store/authStore";
 import { Api } from "./request";
+import {
+  clearStoredRefreshTokenIfCurrent,
+  clearStoredRefreshToken,
+  persistAuthTokenPair,
+  readStoredRefreshToken,
+} from "./authTokens";
 
 export async function tryRefreshToken(): Promise<boolean> {
-  const refreshToken = localStorage.getItem("auth_token");
+  const refreshToken = readStoredRefreshToken();
   const authStore = useAuthStore();
 
   if (!refreshToken) {
@@ -10,29 +16,37 @@ export async function tryRefreshToken(): Promise<boolean> {
   }
 
   try {
-    const newAccessToken = await Api.refreshToken(refreshToken);
-    authStore.setAccessToken(newAccessToken);
+    const tokenPair = await Api.refreshToken(refreshToken);
+    authStore.setAccessToken(persistAuthTokenPair(tokenPair));
     return true;
   } catch {
-    localStorage.removeItem("auth_token");
-    authStore.setAccessToken(null);
+    if (clearStoredRefreshTokenIfCurrent(refreshToken)) {
+      authStore.setAccessToken(null);
+    }
     return false;
   }
 }
 
 export async function login(password: string): Promise<boolean> {
   try {
-    const refreshToken = await Api.login(password);
-    localStorage.setItem("auth_token", refreshToken);
-    await tryRefreshToken();
+    const tokenPair = await Api.login(password);
+    const authStore = useAuthStore();
+    authStore.setAccessToken(persistAuthTokenPair(tokenPair));
     return true;
   } catch {
     return false;
   }
 }
 
-export function logout(): void {
-  localStorage.removeItem("auth_token");
+export async function logout(): Promise<void> {
   const authStore = useAuthStore();
-  authStore.setAccessToken(null);
+  try {
+    await Api.logout();
+  } catch {
+    // Local logout must complete even when the server-side instance is already gone
+    // or the access token has expired.
+  } finally {
+    clearStoredRefreshToken();
+    authStore.setAccessToken(null);
+  }
 }

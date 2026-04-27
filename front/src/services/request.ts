@@ -75,11 +75,12 @@ import type {
   RequestPatchMutationOutcome,
   ModelEffectiveRequestPatchResponse,
   RequestPatchExplainResponse,
+  AuthTokenPair,
 } from "@/store/types";
 
 export const Api = {
   // ========== Auth ==========
-  refreshToken(refreshToken: string): Promise<string> {
+  refreshToken(refreshToken: string): Promise<AuthTokenPair> {
     return request.post(
       "/ai/manager/api/auth/refresh_token",
       {},
@@ -88,8 +89,11 @@ export const Api = {
       },
     );
   },
-  login(password: string): Promise<string> {
+  login(password: string): Promise<AuthTokenPair> {
     return request.post("/ai/manager/api/auth/login", { key: password });
+  },
+  logout(): Promise<void> {
+    return request.post("/ai/manager/api/auth/logout", {});
   },
 
   // ========== System / Dashboard ==========

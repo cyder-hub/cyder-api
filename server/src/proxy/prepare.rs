@@ -210,6 +210,7 @@ pub struct ExecutionPlan {
 }
 
 impl ExecutionPlan {
+    #[cfg(test)]
     pub fn primary_candidate(&self) -> Result<&ExecutionCandidate, String> {
         self.candidates.first().ok_or_else(|| {
             format!(

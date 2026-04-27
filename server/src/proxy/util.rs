@@ -1,13 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use axum::{body::Body, extract::Request};
 use cyder_tools::log::debug;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::ProxyError;
 use crate::{
-    config::CONFIG,
     cost::UsageNormalization,
     schema::enum_def::LlmApiType,
     schema::enum_def::ProviderType,
@@ -201,20 +198,6 @@ pub(super) async fn get_cost_catalog_version(
     } else {
         None
     }
-}
-
-// Parses the request body into a JSON Value.
-pub(super) async fn parse_request_body(request: Request<Body>) -> Result<Value, ProxyError> {
-    let body = axum::body::to_bytes(request.into_body(), CONFIG.max_body_size)
-        .await
-        .map_err(|e| ProxyError::BadRequest(format!("Failed to read body: {}", e)))?;
-
-    if body.is_empty() {
-        return Ok(Value::Null);
-    }
-
-    serde_json::from_slice(&body)
-        .map_err(|e| ProxyError::BadRequest(format!("Failed to parse JSON body: {}", e)))
 }
 
 pub(super) fn parse_utility_usage_normalization(

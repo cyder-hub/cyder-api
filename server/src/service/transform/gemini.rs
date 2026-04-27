@@ -95,21 +95,6 @@ fn render_gemini_image_reference_text(url: &str, detail: Option<&str>) -> String
     }
 }
 
-fn render_gemini_inline_file_data_text(
-    data: &str,
-    mime_type: &str,
-    filename: Option<&str>,
-) -> String {
-    let mut lines = vec![
-        format!("file_data: {data}"),
-        format!("mime_type: {mime_type}"),
-    ];
-    if let Some(filename) = filename.filter(|value| !value.is_empty()) {
-        lines.push(format!("filename: {filename}"));
-    }
-    lines.join("\n")
-}
-
 fn render_gemini_tool_call_text(call: &UnifiedToolCall) -> String {
     format!(
         "tool_call: {}\narguments: {}",

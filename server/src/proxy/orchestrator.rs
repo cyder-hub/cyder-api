@@ -839,6 +839,10 @@ async fn materialize_generation_attempt(
         query_params,
     )
     .await?;
+    debug_assert_eq!(
+        prepared_request.provider_api_key_id,
+        provider_credentials.key_id
+    );
     let final_url = if target_api_type == LlmApiType::Gemini {
         match replay_query_params {
             Some(params) => rebuild_gemini_url_query_from_snapshot(

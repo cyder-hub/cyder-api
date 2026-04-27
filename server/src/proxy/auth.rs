@@ -20,9 +20,29 @@ pub enum ApiKeyPosition {
     KeyQuery,
 }
 
+impl ApiKeyPosition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthorizationHeader => "authorization_header",
+            Self::XGoogApiKeyHeader => "x-goog-api-key_header",
+            Self::XApiKeyHeader => "x-api-key_header",
+            Self::KeyQuery => "key_query",
+        }
+    }
+}
+
 pub struct ApiKeyCheckResult {
     pub api_key: Arc<CacheApiKey>,
     pub position: ApiKeyPosition,
+}
+
+fn log_auth_request_accepted(protocol: &'static str, result: &ApiKeyCheckResult) {
+    crate::debug_event!(
+        "auth.request_accepted",
+        protocol = protocol,
+        api_key_id = result.api_key.id,
+        source = result.position.as_str(),
+    );
 }
 
 fn log_auth_request_rejected(
@@ -65,8 +85,9 @@ pub async fn authenticate_openai_request(
             proxy_error
         })?;
     let result = check_system_api_key(app_state, &system_api_key_str, position).await;
-    if let Err(proxy_error) = &result {
-        log_auth_request_rejected("openai", None, proxy_error);
+    match &result {
+        Ok(auth) => log_auth_request_accepted("openai", auth),
+        Err(proxy_error) => log_auth_request_rejected("openai", None, proxy_error),
     }
     result
 }
@@ -100,8 +121,9 @@ pub async fn authenticate_gemini_request(
         },
     };
     let result = check_system_api_key(app_state, &system_api_key_str, position).await;
-    if let Err(proxy_error) = &result {
-        log_auth_request_rejected("gemini", None, proxy_error);
+    match &result {
+        Ok(auth) => log_auth_request_accepted("gemini", auth),
+        Err(proxy_error) => log_auth_request_rejected("gemini", None, proxy_error),
     }
     result
 }
@@ -117,8 +139,9 @@ pub async fn authenticate_anthropic_request(
             err
         })?;
     let result = check_system_api_key(app_state, &system_api_key_str, position).await;
-    if let Err(proxy_error) = &result {
-        log_auth_request_rejected("anthropic", None, proxy_error);
+    match &result {
+        Ok(auth) => log_auth_request_accepted("anthropic", auth),
+        Err(proxy_error) => log_auth_request_rejected("anthropic", None, proxy_error),
     }
     result
 }
@@ -136,8 +159,9 @@ pub async fn authenticate_ollama_request(
             proxy_error
         })?;
     let result = check_system_api_key(app_state, &system_api_key_str, position).await;
-    if let Err(proxy_error) = &result {
-        log_auth_request_rejected("ollama", None, proxy_error);
+    match &result {
+        Ok(auth) => log_auth_request_accepted("ollama", auth),
+        Err(proxy_error) => log_auth_request_rejected("ollama", None, proxy_error),
     }
     result
 }

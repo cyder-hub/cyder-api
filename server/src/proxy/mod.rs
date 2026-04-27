@@ -12,7 +12,7 @@ mod pipeline;
 mod prepare;
 mod provider_governance;
 #[allow(dead_code)]
-mod reasoning_suffix;
+pub(crate) mod reasoning_suffix;
 mod request;
 mod requested_model;
 #[allow(dead_code)]
@@ -40,7 +40,8 @@ pub(crate) use orchestrator::{
 };
 pub(crate) use prepare::{
     apply_provider_request_auth_header, apply_request_patches, candidate_supports_reasoning_preset,
-    load_runtime_request_patch_trace, resolve_route_runtime_candidates,
+    load_runtime_request_patch_trace, resolve_effective_reasoning_config,
+    resolve_route_runtime_candidates,
 };
 pub use router::create_proxy_router;
 pub(crate) use utility::{UtilityOperation, UtilityProtocol};

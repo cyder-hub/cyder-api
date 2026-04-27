@@ -8,7 +8,6 @@ use crate::database::provider::{
     BootstrapProviderInput, BootstrapProviderResult, NewProvider, NewProviderApiKey, Provider,
     ProviderApiKey, UpdateProviderApiKeyData, UpdateProviderData,
 };
-use crate::database::reasoning_profile::validate_active_reasoning_profile_id;
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
 use crate::utils::ID_GENERATOR;
 
@@ -25,7 +24,6 @@ pub struct ProviderUpsertInput {
     pub use_proxy: bool,
     pub provider_type: Option<ProviderType>,
     pub provider_api_key_mode: Option<ProviderApiKeyMode>,
-    pub default_reasoning_profile_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,11 +55,6 @@ impl ProviderAdminService {
     }
 
     pub async fn create_provider(&self, input: ProviderUpsertInput) -> Result<Provider, BaseError> {
-        validate_active_reasoning_profile_id(
-            "default_reasoning_profile_id",
-            input.default_reasoning_profile_id,
-        )?;
-
         let current_time = Utc::now().timestamp_millis();
         let new_provider_data = NewProvider {
             id: ID_GENERATOR.generate_id(),
@@ -76,7 +69,6 @@ impl ProviderAdminService {
             provider_api_key_mode: input
                 .provider_api_key_mode
                 .unwrap_or(ProviderApiKeyMode::Queue),
-            default_reasoning_profile_id: input.default_reasoning_profile_id,
         };
         let created_provider = Provider::create(&new_provider_data)?;
 
@@ -97,11 +89,6 @@ impl ProviderAdminService {
         id: i64,
         input: ProviderUpsertInput,
     ) -> Result<Provider, BaseError> {
-        validate_active_reasoning_profile_id(
-            "default_reasoning_profile_id",
-            input.default_reasoning_profile_id,
-        )?;
-
         let update_data = UpdateProviderData {
             provider_key: None,
             name: Some(input.name),
@@ -110,7 +97,6 @@ impl ProviderAdminService {
             is_enabled: None,
             provider_type: input.provider_type,
             provider_api_key_mode: input.provider_api_key_mode,
-            default_reasoning_profile_id: Some(input.default_reasoning_profile_id),
         };
         let updated_provider = Provider::update(id, &update_data)?;
 
@@ -357,7 +343,6 @@ fn provider_api_key_audit_event(action: &'static str, key: &ProviderApiKey) -> A
 mod tests {
     use diesel::connection::SimpleConnection;
 
-    use crate::controller::BaseError;
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::model_route::{
         CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput,
@@ -366,7 +351,6 @@ mod tests {
         BootstrapProviderInput, NewProvider, NewProviderApiKey, Provider, ProviderApiKey,
         ProviderSummaryItem,
     };
-    use crate::database::reasoning_profile::ReasoningProfile;
     use crate::database::request_patch::{CreateRequestPatchPayload, RequestPatchRule};
     use crate::database::{DbConnection, TestDbContext, get_connection};
     use crate::schema::enum_def::{
@@ -385,7 +369,6 @@ mod tests {
             use_proxy: false,
             provider_type: Some(ProviderType::Openai),
             provider_api_key_mode: Some(ProviderApiKeyMode::Queue),
-            default_reasoning_profile_id: None,
         }
     }
 
@@ -401,7 +384,6 @@ mod tests {
             updated_at: 1,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
         })
         .expect("provider seed should succeed")
     }
@@ -435,29 +417,6 @@ mod tests {
             },
         )
         .expect("model seed should succeed")
-    }
-
-    fn seed_reasoning_profile(profile_key: &str, is_enabled: bool) -> ReasoningProfile {
-        ReasoningProfile::create(
-            profile_key,
-            profile_key,
-            None,
-            "openai_chat_reasoning_effort",
-            is_enabled,
-        )
-        .expect("reasoning profile seed should succeed")
-    }
-
-    fn assert_param_invalid_contains(err: BaseError, expected: &[&str]) {
-        let BaseError::ParamInvalid(Some(message)) = err else {
-            panic!("expected ParamInvalid with message, got {err:?}");
-        };
-        for needle in expected {
-            assert!(
-                message.contains(needle),
-                "expected error message '{message}' to contain '{needle}'"
-            );
-        }
     }
 
     fn seed_route(route_name: &str, model_id: i64) -> ModelRoute {
@@ -562,124 +521,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_provider_validates_default_reasoning_profile_binding() {
-        let test_db_context = TestDbContext::new_sqlite("admin-provider-reasoning-create.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let disabled_profile =
-                    seed_reasoning_profile("provider_create_disabled_profile", false);
-                let deleted_profile =
-                    seed_reasoning_profile("provider_create_deleted_profile", true);
-                ReasoningProfile::delete(deleted_profile.id).expect("delete profile");
-                let active_profile = seed_reasoning_profile("provider_create_active_profile", true);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-                let catalog_before = app_state
-                    .catalog
-                    .get_models_catalog()
-                    .await
-                    .expect("catalog should load");
-                assert!(catalog_before.providers.is_empty());
-
-                let mut missing_input = provider_input(
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api.example.com/v1",
-                );
-                missing_input.default_reasoning_profile_id = Some(9_001_001);
-                let missing_err = app_state
-                    .admin
-                    .provider
-                    .create_provider(missing_input)
-                    .await
-                    .expect_err("missing reasoning profile should be rejected");
-                assert_param_invalid_contains(
-                    missing_err,
-                    &["default_reasoning_profile_id", "9001001"],
-                );
-
-                let mut disabled_input = provider_input(
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api.example.com/v1",
-                );
-                disabled_input.default_reasoning_profile_id = Some(disabled_profile.id);
-                let disabled_err = app_state
-                    .admin
-                    .provider
-                    .create_provider(disabled_input)
-                    .await
-                    .expect_err("disabled reasoning profile should be rejected");
-                assert_param_invalid_contains(
-                    disabled_err,
-                    &[
-                        "default_reasoning_profile_id",
-                        &disabled_profile.id.to_string(),
-                    ],
-                );
-
-                let mut deleted_input = provider_input(
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api.example.com/v1",
-                );
-                deleted_input.default_reasoning_profile_id = Some(deleted_profile.id);
-                let deleted_err = app_state
-                    .admin
-                    .provider
-                    .create_provider(deleted_input)
-                    .await
-                    .expect_err("deleted reasoning profile should be rejected");
-                assert_param_invalid_contains(
-                    deleted_err,
-                    &[
-                        "default_reasoning_profile_id",
-                        &deleted_profile.id.to_string(),
-                    ],
-                );
-
-                let mut active_input = provider_input(
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api.example.com/v1",
-                );
-                active_input.default_reasoning_profile_id = Some(active_profile.id);
-                let created = app_state
-                    .admin
-                    .provider
-                    .create_provider(active_input)
-                    .await
-                    .expect("active reasoning profile should be accepted");
-
-                let cached_provider = app_state
-                    .catalog
-                    .get_provider_by_id(created.id)
-                    .await
-                    .expect("provider cache should load")
-                    .expect("provider should exist");
-                let catalog_after = app_state
-                    .catalog
-                    .get_models_catalog()
-                    .await
-                    .expect("catalog should reload");
-
-                assert_eq!(
-                    created.default_reasoning_profile_id,
-                    Some(active_profile.id)
-                );
-                assert_eq!(
-                    cached_provider.default_reasoning_profile_id,
-                    Some(active_profile.id)
-                );
-                assert!(catalog_after.providers.iter().any(|item| {
-                    item.id == created.id
-                        && item.default_reasoning_profile_id == Some(active_profile.id)
-                }));
-            })
-            .await;
-    }
-
-    #[tokio::test]
     async fn update_provider_preserves_stable_key_and_refreshes_cached_provider_and_catalog() {
         let test_db_context = TestDbContext::new_sqlite("admin-provider-update.sqlite");
 
@@ -761,146 +602,6 @@ mod tests {
                     item.id == seeded_provider.id
                         && item.endpoint == "https://api-updated.example.com/v1"
                         && item.provider_key == old_provider_key
-                }));
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn update_provider_validates_and_clears_default_reasoning_profile_binding() {
-        let test_db_context = TestDbContext::new_sqlite("admin-provider-reasoning-update.sqlite");
-
-        test_db_context
-            .run_async(async {
-                let seeded_provider = seed_provider(
-                    7011,
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api.example.com/v1",
-                );
-                let disabled_profile =
-                    seed_reasoning_profile("provider_update_disabled_profile", false);
-                let active_profile = seed_reasoning_profile("provider_update_active_profile", true);
-                let app_state = create_test_app_state(test_db_context.clone()).await;
-
-                let provider_before = app_state
-                    .catalog
-                    .get_provider_by_id(seeded_provider.id)
-                    .await
-                    .expect("provider cache should load")
-                    .expect("provider should exist");
-                let catalog_before = app_state
-                    .catalog
-                    .get_models_catalog()
-                    .await
-                    .expect("catalog should load");
-                assert!(provider_before.default_reasoning_profile_id.is_none());
-                assert!(catalog_before.providers.iter().any(|item| {
-                    item.id == seeded_provider.id && item.default_reasoning_profile_id.is_none()
-                }));
-
-                let mut missing_input = provider_input(
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api-updated.example.com/v1",
-                );
-                missing_input.default_reasoning_profile_id = Some(9_001_002);
-                let missing_err = app_state
-                    .admin
-                    .provider
-                    .update_provider(seeded_provider.id, missing_input)
-                    .await
-                    .expect_err("missing reasoning profile should be rejected");
-                assert_param_invalid_contains(
-                    missing_err,
-                    &["default_reasoning_profile_id", "9001002"],
-                );
-
-                let mut disabled_input = provider_input(
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api-updated.example.com/v1",
-                );
-                disabled_input.default_reasoning_profile_id = Some(disabled_profile.id);
-                let disabled_err = app_state
-                    .admin
-                    .provider
-                    .update_provider(seeded_provider.id, disabled_input)
-                    .await
-                    .expect_err("disabled reasoning profile should be rejected");
-                assert_param_invalid_contains(
-                    disabled_err,
-                    &[
-                        "default_reasoning_profile_id",
-                        &disabled_profile.id.to_string(),
-                    ],
-                );
-
-                let mut active_input = provider_input(
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api-updated.example.com/v1",
-                );
-                active_input.default_reasoning_profile_id = Some(active_profile.id);
-                let updated = app_state
-                    .admin
-                    .provider
-                    .update_provider(seeded_provider.id, active_input)
-                    .await
-                    .expect("active reasoning profile should be accepted");
-
-                let provider_after_bind = app_state
-                    .catalog
-                    .get_provider_by_id(seeded_provider.id)
-                    .await
-                    .expect("provider cache should reload")
-                    .expect("provider should exist");
-                let catalog_after_bind = app_state
-                    .catalog
-                    .get_models_catalog()
-                    .await
-                    .expect("catalog should reload");
-                assert_eq!(
-                    updated.default_reasoning_profile_id,
-                    Some(active_profile.id)
-                );
-                assert_eq!(
-                    provider_after_bind.default_reasoning_profile_id,
-                    Some(active_profile.id)
-                );
-                assert!(catalog_after_bind.providers.iter().any(|item| {
-                    item.id == seeded_provider.id
-                        && item.default_reasoning_profile_id == Some(active_profile.id)
-                }));
-
-                let clear_input = provider_input(
-                    "OpenAI api.example.com",
-                    "openai-api-example-com",
-                    "https://api-cleared.example.com/v1",
-                );
-                let cleared = app_state
-                    .admin
-                    .provider
-                    .update_provider(seeded_provider.id, clear_input)
-                    .await
-                    .expect("null reasoning profile should clear binding");
-
-                let provider_after_clear = app_state
-                    .catalog
-                    .get_provider_by_id(seeded_provider.id)
-                    .await
-                    .expect("provider cache should reload after clear")
-                    .expect("provider should exist");
-                let catalog_after_clear = app_state
-                    .catalog
-                    .get_models_catalog()
-                    .await
-                    .expect("catalog should reload after clear");
-
-                assert!(cleared.default_reasoning_profile_id.is_none());
-                assert!(provider_after_clear.default_reasoning_profile_id.is_none());
-                assert!(catalog_after_clear.providers.iter().any(|item| {
-                    item.id == seeded_provider.id && item.default_reasoning_profile_id.is_none()
                 }));
             })
             .await;

@@ -448,10 +448,19 @@
                       </div>
                       <div class="min-w-0">
                         <p class="break-all font-mono text-xs text-gray-600">
-                          {{ candidate.reasoning_profile_key || "no-profile" }}
+                          {{ formatRouteReasoningConfigSource(candidate) }}
+                          <span v-if="candidate.config_id != null">
+                            / {{ candidate.config_scope || "scope" }}:{{ candidate.config_id }}
+                          </span>
                         </p>
-                        <p v-if="candidate.reasoning_family" class="mt-0.5 break-all font-mono text-[11px] text-gray-500">
-                          {{ candidate.reasoning_family }}
+                        <p
+                          v-if="candidate.family || candidate.config_preset_id != null"
+                          class="mt-0.5 break-all font-mono text-[11px] text-gray-500"
+                        >
+                          {{ candidate.family || "missing family" }}
+                          <span v-if="candidate.config_preset_id != null">
+                            / preset row {{ candidate.config_preset_id }}
+                          </span>
                         </p>
                       </div>
                       <div class="min-w-0">
@@ -492,6 +501,7 @@ import type {
   ModelRouteListItem,
   ModelRoutePayload,
   ModelRouteUpdatePayload,
+  ReasoningRouteCandidatePreview,
   ReasoningRoutePreview,
 } from "@/store/types";
 import { Button } from "@/components/ui/button";
@@ -639,6 +649,29 @@ const getCandidateSummary = (candidate: EditingCandidate) => {
   }
 
   return `${provider.provider_key}/${model.real_model_name || model.model_name}`;
+};
+
+const formatRouteReasoningConfigSource = (
+  candidate: ReasoningRouteCandidatePreview,
+) => {
+  if (candidate.runtime_status === "stale_skipped") {
+    return "stale skipped";
+  }
+
+  switch (candidate.config_source) {
+    case "provider_default":
+      return "provider default";
+    case "model_custom":
+      return "model custom";
+    case "model_disabled":
+      return "model disabled";
+    case "missing":
+    case null:
+    case undefined:
+      return "missing config";
+    default:
+      return candidate.config_source;
+  }
 };
 
 const fetchRouteList = async () => {

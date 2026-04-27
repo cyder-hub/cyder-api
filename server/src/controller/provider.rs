@@ -90,7 +90,6 @@ struct InserPayload {
     pub use_proxy: bool,
     pub provider_type: Option<ProviderType>,
     pub provider_api_key_mode: Option<ProviderApiKeyMode>,
-    pub default_reasoning_profile_id: Option<i64>,
 }
 
 async fn insert(
@@ -107,7 +106,6 @@ async fn insert(
             use_proxy: payload.use_proxy,
             provider_type: payload.provider_type,
             provider_api_key_mode: payload.provider_api_key_mode,
-            default_reasoning_profile_id: payload.default_reasoning_profile_id,
         })
         .await?;
 
@@ -137,7 +135,6 @@ async fn update_provider(
                 use_proxy: payload.use_proxy,
                 provider_type: payload.provider_type,
                 provider_api_key_mode: payload.provider_api_key_mode,
-                default_reasoning_profile_id: payload.default_reasoning_profile_id,
             },
         )
         .await?;
@@ -1312,7 +1309,6 @@ mod tests {
             provider_key: "openai-api-example-com".to_string(),
             name: "OpenAI api.example.com".to_string(),
             is_enabled: true,
-            default_reasoning_profile_id: Some(9001),
         }]);
 
         let value = serde_json::to_value(payload).expect("summary payload should serialize");
@@ -1334,10 +1330,8 @@ mod tests {
                 "provider_key".to_string(),
                 "name".to_string(),
                 "is_enabled".to_string(),
-                "default_reasoning_profile_id".to_string(),
             ])
         );
-        assert_eq!(item["default_reasoning_profile_id"], 9001);
         assert!(item.get("models").is_none());
         assert!(item.get("provider_keys").is_none());
         assert!(item.get("custom_fields").is_none());
@@ -1497,7 +1491,6 @@ mod tests {
                 model_name: "gpt-4o-mini".to_string(),
                 real_model_name: None,
                 cost_catalog_id: None,
-                reasoning_profile_override_id: None,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_reasoning: true,
@@ -1525,7 +1518,6 @@ mod tests {
             updated_at: 0,
             provider_type,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
         }
     }
 }

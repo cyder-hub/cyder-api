@@ -30,7 +30,6 @@ export interface EditingProviderData {
   name: string;
   provider_key: string;
   provider_type: string;
-  default_reasoning_profile_id: number | null;
   endpoint: string;
   use_proxy: boolean;
   models: LocalEditableModelItem[];

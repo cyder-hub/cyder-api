@@ -116,6 +116,7 @@ struct RequestLogListItemResponse {
     first_attempt_started_at: Option<i64>,
     response_started_to_client_at: Option<i64>,
     completed_at: Option<i64>,
+    is_stream: bool,
     final_provider_id: Option<i64>,
     final_provider_name_snapshot: Option<String>,
     final_model_id: Option<i64>,
@@ -125,6 +126,7 @@ struct RequestLogListItemResponse {
     estimated_cost_currency: Option<String>,
     total_input_tokens: Option<i32>,
     total_output_tokens: Option<i32>,
+    output_text_tokens: Option<i32>,
     reasoning_tokens: Option<i32>,
     total_tokens: Option<i32>,
     has_transform_diagnostics: bool,
@@ -151,6 +153,7 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
             first_attempt_started_at: value.first_attempt_started_at,
             response_started_to_client_at: value.response_started_to_client_at,
             completed_at: value.completed_at,
+            is_stream: value.is_stream,
             final_provider_id: value.final_provider_id,
             final_provider_name_snapshot: value.final_provider_name_snapshot,
             final_model_id: value.final_model_id,
@@ -160,6 +163,7 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
             estimated_cost_currency: value.estimated_cost_currency,
             total_input_tokens: value.total_input_tokens,
             total_output_tokens: value.total_output_tokens,
+            output_text_tokens: value.output_text_tokens,
             reasoning_tokens: value.reasoning_tokens,
             total_tokens: value.total_tokens,
             has_transform_diagnostics: value.has_transform_diagnostics,
@@ -191,6 +195,7 @@ struct RequestLogResponse {
     first_attempt_started_at: Option<i64>,
     response_started_to_client_at: Option<i64>,
     completed_at: Option<i64>,
+    is_stream: bool,
     client_ip: Option<String>,
     final_attempt_id: Option<i64>,
     final_provider_id: Option<i64>,
@@ -249,6 +254,7 @@ impl From<RequestLogRecord> for RequestLogResponse {
             first_attempt_started_at: value.first_attempt_started_at,
             response_started_to_client_at: value.response_started_to_client_at,
             completed_at: value.completed_at,
+            is_stream: value.is_stream,
             client_ip: value.client_ip,
             final_attempt_id: value.final_attempt_id,
             final_provider_id: value.final_provider_id,
@@ -745,6 +751,7 @@ mod tests {
             first_attempt_started_at: Some(11),
             response_started_to_client_at: None,
             completed_at: Some(12),
+            is_stream: true,
             final_provider_id: Some(3),
             final_provider_name_snapshot: Some("OpenAI".to_string()),
             final_model_id: Some(4),
@@ -754,6 +761,7 @@ mod tests {
             estimated_cost_currency: None,
             total_input_tokens: None,
             total_output_tokens: None,
+            output_text_tokens: None,
             reasoning_tokens: None,
             total_tokens: None,
             has_transform_diagnostics: true,
@@ -769,6 +777,8 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
+        assert_eq!(value.get("is_stream").and_then(|v| v.as_bool()), Some(true));
+        assert!(value.get("output_text_tokens").is_some());
         let legacy_api_key_id_field = ["system", "api", "key", "id"].join("_");
         assert!(value.get(&legacy_api_key_id_field).is_none());
     }
@@ -816,6 +826,7 @@ mod tests {
                 first_attempt_started_at: Some(11),
                 response_started_to_client_at: Some(12),
                 completed_at: Some(13),
+                is_stream: true,
                 client_ip: Some("127.0.0.1".to_string()),
                 final_attempt_id: Some(100),
                 final_provider_id: Some(3),
@@ -913,6 +924,12 @@ mod tests {
                 .pointer("/request/overall_status")
                 .and_then(|item| item.as_str()),
             Some("SUCCESS")
+        );
+        assert_eq!(
+            value
+                .pointer("/request/is_stream")
+                .and_then(|item| item.as_bool()),
+            Some(true)
         );
         assert_eq!(
             value

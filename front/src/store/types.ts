@@ -332,7 +332,6 @@ export interface ProviderBase {
   endpoint: string;
   use_proxy: boolean;
   provider_type: string;
-  default_reasoning_profile_id?: number | null;
 }
 
 export interface ProviderSummaryItem {
@@ -340,7 +339,6 @@ export interface ProviderSummaryItem {
   provider_key: string;
   name: string;
   is_enabled: boolean;
-  default_reasoning_profile_id?: number | null;
 }
 
 export interface ProviderApiKeyItem {
@@ -353,7 +351,6 @@ export interface ModelItem {
   id: number;
   model_name: string;
   real_model_name: string | null;
-  reasoning_profile_override_id?: number | null;
   supports_streaming: boolean;
   supports_tools: boolean;
   supports_reasoning: boolean;
@@ -566,6 +563,15 @@ export type ReasoningPresetKey =
 
 export type ReasoningPatchFamilyKey = string;
 
+export type ReasoningConfigScope = "provider" | "model" | string;
+
+export type ReasoningConfigSource =
+  | "provider_default"
+  | "model_custom"
+  | "model_disabled"
+  | "missing"
+  | string;
+
 export interface ReasoningPresetMetadata {
   preset_key: ReasoningPresetKey;
   suffix: string;
@@ -576,28 +582,28 @@ export interface ReasoningPresetMetadata {
 export interface ReasoningFamilyMetadata {
   family_key: ReasoningPatchFamilyKey;
   supported_presets: ReasoningPresetKey[];
+  target_api_types: string[];
 }
 
-export interface ReasoningProfileCatalog {
+export type ReasoningConfigMode = "custom" | "disabled" | string;
+
+export type ReasoningConfigOwnerStatus =
+  | "custom"
+  | "disabled"
+  | "inherited"
+  | "missing"
+  | string;
+
+export type ModelReasoningConfigWriteMode = "inherit" | "disabled" | "custom";
+
+export interface ReasoningConfigCatalog {
   families: ReasoningFamilyMetadata[];
   presets: ReasoningPresetMetadata[];
 }
 
-export interface ReasoningProfileRow {
+export interface ReasoningConfigPreset {
   id: number;
-  profile_key: string;
-  name: string;
-  description: string | null;
-  family_key: ReasoningPatchFamilyKey;
-  is_enabled: boolean;
-  deleted_at: number | null;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface ReasoningProfilePresetRow {
-  id: number;
-  profile_id: number;
+  config_id: number;
   preset_key: ReasoningPresetKey;
   suffix: string;
   requires_reasoning: boolean;
@@ -608,45 +614,76 @@ export interface ReasoningProfilePresetRow {
   updated_at: number;
 }
 
-export interface ReasoningProfileProviderBinding {
-  provider_id: number;
-  provider_key: string;
+export interface ReasoningConfigDetail {
+  id: number;
+  scope_kind: ReasoningConfigScope;
+  provider_id: number | null;
+  model_id: number | null;
+  mode: ReasoningConfigMode;
+  family_key: ReasoningPatchFamilyKey | null;
+  presets: ReasoningConfigPreset[];
+  created_at: number;
+  updated_at: number;
 }
 
-export interface ReasoningProfileModelBinding {
-  model_id: number;
-  provider_key: string;
-  model_name: string;
+export interface ReasoningConfigResponse {
+  owner_kind: ReasoningConfigScope;
+  owner_id: number;
+  owner_config: ReasoningConfigDetail | null;
+  provider_config: ReasoningConfigDetail | null;
+  effective_config: ReasoningConfigDetail | null;
+  effective_source: ReasoningConfigSource;
+  status: ReasoningConfigOwnerStatus;
 }
 
-export interface ReasoningProfileItem {
-  profile: ReasoningProfileRow;
-  family: ReasoningPatchFamilyKey;
-  presets: ReasoningProfilePresetRow[];
-  provider_bindings: ReasoningProfileProviderBinding[];
-  model_bindings: ReasoningProfileModelBinding[];
+export interface ReasoningGeneratedPatchPreview {
+  placement: RequestPatchPlacement | string;
+  target: string;
+  operation: RequestPatchOperation | string;
+  value_json: JsonValue | null;
+  description: string | null;
 }
 
-export interface ReasoningProfilePayload {
-  profile_key: string;
-  name: string;
-  description?: string | null;
-  family_key: ReasoningPatchFamilyKey;
-  is_enabled?: boolean;
-}
-
-export interface ReasoningProfileUpdatePayload {
-  profile_key?: string;
-  name?: string;
-  description?: string | null;
-  family_key?: ReasoningPatchFamilyKey;
-  is_enabled?: boolean;
-}
-
-export interface ReasoningProfilePresetPayload {
+export interface ReasoningConfigPreviewPreset {
   preset_key: ReasoningPresetKey;
-  expose_in_models?: boolean;
-  is_enabled?: boolean;
+  suffix: string;
+  requires_reasoning: boolean;
+  allowed_operation_kinds: string[];
+  family_supported: boolean;
+  enabled: boolean;
+  expose_in_models: boolean;
+  runtime_supported: boolean;
+  unsupported_reason: string | null;
+  generated_patches: ReasoningGeneratedPatchPreview[];
+}
+
+export interface ReasoningConfigPreview {
+  config: ReasoningConfigResponse;
+  target_api_type: string;
+  presets: ReasoningConfigPreviewPreset[];
+}
+
+export interface ReasoningConfigPresetPayload {
+  preset_key: ReasoningPresetKey;
+  expose_in_models: boolean;
+  is_enabled: boolean;
+}
+
+export interface ProviderReasoningConfigPayload {
+  family_key: ReasoningPatchFamilyKey;
+  presets: ReasoningConfigPresetPayload[];
+}
+
+export interface ProviderReasoningConfigPreviewPayload {
+  provider_type?: string | null;
+  family_key?: ReasoningPatchFamilyKey | null;
+  presets?: ReasoningConfigPresetPayload[];
+}
+
+export interface ModelReasoningConfigPayload {
+  mode: ModelReasoningConfigWriteMode;
+  family_key?: ReasoningPatchFamilyKey | null;
+  presets?: ReasoningConfigPresetPayload[];
 }
 
 export interface ReasoningRouteCandidatePreview {
@@ -660,10 +697,11 @@ export interface ReasoningRouteCandidatePreview {
   suffix: string;
   supported: boolean;
   reason: string | null;
-  reasoning_profile_id: number | null;
-  reasoning_profile_key: string | null;
-  reasoning_profile_preset_id: number | null;
-  reasoning_family: ReasoningPatchFamilyKey | null;
+  config_source: ReasoningConfigSource | null;
+  config_scope: ReasoningConfigScope | null;
+  config_id: number | null;
+  config_preset_id: number | null;
+  family: ReasoningPatchFamilyKey | null;
 }
 
 export interface ReasoningRoutePresetPreview {
@@ -690,6 +728,15 @@ export type RequestPatchSource =
   | {
       kind: "model_rule";
       rule_id: number;
+    }
+  | {
+      kind: "reasoning_preset";
+      config_id: number;
+      config_scope: ReasoningConfigScope;
+      config_preset_id: number;
+      family: ReasoningPatchFamilyKey;
+      preset: ReasoningPresetKey;
+      suffix: string;
     }
   | {
       kind: "reasoning_preset";
@@ -788,7 +835,6 @@ export interface ModelDetailModel {
   model_name: string;
   real_model_name: string | null;
   cost_catalog_id: number | null;
-  reasoning_profile_override_id: number | null;
   supports_streaming: boolean;
   supports_tools: boolean;
   supports_reasoning: boolean;
@@ -1092,6 +1138,7 @@ export interface RecordListItem {
   first_attempt_started_at: number | null;
   response_started_to_client_at: number | null;
   completed_at: number | null;
+  is_stream: boolean;
   final_provider_id: number | null;
   final_provider_name_snapshot: string | null;
   final_model_id: number | null;
@@ -1101,6 +1148,7 @@ export interface RecordListItem {
   estimated_cost_currency: string | null;
   total_input_tokens: number | null;
   total_output_tokens: number | null;
+  output_text_tokens: number | null;
   reasoning_tokens: number | null;
   total_tokens: number | null;
   has_transform_diagnostics: boolean;
@@ -1124,7 +1172,6 @@ export interface RecordRequest extends RecordListItem {
   created_at: number;
   updated_at: number;
   input_text_tokens: number | null;
-  output_text_tokens: number | null;
   input_image_tokens: number | null;
   output_image_tokens: number | null;
   cache_read_tokens: number | null;
@@ -1625,7 +1672,6 @@ export interface ProviderPayload {
   endpoint: string;
   use_proxy: boolean;
   provider_type: string;
-  default_reasoning_profile_id?: number | null;
   omit_config?: JsonObject | null;
   api_keys?: ProviderKeyPayload[];
 }
@@ -1642,7 +1688,6 @@ export interface ModelPayload {
   real_model_name?: string | null;
   is_enabled: boolean;
   cost_catalog_id?: number | null;
-  reasoning_profile_override_id?: number | null;
   supports_streaming?: boolean;
   supports_tools?: boolean;
   supports_reasoning?: boolean;

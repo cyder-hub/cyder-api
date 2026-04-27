@@ -164,7 +164,6 @@ export function createEmptyEditingProviderData(): EditingProviderData {
     name: "",
     provider_key: "",
     provider_type: "OPENAI",
-    default_reasoning_profile_id: null,
     endpoint: "",
     use_proxy: false,
     models: [],
@@ -223,7 +222,6 @@ export function buildProviderUpdatePayload(
     endpoint: trimText(form.endpoint),
     use_proxy: !!form.use_proxy,
     provider_type: trimText(form.provider_type) || trimText(editingData.provider_type),
-    default_reasoning_profile_id: editingData.default_reasoning_profile_id,
     omit_config: null,
     api_keys: [],
   };
@@ -284,10 +282,6 @@ export function hydrateEditingProviderDataFromBootstrap(
     editingData.provider_key;
   editingData.provider_type =
     trimText(provider?.provider_type) || editingData.provider_type;
-  if ("default_reasoning_profile_id" in (provider || {})) {
-    editingData.default_reasoning_profile_id =
-      provider?.default_reasoning_profile_id ?? null;
-  }
   editingData.endpoint = trimText(provider?.endpoint) || editingData.endpoint;
 
   if (typeof provider?.use_proxy === "boolean") {

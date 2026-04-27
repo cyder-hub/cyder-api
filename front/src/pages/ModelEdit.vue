@@ -6,7 +6,7 @@ import { Api } from "@/services/request";
 import { normalizeError } from "@/lib/error";
 import { toastController } from "@/lib/toastController";
 import { useProviderStore } from "@/store/providerStore";
-import { useReasoningProfileStore } from "@/store/reasoningProfileStore";
+import { useModelStore } from "@/store/modelStore";
 import type {
   CostCatalogVersion,
   ModelDetailResponse,
@@ -44,12 +44,12 @@ import CostTemplateDialog from "./cost/CostTemplateDialog.vue";
 import CostVersionDialog from "./cost/CostVersionDialog.vue";
 import { useCostPage } from "./cost/useCostPage";
 import ModelRequestPatchPanel from "@/components/model/ModelRequestPatchPanel.vue";
+import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
 
 interface EditingModelData {
   id: number;
   provider_id: number;
   cost_catalog_id: number | null;
-  reasoning_profile_override_id: number | null;
   model_name: string;
   real_model_name: string;
   supports_streaming: boolean;
@@ -66,7 +66,7 @@ const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
 const providerStore = useProviderStore();
-const reasoningProfileStore = useReasoningProfileStore();
+const modelStore = useModelStore();
 
 const modelId = parseInt(route.params.id as string);
 const isLoading = ref(true);
@@ -86,19 +86,6 @@ const capabilityItems = [
 const currentProvider = computed(() =>
   providerStore.getProviderById(editingData.value?.provider_id),
 );
-const providerDefaultReasoningProfile = computed(() =>
-  reasoningProfileStore.getProfileById(
-    currentProvider.value?.default_reasoning_profile_id ?? null,
-  ),
-);
-const selectedReasoningProfileOverride = computed(() =>
-  reasoningProfileStore.getProfileById(
-    editingData.value?.reasoning_profile_override_id ?? null,
-  ),
-);
-const effectiveReasoningProfile = computed(
-  () => selectedReasoningProfileOverride.value || providerDefaultReasoningProfile.value,
-);
 
 const fetchData = async () => {
   if (isNaN(modelId)) {
@@ -114,7 +101,6 @@ const fetchData = async () => {
     const [detail] = await Promise.all([
       Api.getModelDetail(modelId),
       providerStore.fetchProviders(),
-      reasoningProfileStore.ensureLoaded(),
       costManager.refreshCostData(),
     ]);
 
@@ -125,8 +111,6 @@ const fetchData = async () => {
         id: detail.model.id,
         provider_id: detail.model.provider_id,
         cost_catalog_id: detail.model.cost_catalog_id ?? null,
-        reasoning_profile_override_id:
-          detail.model.reasoning_profile_override_id ?? null,
         model_name: detail.model.model_name,
         real_model_name: detail.model.real_model_name ?? "",
         supports_streaming: detail.model.supports_streaming,
@@ -179,8 +163,6 @@ const handleSaveModel = async () => {
     supports_rerank: editingData.value.supports_rerank,
     is_enabled: editingData.value.is_enabled,
     cost_catalog_id: editingData.value.cost_catalog_id,
-    reasoning_profile_override_id:
-      editingData.value.reasoning_profile_override_id,
   };
 
   try {
@@ -198,6 +180,15 @@ const handleSaveModel = async () => {
       }),
     );
   }
+};
+
+const handleReasoningConfigSaved = () => {
+  void Promise.all([
+    providerStore.fetchProviders(),
+    modelStore.fetchModels(),
+  ]).catch((error) => {
+    console.error("Failed to refresh stores after reasoning config save:", error);
+  });
 };
 
 const handleNavigateToModels = () => {
@@ -455,65 +446,12 @@ onMounted(() => {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Reasoning suffix profile</CardTitle>
-        </CardHeader>
-        <CardContent class="space-y-4">
-          <div class="space-y-1.5">
-            <Label class="text-gray-700">Model override</Label>
-            <Select
-              :model-value="editingData.reasoning_profile_override_id?.toString() || 'inherit'"
-              @update:model-value="
-                (value: any) =>
-                  (editingData!.reasoning_profile_override_id =
-                    value === 'inherit' ? null : Number(value))
-              "
-            >
-              <SelectTrigger class="w-full">
-                <SelectValue placeholder="Select reasoning profile" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="inherit">Inherit provider default</SelectItem>
-                <SelectItem
-                  v-for="option in reasoningProfileStore.profileOptions"
-                  :key="option.value"
-                  :value="String(option.value)"
-                >
-                  {{ option.label }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div class="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
-            <div class="space-y-1">
-              <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                Provider default
-              </p>
-              <p class="break-all font-mono text-xs text-gray-700">
-                {{ providerDefaultReasoningProfile?.profile.profile_key || "-" }}
-              </p>
-            </div>
-            <div class="space-y-1">
-              <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                Model override
-              </p>
-              <p class="break-all font-mono text-xs text-gray-700">
-                {{ selectedReasoningProfileOverride?.profile.profile_key || "-" }}
-              </p>
-            </div>
-            <div class="space-y-1">
-              <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-                Effective profile
-              </p>
-              <p class="break-all font-mono text-xs text-gray-700">
-                {{ effectiveReasoningProfile?.profile.profile_key || "No reasoning suffix profile" }}
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      <ReasoningConfigPanel
+        owner-kind="model"
+        :owner-id="editingData.id"
+        :model-supports-reasoning="editingData.supports_reasoning"
+        @saved="handleReasoningConfigSaved"
+      />
 
       <!-- Cost Catalog Section -->
       <Card>

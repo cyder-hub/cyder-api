@@ -10,18 +10,19 @@ use super::{
     ProxyError,
     auth::admit_api_key_request,
     prepare::{
-        ExecutionCandidate, candidate_supports_reasoning_preset, route_supports_reasoning_preset,
+        ExecutionCandidate, candidate_supports_reasoning_preset,
+        resolve_effective_reasoning_config, route_supports_reasoning_preset,
     },
     util::determine_target_api_type,
 };
 use crate::{
-    database::reasoning_profile::ReasoningPreset,
+    database::reasoning_config::{ReasoningConfigMode, ReasoningPreset},
     schema::enum_def::{LlmApiType, ProviderType},
     service::{
         app_state::AppState,
         cache::types::{
             CacheApiKey, CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelsCatalog,
-            CacheProvider, CacheReasoningProfile,
+            CacheProvider, CacheReasoningConfig,
         },
     },
     utils::acl::ACL_EVALUATOR,
@@ -455,13 +456,13 @@ fn route_exposes_reasoning_preset(
     };
 
     bindings.iter().all(|binding| {
-        catalog.reasoning_profiles.iter().any(|profile| {
-            profile.id == binding.profile_id
-                && profile.is_enabled
-                && profile.presets.iter().any(|profile_preset| {
-                    profile_preset.id == binding.profile_preset_id
-                        && profile_preset.is_enabled
-                        && profile_preset.expose_in_models
+        catalog.reasoning_configs.iter().any(|config| {
+            config.id == binding.config_id
+                && matches!(config.mode, ReasoningConfigMode::Custom)
+                && config.presets.iter().any(|config_preset| {
+                    config_preset.id == binding.config_preset_id
+                        && config_preset.is_enabled
+                        && config_preset.expose_in_models
                 })
         })
     })
@@ -472,35 +473,25 @@ fn exposed_presets_for_model(
     provider: &CacheProvider,
     model: &CacheModel,
 ) -> Vec<ReasoningPreset> {
-    let Some(profile) = effective_reasoning_profile(catalog, provider, model) else {
+    let effective = resolve_effective_reasoning_config(catalog, provider, model);
+    let Some(config) = effective.config else {
         return Vec::new();
     };
+    if !matches!(config.mode, ReasoningConfigMode::Custom) {
+        return Vec::new();
+    }
 
-    exposed_presets_for_profile(profile)
+    exposed_presets_for_config(config)
 }
 
-fn effective_reasoning_profile<'a>(
-    catalog: &'a CacheModelsCatalog,
-    provider: &CacheProvider,
-    model: &CacheModel,
-) -> Option<&'a CacheReasoningProfile> {
-    let profile_id = model
-        .reasoning_profile_override_id
-        .or(provider.default_reasoning_profile_id)?;
-    catalog
-        .reasoning_profiles
-        .iter()
-        .find(|profile| profile.id == profile_id && profile.is_enabled)
-}
-
-fn exposed_presets_for_profile(profile: &CacheReasoningProfile) -> Vec<ReasoningPreset> {
+fn exposed_presets_for_config(config: &CacheReasoningConfig) -> Vec<ReasoningPreset> {
     ReasoningPreset::ALL
         .into_iter()
         .filter(|preset| {
-            profile.presets.iter().any(|profile_preset| {
-                profile_preset.preset == *preset
-                    && profile_preset.is_enabled
-                    && profile_preset.expose_in_models
+            config.presets.iter().any(|config_preset| {
+                config_preset.preset == *preset
+                    && config_preset.is_enabled
+                    && config_preset.expose_in_models
             })
         })
         .collect()
@@ -519,9 +510,10 @@ fn build_direct_reasoning_candidate(
         model: Arc::new(model.clone()),
         llm_api_type: determine_target_api_type(provider),
         provider_api_key_mode: provider.provider_api_key_mode.clone(),
-        reasoning_profile_id: None,
-        reasoning_profile_key: None,
-        reasoning_profile_preset_id: None,
+        reasoning_config_id: None,
+        reasoning_config_scope: None,
+        reasoning_config_source: None,
+        reasoning_config_preset_id: None,
         reasoning_family: None,
         reasoning_preset: None,
         reasoning_suffix: None,
@@ -619,12 +611,14 @@ fn is_model_allowed(api_key: &CacheApiKey, provider: &CacheProvider, model: &Cac
 #[cfg(test)]
 mod tests {
     use super::{collect_accessible_models, render_models_response};
-    use crate::database::reasoning_profile::{ReasoningPatchFamily, ReasoningPreset};
+    use crate::database::reasoning_config::{
+        ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
+    };
     use crate::schema::enum_def::{Action, LlmApiType, ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::{
         CacheApiKey, CacheApiKeyAclRule, CacheApiKeyModelOverride, CacheModel, CacheModelRoute,
-        CacheModelRouteCandidate, CacheModelsCatalog, CacheProvider, CacheReasoningProfile,
-        CacheReasoningProfilePreset,
+        CacheModelRouteCandidate, CacheModelsCatalog, CacheProvider, CacheReasoningConfig,
+        CacheReasoningConfigPreset,
     };
 
     fn provider(id: i64, provider_key: &str, is_enabled: bool) -> CacheProvider {
@@ -636,20 +630,17 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
             is_enabled,
         }
     }
 
-    fn provider_with_reasoning_profile(
+    fn provider_with_type(
         id: i64,
         provider_key: &str,
         provider_type: ProviderType,
-        profile_id: Option<i64>,
     ) -> CacheProvider {
         CacheProvider {
             provider_type,
-            default_reasoning_profile_id: profile_id,
             ..provider(id, provider_key, true)
         }
     }
@@ -661,7 +652,6 @@ mod tests {
             model_name: model_name.to_string(),
             real_model_name: None,
             cost_catalog_id: None,
-            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,
@@ -672,43 +662,92 @@ mod tests {
         }
     }
 
-    fn model_with_reasoning(
+    fn model_with_reasoning_support(
         id: i64,
         provider_id: i64,
         model_name: &str,
-        profile_override_id: Option<i64>,
         supports_reasoning: bool,
     ) -> CacheModel {
         CacheModel {
-            reasoning_profile_override_id: profile_override_id,
             supports_reasoning,
             ..model(id, provider_id, model_name, true)
         }
     }
 
-    fn reasoning_profile(
+    fn provider_reasoning_config(
         id: i64,
-        profile_key: &str,
+        provider_id: i64,
         family: ReasoningPatchFamily,
         presets: &[(ReasoningPreset, bool)],
-    ) -> CacheReasoningProfile {
-        CacheReasoningProfile {
+    ) -> CacheReasoningConfig {
+        reasoning_config(
             id,
-            profile_key: profile_key.to_string(),
-            name: profile_key.to_string(),
-            description: None,
+            ReasoningConfigScope::Provider,
+            Some(provider_id),
+            None,
             family,
-            is_enabled: true,
+            presets,
+        )
+    }
+
+    fn model_reasoning_config(
+        id: i64,
+        model_id: i64,
+        family: ReasoningPatchFamily,
+        presets: &[(ReasoningPreset, bool)],
+    ) -> CacheReasoningConfig {
+        reasoning_config(
+            id,
+            ReasoningConfigScope::Model,
+            None,
+            Some(model_id),
+            family,
+            presets,
+        )
+    }
+
+    fn model_disabled_reasoning_config(id: i64, model_id: i64) -> CacheReasoningConfig {
+        CacheReasoningConfig {
+            id,
+            scope_kind: ReasoningConfigScope::Model,
+            provider_id: None,
+            model_id: Some(model_id),
+            mode: ReasoningConfigMode::Disabled,
+            family: None,
+            presets: Vec::new(),
+        }
+    }
+
+    fn reasoning_config(
+        id: i64,
+        scope_kind: ReasoningConfigScope,
+        provider_id: Option<i64>,
+        model_id: Option<i64>,
+        family: ReasoningPatchFamily,
+        presets: &[(ReasoningPreset, bool)],
+    ) -> CacheReasoningConfig {
+        CacheReasoningConfig {
+            id,
+            scope_kind,
+            provider_id,
+            model_id,
+            mode: ReasoningConfigMode::Custom,
+            family: Some(family),
             presets: presets
                 .iter()
                 .enumerate()
                 .map(
-                    |(index, (preset, expose_in_models))| CacheReasoningProfilePreset {
+                    |(index, (preset, expose_in_models))| CacheReasoningConfigPreset {
                         id: id * 10 + index as i64,
-                        profile_id: id,
+                        config_id: id,
                         preset: *preset,
                         suffix: preset.canonical_suffix().to_string(),
                         requires_reasoning: preset.requires_reasoning(),
+                        allowed_operation_kinds: preset
+                            .allowed_operation_kinds()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
                         expose_in_models: *expose_in_models,
                         is_enabled: true,
                     },
@@ -755,7 +794,7 @@ mod tests {
             ],
             routes: vec![],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -782,7 +821,7 @@ mod tests {
             ],
             routes: vec![],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -797,7 +836,7 @@ mod tests {
             models: vec![model(11, 1, "allowed", true), model(12, 1, "denied", true)],
             routes: vec![],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
         let api_key = api_key(
             Action::Deny,
@@ -845,7 +884,7 @@ mod tests {
                 description: None,
                 is_enabled: true,
             }],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -880,7 +919,7 @@ mod tests {
                 }],
             }],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -921,7 +960,7 @@ mod tests {
                 description: None,
                 is_enabled: true,
             }],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -964,7 +1003,7 @@ mod tests {
                 ],
             }],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
         let api_key = api_key(
             Action::Deny,
@@ -1030,7 +1069,7 @@ mod tests {
                 description: None,
                 is_enabled: true,
             }],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
         let api_key = api_key(Action::Deny, vec![]);
 
@@ -1075,7 +1114,7 @@ mod tests {
                 description: None,
                 is_enabled: true,
             }],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
         let api_key = api_key(
             Action::Deny,
@@ -1162,7 +1201,7 @@ mod tests {
                     is_enabled: true,
                 },
             ],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1181,18 +1220,13 @@ mod tests {
     #[test]
     fn exposes_direct_reasoning_aliases_for_enabled_exposed_presets() {
         let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_reasoning_profile(
-                1,
-                "openai",
-                ProviderType::Openai,
-                Some(900),
-            )],
-            models: vec![model_with_reasoning(11, 1, "gpt", None, true)],
+            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
+            models: vec![model_with_reasoning_support(11, 1, "gpt", true)],
             routes: vec![],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![reasoning_profile(
+            reasoning_configs: vec![provider_reasoning_config(
                 900,
-                "openai-chat",
+                1,
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[(ReasoningPreset::Low, false), (ReasoningPreset::High, true)],
             )],
@@ -1208,20 +1242,58 @@ mod tests {
     }
 
     #[test]
-    fn hides_direct_reasoning_alias_when_model_lacks_reasoning_capability() {
+    fn direct_reasoning_aliases_respect_provider_default_model_custom_and_model_disabled() {
         let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_reasoning_profile(
-                1,
-                "openai",
-                ProviderType::Openai,
-                Some(900),
-            )],
-            models: vec![model_with_reasoning(11, 1, "gpt", None, false)],
+            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
+            models: vec![
+                model_with_reasoning_support(11, 1, "custom", true),
+                model_with_reasoning_support(12, 1, "disabled", true),
+                model_with_reasoning_support(13, 1, "inherited", true),
+            ],
             routes: vec![],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![reasoning_profile(
+            reasoning_configs: vec![
+                provider_reasoning_config(
+                    900,
+                    1,
+                    ReasoningPatchFamily::OpenAiChatReasoningEffort,
+                    &[(ReasoningPreset::High, true)],
+                ),
+                model_reasoning_config(
+                    901,
+                    11,
+                    ReasoningPatchFamily::OpenAiChatReasoningEffort,
+                    &[(ReasoningPreset::Low, true)],
+                ),
+                model_disabled_reasoning_config(902, 12),
+            ],
+        };
+
+        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
+        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "openai/custom".to_string(),
+                "openai/disabled".to_string(),
+                "openai/inherited".to_string(),
+                "openai/custom-low".to_string(),
+                "openai/inherited-high".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hides_direct_reasoning_alias_when_model_lacks_reasoning_capability() {
+        let catalog = CacheModelsCatalog {
+            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
+            models: vec![model_with_reasoning_support(11, 1, "gpt", false)],
+            routes: vec![],
+            api_key_overrides: vec![],
+            reasoning_configs: vec![provider_reasoning_config(
                 900,
-                "openai-chat",
+                1,
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[(ReasoningPreset::High, true)],
             )],
@@ -1236,21 +1308,16 @@ mod tests {
     #[test]
     fn deduplicates_reasoning_alias_when_exact_direct_model_exists() {
         let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_reasoning_profile(
-                1,
-                "openai",
-                ProviderType::Openai,
-                Some(900),
-            )],
+            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
             models: vec![
-                model_with_reasoning(11, 1, "gpt", None, true),
-                model_with_reasoning(12, 1, "gpt-high", None, true),
+                model_with_reasoning_support(11, 1, "gpt", true),
+                model_with_reasoning_support(12, 1, "gpt-high", true),
             ],
             routes: vec![],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![reasoning_profile(
+            reasoning_configs: vec![provider_reasoning_config(
                 900,
-                "openai-chat",
+                1,
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[(ReasoningPreset::High, true)],
             )],
@@ -1279,14 +1346,14 @@ mod tests {
     fn exposes_route_and_override_reasoning_aliases_only_when_route_is_stable() {
         let catalog = CacheModelsCatalog {
             providers: vec![
-                provider_with_reasoning_profile(1, "openai", ProviderType::Openai, Some(900)),
-                provider_with_reasoning_profile(2, "gemini", ProviderType::Gemini, Some(901)),
+                provider_with_type(1, "openai", ProviderType::Openai),
+                provider_with_type(2, "gemini", ProviderType::Gemini),
                 provider(3, "plain", true),
             ],
             models: vec![
-                model_with_reasoning(11, 1, "gpt", None, true),
-                model_with_reasoning(21, 2, "gemini", None, true),
-                model_with_reasoning(31, 3, "plain", None, true),
+                model_with_reasoning_support(11, 1, "gpt", true),
+                model_with_reasoning_support(21, 2, "gemini", true),
+                model_with_reasoning_support(31, 3, "plain", true),
             ],
             routes: vec![
                 CacheModelRoute {
@@ -1344,16 +1411,16 @@ mod tests {
                 description: None,
                 is_enabled: true,
             }],
-            reasoning_profiles: vec![
-                reasoning_profile(
+            reasoning_configs: vec![
+                provider_reasoning_config(
                     900,
-                    "openai-chat",
+                    1,
                     ReasoningPatchFamily::OpenAiChatReasoningEffort,
                     &[(ReasoningPreset::High, true)],
                 ),
-                reasoning_profile(
+                provider_reasoning_config(
                     901,
-                    "gemini-budget",
+                    2,
                     ReasoningPatchFamily::Gemini25ThinkingBudget,
                     &[(ReasoningPreset::High, true)],
                 ),
@@ -1372,15 +1439,15 @@ mod tests {
     }
 
     #[test]
-    fn hides_route_reasoning_alias_when_any_candidate_profile_hides_preset() {
+    fn hides_route_reasoning_alias_when_any_candidate_config_hides_preset() {
         let catalog = CacheModelsCatalog {
             providers: vec![
-                provider_with_reasoning_profile(1, "openai-a", ProviderType::Openai, Some(900)),
-                provider_with_reasoning_profile(2, "openai-b", ProviderType::Openai, Some(901)),
+                provider_with_type(1, "openai-a", ProviderType::Openai),
+                provider_with_type(2, "openai-b", ProviderType::Openai),
             ],
             models: vec![
-                model_with_reasoning(11, 1, "gpt-a", None, true),
-                model_with_reasoning(21, 2, "gpt-b", None, true),
+                model_with_reasoning_support(11, 1, "gpt-a", true),
+                model_with_reasoning_support(21, 2, "gpt-b", true),
             ],
             routes: vec![CacheModelRoute {
                 id: 200,
@@ -1406,16 +1473,16 @@ mod tests {
                 ],
             }],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![
-                reasoning_profile(
+            reasoning_configs: vec![
+                provider_reasoning_config(
                     900,
-                    "openai-exposed",
+                    1,
                     ReasoningPatchFamily::OpenAiChatReasoningEffort,
                     &[(ReasoningPreset::High, true)],
                 ),
-                reasoning_profile(
+                provider_reasoning_config(
                     901,
-                    "openai-hidden",
+                    2,
                     ReasoningPatchFamily::OpenAiChatReasoningEffort,
                     &[(ReasoningPreset::High, false)],
                 ),
@@ -1432,13 +1499,8 @@ mod tests {
     #[test]
     fn hides_route_reasoning_alias_when_api_key_cannot_access_any_candidate() {
         let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_reasoning_profile(
-                1,
-                "openai",
-                ProviderType::Openai,
-                Some(900),
-            )],
-            models: vec![model_with_reasoning(11, 1, "gpt", None, true)],
+            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
+            models: vec![model_with_reasoning_support(11, 1, "gpt", true)],
             routes: vec![CacheModelRoute {
                 id: 200,
                 route_name: "stable-route".to_string(),
@@ -1454,9 +1516,9 @@ mod tests {
                 }],
             }],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![reasoning_profile(
+            reasoning_configs: vec![provider_reasoning_config(
                 900,
-                "openai-chat",
+                1,
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[(ReasoningPreset::High, true)],
             )],

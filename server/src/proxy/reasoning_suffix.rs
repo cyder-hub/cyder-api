@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    database::reasoning_profile::{ReasoningPatchFamily, ReasoningPreset},
-    schema::enum_def::{LlmApiType, RequestPatchOperation, RequestPatchPlacement},
+    database::reasoning_config::{ReasoningPatchFamily, ReasoningPreset},
+    schema::enum_def::{LlmApiType, ProviderType, RequestPatchOperation, RequestPatchPlacement},
     service::cache::types::CacheModel,
 };
 
@@ -58,6 +58,36 @@ impl<'a> ReasoningPatchContext<'a> {
             supports_reasoning: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReasoningPresetPreviewInput {
+    pub preset: ReasoningPreset,
+    pub enabled: bool,
+    pub expose_in_models: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReasoningGeneratedPatchPreview {
+    pub placement: String,
+    pub target: String,
+    pub operation: String,
+    pub value_json: Option<Value>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReasoningPresetPatchPreview {
+    pub preset_key: String,
+    pub suffix: String,
+    pub requires_reasoning: bool,
+    pub allowed_operation_kinds: Vec<String>,
+    pub family_supported: bool,
+    pub enabled: bool,
+    pub expose_in_models: bool,
+    pub runtime_supported: bool,
+    pub unsupported_reason: Option<String>,
+    pub generated_patches: Vec<ReasoningGeneratedPatchPreview>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +215,12 @@ pub(crate) fn generate_reasoning_patches(
         ReasoningPatchFamily::OpenAiResponsesReasoning => {
             generate_openai_responses_reasoning_patch(family, preset, context)
         }
+        ReasoningPatchFamily::DeepSeekOpenAiReasoning => {
+            generate_deepseek_openai_reasoning_patch(family, preset, context)
+        }
+        ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking => {
+            generate_siliconflow_openai_enable_thinking_patch(family, preset, context)
+        }
         ReasoningPatchFamily::AnthropicThinkingBudget => {
             generate_anthropic_thinking_budget_patch(family, preset, context)
         }
@@ -195,6 +231,126 @@ pub(crate) fn generate_reasoning_patches(
             generate_gemini3_thinking_level_patch(family, preset, context)
         }
     }
+}
+
+pub(crate) fn target_api_type_for_provider_type(provider_type: &ProviderType) -> LlmApiType {
+    match provider_type {
+        ProviderType::Vertex | ProviderType::Gemini => LlmApiType::Gemini,
+        ProviderType::Ollama => LlmApiType::Ollama,
+        ProviderType::Anthropic => LlmApiType::Anthropic,
+        ProviderType::Responses => LlmApiType::Responses,
+        ProviderType::GeminiOpenai => LlmApiType::GeminiOpenai,
+        ProviderType::Openai | ProviderType::VertexOpenai => LlmApiType::Openai,
+    }
+}
+
+pub(crate) fn target_api_types_for_reasoning_family(
+    family: ReasoningPatchFamily,
+) -> &'static [LlmApiType] {
+    match family {
+        ReasoningPatchFamily::OpenAiChatReasoningEffort => {
+            &[LlmApiType::Openai, LlmApiType::GeminiOpenai]
+        }
+        ReasoningPatchFamily::OpenAiResponsesReasoning => &[LlmApiType::Responses],
+        ReasoningPatchFamily::DeepSeekOpenAiReasoning => &[LlmApiType::Openai],
+        ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking => &[LlmApiType::Openai],
+        ReasoningPatchFamily::AnthropicThinkingBudget => &[LlmApiType::Anthropic],
+        ReasoningPatchFamily::Gemini25ThinkingBudget
+        | ReasoningPatchFamily::Gemini3ThinkingLevel => &[LlmApiType::Gemini],
+    }
+}
+
+pub(crate) fn preview_reasoning_patches(
+    family: ReasoningPatchFamily,
+    preset_inputs: &[ReasoningPresetPreviewInput],
+    context: ReasoningPatchContext<'_>,
+) -> Vec<ReasoningPresetPatchPreview> {
+    ReasoningPreset::ALL
+        .into_iter()
+        .map(|preset| {
+            let metadata = preset.metadata();
+            let input = preset_inputs.iter().find(|input| input.preset == preset);
+            let enabled = input.map(|input| input.enabled).unwrap_or(false);
+            let expose_in_models = input.map(|input| input.expose_in_models).unwrap_or(false);
+            let family_supported = family.supports_preset(preset);
+
+            if let Some(reason) = family.unsupported_preset_reason(preset) {
+                return ReasoningPresetPatchPreview {
+                    preset_key: metadata.preset_key,
+                    suffix: metadata.suffix,
+                    requires_reasoning: metadata.requires_reasoning,
+                    allowed_operation_kinds: metadata.allowed_operation_kinds,
+                    family_supported,
+                    enabled,
+                    expose_in_models,
+                    runtime_supported: false,
+                    unsupported_reason: Some(reason.to_string()),
+                    generated_patches: Vec::new(),
+                };
+            }
+
+            match generate_reasoning_patches(family, preset, context) {
+                Ok(patches) => {
+                    let generated_patches = patches
+                        .into_iter()
+                        .map(ReasoningGeneratedPatchPreview::from_generated)
+                        .collect();
+                    ReasoningPresetPatchPreview {
+                        preset_key: metadata.preset_key,
+                        suffix: metadata.suffix,
+                        requires_reasoning: metadata.requires_reasoning,
+                        allowed_operation_kinds: metadata.allowed_operation_kinds,
+                        family_supported,
+                        enabled,
+                        expose_in_models,
+                        runtime_supported: enabled,
+                        unsupported_reason: (!enabled)
+                            .then(|| "preset is not enabled for this config".to_string()),
+                        generated_patches,
+                    }
+                }
+                Err(err) => ReasoningPresetPatchPreview {
+                    preset_key: metadata.preset_key,
+                    suffix: metadata.suffix,
+                    requires_reasoning: metadata.requires_reasoning,
+                    allowed_operation_kinds: metadata.allowed_operation_kinds,
+                    family_supported,
+                    enabled,
+                    expose_in_models,
+                    runtime_supported: false,
+                    unsupported_reason: Some(err.reason),
+                    generated_patches: Vec::new(),
+                },
+            }
+        })
+        .collect()
+}
+
+impl ReasoningGeneratedPatchPreview {
+    fn from_generated(patch: GeneratedReasoningPatch) -> Self {
+        Self {
+            placement: serialize_patch_enum(patch.placement),
+            target: patch.target,
+            operation: serialize_patch_enum(patch.operation),
+            value_json: patch
+                .value_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .unwrap_or(None),
+            description: patch.description,
+        }
+    }
+}
+
+fn serialize_patch_enum<T>(value: T) -> String
+where
+    T: Serialize + std::fmt::Debug,
+{
+    serde_json::to_value(&value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{value:?}"))
 }
 
 fn ensure_protocol(
@@ -295,6 +451,112 @@ fn generate_openai_responses_reasoning_patch(
         "/reasoning/effort",
         json!(effort),
         "generated OpenAI Responses reasoning effort patch",
+        context,
+    )
+}
+
+fn generate_deepseek_openai_reasoning_patch(
+    family: ReasoningPatchFamily,
+    preset: ReasoningPreset,
+    context: ReasoningPatchContext<'_>,
+) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
+    ensure_protocol(family, preset, context, &[LlmApiType::Openai])?;
+
+    let thinking_type = match preset {
+        ReasoningPreset::Disabled => "disabled",
+        ReasoningPreset::Enabled | ReasoningPreset::High | ReasoningPreset::XHigh => "enabled",
+        ReasoningPreset::Low | ReasoningPreset::Medium => {
+            return Err(ReasoningPresetUnsupported::new(
+                family,
+                preset,
+                context,
+                "DeepSeek OpenAI reasoning only exposes enabled/high/xhigh strengths",
+            ));
+        }
+        ReasoningPreset::Auto => {
+            return Err(ReasoningPresetUnsupported::new(
+                family,
+                preset,
+                context,
+                "DeepSeek OpenAI reasoning does not define provider-managed auto",
+            ));
+        }
+    };
+
+    let mut patches = vec![
+        GeneratedReasoningPatch::new(
+            family,
+            preset,
+            RequestPatchPlacement::Body,
+            "/thinking/type",
+            RequestPatchOperation::Set,
+            Some(json!(thinking_type)),
+            Some("generated DeepSeek OpenAI thinking switch patch".to_string()),
+        )
+        .map_err(|reason| ReasoningPresetUnsupported::new(family, preset, context, reason))?,
+    ];
+
+    let effort = match preset {
+        ReasoningPreset::High => Some("high"),
+        ReasoningPreset::XHigh => Some("xhigh"),
+        _ => None,
+    };
+
+    if let Some(effort) = effort {
+        patches.push(
+            GeneratedReasoningPatch::new(
+                family,
+                preset,
+                RequestPatchPlacement::Body,
+                "/reasoning_effort",
+                RequestPatchOperation::Set,
+                Some(json!(effort)),
+                Some("generated DeepSeek OpenAI reasoning effort patch".to_string()),
+            )
+            .map_err(|reason| ReasoningPresetUnsupported::new(family, preset, context, reason))?,
+        );
+    }
+
+    Ok(patches)
+}
+
+fn generate_siliconflow_openai_enable_thinking_patch(
+    family: ReasoningPatchFamily,
+    preset: ReasoningPreset,
+    context: ReasoningPatchContext<'_>,
+) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
+    ensure_protocol(family, preset, context, &[LlmApiType::Openai])?;
+
+    let enable_thinking = match preset {
+        ReasoningPreset::Disabled => false,
+        ReasoningPreset::Enabled => true,
+        ReasoningPreset::Low
+        | ReasoningPreset::Medium
+        | ReasoningPreset::High
+        | ReasoningPreset::XHigh => {
+            return Err(ReasoningPresetUnsupported::new(
+                family,
+                preset,
+                context,
+                "SiliconFlow OpenAI reasoning only supports enable_thinking on/off",
+            ));
+        }
+        ReasoningPreset::Auto => {
+            return Err(ReasoningPresetUnsupported::new(
+                family,
+                preset,
+                context,
+                "SiliconFlow OpenAI reasoning does not define provider-managed auto",
+            ));
+        }
+    };
+
+    body_set_patch(
+        family,
+        preset,
+        "/enable_thinking",
+        json!(enable_thinking),
+        "generated SiliconFlow OpenAI enable_thinking patch",
         context,
     )
 }
@@ -466,6 +728,39 @@ mod tests {
         .expect("patch value should decode")
     }
 
+    fn preview_entry(
+        family: ReasoningPatchFamily,
+        preset: ReasoningPreset,
+        api_type: LlmApiType,
+    ) -> ReasoningPresetPatchPreview {
+        preview_reasoning_patches(
+            family,
+            &[ReasoningPresetPreviewInput {
+                preset,
+                enabled: true,
+                expose_in_models: true,
+            }],
+            ReasoningPatchContext::test(api_type),
+        )
+        .into_iter()
+        .find(|entry| entry.preset_key == preset.as_key())
+        .expect("preview entry should exist")
+    }
+
+    fn only_preview_patch(
+        family: ReasoningPatchFamily,
+        preset: ReasoningPreset,
+        api_type: LlmApiType,
+    ) -> ReasoningGeneratedPatchPreview {
+        let entry = preview_entry(family, preset, api_type);
+        assert!(
+            entry.runtime_supported,
+            "preview should be runtime-supported: {entry:?}"
+        );
+        assert_eq!(entry.generated_patches.len(), 1);
+        entry.generated_patches.into_iter().next().unwrap()
+    }
+
     #[test]
     fn preset_runtime_metadata_is_derived_from_builtin_preset() {
         let metadata = reasoning_preset_runtime_metadata(ReasoningPreset::Disabled);
@@ -510,6 +805,94 @@ mod tests {
         );
         assert_eq!(patch.target, "/reasoning_effort");
         assert_eq!(patch_value(&patch), json!("medium"));
+    }
+
+    #[test]
+    fn deepseek_openai_reasoning_generates_thinking_switch_patches() {
+        let disabled = only_patch(
+            ReasoningPatchFamily::DeepSeekOpenAiReasoning,
+            ReasoningPreset::Disabled,
+            LlmApiType::Openai,
+        );
+        assert_eq!(disabled.target, "/thinking/type");
+        assert_eq!(patch_value(&disabled), json!("disabled"));
+
+        let enabled = only_patch(
+            ReasoningPatchFamily::DeepSeekOpenAiReasoning,
+            ReasoningPreset::Enabled,
+            LlmApiType::Openai,
+        );
+        assert_eq!(enabled.target, "/thinking/type");
+        assert_eq!(patch_value(&enabled), json!("enabled"));
+    }
+
+    #[test]
+    fn deepseek_openai_reasoning_high_and_xhigh_generate_effort_patches() {
+        for (preset, effort) in [
+            (ReasoningPreset::High, "high"),
+            (ReasoningPreset::XHigh, "xhigh"),
+        ] {
+            let patches = generate_reasoning_patches(
+                ReasoningPatchFamily::DeepSeekOpenAiReasoning,
+                preset,
+                ReasoningPatchContext::test(LlmApiType::Openai),
+            )
+            .expect("DeepSeek high strength patch should generate");
+            assert_eq!(patches.len(), 2);
+            assert_eq!(patches[0].target, "/thinking/type");
+            assert_eq!(patch_value(&patches[0]), json!("enabled"));
+            assert_eq!(patches[1].target, "/reasoning_effort");
+            assert_eq!(patch_value(&patches[1]), json!(effort));
+        }
+    }
+
+    #[test]
+    fn deepseek_openai_reasoning_rejects_unsupported_strengths() {
+        for preset in [
+            ReasoningPreset::Low,
+            ReasoningPreset::Medium,
+            ReasoningPreset::Auto,
+        ] {
+            assert!(
+                !ReasoningPatchFamily::DeepSeekOpenAiReasoning.supports_preset(preset),
+                "{preset:?} should not be supported"
+            );
+        }
+    }
+
+    #[test]
+    fn siliconflow_openai_enable_thinking_generates_switch_patches() {
+        let disabled = only_patch(
+            ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
+            ReasoningPreset::Disabled,
+            LlmApiType::Openai,
+        );
+        assert_eq!(disabled.target, "/enable_thinking");
+        assert_eq!(patch_value(&disabled), json!(false));
+
+        let enabled = only_patch(
+            ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
+            ReasoningPreset::Enabled,
+            LlmApiType::Openai,
+        );
+        assert_eq!(enabled.target, "/enable_thinking");
+        assert_eq!(patch_value(&enabled), json!(true));
+    }
+
+    #[test]
+    fn siliconflow_openai_enable_thinking_rejects_strength_presets() {
+        for preset in [
+            ReasoningPreset::Low,
+            ReasoningPreset::Medium,
+            ReasoningPreset::High,
+            ReasoningPreset::XHigh,
+            ReasoningPreset::Auto,
+        ] {
+            assert!(
+                !ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking.supports_preset(preset),
+                "{preset:?} should not be supported"
+            );
+        }
     }
 
     #[test]
@@ -639,6 +1022,10 @@ mod tests {
                 LlmApiType::Responses,
             ),
             (
+                ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
+                LlmApiType::Openai,
+            ),
+            (
                 ReasoningPatchFamily::AnthropicThinkingBudget,
                 LlmApiType::Anthropic,
             ),
@@ -682,7 +1069,6 @@ mod tests {
             model_name: "plain-model".to_string(),
             real_model_name: None,
             cost_catalog_id: None,
-            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: false,
@@ -719,6 +1105,11 @@ mod tests {
                 ReasoningPreset::High,
             ),
             (
+                ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
+                LlmApiType::Openai,
+                ReasoningPreset::Enabled,
+            ),
+            (
                 ReasoningPatchFamily::AnthropicThinkingBudget,
                 LlmApiType::Anthropic,
                 ReasoningPreset::High,
@@ -741,5 +1132,143 @@ mod tests {
                     .expect("valid patch should generate");
             assert!(patches.iter().all(|patch| patch.target != "/model"));
         }
+    }
+
+    #[test]
+    fn preview_openai_chat_high_exposes_generated_patch() {
+        let patch = only_preview_patch(
+            ReasoningPatchFamily::OpenAiChatReasoningEffort,
+            ReasoningPreset::High,
+            LlmApiType::Openai,
+        );
+        assert_eq!(patch.placement, "BODY");
+        assert_eq!(patch.operation, "SET");
+        assert_eq!(patch.target, "/reasoning_effort");
+        assert_eq!(patch.value_json, Some(json!("high")));
+    }
+
+    #[test]
+    fn preview_openai_responses_high_exposes_generated_patch() {
+        let patch = only_preview_patch(
+            ReasoningPatchFamily::OpenAiResponsesReasoning,
+            ReasoningPreset::High,
+            LlmApiType::Responses,
+        );
+        assert_eq!(patch.target, "/reasoning/effort");
+        assert_eq!(patch.value_json, Some(json!("high")));
+    }
+
+    #[test]
+    fn preview_siliconflow_enabled_exposes_enable_thinking_patch() {
+        let patch = only_preview_patch(
+            ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
+            ReasoningPreset::Enabled,
+            LlmApiType::Openai,
+        );
+        assert_eq!(patch.target, "/enable_thinking");
+        assert_eq!(patch.value_json, Some(json!(true)));
+    }
+
+    #[test]
+    fn preview_anthropic_high_exposes_generated_patch() {
+        let patch = only_preview_patch(
+            ReasoningPatchFamily::AnthropicThinkingBudget,
+            ReasoningPreset::High,
+            LlmApiType::Anthropic,
+        );
+        assert_eq!(patch.target, "/thinking");
+        assert_eq!(
+            patch.value_json,
+            Some(json!({
+                "type": "enabled",
+                "budget_tokens": ANTHROPIC_THINKING_BUDGET_HIGH,
+            }))
+        );
+    }
+
+    #[test]
+    fn preview_gemini25_auto_exposes_generated_budget_patch() {
+        let patch = only_preview_patch(
+            ReasoningPatchFamily::Gemini25ThinkingBudget,
+            ReasoningPreset::Auto,
+            LlmApiType::Gemini,
+        );
+        assert_eq!(
+            patch.target,
+            "/generationConfig/thinkingConfig/thinkingBudget"
+        );
+        assert_eq!(patch.value_json, Some(json!(GEMINI_THINKING_BUDGET_AUTO)));
+    }
+
+    #[test]
+    fn preview_gemini3_high_exposes_generated_level_patch() {
+        let patch = only_preview_patch(
+            ReasoningPatchFamily::Gemini3ThinkingLevel,
+            ReasoningPreset::High,
+            LlmApiType::Gemini,
+        );
+        assert_eq!(
+            patch.target,
+            "/generationConfig/thinkingConfig/thinkingLevel"
+        );
+        assert_eq!(patch.value_json, Some(json!("high")));
+    }
+
+    #[test]
+    fn preview_marks_model_capability_unsupported_for_reasoning_required_preset() {
+        let context = ReasoningPatchContext {
+            target_api_type: LlmApiType::Openai,
+            model_id: Some(99),
+            model_name: Some("plain-model"),
+            supports_reasoning: false,
+        };
+        let entry = preview_reasoning_patches(
+            ReasoningPatchFamily::OpenAiChatReasoningEffort,
+            &[ReasoningPresetPreviewInput {
+                preset: ReasoningPreset::High,
+                enabled: true,
+                expose_in_models: true,
+            }],
+            context,
+        )
+        .into_iter()
+        .find(|entry| entry.preset_key == "high")
+        .expect("high preview entry should exist");
+
+        assert!(!entry.runtime_supported);
+        assert!(entry.generated_patches.is_empty());
+        assert!(
+            entry
+                .unsupported_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("capability")
+        );
+    }
+
+    #[test]
+    fn preview_generates_review_patch_for_not_enabled_preset() {
+        let entry = preview_reasoning_patches(
+            ReasoningPatchFamily::OpenAiChatReasoningEffort,
+            &[ReasoningPresetPreviewInput {
+                preset: ReasoningPreset::High,
+                enabled: false,
+                expose_in_models: false,
+            }],
+            ReasoningPatchContext::test(LlmApiType::Openai),
+        )
+        .into_iter()
+        .find(|entry| entry.preset_key == "high")
+        .expect("high preview entry should exist");
+
+        assert!(!entry.enabled);
+        assert!(!entry.runtime_supported);
+        assert_eq!(
+            entry.unsupported_reason.as_deref(),
+            Some("preset is not enabled for this config")
+        );
+        assert_eq!(entry.generated_patches.len(), 1);
+        assert_eq!(entry.generated_patches[0].target, "/reasoning_effort");
+        assert_eq!(entry.generated_patches[0].value_json, Some(json!("high")));
     }
 }

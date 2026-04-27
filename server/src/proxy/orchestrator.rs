@@ -41,7 +41,7 @@ use super::{
 use crate::{
     config::CONFIG,
     cost::UsageNormalization,
-    database::{reasoning_profile::ReasoningPreset, request_attempt::RequestAttempt},
+    database::{reasoning_config::ReasoningPreset, request_attempt::RequestAttempt},
     schema::enum_def::{LlmApiType, RequestAttemptStatus, RequestStatus, SchedulerAction},
     service::{
         app_state::AppState,
@@ -2860,6 +2860,8 @@ fn request_uses_reasoning(value: &Value) -> bool {
                     | "thinking"
                     | "thinking_config"
                     | "thinkingConfig"
+                    | "enable_thinking"
+                    | "enableThinking"
                     | "include_reasoning"
                     | "includeReasoning"
             ) {
@@ -2938,7 +2940,6 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
             is_enabled: true,
         })
     }
@@ -2959,7 +2960,6 @@ mod tests {
             model_name: format!("model-{id}"),
             real_model_name: None,
             cost_catalog_id: None,
-            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools,
             supports_reasoning,
@@ -2984,9 +2984,10 @@ mod tests {
             model: model(position as i64, supports_tools, supports_image_input),
             llm_api_type: LlmApiType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            reasoning_profile_id: None,
-            reasoning_profile_key: None,
-            reasoning_profile_preset_id: None,
+            reasoning_config_id: None,
+            reasoning_config_scope: None,
+            reasoning_config_source: None,
+            reasoning_config_preset_id: None,
             reasoning_family: None,
             reasoning_preset: None,
             reasoning_suffix: None,
@@ -3048,6 +3049,31 @@ mod tests {
             LlmApiType::Openai,
             false,
             Some(ReasoningPreset::Disabled),
+        );
+        assert!(!disabled.requires_reasoning);
+    }
+
+    #[test]
+    fn derive_generation_requirement_detects_siliconflow_enable_thinking() {
+        let enabled = derive_generation_requirement(
+            &json!({
+                "messages": [{ "role": "user", "content": "hello" }],
+                "enable_thinking": true,
+            }),
+            LlmApiType::Openai,
+            false,
+            None,
+        );
+        assert!(enabled.requires_reasoning);
+
+        let disabled = derive_generation_requirement(
+            &json!({
+                "messages": [{ "role": "user", "content": "hello" }],
+                "enable_thinking": false,
+            }),
+            LlmApiType::Openai,
+            false,
+            None,
         );
         assert!(!disabled.requires_reasoning);
     }

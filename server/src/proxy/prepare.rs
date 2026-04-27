@@ -13,7 +13,9 @@ use serde_json::{Map, Value, json};
 
 use super::ProxyError;
 use crate::{
-    database::reasoning_profile::{ReasoningPatchFamily, ReasoningPreset},
+    database::reasoning_config::{
+        ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
+    },
     schema::enum_def::{
         LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
     },
@@ -21,7 +23,7 @@ use crate::{
         app_state::AppState,
         cache::types::{
             CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
-            CacheModelsCatalog, CacheProvider, CacheRequestPatchConflict,
+            CacheModelsCatalog, CacheProvider, CacheReasoningConfig, CacheRequestPatchConflict,
             CacheRequestPatchExplainEntry, CacheResolvedRequestPatch, RequestPatchSource,
             RuntimeRequestPatchConflict, RuntimeResolvedRequestPatch,
         },
@@ -119,19 +121,46 @@ pub struct ExecutionCandidate {
     pub model: Arc<CacheModel>,
     pub llm_api_type: LlmApiType,
     pub provider_api_key_mode: ProviderApiKeyMode,
-    pub reasoning_profile_id: Option<i64>,
-    pub reasoning_profile_key: Option<String>,
-    pub reasoning_profile_preset_id: Option<i64>,
+    pub reasoning_config_id: Option<i64>,
+    pub reasoning_config_scope: Option<ReasoningConfigScope>,
+    pub reasoning_config_source: Option<ReasoningConfigSource>,
+    pub reasoning_config_preset_id: Option<i64>,
     pub reasoning_family: Option<ReasoningPatchFamily>,
     pub reasoning_preset: Option<ReasoningPreset>,
     pub reasoning_suffix: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReasoningConfigSource {
+    ProviderDefault,
+    ModelCustom,
+    ModelDisabled,
+    Missing,
+}
+
+impl ReasoningConfigSource {
+    pub(crate) fn as_key(self) -> &'static str {
+        match self {
+            Self::ProviderDefault => "provider_default",
+            Self::ModelCustom => "model_custom",
+            Self::ModelDisabled => "model_disabled",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EffectiveReasoningConfig<'a> {
+    pub source: ReasoningConfigSource,
+    pub config: Option<&'a CacheReasoningConfig>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecutionCandidateReasoningBinding {
-    pub profile_id: i64,
-    pub profile_key: String,
-    pub profile_preset_id: i64,
+    pub config_id: i64,
+    pub config_scope: ReasoningConfigScope,
+    pub config_source: ReasoningConfigSource,
+    pub config_preset_id: i64,
     pub family: ReasoningPatchFamily,
     pub preset: ReasoningPreset,
     pub suffix: String,
@@ -139,9 +168,10 @@ pub(crate) struct ExecutionCandidateReasoningBinding {
 
 impl ExecutionCandidate {
     fn apply_reasoning_binding(&mut self, binding: ExecutionCandidateReasoningBinding) {
-        self.reasoning_profile_id = Some(binding.profile_id);
-        self.reasoning_profile_key = Some(binding.profile_key);
-        self.reasoning_profile_preset_id = Some(binding.profile_preset_id);
+        self.reasoning_config_id = Some(binding.config_id);
+        self.reasoning_config_scope = Some(binding.config_scope);
+        self.reasoning_config_source = Some(binding.config_source);
+        self.reasoning_config_preset_id = Some(binding.config_preset_id);
         self.reasoning_family = Some(binding.family);
         self.reasoning_preset = Some(binding.preset);
         self.reasoning_suffix = Some(binding.suffix);
@@ -202,7 +232,7 @@ impl ExecutionPlan {
             .iter()
             .map(|candidate| {
                 format!(
-                    "#{} route={:?}/{} priority={:?} provider={}/{} model={}/{} llm_api={:?} key_mode={:?} reasoning_profile={:?}/{} reasoning_preset_row={:?} reasoning_family={:?} reasoning_preset={:?} reasoning_suffix={:?}",
+                    "#{} route={:?}/{} priority={:?} provider={}/{} model={}/{} llm_api={:?} key_mode={:?} reasoning_config={:?}/{}/{} reasoning_preset_row={:?} reasoning_family={:?} reasoning_preset={:?} reasoning_suffix={:?}",
                     candidate.candidate_position,
                     candidate.route_id,
                     candidate.route_name.as_deref().unwrap_or("direct"),
@@ -213,9 +243,16 @@ impl ExecutionPlan {
                     candidate.model.model_name,
                     candidate.llm_api_type,
                     candidate.provider_api_key_mode,
-                    candidate.reasoning_profile_id,
-                    candidate.reasoning_profile_key.as_deref().unwrap_or("none"),
-                    candidate.reasoning_profile_preset_id,
+                    candidate.reasoning_config_id,
+                    candidate
+                        .reasoning_config_scope
+                        .map(|scope| scope.as_key())
+                        .unwrap_or("none"),
+                    candidate
+                        .reasoning_config_source
+                        .map(|source| source.as_key())
+                        .unwrap_or("none"),
+                    candidate.reasoning_config_preset_id,
                     candidate.reasoning_family,
                     candidate.reasoning_preset,
                     candidate.reasoning_suffix
@@ -1023,15 +1060,21 @@ fn generated_reasoning_patch_to_runtime(
     candidate: &ExecutionCandidate,
     patch: GeneratedReasoningPatch,
 ) -> Result<RuntimeResolvedRequestPatch, ProxyError> {
-    let profile_id = candidate.reasoning_profile_id.ok_or_else(|| {
+    let config_id = candidate.reasoning_config_id.ok_or_else(|| {
         ProxyError::InternalError(format!(
-            "candidate provider '{}' model '{}' is missing reasoning_profile_id for generated patch",
+            "candidate provider '{}' model '{}' is missing reasoning_config_id for generated patch",
             candidate.provider.provider_key, candidate.model.model_name
         ))
     })?;
-    let profile_preset_id = candidate.reasoning_profile_preset_id.ok_or_else(|| {
+    let config_preset_id = candidate.reasoning_config_preset_id.ok_or_else(|| {
         ProxyError::InternalError(format!(
-            "candidate provider '{}' model '{}' is missing reasoning_profile_preset_id for generated patch",
+            "candidate provider '{}' model '{}' is missing reasoning_config_preset_id for generated patch",
+            candidate.provider.provider_key, candidate.model.model_name
+        ))
+    })?;
+    let config_scope = candidate.reasoning_config_scope.ok_or_else(|| {
+        ProxyError::InternalError(format!(
+            "candidate provider '{}' model '{}' is missing reasoning_config_scope for generated patch",
             candidate.provider.provider_key, candidate.model.model_name
         ))
     })?;
@@ -1042,8 +1085,9 @@ fn generated_reasoning_patch_to_runtime(
         operation: patch.operation,
         value_json: patch.value_json,
         source: RequestPatchSource::ReasoningPreset {
-            profile_id,
-            profile_preset_id,
+            config_id,
+            config_scope,
+            config_preset_id,
             family: patch.family,
             preset: patch.preset,
             suffix: patch.suffix,
@@ -1451,9 +1495,10 @@ fn build_candidate(
         model: Arc::new(model),
         llm_api_type,
         provider_api_key_mode,
-        reasoning_profile_id: None,
-        reasoning_profile_key: None,
-        reasoning_profile_preset_id: None,
+        reasoning_config_id: None,
+        reasoning_config_scope: None,
+        reasoning_config_source: None,
+        reasoning_config_preset_id: None,
         reasoning_family: None,
         reasoning_preset: None,
         reasoning_suffix: None,
@@ -1666,54 +1711,100 @@ pub(crate) fn candidate_supports_reasoning_preset(
     candidate: &ExecutionCandidate,
     preset: ReasoningPreset,
 ) -> Result<ExecutionCandidateReasoningBinding, String> {
-    let profile_id = candidate
-        .model
-        .reasoning_profile_override_id
-        .or(candidate.provider.default_reasoning_profile_id)
-        .ok_or_else(|| {
-            format!(
-                "provider '{}' model '{}' does not have an enabled reasoning profile",
+    let effective =
+        resolve_effective_reasoning_config(catalog, &candidate.provider, &candidate.model);
+    let config = match effective.config {
+        Some(_) if matches!(effective.source, ReasoningConfigSource::ModelDisabled) => {
+            return Err(format!(
+                "model '{}' has disabled reasoning suffix config",
+                candidate.model.model_name
+            ));
+        }
+        Some(config) if matches!(config.mode, ReasoningConfigMode::Custom) => config,
+        Some(config) => {
+            return Err(format!(
+                "reasoning config {} for provider '{}' model '{}' is not a custom config",
+                config.id, candidate.provider.provider_key, candidate.model.model_name
+            ));
+        }
+        None => {
+            return Err(format!(
+                "provider '{}' model '{}' does not have an active reasoning config",
                 candidate.provider.provider_key, candidate.model.model_name
-            )
-        })?;
-
-    let profile = catalog
-        .reasoning_profiles
-        .iter()
-        .find(|profile| profile.id == profile_id && profile.is_enabled)
-        .ok_or_else(|| {
-            format!(
-                "reasoning profile {} for provider '{}' model '{}' is missing or disabled",
-                profile_id, candidate.provider.provider_key, candidate.model.model_name
-            )
-        })?;
-
-    let profile_preset = profile
+            ));
+        }
+    };
+    let family = config.family.ok_or_else(|| {
+        format!(
+            "reasoning config {} for provider '{}' model '{}' is custom but missing family",
+            config.id, candidate.provider.provider_key, candidate.model.model_name
+        )
+    })?;
+    let config_preset = config
         .presets
         .iter()
-        .find(|profile_preset| profile_preset.preset == preset && profile_preset.is_enabled)
+        .find(|config_preset| config_preset.preset == preset && config_preset.is_enabled)
         .ok_or_else(|| {
             format!(
-                "reasoning profile '{}' does not enable preset '{}'",
-                profile.profile_key, preset
+                "reasoning config {} does not enable preset '{}'",
+                config.id, preset
             )
         })?;
 
     generate_reasoning_patches(
-        profile.family,
+        family,
         preset,
         ReasoningPatchContext::for_model(candidate.llm_api_type, &candidate.model),
     )
     .map_err(|err| err.to_string())?;
 
     Ok(ExecutionCandidateReasoningBinding {
-        profile_id: profile.id,
-        profile_key: profile.profile_key.clone(),
-        profile_preset_id: profile_preset.id,
-        family: profile.family,
+        config_id: config.id,
+        config_scope: config.scope_kind,
+        config_source: effective.source,
+        config_preset_id: config_preset.id,
+        family,
         preset,
         suffix: preset.canonical_suffix().to_string(),
     })
+}
+
+pub(crate) fn resolve_effective_reasoning_config<'a>(
+    catalog: &'a CacheModelsCatalog,
+    provider: &CacheProvider,
+    model: &CacheModel,
+) -> EffectiveReasoningConfig<'a> {
+    if let Some(model_config) = catalog.reasoning_configs.iter().find(|config| {
+        matches!(config.scope_kind, ReasoningConfigScope::Model)
+            && config.model_id == Some(model.id)
+    }) {
+        return match model_config.mode {
+            ReasoningConfigMode::Custom => EffectiveReasoningConfig {
+                source: ReasoningConfigSource::ModelCustom,
+                config: Some(model_config),
+            },
+            ReasoningConfigMode::Disabled => EffectiveReasoningConfig {
+                source: ReasoningConfigSource::ModelDisabled,
+                config: Some(model_config),
+            },
+        };
+    }
+
+    if let Some(provider_config) = catalog.reasoning_configs.iter().find(|config| {
+        matches!(config.scope_kind, ReasoningConfigScope::Provider)
+            && config.provider_id == Some(provider.id)
+            && matches!(config.mode, ReasoningConfigMode::Custom)
+    }) {
+        return EffectiveReasoningConfig {
+            source: ReasoningConfigSource::ProviderDefault,
+            config: Some(provider_config),
+        };
+    }
+
+    EffectiveReasoningConfig {
+        source: ReasoningConfigSource::Missing,
+        config: None,
+    }
 }
 
 pub(crate) fn route_supports_reasoning_preset(
@@ -1877,20 +1968,23 @@ pub async fn build_execution_plan(
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedNameScope, apply_request_patches, build_execution_plan_from_catalog,
-        build_runtime_request_patch_trace, parse_provider_model,
+        ReasoningConfigSource, ResolvedNameScope, apply_request_patches,
+        build_execution_plan_from_catalog, build_runtime_request_patch_trace,
+        generate_candidate_reasoning_request_patches, parse_provider_model,
         rebuild_gemini_url_query_from_snapshot, resolve_real_model_name,
         route_supports_reasoning_preset, select_generation_prepare_kind,
     };
     use crate::{
-        database::reasoning_profile::{ReasoningPatchFamily, ReasoningPreset},
+        database::reasoning_config::{
+            ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
+        },
         schema::enum_def::{
             LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation,
             RequestPatchPlacement,
         },
         service::cache::types::{
             CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
-            CacheModelsCatalog, CacheProvider, CacheReasoningProfile, CacheReasoningProfilePreset,
+            CacheModelsCatalog, CacheProvider, CacheReasoningConfig, CacheReasoningConfigPreset,
             CacheResolvedRequestPatch, RequestPatchRuleOrigin, RequestPatchSource,
             RuntimeResolvedRequestPatch,
         },
@@ -1909,33 +2003,83 @@ mod tests {
             use_proxy: false,
             provider_type,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
             is_enabled: true,
         }
     }
 
-    fn reasoning_profile(
+    fn provider_reasoning_config(
         id: i64,
-        profile_key: &str,
+        provider_id: i64,
         family: ReasoningPatchFamily,
         presets: &[ReasoningPreset],
-    ) -> CacheReasoningProfile {
-        CacheReasoningProfile {
+    ) -> CacheReasoningConfig {
+        reasoning_config(
             id,
-            profile_key: profile_key.to_string(),
-            name: profile_key.to_string(),
-            description: None,
+            ReasoningConfigScope::Provider,
+            Some(provider_id),
+            None,
             family,
-            is_enabled: true,
+            presets,
+        )
+    }
+
+    fn model_reasoning_config(
+        id: i64,
+        model_id: i64,
+        family: ReasoningPatchFamily,
+        presets: &[ReasoningPreset],
+    ) -> CacheReasoningConfig {
+        reasoning_config(
+            id,
+            ReasoningConfigScope::Model,
+            None,
+            Some(model_id),
+            family,
+            presets,
+        )
+    }
+
+    fn model_disabled_reasoning_config(id: i64, model_id: i64) -> CacheReasoningConfig {
+        CacheReasoningConfig {
+            id,
+            scope_kind: ReasoningConfigScope::Model,
+            provider_id: None,
+            model_id: Some(model_id),
+            mode: ReasoningConfigMode::Disabled,
+            family: None,
+            presets: Vec::new(),
+        }
+    }
+
+    fn reasoning_config(
+        id: i64,
+        scope_kind: ReasoningConfigScope,
+        provider_id: Option<i64>,
+        model_id: Option<i64>,
+        family: ReasoningPatchFamily,
+        presets: &[ReasoningPreset],
+    ) -> CacheReasoningConfig {
+        CacheReasoningConfig {
+            id,
+            scope_kind,
+            provider_id,
+            model_id,
+            mode: ReasoningConfigMode::Custom,
+            family: Some(family),
             presets: presets
                 .iter()
                 .enumerate()
-                .map(|(index, preset)| CacheReasoningProfilePreset {
+                .map(|(index, preset)| CacheReasoningConfigPreset {
                     id: id * 10 + index as i64,
-                    profile_id: id,
+                    config_id: id,
                     preset: *preset,
                     suffix: preset.canonical_suffix().to_string(),
                     requires_reasoning: preset.requires_reasoning(),
+                    allowed_operation_kinds: preset
+                        .allowed_operation_kinds()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
                     expose_in_models: true,
                     is_enabled: true,
                 })
@@ -1955,7 +2099,6 @@ mod tests {
             model_name: model_name.to_string(),
             real_model_name: real_model_name.map(str::to_string),
             cost_catalog_id: None,
-            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,
@@ -2023,16 +2166,15 @@ mod tests {
                 description: None,
                 is_enabled: true,
             }],
-            reasoning_profiles: vec![],
+            reasoning_configs: vec![],
         }
     }
 
     fn catalog_with_openai_high_reasoning() -> CacheModelsCatalog {
         let mut catalog = catalog();
-        catalog.providers[0].default_reasoning_profile_id = Some(900);
-        catalog.reasoning_profiles.push(reasoning_profile(
+        catalog.reasoning_configs.push(provider_reasoning_config(
             900,
-            "openai-chat",
+            1,
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
             &[ReasoningPreset::High],
         ));
@@ -2040,10 +2182,9 @@ mod tests {
     }
 
     fn add_gemini_high_reasoning(catalog: &mut CacheModelsCatalog) {
-        catalog.providers[1].default_reasoning_profile_id = Some(901);
-        catalog.reasoning_profiles.push(reasoning_profile(
+        catalog.reasoning_configs.push(provider_reasoning_config(
             901,
-            "gemini-budget",
+            2,
             ReasoningPatchFamily::Gemini25ThinkingBudget,
             &[ReasoningPreset::High],
         ));
@@ -2096,8 +2237,9 @@ mod tests {
             operation: RequestPatchOperation::Set,
             value_json: Some(serde_json::to_string(&value).unwrap()),
             source: RequestPatchSource::ReasoningPreset {
-                profile_id: 900,
-                profile_preset_id: 9000,
+                config_id: 900,
+                config_scope: ReasoningConfigScope::Provider,
+                config_preset_id: 9000,
                 family: ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 preset: ReasoningPreset::High,
                 suffix: "high".to_string(),
@@ -2475,7 +2617,12 @@ mod tests {
         let applied = &trace.applied_rules[0];
         assert!(matches!(
             &applied.source,
-            RequestPatchSource::ReasoningPreset { .. }
+            RequestPatchSource::ReasoningPreset {
+                config_id: 900,
+                config_scope: ReasoningConfigScope::Provider,
+                config_preset_id: 9000,
+                ..
+            }
         ));
         assert_eq!(applied.source_rule_id, None);
         assert_eq!(applied.source_origin, None);
@@ -2496,6 +2643,19 @@ mod tests {
         assert_eq!(
             summary["effective_rules"][0]["source"]["kind"],
             "reasoning_preset"
+        );
+        assert_eq!(summary["effective_rules"][0]["source"]["config_id"], 900);
+        assert_eq!(
+            summary["effective_rules"][0]["source"]["config_scope"],
+            "provider"
+        );
+        assert_eq!(
+            summary["effective_rules"][0]["source"]["config_preset_id"],
+            9000
+        );
+        assert_eq!(
+            summary["effective_rules"][0]["source"]["profile_id"],
+            Value::Null
         );
         assert_eq!(summary["effective_rules"][0]["source_rule_id"], Value::Null);
         assert_eq!(
@@ -2547,6 +2707,13 @@ mod tests {
         ));
         assert!(
             trace.conflicts[0].reason.contains("reasoning preset patch"),
+            "{:?}",
+            trace.conflicts[0]
+        );
+        assert!(
+            trace.conflicts[0]
+                .reason
+                .contains("config=provider/900 preset_row=9000"),
             "{:?}",
             trace.conflicts[0]
         );
@@ -2703,12 +2870,16 @@ mod tests {
         assert_eq!(plan.resolved_scope, ResolvedNameScope::Direct);
         assert_eq!(plan.candidate_model_ids(), vec![10]);
         let candidate = plan.primary_candidate().unwrap();
-        assert_eq!(candidate.reasoning_profile_id, Some(900));
+        assert_eq!(candidate.reasoning_config_id, Some(900));
         assert_eq!(
-            candidate.reasoning_profile_key.as_deref(),
-            Some("openai-chat")
+            candidate.reasoning_config_scope,
+            Some(ReasoningConfigScope::Provider)
         );
-        assert_eq!(candidate.reasoning_profile_preset_id, Some(9000));
+        assert_eq!(
+            candidate.reasoning_config_source,
+            Some(ReasoningConfigSource::ProviderDefault)
+        );
+        assert_eq!(candidate.reasoning_config_preset_id, Some(9000));
         assert_eq!(
             candidate.reasoning_family,
             Some(ReasoningPatchFamily::OpenAiChatReasoningEffort)
@@ -2824,16 +2995,116 @@ mod tests {
     }
 
     #[test]
-    fn build_execution_plan_rejects_suffix_when_base_candidate_lacks_profile() {
+    fn build_execution_plan_rejects_suffix_when_base_candidate_lacks_config() {
         let mut catalog = catalog_with_openai_high_reasoning();
-        catalog.providers[0].default_reasoning_profile_id = None;
+        catalog.reasoning_configs.clear();
+        add_gemini_high_reasoning(&mut catalog);
 
         let err = build_execution_plan_from_catalog(&catalog, 7, "openai/gpt-primary-high")
-            .expect_err("base without profile should not support suffix");
+            .expect_err("base without config should not support suffix");
 
         assert!(err.contains("Reasoning suffix 'high'"), "{err}");
         assert!(
-            err.contains("does not have an enabled reasoning profile"),
+            err.contains("does not have an active reasoning config"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_execution_plan_rejects_suffix_when_model_disables_provider_default_config() {
+        let mut catalog = catalog_with_openai_high_reasoning();
+        catalog
+            .reasoning_configs
+            .push(model_disabled_reasoning_config(902, 10));
+
+        let err = build_execution_plan_from_catalog(&catalog, 7, "openai/gpt-primary-high")
+            .expect_err("model disabled config should block provider default");
+
+        assert!(err.contains("Reasoning suffix 'high'"), "{err}");
+        assert!(
+            err.contains("model 'gpt-primary' has disabled reasoning suffix config"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_execution_plan_allows_no_think_preset_in_custom_config() {
+        let mut catalog = catalog();
+        catalog.reasoning_configs.push(provider_reasoning_config(
+            900,
+            1,
+            ReasoningPatchFamily::OpenAiChatReasoningEffort,
+            &[ReasoningPreset::Disabled],
+        ));
+
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "openai/gpt-primary-no-think")
+            .expect("no-think should resolve as a custom disabled preset");
+
+        assert_eq!(plan.base_requested_name, "openai/gpt-primary");
+        assert_eq!(plan.resolved_reasoning_suffix.as_deref(), Some("no-think"));
+        assert_eq!(
+            plan.resolved_reasoning_preset,
+            Some(ReasoningPreset::Disabled)
+        );
+        let candidate = plan.primary_candidate().unwrap();
+        assert_eq!(
+            candidate.reasoning_config_source,
+            Some(ReasoningConfigSource::ProviderDefault)
+        );
+        assert_eq!(candidate.reasoning_config_id, Some(900));
+        assert_eq!(candidate.reasoning_config_preset_id, Some(9000));
+        assert_eq!(candidate.reasoning_preset, Some(ReasoningPreset::Disabled));
+    }
+
+    #[test]
+    fn generated_reasoning_patch_uses_bound_config_fields() {
+        let catalog = catalog_with_openai_high_reasoning();
+        let plan = build_execution_plan_from_catalog(&catalog, 7, "openai/gpt-primary-high")
+            .expect("reasoning suffix should bind config fields");
+
+        let generated_rules =
+            generate_candidate_reasoning_request_patches(Some(plan.primary_candidate().unwrap()))
+                .expect("bound config fields should generate reasoning patch");
+
+        assert_eq!(generated_rules.len(), 1);
+        let RequestPatchSource::ReasoningPreset {
+            config_id,
+            config_scope,
+            config_preset_id,
+            family,
+            preset,
+            suffix,
+        } = generated_rules[0].source.clone()
+        else {
+            panic!("expected generated reasoning preset source");
+        };
+        assert_eq!(config_id, 900);
+        assert_eq!(config_scope, ReasoningConfigScope::Provider);
+        assert_eq!(config_preset_id, 9000);
+        assert_eq!(family, ReasoningPatchFamily::OpenAiChatReasoningEffort);
+        assert_eq!(preset, ReasoningPreset::High);
+        assert_eq!(suffix, "high");
+    }
+
+    #[test]
+    fn build_execution_plan_model_disabled_config_rejects_no_think_too() {
+        let mut catalog = catalog();
+        catalog.reasoning_configs.push(provider_reasoning_config(
+            900,
+            1,
+            ReasoningPatchFamily::OpenAiChatReasoningEffort,
+            &[ReasoningPreset::Disabled],
+        ));
+        catalog
+            .reasoning_configs
+            .push(model_disabled_reasoning_config(902, 10));
+
+        let err = build_execution_plan_from_catalog(&catalog, 7, "openai/gpt-primary-no-think")
+            .expect_err("model disabled config should reject every suffix");
+
+        assert!(err.contains("Reasoning suffix 'no-think'"), "{err}");
+        assert!(
+            err.contains("model 'gpt-primary' has disabled reasoning suffix config"),
             "{err}"
         );
     }
@@ -2849,7 +3120,7 @@ mod tests {
         assert!(err.contains("Reasoning suffix 'high'"), "{err}");
         assert!(err.contains("candidate provider 'gemini'"), "{err}");
         assert!(
-            err.contains("does not have an enabled reasoning profile"),
+            err.contains("does not have an active reasoning config"),
             "{err}"
         );
     }
@@ -2865,22 +3136,25 @@ mod tests {
             .expect("stale candidate should be skipped before stability check");
 
         assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].profile_id, 900);
-        assert_eq!(bindings[0].profile_preset_id, 9000);
+        assert_eq!(bindings[0].config_id, 900);
+        assert_eq!(bindings[0].config_scope, ReasoningConfigScope::Provider);
+        assert_eq!(
+            bindings[0].config_source,
+            ReasoningConfigSource::ProviderDefault
+        );
+        assert_eq!(bindings[0].config_preset_id, 9000);
         assert_eq!(bindings[0].preset, ReasoningPreset::High);
     }
 
     #[test]
     fn same_suffix_with_different_preset_key_does_not_pass_route_stability() {
         let mut catalog = catalog_with_openai_high_reasoning();
-        catalog.reasoning_profiles.push(reasoning_profile(
+        catalog.reasoning_configs.push(model_reasoning_config(
             901,
-            "openai-medium",
+            30,
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
             &[ReasoningPreset::Medium],
         ));
-        catalog.reasoning_profiles[1].presets[0].suffix = "high".to_string();
-        catalog.models[2].reasoning_profile_override_id = Some(901);
 
         let err = build_execution_plan_from_catalog(&catalog, 7, "smart-route-high")
             .expect_err("suffix must resolve to the same preset key for every candidate");

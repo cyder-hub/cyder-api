@@ -35,6 +35,7 @@ db_object! {
         pub response_started_to_client_at: Option<i64>,
         #[diesel(column_name = llm_response_completed_at)]
         pub completed_at: Option<i64>,
+        pub is_stream: bool,
         pub client_ip: Option<String>,
         pub final_attempt_id: Option<i64>,
         #[diesel(column_name = provider_id)]
@@ -100,6 +101,7 @@ db_object! {
         pub response_started_to_client_at: Option<i64>,
         #[diesel(column_name = llm_response_completed_at)]
         pub completed_at: Option<i64>,
+        pub is_stream: bool,
         #[diesel(column_name = provider_id)]
         pub final_provider_id: Option<i64>,
         pub final_provider_name_snapshot: Option<String>,
@@ -113,6 +115,7 @@ db_object! {
         pub estimated_cost_currency: Option<String>,
         pub total_input_tokens: Option<i32>,
         pub total_output_tokens: Option<i32>,
+        pub output_text_tokens: Option<i32>,
         pub reasoning_tokens: Option<i32>,
         pub total_tokens: Option<i32>,
         pub has_transform_diagnostics: bool,

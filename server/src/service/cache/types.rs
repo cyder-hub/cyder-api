@@ -4,8 +4,9 @@ use bincode::{Decode, Encode};
 // reducing memory footprint and improving cache performance.
 
 use crate::database::model_route::{ApiKeyModelOverride, ModelRouteDetail};
-use crate::database::reasoning_profile::{
-    ReasoningPatchFamily, ReasoningPreset, ReasoningProfileWithPresets,
+use crate::database::reasoning_config::{
+    ReasoningConfigMode, ReasoningConfigScope, ReasoningConfigWithPresets, ReasoningPatchFamily,
+    ReasoningPreset,
 };
 use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::schema::enum_def::{
@@ -57,7 +58,6 @@ pub struct CacheModel {
     pub model_name: String,
     pub real_model_name: Option<String>,
     pub cost_catalog_id: Option<i64>,
-    pub reasoning_profile_override_id: Option<i64>,
     pub supports_streaming: bool,
     pub supports_tools: bool,
     pub supports_reasoning: bool,
@@ -77,30 +77,30 @@ pub struct CacheProvider {
     pub use_proxy: bool,
     pub provider_type: ProviderType,
     pub provider_api_key_mode: ProviderApiKeyMode,
-    pub default_reasoning_profile_id: Option<i64>,
     pub is_enabled: bool,
 }
 
-/// Cached enabled reasoning profile and enabled presets.
+/// Cached provider/model-scoped reasoning config and active presets.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheReasoningProfile {
+pub struct CacheReasoningConfig {
     pub id: i64,
-    pub profile_key: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub family: ReasoningPatchFamily,
-    pub is_enabled: bool,
-    pub presets: Vec<CacheReasoningProfilePreset>,
+    pub scope_kind: ReasoningConfigScope,
+    pub provider_id: Option<i64>,
+    pub model_id: Option<i64>,
+    pub mode: ReasoningConfigMode,
+    pub family: Option<ReasoningPatchFamily>,
+    pub presets: Vec<CacheReasoningConfigPreset>,
 }
 
 /// Cached enabled preset metadata derived from the built-in preset key.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheReasoningProfilePreset {
+pub struct CacheReasoningConfigPreset {
     pub id: i64,
-    pub profile_id: i64,
+    pub config_id: i64,
     pub preset: ReasoningPreset,
     pub suffix: String,
     pub requires_reasoning: bool,
+    pub allowed_operation_kinds: Vec<String>,
     pub expose_in_models: bool,
     pub is_enabled: bool,
 }
@@ -144,7 +144,7 @@ pub struct CacheModelsCatalog {
     pub models: Vec<CacheModel>,
     pub routes: Vec<CacheModelRoute>,
     pub api_key_overrides: Vec<CacheApiKeyModelOverride>,
-    pub reasoning_profiles: Vec<CacheReasoningProfile>,
+    pub reasoning_configs: Vec<CacheReasoningConfig>,
 }
 
 /// Cached provider API key
@@ -184,8 +184,9 @@ pub enum RequestPatchSource {
         rule_id: i64,
     },
     ReasoningPreset {
-        profile_id: i64,
-        profile_preset_id: i64,
+        config_id: i64,
+        config_scope: ReasoningConfigScope,
+        config_preset_id: i64,
         family: ReasoningPatchFamily,
         preset: ReasoningPreset,
         suffix: String,
@@ -213,13 +214,14 @@ impl RequestPatchSource {
             Self::ProviderRule { rule_id } => format!("provider request patch rule {rule_id}"),
             Self::ModelRule { rule_id } => format!("model request patch rule {rule_id}"),
             Self::ReasoningPreset {
-                profile_id,
-                profile_preset_id,
+                config_id,
+                config_scope,
+                config_preset_id,
                 family,
                 preset,
                 suffix,
             } => format!(
-                "reasoning preset patch profile={profile_id} preset_row={profile_preset_id} family={family} preset={preset} suffix={suffix}"
+                "reasoning preset patch config={config_scope}/{config_id} preset_row={config_preset_id} family={family} preset={preset} suffix={suffix}"
             ),
         }
     }
@@ -432,7 +434,6 @@ impl From<crate::database::model::Model> for CacheModel {
             real_model_name: db.real_model_name,
             model_name: db.model_name,
             cost_catalog_id: db.cost_catalog_id,
-            reasoning_profile_override_id: db.reasoning_profile_override_id,
             supports_streaming: db.supports_streaming,
             supports_tools: db.supports_tools,
             supports_reasoning: db.supports_reasoning,
@@ -500,30 +501,30 @@ impl From<crate::database::provider::Provider> for CacheProvider {
             use_proxy: db.use_proxy,
             provider_type: db.provider_type,
             provider_api_key_mode: db.provider_api_key_mode,
-            default_reasoning_profile_id: db.default_reasoning_profile_id,
             is_enabled: db.is_enabled,
         }
     }
 }
 
-impl From<ReasoningProfileWithPresets> for CacheReasoningProfile {
-    fn from(db: ReasoningProfileWithPresets) -> Self {
+impl From<ReasoningConfigWithPresets> for CacheReasoningConfig {
+    fn from(db: ReasoningConfigWithPresets) -> Self {
         Self {
-            id: db.profile.id,
-            profile_key: db.profile.profile_key,
-            name: db.profile.name,
-            description: db.profile.description,
+            id: db.config.id,
+            scope_kind: db.scope,
+            provider_id: db.config.provider_id,
+            model_id: db.config.model_id,
+            mode: db.mode,
             family: db.family,
-            is_enabled: db.profile.is_enabled,
             presets: db
                 .presets
                 .into_iter()
-                .map(|preset| CacheReasoningProfilePreset {
+                .map(|preset| CacheReasoningConfigPreset {
                     id: preset.preset.id,
-                    profile_id: preset.preset.profile_id,
+                    config_id: preset.preset.config_id,
                     preset: preset.preset_key,
                     suffix: preset.suffix,
                     requires_reasoning: preset.requires_reasoning,
+                    allowed_operation_kinds: preset.allowed_operation_kinds,
                     expose_in_models: preset.preset.expose_in_models,
                     is_enabled: preset.preset.is_enabled,
                 })

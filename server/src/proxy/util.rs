@@ -305,7 +305,6 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::GeminiOpenai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
             is_enabled: true,
         };
 

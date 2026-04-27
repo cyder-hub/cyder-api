@@ -27,11 +27,12 @@ import type {
   ModelRouteDetail,
   ModelRoutePayload,
   ModelRouteUpdatePayload,
-  ReasoningProfileCatalog,
-  ReasoningProfileItem,
-  ReasoningProfilePayload,
-  ReasoningProfilePresetPayload,
-  ReasoningProfileUpdatePayload,
+  ModelReasoningConfigPayload,
+  ProviderReasoningConfigPayload,
+  ProviderReasoningConfigPreviewPayload,
+  ReasoningConfigCatalog,
+  ReasoningConfigPreview,
+  ReasoningConfigResponse,
   ReasoningRoutePreview,
   PaginatedResponse,
   CostCatalog,
@@ -197,52 +198,73 @@ export const Api = {
     return request.get(`/ai/manager/api/model_route/${id}/reasoning_preview`);
   },
 
-  // ========== Reasoning Profile ==========
-  getReasoningProfileCatalog(): Promise<ReasoningProfileCatalog> {
-    return request.get("/ai/manager/api/reasoning_profile/catalog");
+  // ========== Reasoning Config ==========
+  getReasoningConfigCatalog(): Promise<ReasoningConfigCatalog> {
+    return request.get("/ai/manager/api/reasoning_config/catalog");
   },
-  getReasoningProfileList(): Promise<ReasoningProfileItem[]> {
-    return request.get("/ai/manager/api/reasoning_profile/list");
+  getProviderReasoningConfig(
+    providerId: number | string,
+  ): Promise<ReasoningConfigResponse> {
+    return request.get(`/ai/manager/api/provider/${providerId}/reasoning_config`);
   },
-  getReasoningProfile(id: number | string): Promise<ReasoningProfileItem> {
-    return request.get(`/ai/manager/api/reasoning_profile/${id}`);
-  },
-  createReasoningProfile(
-    payload: ReasoningProfilePayload,
-  ): Promise<ReasoningProfileItem> {
-    return request.post("/ai/manager/api/reasoning_profile", payload);
-  },
-  updateReasoningProfile(
-    id: number | string,
-    payload: ReasoningProfileUpdatePayload,
-  ): Promise<ReasoningProfileItem> {
-    return request.put(`/ai/manager/api/reasoning_profile/${id}`, payload);
-  },
-  deleteReasoningProfile(id: number | string): Promise<void> {
-    return request.delete(`/ai/manager/api/reasoning_profile/${id}`);
-  },
-  upsertReasoningProfilePreset(
-    id: number | string,
-    payload: ReasoningProfilePresetPayload,
-  ): Promise<ReasoningProfileItem> {
-    return request.post(`/ai/manager/api/reasoning_profile/${id}/preset`, payload);
-  },
-  updateReasoningProfilePreset(
-    profileId: number | string,
-    presetId: number | string,
-    payload: Partial<ReasoningProfilePresetPayload>,
-  ): Promise<ReasoningProfileItem> {
+  updateProviderReasoningConfig(
+    providerId: number | string,
+    payload: ProviderReasoningConfigPayload,
+  ): Promise<ReasoningConfigResponse> {
     return request.put(
-      `/ai/manager/api/reasoning_profile/${profileId}/preset/${presetId}`,
+      `/ai/manager/api/provider/${providerId}/reasoning_config`,
       payload,
     );
   },
-  deleteReasoningProfilePreset(
-    profileId: number | string,
-    presetId: number | string,
-  ): Promise<ReasoningProfileItem> {
+  deleteProviderReasoningConfig(providerId: number | string): Promise<void> {
     return request.delete(
-      `/ai/manager/api/reasoning_profile/${profileId}/preset/${presetId}`,
+      `/ai/manager/api/provider/${providerId}/reasoning_config`,
+    );
+  },
+  previewProviderReasoningConfig(
+    providerId: number | string,
+  ): Promise<ReasoningConfigPreview> {
+    return request.get(
+      `/ai/manager/api/provider/${providerId}/reasoning_config/preview`,
+    );
+  },
+  previewProviderReasoningConfigDraft(
+    providerId: number | string,
+    payload: ProviderReasoningConfigPreviewPayload,
+  ): Promise<ReasoningConfigPreview> {
+    return request.post(
+      `/ai/manager/api/provider/${providerId}/reasoning_config/preview`,
+      payload,
+    );
+  },
+  getModelReasoningConfig(
+    modelId: number | string,
+  ): Promise<ReasoningConfigResponse> {
+    return request.get(`/ai/manager/api/model/${modelId}/reasoning_config`);
+  },
+  updateModelReasoningConfig(
+    modelId: number | string,
+    payload: ModelReasoningConfigPayload,
+  ): Promise<ReasoningConfigResponse> {
+    return request.put(`/ai/manager/api/model/${modelId}/reasoning_config`, payload);
+  },
+  deleteModelReasoningConfig(modelId: number | string): Promise<void> {
+    return request.delete(`/ai/manager/api/model/${modelId}/reasoning_config`);
+  },
+  previewModelReasoningConfig(
+    modelId: number | string,
+  ): Promise<ReasoningConfigPreview> {
+    return request.get(
+      `/ai/manager/api/model/${modelId}/reasoning_config/preview`,
+    );
+  },
+  previewModelReasoningConfigDraft(
+    modelId: number | string,
+    payload: ModelReasoningConfigPayload,
+  ): Promise<ReasoningConfigPreview> {
+    return request.post(
+      `/ai/manager/api/model/${modelId}/reasoning_config/preview`,
+      payload,
     );
   },
 

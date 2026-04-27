@@ -54,9 +54,11 @@ pub enum AdminCatalogInvalidation {
     ProviderRequestPatchRules {
         provider_id: i64,
     },
-    ReasoningProfile {
-        id: i64,
-        key: Option<String>,
+    ReasoningProviderConfig {
+        provider_id: i64,
+    },
+    ReasoningModelConfig {
+        model_id: i64,
     },
     Model {
         id: i64,
@@ -94,7 +96,8 @@ impl AdminCatalogInvalidation {
             Self::Provider { .. } => "provider",
             Self::ProviderApiKeys { .. } => "provider_api_keys",
             Self::ProviderRequestPatchRules { .. } => "provider_request_patch_rules",
-            Self::ReasoningProfile { .. } => "reasoning_profile",
+            Self::ReasoningProviderConfig { .. } => "reasoning_provider_config",
+            Self::ReasoningModelConfig { .. } => "reasoning_model_config",
             Self::Model { .. } => "model",
             Self::ModelRoute { .. } => "model_route",
             Self::ModelRoutes(_) => "model_routes",
@@ -197,9 +200,14 @@ impl AdminMutationRunner {
                     .invalidate_provider_request_patch_rules(*provider_id)
                     .await
             }
-            AdminCatalogInvalidation::ReasoningProfile { id, key } => {
+            AdminCatalogInvalidation::ReasoningProviderConfig { provider_id } => {
                 self.catalog
-                    .invalidate_reasoning_profile(*id, key.as_deref())
+                    .invalidate_reasoning_provider_config(*provider_id)
+                    .await
+            }
+            AdminCatalogInvalidation::ReasoningModelConfig { model_id } => {
+                self.catalog
+                    .invalidate_reasoning_model_config(*model_id)
                     .await
             }
             AdminCatalogInvalidation::Model {
@@ -342,10 +350,10 @@ mod tests {
                         AdminCatalogInvalidation::ProviderRequestPatchRules { provider_id: 11 },
                     ),
                     AdminMutationEffect::catalog_invalidation(
-                        AdminCatalogInvalidation::ReasoningProfile {
-                            id: 61,
-                            key: Some("profile-a".to_string()),
-                        },
+                        AdminCatalogInvalidation::ReasoningProviderConfig { provider_id: 11 },
+                    ),
+                    AdminMutationEffect::catalog_invalidation(
+                        AdminCatalogInvalidation::ReasoningModelConfig { model_id: 21 },
                     ),
                     AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Model {
                         id: 21,

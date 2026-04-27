@@ -156,13 +156,13 @@ diesel::table! {
 }
 
 diesel::table! {
-    reasoning_profile (id) {
+    reasoning_config (id) {
         id -> Int8,
-        profile_key -> Text,
-        name -> Text,
-        description -> Nullable<Text>,
-        family_key -> Text,
-        is_enabled -> Bool,
+        scope_kind -> Text,
+        provider_id -> Nullable<Int8>,
+        model_id -> Nullable<Int8>,
+        mode -> Text,
+        family_key -> Nullable<Text>,
         deleted_at -> Nullable<Int8>,
         created_at -> Int8,
         updated_at -> Int8,
@@ -170,9 +170,9 @@ diesel::table! {
 }
 
 diesel::table! {
-    reasoning_profile_preset (id) {
+    reasoning_config_preset (id) {
         id -> Int8,
-        profile_id -> Int8,
+        config_id -> Int8,
         preset_key -> Text,
         expose_in_models -> Bool,
         is_enabled -> Bool,
@@ -187,7 +187,6 @@ diesel::table! {
         id -> Int8,
         provider_id -> Int8,
         cost_catalog_id -> Nullable<Int8>,
-        reasoning_profile_override_id -> Nullable<Int8>,
         model_name -> Text,
         real_model_name -> Nullable<Text>,
         supports_streaming -> Bool,
@@ -248,7 +247,6 @@ diesel::table! {
         updated_at -> Int8,
         provider_type -> ProviderTypeMapping,
         provider_api_key_mode -> ProviderApiKeyModeMapping,
-        default_reasoning_profile_id -> Nullable<Int8>,
     }
 }
 
@@ -288,6 +286,7 @@ diesel::table! {
         llm_response_first_chunk_at -> Nullable<Int8>,
         #[sql_name = "completed_at"]
         llm_response_completed_at -> Nullable<Int8>,
+        is_stream -> Bool,
         client_ip -> Nullable<Text>,
         #[sql_name = "final_attempt_id"]
         final_attempt_id -> Nullable<Int8>,
@@ -473,12 +472,10 @@ diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
 diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
-diesel::joinable!(model -> reasoning_profile (reasoning_profile_override_id));
 diesel::joinable!(model_route_candidate -> model (model_id));
 diesel::joinable!(model_route_candidate -> model_route (route_id));
-diesel::joinable!(provider -> reasoning_profile (default_reasoning_profile_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
-diesel::joinable!(reasoning_profile_preset -> reasoning_profile (profile_id));
+diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
 diesel::joinable!(request_attempt -> cost_catalog_versions (cost_catalog_version_id));
 diesel::joinable!(request_attempt -> model (model_id));
 diesel::joinable!(request_attempt -> provider (provider_id));
@@ -509,8 +506,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     model_route_candidate,
     provider,
     provider_api_key,
-    reasoning_profile,
-    reasoning_profile_preset,
+    reasoning_config,
+    reasoning_config_preset,
     request_attempt,
     request_log,
     request_replay_run,

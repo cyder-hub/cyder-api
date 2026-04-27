@@ -12,8 +12,11 @@ use crate::{
         CreateModelRoutePayload, ModelRoute, ModelRouteDetail, ModelRouteListItem,
         UpdateModelRoutePayload,
     },
-    database::reasoning_profile::ReasoningPreset,
-    proxy::{candidate_supports_reasoning_preset, resolve_route_runtime_candidates},
+    database::reasoning_config::ReasoningPreset,
+    proxy::{
+        candidate_supports_reasoning_preset, resolve_effective_reasoning_config,
+        resolve_route_runtime_candidates,
+    },
     service::{
         app_state::{AppState, StateRouter, create_state_router},
         cache::types::{CacheModelRoute, CacheModelsCatalog},
@@ -33,10 +36,11 @@ struct ModelRouteReasoningCandidatePreview {
     suffix: String,
     supported: bool,
     reason: Option<String>,
-    reasoning_profile_id: Option<i64>,
-    reasoning_profile_key: Option<String>,
-    reasoning_profile_preset_id: Option<i64>,
-    reasoning_family: Option<String>,
+    config_source: Option<String>,
+    config_scope: Option<String>,
+    config_id: Option<i64>,
+    config_preset_id: Option<i64>,
+    family: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,14 +145,20 @@ fn build_model_route_reasoning_preview(
                                 reason: runtime_candidate.stale_reason.as_ref().map(|reason| {
                                     format!("stale candidate skipped by runtime: {reason}")
                                 }),
-                                reasoning_profile_id: None,
-                                reasoning_profile_key: None,
-                                reasoning_profile_preset_id: None,
-                                reasoning_family: None,
+                                config_source: None,
+                                config_scope: None,
+                                config_id: None,
+                                config_preset_id: None,
+                                family: None,
                             };
                         };
 
                         valid_candidate_count += 1;
+                        let effective = resolve_effective_reasoning_config(
+                            catalog,
+                            &candidate.provider,
+                            &candidate.model,
+                        );
                         match candidate_supports_reasoning_preset(catalog, candidate, preset) {
                             Ok(binding) => ModelRouteReasoningCandidatePreview {
                                 candidate_position: runtime_candidate.route_candidate_position,
@@ -161,10 +171,11 @@ fn build_model_route_reasoning_preview(
                                 suffix: binding.suffix,
                                 supported: true,
                                 reason: None,
-                                reasoning_profile_id: Some(binding.profile_id),
-                                reasoning_profile_key: Some(binding.profile_key),
-                                reasoning_profile_preset_id: Some(binding.profile_preset_id),
-                                reasoning_family: Some(binding.family.as_key().to_string()),
+                                config_source: Some(binding.config_source.as_key().to_string()),
+                                config_scope: Some(binding.config_scope.as_key().to_string()),
+                                config_id: Some(binding.config_id),
+                                config_preset_id: Some(binding.config_preset_id),
+                                family: Some(binding.family.as_key().to_string()),
                             },
                             Err(reason) => ModelRouteReasoningCandidatePreview {
                                 candidate_position: runtime_candidate.route_candidate_position,
@@ -177,10 +188,25 @@ fn build_model_route_reasoning_preview(
                                 suffix: preset.canonical_suffix().to_string(),
                                 supported: false,
                                 reason: Some(reason),
-                                reasoning_profile_id: None,
-                                reasoning_profile_key: None,
-                                reasoning_profile_preset_id: None,
-                                reasoning_family: None,
+                                config_source: Some(effective.source.as_key().to_string()),
+                                config_scope: effective
+                                    .config
+                                    .map(|config| config.scope_kind.as_key().to_string()),
+                                config_id: effective.config.map(|config| config.id),
+                                config_preset_id: effective.config.and_then(|config| {
+                                    config
+                                        .presets
+                                        .iter()
+                                        .find(|config_preset| {
+                                            config_preset.preset == preset
+                                                && config_preset.is_enabled
+                                        })
+                                        .map(|config_preset| config_preset.id)
+                                }),
+                                family: effective
+                                    .config
+                                    .and_then(|config| config.family)
+                                    .map(|family| family.as_key().to_string()),
                             },
                         }
                     })
@@ -282,13 +308,15 @@ mod tests {
         ModelRouteCandidateInput,
     };
     use crate::database::provider::{NewProvider, Provider};
-    use crate::database::reasoning_profile::{ReasoningPatchFamily, ReasoningPreset};
+    use crate::database::reasoning_config::{
+        ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
+    };
     use crate::schema::enum_def::{Action, ProviderApiKeyMode, ProviderType};
     use crate::service::{
         app_state::{AppState, create_test_app_state},
         cache::types::{
             CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
-            CacheModelsCatalog, CacheProvider, CacheReasoningProfile, CacheReasoningProfilePreset,
+            CacheModelsCatalog, CacheProvider, CacheReasoningConfig, CacheReasoningConfigPreset,
         },
     };
 
@@ -306,7 +334,6 @@ mod tests {
             updated_at: 1,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
         })
         .expect("provider seed should succeed")
     }
@@ -389,11 +416,7 @@ mod tests {
         serde_json::from_slice(&body).expect("response should be json")
     }
 
-    fn cache_provider(
-        id: i64,
-        provider_key: &str,
-        default_reasoning_profile_id: Option<i64>,
-    ) -> CacheProvider {
+    fn cache_provider(id: i64, provider_key: &str) -> CacheProvider {
         CacheProvider {
             id,
             provider_key: provider_key.to_string(),
@@ -402,7 +425,6 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id,
             is_enabled: true,
         }
     }
@@ -414,7 +436,6 @@ mod tests {
             model_name: model_name.to_string(),
             real_model_name: None,
             cost_catalog_id: None,
-            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,
@@ -447,27 +468,33 @@ mod tests {
         }
     }
 
-    fn cache_reasoning_profile(
+    fn cache_provider_reasoning_config(
         id: i64,
+        provider_id: i64,
         family: ReasoningPatchFamily,
         presets: &[ReasoningPreset],
-    ) -> CacheReasoningProfile {
-        CacheReasoningProfile {
+    ) -> CacheReasoningConfig {
+        CacheReasoningConfig {
             id,
-            profile_key: "openai-chat".to_string(),
-            name: "OpenAI Chat".to_string(),
-            description: None,
-            family,
-            is_enabled: true,
+            scope_kind: ReasoningConfigScope::Provider,
+            provider_id: Some(provider_id),
+            model_id: None,
+            mode: ReasoningConfigMode::Custom,
+            family: Some(family),
             presets: presets
                 .iter()
                 .enumerate()
-                .map(|(index, preset)| CacheReasoningProfilePreset {
+                .map(|(index, preset)| CacheReasoningConfigPreset {
                     id: id * 10 + index as i64,
-                    profile_id: id,
+                    config_id: id,
                     preset: *preset,
                     suffix: preset.canonical_suffix().to_string(),
                     requires_reasoning: preset.requires_reasoning(),
+                    allowed_operation_kinds: preset
+                        .allowed_operation_kinds()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
                     expose_in_models: true,
                     is_enabled: true,
                 })
@@ -475,18 +502,30 @@ mod tests {
         }
     }
 
+    fn cache_model_disabled_reasoning_config(id: i64, model_id: i64) -> CacheReasoningConfig {
+        CacheReasoningConfig {
+            id,
+            scope_kind: ReasoningConfigScope::Model,
+            provider_id: None,
+            model_id: Some(model_id),
+            mode: ReasoningConfigMode::Disabled,
+            family: None,
+            presets: Vec::new(),
+        }
+    }
+
     fn preview_catalog(
         providers: Vec<CacheProvider>,
         models: Vec<CacheModel>,
         route: CacheModelRoute,
-        reasoning_profiles: Vec<CacheReasoningProfile>,
+        reasoning_configs: Vec<CacheReasoningConfig>,
     ) -> CacheModelsCatalog {
         CacheModelsCatalog {
             providers,
             models,
             routes: vec![route],
             api_key_overrides: Vec::<CacheApiKeyModelOverride>::new(),
-            reasoning_profiles,
+            reasoning_configs,
         }
     }
 
@@ -510,11 +549,12 @@ mod tests {
     fn reasoning_preview_skips_stale_candidate_for_stability_but_keeps_diagnostic() {
         let route = cache_route(&[(10, 1, 10, true), (999, 999, 20, true)]);
         let catalog = preview_catalog(
-            vec![cache_provider(1, "openai", Some(900))],
+            vec![cache_provider(1, "openai")],
             vec![cache_model(10, 1, "gpt-primary")],
             route,
-            vec![cache_reasoning_profile(
+            vec![cache_provider_reasoning_config(
                 900,
+                1,
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[ReasoningPreset::High],
             )],
@@ -527,8 +567,21 @@ mod tests {
         assert_eq!(high.candidates.len(), 2);
         assert_eq!(high.candidates[0].runtime_status, "valid");
         assert!(high.candidates[0].supported);
+        assert_eq!(
+            high.candidates[0].config_source.as_deref(),
+            Some("provider_default")
+        );
+        assert_eq!(high.candidates[0].config_scope.as_deref(), Some("provider"));
+        assert_eq!(high.candidates[0].config_id, Some(900));
+        assert_eq!(high.candidates[0].config_preset_id, Some(9000));
+        assert_eq!(
+            high.candidates[0].family.as_deref(),
+            Some("openai_chat_reasoning_effort")
+        );
         assert_eq!(high.candidates[1].runtime_status, "stale_skipped");
         assert!(!high.candidates[1].supported);
+        assert_eq!(high.candidates[1].config_source, None);
+        assert_eq!(high.candidates[1].config_id, None);
         assert!(
             high.candidates[1]
                 .reason
@@ -542,17 +595,15 @@ mod tests {
     fn reasoning_preview_marks_valid_unsupported_candidate_unstable() {
         let route = cache_route(&[(10, 1, 10, true), (20, 2, 20, true)]);
         let catalog = preview_catalog(
-            vec![
-                cache_provider(1, "openai-a", Some(900)),
-                cache_provider(2, "openai-b", None),
-            ],
+            vec![cache_provider(1, "openai-a"), cache_provider(2, "openai-b")],
             vec![
                 cache_model(10, 1, "gpt-primary"),
                 cache_model(20, 2, "gpt-secondary"),
             ],
             route,
-            vec![cache_reasoning_profile(
+            vec![cache_provider_reasoning_config(
                 900,
+                1,
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[ReasoningPreset::High],
             )],
@@ -571,12 +622,95 @@ mod tests {
         assert!(high.candidates[0].supported);
         assert_eq!(high.candidates[1].runtime_status, "valid");
         assert!(!high.candidates[1].supported);
+        assert_eq!(high.candidates[1].config_source.as_deref(), Some("missing"));
+        assert_eq!(high.candidates[1].config_scope, None);
+        assert_eq!(high.candidates[1].config_id, None);
         assert!(
             high.candidates[1]
                 .reason
                 .as_deref()
                 .unwrap_or_default()
-                .contains("does not have an enabled reasoning profile")
+                .contains("does not have an active reasoning config")
+        );
+    }
+
+    #[test]
+    fn reasoning_preview_distinguishes_model_disabled_config() {
+        let route = cache_route(&[(10, 1, 10, true)]);
+        let catalog = preview_catalog(
+            vec![cache_provider(1, "openai")],
+            vec![cache_model(10, 1, "gpt-primary")],
+            route,
+            vec![
+                cache_provider_reasoning_config(
+                    900,
+                    1,
+                    ReasoningPatchFamily::OpenAiChatReasoningEffort,
+                    &[ReasoningPreset::High],
+                ),
+                cache_model_disabled_reasoning_config(901, 10),
+            ],
+        );
+
+        let preview = build_model_route_reasoning_preview(&catalog, &catalog.routes[0]);
+        let high = find_preset(&preview, ReasoningPreset::High);
+
+        assert!(!high.stable);
+        assert_eq!(high.candidates.len(), 1);
+        assert_eq!(high.candidates[0].runtime_status, "valid");
+        assert!(!high.candidates[0].supported);
+        assert_eq!(
+            high.candidates[0].config_source.as_deref(),
+            Some("model_disabled")
+        );
+        assert_eq!(high.candidates[0].config_scope.as_deref(), Some("model"));
+        assert_eq!(high.candidates[0].config_id, Some(901));
+        assert!(
+            high.candidates[0]
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("has disabled reasoning suffix config")
+        );
+    }
+
+    #[test]
+    fn reasoning_preview_keeps_config_context_for_family_unsupported_preset() {
+        let route = cache_route(&[(10, 1, 10, true)]);
+        let catalog = preview_catalog(
+            vec![cache_provider(1, "openai")],
+            vec![cache_model(10, 1, "gpt-primary")],
+            route,
+            vec![cache_provider_reasoning_config(
+                900,
+                1,
+                ReasoningPatchFamily::OpenAiChatReasoningEffort,
+                &[ReasoningPreset::Auto],
+            )],
+        );
+
+        let preview = build_model_route_reasoning_preview(&catalog, &catalog.routes[0]);
+        let auto = find_preset(&preview, ReasoningPreset::Auto);
+
+        assert!(!auto.stable);
+        assert_eq!(auto.candidates.len(), 1);
+        assert_eq!(
+            auto.candidates[0].config_source.as_deref(),
+            Some("provider_default")
+        );
+        assert_eq!(auto.candidates[0].config_scope.as_deref(), Some("provider"));
+        assert_eq!(auto.candidates[0].config_id, Some(900));
+        assert_eq!(auto.candidates[0].config_preset_id, Some(9000));
+        assert_eq!(
+            auto.candidates[0].family.as_deref(),
+            Some("openai_chat_reasoning_effort")
+        );
+        assert!(
+            auto.candidates[0]
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("unsupported")
         );
     }
 
@@ -584,11 +718,12 @@ mod tests {
     fn reasoning_preview_marks_all_presets_unstable_when_route_has_no_valid_candidates() {
         let route = cache_route(&[(999, 999, 10, true)]);
         let catalog = preview_catalog(
-            vec![cache_provider(1, "openai", Some(900))],
+            vec![cache_provider(1, "openai")],
             vec![],
             route,
-            vec![cache_reasoning_profile(
+            vec![cache_provider_reasoning_config(
                 900,
+                1,
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[ReasoningPreset::High],
             )],

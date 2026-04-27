@@ -559,6 +559,7 @@ import { useApiKeyStore } from "@/store/apiKeyStore";
 import { useModelStore } from "@/store/modelStore";
 import { useProviderStore } from "@/store/providerStore";
 import type { RecordAttempt, RecordListItem, RecordListParams, RecordRequest } from "@/store/types";
+import { calculateRecordTps } from "./recordTps";
 import {
   emptyValue,
   formatCompactMetrics,
@@ -978,24 +979,14 @@ const enrichRecord = (record: RecordListItem) => {
     diagnosticsDisplay,
     firstRespTimeDisplay,
     totalRespTimeDisplay,
-    tpsDisplay: calculateTps(record),
+    tpsDisplay: formatTps(record),
     costDisplay: formatPrice(record.estimated_cost_nanos, record.estimated_cost_currency),
     request_at_formatted: formatDate(record.request_received_at),
   };
 };
 
-const calculateTps = (record: RecordListItem) => {
-  if (
-    record.total_output_tokens == null ||
-    record.completed_at == null ||
-    record.first_attempt_started_at == null
-  ) {
-    return emptyValue;
-  }
-  const durationMs = record.completed_at - record.first_attempt_started_at;
-  if (durationMs <= 0) return emptyValue;
-  return (record.total_output_tokens / (durationMs / 1000)).toFixed(2);
-};
+const formatTps = (record: RecordListItem) =>
+  calculateRecordTps(record)?.value.toFixed(2) ?? emptyValue;
 
 const closeMobileFilterPanel = () => {
   isFilterPanelOpen.value = false;

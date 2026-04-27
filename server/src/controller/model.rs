@@ -86,7 +86,6 @@ pub struct UpdateModelRequest {
     pub supports_image_input: Option<bool>,
     pub supports_embeddings: Option<bool>,
     pub supports_rerank: Option<bool>,
-    pub reasoning_profile_override_id: Option<i64>,
 }
 
 async fn update_model(
@@ -110,7 +109,6 @@ async fn update_model(
                 supports_image_input: request.supports_image_input,
                 supports_embeddings: request.supports_embeddings,
                 supports_rerank: request.supports_rerank,
-                reasoning_profile_override_id: request.reasoning_profile_override_id,
             },
         )
         .await?;
@@ -190,7 +188,6 @@ mod tests {
             updated_at: 1,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
         })
         .expect("provider seed should succeed")
     }

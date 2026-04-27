@@ -4599,6 +4599,14 @@ impl StreamTransformer {
         parsed
     }
 
+    pub fn cached_usage_info(&self) -> Option<UsageInfo> {
+        self.session.usage_cache.clone()
+    }
+
+    pub fn cached_usage_normalization(&self) -> Option<UsageNormalization> {
+        self.session.usage_normalization_cache.clone()
+    }
+
     pub fn parse_usage_normalization(&mut self) -> Option<UsageNormalization> {
         self.session.usage_normalization_cache.clone()
     }

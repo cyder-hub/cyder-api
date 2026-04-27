@@ -1,5 +1,6 @@
 use crate::{
-    database::reasoning_profile::ReasoningPreset, service::cache::types::CacheModelsCatalog,
+    database::reasoning_config::{ReasoningConfigMode, ReasoningPreset},
+    service::cache::types::CacheModelsCatalog,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,12 +46,12 @@ pub(crate) fn enabled_reasoning_suffixes(
 ) -> Vec<ReasoningSuffixDefinition> {
     let mut suffixes = Vec::new();
 
-    for profile in &catalog.reasoning_profiles {
-        if !profile.is_enabled {
+    for config in &catalog.reasoning_configs {
+        if !matches!(config.mode, ReasoningConfigMode::Custom) {
             continue;
         }
 
-        for preset in &profile.presets {
+        for preset in &config.presets {
             if !preset.is_enabled {
                 continue;
             }
@@ -119,7 +120,7 @@ pub(crate) fn parse_reasoning_suffix(
 mod tests {
     use super::*;
     use crate::service::cache::types::{
-        CacheModelsCatalog, CacheReasoningProfile, CacheReasoningProfilePreset,
+        CacheModelsCatalog, CacheReasoningConfig, CacheReasoningConfigPreset,
     };
 
     fn suffix(suffix: &str, preset: ReasoningPreset) -> ReasoningSuffixDefinition {
@@ -184,29 +185,31 @@ mod tests {
             models: vec![],
             routes: vec![],
             api_key_overrides: vec![],
-            reasoning_profiles: vec![CacheReasoningProfile {
+            reasoning_configs: vec![CacheReasoningConfig {
                 id: 1,
-                profile_key: "openai".to_string(),
-                name: "OpenAI".to_string(),
-                description: None,
-                family: crate::database::reasoning_profile::ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                is_enabled: true,
+                scope_kind: crate::database::reasoning_config::ReasoningConfigScope::Provider,
+                provider_id: Some(1),
+                model_id: None,
+                mode: ReasoningConfigMode::Custom,
+                family: Some(crate::database::reasoning_config::ReasoningPatchFamily::OpenAiChatReasoningEffort),
                 presets: vec![
-                    CacheReasoningProfilePreset {
+                    CacheReasoningConfigPreset {
                         id: 10,
-                        profile_id: 1,
+                        config_id: 1,
                         preset: ReasoningPreset::High,
                         suffix: "ignored-cache-value".to_string(),
                         requires_reasoning: true,
+                        allowed_operation_kinds: vec!["generation".to_string()],
                         expose_in_models: true,
                         is_enabled: true,
                     },
-                    CacheReasoningProfilePreset {
+                    CacheReasoningConfigPreset {
                         id: 11,
-                        profile_id: 1,
+                        config_id: 1,
                         preset: ReasoningPreset::Medium,
                         suffix: "medium".to_string(),
                         requires_reasoning: true,
+                        allowed_operation_kinds: vec!["generation".to_string()],
                         expose_in_models: true,
                         is_enabled: false,
                     },

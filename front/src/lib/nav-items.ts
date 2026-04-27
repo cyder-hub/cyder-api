@@ -7,7 +7,6 @@ import {
   ClipboardList,
   Server,
   Activity,
-  BrainCircuit,
 } from "lucide-vue-next";
 
 type NavItem = {
@@ -58,12 +57,6 @@ export const navItems: NavItem[] = [
     path: "/model_route",
     i18nKey: "sidebar.modelRoute",
     icon: ArrowRightLeft,
-    section: "advanced",
-  },
-  {
-    path: "/reasoning_profile",
-    i18nKey: "sidebar.reasoningProfile",
-    icon: BrainCircuit,
     section: "advanced",
   },
   {

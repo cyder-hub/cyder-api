@@ -252,7 +252,6 @@ mod tests {
             updated_at: 1,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
         })
         .expect("provider seed should succeed")
     }

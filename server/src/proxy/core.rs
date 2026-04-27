@@ -449,8 +449,8 @@ async fn sync_stream_usage_to_log_context(
     log_context: &Arc<TokioMutex<RequestLogContext>>,
     transformer: &mut StreamTransformer,
 ) {
-    let usage = transformer.parse_usage_info();
-    let usage_normalization = transformer.parse_usage_normalization();
+    let usage = transformer.cached_usage_info();
+    let usage_normalization = transformer.cached_usage_normalization();
     let diagnostics = transformer.diagnostics_snapshot();
 
     if usage.is_none() && usage_normalization.is_none() && diagnostics.is_empty() {
@@ -1464,7 +1464,6 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
             is_enabled: true,
         };
         let model = CacheModel {
@@ -1473,7 +1472,6 @@ mod tests {
             model_name: "gpt-test".to_string(),
             real_model_name: None,
             cost_catalog_id: None,
-            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,
@@ -1790,6 +1788,59 @@ mod tests {
                 .map(|u| u.total_output_tokens),
             Some(16)
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_usage_sync_ignores_missing_intermediate_usage() {
+        let log_context = std::sync::Arc::new(tokio::sync::Mutex::new(make_log_context()));
+        let mut parser = SseParser::new();
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Openai);
+        let sse_chunk = concat!(
+            "data: {",
+            "\"id\":\"chatcmpl-test\",",
+            "\"object\":\"chat.completion.chunk\",",
+            "\"created\":1776310010,",
+            "\"model\":\"deepseek-ai/DeepSeek-V3.2\",",
+            "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\",\"role\":\"assistant\"},\"finish_reason\":null}]",
+            "}\n\n"
+        );
+
+        let events = parser.process(sse_chunk.as_bytes());
+        assert_eq!(events.len(), 1);
+        let transformed_events = transformer.transform_events(events);
+        assert_eq!(transformed_events.len(), 1);
+
+        sync_stream_usage_to_log_context(&log_context, &mut transformer).await;
+
+        assert!(transformer.diagnostics_snapshot().is_empty());
+        let context = log_context.lock().await;
+        assert_eq!(context.usage, None);
+        assert_eq!(context.usage_normalization, None);
+        assert!(context.transform_diagnostics.is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_final_usage_parse_records_missing_usage_diagnostic() {
+        let mut parser = SseParser::new();
+        let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Openai);
+        let sse_chunk = concat!(
+            "data: {",
+            "\"id\":\"chatcmpl-test\",",
+            "\"object\":\"chat.completion.chunk\",",
+            "\"created\":1776310010,",
+            "\"model\":\"deepseek-ai/DeepSeek-V3.2\",",
+            "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]",
+            "}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = parser.process(sse_chunk.as_bytes());
+        assert_eq!(events.len(), 2);
+        let transformed_events = transformer.transform_events(events);
+        assert_eq!(transformed_events.len(), 2);
+
+        assert_eq!(transformer.parse_usage_info(), None);
+        assert_eq!(transformer.diagnostics_snapshot().len(), 1);
     }
 
     #[tokio::test]

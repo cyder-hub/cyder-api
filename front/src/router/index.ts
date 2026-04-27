@@ -36,11 +36,6 @@ const router = createRouter({
           component: () => import("@/pages/ModelRoute.vue"),
         },
         {
-          path: "reasoning_profile",
-          name: "ReasoningProfile",
-          component: () => import("@/pages/ReasoningProfile.vue"),
-        },
-        {
           path: "cost",
           name: "Cost",
           component: () => import("@/pages/Cost.vue"),

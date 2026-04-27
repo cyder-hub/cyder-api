@@ -1706,6 +1706,7 @@ impl LogManager {
             first_attempt_started_at,
             response_started_to_client_at: context.first_chunk_ts,
             completed_at: context.completion_ts.or(Some(now)),
+            is_stream: context.is_stream,
             client_ip: context.client_ip.clone(),
             final_attempt_id: None,
             final_provider_id: Some(context.provider_id),
@@ -2128,7 +2129,6 @@ mod tests {
             use_proxy: false,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            default_reasoning_profile_id: None,
             is_enabled: true,
         };
         let model = CacheModel {
@@ -2137,7 +2137,6 @@ mod tests {
             model_name: "gpt-test".to_string(),
             real_model_name: Some("real-gpt-test".to_string()),
             cost_catalog_id: None,
-            reasoning_profile_override_id: None,
             supports_streaming: true,
             supports_tools: true,
             supports_reasoning: true,
@@ -2617,6 +2616,7 @@ mod tests {
         assert_eq!(request_log.attempt_count, 1);
         assert_eq!(request_log.retry_count, 0);
         assert_eq!(request_log.fallback_count, 0);
+        assert!(request_log.is_stream);
         assert_eq!(request_log.final_provider_id, Some(2));
         assert_eq!(request_log.final_model_id, Some(3));
         assert_eq!(

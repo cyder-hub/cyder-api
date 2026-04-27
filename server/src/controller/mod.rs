@@ -12,7 +12,7 @@ use model::create_model_router;
 use model_route::create_model_route_router;
 use provider::create_provider_router;
 use provider_runtime::create_provider_runtime_router;
-use reasoning_profile::create_reasoning_profile_router;
+use reasoning_config::create_reasoning_config_router;
 use request_log::create_record_router;
 use request_patch::create_request_patch_router;
 use stat::routes as create_stat_router;
@@ -31,7 +31,7 @@ mod model;
 mod model_route;
 mod provider;
 mod provider_runtime;
-mod reasoning_profile;
+mod reasoning_config;
 mod request_log;
 mod request_patch;
 mod stat;
@@ -62,7 +62,7 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_model_router())
             .merge(create_model_route_router())
             .merge(create_request_patch_router())
-            .merge(create_reasoning_profile_router())
+            .merge(create_reasoning_config_router())
             .merge(create_cost_router())
             .merge(create_stat_router())
             .layer(middleware::from_fn(authorization_access_middleware))

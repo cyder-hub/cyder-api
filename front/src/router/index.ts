@@ -3,6 +3,7 @@ import DefaultLayout from "@/layouts/DefaultLayout.vue";
 import LoginLayout from "@/layouts/LoginLayout.vue";
 import { useAuthStore } from "@/store/authStore";
 import { tryRefreshToken } from "@/services/auth";
+import { readStoredRefreshToken } from "@/services/authTokens";
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -98,7 +99,7 @@ const router = createRouter({
 
 router.beforeEach(async (to, _from, next) => {
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
-  const refreshToken = localStorage.getItem("auth_token");
+  const refreshToken = readStoredRefreshToken();
   const isAuthenticated = !!refreshToken;
 
   if (requiresAuth) {

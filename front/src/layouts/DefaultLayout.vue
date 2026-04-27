@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { RouterLink, RouterView, useRoute } from "vue-router";
+import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import LanguageSwitcher from "@/components/LanguageSwitcher.vue";
 import { navItems } from "@/lib/nav-items";
+import { logout as logoutSession } from "@/services/auth";
 import {
+  LogOut,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -13,6 +15,7 @@ import {
 
 const { t } = useI18n();
 const route = useRoute();
+const router = useRouter();
 
 const isCollapsed = ref(false);
 const isMobileNavOpen = ref(false);
@@ -27,6 +30,12 @@ const openMobileNav = () => {
 
 const closeMobileNav = () => {
   isMobileNavOpen.value = false;
+};
+
+const handleLogout = async () => {
+  await logoutSession();
+  closeMobileNav();
+  router.replace({ name: "Login" });
 };
 
 const translateNavItem = (item: { text?: string; i18nKey?: string }) => {
@@ -172,6 +181,25 @@ watch(isMobileNavOpen, (open) => {
         <PanelLeftOpen class="h-4 w-4" />
       </button>
 
+      <div class="px-2 pb-2">
+        <button
+          type="button"
+          class="group flex w-full items-center rounded-md px-3 py-2 text-sm font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
+          :class="{ 'justify-center px-0': isCollapsed }"
+          :title="isCollapsed ? t('app.logout') : undefined"
+          :aria-label="t('app.logout')"
+          @click="handleLogout"
+        >
+          <LogOut class="h-4 w-4 flex-shrink-0 text-gray-400 group-hover:text-gray-600" />
+          <span
+            v-if="!isCollapsed"
+            class="ml-2.5 overflow-hidden whitespace-nowrap"
+          >
+            {{ t("app.logout") }}
+          </span>
+        </button>
+      </div>
+
       <LanguageSwitcher :is-collapsed="isCollapsed" />
     </aside>
 
@@ -272,7 +300,16 @@ watch(isMobileNavOpen, (open) => {
             </div>
           </nav>
 
-          <div class="border-t border-gray-100 p-3">
+          <div class="space-y-2 border-t border-gray-100 p-3">
+            <button
+              type="button"
+              class="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
+              :aria-label="t('app.logout')"
+              @click="handleLogout"
+            >
+              <LogOut class="h-4 w-4 flex-shrink-0 text-gray-400" />
+              <span class="truncate">{{ t("app.logout") }}</span>
+            </button>
             <LanguageSwitcher class="w-full" />
           </div>
         </aside>

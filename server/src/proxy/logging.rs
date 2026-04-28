@@ -1,4 +1,4 @@
-use super::orchestrator::RequestAttemptDraft;
+use super::runtime::attempt::RequestAttemptDraft;
 use crate::{
     cost::{CostLedger, CostRatingContext, CostSnapshot, UsageNormalization, rate_cost},
     database::{
@@ -2089,7 +2089,7 @@ mod tests {
         StreamingBodyWriter, response_capture_state_for_bundle, should_persist_response_bodies,
     };
     use crate::cost::UsageNormalization;
-    use crate::proxy::orchestrator::{
+    use crate::proxy::runtime::attempt::{
         CAPABILITY_MISMATCH_SKIPPED_ERROR, NO_CANDIDATE_AVAILABLE_ERROR, RequestAttemptDraft,
     };
     use crate::schema::enum_def::{

@@ -9,7 +9,7 @@ use serde::Serialize;
 use super::{
     ProxyError,
     auth::admit_api_key_request,
-    prepare::{
+    runtime::route_resolver::{
         ExecutionCandidate, candidate_supports_reasoning_preset,
         resolve_effective_reasoning_config, route_supports_reasoning_preset,
     },

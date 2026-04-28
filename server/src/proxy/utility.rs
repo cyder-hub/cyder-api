@@ -5,10 +5,12 @@ use axum::{body::Body, http::HeaderMap, response::Response};
 use super::{
     ProxyError,
     cancellation::ProxyCancellationContext,
-    core::ProxyExecutionPolicy,
-    orchestrator::{UtilityOrchestrationInput, orchestrate_utility},
-    prepare::ExecutionPlan,
     request::ParsedProxyRequest,
+    runtime::{
+        facade::{UtilityOrchestrationInput, execute_utility},
+        policy::RuntimeExecutionPolicy as ProxyExecutionPolicy,
+        route_resolver::ExecutionPlan,
+    },
 };
 use crate::{
     schema::enum_def::LlmApiType,
@@ -83,7 +85,7 @@ pub(super) async fn execute_utility_proxy(
         ..
     } = parsed_request;
 
-    orchestrate_utility(
+    execute_utility(
         app_state,
         UtilityOrchestrationInput {
             cancellation,

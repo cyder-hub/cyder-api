@@ -2519,6 +2519,58 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
         .len();
         assert_eq!(log_count_after, log_count_before);
 
+        let run = execute_gateway_replay(
+            &fixture.app_state,
+            log.id,
+            GatewayReplayExecuteParams {
+                replay_mode: Some(RequestReplayMode::Live),
+                confirm_live_request: true,
+                preview_fingerprint: Some(preview.preview_fingerprint.clone()),
+            },
+        )
+        .await
+        .expect("gateway replay live should skip open candidate and use fallback");
+        assert_eq!(run.status, RequestReplayStatus::Success);
+        assert_eq!(run.executed_provider_id, Some(fallback_provider.id));
+        assert_eq!(run.executed_model_id, Some(fallback_model.id));
+        let artifact = load_replay_artifact_for_run(&run)
+            .await
+            .expect("gateway replay live artifact should load");
+        let result = artifact.result.expect("artifact result should exist");
+        assert!(
+            result
+                .attempt_timeline
+                .iter()
+                .any(|attempt| attempt.provider_id == Some(fallback_provider.id)
+                    && attempt.attempt_status == RequestAttemptStatus::Success)
+        );
+
+        assert_eq!(skipped_upstream.captured_requests().await.len(), 0);
+        assert_eq!(fallback_upstream.captured_requests().await.len(), 2);
+        let skipped_health_after_execute = fixture
+            .app_state
+            .provider_circuit
+            .get_provider_health_snapshot(fixture.provider.id)
+            .await;
+        assert_eq!(
+            skipped_health_after_execute.status,
+            skipped_health_before.status
+        );
+        assert_eq!(
+            skipped_health_after_execute.half_open_probe_in_flight,
+            skipped_health_before.half_open_probe_in_flight
+        );
+        let log_count_after_execute = RequestLog::list_full(RequestLogQueryPayload {
+            provider_id: Some(fallback_provider.id),
+            page: Some(1),
+            page_size: Some(100),
+            ..Default::default()
+        })
+        .expect("request logs should be queryable")
+        .list
+        .len();
+        assert_eq!(log_count_after_execute, log_count_before);
+
         let _ = ModelRoute::delete(route.route.id);
         let _ = Model::delete(fallback_model.id);
         let _ = ProviderApiKey::delete(fallback_key.id);

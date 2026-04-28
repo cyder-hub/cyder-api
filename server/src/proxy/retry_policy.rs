@@ -1,7 +1,10 @@
 use std::time::Duration;
 
-use super::ProxyError;
 pub(super) use super::error::REQUEST_PATCH_CONFLICT_ERROR;
+use super::{
+    ProxyError,
+    runtime::attempt::{CAPABILITY_MISMATCH_SKIPPED_ERROR, NO_CANDIDATE_AVAILABLE_ERROR},
+};
 use crate::{config::RoutingResilienceConfig, schema::enum_def::SchedulerAction};
 
 pub(super) const PROVIDER_OPEN_SKIPPED_ERROR: &str = "provider_open_skipped";
@@ -57,13 +60,9 @@ impl RetryFailureKind<'_> {
         match self {
             RetryFailureKind::ProxyError(error) => error.error_code(),
             RetryFailureKind::ProviderGovernance(rejection) => rejection.error_code(),
-            RetryFailureKind::CapabilityMismatch => {
-                super::orchestrator::CAPABILITY_MISMATCH_SKIPPED_ERROR
-            }
+            RetryFailureKind::CapabilityMismatch => CAPABILITY_MISMATCH_SKIPPED_ERROR,
             RetryFailureKind::RequestPatchConflict => REQUEST_PATCH_CONFLICT_ERROR,
-            RetryFailureKind::NoCandidateAvailable => {
-                super::orchestrator::NO_CANDIDATE_AVAILABLE_ERROR
-            }
+            RetryFailureKind::NoCandidateAvailable => NO_CANDIDATE_AVAILABLE_ERROR,
         }
     }
 }

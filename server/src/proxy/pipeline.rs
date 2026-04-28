@@ -18,8 +18,8 @@ use super::{
     cancellation::ProxyCancellationContext,
     generation::{GenerationExecutionInput, execute_generation_proxy, extract_model_from_request},
     models::execute_models_listing,
-    prepare::build_execution_plan,
     request::parse_json_request,
+    runtime::route_resolver::build_execution_plan,
     util::build_request_snapshot,
     utility::{UtilityExecutionInput, UtilityOperation, execute_utility_proxy},
 };

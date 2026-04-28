@@ -6,10 +6,12 @@ use serde_json::Value;
 use super::{
     ProxyError,
     cancellation::ProxyCancellationContext,
-    core::ProxyExecutionPolicy,
-    orchestrator::{GenerationOrchestrationInput, orchestrate_generation},
-    prepare::ExecutionPlan,
     request::ParsedProxyRequest,
+    runtime::{
+        facade::{GenerationOrchestrationInput, execute_generation},
+        policy::RuntimeExecutionPolicy as ProxyExecutionPolicy,
+        route_resolver::ExecutionPlan,
+    },
 };
 use crate::{
     schema::enum_def::LlmApiType,
@@ -60,7 +62,7 @@ pub(super) async fn execute_generation_proxy(
         original_request_body,
     } = parsed_request;
 
-    orchestrate_generation(
+    execute_generation(
         app_state,
         GenerationOrchestrationInput {
             cancellation,

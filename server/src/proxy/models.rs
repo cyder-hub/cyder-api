@@ -9,9 +9,12 @@ use serde::Serialize;
 use super::{
     ProxyError,
     auth::admit_api_key_request,
-    runtime::route_resolver::{
-        ExecutionCandidate, candidate_supports_reasoning_preset,
-        resolve_effective_reasoning_config, route_supports_reasoning_preset,
+    runtime::{
+        api_key_lease::ApiKeyRequestLeaseFinalizer,
+        route_resolver::{
+            ExecutionCandidate, candidate_supports_reasoning_preset,
+            resolve_effective_reasoning_config, route_supports_reasoning_preset,
+        },
     },
     util::determine_target_api_type,
 };
@@ -66,21 +69,28 @@ pub(super) async fn execute_models_listing(
     api_key: Arc<CacheApiKey>,
     api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
-    let _api_key_concurrency_guard =
-        admit_api_key_request(&app_state, &api_key)
-            .await
-            .map_err(|e| {
-                error!("API key request admission failed for /models: {:?}", e);
-                e
-            })?;
-    let accessible_models = get_accessible_models(&app_state, &api_key).await?;
-    let response_body = render_models_response(api_type, &accessible_models)?;
+    let request_lease = admit_api_key_request(&app_state, &api_key)
+        .await
+        .map_err(|e| {
+            error!("API key request admission failed for /models: {:?}", e);
+            e
+        })?;
+    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
 
-    Ok(Response::builder()
-        .status(200)
-        .header("content-type", "application/json")
-        .body(Body::from(response_body))
-        .unwrap())
+    let result = async {
+        let accessible_models = get_accessible_models(&app_state, &api_key).await?;
+        let response_body = render_models_response(api_type, &accessible_models)?;
+
+        Ok(Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(Body::from(response_body))
+            .unwrap())
+    }
+    .await;
+
+    request_lease.release().await;
+    result
 }
 
 // --- Structs for /models endpoint response ---

@@ -29,15 +29,15 @@ use crate::{
         logging::RequestLogContext,
         provider_governance::record_provider_failure,
         runtime::{
+            api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::record_immediate_completion_if_allowed,
             policy::{RuntimeExecutionPolicy, RuntimeLogMode},
         },
         util::serialize_upstream_response_headers_for_log,
     },
     schema::enum_def::{LlmApiType, RequestStatus},
-    service::{
-        app_state::AppState, cache::types::CacheCostCatalogVersion, runtime::ApiKeyConcurrencyGuard,
-    },
+    service::runtime::ProviderCircuitProbePermit,
+    service::{app_state::AppState, cache::types::CacheCostCatalogVersion},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -85,7 +85,8 @@ pub(in crate::proxy) async fn send_materialized_request(
     model_str: String,
     use_proxy: bool,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
-    api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
+    mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
+    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     log_mode: RuntimeLogMode,
     execution_policy: RuntimeExecutionPolicy,
@@ -131,7 +132,14 @@ pub(in crate::proxy) async fn send_materialized_request(
             if execution_policy.records_provider_runtime()
                 && !matches!(proxy_error, ProxyError::ClientCancelled(_))
             {
-                record_provider_failure(&app_state, provider_id, &model_str, &proxy_error).await;
+                record_provider_failure(
+                    &app_state,
+                    provider_id,
+                    &model_str,
+                    &proxy_error,
+                    provider_circuit_permit.as_ref(),
+                )
+                .await;
             }
             let completed_at = Utc::now().timestamp_millis();
 
@@ -151,6 +159,7 @@ pub(in crate::proxy) async fn send_materialized_request(
                 execution_policy,
             )
             .await;
+            api_key_request_lease.release().await;
 
             return Err(ProxyRequestFailure {
                 error: proxy_error,
@@ -187,7 +196,8 @@ pub(in crate::proxy) async fn send_materialized_request(
             response,
             &url,
             cost_catalog_version,
-            api_key_concurrency_guard,
+            api_key_request_lease,
+            provider_circuit_permit,
             api_type,
             target_api_type,
             log_mode,
@@ -218,7 +228,8 @@ pub(in crate::proxy) async fn send_materialized_request(
             response,
             &url,
             cost_catalog_version.as_ref(),
-            api_key_concurrency_guard,
+            api_key_request_lease,
+            provider_circuit_permit,
             response_mode,
             log_mode,
             execution_policy,

@@ -92,6 +92,37 @@ export const zhDict = {
       activeProviders: "今日活跃渠道",
       activeModels: "活跃模型",
     },
+    runtimeState: {
+      title: "Runtime State 后端",
+      backend: {
+        memory: "Memory",
+        redis: "Redis",
+      },
+      deployment: {
+        single_instance: "单实例",
+        multi_instance: "多实例",
+      },
+      status: {
+        recommended: "推荐",
+        shared: "共享",
+        nonShared: "非共享",
+        degraded: "异常",
+      },
+      scope: {
+        runtime: "Runtime state",
+        catalog: "Catalog cache",
+      },
+      configured: "配置值",
+      effective: "实际值",
+      description: "{deployment}；runtime {runtime}；catalog cache {catalog}。",
+      recommendedHint: "Memory runtime state 是单实例部署的推荐默认值。",
+      sharedHint: "Runtime 治理状态通过 Redis 共享。",
+      nonSharedHint: "Runtime 治理状态仅保存在当前实例。",
+      fallback: "Runtime fallback：{reason}",
+      catalogFallback: "Catalog cache fallback：{reason}",
+      lastError: "后端错误：{error}",
+      lastChecked: "检查时间 {time}",
+    },
     alertGroups: {
       unstable: "当前异常渠道",
       topErrors: "最近错误最多",
@@ -285,6 +316,9 @@ export const zhDict = {
       noStatusCode: "暂无状态码分布",
       noCost: "暂无成本记录",
       noError: "暂无错误摘要",
+    },
+    backendStatus: {
+      itemError: "Runtime state 后端读取失败：{error}",
     },
   },
   app: {

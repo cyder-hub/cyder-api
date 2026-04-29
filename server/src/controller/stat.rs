@@ -1,7 +1,9 @@
 use crate::controller::provider_runtime::{
     ProviderRuntimeItem, ProviderRuntimeLevel, ProviderRuntimeWindow, build_provider_runtime_items,
+    runtime_backend_status_for_provider_items,
 };
 use crate::service::app_state::{AppState, StateRouter, create_state_router};
+use crate::service::runtime::RuntimeStateBackendOperatorStatus;
 use crate::{
     controller::error::BaseError,
     database::stat::{
@@ -22,6 +24,13 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Serialize, Debug)]
+pub struct SystemOverviewResponse {
+    #[serde(flatten)]
+    stats: SystemOverviewStats,
+    runtime_state_backend: RuntimeStateBackendOperatorStatus,
+}
 
 #[derive(Deserialize, Debug)]
 pub struct UsageStatsParams {
@@ -244,6 +253,7 @@ pub struct DashboardResponse {
     overview: DashboardOverviewStats,
     today: DashboardTodayStats,
     runtime: DashboardRuntimeSummary,
+    runtime_state_backend: RuntimeStateBackendOperatorStatus,
     alerts: DashboardAlerts,
     top_providers: Vec<DashboardTopProviderItem>,
     top_models: Vec<DashboardTopModelItem>,
@@ -260,6 +270,7 @@ pub struct DashboardResourcesSection {
     overview: DashboardOverviewStats,
     today: DashboardTodayStats,
     runtime: DashboardRuntimeSummary,
+    runtime_state_backend: RuntimeStateBackendOperatorStatus,
 }
 
 #[derive(Serialize, Debug)]
@@ -478,9 +489,15 @@ fn top_group_keys(items: &[UsageStatItem], metric: UsageMetric, top_n: usize) ->
         .collect()
 }
 
-async fn system_overview_stats() -> Result<HttpResult<SystemOverviewStats>, BaseError> {
+async fn system_overview_stats(
+    State(app_state): State<Arc<AppState>>,
+) -> Result<HttpResult<SystemOverviewResponse>, BaseError> {
     let stats = get_system_overview_stats()?;
-    Ok(HttpResult::new(stats))
+    let runtime_state_backend = app_state.runtime_state_backend_operator_status().await;
+    Ok(HttpResult::new(SystemOverviewResponse {
+        stats,
+        runtime_state_backend,
+    }))
 }
 
 async fn today_request_log_stats() -> Result<HttpResult<TodayRequestLogStats>, BaseError> {
@@ -701,12 +718,15 @@ async fn system_dashboard(
     let today = DashboardTodayStats::from(get_dashboard_today_stats()?);
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     let runtime = runtime_summary_from_items(&runtime_items);
+    let runtime_state_backend =
+        runtime_backend_status_for_provider_items(&app_state, &runtime_items).await;
     let alerts_section = build_dashboard_alerts_section(&runtime_items)?;
 
     Ok(HttpResult::new(DashboardResponse {
         overview,
         today,
         runtime,
+        runtime_state_backend,
         alerts: alerts_section.alerts,
         top_providers: alerts_section.top_providers,
         top_models: alerts_section.top_models,
@@ -730,11 +750,14 @@ async fn system_dashboard_resources(
     let today = DashboardTodayStats::from(get_dashboard_today_stats()?);
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     let runtime = runtime_summary_from_items(&runtime_items);
+    let runtime_state_backend =
+        runtime_backend_status_for_provider_items(&app_state, &runtime_items).await;
 
     Ok(HttpResult::new(DashboardResourcesSection {
         overview,
         today,
         runtime,
+        runtime_state_backend,
     }))
 }
 
@@ -904,6 +927,7 @@ mod tests {
     use crate::controller::provider_runtime::{
         ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeItem,
         ProviderRuntimeLevel, ProviderRuntimeStatusCodeStat, ProviderRuntimeWindow,
+        first_runtime_backend_read_error,
     };
     use serde_json::to_value;
     use std::collections::HashMap;
@@ -931,6 +955,8 @@ mod tests {
             last_failure_at: None,
             last_recovered_at: None,
             last_error: None,
+            runtime_state_backend_degraded: false,
+            runtime_state_backend_error: None,
             request_count,
             success_count: request_count.saturating_sub(error_count),
             error_count,
@@ -1048,6 +1074,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![3, 1, 2]
         );
+    }
+
+    #[test]
+    fn dashboard_runtime_backend_read_error_uses_item_error() {
+        let mut healthy = sample_runtime_item(1, ProviderRuntimeLevel::Healthy, 10, 0);
+        let mut degraded = sample_runtime_item(2, ProviderRuntimeLevel::Degraded, 0, 0);
+        degraded.runtime_state_backend_degraded = true;
+        degraded.runtime_state_backend_error = Some("redis snapshot failed".to_string());
+
+        assert_eq!(
+            first_runtime_backend_read_error(&[healthy.clone(), degraded]).as_deref(),
+            Some("redis snapshot failed")
+        );
+
+        healthy.runtime_state_backend_error = None;
+        assert!(first_runtime_backend_read_error(&[healthy]).is_none());
     }
 
     #[test]

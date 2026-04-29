@@ -8,8 +8,8 @@ use crate::service::cache::types::CacheApiKey;
 
 use super::memory_store::MemoryApiKeyRuntimeStore;
 use super::types::{
-    ApiKeyCompletionDelta, ApiKeyConcurrencyGuard, ApiKeyGovernanceAdmissionError,
-    ApiKeyGovernanceSnapshot, ApiKeyRollupBaseline, ApiKeyRuntimeStore, day_bucket_start,
+    ApiKeyCompletionDelta, ApiKeyGovernanceAdmissionError, ApiKeyGovernanceSnapshot,
+    ApiKeyRequestLease, ApiKeyRollupBaseline, ApiKeyRuntimeStore, day_bucket_start,
     month_bucket_start, normalize_currency_code,
 };
 
@@ -77,47 +77,38 @@ impl ApiKeyGovernanceService {
         Ok(baseline)
     }
 
-    async fn ensure_api_key_governance_usage_state(
+    async fn rollup_baseline_for_store(
         &self,
         api_key_id: i64,
         timestamp_ms: i64,
-    ) -> Result<(), AppStoreError> {
+    ) -> Result<ApiKeyRollupBaseline, AppStoreError> {
         let day_bucket = day_bucket_start(timestamp_ms);
         let month_bucket = month_bucket_start(timestamp_ms);
-        let snapshot = self.store.snapshot(api_key_id)?;
-        let needs_reload =
-            snapshot.day_bucket != Some(day_bucket) || snapshot.month_bucket != Some(month_bucket);
+        let snapshot = self.store.snapshot(api_key_id).await?;
 
-        if !needs_reload {
-            return Ok(());
+        if snapshot.day_bucket == Some(day_bucket) && snapshot.month_bucket == Some(month_bucket) {
+            return Ok(ApiKeyRollupBaseline {
+                day_bucket,
+                month_bucket,
+                ..ApiKeyRollupBaseline::default()
+            });
         }
 
-        let baseline = self
-            .load_api_key_rollup_baseline(api_key_id, timestamp_ms)
-            .await?;
-        self.store.apply_rollup_baseline(api_key_id, &baseline)
+        self.load_api_key_rollup_baseline(api_key_id, timestamp_ms)
+            .await
     }
 
-    pub fn try_acquire_api_key_concurrency(
-        &self,
-        api_key_id: i64,
-        max_concurrent_requests: Option<i32>,
-    ) -> Result<Option<ApiKeyConcurrencyGuard>, AppStoreError> {
-        self.store
-            .try_acquire_concurrency(api_key_id, max_concurrent_requests)
-    }
-
-    pub fn get_api_key_governance_snapshot(
+    pub async fn get_api_key_governance_snapshot(
         &self,
         api_key_id: i64,
     ) -> Result<ApiKeyGovernanceSnapshot, AppStoreError> {
-        self.store.snapshot(api_key_id)
+        self.store.snapshot(api_key_id).await
     }
 
-    pub fn list_api_key_governance_snapshots(
+    pub async fn list_api_key_governance_snapshots(
         &self,
     ) -> Result<Vec<ApiKeyGovernanceSnapshot>, AppStoreError> {
-        self.store.snapshots()
+        self.store.snapshots().await
     }
 
     pub async fn try_admit_api_key_governance(
@@ -125,7 +116,8 @@ impl ApiKeyGovernanceService {
         api_key: &CacheApiKey,
     ) -> Result<(), ApiKeyGovernanceAdmissionError> {
         let now_ms = Utc::now().timestamp_millis();
-        self.ensure_api_key_governance_usage_state(api_key.id, now_ms)
+        let baseline = self
+            .rollup_baseline_for_store(api_key.id, now_ms)
             .await
             .map_err(|err| ApiKeyGovernanceAdmissionError::Internal(err.to_string()))?;
 
@@ -133,28 +125,40 @@ impl ApiKeyGovernanceService {
         api_key_without_concurrency.max_concurrent_requests = None;
         let _ = self
             .store
-            .try_begin_request(&api_key_without_concurrency, now_ms)?;
+            .try_begin_request(&api_key_without_concurrency, now_ms, &baseline)
+            .await?;
         Ok(())
     }
 
     pub async fn try_begin_api_key_request(
         &self,
         api_key: &CacheApiKey,
-    ) -> Result<Option<ApiKeyConcurrencyGuard>, ApiKeyGovernanceAdmissionError> {
+    ) -> Result<Option<ApiKeyRequestLease>, ApiKeyGovernanceAdmissionError> {
         let now_ms = Utc::now().timestamp_millis();
-        self.ensure_api_key_governance_usage_state(api_key.id, now_ms)
+        let baseline = self
+            .rollup_baseline_for_store(api_key.id, now_ms)
             .await
             .map_err(|err| ApiKeyGovernanceAdmissionError::Internal(err.to_string()))?;
-        self.store.try_begin_request(api_key, now_ms)
+        self.store
+            .try_begin_request(api_key, now_ms, &baseline)
+            .await
+    }
+
+    pub async fn release_api_key_request_lease(
+        &self,
+        lease: ApiKeyRequestLease,
+    ) -> Result<(), AppStoreError> {
+        self.store.release_request_lease(&lease).await
     }
 
     pub async fn record_api_key_completion(
         &self,
         delta: &ApiKeyCompletionDelta,
     ) -> Result<(), AppStoreError> {
-        self.ensure_api_key_governance_usage_state(delta.api_key_id, delta.occurred_at)
+        let baseline = self
+            .rollup_baseline_for_store(delta.api_key_id, delta.occurred_at)
             .await?;
-        self.store.apply_completion(delta)
+        self.store.apply_completion(delta, &baseline).await
     }
 }
 
@@ -214,6 +218,7 @@ mod tests {
 
                 let snapshot = service
                     .get_api_key_governance_snapshot(api_key.id)
+                    .await
                     .expect("snapshot should load");
                 assert_eq!(snapshot.current_concurrency, 0);
                 assert_eq!(snapshot.current_minute_request_count, 1);
@@ -299,6 +304,7 @@ mod tests {
 
                 let snapshot = service
                     .get_api_key_governance_snapshot(api_key.id)
+                    .await
                     .expect("snapshot should load");
                 assert_eq!(snapshot.day_bucket, Some(day_bucket));
                 assert_eq!(snapshot.daily_request_count, 5);

@@ -25,6 +25,7 @@ use crate::{
         protocol_transform_error,
         provider_governance::{record_provider_failure, record_provider_success},
         runtime::{
+            api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{
                 finalize_cancelled_log_context, finalize_streaming_log_context,
                 record_streaming_completion_if_allowed,
@@ -35,7 +36,7 @@ use crate::{
     schema::enum_def::{LlmApiType, RequestStatus},
     service::{
         app_state::AppState, cache::types::CacheCostCatalogVersion,
-        runtime::ApiKeyConcurrencyGuard, transform::StreamTransformer,
+        runtime::ProviderCircuitProbePermit, transform::StreamTransformer,
     },
     utils::{sse::SseParser, storage::LogBodyCaptureState},
 };
@@ -170,7 +171,8 @@ pub(super) async fn handle_streaming_response(
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
-    api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
+    mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
+    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
     log_mode: RuntimeLogMode,
@@ -208,19 +210,29 @@ pub(super) async fn handle_streaming_response(
     let mut transformer = StreamTransformer::new(target_api_type, api_type);
     let mut parser = SseParser::new();
     let log_context_clone = log_context.clone();
-    let llm_body_writer = StreamingBodyWriter::new(LogBodyKind::LlmResponse, log_id)
-        .await
-        .map_err(|e| {
-            ProxyError::InternalError(format!("Failed to create LLM stream spool writer: {e}"))
-        })?;
-    let user_body_writer = StreamingBodyWriter::new(LogBodyKind::UserResponse, log_id)
-        .await
-        .map_err(|e| {
-            ProxyError::InternalError(format!("Failed to create user stream spool writer: {e}"))
-        })?;
+    let llm_body_writer = match StreamingBodyWriter::new(LogBodyKind::LlmResponse, log_id).await {
+        Ok(writer) => writer,
+        Err(e) => {
+            let proxy_error =
+                ProxyError::InternalError(format!("Failed to create LLM stream spool writer: {e}"));
+            api_key_request_lease.release().await;
+            return Err(proxy_error);
+        }
+    };
+    let user_body_writer = match StreamingBodyWriter::new(LogBodyKind::UserResponse, log_id).await {
+        Ok(writer) => writer,
+        Err(e) => {
+            let proxy_error = ProxyError::InternalError(format!(
+                "Failed to create user stream spool writer: {e}"
+            ));
+            api_key_request_lease.release().await;
+            return Err(proxy_error);
+        }
+    };
 
     let monitored_stream = async_stream::stream! {
-        let _api_key_concurrency_guard = api_key_concurrency_guard;
+        let mut api_key_request_lease = api_key_request_lease;
+        let provider_circuit_permit = provider_circuit_permit;
         let mut response_drop_guard = ResponseStreamCancellationGuard::new(
             Arc::clone(&app_state_clone),
             cancellation.clone(),
@@ -253,6 +265,7 @@ pub(super) async fn handle_streaming_response(
                             cost_catalog_version_clone.as_ref(),
                             execution_policy,
                         ).await;
+                        api_key_request_lease.release().await;
                         yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, proxy_error.to_string()));
                         return;
                     }
@@ -285,10 +298,12 @@ pub(super) async fn handle_streaming_response(
                                     provider_id,
                                     &model_str,
                                     &proxy_error,
+                                    provider_circuit_permit.as_ref(),
                                 )
                                 .await;
                             }
 
+                            api_key_request_lease.release().await;
                             yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut, stream_error_message));
                             return;
                         }
@@ -308,6 +323,7 @@ pub(super) async fn handle_streaming_response(
                                 cost_catalog_version_clone.as_ref(),
                                 execution_policy,
                             ).await;
+                            api_key_request_lease.release().await;
                             yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, cancellation.cancellation_error().await.to_string()));
                             return;
                         }
@@ -346,10 +362,12 @@ pub(super) async fn handle_streaming_response(
                                 provider_id,
                                 &model_str,
                                 &proxy_error,
+                                provider_circuit_permit.as_ref(),
                             )
                             .await;
                         }
 
+                        api_key_request_lease.release().await;
                         yield Err(std::io::Error::other(stream_error_message));
                         return;
                     }
@@ -409,10 +427,12 @@ pub(super) async fn handle_streaming_response(
                                 provider_id,
                                 &model_str,
                                 &proxy_error,
+                                provider_circuit_permit.as_ref(),
                             )
                             .await;
                         }
 
+                        api_key_request_lease.release().await;
                         yield Err(std::io::Error::other(stream_error_message));
                         return;
                     }
@@ -456,10 +476,12 @@ pub(super) async fn handle_streaming_response(
                             provider_id,
                             &model_str,
                             &proxy_error,
+                            provider_circuit_permit.as_ref(),
                         )
                         .await;
                     }
 
+                    api_key_request_lease.release().await;
                     yield Err(std::io::Error::other(stream_error_message));
                     return;
                 }
@@ -493,10 +515,12 @@ pub(super) async fn handle_streaming_response(
                         provider_id,
                         &model_str,
                         &proxy_error,
+                        provider_circuit_permit.as_ref(),
                     )
                     .await;
                 }
 
+                api_key_request_lease.release().await;
                 yield Err(std::io::Error::other(stream_error_message));
                 return;
             }
@@ -545,7 +569,13 @@ pub(super) async fn handle_streaming_response(
             )
             .await;
             if execution_policy.records_provider_runtime() {
-                record_provider_success(&app_state_clone, provider_id, &model_str).await;
+                record_provider_success(
+                    &app_state_clone,
+                    provider_id,
+                    &model_str,
+                    provider_circuit_permit.as_ref(),
+                )
+                .await;
             }
             if context.usage.is_none() {
                 crate::debug_event!(
@@ -563,6 +593,7 @@ pub(super) async fn handle_streaming_response(
                 is_stream = true,
                 latency_ms = llm_response_completed_at.saturating_sub(context.request_received_at),
             );
+            api_key_request_lease.release().await;
             response_drop_guard.disarm();
         } else {
             let proxy_error = classify_upstream_status(status_code, &[]);
@@ -580,8 +611,16 @@ pub(super) async fn handle_streaming_response(
             )
             .await;
             if execution_policy.records_provider_runtime() {
-                record_provider_failure(&app_state_clone, provider_id, &model_str, &proxy_error).await;
+                record_provider_failure(
+                    &app_state_clone,
+                    provider_id,
+                    &model_str,
+                    &proxy_error,
+                    provider_circuit_permit.as_ref(),
+                )
+                .await;
             }
+            api_key_request_lease.release().await;
             response_drop_guard.disarm();
         }
     };

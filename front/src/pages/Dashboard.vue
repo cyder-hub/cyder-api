@@ -148,6 +148,59 @@
                   </div>
                 </div>
 
+                <div class="mt-4 border-t border-gray-100 pt-4">
+                  <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div class="min-w-0">
+                      <p class="text-xs font-medium uppercase tracking-wide text-gray-500">
+                        {{ $t("dashboard.runtimeState.title") }}
+                      </p>
+                      <p class="mt-1 text-sm font-medium text-gray-900">
+                        {{ runtimeBackendHeadline }}
+                      </p>
+                      <p class="mt-1 text-xs text-gray-500">
+                        {{ runtimeBackendDetail }}
+                      </p>
+                      <dl class="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
+                        <div
+                          v-for="row in runtimeBackendRows"
+                          :key="`dashboard-backend-${row.key}`"
+                          class="min-w-0"
+                        >
+                          <dt class="font-medium uppercase tracking-wide text-gray-400">
+                            {{ row.label }}
+                          </dt>
+                          <dd class="mt-1 flex flex-wrap items-center gap-1.5 text-gray-600">
+                            <span>{{ $t("dashboard.runtimeState.configured") }}</span>
+                            <span class="font-mono font-medium text-gray-900">
+                              {{ row.configured }}
+                            </span>
+                            <span class="text-gray-300">/</span>
+                            <span>{{ $t("dashboard.runtimeState.effective") }}</span>
+                            <span
+                              class="font-mono font-medium"
+                              :class="row.changed ? 'text-amber-700' : 'text-gray-900'"
+                            >
+                              {{ row.effective }}
+                            </span>
+                          </dd>
+                        </div>
+                      </dl>
+                    </div>
+                    <Badge :class="runtimeBackendBadgeClass">
+                      {{ runtimeBackendBadgeLabel }}
+                    </Badge>
+                  </div>
+                  <p
+                    v-if="runtimeBackendStatus.last_error"
+                    class="mt-2 break-words text-xs text-red-600"
+                  >
+                    {{ $t("dashboard.runtimeState.lastError", { error: runtimeBackendStatus.last_error }) }}
+                  </p>
+                  <p class="mt-2 text-xs text-gray-400">
+                    {{ $t("dashboard.runtimeState.lastChecked", { time: formatDateTime(runtimeBackendStatus.last_checked_at) }) }}
+                  </p>
+                </div>
+
                 <div class="mt-4 flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row">
                   <Button variant="outline" class="w-full sm:w-auto" @click="goToRuntime">
                     {{ $t("dashboard.actions.viewRuntime") }}
@@ -488,6 +541,7 @@ import { Api } from "@/services/request";
 import type {
   DashboardRuntimeSummary,
   ProviderRuntimeLevel,
+  RuntimeStateBackendStatus,
 } from "@/store/types";
 import UsageChart from "@/components/UsageChart.vue";
 import { Badge } from "@/components/ui/badge";
@@ -495,6 +549,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatPriceFromNanos, formatTimestamp } from "@/lib/utils";
 import { createDashboardPageState } from "./dashboardPageState";
+import { buildRuntimeStateBackendRows } from "./dashboardViewModel";
 
 const { t: $t } = useI18n();
 const router = useRouter();
@@ -547,6 +602,16 @@ const runtimeWindowLabel = (window: DashboardRuntimeSummary["window"]) =>
 const runtimeLevelLabel = (level: ProviderRuntimeLevel) =>
   $t(`providerRuntimePage.status.${level}`);
 
+const backendLabel = (backend: RuntimeStateBackendStatus["runtime_effective_backend"]) =>
+  backend === "memory" || backend === "redis"
+    ? $t(`dashboard.runtimeState.backend.${backend}`)
+    : backend;
+
+const deploymentModeLabel = (mode: RuntimeStateBackendStatus["deployment_mode"]) =>
+  mode === "single_instance" || mode === "multi_instance"
+    ? $t(`dashboard.runtimeState.deployment.${mode}`)
+    : mode;
+
 const runtimeLevelBadgeClass = (level: ProviderRuntimeLevel) => {
   switch (level) {
     case "open":
@@ -576,6 +641,76 @@ const runtimeBadgeClass = (key: string) => {
       return "border-gray-200 bg-gray-50 text-gray-700 hover:bg-gray-50";
   }
 };
+
+const runtimeBackendStatus = computed(
+  () => resourcesSection.value.runtime_state_backend,
+);
+
+const runtimeBackendHeadline = computed(() =>
+  $t("dashboard.runtimeState.description", {
+    deployment: deploymentModeLabel(runtimeBackendStatus.value.deployment_mode),
+    runtime: backendLabel(runtimeBackendStatus.value.runtime_effective_backend),
+    catalog: backendLabel(runtimeBackendStatus.value.catalog_cache_backend),
+  }),
+);
+
+const runtimeBackendRows = computed(() =>
+  buildRuntimeStateBackendRows(runtimeBackendStatus.value).map((row) => ({
+    key: row.key,
+    label: $t(`dashboard.runtimeState.scope.${row.key}`),
+    configured: backendLabel(row.configured),
+    effective: backendLabel(row.effective),
+    changed: row.changed,
+  })),
+);
+
+const runtimeBackendBadgeLabel = computed(() => {
+  if (runtimeBackendStatus.value.runtime_degraded) {
+    return $t("dashboard.runtimeState.status.degraded");
+  }
+  if (
+    runtimeBackendStatus.value.deployment_mode === "single_instance" &&
+    runtimeBackendStatus.value.runtime_effective_backend === "memory" &&
+    !runtimeBackendStatus.value.fallback_reason
+  ) {
+    return $t("dashboard.runtimeState.status.recommended");
+  }
+  return runtimeBackendStatus.value.runtime_shared
+    ? $t("dashboard.runtimeState.status.shared")
+    : $t("dashboard.runtimeState.status.nonShared");
+});
+
+const runtimeBackendBadgeClass = computed(() => {
+  if (runtimeBackendStatus.value.runtime_degraded) {
+    return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
+  }
+  if (runtimeBackendStatus.value.runtime_shared) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-50";
+  }
+  return "border-gray-200 bg-gray-50 text-gray-700 hover:bg-gray-50";
+});
+
+const runtimeBackendDetail = computed(() => {
+  if (runtimeBackendStatus.value.fallback_reason) {
+    return $t("dashboard.runtimeState.fallback", {
+      reason: runtimeBackendStatus.value.fallback_reason,
+    });
+  }
+  if (runtimeBackendStatus.value.catalog_cache_fallback_reason) {
+    return $t("dashboard.runtimeState.catalogFallback", {
+      reason: runtimeBackendStatus.value.catalog_cache_fallback_reason,
+    });
+  }
+  if (
+    runtimeBackendStatus.value.deployment_mode === "single_instance" &&
+    runtimeBackendStatus.value.runtime_effective_backend === "memory"
+  ) {
+    return $t("dashboard.runtimeState.recommendedHint");
+  }
+  return runtimeBackendStatus.value.runtime_shared
+    ? $t("dashboard.runtimeState.sharedHint")
+    : $t("dashboard.runtimeState.nonSharedHint");
+});
 
 const kpiCards = computed(() => [
   {

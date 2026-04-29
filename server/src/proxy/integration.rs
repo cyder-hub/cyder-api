@@ -3,7 +3,7 @@ use crate::{
     config::CONFIG,
     database::{
         TestDbContext,
-        api_key::{ApiKey, CreateApiKeyPayload},
+        api_key::{ApiKey, CreateApiKeyPayload, UpdateApiKeyMetadataPayload},
         model::Model,
         model_route::{CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput},
         provider::{BootstrapProviderInput, Provider, ProviderApiKey},
@@ -2226,6 +2226,20 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
             Some("skipped-openai-model".to_string()),
         )
         .await;
+        ApiKey::update_metadata(
+            fixture.api_key.id,
+            &UpdateApiKeyMetadataPayload {
+                max_concurrent_requests: Some(Some(1)),
+                ..Default::default()
+            },
+        )
+        .expect("api key max concurrency should update");
+        fixture
+            .app_state
+            .catalog
+            .invalidate_api_key_id(fixture.api_key.id)
+            .await
+            .expect("api key cache should invalidate");
         let (fallback_provider, fallback_key, fallback_model) = create_provider_model(
             ProviderType::Openai,
             format!("{}/v1", fallback_upstream.base_url),
@@ -2261,8 +2275,13 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
             fixture
                 .app_state
                 .provider_circuit
-                .record_provider_failure(fixture.provider.id, "forced test failure".to_string())
-                .await;
+                .record_provider_failure(
+                    fixture.provider.id,
+                    "forced test failure".to_string(),
+                    None,
+                )
+                .await
+                .expect("forced provider failure should be recorded");
         }
 
         let request = build_json_request(
@@ -2284,6 +2303,14 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
         assert_eq!(body["choices"][0]["message"]["content"], "fallback ok");
         assert_eq!(skipped_upstream.captured_requests().await.len(), 0);
         assert_eq!(fallback_upstream.captured_requests().await.len(), 1);
+        let governance_snapshot = fixture
+            .app_state
+            .api_key_governance
+            .get_api_key_governance_snapshot(fixture.api_key.id)
+            .await
+            .expect("api key governance snapshot should load");
+        assert_eq!(governance_snapshot.current_concurrency, 0);
+        assert_eq!(governance_snapshot.daily_request_count, 2);
 
         let log = fixture.latest_log_for_provider(fallback_provider.id).await;
         assert_eq!(log.overall_status, RequestStatus::Success);
@@ -2417,8 +2444,13 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
             fixture
                 .app_state
                 .provider_circuit
-                .record_provider_failure(fixture.provider.id, "forced test failure".to_string())
-                .await;
+                .record_provider_failure(
+                    fixture.provider.id,
+                    "forced test failure".to_string(),
+                    None,
+                )
+                .await
+                .expect("forced provider failure should be recorded");
         }
 
         let request = build_json_request(
@@ -2443,7 +2475,8 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
             .app_state
             .provider_circuit
             .get_provider_health_snapshot(fixture.provider.id)
-            .await;
+            .await
+            .expect("provider health snapshot should load");
         assert_eq!(skipped_health_before.status, ProviderHealthStatus::Open);
         let log_count_before = RequestLog::list_full(RequestLogQueryPayload {
             provider_id: Some(fallback_provider.id),
@@ -2502,7 +2535,8 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
             .app_state
             .provider_circuit
             .get_provider_health_snapshot(fixture.provider.id)
-            .await;
+            .await
+            .expect("provider health snapshot should load");
         assert_eq!(skipped_health_after.status, skipped_health_before.status);
         assert_eq!(
             skipped_health_after.half_open_probe_in_flight,
@@ -2551,7 +2585,8 @@ fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without
             .app_state
             .provider_circuit
             .get_provider_health_snapshot(fixture.provider.id)
-            .await;
+            .await
+            .expect("provider health snapshot should load");
         assert_eq!(
             skipped_health_after_execute.status,
             skipped_health_before.status

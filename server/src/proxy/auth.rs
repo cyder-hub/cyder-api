@@ -8,7 +8,7 @@ use crate::{
     database::api_key::{ApiKey, hash_api_key},
     service::app_state::{AppState, AppStoreError},
     service::cache::types::{CacheApiKey, CacheModel, CacheProvider},
-    service::runtime::{ApiKeyConcurrencyGuard, ApiKeyGovernanceAdmissionError},
+    service::runtime::{ApiKeyGovernanceAdmissionError, ApiKeyRequestLease},
     utils::acl::ACL_EVALUATOR,
 };
 
@@ -192,7 +192,7 @@ pub async fn check_access_control(
 pub async fn admit_api_key_request(
     app_state: &Arc<AppState>,
     api_key: &CacheApiKey,
-) -> Result<Option<ApiKeyConcurrencyGuard>, ProxyError> {
+) -> Result<Option<ApiKeyRequestLease>, ProxyError> {
     match app_state
         .api_key_governance
         .try_begin_api_key_request(api_key)

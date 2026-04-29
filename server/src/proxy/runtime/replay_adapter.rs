@@ -16,7 +16,7 @@ use crate::{
         auth::check_access_control,
         cancellation::ProxyCancellationContext,
         logging::RequestLogContext,
-        provider_governance::preview_provider_request_allowed,
+        provider_governance::{ProviderGovernanceCheckError, preview_provider_request_allowed},
         runtime::{
             attempt::{
                 RequestAttemptDraft, classify_attempt_failure, classify_provider_governance_skip,
@@ -692,25 +692,28 @@ async fn materialize_gateway_replay_candidate(
     let now = Utc::now().timestamp_millis();
     attempt.started_at = Some(now);
 
-    if let Err(rejection) = preview_provider_request_allowed(app_state, candidate.provider.id).await
-    {
-        attempt.completed_at = Some(Utc::now().timestamp_millis());
-        attempt.started_at = None;
-        attempt.provider_api_key_id = None;
-        attempt.request_uri = None;
-        attempt.request_headers_json = None;
-        attempt.llm_request_body_for_log = None;
-        classify_provider_governance_skip(
-            &mut attempt,
-            rejection,
-            materialized.model_str.as_str(),
-            attempted_candidate_count,
-            next_candidate_available,
-        );
-        return Ok(GatewayReplayCandidateMaterialization::Rejected {
-            attempt,
-            error: rejection.to_proxy_error(materialized.model_str.as_str()),
-        });
+    match preview_provider_request_allowed(app_state, candidate.provider.id).await {
+        Ok(()) => {}
+        Err(ProviderGovernanceCheckError::Rejected(rejection)) => {
+            attempt.completed_at = Some(Utc::now().timestamp_millis());
+            attempt.started_at = None;
+            attempt.provider_api_key_id = None;
+            attempt.request_uri = None;
+            attempt.request_headers_json = None;
+            attempt.llm_request_body_for_log = None;
+            classify_provider_governance_skip(
+                &mut attempt,
+                rejection,
+                materialized.model_str.as_str(),
+                attempted_candidate_count,
+                next_candidate_available,
+            );
+            return Ok(GatewayReplayCandidateMaterialization::Rejected {
+                attempt,
+                error: rejection.to_proxy_error(materialized.model_str.as_str()),
+            });
+        }
+        Err(ProviderGovernanceCheckError::Backend(proxy_error)) => return Err(proxy_error),
     }
 
     attempt.completed_at = Some(now);

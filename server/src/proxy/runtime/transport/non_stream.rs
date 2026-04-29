@@ -22,6 +22,7 @@ use crate::{
         logging::{LoggedBody, RequestLogContext},
         provider_governance::{record_provider_failure, record_provider_success},
         runtime::{
+            api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{
                 append_response_transform_diagnostics, finalize_non_streaming_log_context,
                 record_immediate_completion_if_allowed,
@@ -34,7 +35,8 @@ use crate::{
     },
     schema::enum_def::RequestStatus,
     service::{
-        app_state::AppState, cache::types::CacheCostCatalogVersion, runtime::ApiKeyConcurrencyGuard,
+        app_state::AppState, cache::types::CacheCostCatalogVersion,
+        runtime::ProviderCircuitProbePermit,
     },
 };
 use tokio::sync::Mutex as TokioMutex;
@@ -48,7 +50,8 @@ pub(super) async fn handle_non_streaming_response(
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
-    _api_key_concurrency_guard: Option<ApiKeyConcurrencyGuard>,
+    mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
+    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     log_mode: RuntimeLogMode,
     execution_policy: RuntimeExecutionPolicy,
@@ -79,7 +82,14 @@ pub(super) async fn handle_non_streaming_response(
             if execution_policy.records_provider_runtime()
                 && !matches!(proxy_error, ProxyError::ClientCancelled(_))
             {
-                record_provider_failure(app_state, provider_id, &model_str, &proxy_error).await;
+                record_provider_failure(
+                    app_state,
+                    provider_id,
+                    &model_str,
+                    &proxy_error,
+                    provider_circuit_permit.as_ref(),
+                )
+                .await;
             }
             let completed_at = Utc::now().timestamp_millis();
 
@@ -97,6 +107,7 @@ pub(super) async fn handle_non_streaming_response(
                 Some(LoggedBody::from_bytes(Bytes::from(proxy_error.to_string())));
             record_immediate_completion_if_allowed(app_state, &context, log_mode, execution_policy)
                 .await;
+            api_key_request_lease.release().await;
 
             return Err(ProxyRequestFailure {
                 error: proxy_error,
@@ -147,7 +158,13 @@ pub(super) async fn handle_non_streaming_response(
         record_immediate_completion_if_allowed(app_state, &context, log_mode, execution_policy)
             .await;
         if execution_policy.records_provider_runtime() {
-            record_provider_success(app_state, provider_id, &model_str).await;
+            record_provider_success(
+                app_state,
+                provider_id,
+                &model_str,
+                provider_circuit_permit.as_ref(),
+            )
+            .await;
         }
         crate::debug_event!(
             "proxy.request_succeeded_debug",
@@ -159,6 +176,7 @@ pub(super) async fn handle_non_streaming_response(
         );
 
         let response = response_builder.body(Body::from(final_body)).unwrap();
+        api_key_request_lease.release().await;
         Ok(ProxyRequestOutcome {
             response,
             log_context: context.clone(),
@@ -191,8 +209,16 @@ pub(super) async fn handle_non_streaming_response(
             .await;
         let proxy_error = classify_upstream_status(status_code, &decompressed_body);
         if execution_policy.records_provider_runtime() {
-            record_provider_failure(app_state, provider_id, &model_str, &proxy_error).await;
+            record_provider_failure(
+                app_state,
+                provider_id,
+                &model_str,
+                &proxy_error,
+                provider_circuit_permit.as_ref(),
+            )
+            .await;
         }
+        api_key_request_lease.release().await;
         Err(ProxyRequestFailure {
             error: proxy_error,
             log_context: context.clone(),

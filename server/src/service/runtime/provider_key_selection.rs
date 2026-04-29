@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+use cyder_tools::log::warn;
 use rand::{Rng, rng};
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -6,6 +8,10 @@ use crate::schema::enum_def::ProviderApiKeyMode;
 use crate::service::app_state::AppStoreError;
 use crate::service::cache::types::CacheProviderKey;
 use crate::service::catalog::CatalogService;
+
+mod redis_cursor_store;
+
+pub use redis_cursor_store::RedisProviderKeyCursorStore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupItemSelectionStrategy {
@@ -22,21 +28,24 @@ impl From<ProviderApiKeyMode> for GroupItemSelectionStrategy {
     }
 }
 
+#[async_trait]
+pub trait ProviderKeyCursorStore: Send + Sync {
+    async fn next_queue_index(
+        &self,
+        provider_id: i64,
+        key_count: usize,
+    ) -> Result<usize, AppStoreError>;
+
+    async fn reset_provider_cursor(&self, provider_id: i64) -> Result<(), AppStoreError>;
+}
+
+/// Single-instance default and dev/test backend; not a multi-instance correctness backend.
 #[derive(Default)]
-struct QueueCursorStore {
+pub struct MemoryProviderKeyCursorStore {
     inner: tokio::sync::Mutex<HashMap<i64, usize>>,
 }
 
-impl QueueCursorStore {
-    async fn next_queue_index(&self, provider_id: i64, key_count: usize) -> usize {
-        let mut state = self.inner.lock().await;
-        Self::advance_queue_cursor(&mut state, provider_id, key_count)
-    }
-
-    async fn reset_provider_cursor(&self, provider_id: i64) {
-        self.inner.lock().await.remove(&provider_id);
-    }
-
+impl MemoryProviderKeyCursorStore {
     fn advance_queue_cursor(
         state: &mut HashMap<i64, usize>,
         provider_id: i64,
@@ -49,19 +58,57 @@ impl QueueCursorStore {
     }
 }
 
+#[async_trait]
+impl ProviderKeyCursorStore for MemoryProviderKeyCursorStore {
+    async fn next_queue_index(
+        &self,
+        provider_id: i64,
+        key_count: usize,
+    ) -> Result<usize, AppStoreError> {
+        if key_count == 0 {
+            return Err(AppStoreError::CacheError(
+                "provider key cursor requires at least one key".to_string(),
+            ));
+        }
+
+        let mut state = self.inner.lock().await;
+        Ok(Self::advance_queue_cursor(
+            &mut state,
+            provider_id,
+            key_count,
+        ))
+    }
+
+    async fn reset_provider_cursor(&self, provider_id: i64) -> Result<(), AppStoreError> {
+        self.inner.lock().await.remove(&provider_id);
+        Ok(())
+    }
+}
+
 pub struct ProviderKeySelector {
     catalog: Arc<CatalogService>,
-    queue_cursor_store: QueueCursorStore,
+    queue_cursor_store: Arc<dyn ProviderKeyCursorStore>,
 }
 
 impl ProviderKeySelector {
-    pub async fn new(catalog: Arc<CatalogService>) -> Arc<Self> {
+    pub async fn new(
+        catalog: Arc<CatalogService>,
+        queue_cursor_store: Arc<dyn ProviderKeyCursorStore>,
+    ) -> Arc<Self> {
         let selector = Arc::new(Self {
             catalog,
-            queue_cursor_store: QueueCursorStore::default(),
+            queue_cursor_store,
         });
         selector.install_invalidation_hook().await;
         selector
+    }
+
+    pub async fn new_memory(catalog: Arc<CatalogService>) -> Arc<Self> {
+        Self::new(
+            catalog,
+            Arc::new(MemoryProviderKeyCursorStore::default()) as Arc<dyn ProviderKeyCursorStore>,
+        )
+        .await
     }
 
     async fn install_invalidation_hook(self: &Arc<Self>) {
@@ -71,7 +118,12 @@ impl ProviderKeySelector {
                 let selector = selector.upgrade();
                 Box::pin(async move {
                     if let Some(selector) = selector {
-                        selector.reset_provider_cursor(provider_id).await;
+                        if let Err(err) = selector.reset_provider_cursor(provider_id).await {
+                            warn!(
+                                "failed to reset provider key cursor after provider api key invalidation: provider_id={}, error={}",
+                                provider_id, err
+                            );
+                        }
                     }
                 })
             }))
@@ -93,7 +145,7 @@ impl ProviderKeySelector {
                     let index = self
                         .queue_cursor_store
                         .next_queue_index(provider_id, keys.len())
-                        .await;
+                        .await?;
                     Ok(keys.get(index).cloned().map(Arc::new))
                 }
                 GroupItemSelectionStrategy::Random => {
@@ -104,10 +156,10 @@ impl ProviderKeySelector {
         }
     }
 
-    pub async fn reset_provider_cursor(&self, provider_id: i64) {
+    pub async fn reset_provider_cursor(&self, provider_id: i64) -> Result<(), AppStoreError> {
         self.queue_cursor_store
             .reset_provider_cursor(provider_id)
-            .await;
+            .await
     }
 
     fn random_index(key_count: usize) -> usize {
@@ -116,44 +168,14 @@ impl ProviderKeySelector {
 }
 
 #[cfg(test)]
+mod contract_tests;
+
+#[cfg(test)]
 mod tests {
-    use super::{GroupItemSelectionStrategy, QueueCursorStore};
+    use super::GroupItemSelectionStrategy;
     use crate::schema::enum_def::ProviderApiKeyMode;
     use crate::service::catalog::CatalogService;
-    use std::collections::HashMap;
     use std::sync::Arc;
-
-    #[test]
-    fn queue_strategy_advances_and_wraps() {
-        let mut state = HashMap::new();
-
-        assert_eq!(QueueCursorStore::advance_queue_cursor(&mut state, 42, 3), 0);
-        assert_eq!(QueueCursorStore::advance_queue_cursor(&mut state, 42, 3), 1);
-        assert_eq!(QueueCursorStore::advance_queue_cursor(&mut state, 42, 3), 2);
-        assert_eq!(QueueCursorStore::advance_queue_cursor(&mut state, 42, 3), 0);
-    }
-
-    #[test]
-    fn queue_strategy_handles_key_count_changes() {
-        let mut state = HashMap::new();
-
-        assert_eq!(QueueCursorStore::advance_queue_cursor(&mut state, 7, 4), 0);
-        assert_eq!(QueueCursorStore::advance_queue_cursor(&mut state, 7, 4), 1);
-        assert_eq!(QueueCursorStore::advance_queue_cursor(&mut state, 7, 2), 0);
-        assert_eq!(QueueCursorStore::advance_queue_cursor(&mut state, 7, 2), 1);
-    }
-
-    #[tokio::test]
-    async fn resetting_provider_cursor_restarts_queue_from_zero() {
-        let store = QueueCursorStore::default();
-
-        assert_eq!(store.next_queue_index(9, 3).await, 0);
-        assert_eq!(store.next_queue_index(9, 3).await, 1);
-
-        store.reset_provider_cursor(9).await;
-
-        assert_eq!(store.next_queue_index(9, 3).await, 0);
-    }
 
     #[test]
     fn provider_api_key_mode_maps_to_runtime_strategy() {
@@ -170,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn invalidation_hook_does_not_retain_selector() {
         let catalog = Arc::new(CatalogService::new(true).await);
-        let selector = super::ProviderKeySelector::new(Arc::clone(&catalog)).await;
+        let selector = super::ProviderKeySelector::new_memory(Arc::clone(&catalog)).await;
         let weak_selector = Arc::downgrade(&selector);
 
         assert_eq!(Arc::strong_count(&selector), 1);

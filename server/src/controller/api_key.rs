@@ -265,7 +265,8 @@ async fn get_api_key_runtime_snapshot(
     ApiKey::get_by_id(id)?;
     let snapshot = app_state
         .api_key_governance
-        .get_api_key_governance_snapshot(id)?;
+        .get_api_key_governance_snapshot(id)
+        .await?;
     Ok(HttpResult::new(snapshot.into()))
 }
 
@@ -274,7 +275,8 @@ async fn list_api_key_runtime_snapshots(
 ) -> Result<HttpResult<Vec<ApiKeyRuntimeSnapshotResponse>>, BaseError> {
     let snapshots = app_state
         .api_key_governance
-        .list_api_key_governance_snapshots()?
+        .list_api_key_governance_snapshots()
+        .await?
         .into_iter()
         .map(Into::into)
         .collect();

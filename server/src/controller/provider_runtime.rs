@@ -17,7 +17,9 @@ use crate::database::provider_runtime::{
 };
 use crate::schema::enum_def::ProviderType;
 use crate::service::app_state::{AppState, StateRouter, create_state_router};
-use crate::service::runtime::{ProviderHealthSnapshot, ProviderHealthStatus};
+use crate::service::runtime::{
+    ProviderHealthSnapshot, ProviderHealthStatus, RuntimeStateBackendOperatorStatus,
+};
 use crate::utils::HttpResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +172,8 @@ pub struct ProviderRuntimeItem {
     pub last_failure_at: Option<i64>,
     pub last_recovered_at: Option<i64>,
     pub last_error: Option<String>,
+    pub runtime_state_backend_degraded: bool,
+    pub runtime_state_backend_error: Option<String>,
     pub request_count: i64,
     pub success_count: i64,
     pub error_count: i64,
@@ -195,6 +199,7 @@ pub struct ProviderRuntimeSummary {
     pub no_traffic_count: i64,
     pub window: ProviderRuntimeWindow,
     pub generated_at: i64,
+    pub runtime_state_backend: RuntimeStateBackendOperatorStatus,
 }
 
 fn map_health_status(status: ProviderHealthStatus) -> ProviderRuntimeHealthStatus {
@@ -239,7 +244,12 @@ fn compute_runtime_level(
     request_count: i64,
     error_count: i64,
     avg_total_latency_ms: Option<f64>,
+    runtime_state_backend_degraded: bool,
 ) -> ProviderRuntimeLevel {
+    if runtime_state_backend_degraded {
+        return ProviderRuntimeLevel::Degraded;
+    }
+
     match health_status {
         ProviderHealthStatus::Open => ProviderRuntimeLevel::Open,
         ProviderHealthStatus::HalfOpen => ProviderRuntimeLevel::HalfOpen,
@@ -327,6 +337,41 @@ fn search_matches(provider_name: &str, provider_key: &str, search: &str) -> bool
         || provider_key.to_ascii_lowercase().contains(&needle)
 }
 
+pub(crate) fn first_runtime_backend_read_error(
+    runtime_items: &[ProviderRuntimeItem],
+) -> Option<String> {
+    runtime_items
+        .iter()
+        .find_map(|item| item.runtime_state_backend_error.clone())
+}
+
+pub(crate) fn merge_runtime_backend_item_read_errors(
+    status: &mut RuntimeStateBackendOperatorStatus,
+    runtime_items: &[ProviderRuntimeItem],
+    checked_at: i64,
+) {
+    if let Some(error) = first_runtime_backend_read_error(runtime_items) {
+        status.runtime_degraded = true;
+        if status.last_error.is_none() {
+            status.last_error = Some(error);
+            status.last_checked_at = checked_at;
+        }
+    }
+}
+
+pub(crate) async fn runtime_backend_status_for_provider_items(
+    app_state: &Arc<AppState>,
+    runtime_items: &[ProviderRuntimeItem],
+) -> RuntimeStateBackendOperatorStatus {
+    let mut status = app_state.runtime_state_backend_operator_status().await;
+    merge_runtime_backend_item_read_errors(
+        &mut status,
+        runtime_items,
+        Utc::now().timestamp_millis(),
+    );
+    status
+}
+
 pub(crate) async fn build_provider_runtime_items(
     app_state: &Arc<AppState>,
     window: ProviderRuntimeWindow,
@@ -370,10 +415,23 @@ pub(crate) async fn build_provider_runtime_items(
 
     let mut items = Vec::with_capacity(providers.len());
     for provider in providers {
-        let health_snapshot = app_state
-            .provider_circuit
-            .get_provider_health_snapshot(provider.id)
-            .await;
+        let (health_snapshot, runtime_state_backend_degraded, runtime_state_backend_error) =
+            app_state
+                .provider_circuit
+                .get_provider_health_snapshot(provider.id)
+                .await
+                .map(|snapshot| (snapshot, false, None))
+                .unwrap_or_else(|err| {
+                    let error = err.to_string();
+                    crate::warn_event!(
+                        "runtime_state.read_failed",
+                        read_model = "provider_runtime",
+                        component = "provider_circuit",
+                        provider_id = provider.id,
+                        error = &error,
+                    );
+                    (ProviderHealthSnapshot::default(), true, Some(error))
+                });
         let runtime_aggregate =
             aggregate_map
                 .get(&provider.id)
@@ -397,6 +455,7 @@ pub(crate) async fn build_provider_runtime_items(
             runtime_aggregate.request_count,
             runtime_aggregate.error_count,
             runtime_aggregate.avg_total_latency_ms,
+            runtime_state_backend_degraded,
         );
 
         let mut item = ProviderRuntimeItem {
@@ -422,6 +481,8 @@ pub(crate) async fn build_provider_runtime_items(
             last_failure_at: health_snapshot.last_failure_at,
             last_recovered_at: health_snapshot.last_recovered_at,
             last_error: health_snapshot.last_error.clone(),
+            runtime_state_backend_degraded,
+            runtime_state_backend_error,
             request_count: runtime_aggregate.request_count,
             success_count: runtime_aggregate.success_count,
             error_count: runtime_aggregate.error_count,
@@ -529,6 +590,7 @@ async fn summary_provider_runtime(
 ) -> Result<HttpResult<ProviderRuntimeSummary>, BaseError> {
     let items =
         build_provider_runtime_items(&app_state, params.window, params.only_enabled).await?;
+    let runtime_state_backend = runtime_backend_status_for_provider_items(&app_state, &items).await;
     let mut summary = ProviderRuntimeSummary {
         total_provider_count: items.len() as i64,
         healthy_count: 0,
@@ -538,6 +600,7 @@ async fn summary_provider_runtime(
         no_traffic_count: 0,
         window: params.window,
         generated_at: Utc::now().timestamp_millis(),
+        runtime_state_backend,
     };
 
     for item in items {
@@ -569,7 +632,7 @@ mod tests {
         ProviderRuntimeLevel, ProviderRuntimeSortField, ProviderRuntimeStatusCodeStat,
         ProviderRuntimeStatusFilter, ProviderRuntimeSummaryParams, ProviderRuntimeWindow,
         SortDirection, build_last_error_summary, compute_runtime_level,
-        sort_provider_runtime_items,
+        merge_runtime_backend_item_read_errors, sort_provider_runtime_items,
     };
     use crate::database::provider_runtime::{
         ProviderRuntimeAggregate, ProviderRuntimeStatusCodeCount,
@@ -607,15 +670,15 @@ mod tests {
     #[test]
     fn compute_runtime_level_handles_open_half_open_and_no_traffic() {
         assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Open, 10, 10, Some(20_000.0)),
+            compute_runtime_level(ProviderHealthStatus::Open, 10, 10, Some(20_000.0), false),
             ProviderRuntimeLevel::Open
         );
         assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::HalfOpen, 10, 0, Some(100.0)),
+            compute_runtime_level(ProviderHealthStatus::HalfOpen, 10, 0, Some(100.0), false),
             ProviderRuntimeLevel::HalfOpen
         );
         assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 0, 0, None),
+            compute_runtime_level(ProviderHealthStatus::Healthy, 0, 0, None, false),
             ProviderRuntimeLevel::NoTraffic
         );
     }
@@ -623,16 +686,24 @@ mod tests {
     #[test]
     fn compute_runtime_level_marks_high_error_rate_and_latency_as_degraded() {
         assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 5, 1, Some(500.0)),
+            compute_runtime_level(ProviderHealthStatus::Healthy, 5, 1, Some(500.0), false),
             ProviderRuntimeLevel::Degraded
         );
         assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 3, 0, Some(10_000.0)),
+            compute_runtime_level(ProviderHealthStatus::Healthy, 3, 0, Some(10_000.0), false),
             ProviderRuntimeLevel::Degraded
         );
         assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 10, 1, Some(500.0)),
+            compute_runtime_level(ProviderHealthStatus::Healthy, 10, 1, Some(500.0), false),
             ProviderRuntimeLevel::Healthy
+        );
+    }
+
+    #[test]
+    fn compute_runtime_level_marks_runtime_state_backend_error_as_degraded() {
+        assert_eq!(
+            compute_runtime_level(ProviderHealthStatus::Healthy, 0, 0, None, true),
+            ProviderRuntimeLevel::Degraded
         );
     }
 
@@ -771,6 +842,44 @@ mod tests {
         assert!(params.only_enabled);
     }
 
+    #[test]
+    fn runtime_backend_status_merge_marks_item_read_errors_degraded() {
+        let mut status = crate::service::runtime::RuntimeStateBackendOperatorStatus {
+            deployment_mode: "single_instance".to_string(),
+            catalog_cache_backend: "memory".to_string(),
+            catalog_cache_configured_backend: "memory".to_string(),
+            catalog_cache_effective_backend: "memory".to_string(),
+            catalog_cache_fallback_reason: None,
+            runtime_configured_backend: "redis".to_string(),
+            runtime_effective_backend: "redis".to_string(),
+            runtime_shared: true,
+            runtime_degraded: false,
+            fallback_reason: None,
+            last_error: None,
+            last_checked_at: 1,
+        };
+        let mut item = sample_item(
+            1,
+            "redis-backed",
+            ProviderRuntimeLevel::Healthy,
+            0,
+            0,
+            None,
+            None,
+        );
+        item.runtime_state_backend_degraded = true;
+        item.runtime_state_backend_error = Some("provider circuit snapshot failed".to_string());
+
+        merge_runtime_backend_item_read_errors(&mut status, &[item], 2);
+
+        assert!(status.runtime_degraded);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("provider circuit snapshot failed")
+        );
+        assert_eq!(status.last_checked_at, 2);
+    }
+
     fn sample_item(
         provider_id: i64,
         provider_name: &str,
@@ -797,6 +906,8 @@ mod tests {
             last_failure_at: last_error_at,
             last_recovered_at: None,
             last_error: None,
+            runtime_state_backend_degraded: false,
+            runtime_state_backend_error: None,
             request_count,
             success_count: request_count.saturating_sub(error_count),
             error_count,

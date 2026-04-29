@@ -43,6 +43,60 @@
         </Card>
       </div>
 
+      <div
+        v-if="runtimeBackendStatus"
+        class="rounded-lg border px-4 py-3"
+        :class="runtimeBackendPanelClass"
+      >
+        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div class="min-w-0">
+            <p class="text-xs font-medium uppercase tracking-wide text-gray-500">
+              {{ $t("dashboard.runtimeState.title") }}
+            </p>
+            <p class="mt-1 text-sm font-medium text-gray-900">
+              {{ runtimeBackendHeadline }}
+            </p>
+            <p class="mt-1 text-xs text-gray-500">
+              {{ runtimeBackendDetail }}
+            </p>
+            <dl class="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-2">
+              <div
+                v-for="row in runtimeBackendRows"
+                :key="`provider-runtime-backend-${row.key}`"
+                class="min-w-0"
+              >
+                <dt class="font-medium uppercase tracking-wide text-gray-400">
+                  {{ row.label }}
+                </dt>
+                <dd class="mt-1 flex flex-wrap items-center gap-1.5 text-gray-600">
+                  <span>{{ $t("dashboard.runtimeState.configured") }}</span>
+                  <span class="font-mono font-medium text-gray-900">
+                    {{ row.configured }}
+                  </span>
+                  <span class="text-gray-300">/</span>
+                  <span>{{ $t("dashboard.runtimeState.effective") }}</span>
+                  <span
+                    class="font-mono font-medium"
+                    :class="row.changed ? 'text-amber-700' : 'text-gray-900'"
+                  >
+                    {{ row.effective }}
+                  </span>
+                </dd>
+              </div>
+            </dl>
+          </div>
+          <Badge :class="runtimeBackendBadgeClass">
+            {{ runtimeBackendBadgeLabel }}
+          </Badge>
+        </div>
+        <p
+          v-if="runtimeBackendStatus.last_error"
+          class="mt-2 break-words text-xs text-red-600"
+        >
+          {{ $t("dashboard.runtimeState.lastError", { error: runtimeBackendStatus.last_error }) }}
+        </p>
+      </div>
+
       <div class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
         <div class="flex flex-col gap-3 border-b border-gray-100 pb-4 md:flex-row md:items-start md:justify-between">
           <div class="min-w-0">
@@ -254,6 +308,17 @@
           </CardHeader>
 
           <CardContent class="space-y-4 px-4 pb-4 sm:px-5">
+            <div
+              v-if="item.runtime_state_backend_degraded && item.runtime_state_backend_error"
+              class="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs text-orange-700"
+            >
+              {{
+                $t("providerRuntimePage.backendStatus.itemError", {
+                  error: item.runtime_state_backend_error,
+                })
+              }}
+            </div>
+
             <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div
                 v-for="metric in buildPrimaryMetrics(item)"
@@ -374,12 +439,14 @@ import {
 } from "@/components/ui/select";
 import { formatPriceFromNanos, formatTimestamp } from "@/lib/utils";
 import { useProviderRuntimeStore } from "@/store/providerRuntimeStore";
+import { buildRuntimeStateBackendRows } from "./dashboardViewModel";
 import type {
   ProviderRuntimeItem,
   ProviderRuntimeLevel,
   ProviderRuntimeSortField,
   ProviderRuntimeStatusFilter,
   ProviderRuntimeWindow,
+  RuntimeStateBackendStatus,
   SortDirection,
 } from "@/store/types";
 
@@ -470,6 +537,112 @@ const activeFilterSummary = computed(() => {
   }
 
   return parts.join(" · ");
+});
+
+const runtimeBackendStatus = computed(
+  () => store.summary?.runtime_state_backend ?? null,
+);
+
+function backendLabel(backend: RuntimeStateBackendStatus["runtime_effective_backend"]) {
+  return backend === "memory" || backend === "redis"
+    ? $t(`dashboard.runtimeState.backend.${backend}`)
+    : backend;
+}
+
+function deploymentModeLabel(mode: RuntimeStateBackendStatus["deployment_mode"]) {
+  return mode === "single_instance" || mode === "multi_instance"
+    ? $t(`dashboard.runtimeState.deployment.${mode}`)
+    : mode;
+}
+
+const runtimeBackendHeadline = computed(() => {
+  const status = runtimeBackendStatus.value;
+  if (!status) {
+    return "";
+  }
+  return $t("dashboard.runtimeState.description", {
+    deployment: deploymentModeLabel(status.deployment_mode),
+    runtime: backendLabel(status.runtime_effective_backend),
+    catalog: backendLabel(status.catalog_cache_backend),
+  });
+});
+
+const runtimeBackendRows = computed(() => {
+  const status = runtimeBackendStatus.value;
+  if (!status) {
+    return [];
+  }
+  return buildRuntimeStateBackendRows(status).map((row) => ({
+    key: row.key,
+    label: $t(`dashboard.runtimeState.scope.${row.key}`),
+    configured: backendLabel(row.configured),
+    effective: backendLabel(row.effective),
+    changed: row.changed,
+  }));
+});
+
+const runtimeBackendBadgeLabel = computed(() => {
+  const status = runtimeBackendStatus.value;
+  if (!status) {
+    return "";
+  }
+  if (status.runtime_degraded) {
+    return $t("dashboard.runtimeState.status.degraded");
+  }
+  if (
+    status.deployment_mode === "single_instance" &&
+    status.runtime_effective_backend === "memory" &&
+    !status.fallback_reason
+  ) {
+    return $t("dashboard.runtimeState.status.recommended");
+  }
+  return status.runtime_shared
+    ? $t("dashboard.runtimeState.status.shared")
+    : $t("dashboard.runtimeState.status.nonShared");
+});
+
+const runtimeBackendBadgeClass = computed(() => {
+  const status = runtimeBackendStatus.value;
+  if (status?.runtime_degraded) {
+    return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
+  }
+  if (status?.runtime_shared) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-50";
+  }
+  return "border-gray-200 bg-white text-gray-700 hover:bg-white";
+});
+
+const runtimeBackendPanelClass = computed(() => {
+  if (runtimeBackendStatus.value?.runtime_degraded) {
+    return "border-red-200 bg-red-50";
+  }
+  return "border-gray-200 bg-white";
+});
+
+const runtimeBackendDetail = computed(() => {
+  const status = runtimeBackendStatus.value;
+  if (!status) {
+    return "";
+  }
+  if (status.fallback_reason) {
+    return $t("dashboard.runtimeState.fallback", {
+      reason: status.fallback_reason,
+    });
+  }
+  if (status.catalog_cache_fallback_reason) {
+    return $t("dashboard.runtimeState.catalogFallback", {
+      reason: status.catalog_cache_fallback_reason,
+    });
+  }
+  if (
+    status.deployment_mode === "single_instance" &&
+    status.runtime_effective_backend === "memory"
+  ) {
+    return $t("dashboard.runtimeState.recommendedHint");
+  }
+  return status.runtime_shared
+    ? $t("dashboard.runtimeState.sharedHint")
+    : $t("dashboard.runtimeState.nonSharedHint");
 });
 
 function getSingleQueryValue(value: QueryValue): string | undefined {

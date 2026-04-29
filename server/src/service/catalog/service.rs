@@ -37,6 +37,13 @@ type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
 type ProviderApiKeysInvalidationHook =
     Arc<dyn Fn(i64) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CatalogCacheBackendStatus {
+    pub configured_backend: CacheBackendType,
+    pub effective_backend: CacheBackendType,
+    pub fallback_reason: Option<String>,
+}
+
 pub struct CatalogService {
     api_key_cache: CacheRepo<CacheApiKey>,
     model_route_cache: CacheRepo<CacheModelRoute>,
@@ -49,6 +56,7 @@ pub struct CatalogService {
     model_request_patch_rules_cache: CacheRepo<Vec<CacheRequestPatchRule>>,
     model_effective_request_patches_cache: CacheRepo<CacheResolvedModelRequestPatches>,
     cost_catalog_version_cache: CacheRepo<CacheCostCatalogVersion>,
+    backend_status: CatalogCacheBackendStatus,
     negative_cache_ttl: Duration,
     provider_api_keys_invalidation_hook:
         tokio::sync::RwLock<Option<ProviderApiKeysInvalidationHook>>,
@@ -56,46 +64,30 @@ pub struct CatalogService {
 
 impl CatalogService {
     pub async fn new(force_memory_cache: bool) -> Self {
-        let negative_cache_ttl = CONFIG.cache.negative_ttl();
-        let ttl = Some(CONFIG.cache.ttl());
+        let negative_cache_ttl = CONFIG.cache.catalog_negative_ttl();
+        let ttl = Some(CONFIG.cache.catalog_ttl());
         let redis_pool = if force_memory_cache {
             None
         } else {
             redis::get_pool().await
         };
-        let use_redis = !force_memory_cache
-            && CONFIG.cache.backend == CacheBackendType::Redis
-            && redis_pool.is_some();
+        let configured_backend = CONFIG.cache.catalog_backend();
+        let backend_status = select_catalog_cache_backend_status(
+            configured_backend.clone(),
+            force_memory_cache,
+            CONFIG.redis.is_some(),
+            redis_pool.is_some(),
+        );
+        let use_redis = backend_status.effective_backend == CacheBackendType::Redis;
 
-        if use_redis {
-            crate::info_event!(
-                "cache.backend_selected",
-                configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
-                effective_backend = "redis",
-            );
-        } else if force_memory_cache {
-            crate::info_event!(
-                "cache.backend_selected",
-                configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
-                effective_backend = "memory",
-                fallback_reason = "test_isolation",
-            );
-        } else if CONFIG.cache.backend == CacheBackendType::Redis {
-            crate::info_event!(
-                "cache.backend_selected",
-                configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
-                effective_backend = "memory",
-                fallback_reason = "redis_unavailable",
-            );
-        } else {
-            crate::info_event!(
-                "cache.backend_selected",
-                configured_backend = cache_backend_name(CONFIG.cache.backend.clone()),
-                effective_backend = "memory",
-            );
-        }
+        crate::info_event!(
+            "cache.catalog.backend_selected",
+            configured_backend = cache_backend_name(backend_status.configured_backend.clone()),
+            effective_backend = cache_backend_name(backend_status.effective_backend.clone()),
+            fallback_reason = &backend_status.fallback_reason,
+        );
 
-        let pool = redis_pool.as_ref();
+        let pool = if use_redis { redis_pool.as_ref() } else { None };
 
         Self {
             api_key_cache: Self::create_repo(ttl, pool),
@@ -109,9 +101,14 @@ impl CatalogService {
             model_request_patch_rules_cache: Self::create_repo(ttl, pool),
             model_effective_request_patches_cache: Self::create_repo(ttl, pool),
             cost_catalog_version_cache: Self::create_repo(ttl, pool),
+            backend_status,
             negative_cache_ttl,
             provider_api_keys_invalidation_hook: tokio::sync::RwLock::new(None),
         }
+    }
+
+    pub fn backend_status(&self) -> CatalogCacheBackendStatus {
+        self.backend_status.clone()
     }
 
     pub(crate) async fn set_provider_api_keys_invalidation_hook(
@@ -139,7 +136,8 @@ impl CatalogService {
                 .expect("Redis config should exist if pool exists");
             let key_prefix = format!(
                 "{}{}",
-                redis_config.key_prefix, CONFIG.cache.redis.key_prefix
+                redis_config.key_prefix,
+                CONFIG.cache.catalog_redis_key_prefix()
             );
             let backend = RedisCacheBackend::new(pool.clone(), key_prefix);
             Arc::new(CacheRepository::new(backend, ttl))
@@ -1479,9 +1477,48 @@ impl CatalogService {
     }
 }
 
+fn select_catalog_cache_backend_status(
+    configured_backend: CacheBackendType,
+    force_memory_cache: bool,
+    redis_configured: bool,
+    redis_available: bool,
+) -> CatalogCacheBackendStatus {
+    if force_memory_cache {
+        return CatalogCacheBackendStatus {
+            configured_backend,
+            effective_backend: CacheBackendType::Memory,
+            fallback_reason: Some("test_isolation".to_string()),
+        };
+    }
+
+    match configured_backend {
+        CacheBackendType::Memory => CatalogCacheBackendStatus {
+            configured_backend,
+            effective_backend: CacheBackendType::Memory,
+            fallback_reason: None,
+        },
+        CacheBackendType::Redis if redis_available => CatalogCacheBackendStatus {
+            configured_backend,
+            effective_backend: CacheBackendType::Redis,
+            fallback_reason: None,
+        },
+        CacheBackendType::Redis if !redis_configured => CatalogCacheBackendStatus {
+            configured_backend,
+            effective_backend: CacheBackendType::Memory,
+            fallback_reason: Some("redis_config_missing".to_string()),
+        },
+        CacheBackendType::Redis => CatalogCacheBackendStatus {
+            configured_backend,
+            effective_backend: CacheBackendType::Memory,
+            fallback_reason: Some("redis_unavailable".to_string()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CatalogService;
+    use super::{CatalogService, select_catalog_cache_backend_status};
+    use crate::config::CacheBackendType;
     use crate::database::TestDbContext;
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::provider::{NewProvider, Provider};
@@ -1547,6 +1584,58 @@ mod tests {
         )
         .expect("model seed should succeed");
         CacheModel::from(model)
+    }
+
+    #[test]
+    fn catalog_cache_backend_status_uses_memory_when_memory_is_configured() {
+        let status =
+            select_catalog_cache_backend_status(CacheBackendType::Memory, false, true, true);
+
+        assert_eq!(status.configured_backend, CacheBackendType::Memory);
+        assert_eq!(status.effective_backend, CacheBackendType::Memory);
+        assert!(status.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn catalog_cache_backend_status_exposes_missing_redis_config_fallback() {
+        let status =
+            select_catalog_cache_backend_status(CacheBackendType::Redis, false, false, false);
+
+        assert_eq!(status.configured_backend, CacheBackendType::Redis);
+        assert_eq!(status.effective_backend, CacheBackendType::Memory);
+        assert_eq!(
+            status.fallback_reason.as_deref(),
+            Some("redis_config_missing")
+        );
+    }
+
+    #[test]
+    fn catalog_cache_backend_status_exposes_unavailable_redis_fallback() {
+        let status =
+            select_catalog_cache_backend_status(CacheBackendType::Redis, false, true, false);
+
+        assert_eq!(status.configured_backend, CacheBackendType::Redis);
+        assert_eq!(status.effective_backend, CacheBackendType::Memory);
+        assert_eq!(status.fallback_reason.as_deref(), Some("redis_unavailable"));
+    }
+
+    #[test]
+    fn catalog_cache_backend_status_uses_redis_when_configured_and_available() {
+        let status =
+            select_catalog_cache_backend_status(CacheBackendType::Redis, false, true, true);
+
+        assert_eq!(status.configured_backend, CacheBackendType::Redis);
+        assert_eq!(status.effective_backend, CacheBackendType::Redis);
+        assert!(status.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn catalog_cache_backend_status_exposes_test_isolation() {
+        let status = select_catalog_cache_backend_status(CacheBackendType::Redis, true, true, true);
+
+        assert_eq!(status.configured_backend, CacheBackendType::Redis);
+        assert_eq!(status.effective_backend, CacheBackendType::Memory);
+        assert_eq!(status.fallback_reason.as_deref(), Some("test_isolation"));
     }
 
     fn preset(

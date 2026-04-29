@@ -1,3 +1,44 @@
+function buildDefaultRuntimeStateBackendStatus() {
+  return {
+    deployment_mode: "single_instance",
+    catalog_cache_backend: "memory",
+    catalog_cache_configured_backend: "memory",
+    catalog_cache_effective_backend: "memory",
+    catalog_cache_fallback_reason: null,
+    runtime_configured_backend: "memory",
+    runtime_effective_backend: "memory",
+    runtime_shared: false,
+    runtime_degraded: false,
+    fallback_reason: null,
+    last_error: null,
+    last_checked_at: 0,
+  };
+}
+
+export function buildRuntimeStateBackendRows(status) {
+  const catalogConfigured =
+    status.catalog_cache_configured_backend ?? status.catalog_cache_backend;
+  const catalogEffective =
+    status.catalog_cache_effective_backend ?? status.catalog_cache_backend;
+
+  return [
+    {
+      key: "runtime",
+      configured: status.runtime_configured_backend,
+      effective: status.runtime_effective_backend,
+      fallback_reason: status.fallback_reason,
+      changed: status.runtime_configured_backend !== status.runtime_effective_backend,
+    },
+    {
+      key: "catalog",
+      configured: catalogConfigured,
+      effective: catalogEffective,
+      fallback_reason: status.catalog_cache_fallback_reason,
+      changed: catalogConfigured !== catalogEffective,
+    },
+  ];
+}
+
 export function buildEmptyDashboard() {
   return {
     overview: {
@@ -34,6 +75,7 @@ export function buildEmptyDashboard() {
       open_count: 0,
       no_traffic_count: 0,
     },
+    runtime_state_backend: buildDefaultRuntimeStateBackendStatus(),
     alerts: {
       open_providers: [],
       half_open_providers: [],
@@ -61,6 +103,7 @@ export function buildEmptyDashboardResourcesSection() {
     overview: dashboard.overview,
     today: dashboard.today,
     runtime: dashboard.runtime,
+    runtime_state_backend: dashboard.runtime_state_backend,
   };
 }
 

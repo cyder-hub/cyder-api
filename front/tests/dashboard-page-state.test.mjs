@@ -57,6 +57,10 @@ function buildResourcesSection(overrides = {}) {
       healthy_count: 3,
       ...overrides.runtime,
     },
+    runtime_state_backend: {
+      ...buildEmptyDashboardResourcesSection().runtime_state_backend,
+      ...overrides.runtime_state_backend,
+    },
   };
 }
 
@@ -151,6 +155,10 @@ test("dashboard page state loads all sections and derives alert-focused state", 
   assert.equal(state.alertsError.value, null);
   assert.equal(state.kpiSection.value.today.request_count, 42);
   assert.equal(state.resourcesSection.value.overview.provider_count, 5);
+  assert.equal(
+    state.resourcesSection.value.runtime_state_backend.runtime_effective_backend,
+    "memory",
+  );
   assert.equal(state.alertsSection.value.top_providers.length, 1);
   assert.equal(state.showCostHotspots.value, true);
   assert.deepEqual(
@@ -161,6 +169,32 @@ test("dashboard page state loads all sections and derives alert-focused state", 
     ],
   );
   assert.equal(state.isRefreshing.value, false);
+});
+
+test("dashboard page state preserves catalog configured effective fallback status", async () => {
+  const state = createDashboardPageState({
+    api: createApiMock({
+      getSystemDashboardKpi: async () => buildKpiSection(),
+      getSystemDashboardResources: async () =>
+        buildResourcesSection({
+          runtime_state_backend: {
+            catalog_cache_backend: "memory",
+            catalog_cache_configured_backend: "redis",
+            catalog_cache_effective_backend: "memory",
+            catalog_cache_fallback_reason: "redis_config_missing",
+          },
+        }),
+      getSystemDashboardAlerts: async () => buildAlertsSection(),
+    }),
+  });
+
+  await state.fetchDashboard();
+
+  const backend = state.resourcesSection.value.runtime_state_backend;
+  assert.equal(backend.catalog_cache_backend, "memory");
+  assert.equal(backend.catalog_cache_configured_backend, "redis");
+  assert.equal(backend.catalog_cache_effective_backend, "memory");
+  assert.equal(backend.catalog_cache_fallback_reason, "redis_config_missing");
 });
 
 test("dashboard page state preserves stable empty sections without errors", async () => {

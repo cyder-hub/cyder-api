@@ -1,3 +1,4 @@
+pub(crate) mod api_key_lease;
 pub(crate) mod attempt;
 pub(crate) mod candidate_filter;
 pub(crate) mod credential;

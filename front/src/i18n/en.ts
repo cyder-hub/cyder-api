@@ -93,6 +93,39 @@ export const enDict = {
       activeProviders: "Active Providers Today",
       activeModels: "Active Models",
     },
+    runtimeState: {
+      title: "Runtime State Backend",
+      backend: {
+        memory: "Memory",
+        redis: "Redis",
+      },
+      deployment: {
+        single_instance: "Single instance",
+        multi_instance: "Multi-instance",
+      },
+      status: {
+        recommended: "Recommended",
+        shared: "Shared",
+        nonShared: "Non-shared",
+        degraded: "Degraded",
+      },
+      scope: {
+        runtime: "Runtime state",
+        catalog: "Catalog cache",
+      },
+      configured: "Configured",
+      effective: "Effective",
+      description:
+        "{deployment}; runtime {runtime}; catalog cache {catalog}.",
+      recommendedHint:
+        "Memory runtime state is the recommended default for single-instance deployments.",
+      sharedHint: "Runtime governance state is shared through Redis.",
+      nonSharedHint: "Runtime governance state is local to this instance.",
+      fallback: "Runtime fallback: {reason}",
+      catalogFallback: "Catalog cache fallback: {reason}",
+      lastError: "Backend error: {error}",
+      lastChecked: "Checked {time}",
+    },
     alertGroups: {
       unstable: "Unstable Providers",
       topErrors: "Top Error Providers",
@@ -290,6 +323,9 @@ export const enDict = {
       noStatusCode: "No status code breakdown",
       noCost: "No cost data",
       noError: "No error summary",
+    },
+    backendStatus: {
+      itemError: "Runtime state backend read failed: {error}",
     },
   },
   app: {

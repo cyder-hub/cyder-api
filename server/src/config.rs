@@ -1,6 +1,36 @@
 use rand::{Rng, distr::Alphanumeric, rng};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{fs, path::Path, sync::LazyLock, time::Duration};
+
+// --- START DEPLOYMENT CONFIG ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentMode {
+    SingleInstance,
+    MultiInstance,
+}
+
+impl Default for DeploymentMode {
+    fn default() -> Self {
+        Self::SingleInstance
+    }
+}
+
+impl DeploymentMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeploymentMode::SingleInstance => "single_instance",
+            DeploymentMode::MultiInstance => "multi_instance",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeploymentConfig {
+    #[serde(default)]
+    pub mode: DeploymentMode,
+}
 
 // --- START REDIS CONFIG ---
 
@@ -27,7 +57,7 @@ impl Default for RedisConfig {
 // --- START CACHE CONFIG ---
 
 /// Cache backend type
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheBackendType {
     Memory,
@@ -37,6 +67,15 @@ pub enum CacheBackendType {
 impl Default for CacheBackendType {
     fn default() -> Self {
         CacheBackendType::Memory
+    }
+}
+
+impl CacheBackendType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CacheBackendType::Memory => "memory",
+            CacheBackendType::Redis => "redis",
+        }
     }
 }
 
@@ -55,9 +94,9 @@ impl Default for CacheRedisConfig {
     }
 }
 
-/// Overall cache configuration
+/// Catalog cache domain configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheConfig {
+pub struct CacheCatalogConfig {
     #[serde(default)]
     pub backend: CacheBackendType,
     #[serde(default = "default_ttl_seconds")]
@@ -68,7 +107,7 @@ pub struct CacheConfig {
     pub redis: CacheRedisConfig,
 }
 
-impl Default for CacheConfig {
+impl Default for CacheCatalogConfig {
     fn default() -> Self {
         Self {
             backend: CacheBackendType::default(),
@@ -79,13 +118,167 @@ impl Default for CacheConfig {
     }
 }
 
-impl CacheConfig {
+impl CacheCatalogConfig {
     pub fn ttl(&self) -> Duration {
         Duration::from_secs(self.ttl)
     }
 
     pub fn negative_ttl(&self) -> Duration {
         Duration::from_secs(self.negative_ttl)
+    }
+}
+
+/// Overall cache configuration. Legacy `cache.backend` / `ttl` / `negative_ttl`
+/// / `redis` are accepted as shorthand for `cache.catalog.*` during
+/// deserialization, but serialization emits only the domain-based shape.
+#[derive(Debug, Clone, Serialize)]
+pub struct CacheConfig {
+    #[serde(default)]
+    pub catalog: CacheCatalogConfig,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            catalog: CacheCatalogConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCacheConfig {
+    #[serde(default)]
+    backend: Option<CacheBackendType>,
+    #[serde(default)]
+    ttl: Option<u64>,
+    #[serde(default)]
+    negative_ttl: Option<u64>,
+    #[serde(default)]
+    redis: Option<CacheRedisConfig>,
+    #[serde(default)]
+    catalog: Option<CacheCatalogConfig>,
+}
+
+impl<'de> Deserialize<'de> for CacheConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawCacheConfig::deserialize(deserializer)?;
+        if let Some(catalog) = raw.catalog {
+            return Ok(Self { catalog });
+        }
+
+        Ok(Self {
+            catalog: CacheCatalogConfig {
+                backend: raw.backend.unwrap_or_default(),
+                ttl: raw.ttl.unwrap_or_else(default_ttl_seconds),
+                negative_ttl: raw
+                    .negative_ttl
+                    .unwrap_or_else(default_negative_ttl_seconds),
+                redis: raw.redis.unwrap_or_default(),
+            },
+        })
+    }
+}
+
+impl CacheConfig {
+    pub fn catalog_backend(&self) -> CacheBackendType {
+        self.catalog.backend.clone()
+    }
+
+    pub fn catalog_ttl(&self) -> Duration {
+        self.catalog.ttl()
+    }
+
+    pub fn catalog_negative_ttl(&self) -> Duration {
+        self.catalog.negative_ttl()
+    }
+
+    pub fn catalog_redis_key_prefix(&self) -> &str {
+        &self.catalog.redis.key_prefix
+    }
+}
+
+// --- START RUNTIME STATE CONFIG ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeStateBackendType {
+    Memory,
+    Redis,
+}
+
+impl Default for RuntimeStateBackendType {
+    fn default() -> Self {
+        Self::Memory
+    }
+}
+
+impl RuntimeStateBackendType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeStateBackendType::Memory => "memory",
+            RuntimeStateBackendType::Redis => "redis",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStateRedisConfig {
+    #[serde(default = "default_runtime_state_redis_key_prefix")]
+    pub key_prefix: String,
+    #[serde(default = "default_api_key_concurrency_lease_ttl_seconds")]
+    pub api_key_concurrency_lease_ttl_seconds: u64,
+    #[serde(default = "default_provider_circuit_probe_lease_ttl_seconds")]
+    pub provider_circuit_probe_lease_ttl_seconds: u64,
+    #[serde(default = "default_runtime_state_ttl_seconds")]
+    pub state_ttl_seconds: u64,
+}
+
+impl Default for RuntimeStateRedisConfig {
+    fn default() -> Self {
+        Self {
+            key_prefix: default_runtime_state_redis_key_prefix(),
+            api_key_concurrency_lease_ttl_seconds: default_api_key_concurrency_lease_ttl_seconds(),
+            provider_circuit_probe_lease_ttl_seconds:
+                default_provider_circuit_probe_lease_ttl_seconds(),
+            state_ttl_seconds: default_runtime_state_ttl_seconds(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStateConfig {
+    #[serde(default)]
+    pub backend: RuntimeStateBackendType,
+    #[serde(default)]
+    pub redis: RuntimeStateRedisConfig,
+    #[serde(default)]
+    pub fallback_to_memory: bool,
+}
+
+impl Default for RuntimeStateConfig {
+    fn default() -> Self {
+        Self {
+            backend: RuntimeStateBackendType::default(),
+            redis: RuntimeStateRedisConfig::default(),
+            fallback_to_memory: false,
+        }
+    }
+}
+
+impl RuntimeStateConfig {
+    pub fn api_key_concurrency_lease_ttl(&self) -> Duration {
+        Duration::from_secs(self.redis.api_key_concurrency_lease_ttl_seconds)
+    }
+
+    pub fn provider_circuit_probe_lease_ttl(&self) -> Duration {
+        Duration::from_secs(self.redis.provider_circuit_probe_lease_ttl_seconds)
+    }
+
+    pub fn state_ttl(&self) -> Duration {
+        Duration::from_secs(self.redis.state_ttl_seconds)
     }
 }
 
@@ -330,6 +523,22 @@ fn default_cache_redis_key_prefix() -> String {
     "cache:".to_string()
 }
 
+fn default_runtime_state_redis_key_prefix() -> String {
+    "runtime:".to_string()
+}
+
+fn default_api_key_concurrency_lease_ttl_seconds() -> u64 {
+    900
+}
+
+fn default_provider_circuit_probe_lease_ttl_seconds() -> u64 {
+    600
+}
+
+fn default_runtime_state_ttl_seconds() -> u64 {
+    30 * 24 * 60 * 60
+}
+
 fn default_redis_url() -> String {
     "redis://127.0.0.1:6379/".to_string()
 }
@@ -363,6 +572,8 @@ pub struct FinalConfig {
     pub db_pool_size: u32,
     pub redis: Option<RedisConfig>,
     #[serde(default)]
+    pub deployment: DeploymentConfig,
+    #[serde(default)]
     pub proxy_request: ProxyRequestConfig,
     #[serde(default)]
     pub provider_governance: ProviderGovernanceConfig,
@@ -371,7 +582,66 @@ pub struct FinalConfig {
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
+    pub runtime_state: RuntimeStateConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
+}
+
+impl FinalConfig {
+    pub fn deployment_mode(&self) -> &DeploymentMode {
+        &self.deployment.mode
+    }
+
+    pub fn uses_postgres_database(&self) -> bool {
+        self.db_url
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("postgres")
+    }
+
+    pub fn validate_deployment_runtime_state(&self) -> Result<(), String> {
+        let mut errors = Vec::new();
+
+        if self.deployment.mode == DeploymentMode::MultiInstance {
+            if !self.uses_postgres_database() {
+                errors.push(
+                    "deployment.mode=multi_instance requires a shared PostgreSQL database"
+                        .to_string(),
+                );
+            }
+            if self.cache.catalog_backend() != CacheBackendType::Redis {
+                errors.push(
+                    "deployment.mode=multi_instance requires cache.catalog.backend=redis"
+                        .to_string(),
+                );
+            }
+            if self.runtime_state.backend != RuntimeStateBackendType::Redis {
+                errors.push(
+                    "deployment.mode=multi_instance requires runtime_state.backend=redis"
+                        .to_string(),
+                );
+            }
+            if self.runtime_state.fallback_to_memory {
+                errors.push(
+                    "deployment.mode=multi_instance requires runtime_state.fallback_to_memory=false"
+                        .to_string(),
+                );
+            }
+        }
+
+        if self.runtime_state.backend == RuntimeStateBackendType::Redis
+            && self.redis.is_none()
+            && !self.runtime_state.fallback_to_memory
+        {
+            errors.push("runtime_state.backend=redis requires redis configuration".to_string());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
 }
 
 fn generate_random_string(len: usize) -> String {
@@ -420,10 +690,12 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
         replay_response_capture_max_bytes: default_replay_response_capture_max_bytes(),
         db_pool_size: 5,
         redis: None,
+        deployment: DeploymentConfig::default(),
         proxy_request: ProxyRequestConfig::default(),
         provider_governance: ProviderGovernanceConfig::default(),
         routing_resilience: RoutingResilienceConfig::default(),
         cache: CacheConfig::default(),
+        runtime_state: RuntimeStateConfig::default(),
         storage: StorageConfig::default(),
     };
 
@@ -467,27 +739,28 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
 
     builder = builder.add_source(env_config);
 
-    let mut final_config: FinalConfig = builder
+    let final_config: FinalConfig = builder
         .build()
         .expect("Failed to build user and environment merged config")
         .try_deserialize()
         .expect("Failed to deserialize final configuration from merged tree");
 
-    if final_config.redis.is_none() && final_config.cache.backend == CacheBackendType::Redis {
-        final_config.cache.backend = CacheBackendType::Memory;
-    }
+    finalize_loaded_config(final_config)
+});
 
+fn finalize_loaded_config(mut final_config: FinalConfig) -> FinalConfig {
     if final_config.storage.driver == StorageDriver::S3 && final_config.storage.s3.is_none() {
         final_config.storage.driver = StorageDriver::Local;
     }
 
     final_config
-});
+}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        FinalConfig, ProviderGovernanceConfig, ProxyRequestConfig, RoutingResilienceConfig,
+        CacheBackendType, DeploymentMode, FinalConfig, ProviderGovernanceConfig,
+        ProxyRequestConfig, RoutingResilienceConfig, RuntimeStateBackendType,
         default_replay_response_capture_max_bytes,
     };
 
@@ -581,6 +854,387 @@ routing_resilience:
                 .map(|value| value.as_secs()),
             Some(600)
         );
+    }
+
+    #[test]
+    fn final_config_deserializes_runtime_state_and_catalog_cache_domains() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: postgres://cyder:cyder@localhost/cyder
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+redis:
+  url: redis://127.0.0.1:6379/
+  pool_size: 10
+  key_prefix: "cyder:"
+deployment:
+  mode: multi_instance
+cache:
+  catalog:
+    backend: redis
+    ttl: 120
+    negative_ttl: 10
+    redis:
+      key_prefix: "catalog:"
+runtime_state:
+  backend: redis
+  fallback_to_memory: false
+  redis:
+    key_prefix: "runtime:"
+    api_key_concurrency_lease_ttl_seconds: 11
+    provider_circuit_probe_lease_ttl_seconds: 22
+    state_ttl_seconds: 33
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        assert_eq!(config.deployment.mode, DeploymentMode::MultiInstance);
+        assert_eq!(config.cache.catalog_backend(), CacheBackendType::Redis);
+        assert_eq!(config.cache.catalog_ttl().as_secs(), 120);
+        assert_eq!(config.cache.catalog_negative_ttl().as_secs(), 10);
+        assert_eq!(config.cache.catalog_redis_key_prefix(), "catalog:");
+        assert_eq!(config.runtime_state.backend, RuntimeStateBackendType::Redis);
+        assert_eq!(
+            config
+                .runtime_state
+                .api_key_concurrency_lease_ttl()
+                .as_secs(),
+            11
+        );
+        assert_eq!(
+            config
+                .runtime_state
+                .provider_circuit_probe_lease_ttl()
+                .as_secs(),
+            22
+        );
+        assert_eq!(config.runtime_state.state_ttl().as_secs(), 33);
+        assert!(config.validate_deployment_runtime_state().is_ok());
+    }
+
+    #[test]
+    fn cache_config_accepts_legacy_backend_shorthand() {
+        let yaml = r#"
+backend: redis
+ttl: 120
+negative_ttl: 10
+redis:
+  key_prefix: "legacy-cache:"
+"#;
+
+        let cache: super::CacheConfig = serde_yaml::from_str(yaml).expect("cache should parse");
+        assert_eq!(cache.catalog_backend(), CacheBackendType::Redis);
+        assert_eq!(cache.catalog_ttl().as_secs(), 120);
+        assert_eq!(cache.catalog_negative_ttl().as_secs(), 10);
+        assert_eq!(cache.catalog_redis_key_prefix(), "legacy-cache:");
+    }
+
+    #[test]
+    fn cache_catalog_domain_takes_precedence_over_legacy_shorthand() {
+        let yaml = r#"
+backend: memory
+ttl: 120
+negative_ttl: 10
+catalog:
+  backend: redis
+  ttl: 300
+  negative_ttl: 30
+  redis:
+    key_prefix: "catalog:"
+"#;
+
+        let cache: super::CacheConfig = serde_yaml::from_str(yaml).expect("cache should parse");
+        assert_eq!(cache.catalog_backend(), CacheBackendType::Redis);
+        assert_eq!(cache.catalog_ttl().as_secs(), 300);
+        assert_eq!(cache.catalog_negative_ttl().as_secs(), 30);
+        assert_eq!(cache.catalog_redis_key_prefix(), "catalog:");
+    }
+
+    #[test]
+    fn final_config_preserves_explicit_catalog_redis_without_redis_config() {
+        let mut config: FinalConfig = serde_yaml::from_str(
+            r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+redis: null
+cache:
+  catalog:
+    backend: redis
+runtime_state:
+  backend: memory
+"#,
+        )
+        .expect("config should deserialize");
+        config.cache.catalog.backend = CacheBackendType::Redis;
+
+        let finalized = super::finalize_loaded_config(config);
+
+        assert!(finalized.redis.is_none());
+        assert_eq!(finalized.cache.catalog_backend(), CacheBackendType::Redis);
+        assert_eq!(
+            finalized.runtime_state.backend,
+            RuntimeStateBackendType::Memory
+        );
+        assert!(finalized.validate_deployment_runtime_state().is_ok());
+    }
+
+    #[test]
+    fn default_single_instance_memory_runtime_does_not_require_redis() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        assert_eq!(config.deployment.mode, DeploymentMode::SingleInstance);
+        assert_eq!(config.cache.catalog_backend(), CacheBackendType::Memory);
+        assert_eq!(
+            config.runtime_state.backend,
+            RuntimeStateBackendType::Memory
+        );
+        assert!(config.redis.is_none());
+        assert!(config.validate_deployment_runtime_state().is_ok());
+    }
+
+    #[test]
+    fn single_instance_can_opt_into_redis_runtime_state_without_redis_catalog_cache() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+redis:
+  url: redis://127.0.0.1:6379/
+  pool_size: 10
+  key_prefix: "cyder:"
+runtime_state:
+  backend: redis
+  fallback_to_memory: false
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        assert_eq!(config.deployment.mode, DeploymentMode::SingleInstance);
+        assert_eq!(config.cache.catalog_backend(), CacheBackendType::Memory);
+        assert_eq!(config.runtime_state.backend, RuntimeStateBackendType::Redis);
+        assert!(config.redis.is_some());
+        assert!(config.validate_deployment_runtime_state().is_ok());
+    }
+
+    #[test]
+    fn multi_instance_redis_runtime_state_requires_redis_configuration() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: postgres://cyder:cyder@localhost/cyder
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+deployment:
+  mode: multi_instance
+cache:
+  catalog:
+    backend: redis
+runtime_state:
+  backend: redis
+  fallback_to_memory: false
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        let error = config
+            .validate_deployment_runtime_state()
+            .expect_err("multi-instance redis state should require redis config");
+        assert!(error.contains("runtime_state.backend=redis requires redis configuration"));
+    }
+
+    #[test]
+    fn multi_instance_rejects_memory_catalog_cache() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: postgres://cyder:cyder@localhost/cyder
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+redis:
+  url: redis://127.0.0.1:6379/
+deployment:
+  mode: multi_instance
+cache:
+  catalog:
+    backend: memory
+runtime_state:
+  backend: redis
+  fallback_to_memory: false
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        let error = config
+            .validate_deployment_runtime_state()
+            .expect_err("multi-instance memory catalog cache should be rejected");
+        assert!(error.contains("cache.catalog.backend=redis"));
+        assert!(!error.contains("runtime_state.backend=redis"));
+    }
+
+    #[test]
+    fn multi_instance_rejects_memory_runtime_state() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: postgres://cyder:cyder@localhost/cyder
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+redis:
+  url: redis://127.0.0.1:6379/
+deployment:
+  mode: multi_instance
+cache:
+  catalog:
+    backend: redis
+runtime_state:
+  backend: memory
+  fallback_to_memory: false
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        let error = config
+            .validate_deployment_runtime_state()
+            .expect_err("multi-instance memory runtime state should be rejected");
+        assert!(error.contains("runtime_state.backend=redis"));
+        assert!(!error.contains("cache.catalog.backend=redis"));
+    }
+
+    #[test]
+    fn multi_instance_rejects_local_sqlite_database() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+redis:
+  url: redis://127.0.0.1:6379/
+deployment:
+  mode: multi_instance
+cache:
+  catalog:
+    backend: redis
+runtime_state:
+  backend: redis
+  fallback_to_memory: false
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        let error = config
+            .validate_deployment_runtime_state()
+            .expect_err("multi-instance sqlite database should be rejected");
+        assert!(error.contains("shared PostgreSQL"));
+        assert!(!error.contains("cache.catalog.backend=redis"));
+        assert!(!error.contains("runtime_state.backend=redis"));
+    }
+
+    #[test]
+    fn multi_instance_runtime_validation_rejects_local_state() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+deployment:
+  mode: multi_instance
+cache:
+  catalog:
+    backend: memory
+runtime_state:
+  backend: memory
+  fallback_to_memory: true
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+        let error = config
+            .validate_deployment_runtime_state()
+            .expect_err("multi-instance local state should be rejected");
+        assert!(error.contains("shared PostgreSQL"));
+        assert!(error.contains("cache.catalog.backend=redis"));
+        assert!(error.contains("runtime_state.backend=redis"));
+        assert!(error.contains("runtime_state.fallback_to_memory=false"));
     }
 
     #[test]

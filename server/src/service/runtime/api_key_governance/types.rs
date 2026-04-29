@@ -1,6 +1,8 @@
+use async_trait::async_trait;
 use chrono::{Datelike, TimeZone, Utc};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use uuid::Uuid;
 
 use crate::service::app_state::AppStoreError;
 use crate::service::cache::types::CacheApiKey;
@@ -73,6 +75,7 @@ pub enum ApiKeyGovernanceAdmissionError {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ApiKeyRuntimeState {
     pub(crate) current_concurrency: u32,
+    pub(crate) active_request_leases: HashMap<String, ApiKeyActiveRequestLease>,
     pub(crate) current_minute_bucket: Option<i64>,
     pub(crate) current_minute_request_count: u32,
     pub(crate) day_bucket: Option<i64>,
@@ -82,6 +85,11 @@ pub(crate) struct ApiKeyRuntimeState {
     pub(crate) month_bucket: Option<i64>,
     pub(crate) monthly_token_count: i64,
     pub(crate) monthly_billed_amounts: HashMap<String, i64>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ApiKeyActiveRequestLease {
+    pub(crate) expires_at_ms: i64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -247,15 +255,41 @@ impl ApiKeyRuntimeState {
         self.daily_request_count = self.daily_request_count.saturating_add(1);
     }
 
+    fn sync_current_concurrency_from_leases(&mut self) {
+        self.current_concurrency =
+            u32::try_from(self.active_request_leases.len()).unwrap_or(u32::MAX);
+    }
+
+    pub(crate) fn prune_expired_request_leases(&mut self, now_ms: i64) {
+        let previous_len = self.active_request_leases.len();
+        self.active_request_leases
+            .retain(|_, lease| lease.expires_at_ms > now_ms);
+        if self.active_request_leases.len() != previous_len {
+            self.sync_current_concurrency_from_leases();
+        }
+    }
+
+    pub(crate) fn release_request_lease(&mut self, lease_id: &str) -> bool {
+        let removed = self.active_request_leases.remove(lease_id).is_some();
+        if removed {
+            self.sync_current_concurrency_from_leases();
+        }
+        removed
+    }
+
     pub(crate) fn try_begin_request(
         &mut self,
         api_key: &CacheApiKey,
         now_ms: i64,
-        store: Arc<Mutex<HashMap<i64, ApiKeyRuntimeState>>>,
-    ) -> Result<Option<ApiKeyConcurrencyGuard>, ApiKeyGovernanceAdmissionError> {
+        baseline: &ApiKeyRollupBaseline,
+        lease_now_ms: i64,
+        request_lease_ttl: Duration,
+    ) -> Result<Option<ApiKeyRequestLease>, ApiKeyGovernanceAdmissionError> {
+        self.apply_rollup_baseline(baseline);
+        self.prune_expired_request_leases(lease_now_ms);
         self.check_admission_limits(api_key, now_ms)?;
 
-        let concurrency_guard = match api_key.max_concurrent_requests {
+        let request_lease = match api_key.max_concurrent_requests {
             Some(limit) => {
                 let limit = u32::try_from(limit).unwrap_or(0);
                 if self.current_concurrency >= limit {
@@ -264,14 +298,22 @@ impl ApiKeyRuntimeState {
                         current: self.current_concurrency,
                     });
                 }
-                self.current_concurrency = self.current_concurrency.saturating_add(1);
-                Some(ApiKeyConcurrencyGuard::new(api_key.id, store))
+                let lease_id = Uuid::new_v4().to_string();
+                let ttl_ms = i64::try_from(request_lease_ttl.as_millis()).unwrap_or(i64::MAX);
+                self.active_request_leases.insert(
+                    lease_id.clone(),
+                    ApiKeyActiveRequestLease {
+                        expires_at_ms: lease_now_ms.saturating_add(ttl_ms),
+                    },
+                );
+                self.sync_current_concurrency_from_leases();
+                Some(ApiKeyRequestLease::new(api_key.id, lease_id))
             }
             None => None,
         };
 
         self.record_request_admission();
-        Ok(concurrency_guard)
+        Ok(request_lease)
     }
 
     pub(crate) fn apply_completion(&mut self, delta: &ApiKeyCompletionDelta) {
@@ -295,59 +337,45 @@ impl ApiKeyRuntimeState {
     }
 }
 
-pub struct ApiKeyConcurrencyGuard {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiKeyRequestLease {
     api_key_id: i64,
-    store: Arc<Mutex<HashMap<i64, ApiKeyRuntimeState>>>,
+    lease_id: String,
 }
 
-impl ApiKeyConcurrencyGuard {
-    pub(super) fn new(
-        api_key_id: i64,
-        store: Arc<Mutex<HashMap<i64, ApiKeyRuntimeState>>>,
-    ) -> Self {
-        Self { api_key_id, store }
-    }
-}
-
-impl Drop for ApiKeyConcurrencyGuard {
-    fn drop(&mut self) {
-        let Ok(mut guard) = self.store.lock() else {
-            return;
-        };
-
-        let remove_entry = match guard.get_mut(&self.api_key_id) {
-            Some(state) => {
-                state.current_concurrency = state.current_concurrency.saturating_sub(1);
-                !state.is_active()
-            }
-            None => false,
-        };
-
-        if remove_entry {
-            guard.remove(&self.api_key_id);
+impl ApiKeyRequestLease {
+    pub(crate) fn new(api_key_id: i64, lease_id: String) -> Self {
+        Self {
+            api_key_id,
+            lease_id,
         }
     }
+
+    pub fn api_key_id(&self) -> i64 {
+        self.api_key_id
+    }
+
+    pub fn lease_id(&self) -> &str {
+        &self.lease_id
+    }
 }
 
+#[async_trait]
 pub(crate) trait ApiKeyRuntimeStore: Send + Sync {
-    fn snapshot(&self, api_key_id: i64) -> Result<ApiKeyGovernanceSnapshot, AppStoreError>;
-    fn snapshots(&self) -> Result<Vec<ApiKeyGovernanceSnapshot>, AppStoreError>;
-    fn try_begin_request(
+    async fn snapshot(&self, api_key_id: i64) -> Result<ApiKeyGovernanceSnapshot, AppStoreError>;
+    async fn snapshots(&self) -> Result<Vec<ApiKeyGovernanceSnapshot>, AppStoreError>;
+    async fn try_begin_request(
         &self,
         api_key: &CacheApiKey,
         now_ms: i64,
-    ) -> Result<Option<ApiKeyConcurrencyGuard>, ApiKeyGovernanceAdmissionError>;
-    fn try_acquire_concurrency(
+        baseline: &ApiKeyRollupBaseline,
+    ) -> Result<Option<ApiKeyRequestLease>, ApiKeyGovernanceAdmissionError>;
+    async fn release_request_lease(&self, lease: &ApiKeyRequestLease) -> Result<(), AppStoreError>;
+    async fn apply_completion(
         &self,
-        api_key_id: i64,
-        max_concurrent_requests: Option<i32>,
-    ) -> Result<Option<ApiKeyConcurrencyGuard>, AppStoreError>;
-    fn apply_rollup_baseline(
-        &self,
-        api_key_id: i64,
+        delta: &ApiKeyCompletionDelta,
         baseline: &ApiKeyRollupBaseline,
     ) -> Result<(), AppStoreError>;
-    fn apply_completion(&self, delta: &ApiKeyCompletionDelta) -> Result<(), AppStoreError>;
 }
 
 pub(crate) fn minute_bucket_start(timestamp_ms: i64) -> i64 {

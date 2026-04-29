@@ -15,6 +15,7 @@ export interface SystemOverviewStats {
   providers_count: number;
   models_count: number;
   provider_keys_count: number;
+  runtime_state_backend: RuntimeStateBackendStatus;
 }
 
 export interface TodayRequestLogStats {
@@ -24,6 +25,24 @@ export interface TodayRequestLogStats {
   total_reasoning_tokens: number;
   total_tokens: number;
   total_cost: Record<string, number>;
+}
+
+export type RuntimeStateBackendName = "memory" | "redis" | string;
+export type DeploymentMode = "single_instance" | "multi_instance" | string;
+
+export interface RuntimeStateBackendStatus {
+  deployment_mode: DeploymentMode;
+  catalog_cache_backend: RuntimeStateBackendName;
+  catalog_cache_configured_backend: RuntimeStateBackendName;
+  catalog_cache_effective_backend: RuntimeStateBackendName;
+  catalog_cache_fallback_reason: string | null;
+  runtime_configured_backend: RuntimeStateBackendName;
+  runtime_effective_backend: RuntimeStateBackendName;
+  runtime_shared: boolean;
+  runtime_degraded: boolean;
+  fallback_reason: string | null;
+  last_error: string | null;
+  last_checked_at: number;
 }
 
 export type DashboardRuntimeWindow = "15m" | "1h" | "6h" | "24h";
@@ -135,6 +154,7 @@ export interface DashboardResponse {
   overview: DashboardOverviewStats;
   today: DashboardTodayStats;
   runtime: DashboardRuntimeSummary;
+  runtime_state_backend: RuntimeStateBackendStatus;
   alerts: DashboardAlerts;
   top_providers: DashboardTopProviderItem[];
   top_models: DashboardTopModelItem[];
@@ -149,6 +169,7 @@ export interface DashboardResourcesSection {
   overview: DashboardOverviewStats;
   today: DashboardTodayStats;
   runtime: DashboardRuntimeSummary;
+  runtime_state_backend: RuntimeStateBackendStatus;
 }
 
 export interface DashboardAlertsSection {
@@ -448,6 +469,8 @@ export interface ProviderRuntimeItem {
   last_failure_at: number | null;
   last_recovered_at: number | null;
   last_error: string | null;
+  runtime_state_backend_degraded: boolean;
+  runtime_state_backend_error: string | null;
   request_count: number;
   success_count: number;
   error_count: number;
@@ -472,6 +495,7 @@ export interface ProviderRuntimeSummary {
   no_traffic_count: number;
   window: ProviderRuntimeWindow;
   generated_at: number;
+  runtime_state_backend: RuntimeStateBackendStatus;
 }
 
 export interface ProviderRuntimeListParams {

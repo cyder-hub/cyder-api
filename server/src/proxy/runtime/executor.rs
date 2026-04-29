@@ -15,9 +15,12 @@ use crate::{
         auth::{admit_api_key_request, check_access_control},
         cancellation::ProxyCancellationContext,
         logging::RequestLogContext,
-        provider_governance::{ensure_provider_request_allowed, preview_provider_request_allowed},
-        retry_policy::ProviderGovernanceRejection,
+        provider_governance::{
+            ProviderGovernanceCheckError, ensure_provider_request_allowed,
+            preview_provider_request_allowed,
+        },
         runtime::{
+            api_key_lease::ApiKeyRequestLeaseFinalizer,
             attempt::{
                 RequestAttemptDraft, classify_attempt_failure, classify_provider_governance_skip,
                 complete_attempt_from_response, sync_attempt_from_proxy_failure,
@@ -38,7 +41,9 @@ use crate::{
         utility::{UtilityOperation, validate_utility_target},
     },
     schema::enum_def::LlmApiType,
-    service::{app_state::AppState, cache::types::CacheApiKey},
+    service::{
+        app_state::AppState, cache::types::CacheApiKey, runtime::ProviderCircuitProbePermit,
+    },
     utils::storage::{
         RequestLogBundleCandidateManifest, RequestLogBundleQueryParam,
         RequestLogBundleRequestSnapshot, RequestLogBundleTransformDiagnosticItem,
@@ -146,12 +151,14 @@ async fn ensure_provider_governance_for_policy(
     execution_policy: RuntimeExecutionPolicy,
     provider_id: i64,
     provider_label: &str,
-) -> Result<(), ProviderGovernanceRejection> {
+) -> Result<Option<ProviderCircuitProbePermit>, ProviderGovernanceCheckError> {
     if execution_policy.uses_mutating_provider_governance() {
         ensure_provider_request_allowed(app_state, provider_id, provider_label).await
     } else {
         debug_assert!(execution_policy.uses_read_only_provider_governance());
-        preview_provider_request_allowed(app_state, provider_id).await
+        preview_provider_request_allowed(app_state, provider_id)
+            .await
+            .map(|_| None)
     }
 }
 
@@ -452,9 +459,9 @@ pub(in crate::proxy) async fn execute_attempt(
     sync_attempt_timing_and_usage(&mut attempt, &log_context, cost_catalog_version.as_ref());
     log_context.set_attempts_for_logging(&skipped_attempts_for_log, Some(attempt.clone()));
 
-    let api_key_concurrency_guard = if execution_policy.admits_api_key_requests() {
+    let api_key_request_lease = if execution_policy.admits_api_key_requests() {
         match admit_api_key_request(&app_state, &api_key).await {
-            Ok(guard) => guard,
+            Ok(lease) => lease,
             Err(proxy_error) => {
                 let log_context = finalize_early_attempt_failure(
                     &app_state,
@@ -477,8 +484,10 @@ pub(in crate::proxy) async fn execute_attempt(
     } else {
         None
     };
+    let mut api_key_request_lease =
+        ApiKeyRequestLeaseFinalizer::new(&app_state, api_key_request_lease);
 
-    if let Err(rejection) = ensure_provider_governance_for_policy(
+    let provider_circuit_permit = match ensure_provider_governance_for_policy(
         &app_state,
         execution_policy,
         candidate.provider.id,
@@ -486,34 +495,57 @@ pub(in crate::proxy) async fn execute_attempt(
     )
     .await
     {
-        let completed_at = Utc::now().timestamp_millis();
-        attempt.completed_at = Some(completed_at);
-        clear_provider_governance_skip_runtime_fields(&mut attempt, &mut log_context);
-        classify_provider_governance_skip(
-            &mut attempt,
-            rejection,
-            materialized.model_str.as_str(),
-            attempted_candidate_count,
-            next_candidate_available,
-        );
-        let proxy_error = rejection.to_proxy_error(materialized.model_str.as_str());
-        let log_context = maybe_record_attempt_failure(
-            &app_state,
-            log_context,
-            &skipped_attempts_for_log,
-            &attempt,
-            &proxy_error,
-            log_mode,
-            execution_policy,
-        )
-        .await;
-        log_provider_skipped(&log_context, &attempt, &proxy_error);
-        return AttemptExecutionResult {
-            attempt,
-            response: Err(proxy_error),
-            log_context,
-        };
-    }
+        Ok(permit) => permit,
+        Err(ProviderGovernanceCheckError::Rejected(rejection)) => {
+            let completed_at = Utc::now().timestamp_millis();
+            attempt.completed_at = Some(completed_at);
+            clear_provider_governance_skip_runtime_fields(&mut attempt, &mut log_context);
+            classify_provider_governance_skip(
+                &mut attempt,
+                rejection,
+                materialized.model_str.as_str(),
+                attempted_candidate_count,
+                next_candidate_available,
+            );
+            let proxy_error = rejection.to_proxy_error(materialized.model_str.as_str());
+            let log_context = maybe_record_attempt_failure(
+                &app_state,
+                log_context,
+                &skipped_attempts_for_log,
+                &attempt,
+                &proxy_error,
+                log_mode,
+                execution_policy,
+            )
+            .await;
+            log_provider_skipped(&log_context, &attempt, &proxy_error);
+            api_key_request_lease.release().await;
+            return AttemptExecutionResult {
+                attempt,
+                response: Err(proxy_error),
+                log_context,
+            };
+        }
+        Err(ProviderGovernanceCheckError::Backend(proxy_error)) => {
+            let log_context = finalize_early_attempt_failure(
+                &app_state,
+                log_context,
+                &skipped_attempts_for_log,
+                &mut attempt,
+                &proxy_error,
+                scheduling,
+                log_mode,
+                execution_policy,
+            )
+            .await;
+            api_key_request_lease.release().await;
+            return AttemptExecutionResult {
+                attempt,
+                response: Err(proxy_error),
+                log_context,
+            };
+        }
+    };
 
     let proxy_result = send_materialized_request(
         Arc::clone(&app_state),
@@ -525,7 +557,8 @@ pub(in crate::proxy) async fn execute_attempt(
         materialized.model_str,
         candidate.provider.use_proxy,
         cost_catalog_version.clone(),
-        api_key_concurrency_guard,
+        api_key_request_lease,
+        provider_circuit_permit,
         materialized.response_mode,
         log_mode.proxy_log_mode(),
         execution_policy,
@@ -593,10 +626,11 @@ mod tests {
 
     use crate::{
         config::ProviderGovernanceConfig,
-        proxy::runtime::policy::RuntimeExecutionPolicy,
+        proxy::{ProxyError, runtime::policy::RuntimeExecutionPolicy},
         service::{
             app_state::AppState,
             runtime::{
+                ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitProbePermit,
                 ProviderCircuitService, ProviderCircuitStore, ProviderHealthSnapshot,
                 ProviderHealthStatus,
             },
@@ -629,22 +663,35 @@ mod tests {
         }
     }
 
+    struct FailingProviderCircuitStore;
+
     #[async_trait]
     impl ProviderCircuitStore for RecordingProviderCircuitStore {
         async fn allow_request(
             &self,
             _provider_id: i64,
             _config: &ProviderGovernanceConfig,
-        ) -> Result<ProviderHealthSnapshot, Option<Duration>> {
+        ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
             self.allow_calls.fetch_add(1, Ordering::SeqCst);
             let mut snapshot = self.snapshot.lock().await;
             snapshot.status = ProviderHealthStatus::HalfOpen;
             snapshot.half_open_probe_in_flight = true;
-            Ok(snapshot.clone())
+            Ok(ProviderCircuitDecision {
+                snapshot: snapshot.clone(),
+                allowed: true,
+                rejection: None,
+                retry_after: None,
+                probe_permit: None,
+            })
         }
 
-        async fn record_success(&self, _provider_id: i64) -> ProviderHealthSnapshot {
-            self.snapshot.lock().await.clone()
+        async fn record_success(
+            &self,
+            _provider_id: i64,
+            _config: &ProviderGovernanceConfig,
+            _permit: Option<&ProviderCircuitProbePermit>,
+        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+            Ok(self.snapshot.lock().await.clone())
         }
 
         async fn record_failure(
@@ -652,12 +699,61 @@ mod tests {
             _provider_id: i64,
             _config: &ProviderGovernanceConfig,
             _error_message: String,
-        ) -> ProviderHealthSnapshot {
-            self.snapshot.lock().await.clone()
+            _permit: Option<&ProviderCircuitProbePermit>,
+        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+            Ok(self.snapshot.lock().await.clone())
         }
 
-        async fn snapshot(&self, _provider_id: i64) -> ProviderHealthSnapshot {
-            self.snapshot.lock().await.clone()
+        async fn snapshot(
+            &self,
+            _provider_id: i64,
+        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+            Ok(self.snapshot.lock().await.clone())
+        }
+    }
+
+    #[async_trait]
+    impl ProviderCircuitStore for FailingProviderCircuitStore {
+        async fn allow_request(
+            &self,
+            _provider_id: i64,
+            _config: &ProviderGovernanceConfig,
+        ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+            Err(ProviderCircuitError::Backend(
+                "redis unavailable".to_string(),
+            ))
+        }
+
+        async fn record_success(
+            &self,
+            _provider_id: i64,
+            _config: &ProviderGovernanceConfig,
+            _permit: Option<&ProviderCircuitProbePermit>,
+        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+            Err(ProviderCircuitError::Backend(
+                "redis unavailable".to_string(),
+            ))
+        }
+
+        async fn record_failure(
+            &self,
+            _provider_id: i64,
+            _config: &ProviderGovernanceConfig,
+            _error_message: String,
+            _permit: Option<&ProviderCircuitProbePermit>,
+        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+            Err(ProviderCircuitError::Backend(
+                "redis unavailable".to_string(),
+            ))
+        }
+
+        async fn snapshot(
+            &self,
+            _provider_id: i64,
+        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+            Err(ProviderCircuitError::Backend(
+                "redis unavailable".to_string(),
+            ))
         }
     }
 
@@ -702,7 +798,8 @@ mod tests {
         let snapshot = app_state
             .provider_circuit
             .get_provider_health_snapshot(7)
-            .await;
+            .await
+            .expect("snapshot should load");
         assert_eq!(snapshot.status, ProviderHealthStatus::Open);
         assert!(!snapshot.half_open_probe_in_flight);
     }
@@ -728,8 +825,32 @@ mod tests {
         let snapshot = app_state
             .provider_circuit
             .get_provider_health_snapshot(7)
-            .await;
+            .await
+            .expect("snapshot should load");
         assert_eq!(snapshot.status, ProviderHealthStatus::HalfOpen);
         assert!(snapshot.half_open_probe_in_flight);
+    }
+
+    #[tokio::test]
+    async fn normal_provider_governance_surfaces_backend_errors() {
+        let mut app_state = AppState::new().await;
+        app_state.provider_circuit = Arc::new(ProviderCircuitService::new(Arc::new(
+            FailingProviderCircuitStore,
+        )));
+
+        let result = ensure_provider_governance_for_policy(
+            &app_state,
+            RuntimeExecutionPolicy::Normal,
+            7,
+            "model",
+        )
+        .await;
+
+        let Err(super::ProviderGovernanceCheckError::Backend(ProxyError::InternalError(message))) =
+            result
+        else {
+            panic!("provider circuit backend error should be surfaced as internal error");
+        };
+        assert!(message.contains("Provider circuit state backend error"));
     }
 }

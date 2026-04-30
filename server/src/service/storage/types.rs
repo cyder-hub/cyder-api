@@ -1,6 +1,7 @@
+use serde::Serialize;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum StorageError {
     #[error("failed to put object: {0}")]
     Put(String),
@@ -29,4 +30,23 @@ pub struct PutObjectOptions<'a> {
 #[derive(Debug, Default, Clone)]
 pub struct GetObjectOptions<'a> {
     pub content_encoding: Option<&'a str>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ListObjectOptions<'a> {
+    pub prefix: Option<&'a str>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct StorageObjectList {
+    pub objects: Vec<StorageObjectMetadata>,
+    pub limit_reached: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StorageObjectMetadata {
+    pub key: String,
+    pub size_bytes: Option<i64>,
+    pub last_modified_ms: Option<i64>,
 }

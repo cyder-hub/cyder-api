@@ -281,8 +281,8 @@ mod tests {
     use bb8_redis::RedisConnectionManager;
 
     use crate::config::{
-        CacheCatalogConfig, CacheConfig, CacheRedisConfig, DeploymentConfig, RedisConfig,
-        RuntimeStateConfig, RuntimeStateRedisConfig, StorageConfig,
+        CacheCatalogConfig, CacheConfig, CacheRedisConfig, DeploymentConfig, DiagnosticsConfig,
+        RedisConfig, RuntimeStateConfig, RuntimeStateRedisConfig, StorageConfig,
     };
 
     fn base_config() -> FinalConfig {
@@ -300,6 +300,7 @@ mod tests {
             timezone: None,
             max_body_size: 100 * 1024 * 1024,
             replay_response_capture_max_bytes: 4 * 1024 * 1024,
+            diagnostics: DiagnosticsConfig::default(),
             db_pool_size: 5,
             redis: None,
             deployment: DeploymentConfig::default(),

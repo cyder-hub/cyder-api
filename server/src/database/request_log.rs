@@ -126,6 +126,15 @@ db_object! {
 
 pub type RequestLogRecord = RequestLog;
 
+#[derive(Debug, Clone)]
+pub struct RequestLogBundleRetentionRecord {
+    pub id: i64,
+    pub bundle_version: Option<i32>,
+    pub bundle_storage_type: StorageType,
+    pub bundle_storage_key: String,
+    pub created_at: i64,
+}
+
 #[derive(Deserialize, Debug, Default)]
 pub struct RequestLogQueryPayload {
     pub api_key_id: Option<i64>,
@@ -359,6 +368,108 @@ impl RequestLog {
                         log_id, other
                     ))),
                 })
+        })
+    }
+
+    pub fn list_bundle_retention_candidates(
+        cutoff_created_at: i64,
+        limit: i64,
+    ) -> DbResult<Vec<RequestLogBundleRetentionRecord>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            request_log::table
+                .filter(request_log::dsl::created_at.lt(cutoff_created_at))
+                .filter(request_log::dsl::storage_type.is_not_null())
+                .filter(request_log::dsl::bundle_storage_key.is_not_null())
+                .order(request_log::dsl::created_at.asc())
+                .limit(limit)
+                .select(RequestLogDb::as_select())
+                .load::<RequestLogDb>(conn)
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter_map(|row| {
+                            let record = row.from_db();
+                            Some(RequestLogBundleRetentionRecord {
+                                id: record.id,
+                                bundle_version: record.bundle_version,
+                                bundle_storage_type: record.bundle_storage_type?,
+                                bundle_storage_key: record.bundle_storage_key?,
+                                created_at: record.created_at,
+                            })
+                        })
+                        .collect()
+                })
+                .map_err(|err| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list request log bundle retention candidates: {}",
+                        err
+                    )))
+                })
+        })
+    }
+
+    pub fn list_bundle_storage_locators(
+        limit: i64,
+    ) -> DbResult<Vec<RequestLogBundleRetentionRecord>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            request_log::table
+                .filter(request_log::dsl::storage_type.is_not_null())
+                .filter(request_log::dsl::bundle_storage_key.is_not_null())
+                .order(request_log::dsl::created_at.asc())
+                .limit(limit)
+                .select(RequestLogDb::as_select())
+                .load::<RequestLogDb>(conn)
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter_map(|row| {
+                            let record = row.from_db();
+                            Some(RequestLogBundleRetentionRecord {
+                                id: record.id,
+                                bundle_version: record.bundle_version,
+                                bundle_storage_type: record.bundle_storage_type?,
+                                bundle_storage_key: record.bundle_storage_key?,
+                                created_at: record.created_at,
+                            })
+                        })
+                        .collect()
+                })
+                .map_err(|err| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list request log bundle storage locators: {}",
+                        err
+                    )))
+                })
+        })
+    }
+
+    pub fn clear_bundle_locator_if_matches(
+        log_id: i64,
+        storage_type: StorageType,
+        storage_key: &str,
+        updated_at: i64,
+    ) -> DbResult<bool> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            diesel::update(
+                request_log::table
+                    .find(log_id)
+                    .filter(request_log::dsl::storage_type.eq(Some(storage_type)))
+                    .filter(request_log::dsl::bundle_storage_key.eq(Some(storage_key))),
+            )
+            .set((
+                request_log::dsl::storage_type.eq(Option::<StorageType>::None),
+                request_log::dsl::bundle_storage_key.eq(Option::<String>::None),
+                request_log::dsl::updated_at.eq(updated_at),
+            ))
+            .execute(conn)
+            .map(|updated_rows| updated_rows > 0)
+            .map_err(|err| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to clear request log {} bundle locator: {}",
+                    log_id, err
+                )))
+            })
         })
     }
 

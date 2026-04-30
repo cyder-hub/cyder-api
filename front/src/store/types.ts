@@ -1386,6 +1386,129 @@ export interface RecordListParams {
   [key: string]: string | number | boolean | undefined;
 }
 
+export type RecordStorageType = "FILE_SYSTEM" | "S3";
+
+export interface RecordDiagnosticsRetentionParams {
+  request_log_bundle_retention_days?: number | null;
+  replay_artifact_retention_days?: number | null;
+  delete_batch_size?: number | null;
+  include_request_log_bundles?: boolean | null;
+  include_replay_artifacts?: boolean | null;
+}
+
+export type RecordDiagnosticsRetentionItemStatus =
+  | "candidate"
+  | "deleted"
+  | "skipped"
+  | "failed";
+
+export interface RecordDiagnosticsRetentionItem {
+  id: number;
+  request_log_id: number | null;
+  replay_run_id: number | null;
+  storage_type: RecordStorageType;
+  storage_key: string;
+  artifact_version: number | null;
+  bundle_version: number | null;
+  created_at: number;
+  status: RecordDiagnosticsRetentionItemStatus;
+  message: string | null;
+}
+
+export interface RecordDiagnosticsRetentionStorageTypeCount {
+  storage_type: RecordStorageType;
+  count: number;
+}
+
+export interface RecordDiagnosticsRetentionBucket {
+  retention_days: number;
+  cutoff_created_before: number;
+  candidate_count: number;
+  storage_type_counts: RecordDiagnosticsRetentionStorageTypeCount[];
+  oldest_created_at: number | null;
+  newest_created_at: number | null;
+  sample_storage_keys: string[];
+  succeeded_count: number;
+  skipped_count: number;
+  failed_count: number;
+  items: RecordDiagnosticsRetentionItem[];
+}
+
+export interface RecordDiagnosticsRetentionResponse {
+  enabled: boolean;
+  executed: boolean;
+  now_ms: number;
+  delete_batch_size: number;
+  request_log_bundles: RecordDiagnosticsRetentionBucket;
+  replay_artifacts: RecordDiagnosticsRetentionBucket;
+}
+
+export interface RecordDiagnosticsStorageInventoryParams {
+  storage_types?: RecordStorageType[] | null;
+  prefix?: string | null;
+  object_sample_limit?: number | null;
+  missing_locator_sample_limit?: number | null;
+  object_scan_limit?: number | null;
+  db_locator_limit?: number | null;
+}
+
+export type RecordDiagnosticsStorageInventoryStatus =
+  | "available"
+  | "skipped"
+  | "failed";
+
+export type RecordDiagnosticsStorageLocatorKind =
+  | "request_log_bundle"
+  | "replay_artifact";
+
+export interface RecordDiagnosticsStorageObjectSample {
+  key: string;
+  size_bytes: number | null;
+  last_modified_ms: number | null;
+}
+
+export interface RecordDiagnosticsStorageMissingLocatorSample {
+  locator_kind: RecordDiagnosticsStorageLocatorKind;
+  request_log_id: number | null;
+  replay_run_id: number | null;
+  storage_type: RecordStorageType;
+  storage_key: string;
+  artifact_version: number | null;
+  bundle_version: number | null;
+  created_at: number;
+  message: string | null;
+}
+
+export interface RecordDiagnosticsStorageInventoryBucket {
+  storage_type: RecordStorageType;
+  status: RecordDiagnosticsStorageInventoryStatus;
+  message: string | null;
+  prefix: string | null;
+  object_scan_limit: number;
+  object_limit_reached: boolean;
+  object_count: number;
+  total_size_bytes: number;
+  unknown_size_object_count: number;
+  referenced_object_count: number;
+  unreferenced_object_count: number;
+  missing_locator_count: number;
+  locator_check_failed_count: number;
+  object_samples: RecordDiagnosticsStorageObjectSample[];
+  unreferenced_samples: RecordDiagnosticsStorageObjectSample[];
+  missing_locator_samples: RecordDiagnosticsStorageMissingLocatorSample[];
+}
+
+export interface RecordDiagnosticsStorageInventoryResponse {
+  prefix: string | null;
+  object_sample_limit: number;
+  missing_locator_sample_limit: number;
+  object_scan_limit: number;
+  db_locator_limit: number;
+  db_locator_scanned_count: number;
+  db_locator_limit_reached: boolean;
+  storage: RecordDiagnosticsStorageInventoryBucket[];
+}
+
 export type RecordReplayKind = "attempt_upstream" | "gateway_request";
 export type RecordReplayMode = "dry_run" | "live";
 export type RecordReplaySemanticBasis =

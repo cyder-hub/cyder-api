@@ -50,6 +50,16 @@ db_object! {
 
 pub type RequestReplayRunRecord = RequestReplayRun;
 
+#[derive(Debug, Clone)]
+pub struct RequestReplayArtifactRetentionRecord {
+    pub id: i64,
+    pub source_request_log_id: i64,
+    pub artifact_version: i32,
+    pub artifact_storage_type: StorageType,
+    pub artifact_storage_key: String,
+    pub created_at: i64,
+}
+
 impl RequestReplayRun {
     pub fn insert(new_run: &RequestReplayRun) -> DbResult<RequestReplayRunRecord> {
         let conn = &mut get_connection()?;
@@ -122,6 +132,113 @@ impl RequestReplayRun {
                         source_request_log_id, err
                     )))
                 })
+        })
+    }
+
+    pub fn list_artifact_retention_candidates(
+        cutoff_created_at: i64,
+        limit: i64,
+    ) -> DbResult<Vec<RequestReplayArtifactRetentionRecord>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            request_replay_run::table
+                .filter(request_replay_run::dsl::created_at.lt(cutoff_created_at))
+                .filter(request_replay_run::dsl::artifact_version.is_not_null())
+                .filter(request_replay_run::dsl::artifact_storage_type.is_not_null())
+                .filter(request_replay_run::dsl::artifact_storage_key.is_not_null())
+                .order(request_replay_run::dsl::created_at.asc())
+                .limit(limit)
+                .select(RequestReplayRunDb::as_select())
+                .load::<RequestReplayRunDb>(conn)
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter_map(|row| {
+                            let record = row.from_db();
+                            Some(RequestReplayArtifactRetentionRecord {
+                                id: record.id,
+                                source_request_log_id: record.source_request_log_id,
+                                artifact_version: record.artifact_version?,
+                                artifact_storage_type: record.artifact_storage_type?,
+                                artifact_storage_key: record.artifact_storage_key?,
+                                created_at: record.created_at,
+                            })
+                        })
+                        .collect()
+                })
+                .map_err(|err| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list replay artifact retention candidates: {}",
+                        err
+                    )))
+                })
+        })
+    }
+
+    pub fn list_artifact_storage_locators(
+        limit: i64,
+    ) -> DbResult<Vec<RequestReplayArtifactRetentionRecord>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            request_replay_run::table
+                .filter(request_replay_run::dsl::artifact_version.is_not_null())
+                .filter(request_replay_run::dsl::artifact_storage_type.is_not_null())
+                .filter(request_replay_run::dsl::artifact_storage_key.is_not_null())
+                .order(request_replay_run::dsl::created_at.asc())
+                .limit(limit)
+                .select(RequestReplayRunDb::as_select())
+                .load::<RequestReplayRunDb>(conn)
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter_map(|row| {
+                            let record = row.from_db();
+                            Some(RequestReplayArtifactRetentionRecord {
+                                id: record.id,
+                                source_request_log_id: record.source_request_log_id,
+                                artifact_version: record.artifact_version?,
+                                artifact_storage_type: record.artifact_storage_type?,
+                                artifact_storage_key: record.artifact_storage_key?,
+                                created_at: record.created_at,
+                            })
+                        })
+                        .collect()
+                })
+                .map_err(|err| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list replay artifact storage locators: {}",
+                        err
+                    )))
+                })
+        })
+    }
+
+    pub fn clear_artifact_locator_if_matches(
+        replay_run_id: i64,
+        storage_type: StorageType,
+        storage_key: &str,
+        updated_at: i64,
+    ) -> DbResult<bool> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            diesel::update(
+                request_replay_run::table
+                    .find(replay_run_id)
+                    .filter(request_replay_run::dsl::artifact_storage_type.eq(Some(storage_type)))
+                    .filter(request_replay_run::dsl::artifact_storage_key.eq(Some(storage_key))),
+            )
+            .set((
+                request_replay_run::dsl::artifact_version.eq(Option::<i32>::None),
+                request_replay_run::dsl::artifact_storage_type.eq(Option::<StorageType>::None),
+                request_replay_run::dsl::artifact_storage_key.eq(Option::<String>::None),
+                request_replay_run::dsl::updated_at.eq(updated_at),
+            ))
+            .execute(conn)
+            .map(|updated_rows| updated_rows > 0)
+            .map_err(|err| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to clear request replay run {} artifact locator: {}",
+                    replay_run_id, err
+                )))
+            })
         })
     }
 }

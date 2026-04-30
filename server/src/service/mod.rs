@@ -2,6 +2,7 @@ pub mod admin;
 pub mod app_state;
 pub mod cache;
 pub mod catalog;
+pub mod diagnostics;
 pub mod infra;
 pub mod redis;
 pub mod request_log_artifact;

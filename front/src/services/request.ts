@@ -53,6 +53,10 @@ import type {
   RecordAttemptReplayExecuteParams,
   RecordAttemptReplayPreviewParams,
   RecordAttemptReplayPreviewResponse,
+  RecordDiagnosticsRetentionParams,
+  RecordDiagnosticsRetentionResponse,
+  RecordDiagnosticsStorageInventoryParams,
+  RecordDiagnosticsStorageInventoryResponse,
   RecordGatewayReplayExecuteParams,
   RecordGatewayReplayPreviewParams,
   RecordGatewayReplayPreviewResponse,
@@ -422,6 +426,24 @@ export const Api = {
       headers: { "Content-Type": "application/msgpack" },
       responseType: "arraybuffer",
     });
+  },
+  previewRecordRetention(
+    payload: RecordDiagnosticsRetentionParams,
+  ): Promise<RecordDiagnosticsRetentionResponse> {
+    return request.post("/ai/manager/api/request_log/retention/preview", payload);
+  },
+  executeRecordRetention(
+    payload: RecordDiagnosticsRetentionParams,
+  ): Promise<RecordDiagnosticsRetentionResponse> {
+    return request.post("/ai/manager/api/request_log/retention/execute", payload);
+  },
+  previewRecordStorageInventory(
+    payload: RecordDiagnosticsStorageInventoryParams,
+  ): Promise<RecordDiagnosticsStorageInventoryResponse> {
+    return request.post(
+      "/ai/manager/api/request_log/storage_inventory/preview",
+      payload,
+    );
   },
 
   // ========== Provider CRUD (Extended) ==========

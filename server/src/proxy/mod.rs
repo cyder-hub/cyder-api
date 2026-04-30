@@ -32,11 +32,6 @@ pub(crate) use error::{
 pub use router::create_proxy_router;
 pub(crate) use runtime::credential::apply_provider_request_auth_header;
 pub(crate) use runtime::facade::{execute_gateway_replay_request, preview_gateway_replay_request};
-pub(crate) use runtime::replay_adapter::{
-    GatewayReplayAttemptKind, GatewayReplayCandidateDecision, GatewayReplayExecutionFailure,
-    GatewayReplayExecutionMetadata, GatewayReplayFinalAttempt, GatewayReplayInput,
-    GatewayReplayPreparedRequest,
-};
 pub(crate) use runtime::request_patch::{apply_request_patches, load_runtime_request_patch_trace};
 pub(crate) use runtime::route_resolver::{
     candidate_supports_reasoning_preset, resolve_effective_reasoning_config,

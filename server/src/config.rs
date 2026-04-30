@@ -432,6 +432,7 @@ impl Default for LocalStorageConfig {
 pub struct S3StorageConfig {
     pub endpoint: Option<String>,
     pub region: Option<String>,
+    #[serde(default)]
     pub bucket: String,
     #[serde(default)]
     pub access_mode: S3AccessMode,
@@ -551,6 +552,99 @@ fn default_replay_response_capture_max_bytes() -> usize {
     4 * 1024 * 1024
 }
 
+pub const DEFAULT_DIAGNOSTICS_REPLAY_PREVIEW_CONFIRMATION_TTL_SECONDS: u64 = 15 * 60;
+pub const DEFAULT_DIAGNOSTICS_REPLAY_PREVIEW_CONFIRMATION_CLOCK_SKEW_SECONDS: u64 = 60;
+pub const DEFAULT_DIAGNOSTICS_RESPONSE_CAPTURE_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_DIAGNOSTICS_RAW_BUNDLE_DOWNLOAD_ENABLED: bool = true;
+pub const DEFAULT_DIAGNOSTICS_RETENTION_ENABLED: bool = false;
+pub const DEFAULT_DIAGNOSTICS_REQUEST_LOG_BUNDLE_RETENTION_DAYS: u64 = 30;
+pub const DEFAULT_DIAGNOSTICS_REPLAY_ARTIFACT_RETENTION_DAYS: u64 = 30;
+pub const DEFAULT_DIAGNOSTICS_RETENTION_DELETE_BATCH_SIZE: usize = 200;
+
+fn default_diagnostics_replay_preview_confirmation_ttl_seconds() -> u64 {
+    DEFAULT_DIAGNOSTICS_REPLAY_PREVIEW_CONFIRMATION_TTL_SECONDS
+}
+
+fn default_diagnostics_replay_preview_confirmation_clock_skew_seconds() -> u64 {
+    DEFAULT_DIAGNOSTICS_REPLAY_PREVIEW_CONFIRMATION_CLOCK_SKEW_SECONDS
+}
+
+fn default_diagnostics_response_capture_max_bytes() -> usize {
+    DEFAULT_DIAGNOSTICS_RESPONSE_CAPTURE_MAX_BYTES
+}
+
+fn default_diagnostics_raw_bundle_download_enabled() -> bool {
+    DEFAULT_DIAGNOSTICS_RAW_BUNDLE_DOWNLOAD_ENABLED
+}
+
+fn default_diagnostics_retention_enabled() -> bool {
+    DEFAULT_DIAGNOSTICS_RETENTION_ENABLED
+}
+
+fn default_diagnostics_request_log_bundle_retention_days() -> u64 {
+    DEFAULT_DIAGNOSTICS_REQUEST_LOG_BUNDLE_RETENTION_DAYS
+}
+
+fn default_diagnostics_replay_artifact_retention_days() -> u64 {
+    DEFAULT_DIAGNOSTICS_REPLAY_ARTIFACT_RETENTION_DAYS
+}
+
+fn default_diagnostics_retention_delete_batch_size() -> usize {
+    DEFAULT_DIAGNOSTICS_RETENTION_DELETE_BATCH_SIZE
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticsRetentionConfig {
+    #[serde(default = "default_diagnostics_retention_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_diagnostics_request_log_bundle_retention_days")]
+    pub request_log_bundle_retention_days: u64,
+    #[serde(default = "default_diagnostics_replay_artifact_retention_days")]
+    pub replay_artifact_retention_days: u64,
+    #[serde(default = "default_diagnostics_retention_delete_batch_size")]
+    pub delete_batch_size: usize,
+}
+
+impl Default for DiagnosticsRetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_diagnostics_retention_enabled(),
+            request_log_bundle_retention_days:
+                default_diagnostics_request_log_bundle_retention_days(),
+            replay_artifact_retention_days: default_diagnostics_replay_artifact_retention_days(),
+            delete_batch_size: default_diagnostics_retention_delete_batch_size(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticsConfig {
+    #[serde(default = "default_diagnostics_replay_preview_confirmation_ttl_seconds")]
+    pub replay_preview_confirmation_ttl_seconds: u64,
+    #[serde(default = "default_diagnostics_replay_preview_confirmation_clock_skew_seconds")]
+    pub replay_preview_confirmation_clock_skew_seconds: u64,
+    #[serde(default = "default_diagnostics_response_capture_max_bytes")]
+    pub response_capture_max_bytes: usize,
+    #[serde(default = "default_diagnostics_raw_bundle_download_enabled")]
+    pub raw_bundle_download_enabled: bool,
+    #[serde(default)]
+    pub retention: DiagnosticsRetentionConfig,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            replay_preview_confirmation_ttl_seconds:
+                default_diagnostics_replay_preview_confirmation_ttl_seconds(),
+            replay_preview_confirmation_clock_skew_seconds:
+                default_diagnostics_replay_preview_confirmation_clock_skew_seconds(),
+            response_capture_max_bytes: default_diagnostics_response_capture_max_bytes(),
+            raw_bundle_download_enabled: default_diagnostics_raw_bundle_download_enabled(),
+            retention: DiagnosticsRetentionConfig::default(),
+        }
+    }
+}
+
 // The fully resolved configuration used by the application.
 // This is also the format for the default configuration file.
 #[derive(Debug, Deserialize, Serialize)]
@@ -569,6 +663,8 @@ pub struct FinalConfig {
     pub max_body_size: usize,
     #[serde(default = "default_replay_response_capture_max_bytes")]
     pub replay_response_capture_max_bytes: usize,
+    #[serde(default)]
+    pub diagnostics: DiagnosticsConfig,
     pub db_pool_size: u32,
     pub redis: Option<RedisConfig>,
     #[serde(default)]
@@ -688,6 +784,7 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
         timezone: None,
         max_body_size: 100 * 1024 * 1024, // 100MB
         replay_response_capture_max_bytes: default_replay_response_capture_max_bytes(),
+        diagnostics: DiagnosticsConfig::default(),
         db_pool_size: 5,
         redis: None,
         deployment: DeploymentConfig::default(),
@@ -749,8 +846,16 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
 });
 
 fn finalize_loaded_config(mut final_config: FinalConfig) -> FinalConfig {
-    if final_config.storage.driver == StorageDriver::S3 && final_config.storage.s3.is_none() {
-        final_config.storage.driver = StorageDriver::Local;
+    let legacy_default = default_replay_response_capture_max_bytes();
+    let diagnostics_default = default_diagnostics_response_capture_max_bytes();
+    if final_config.diagnostics.response_capture_max_bytes == diagnostics_default
+        && final_config.replay_response_capture_max_bytes != legacy_default
+    {
+        final_config.diagnostics.response_capture_max_bytes =
+            final_config.replay_response_capture_max_bytes;
+    } else {
+        final_config.replay_response_capture_max_bytes =
+            final_config.diagnostics.response_capture_max_bytes;
     }
 
     final_config
@@ -759,8 +864,8 @@ fn finalize_loaded_config(mut final_config: FinalConfig) -> FinalConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        CacheBackendType, DeploymentMode, FinalConfig, ProviderGovernanceConfig,
-        ProxyRequestConfig, RoutingResilienceConfig, RuntimeStateBackendType,
+        CacheBackendType, DeploymentMode, DiagnosticsConfig, FinalConfig, ProviderGovernanceConfig,
+        ProxyRequestConfig, RoutingResilienceConfig, RuntimeStateBackendType, StorageDriver,
         default_replay_response_capture_max_bytes,
     };
 
@@ -798,6 +903,170 @@ mod tests {
     #[test]
     fn replay_response_capture_default_is_independent_from_request_body_limit() {
         assert_eq!(default_replay_response_capture_max_bytes(), 4 * 1024 * 1024);
+        assert_eq!(
+            DiagnosticsConfig::default().response_capture_max_bytes,
+            4 * 1024 * 1024
+        );
+        assert_eq!(
+            DiagnosticsConfig::default().replay_preview_confirmation_ttl_seconds,
+            900
+        );
+        assert_eq!(
+            DiagnosticsConfig::default().replay_preview_confirmation_clock_skew_seconds,
+            60
+        );
+        assert!(DiagnosticsConfig::default().raw_bundle_download_enabled);
+        assert!(!DiagnosticsConfig::default().retention.enabled);
+    }
+
+    #[test]
+    fn final_config_accepts_diagnostics_domain_and_legacy_capture_alias() {
+        let diagnostics_yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+diagnostics:
+  replay_preview_confirmation_ttl_seconds: 30
+  replay_preview_confirmation_clock_skew_seconds: 5
+  response_capture_max_bytes: 1234
+  raw_bundle_download_enabled: false
+  retention:
+    enabled: true
+    request_log_bundle_retention_days: 7
+    replay_artifact_retention_days: 8
+    delete_batch_size: 9
+"#;
+
+        let config: FinalConfig =
+            serde_yaml::from_str(diagnostics_yaml).expect("diagnostics config should deserialize");
+        assert_eq!(config.diagnostics.response_capture_max_bytes, 1234);
+        assert_eq!(
+            config.diagnostics.replay_preview_confirmation_ttl_seconds,
+            30
+        );
+        assert_eq!(
+            config
+                .diagnostics
+                .replay_preview_confirmation_clock_skew_seconds,
+            5
+        );
+        assert!(!config.diagnostics.raw_bundle_download_enabled);
+        assert!(config.diagnostics.retention.enabled);
+        assert_eq!(
+            config
+                .diagnostics
+                .retention
+                .request_log_bundle_retention_days,
+            7
+        );
+        assert_eq!(
+            config.diagnostics.retention.replay_artifact_retention_days,
+            8
+        );
+        assert_eq!(config.diagnostics.retention.delete_batch_size, 9);
+
+        let legacy_yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+replay_response_capture_max_bytes: 2048
+db_pool_size: 5
+"#;
+
+        let legacy: FinalConfig =
+            serde_yaml::from_str(legacy_yaml).expect("legacy capture config should deserialize");
+        let finalized = super::finalize_loaded_config(legacy);
+        assert_eq!(finalized.diagnostics.response_capture_max_bytes, 2048);
+        assert_eq!(finalized.replay_response_capture_max_bytes, 2048);
+    }
+
+    #[test]
+    fn final_config_preserves_s3_driver_when_s3_config_is_missing() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+storage:
+  driver: s3
+  s3: null
+"#;
+
+        let config: FinalConfig =
+            serde_yaml::from_str(yaml).expect("S3 config with null block should deserialize");
+        let finalized = super::finalize_loaded_config(config);
+
+        assert_eq!(finalized.storage.driver, StorageDriver::S3);
+        assert!(finalized.storage.s3.is_none());
+    }
+
+    #[test]
+    fn final_config_preserves_s3_driver_when_s3_config_is_incomplete() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+storage:
+  driver: s3
+  s3:
+    region: null
+    bucket: ""
+    access_key: "   "
+    secret_key: ""
+"#;
+
+        let config: FinalConfig =
+            serde_yaml::from_str(yaml).expect("half configured S3 should deserialize");
+        let finalized = super::finalize_loaded_config(config);
+        let s3 = finalized
+            .storage
+            .s3
+            .as_ref()
+            .expect("S3 config block should remain available for validation");
+
+        assert_eq!(finalized.storage.driver, StorageDriver::S3);
+        assert!(s3.region.is_none());
+        assert!(s3.bucket.is_empty());
+        assert_eq!(s3.access_key.as_deref(), Some("   "));
+        assert_eq!(s3.secret_key.as_deref(), Some(""));
     }
 
     #[test]

@@ -7,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use cyder_tools::log::debug;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -18,7 +17,7 @@ use crate::{
             RequestLog, RequestLogListItem, RequestLogQueryPayload as DbRequestLogQueryPayload,
             RequestLogRecord,
         },
-        request_replay_run::{RequestReplayRun, RequestReplayRunRecord},
+        request_replay_run::RequestReplayRunRecord,
     },
     schema::enum_def::{
         LlmApiType, RequestAttemptStatus, RequestReplayKind, RequestReplayMode,
@@ -27,18 +26,13 @@ use crate::{
     },
     service::{
         app_state::{AppState, StateRouter},
-        request_log_artifact::{
-            RequestLogArtifactResponse, get_request_log_artifacts as load_request_log_artifacts,
-        },
-        request_replay::{
+        diagnostics::{
             AttemptReplayExecuteParams, AttemptReplayPreviewParams, AttemptReplayPreviewResponse,
+            DiagnosticsRetentionParams, DiagnosticsRetentionResponse, DiagnosticsService,
+            DiagnosticsStorageInventoryParams, DiagnosticsStorageInventoryResponse,
             GatewayReplayExecuteParams, GatewayReplayPreviewParams, GatewayReplayPreviewResponse,
-            RequestReplayArtifact, execute_attempt_replay as execute_attempt_replay_service,
-            execute_gateway_replay as execute_gateway_replay_service, load_replay_artifact_for_run,
-            preview_attempt_replay as preview_attempt_replay_service,
-            preview_gateway_replay as preview_gateway_replay_service,
+            RequestLogArtifactResponse, RequestReplayArtifact,
         },
-        storage::{Storage, get_local_storage, get_s3_storage, types::GetObjectOptions},
     },
     utils::HttpResult,
 };
@@ -508,7 +502,10 @@ async fn get_request_log(
 async fn get_request_log_artifacts(
     Path(id): Path<i64>,
 ) -> Result<HttpResult<RequestLogArtifactResponse>, BaseError> {
-    Ok(HttpResult::new(load_request_log_artifacts(id).await?))
+    let diagnostics = DiagnosticsService::new();
+    Ok(HttpResult::new(
+        diagnostics.get_request_log_artifacts(id).await?,
+    ))
 }
 
 async fn preview_attempt_replay(
@@ -516,8 +513,11 @@ async fn preview_attempt_replay(
     Path((request_log_id, attempt_id)): Path<(i64, i64)>,
     Json(payload): Json<AttemptReplayPreviewParams>,
 ) -> Result<HttpResult<AttemptReplayPreviewResponse>, BaseError> {
+    let diagnostics = DiagnosticsService::new();
     Ok(HttpResult::new(
-        preview_attempt_replay_service(&app_state, request_log_id, attempt_id, payload).await?,
+        diagnostics
+            .preview_attempt_replay(&app_state, request_log_id, attempt_id, payload)
+            .await?,
     ))
 }
 
@@ -526,8 +526,10 @@ async fn execute_attempt_replay(
     Path((request_log_id, attempt_id)): Path<(i64, i64)>,
     Json(payload): Json<AttemptReplayExecuteParams>,
 ) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
-    let run =
-        execute_attempt_replay_service(&app_state, request_log_id, attempt_id, payload).await?;
+    let diagnostics = DiagnosticsService::new();
+    let run = diagnostics
+        .execute_attempt_replay(&app_state, request_log_id, attempt_id, payload)
+        .await?;
     Ok(HttpResult::new(run.into()))
 }
 
@@ -536,8 +538,11 @@ async fn preview_gateway_replay(
     Path(request_log_id): Path<i64>,
     Json(payload): Json<GatewayReplayPreviewParams>,
 ) -> Result<HttpResult<GatewayReplayPreviewResponse>, BaseError> {
+    let diagnostics = DiagnosticsService::new();
     Ok(HttpResult::new(
-        preview_gateway_replay_service(&app_state, request_log_id, payload).await?,
+        diagnostics
+            .preview_gateway_replay(&app_state, request_log_id, payload)
+            .await?,
     ))
 }
 
@@ -546,85 +551,80 @@ async fn execute_gateway_replay(
     Path(request_log_id): Path<i64>,
     Json(payload): Json<GatewayReplayExecuteParams>,
 ) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
-    let run = execute_gateway_replay_service(&app_state, request_log_id, payload).await?;
+    let diagnostics = DiagnosticsService::new();
+    let run = diagnostics
+        .execute_gateway_replay(&app_state, request_log_id, payload)
+        .await?;
     Ok(HttpResult::new(run.into()))
 }
 
 async fn list_request_replay_runs(
     Path(request_log_id): Path<i64>,
 ) -> Result<HttpResult<Vec<RequestReplayRunResponse>>, BaseError> {
-    let runs = RequestReplayRun::list_by_source_request_log_id(request_log_id)?;
+    let diagnostics = DiagnosticsService::new();
+    let runs = diagnostics.list_replay_runs(request_log_id)?;
     Ok(HttpResult::new(runs.into_iter().map(Into::into).collect()))
 }
 
 async fn get_request_replay_run(
     Path((request_log_id, replay_run_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
-    let run = RequestReplayRun::get_by_source_and_id(request_log_id, replay_run_id)?;
+    let diagnostics = DiagnosticsService::new();
+    let run = diagnostics.get_replay_run(request_log_id, replay_run_id)?;
     Ok(HttpResult::new(run.into()))
 }
 
 async fn get_request_replay_artifacts(
     Path((request_log_id, replay_run_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<RequestReplayArtifact>, BaseError> {
-    let run = RequestReplayRun::get_by_source_and_id(request_log_id, replay_run_id)?;
-    Ok(HttpResult::new(load_replay_artifact_for_run(&run).await?))
-}
-
-fn resolve_request_log_content_location(
-    storage_type: Option<StorageType>,
-    storage_key: Option<String>,
-) -> Result<(StorageType, String), BaseError> {
-    match (storage_type, storage_key) {
-        (Some(storage_type), Some(key)) => Ok((storage_type, key)),
-        _ => Err(BaseError::NotFound(Some(
-            "Storage type not found".to_string(),
-        ))),
-    }
+    let diagnostics = DiagnosticsService::new();
+    Ok(HttpResult::new(
+        diagnostics
+            .get_replay_artifact(request_log_id, replay_run_id)
+            .await?,
+    ))
 }
 
 async fn get_request_log_content(Path(id): Path<i64>) -> Result<Response, BaseError> {
-    match RequestLog::get_by_id(id) {
-        Ok(record) => match resolve_request_log_content_location(
-            record.bundle_storage_type,
-            record.bundle_storage_key,
-        ) {
-            Ok((storage_type, key)) => {
-                let storage: &dyn Storage = match storage_type {
-                    StorageType::FileSystem => get_local_storage().await,
-                    StorageType::S3 => get_s3_storage().await.ok_or_else(|| {
-                        BaseError::NotFound(Some("S3 storage not available".to_string()))
-                    })?,
-                };
-                debug!("Getting request log content for key: {}", key);
-                let content = storage
-                    .get_object(
-                        &key,
-                        Some(GetObjectOptions {
-                            content_encoding: Some(&""),
-                        }),
-                    )
-                    .await
-                    .map_err(|e| BaseError::DatabaseFatal(Some(e.to_string())))?;
+    let diagnostics = DiagnosticsService::new();
+    let content = diagnostics.get_request_log_bundle_content(id).await?;
+    let cache_headers = [(header::CACHE_CONTROL, "public, max-age=31536000, immutable")];
+    let mut response = (cache_headers, content).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/msgpack"),
+    );
+    headers.insert(
+        header::CONTENT_ENCODING,
+        axum::http::HeaderValue::from_static("gzip"),
+    );
+    Ok(response)
+}
 
-                let cache_headers =
-                    [(header::CACHE_CONTROL, "public, max-age=31536000, immutable")];
-                let mut response = (cache_headers, content).into_response();
-                let headers = response.headers_mut();
-                headers.insert(
-                    header::CONTENT_TYPE,
-                    axum::http::HeaderValue::from_static("application/msgpack"),
-                );
-                headers.insert(
-                    header::CONTENT_ENCODING,
-                    axum::http::HeaderValue::from_static("gzip"),
-                );
-                Ok(response)
-            }
-            Err(error) => Err(error),
-        },
-        Err(e) => Err(e),
-    }
+async fn preview_request_log_retention(
+    Json(payload): Json<DiagnosticsRetentionParams>,
+) -> Result<HttpResult<DiagnosticsRetentionResponse>, BaseError> {
+    let diagnostics = DiagnosticsService::new();
+    Ok(HttpResult::new(diagnostics.retention_preview(payload)?))
+}
+
+async fn execute_request_log_retention(
+    Json(payload): Json<DiagnosticsRetentionParams>,
+) -> Result<HttpResult<DiagnosticsRetentionResponse>, BaseError> {
+    let diagnostics = DiagnosticsService::new();
+    Ok(HttpResult::new(
+        diagnostics.retention_execute(payload).await?,
+    ))
+}
+
+async fn preview_storage_inventory(
+    Json(payload): Json<DiagnosticsStorageInventoryParams>,
+) -> Result<HttpResult<DiagnosticsStorageInventoryResponse>, BaseError> {
+    let diagnostics = DiagnosticsService::new();
+    Ok(HttpResult::new(
+        diagnostics.storage_inventory_preview(payload).await?,
+    ))
 }
 
 pub fn create_record_router() -> StateRouter {
@@ -632,6 +632,12 @@ pub fn create_record_router() -> StateRouter {
         "/request_log",
         StateRouter::new()
             .route("/list", get(list_request_log))
+            .route("/retention/preview", post(preview_request_log_retention))
+            .route("/retention/execute", post(execute_request_log_retention))
+            .route(
+                "/storage_inventory/preview",
+                post(preview_storage_inventory),
+            )
             .route("/{id}", get(get_request_log))
             .route("/{id}/artifacts", get(get_request_log_artifacts))
             .route(
@@ -659,9 +665,7 @@ mod tests {
     use super::{
         RequestAttemptResponse, RequestLogDetailResponse, RequestLogListItemResponse,
         RequestLogQueryParams, RequestLogResponse, RequestReplayRunResponse, create_record_router,
-        resolve_request_log_content_location,
     };
-    use crate::controller::BaseError;
     use crate::database::request_replay_run::RequestReplayRunRecord;
     use crate::schema::enum_def::{
         LlmApiType, RequestAttemptStatus, RequestReplayKind, RequestReplayMode,
@@ -781,25 +785,6 @@ mod tests {
         assert!(value.get("output_text_tokens").is_some());
         let legacy_api_key_id_field = ["system", "api", "key", "id"].join("_");
         assert!(value.get(&legacy_api_key_id_field).is_none());
-    }
-
-    #[test]
-    fn request_log_content_location_uses_persisted_bundle_key_only() {
-        let (storage_type, key) = resolve_request_log_content_location(
-            Some(StorageType::FileSystem),
-            Some("explicit/bundle-key.mp.gz".to_string()),
-        )
-        .expect("persisted bundle key should resolve");
-
-        assert_eq!(storage_type, StorageType::FileSystem);
-        assert_eq!(key, "explicit/bundle-key.mp.gz");
-
-        let missing_key = resolve_request_log_content_location(Some(StorageType::FileSystem), None);
-        assert!(matches!(missing_key, Err(BaseError::NotFound(_))));
-
-        let missing_storage =
-            resolve_request_log_content_location(None, Some("legacy-derived-key".to_string()));
-        assert!(matches!(missing_storage, Err(BaseError::NotFound(_))));
     }
 
     #[test]

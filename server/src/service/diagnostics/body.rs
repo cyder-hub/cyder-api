@@ -12,8 +12,7 @@ use crate::{
     proxy::ProxyError,
     service::diagnostics::{
         policy::{
-            disallowed_replay_request_header_names, redacted_header_names,
-            response_capture_max_bytes,
+            DiagnosticsPolicy, disallowed_replay_request_header_names, redacted_header_names,
         },
         replay::types::{
             RequestReplayBody, RequestReplayBodyCaptureMetadata, RequestReplayNameValue,
@@ -39,8 +38,8 @@ pub(crate) struct ReplayResponseBodyCapture {
     pub(crate) body_encoding: String,
 }
 
-pub(crate) fn replay_response_capture_limit() -> usize {
-    response_capture_max_bytes()
+pub(crate) fn replay_response_capture_limit(policy: &DiagnosticsPolicy) -> usize {
+    policy.response_capture_max_bytes()
 }
 
 pub(crate) async fn read_replay_response_body_bounded<S, E, F>(
@@ -192,6 +191,7 @@ pub(crate) fn replay_body_capture_metadata(
 pub(crate) fn replay_body_capture_metadata_from_bytes(
     body: &Bytes,
     capture_state: Option<&str>,
+    capture_limit_bytes: usize,
 ) -> RequestReplayBodyCaptureMetadata {
     let state = capture_state
         .filter(|value| !value.trim().is_empty())
@@ -205,7 +205,7 @@ pub(crate) fn replay_body_capture_metadata_from_bytes(
         original_size_known: !truncated,
         truncated,
         sha256: sha256_hex(body),
-        capture_limit_bytes: replay_response_capture_limit() as i64,
+        capture_limit_bytes: capture_limit_bytes.max(1) as i64,
         body_encoding: "unknown".to_string(),
     }
 }
@@ -464,6 +464,15 @@ mod tests {
     use reqwest::header::CONTENT_TYPE;
 
     use super::*;
+
+    #[test]
+    fn replay_response_capture_limit_uses_supplied_policy() {
+        let mut config = crate::config::DiagnosticsConfig::default();
+        config.response_capture_max_bytes = 2048;
+        let policy = DiagnosticsPolicy::from_config(&config);
+
+        assert_eq!(replay_response_capture_limit(&policy), 2048);
+    }
 
     #[tokio::test]
     async fn replay_response_capture_marks_large_plain_body_incomplete() {

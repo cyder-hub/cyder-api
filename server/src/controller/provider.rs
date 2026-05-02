@@ -651,14 +651,14 @@ async fn check_provider(
     let provider = Provider::get_by_id(id)?;
 
     let client = if provider.use_proxy {
-        app_state.infra.proxy_client()
+        app_state.infra.proxy_client().await
     } else {
-        app_state.infra.client()
+        app_state.infra.client().await
     };
 
     perform_provider_check(
         &app_state,
-        client,
+        client.as_ref(),
         &provider,
         selected_model.as_ref(),
         provider_api_key_id,
@@ -702,9 +702,9 @@ async fn bootstrap_provider(
 
     let check_result = if payload.save_and_test {
         let client = if created.provider.use_proxy {
-            app_state.infra.proxy_client()
+            app_state.infra.proxy_client().await
         } else {
-            app_state.infra.client()
+            app_state.infra.client().await
         };
         let model_name_to_check = created
             .created_model
@@ -715,7 +715,7 @@ async fn bootstrap_provider(
 
         match perform_provider_check(
             &app_state,
-            client,
+            client.as_ref(),
             &created.provider,
             Some(&created.created_model),
             created.created_key.id,
@@ -763,9 +763,9 @@ async fn get_remote_models(
     })?;
 
     let client = if provider.use_proxy {
-        app_state.infra.proxy_client()
+        app_state.infra.proxy_client().await
     } else {
-        app_state.infra.client()
+        app_state.infra.client().await
     };
 
     let response = if provider.provider_type == ProviderType::Gemini {
@@ -782,7 +782,7 @@ async fn get_remote_models(
             BaseError::ParamInvalid(Some(format!("Failed to fetch remote models: {}", e)))
         })?
     } else if provider.provider_type == ProviderType::Vertex {
-        let token = get_vertex_token(client, api_key_record.id, &api_key_record.api_key)
+        let token = get_vertex_token(client.as_ref(), api_key_record.id, &api_key_record.api_key)
             .await
             .map_err(|e| {
                 BaseError::ParamInvalid(Some(format!("Failed to get vertex token: {}", e)))

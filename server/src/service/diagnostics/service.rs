@@ -16,6 +16,7 @@ use crate::{
                 RequestLogArtifactResponse, build_request_log_artifact_response,
             },
             bundle,
+            policy::{DiagnosticsPolicy, DiagnosticsPolicyManager},
             replay::artifact_store,
             replay::executor,
             replay::types::{
@@ -31,12 +32,28 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DiagnosticsService;
+#[derive(Debug, Clone)]
+pub struct DiagnosticsService {
+    policy_manager: Arc<DiagnosticsPolicyManager>,
+}
 
 impl DiagnosticsService {
-    pub const fn new() -> Self {
-        Self
+    pub fn new(policy_manager: Arc<DiagnosticsPolicyManager>) -> Self {
+        Self { policy_manager }
+    }
+
+    pub fn new_with_default_policy() -> Self {
+        Self::new(Arc::new(DiagnosticsPolicyManager::new(
+            DiagnosticsPolicy::default(),
+        )))
+    }
+
+    pub fn policy_manager(&self) -> Arc<DiagnosticsPolicyManager> {
+        Arc::clone(&self.policy_manager)
+    }
+
+    pub async fn policy(&self) -> DiagnosticsPolicy {
+        self.policy_manager.current().await
     }
 
     pub async fn get_request_log_artifacts(
@@ -58,7 +75,8 @@ impl DiagnosticsService {
         &self,
         request_log_id: i64,
     ) -> Result<Bytes, BaseError> {
-        bundle::load_request_log_bundle_content(request_log_id).await
+        let policy = self.policy().await;
+        bundle::load_request_log_bundle_content(request_log_id, &policy).await
     }
 
     pub async fn preview_attempt_replay(
@@ -123,18 +141,20 @@ impl DiagnosticsService {
         artifact_store::load_replay_artifact_for_run(&run).await
     }
 
-    pub fn retention_preview(
+    pub async fn retention_preview(
         &self,
         params: DiagnosticsRetentionParams,
     ) -> Result<DiagnosticsRetentionResponse, BaseError> {
-        retention::preview_retention(params)
+        let policy = self.policy().await;
+        retention::preview_retention(params, &policy)
     }
 
     pub async fn retention_execute(
         &self,
         params: DiagnosticsRetentionParams,
     ) -> Result<DiagnosticsRetentionResponse, BaseError> {
-        retention::execute_retention(params).await
+        let policy = self.policy().await;
+        retention::execute_retention(params, &policy).await
     }
 
     pub async fn storage_inventory_preview(
@@ -147,16 +167,13 @@ impl DiagnosticsService {
 
 #[cfg(test)]
 mod tests {
-    use std::mem;
-
     use super::*;
 
     #[test]
-    fn diagnostics_service_is_stateless() {
-        let service = DiagnosticsService::new();
+    fn diagnostics_service_exposes_policy_manager() {
+        let service = DiagnosticsService::new_with_default_policy();
 
-        assert_eq!(mem::size_of::<DiagnosticsService>(), 0);
-        assert_eq!(mem::size_of_val(&service), 0);
+        assert_eq!(Arc::strong_count(&service.policy_manager()), 2);
     }
 
     #[test]

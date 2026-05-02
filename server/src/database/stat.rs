@@ -1,9 +1,9 @@
-use crate::config::CONFIG;
+use crate::controller::BaseError;
 use crate::database::model::Model;
 use crate::database::provider::{Provider, ProviderApiKey};
 use crate::database::{DbConnection, DbResult, get_connection};
 use crate::{db_execute, db_object};
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use diesel::QueryableByName;
 use diesel::dsl::{count_star, sum};
@@ -388,9 +388,9 @@ pub fn get_request_logs_in_range(
     }
 }
 
-pub fn get_today_request_log_stats() -> DbResult<TodayRequestLogStats> {
+pub fn get_today_request_log_stats(timezone: Option<&str>) -> DbResult<TodayRequestLogStats> {
     let conn = &mut get_connection()?;
-    let start_of_today = start_of_today_timestamp_ms();
+    let start_of_today = start_of_today_timestamp_ms(timezone)?;
     let summary_row = load_today_request_log_summary(conn, start_of_today)?;
 
     Ok(TodayRequestLogStats {
@@ -423,9 +423,9 @@ pub fn get_dashboard_overview_stats() -> DbResult<DashboardOverviewStats> {
     })
 }
 
-pub fn get_dashboard_today_stats() -> DbResult<DashboardTodayStats> {
+pub fn get_dashboard_today_stats(timezone: Option<&str>) -> DbResult<DashboardTodayStats> {
     let conn = &mut get_connection()?;
-    let start_of_today = start_of_today_timestamp_ms();
+    let start_of_today = start_of_today_timestamp_ms(timezone)?;
     let aggregate = load_dashboard_today_aggregate(conn, start_of_today)?;
 
     Ok(DashboardTodayStats {
@@ -446,9 +446,12 @@ pub fn get_dashboard_today_stats() -> DbResult<DashboardTodayStats> {
     })
 }
 
-pub fn get_dashboard_top_models(limit: usize) -> DbResult<Vec<DashboardTopModelItem>> {
+pub fn get_dashboard_top_models(
+    limit: usize,
+    timezone: Option<&str>,
+) -> DbResult<Vec<DashboardTopModelItem>> {
     let conn = &mut get_connection()?;
-    let start_of_today = start_of_today_timestamp_ms();
+    let start_of_today = start_of_today_timestamp_ms(timezone)?;
     let mut items = load_dashboard_top_model_base_rows(conn, start_of_today, limit)?
         .into_iter()
         .map(|row| {
@@ -490,9 +493,12 @@ pub fn get_dashboard_top_models(limit: usize) -> DbResult<Vec<DashboardTopModelI
     Ok(result)
 }
 
-pub fn get_dashboard_cost_alert_models(limit: usize) -> DbResult<Vec<DashboardTopModelItem>> {
+pub fn get_dashboard_cost_alert_models(
+    limit: usize,
+    timezone: Option<&str>,
+) -> DbResult<Vec<DashboardTopModelItem>> {
     let conn = &mut get_connection()?;
-    let start_of_today = start_of_today_timestamp_ms();
+    let start_of_today = start_of_today_timestamp_ms(timezone)?;
     let mut items = load_dashboard_top_model_base_rows_for_cost(conn, start_of_today, limit)?
         .into_iter()
         .map(|row| {
@@ -629,18 +635,37 @@ pub fn get_usage_stats_aggregates(
     Ok(result)
 }
 
-fn start_of_today_timestamp_ms() -> i64 {
-    let tz: Tz = CONFIG
-        .timezone
-        .as_deref()
-        .and_then(|tz_str| tz_str.parse::<Tz>().ok())
-        .unwrap_or(Tz::Etc__UTC);
+pub(crate) fn start_of_today_timestamp_ms(timezone: Option<&str>) -> DbResult<i64> {
+    start_of_day_timestamp_ms_at(Utc::now(), timezone)
+}
 
-    let now = Utc::now();
+fn start_of_day_timestamp_ms_at(now: DateTime<Utc>, timezone: Option<&str>) -> DbResult<i64> {
+    let tz = parse_stats_timezone(timezone)?;
     let today_in_tz = now.with_timezone(&tz).date_naive();
-    tz.from_local_datetime(&today_in_tz.and_hms_opt(0, 0, 0).unwrap())
-        .unwrap()
-        .timestamp_millis()
+    let local_start = today_in_tz.and_hms_opt(0, 0, 0).ok_or_else(|| {
+        BaseError::InternalServerError(Some("Invalid local day start".to_string()))
+    })?;
+    tz.from_local_datetime(&local_start)
+        .earliest()
+        .map(|value| value.timestamp_millis())
+        .ok_or_else(|| {
+            BaseError::InternalServerError(Some(format!(
+                "Invalid local day boundary for timezone '{}'",
+                timezone.unwrap_or("UTC")
+            )))
+        })
+}
+
+fn parse_stats_timezone(timezone: Option<&str>) -> DbResult<Tz> {
+    let Some(timezone) = timezone.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Tz::Etc__UTC);
+    };
+    timezone.parse::<Tz>().map_err(|_| {
+        BaseError::InternalServerError(Some(format!(
+            "Invalid runtime timezone '{}'; update system configuration before reading today stats",
+            timezone
+        )))
+    })
 }
 
 fn calculate_success_rate(request_count: i64, success_count: i64) -> Option<f64> {
@@ -1314,9 +1339,10 @@ mod tests {
         CostByCurrencyRow, TodayRequestLogSummaryRow, UsageStatsGroupBy, calculate_success_rate,
         load_dashboard_api_key_counts, load_dashboard_today_aggregate,
         load_dashboard_top_model_base_rows, load_dashboard_top_model_cost_rows,
-        load_usage_stats_base_rows, load_usage_stats_cost_rows,
+        load_usage_stats_base_rows, load_usage_stats_cost_rows, start_of_day_timestamp_ms_at,
     };
     use crate::database::DbConnection;
+    use chrono::TimeZone;
     use diesel::connection::SimpleConnection;
     use diesel::sqlite::SqliteConnection;
 
@@ -1341,6 +1367,20 @@ mod tests {
     fn calculate_success_rate_handles_empty_and_non_empty_windows() {
         assert_eq!(calculate_success_rate(0, 0), None);
         assert_eq!(calculate_success_rate(10, 7), Some(0.7));
+    }
+
+    #[test]
+    fn start_of_today_respects_supplied_timezone() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap();
+
+        let utc_start =
+            start_of_day_timestamp_ms_at(now, None).expect("utc boundary should calculate");
+        let shanghai_start = start_of_day_timestamp_ms_at(now, Some("Asia/Shanghai"))
+            .expect("shanghai boundary should calculate");
+
+        assert_ne!(utc_start, shanghai_start);
+        assert_eq!(utc_start - shanghai_start, 8 * 60 * 60 * 1000);
+        assert!(start_of_day_timestamp_ms_at(now, Some("Not/AZone")).is_err());
     }
 
     #[test]

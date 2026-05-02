@@ -16,7 +16,6 @@ use tokio::{
 
 use super::{cancellation::ResponseStreamCancellationGuard, response::build_response_builder};
 use crate::{
-    config::CONFIG,
     proxy::{
         ProxyError,
         cancellation::ProxyCancellationContext,
@@ -78,9 +77,10 @@ pub(super) async fn mark_stream_response_started_to_client(
 
 pub(super) fn next_stream_chunk_timeout_duration(
     first_chunk_received_at_proxy: i64,
+    first_byte_timeout: Option<Duration>,
 ) -> Option<Duration> {
     if first_chunk_received_at_proxy == 0 {
-        CONFIG.proxy_request.first_byte_timeout()
+        first_byte_timeout
     } else {
         None
     }
@@ -177,6 +177,7 @@ pub(super) async fn handle_streaming_response(
     target_api_type: LlmApiType,
     log_mode: RuntimeLogMode,
     execution_policy: RuntimeExecutionPolicy,
+    first_byte_timeout: Option<Duration>,
 ) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -248,7 +249,7 @@ pub(super) async fn handle_streaming_response(
         let mut user_body_writer = Some(user_body_writer);
 
         loop {
-            let chunk_result = match next_stream_chunk_timeout_duration(first_chunk_received_at_proxy) {
+            let chunk_result = match next_stream_chunk_timeout_duration(first_chunk_received_at_proxy, first_byte_timeout) {
                 Some(timeout_duration) => match tokio::select! {
                     _ = cancellation.cancelled() => Err(cancellation.cancellation_error().await),
                     result = timeout(timeout_duration, rx.recv()) => Ok(result),

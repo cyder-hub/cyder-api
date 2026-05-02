@@ -7,6 +7,13 @@ import type {
   DashboardResourcesSection,
   DashboardAlertsSection,
   UsageStatsPeriod,
+  SystemConfigChangeRequest,
+  SystemConfigApplyRequest,
+  SystemConfigHistoryItem,
+  SystemConfigHistoryQuery,
+  SystemConfigPreviewResponse,
+  SystemConfigReport,
+  SystemConfigResetApplyRequest,
   ApiKeyItem,
   ApiKeyDetail,
   ApiKeyReveal,
@@ -121,6 +128,42 @@ export const Api = {
   },
   getUsageStats(params: URLSearchParams): Promise<UsageStatsPeriod[]> {
     return request(`/ai/manager/api/system/usage_stats?${params.toString()}`);
+  },
+  getSystemConfig(): Promise<SystemConfigReport> {
+    return request.get("/ai/manager/api/system/config");
+  },
+  previewSystemConfig(
+    payload: SystemConfigChangeRequest,
+  ): Promise<SystemConfigPreviewResponse> {
+    return request.post("/ai/manager/api/system/config/preview", payload);
+  },
+  applySystemConfig(
+    payload: SystemConfigApplyRequest,
+  ): Promise<SystemConfigReport> {
+    return request.post("/ai/manager/api/system/config/apply", payload);
+  },
+  resetSystemConfig(
+    payload: SystemConfigResetApplyRequest,
+  ): Promise<SystemConfigReport> {
+    return request.post("/ai/manager/api/system/config/reset", payload);
+  },
+  reloadSystemConfig(): Promise<SystemConfigReport> {
+    return request.post("/ai/manager/api/system/config/reload", {});
+  },
+  getSystemConfigHistory(
+    params: SystemConfigHistoryQuery = {},
+  ): Promise<SystemConfigHistoryItem[]> {
+    const qs = new URLSearchParams();
+    if (params.limit !== undefined) {
+      qs.set("limit", String(params.limit));
+    }
+    if (params.offset !== undefined) {
+      qs.set("offset", String(params.offset));
+    }
+    const suffix = qs.toString();
+    return request.get(
+      `/ai/manager/api/system/config/history${suffix ? `?${suffix}` : ""}`,
+    );
   },
 
   // ========== API Key ==========

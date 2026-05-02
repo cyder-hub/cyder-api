@@ -2,7 +2,6 @@ use super::{
     ProxyError, classify_request_body_error,
     util::{sha256_hex, top_level_json_field_count},
 };
-use crate::config::CONFIG;
 use axum::{body::Body, extract::Request};
 use bytes::Bytes;
 use serde_json::Value;
@@ -16,8 +15,9 @@ pub(super) struct ParsedProxyRequest {
 
 pub(super) async fn parse_json_request(
     request: Request<Body>,
+    max_body_size: usize,
 ) -> Result<ParsedProxyRequest, ProxyError> {
-    let body_bytes = axum::body::to_bytes(request.into_body(), CONFIG.max_body_size)
+    let body_bytes = axum::body::to_bytes(request.into_body(), max_body_size)
         .await
         .map_err(|e| classify_request_body_error(e.to_string()))?;
     let data: Value = serde_json::from_slice(&body_bytes)
@@ -52,7 +52,7 @@ mod tests {
             .body(Body::from(r#"{"model":"gpt-test","stream":true}"#))
             .unwrap();
 
-        let parsed = parse_json_request(request).await.unwrap();
+        let parsed = parse_json_request(request, 1024 * 1024).await.unwrap();
 
         assert_eq!(parsed.data, json!({"model":"gpt-test","stream":true}));
         assert_eq!(parsed.original_request_value, parsed.data);
@@ -69,8 +69,20 @@ mod tests {
             .body(Body::from("{not-json"))
             .unwrap();
 
-        let err = parse_json_request(request).await.unwrap_err();
+        let err = parse_json_request(request, 1024 * 1024).await.unwrap_err();
 
         assert!(matches!(err, ProxyError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn parse_json_request_uses_supplied_body_limit() {
+        let request = Request::builder()
+            .uri("/v1/chat/completions")
+            .body(Body::from(r#"{"model":"gpt-test"}"#))
+            .unwrap();
+
+        let err = parse_json_request(request, 4).await.unwrap_err();
+
+        assert!(matches!(err, ProxyError::PayloadTooLarge(_)));
     }
 }

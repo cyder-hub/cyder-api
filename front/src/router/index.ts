@@ -42,6 +42,11 @@ const router = createRouter({
           component: () => import("@/pages/Cost.vue"),
         },
         {
+          path: "system/config",
+          name: "SystemConfig",
+          component: () => import("@/pages/SystemConfig.vue"),
+        },
+        {
           path: "provider",
           name: "Provider",
           component: () => import("@/pages/Provider.vue"),

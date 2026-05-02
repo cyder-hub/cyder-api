@@ -500,9 +500,16 @@ async fn system_overview_stats(
     }))
 }
 
-async fn today_request_log_stats() -> Result<HttpResult<TodayRequestLogStats>, BaseError> {
-    let stats = get_today_request_log_stats()?;
+async fn today_request_log_stats(
+    State(app_state): State<Arc<AppState>>,
+) -> Result<HttpResult<TodayRequestLogStats>, BaseError> {
+    let timezone = current_runtime_timezone(&app_state).await;
+    let stats = get_today_request_log_stats(timezone.as_deref())?;
     Ok(HttpResult::new(stats))
+}
+
+async fn current_runtime_timezone(app_state: &Arc<AppState>) -> Option<String> {
+    app_state.system_config.runtime_snapshot().await.timezone
 }
 
 fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntimeSummary {
@@ -697,9 +704,10 @@ async fn build_dashboard_runtime_items(
 
 fn build_dashboard_alerts_section(
     runtime_items: &[ProviderRuntimeItem],
+    timezone: Option<&str>,
 ) -> Result<DashboardAlertsSection, BaseError> {
     let mut alerts = dashboard_alerts_from_runtime_items(runtime_items);
-    alerts.top_cost_models = get_dashboard_cost_alert_models(5)?
+    alerts.top_cost_models = get_dashboard_cost_alert_models(5, timezone)?
         .into_iter()
         .map(cost_model_alert_item_from_top_model_item)
         .collect();
@@ -707,20 +715,22 @@ fn build_dashboard_alerts_section(
     Ok(DashboardAlertsSection {
         alerts,
         top_providers: top_providers_from_runtime_items(runtime_items),
-        top_models: get_dashboard_top_models(5)?,
+        top_models: get_dashboard_top_models(5, timezone)?,
     })
 }
 
 async fn system_dashboard(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardResponse>, BaseError> {
+    let timezone = current_runtime_timezone(&app_state).await;
+    let timezone = timezone.as_deref();
     let overview = DashboardOverviewStats::from(get_dashboard_overview_stats()?);
-    let today = DashboardTodayStats::from(get_dashboard_today_stats()?);
+    let today = DashboardTodayStats::from(get_dashboard_today_stats(timezone)?);
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     let runtime = runtime_summary_from_items(&runtime_items);
     let runtime_state_backend =
         runtime_backend_status_for_provider_items(&app_state, &runtime_items).await;
-    let alerts_section = build_dashboard_alerts_section(&runtime_items)?;
+    let alerts_section = build_dashboard_alerts_section(&runtime_items, timezone)?;
 
     Ok(HttpResult::new(DashboardResponse {
         overview,
@@ -736,7 +746,8 @@ async fn system_dashboard(
 async fn system_dashboard_kpi(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardKpiSection>, BaseError> {
-    let today = DashboardTodayStats::from(get_dashboard_today_stats()?);
+    let timezone = current_runtime_timezone(&app_state).await;
+    let today = DashboardTodayStats::from(get_dashboard_today_stats(timezone.as_deref())?);
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     let runtime = runtime_summary_from_items(&runtime_items);
 
@@ -746,8 +757,10 @@ async fn system_dashboard_kpi(
 async fn system_dashboard_resources(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardResourcesSection>, BaseError> {
+    let timezone = current_runtime_timezone(&app_state).await;
+    let timezone = timezone.as_deref();
     let overview = DashboardOverviewStats::from(get_dashboard_overview_stats()?);
-    let today = DashboardTodayStats::from(get_dashboard_today_stats()?);
+    let today = DashboardTodayStats::from(get_dashboard_today_stats(timezone)?);
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     let runtime = runtime_summary_from_items(&runtime_items);
     let runtime_state_backend =
@@ -764,9 +777,11 @@ async fn system_dashboard_resources(
 async fn system_dashboard_alerts(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardAlertsSection>, BaseError> {
+    let timezone = current_runtime_timezone(&app_state).await;
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
     Ok(HttpResult::new(build_dashboard_alerts_section(
         &runtime_items,
+        timezone.as_deref(),
     )?))
 }
 

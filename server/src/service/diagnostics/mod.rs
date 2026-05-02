@@ -15,6 +15,7 @@ pub use self::artifact_read_model::{
     TransformDiagnosticsSummaryBodyResponse, TransformDiagnosticsSummaryResponse,
 };
 pub use self::capability::{ReplayCapabilitySummary, ReplayKindCapabilitySummary};
+pub use self::policy::{DiagnosticsPolicy, DiagnosticsPolicyManager};
 pub use self::replay::types::{
     AttemptReplayBaselineSummary, AttemptReplayExecuteParams, AttemptReplayPreviewParams,
     AttemptReplayPreviewResponse, GatewayReplayBaselineSummary, GatewayReplayExecuteParams,

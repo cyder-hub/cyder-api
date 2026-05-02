@@ -16,6 +16,7 @@ use reasoning_config::create_reasoning_config_router;
 use request_log::create_record_router;
 use request_patch::create_request_patch_router;
 use stat::routes as create_stat_router;
+use system_config::create_system_config_router;
 
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -36,6 +37,7 @@ mod request_log;
 mod request_patch;
 mod stat;
 mod system;
+mod system_config;
 
 pub use error::BaseError;
 pub use system::create_system_router;
@@ -65,6 +67,7 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_reasoning_config_router())
             .merge(create_cost_router())
             .merge(create_stat_router())
+            .merge(create_system_config_router())
             .layer(middleware::from_fn(authorization_access_middleware))
             .merge(create_auth_router()),
     );

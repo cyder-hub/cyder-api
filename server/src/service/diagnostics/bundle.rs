@@ -10,7 +10,7 @@ use crate::{
     database::request_log::{RequestLog, RequestLogRecord},
     schema::enum_def::StorageType,
     service::{
-        diagnostics::policy,
+        diagnostics::policy::DiagnosticsPolicy,
         storage::{Storage, get_local_storage, get_s3_storage, types::GetObjectOptions},
     },
     utils::storage::{REQUEST_LOG_BUNDLE_V2_VERSION, RequestLogBundleV2},
@@ -40,8 +40,11 @@ pub(crate) async fn load_request_log_bundle(
         .map(Some)
 }
 
-pub async fn load_request_log_bundle_content(request_log_id: i64) -> Result<Bytes, BaseError> {
-    if !policy::raw_bundle_download_enabled() {
+pub async fn load_request_log_bundle_content(
+    request_log_id: i64,
+    policy: &DiagnosticsPolicy,
+) -> Result<Bytes, BaseError> {
+    if !policy.raw_bundle_download_enabled() {
         return Err(BaseError::ParamInvalid(Some(
             "Raw request log bundle download is disabled by diagnostics.raw_bundle_download_enabled"
                 .to_string(),
@@ -182,15 +185,19 @@ mod tests {
     use crate::{
         controller::BaseError,
         schema::enum_def::StorageType,
-        service::storage::{Storage, local::LocalStorage},
+        service::{
+            diagnostics::DiagnosticsPolicy,
+            storage::{Storage, local::LocalStorage},
+        },
         utils::storage::{
             RequestLogBundleRequestSection, RequestLogBundleV2, RequestLogBundleV2Builder,
         },
     };
 
     use super::{
-        decode_request_log_bundle, load_request_log_bundle_content_with_storage,
-        load_request_log_bundle_with_storage, resolve_request_log_bundle_content_location,
+        decode_request_log_bundle, load_request_log_bundle_content,
+        load_request_log_bundle_content_with_storage, load_request_log_bundle_with_storage,
+        resolve_request_log_bundle_content_location,
     };
 
     fn bundle() -> RequestLogBundleV2 {
@@ -282,6 +289,21 @@ mod tests {
         assert_ne!(raw, Bytes::from(encoded.clone()));
         let decoded = decode_request_log_bundle(&raw).unwrap();
         assert_eq!(decoded.log_id, 42);
+    }
+
+    #[tokio::test]
+    async fn request_log_content_rejects_when_raw_bundle_download_disabled() {
+        let mut config = crate::config::DiagnosticsConfig::default();
+        config.raw_bundle_download_enabled = false;
+        let policy = DiagnosticsPolicy::from_config(&config);
+
+        let err = load_request_log_bundle_content(42, &policy)
+            .await
+            .expect_err("disabled raw bundle download should be rejected before db lookup");
+
+        assert!(
+            matches!(err, BaseError::ParamInvalid(Some(message)) if message.contains("raw_bundle_download_enabled"))
+        );
     }
 
     #[tokio::test]

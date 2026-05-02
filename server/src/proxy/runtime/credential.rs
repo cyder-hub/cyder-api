@@ -56,7 +56,7 @@ pub(in crate::proxy) async fn resolve_provider_credentials(
 
     let request_key = match provider.provider_type {
         ProviderType::Vertex | ProviderType::VertexOpenai => get_vertex_token(
-            app_state.infra.proxy_client(),
+            app_state.infra.proxy_client().await.as_ref(),
             selected_key.id,
             &selected_key.api_key,
         )

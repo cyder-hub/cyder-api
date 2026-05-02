@@ -151,10 +151,13 @@ The frontend is a Vue admin console, not a Solid app.
 
 The app loads configuration from:
 
+- program defaults
 - `config.default.yaml`
-- `config.local.yaml` in development when present
-- otherwise `config.yaml`
-- environment variables override file values
+- `config.local.yaml` in development when present, otherwise `config.yaml`
+- environment variables
+- `config.override.yaml`
+
+`config.override.yaml` is the highest-priority, manager UI managed override file. It must only contain the system-config hot-reload allowlist; non-allowlisted settings belong in the base config file and require restart. `config.override.history.jsonl` is audit history only and is not loaded as configuration. Multi-instance mode is read-only for manager UI override writes.
 
 Default `base_path` is `/ai`.
 

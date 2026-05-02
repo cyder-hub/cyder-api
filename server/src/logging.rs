@@ -1,7 +1,4 @@
-use std::{
-    fmt::{self, Write},
-    str::FromStr,
-};
+use std::fmt::{self, Write};
 
 use chrono::{DateTime, Local, SecondsFormat};
 use log::{Level, LevelFilter, Log, Metadata, Record};
@@ -27,7 +24,30 @@ pub fn event_message_with_fields(event: &str, fields: &[(&str, Option<String>)])
 
 pub fn init(level: &str) {
     log::set_logger(&LOGGER).expect("local logger init");
-    let level = LevelFilter::from_str(level).unwrap_or(LevelFilter::Info);
+    let level = parse_level(level).unwrap_or(LevelFilter::Info);
+    log::set_max_level(level);
+}
+
+pub fn parse_level(level: &str) -> Result<LevelFilter, String> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "trace" => Ok(LevelFilter::Trace),
+        "debug" => Ok(LevelFilter::Debug),
+        "info" => Ok(LevelFilter::Info),
+        "warn" => Ok(LevelFilter::Warn),
+        "error" => Ok(LevelFilter::Error),
+        _ => Err(format!(
+            "invalid log level '{level}', expected trace, debug, info, warn, or error"
+        )),
+    }
+}
+
+pub fn set_level(level: &str) -> Result<(), String> {
+    let level = parse_level(level)?;
+    set_level_filter(level);
+    Ok(())
+}
+
+pub fn set_level_filter(level: LevelFilter) {
     log::set_max_level(level);
 }
 
@@ -243,9 +263,16 @@ macro_rules! error_event {
 
 #[cfg(test)]
 mod tests {
-    use log::{Level, Record};
+    use std::sync::Mutex;
 
-    use super::{THIRD_PARTY_DEBUG_ENV, format_log_line, is_app_target, third_party_debug_enabled};
+    use log::{Level, LevelFilter, Record};
+
+    use super::{
+        THIRD_PARTY_DEBUG_ENV, format_log_line, is_app_target, parse_level, set_level,
+        third_party_debug_enabled,
+    };
+
+    static LOG_LEVEL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn app_targets_are_recognized() {
@@ -253,6 +280,28 @@ mod tests {
         assert!(is_app_target("cyder_tools::auth"));
         assert!(!is_app_target("aws_smithy_runtime::client"));
         assert!(!is_app_target("hyper_util::client::legacy::pool"));
+    }
+
+    #[test]
+    fn legal_log_levels_parse() {
+        assert_eq!(parse_level("trace"), Ok(LevelFilter::Trace));
+        assert_eq!(parse_level("debug"), Ok(LevelFilter::Debug));
+        assert_eq!(parse_level("info"), Ok(LevelFilter::Info));
+        assert_eq!(parse_level("warn"), Ok(LevelFilter::Warn));
+        assert_eq!(parse_level("error"), Ok(LevelFilter::Error));
+        assert!(parse_level("off").is_err());
+        assert!(parse_level("invalid").is_err());
+    }
+
+    #[test]
+    fn set_level_updates_global_max_level_and_can_be_restored() {
+        let _guard = LOG_LEVEL_TEST_LOCK.lock().expect("log level lock");
+        let previous = log::max_level();
+
+        set_level("debug").expect("debug level should apply");
+        assert_eq!(log::max_level(), LevelFilter::Debug);
+
+        log::set_max_level(previous);
     }
 
     #[test]

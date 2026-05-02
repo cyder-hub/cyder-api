@@ -94,10 +94,12 @@ pub(in crate::proxy) async fn send_materialized_request(
     let provider_id = log_context.provider_id;
     let log_context = Arc::new(TokioMutex::new(log_context));
 
+    let client_bundle = app_state.infra.client_bundle().await;
+    let first_byte_timeout = client_bundle.proxy_request.first_byte_timeout();
     let client = if use_proxy {
-        app_state.infra.proxy_client()
+        Arc::clone(&client_bundle.proxy_client)
     } else {
-        app_state.infra.client()
+        Arc::clone(&client_bundle.client)
     };
 
     let mut cancellation_guard = RequestLogContextGuard::new(
@@ -122,6 +124,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             .headers(headers)
             .body(data),
         "LLM request",
+        first_byte_timeout,
     )
     .await
     {
@@ -202,6 +205,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             target_api_type,
             log_mode,
             execution_policy,
+            first_byte_timeout,
         )
         .await
         {
@@ -381,14 +385,16 @@ mod tests {
 
     #[test]
     fn next_stream_chunk_timeout_only_applies_before_first_chunk() {
+        let first_byte_timeout = Some(std::time::Duration::from_secs(7));
         assert_eq!(
-            next_stream_chunk_timeout_duration(0).map(|value| value.as_secs()),
-            crate::config::CONFIG
-                .proxy_request
-                .first_byte_timeout()
-                .map(|value| value.as_secs())
+            next_stream_chunk_timeout_duration(0, first_byte_timeout).map(|value| value.as_secs()),
+            Some(7)
         );
-        assert_eq!(next_stream_chunk_timeout_duration(1), None);
+        assert_eq!(
+            next_stream_chunk_timeout_duration(1, first_byte_timeout),
+            None
+        );
+        assert_eq!(next_stream_chunk_timeout_duration(0, None), None);
     }
 
     #[tokio::test]
@@ -504,6 +510,7 @@ mod tests {
             &cancellation,
             client.get("http://127.0.0.1:9"),
             "LLM request",
+            Some(std::time::Duration::from_secs(1)),
         )
         .await;
 

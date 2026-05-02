@@ -1,6 +1,11 @@
 use rand::{Rng, distr::Alphanumeric, rng};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{fs, path::Path, sync::LazyLock, time::Duration};
+use std::{sync::LazyLock, time::Duration};
+
+pub mod loader;
+pub mod override_policy;
+pub mod paths;
+pub mod source;
 
 // --- START DEPLOYMENT CONFIG ---
 
@@ -284,7 +289,7 @@ impl RuntimeStateConfig {
 
 // --- START PROXY REQUEST CONFIG ---
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProxyRequestConfig {
     #[serde(default = "default_proxy_connect_timeout_seconds")]
@@ -319,7 +324,7 @@ impl ProxyRequestConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderGovernanceConfig {
     #[serde(default = "default_provider_governance_enabled")]
     pub enabled: bool,
@@ -356,7 +361,7 @@ pub const DEFAULT_BASE_BACKOFF_MS: u64 = 250;
 pub const DEFAULT_MAX_BACKOFF_MS: u64 = 1500;
 pub const DEFAULT_RESPECT_RETRY_AFTER_UP_TO_SECONDS: u64 = 3;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoutingResilienceConfig {
     #[serde(default = "default_same_candidate_max_retries")]
     pub same_candidate_max_retries: u32,
@@ -647,7 +652,7 @@ impl Default for DiagnosticsConfig {
 
 // The fully resolved configuration used by the application.
 // This is also the format for the default configuration file.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FinalConfig {
     pub host: String,
     pub port: u16,
@@ -749,28 +754,16 @@ fn generate_random_string(len: usize) -> String {
 }
 
 pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
-    let default_config_path = if cfg!(debug_assertions) {
-        Path::new("../config.default.yaml")
-    } else {
-        Path::new("config.default.yaml")
-    };
-    let user_config_path_release = Path::new("config.yaml");
-    let user_config_path_dev_primary = Path::new("../config.local.yaml");
-    let user_config_path_dev_fallback = Path::new("../config.yaml");
+    loader::load_effective_config(
+        &paths::ConfigPaths::for_current_build(),
+        loader::ConfigLoadOptions::default(),
+    )
+    .unwrap_or_else(|err| panic!("Failed to load configuration: {}", err))
+    .config
+});
 
-    // Determine which user config file to use for overrides
-    let user_config_path = if cfg!(debug_assertions) {
-        if user_config_path_dev_primary.exists() {
-            user_config_path_dev_primary
-        } else {
-            user_config_path_dev_fallback
-        }
-    } else {
-        user_config_path_release
-    };
-
-    // Create a FinalConfig with programmatic defaults.
-    let effective_default_config = FinalConfig {
+pub(crate) fn programmatic_default_config() -> FinalConfig {
+    FinalConfig {
         host: "0.0.0.0".to_string(),
         port: 8000,
         base_path: "/ai".to_string(),
@@ -794,58 +787,10 @@ pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
         cache: CacheConfig::default(),
         runtime_state: RuntimeStateConfig::default(),
         storage: StorageConfig::default(),
-    };
-
-    let default_yaml_str = serde_yaml::to_string(&effective_default_config).unwrap();
-
-    // First stage: parse default config
-    let mut default_builder = config::Config::builder().add_source(config::File::from_str(
-        &default_yaml_str,
-        config::FileFormat::Yaml,
-    ));
-
-    if default_config_path.exists() {
-        default_builder =
-            default_builder.add_source(config::File::from(default_config_path).required(false));
     }
+}
 
-    let default_config: FinalConfig = default_builder
-        .build()
-        .expect("Failed to build default block in config")
-        .try_deserialize()
-        .expect("Failed to deserialize default configuration");
-
-    let merged_default_yaml = serde_yaml::to_string(&default_config).unwrap();
-    fs::write(default_config_path, &merged_default_yaml)
-        .unwrap_or_else(|err| panic!("Failed to write default configuration file: {}", err));
-
-    // Second stage: user config and optionally override env vars
-    let mut builder = config::Config::builder().add_source(config::File::from_str(
-        &merged_default_yaml,
-        config::FileFormat::Yaml,
-    ));
-
-    if user_config_path.exists() {
-        builder = builder.add_source(config::File::from(user_config_path).required(false));
-    }
-
-    // Load configuration from environment variables, which have the highest priority.
-    let env_config = config::Environment::default()
-        .try_parsing(true)
-        .ignore_empty(true);
-
-    builder = builder.add_source(env_config);
-
-    let final_config: FinalConfig = builder
-        .build()
-        .expect("Failed to build user and environment merged config")
-        .try_deserialize()
-        .expect("Failed to deserialize final configuration from merged tree");
-
-    finalize_loaded_config(final_config)
-});
-
-fn finalize_loaded_config(mut final_config: FinalConfig) -> FinalConfig {
+pub(crate) fn finalize_loaded_config(mut final_config: FinalConfig) -> FinalConfig {
     let legacy_default = default_replay_response_capture_max_bytes();
     let diagnostics_default = default_diagnostics_response_capture_max_bytes();
     if final_config.diagnostics.response_capture_max_bytes == diagnostics_default
@@ -866,8 +811,31 @@ mod tests {
     use super::{
         CacheBackendType, DeploymentMode, DiagnosticsConfig, FinalConfig, ProviderGovernanceConfig,
         ProxyRequestConfig, RoutingResilienceConfig, RuntimeStateBackendType, StorageDriver,
-        default_replay_response_capture_max_bytes,
+        default_replay_response_capture_max_bytes, source::ConfigLayerKind,
     };
+    use std::{ffi::OsString, fs, sync::Mutex};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn load_without_environment(paths: &super::paths::ConfigPaths) -> super::loader::LoadedConfig {
+        super::loader::load_effective_config(
+            paths,
+            super::loader::ConfigLoadOptions {
+                include_environment: false,
+                include_override: true,
+            },
+        )
+        .expect("config should load")
+    }
+
+    fn restore_env_var(key: &str, old_value: Option<OsString>) {
+        unsafe {
+            match old_value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
 
     #[test]
     fn proxy_request_config_defaults_keep_overall_timeout_disabled() {
@@ -917,6 +885,326 @@ mod tests {
         );
         assert!(DiagnosticsConfig::default().raw_bundle_download_enabled);
         assert!(!DiagnosticsConfig::default().retention.enabled);
+    }
+
+    #[test]
+    fn config_loader_preserves_existing_behavior_without_override_file() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(
+            temp_dir.path().join("config.local.yaml"),
+            r#"
+port: 3456
+log_level: debug
+proxy_request:
+  first_byte_timeout_seconds: 45
+"#,
+        )
+        .expect("user config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        assert_eq!(loaded.config.port, 3456);
+        assert_eq!(loaded.config.log_level, "debug");
+        assert_eq!(
+            loaded.config.proxy_request.first_byte_timeout_seconds,
+            Some(45)
+        );
+        assert_eq!(loaded.config.proxy_request.connect_timeout_seconds, 10);
+        assert!(paths.default_config_path.exists());
+    }
+
+    #[test]
+    fn config_loader_prefers_local_config_in_test_paths() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(temp_dir.path().join("config.yaml"), "port: 1111\n")
+            .expect("fallback config should be written");
+        fs::write(temp_dir.path().join("config.local.yaml"), "port: 2222\n")
+            .expect("local config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        assert!(paths.user_config_path.ends_with("config.local.yaml"));
+        assert_eq!(loaded.config.port, 2222);
+    }
+
+    #[test]
+    fn config_loader_falls_back_to_config_yaml_when_local_is_absent() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(temp_dir.path().join("config.yaml"), "port: 3333\n")
+            .expect("fallback config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        assert!(paths.user_config_path.ends_with("config.yaml"));
+        assert_eq!(loaded.config.port, 3333);
+    }
+
+    #[test]
+    fn config_loader_treats_missing_override_as_empty() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        assert_eq!(loaded.config.base_path, "/ai");
+        assert!(!paths.override_config_path.exists());
+    }
+
+    #[test]
+    fn config_loader_override_file_wins_over_environment() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let old_log_level = std::env::var_os("LOG_LEVEL");
+        unsafe {
+            std::env::set_var("LOG_LEVEL", "warn");
+        }
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(temp_dir.path().join("config.yaml"), "log_level: debug\n")
+            .expect("user config should be written");
+        fs::write(
+            temp_dir.path().join("config.override.yaml"),
+            "log_level: error\n",
+        )
+        .expect("override config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        let loaded = super::loader::load_effective_config(
+            &paths,
+            super::loader::ConfigLoadOptions::default(),
+        );
+
+        restore_env_var("LOG_LEVEL", old_log_level);
+
+        let loaded = loaded.expect("config should load");
+        assert_eq!(loaded.config.log_level, "error");
+        let source = loaded
+            .source_report
+            .resolve_field_source("log_level")
+            .expect("log_level source should be resolved");
+        assert_eq!(source.kind, ConfigLayerKind::OverrideFile);
+        assert!(source.configured);
+    }
+
+    #[test]
+    fn config_source_tracks_program_default_fields_as_unconfigured() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        let log_level = loaded
+            .source_report
+            .resolve_field_source("log_level")
+            .expect("log_level source should be resolved");
+        assert_eq!(log_level.kind, ConfigLayerKind::ProgramDefault);
+        assert!(!log_level.configured);
+
+        let nested = loaded
+            .source_report
+            .resolve_field_source("routing_resilience.max_candidates_per_request")
+            .expect("nested source should be resolved");
+        assert_eq!(nested.kind, ConfigLayerKind::ProgramDefault);
+        assert!(!nested.configured);
+    }
+
+    #[test]
+    fn config_source_ignores_default_file_values_that_match_program_defaults() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(
+            temp_dir.path().join("config.default.yaml"),
+            "log_level: info\n",
+        )
+        .expect("default config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        let source = loaded
+            .source_report
+            .resolve_field_source("log_level")
+            .expect("log_level source should be resolved");
+        assert_eq!(source.kind, ConfigLayerKind::ProgramDefault);
+        assert!(!source.configured);
+    }
+
+    #[test]
+    fn config_source_marks_default_file_true_overrides_as_configured() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(
+            temp_dir.path().join("config.default.yaml"),
+            "log_level: debug\n",
+        )
+        .expect("default config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        assert_eq!(loaded.config.log_level, "debug");
+        let source = loaded
+            .source_report
+            .resolve_field_source("log_level")
+            .expect("log_level source should be resolved");
+        assert_eq!(source.kind, ConfigLayerKind::DefaultFile);
+        assert!(source.configured);
+    }
+
+    #[test]
+    fn config_source_tracks_user_file_over_default_config() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(
+            temp_dir.path().join("config.yaml"),
+            r#"
+log_level: debug
+storage:
+  driver: s3
+  s3:
+    bucket: gateway-bundles
+"#,
+        )
+        .expect("user config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        assert_eq!(loaded.config.log_level, "debug");
+        assert_eq!(
+            loaded
+                .config
+                .storage
+                .s3
+                .as_ref()
+                .expect("S3 config should be present")
+                .bucket,
+            "gateway-bundles"
+        );
+        let log_level = loaded
+            .source_report
+            .resolve_field_source("log_level")
+            .expect("log_level source should be resolved");
+        assert_eq!(log_level.kind, ConfigLayerKind::UserFile);
+        assert!(log_level.configured);
+
+        let storage_bucket = loaded
+            .source_report
+            .resolve_field_source("storage.s3.bucket")
+            .expect("storage bucket source should be resolved");
+        assert_eq!(storage_bucket.kind, ConfigLayerKind::UserFile);
+        assert!(storage_bucket.configured);
+
+        let storage = loaded
+            .source_report
+            .resolve_field_source("storage")
+            .expect("storage source should be resolved");
+        assert_eq!(storage.kind, ConfigLayerKind::UserFile);
+        assert!(storage.configured);
+    }
+
+    #[test]
+    fn config_source_tracks_environment_over_user_file() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let old_log_level = std::env::var_os("LOG_LEVEL");
+        unsafe {
+            std::env::set_var("LOG_LEVEL", "warn");
+        }
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(temp_dir.path().join("config.yaml"), "log_level: debug\n")
+            .expect("user config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        let loaded = super::loader::load_effective_config(
+            &paths,
+            super::loader::ConfigLoadOptions {
+                include_environment: true,
+                include_override: false,
+            },
+        );
+
+        restore_env_var("LOG_LEVEL", old_log_level);
+
+        let loaded = loaded.expect("config should load");
+        assert_eq!(loaded.config.log_level, "warn");
+        let source = loaded
+            .source_report
+            .resolve_field_source("log_level")
+            .expect("log_level source should be resolved");
+        assert_eq!(source.kind, ConfigLayerKind::Environment);
+        assert!(source.configured);
+    }
+
+    #[test]
+    fn config_source_marks_legacy_replay_capture_alias_as_derived() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(
+            temp_dir.path().join("config.yaml"),
+            "replay_response_capture_max_bytes: 2048\n",
+        )
+        .expect("user config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let loaded = load_without_environment(&paths);
+
+        assert_eq!(loaded.config.diagnostics.response_capture_max_bytes, 2048);
+        assert_eq!(loaded.config.replay_response_capture_max_bytes, 2048);
+
+        let derived = loaded
+            .source_report
+            .resolve_field_source("diagnostics.response_capture_max_bytes")
+            .expect("diagnostics response capture source should be resolved");
+        assert_eq!(derived.kind, ConfigLayerKind::Derived);
+        assert!(derived.configured);
+        assert!(
+            derived
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("replay_response_capture_max_bytes")),
+            "derived source should explain legacy alias mapping: {:?}",
+            derived.warnings
+        );
+
+        let legacy = loaded
+            .source_report
+            .resolve_field_source("replay_response_capture_max_bytes")
+            .expect("legacy alias source should be resolved");
+        assert_eq!(legacy.kind, ConfigLayerKind::UserFile);
+        assert!(legacy.configured);
+    }
+
+    #[test]
+    fn config_loader_rejects_non_whitelisted_override_paths() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        fs::write(
+            temp_dir.path().join("config.override.yaml"),
+            r#"
+db_url: postgres://example
+secret_key: should-not-be-here
+storage:
+  driver: s3
+"#,
+        )
+        .expect("override config should be written");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+
+        let error = super::loader::load_effective_config(
+            &paths,
+            super::loader::ConfigLoadOptions {
+                include_environment: false,
+                include_override: true,
+            },
+        )
+        .expect_err("non-whitelisted override paths should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("db_url"), "unexpected error: {message}");
+        assert!(
+            message.contains("secret_key"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("storage.driver"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

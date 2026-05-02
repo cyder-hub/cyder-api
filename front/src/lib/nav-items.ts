@@ -7,6 +7,7 @@ import {
   ClipboardList,
   Server,
   Activity,
+  Settings,
 } from "lucide-vue-next";
 
 type NavItem = {
@@ -63,6 +64,12 @@ export const navItems: NavItem[] = [
     path: "/cost",
     i18nKey: "sidebar.cost",
     icon: DollarSign,
+    section: "advanced",
+  },
+  {
+    path: "/system/config",
+    i18nKey: "sidebar.systemConfig",
+    icon: Settings,
     section: "advanced",
   },
 ];

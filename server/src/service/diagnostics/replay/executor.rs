@@ -133,7 +133,9 @@ pub async fn execute_attempt_replay(
     attempt_id: i64,
     params: AttemptReplayExecuteParams,
 ) -> Result<RequestReplayRunRecord, BaseError> {
-    let confirmation = parse_replay_preview_confirmation(params.preview_fingerprint.as_deref())?;
+    let policy = app_state.diagnostics.policy().await;
+    let confirmation =
+        parse_replay_preview_confirmation(params.preview_fingerprint.as_deref(), &policy)?;
     let source = load_attempt_replay_source(app_state, request_log_id, attempt_id).await?;
     let credential = resolve_replay_provider_credentials(
         app_state,
@@ -181,7 +183,9 @@ pub async fn execute_gateway_replay(
     request_log_id: i64,
     params: GatewayReplayExecuteParams,
 ) -> Result<RequestReplayRunRecord, BaseError> {
-    let confirmation = parse_replay_preview_confirmation(params.preview_fingerprint.as_deref())?;
+    let policy = app_state.diagnostics.policy().await;
+    let confirmation =
+        parse_replay_preview_confirmation(params.preview_fingerprint.as_deref(), &policy)?;
     let source = load_gateway_replay_source(request_log_id).await?;
     let prepared = preview_gateway_replay_request(Arc::clone(app_state), &source)
         .await
@@ -693,6 +697,7 @@ fn execution_preview_from_gateway_failure(
 
 fn gateway_live_outcome_from_failure(
     failure: GatewayReplayExecutionFailure,
+    capture_limit_bytes: usize,
 ) -> GatewayReplayLiveOutcome {
     let execution_preview = execution_preview_from_gateway_failure(&failure);
     let attempt_timeline = execution_preview.candidate_decisions.clone();
@@ -728,6 +733,7 @@ fn gateway_live_outcome_from_failure(
             replay_body_capture_metadata_from_bytes(
                 body,
                 outcome.response_body_capture_state.as_deref(),
+                capture_limit_bytes,
             )
         });
         outcome.usage_normalization = metadata.usage_normalization;
@@ -749,9 +755,11 @@ async fn perform_gateway_replay_execution(
     app_state: &Arc<AppState>,
     source: &GatewayReplaySource,
 ) -> GatewayReplayLiveOutcome {
+    let policy = app_state.diagnostics.policy().await;
+    let capture_limit_bytes = replay_response_capture_limit(&policy);
     let execution = match execute_gateway_replay_request(Arc::clone(app_state), source).await {
         Ok(execution) => execution,
-        Err(failure) => return gateway_live_outcome_from_failure(failure),
+        Err(failure) => return gateway_live_outcome_from_failure(failure, capture_limit_bytes),
     };
 
     let first_byte_at = Some(Utc::now().timestamp_millis());
@@ -780,7 +788,7 @@ async fn perform_gateway_replay_execution(
     let capture = match read_replay_response_body_bounded(
         execution.response.into_body().into_data_stream(),
         is_gzip,
-        replay_response_capture_limit(),
+        capture_limit_bytes,
         |err| {
             ProxyError::BadGateway(format!(
                 "Reading gateway replay response body failed: {}",
@@ -929,7 +937,7 @@ async fn resolve_replay_provider_credentials(
 
     let request_key = match provider.provider_type {
         ProviderType::Vertex | ProviderType::VertexOpenai => get_vertex_token(
-            app_state.infra.proxy_client(),
+            app_state.infra.proxy_client().await.as_ref(),
             selected_key.id,
             &selected_key.api_key,
         )

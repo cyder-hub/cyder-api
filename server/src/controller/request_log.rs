@@ -28,7 +28,7 @@ use crate::{
         app_state::{AppState, StateRouter},
         diagnostics::{
             AttemptReplayExecuteParams, AttemptReplayPreviewParams, AttemptReplayPreviewResponse,
-            DiagnosticsRetentionParams, DiagnosticsRetentionResponse, DiagnosticsService,
+            DiagnosticsRetentionParams, DiagnosticsRetentionResponse,
             DiagnosticsStorageInventoryParams, DiagnosticsStorageInventoryResponse,
             GatewayReplayExecuteParams, GatewayReplayPreviewParams, GatewayReplayPreviewResponse,
             RequestLogArtifactResponse, RequestReplayArtifact,
@@ -500,11 +500,11 @@ async fn get_request_log(
 }
 
 async fn get_request_log_artifacts(
+    State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<RequestLogArtifactResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
     Ok(HttpResult::new(
-        diagnostics.get_request_log_artifacts(id).await?,
+        app_state.diagnostics.get_request_log_artifacts(id).await?,
     ))
 }
 
@@ -513,9 +513,9 @@ async fn preview_attempt_replay(
     Path((request_log_id, attempt_id)): Path<(i64, i64)>,
     Json(payload): Json<AttemptReplayPreviewParams>,
 ) -> Result<HttpResult<AttemptReplayPreviewResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
     Ok(HttpResult::new(
-        diagnostics
+        app_state
+            .diagnostics
             .preview_attempt_replay(&app_state, request_log_id, attempt_id, payload)
             .await?,
     ))
@@ -526,8 +526,8 @@ async fn execute_attempt_replay(
     Path((request_log_id, attempt_id)): Path<(i64, i64)>,
     Json(payload): Json<AttemptReplayExecuteParams>,
 ) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
-    let run = diagnostics
+    let run = app_state
+        .diagnostics
         .execute_attempt_replay(&app_state, request_log_id, attempt_id, payload)
         .await?;
     Ok(HttpResult::new(run.into()))
@@ -538,9 +538,9 @@ async fn preview_gateway_replay(
     Path(request_log_id): Path<i64>,
     Json(payload): Json<GatewayReplayPreviewParams>,
 ) -> Result<HttpResult<GatewayReplayPreviewResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
     Ok(HttpResult::new(
-        diagnostics
+        app_state
+            .diagnostics
             .preview_gateway_replay(&app_state, request_log_id, payload)
             .await?,
     ))
@@ -551,43 +551,51 @@ async fn execute_gateway_replay(
     Path(request_log_id): Path<i64>,
     Json(payload): Json<GatewayReplayExecuteParams>,
 ) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
-    let run = diagnostics
+    let run = app_state
+        .diagnostics
         .execute_gateway_replay(&app_state, request_log_id, payload)
         .await?;
     Ok(HttpResult::new(run.into()))
 }
 
 async fn list_request_replay_runs(
+    State(app_state): State<Arc<AppState>>,
     Path(request_log_id): Path<i64>,
 ) -> Result<HttpResult<Vec<RequestReplayRunResponse>>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
-    let runs = diagnostics.list_replay_runs(request_log_id)?;
+    let runs = app_state.diagnostics.list_replay_runs(request_log_id)?;
     Ok(HttpResult::new(runs.into_iter().map(Into::into).collect()))
 }
 
 async fn get_request_replay_run(
+    State(app_state): State<Arc<AppState>>,
     Path((request_log_id, replay_run_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<RequestReplayRunResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
-    let run = diagnostics.get_replay_run(request_log_id, replay_run_id)?;
+    let run = app_state
+        .diagnostics
+        .get_replay_run(request_log_id, replay_run_id)?;
     Ok(HttpResult::new(run.into()))
 }
 
 async fn get_request_replay_artifacts(
+    State(app_state): State<Arc<AppState>>,
     Path((request_log_id, replay_run_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<RequestReplayArtifact>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
     Ok(HttpResult::new(
-        diagnostics
+        app_state
+            .diagnostics
             .get_replay_artifact(request_log_id, replay_run_id)
             .await?,
     ))
 }
 
-async fn get_request_log_content(Path(id): Path<i64>) -> Result<Response, BaseError> {
-    let diagnostics = DiagnosticsService::new();
-    let content = diagnostics.get_request_log_bundle_content(id).await?;
+async fn get_request_log_content(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Response, BaseError> {
+    let content = app_state
+        .diagnostics
+        .get_request_log_bundle_content(id)
+        .await?;
     let cache_headers = [(header::CACHE_CONTROL, "public, max-age=31536000, immutable")];
     let mut response = (cache_headers, content).into_response();
     let headers = response.headers_mut();
@@ -603,27 +611,32 @@ async fn get_request_log_content(Path(id): Path<i64>) -> Result<Response, BaseEr
 }
 
 async fn preview_request_log_retention(
+    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<DiagnosticsRetentionParams>,
 ) -> Result<HttpResult<DiagnosticsRetentionResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
-    Ok(HttpResult::new(diagnostics.retention_preview(payload)?))
+    Ok(HttpResult::new(
+        app_state.diagnostics.retention_preview(payload).await?,
+    ))
 }
 
 async fn execute_request_log_retention(
+    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<DiagnosticsRetentionParams>,
 ) -> Result<HttpResult<DiagnosticsRetentionResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
     Ok(HttpResult::new(
-        diagnostics.retention_execute(payload).await?,
+        app_state.diagnostics.retention_execute(payload).await?,
     ))
 }
 
 async fn preview_storage_inventory(
+    State(app_state): State<Arc<AppState>>,
     Json(payload): Json<DiagnosticsStorageInventoryParams>,
 ) -> Result<HttpResult<DiagnosticsStorageInventoryResponse>, BaseError> {
-    let diagnostics = DiagnosticsService::new();
     Ok(HttpResult::new(
-        diagnostics.storage_inventory_preview(payload).await?,
+        app_state
+            .diagnostics
+            .storage_inventory_preview(payload)
+            .await?,
     ))
 }
 

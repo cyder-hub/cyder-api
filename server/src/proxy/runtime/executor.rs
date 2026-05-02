@@ -10,6 +10,7 @@ use reqwest::header::RETRY_AFTER;
 use serde_json::Value;
 
 use crate::{
+    config::RoutingResilienceConfig,
     proxy::{
         ProxyError,
         auth::{admit_api_key_request, check_access_control},
@@ -89,6 +90,7 @@ pub(in crate::proxy) struct AttemptExecutionInput {
     pub same_candidate_retry_count: u32,
     pub attempted_candidate_count: u32,
     pub next_candidate_available: bool,
+    pub routing_resilience: RoutingResilienceConfig,
     pub log_mode: RuntimeLogMode,
     pub execution_policy: RuntimeExecutionPolicy,
     pub kind: AttemptExecutionKind,
@@ -100,11 +102,12 @@ pub(in crate::proxy) struct AttemptExecutionResult {
     pub log_context: RequestLogContext,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AttemptSchedulingContext {
     same_candidate_retry_count: u32,
     attempted_candidate_count: u32,
     next_candidate_available: bool,
+    routing_resilience: RoutingResilienceConfig,
 }
 
 fn retry_after_from_headers(headers: Option<&HeaderMap>) -> Option<Duration> {
@@ -121,12 +124,13 @@ async fn finalize_early_attempt_failure(
     skipped_attempts_for_log: &[RequestAttemptDraft],
     attempt: &mut RequestAttemptDraft,
     proxy_error: &ProxyError,
-    scheduling: AttemptSchedulingContext,
+    scheduling: &AttemptSchedulingContext,
     log_mode: RuntimeLogMode,
     execution_policy: RuntimeExecutionPolicy,
 ) -> RequestLogContext {
     attempt.completed_at = Some(Utc::now().timestamp_millis());
     classify_attempt_failure(
+        &scheduling.routing_resilience,
         attempt,
         proxy_error,
         scheduling.same_candidate_retry_count,
@@ -209,6 +213,7 @@ pub(in crate::proxy) async fn execute_attempt(
         same_candidate_retry_count,
         attempted_candidate_count,
         next_candidate_available,
+        routing_resilience,
         log_mode,
         execution_policy,
         kind,
@@ -218,6 +223,7 @@ pub(in crate::proxy) async fn execute_attempt(
         same_candidate_retry_count,
         attempted_candidate_count,
         next_candidate_available,
+        routing_resilience: routing_resilience.clone(),
     };
     let mut attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
     let skipped_attempts_for_log = skipped_attempts.clone();
@@ -257,7 +263,7 @@ pub(in crate::proxy) async fn execute_attempt(
                     &skipped_attempts_for_log,
                     &mut attempt,
                     &proxy_error,
-                    scheduling,
+                    &scheduling,
                     log_mode,
                     execution_policy,
                 )
@@ -281,7 +287,7 @@ pub(in crate::proxy) async fn execute_attempt(
                 &skipped_attempts_for_log,
                 &mut attempt,
                 &proxy_error,
-                scheduling,
+                &scheduling,
                 log_mode,
                 execution_policy,
             )
@@ -303,7 +309,7 @@ pub(in crate::proxy) async fn execute_attempt(
             &skipped_attempts_for_log,
             &mut attempt,
             &proxy_error,
-            scheduling,
+            &scheduling,
             log_mode,
             execution_policy,
         )
@@ -331,7 +337,7 @@ pub(in crate::proxy) async fn execute_attempt(
                 &skipped_attempts_for_log,
                 &mut attempt,
                 &proxy_error,
-                scheduling,
+                &scheduling,
                 log_mode,
                 execution_policy,
             )
@@ -354,7 +360,7 @@ pub(in crate::proxy) async fn execute_attempt(
             &skipped_attempts_for_log,
             &mut attempt,
             &proxy_error,
-            scheduling,
+            &scheduling,
             log_mode,
             execution_policy,
         )
@@ -396,7 +402,7 @@ pub(in crate::proxy) async fn execute_attempt(
                         &skipped_attempts_for_log,
                         &mut attempt,
                         &proxy_error,
-                        scheduling,
+                        &scheduling,
                         log_mode,
                         execution_policy,
                     )
@@ -429,7 +435,7 @@ pub(in crate::proxy) async fn execute_attempt(
                     &skipped_attempts_for_log,
                     &mut attempt,
                     &proxy_error,
-                    scheduling,
+                    &scheduling,
                     log_mode,
                     execution_policy,
                 )
@@ -469,7 +475,7 @@ pub(in crate::proxy) async fn execute_attempt(
                     &skipped_attempts_for_log,
                     &mut attempt,
                     &proxy_error,
-                    scheduling,
+                    &scheduling,
                     log_mode,
                     execution_policy,
                 )
@@ -501,6 +507,7 @@ pub(in crate::proxy) async fn execute_attempt(
             attempt.completed_at = Some(completed_at);
             clear_provider_governance_skip_runtime_fields(&mut attempt, &mut log_context);
             classify_provider_governance_skip(
+                &routing_resilience,
                 &mut attempt,
                 rejection,
                 materialized.model_str.as_str(),
@@ -533,7 +540,7 @@ pub(in crate::proxy) async fn execute_attempt(
                 &skipped_attempts_for_log,
                 &mut attempt,
                 &proxy_error,
-                scheduling,
+                &scheduling,
                 log_mode,
                 execution_policy,
             )
@@ -582,6 +589,7 @@ pub(in crate::proxy) async fn execute_attempt(
             sync_attempt_from_proxy_failure(&mut attempt, &failure, cost_catalog_version.as_ref());
             attempt.completed_at = Some(completed_at);
             classify_attempt_failure(
+                &routing_resilience,
                 &mut attempt,
                 &failure.error,
                 same_candidate_retry_count,

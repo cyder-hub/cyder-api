@@ -99,12 +99,21 @@ Current code already provides:
 
 ### Configuration
 
-Runtime config is loaded from:
+Runtime config is loaded in this order, from lowest to highest priority:
 
-- `config.default.yaml`
-- `config.local.yaml` in development if present
-- otherwise `config.yaml`
-- environment variables override file values
+1. program defaults compiled into the server
+2. `config.default.yaml`
+3. `config.local.yaml` in development if present, otherwise `config.yaml`
+4. environment variables
+5. `config.override.yaml`
+
+`config.override.yaml` is a managed override file written by the System Config page in the management console. It is only for the hot-reload allowlist exposed by that page, such as log level, timezone, proxy request timeout settings, routing resilience, provider governance, and diagnostics retention/capture settings.
+
+Do not use `config.override.yaml` as a general replacement for `config.yaml`. Bind settings, manager secrets, database, Redis/cache, storage, deployment mode, runtime state backend, and other non-allowlisted settings must be changed in the base config file and applied with a server restart. If a non-allowlisted path is present in `config.override.yaml`, startup/reload/apply validation rejects it instead of treating it as a restart-only override.
+
+The management console can reload `config.override.yaml` after a manual edit, but routine edits should be made through the UI so preview, validation, and audit history stay consistent. `config.override.history.jsonl` records apply/reset/reload history for audit display only; it is not part of configuration loading.
+
+In the first version of this feature, multi-instance deployments are read-only for System Config writes. This prevents multiple instances from diverging through separate local override files.
 
 Important config areas include:
 

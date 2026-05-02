@@ -13,7 +13,7 @@ pub use crate::service::diagnostics::capability::{
 pub async fn get_request_log_artifacts(
     request_log_id: i64,
 ) -> Result<RequestLogArtifactResponse, BaseError> {
-    DiagnosticsService::new()
+    DiagnosticsService::new_with_default_policy()
         .get_request_log_artifacts(request_log_id)
         .await
 }

@@ -4,8 +4,16 @@ use axum::Router;
 use chrono::Utc;
 use thiserror::Error;
 
-use crate::config::RuntimeStateBackendType;
+use crate::config::{
+    RuntimeStateBackendType,
+    loader::{ConfigLoadOptions, LoadedConfig, load_effective_config},
+    paths::ConfigPaths,
+};
 use crate::service::cache::CacheError;
+use crate::service::{
+    diagnostics::{DiagnosticsPolicy, DiagnosticsPolicyManager, DiagnosticsService},
+    system_config::SystemConfigService,
+};
 
 #[cfg(test)]
 use crate::database::TestDbContext;
@@ -29,7 +37,9 @@ pub struct AppState {
     pub provider_key_selector: Arc<ProviderKeySelector>,
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
     pub provider_circuit: Arc<ProviderCircuitService>,
+    pub diagnostics: Arc<DiagnosticsService>,
     pub runtime_backend_status: Arc<RuntimeStateBackendStatus>,
+    pub system_config: Arc<SystemConfigService>,
 }
 
 impl AppState {
@@ -62,21 +72,54 @@ impl AppState {
         #[cfg(not(test))]
         let force_memory_cache = false;
         let force_memory_runtime_state = force_memory_cache;
+        let loaded_config = load_initial_config()?;
+        let system_config = Arc::new(SystemConfigService::new(
+            loaded_config.clone(),
+            ConfigLoadOptions::default(),
+        ));
+        let initial_snapshot = system_config.runtime_snapshot().await;
 
         #[cfg(test)]
-        let infra = match test_db_context.clone() {
-            Some(test_db_context) => Arc::new(AppInfra::new_for_test(test_db_context).await),
-            None => Arc::new(AppInfra::new().await),
-        };
+        let infra = Arc::new(
+            AppInfra::new_with_config(
+                initial_snapshot.version,
+                initial_snapshot.proxy_request.clone(),
+                initial_snapshot.proxy.clone(),
+                test_db_context.clone(),
+            )
+            .await,
+        );
 
         #[cfg(not(test))]
-        let infra = Arc::new(AppInfra::new().await);
+        let infra = Arc::new(
+            AppInfra::new_with_config(
+                initial_snapshot.version,
+                initial_snapshot.proxy_request.clone(),
+                initial_snapshot.proxy.clone(),
+            )
+            .await,
+        );
+        system_config
+            .register_http_client_manager(infra.http_clients())
+            .await;
+        let diagnostics_policy_manager = Arc::new(DiagnosticsPolicyManager::new(
+            DiagnosticsPolicy::from_config(&initial_snapshot.diagnostics),
+        ));
+        system_config
+            .register_diagnostics_policy_manager(Arc::clone(&diagnostics_policy_manager))
+            .await;
+        let diagnostics = Arc::new(DiagnosticsService::new(diagnostics_policy_manager));
 
         let runtime_backend = RuntimeStateBackendBundle::from_config(
-            &crate::config::CONFIG,
+            &loaded_config.config,
             force_memory_runtime_state,
         )
         .await?;
+        system_config
+            .register_provider_governance_config_manager(
+                runtime_backend.provider_circuit.config_manager(),
+            )
+            .await;
         let catalog = Arc::new(CatalogService::new(force_memory_cache).await);
         let admin = Arc::new(AdminServices::new(Arc::clone(&catalog)));
         let provider_key_selector = ProviderKeySelector::new(
@@ -92,7 +135,9 @@ impl AppState {
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
+            diagnostics,
             runtime_backend_status: Arc::new(runtime_backend.status),
+            system_config,
         })
     }
 
@@ -186,6 +231,14 @@ pub fn create_state_router() -> StateRouter {
     Router::<Arc<AppState>>::new()
 }
 
+fn load_initial_config() -> Result<LoadedConfig, RuntimeStateBackendError> {
+    load_effective_config(
+        &ConfigPaths::for_current_build(),
+        ConfigLoadOptions::default(),
+    )
+    .map_err(|err| RuntimeStateBackendError::Config(err.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::admin::AdminServices;
@@ -193,16 +246,47 @@ mod tests {
     use crate::config::{CONFIG, RuntimeStateBackendType};
     use crate::database::TestDbContext;
     use crate::service::catalog::CatalogService;
+    use crate::service::diagnostics::{
+        DiagnosticsPolicy, DiagnosticsPolicyManager, DiagnosticsService,
+    };
     use crate::service::infra::AppInfra;
     use crate::service::runtime::{ProviderKeySelector, RuntimeStateBackendBundle};
+    use crate::service::system_config::SystemConfigService;
     use std::sync::Arc;
 
     async fn test_app_state() -> AppState {
         let catalog = Arc::new(CatalogService::new(true).await);
         let admin = Arc::new(AdminServices::new(Arc::clone(&catalog)));
+        let loaded_config = super::load_initial_config().expect("config should load");
+        let system_config = Arc::new(SystemConfigService::new_with_default_options(loaded_config));
+        let initial_snapshot = system_config.runtime_snapshot().await;
+        let infra = Arc::new(
+            AppInfra::new_with_config(
+                initial_snapshot.version,
+                initial_snapshot.proxy_request.clone(),
+                initial_snapshot.proxy.clone(),
+                None,
+            )
+            .await,
+        );
+        system_config
+            .register_http_client_manager(infra.http_clients())
+            .await;
+        let diagnostics_policy_manager = Arc::new(DiagnosticsPolicyManager::new(
+            DiagnosticsPolicy::from_config(&initial_snapshot.diagnostics),
+        ));
+        system_config
+            .register_diagnostics_policy_manager(Arc::clone(&diagnostics_policy_manager))
+            .await;
+        let diagnostics = Arc::new(DiagnosticsService::new(diagnostics_policy_manager));
         let runtime_backend = RuntimeStateBackendBundle::from_config(&CONFIG, true)
             .await
             .expect("test runtime backend should initialize");
+        system_config
+            .register_provider_governance_config_manager(
+                runtime_backend.provider_circuit.config_manager(),
+            )
+            .await;
         let provider_key_selector = ProviderKeySelector::new(
             Arc::clone(&catalog),
             Arc::clone(&runtime_backend.provider_key_cursor_store),
@@ -210,13 +294,15 @@ mod tests {
         .await;
 
         AppState {
-            infra: Arc::new(AppInfra::new().await),
+            infra,
             catalog,
             admin,
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
+            diagnostics,
             runtime_backend_status: Arc::new(runtime_backend.status),
+            system_config,
         }
     }
 
@@ -230,7 +316,9 @@ mod tests {
         assert_eq!(Arc::strong_count(&app_state.provider_key_selector), 1);
         assert_eq!(Arc::strong_count(&app_state.api_key_governance), 1);
         assert_eq!(Arc::strong_count(&app_state.provider_circuit), 1);
+        assert_eq!(Arc::strong_count(&app_state.diagnostics), 1);
         assert_eq!(Arc::strong_count(&app_state.runtime_backend_status), 1);
+        assert_eq!(Arc::strong_count(&app_state.system_config), 1);
     }
 
     #[tokio::test]
@@ -262,5 +350,21 @@ mod tests {
         assert_eq!(status.catalog_cache_backend, "memory");
         assert!(!status.runtime_shared);
         assert!(status.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn app_state_exposes_initial_system_config_snapshot() {
+        let app_state =
+            AppState::new_for_test(TestDbContext::new_sqlite("app-state-system-config.sqlite"))
+                .await;
+
+        let snapshot = app_state.system_config.runtime_snapshot().await;
+        let expected = super::load_initial_config()
+            .expect("config should load")
+            .config
+            .log_level;
+
+        assert_eq!(snapshot.version, 1);
+        assert_eq!(snapshot.log_level, expected);
     }
 }

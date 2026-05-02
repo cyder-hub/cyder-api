@@ -67,10 +67,14 @@ pub(crate) async fn perform_attempt_replay_execution(
         Ok(headers) => headers,
         Err(err) => return invalid_replay_headers_outcome(err),
     };
+    let client_bundle = app_state.infra.client_bundle().await;
+    let policy = app_state.diagnostics.policy().await;
+    let capture_limit_bytes = replay_response_capture_limit(&policy);
+    let first_byte_timeout = client_bundle.proxy_request.first_byte_timeout();
     let client = if source.provider.use_proxy {
-        app_state.infra.proxy_client()
+        std::sync::Arc::clone(&client_bundle.proxy_client)
     } else {
-        app_state.infra.client()
+        std::sync::Arc::clone(&client_bundle.client)
     };
 
     let cancellation = ProxyCancellationContext::new();
@@ -81,6 +85,7 @@ pub(crate) async fn perform_attempt_replay_execution(
             .headers(headers)
             .body(source.llm_request_body.bytes.clone()),
         "Attempt replay upstream request",
+        first_byte_timeout,
     )
     .await
     {
@@ -109,7 +114,7 @@ pub(crate) async fn perform_attempt_replay_execution(
     let capture = match read_replay_response_body_bounded(
         response.bytes_stream(),
         is_gzip,
-        replay_response_capture_limit(),
+        capture_limit_bytes,
         |err| classify_reqwest_error("Reading attempt replay response body", &err),
     )
     .await
@@ -696,7 +701,8 @@ mod tests {
 
     #[tokio::test]
     async fn attempt_replay_transport_marks_large_response_incomplete_without_failing() {
-        let limit = replay_response_capture_limit();
+        let policy = crate::service::diagnostics::policy::DiagnosticsPolicy::default();
+        let limit = replay_response_capture_limit(&policy);
         let response_body = "x".repeat(limit + 1024);
         let provider_type = ProviderType::Openai;
         let (base_url, _captured) = spawn_upstream(

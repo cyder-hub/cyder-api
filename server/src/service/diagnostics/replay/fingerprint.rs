@@ -7,7 +7,7 @@ use crate::{
     schema::enum_def::{RequestReplayKind, RequestReplaySemanticBasis},
     service::diagnostics::{
         body::sha256_hex,
-        policy::{replay_preview_confirmation_clock_skew_ms, replay_preview_confirmation_ttl_ms},
+        policy::DiagnosticsPolicy,
         replay::{
             source::DecodedBundleBody,
             types::{
@@ -176,6 +176,7 @@ pub(crate) fn build_replay_preview_fingerprint(
 
 pub(crate) fn parse_replay_preview_confirmation(
     fingerprint: Option<&str>,
+    policy: &DiagnosticsPolicy,
 ) -> Result<ParsedReplayPreviewConfirmation, BaseError> {
     let raw = fingerprint
         .map(str::trim)
@@ -208,8 +209,9 @@ pub(crate) fn parse_replay_preview_confirmation(
         })?;
     let now = Utc::now().timestamp_millis();
     if preview_created_at <= 0
-        || now.saturating_sub(preview_created_at) > replay_preview_confirmation_ttl_ms()
-        || preview_created_at.saturating_sub(now) > replay_preview_confirmation_clock_skew_ms()
+        || now.saturating_sub(preview_created_at) > policy.replay_preview_confirmation_ttl_ms()
+        || preview_created_at.saturating_sub(now)
+            > policy.replay_preview_confirmation_clock_skew_ms()
     {
         return Err(BaseError::ParamInvalid(Some(
             "Replay preview confirmation expired; regenerate preview before execute.".to_string(),
@@ -259,13 +261,14 @@ mod tests {
 
     #[test]
     fn replay_preview_confirmation_distinguishes_missing_expired_invalid_and_mismatch() {
-        let missing = parse_replay_preview_confirmation(None)
+        let policy = DiagnosticsPolicy::default();
+        let missing = parse_replay_preview_confirmation(None, &policy)
             .expect_err("missing confirmation should be rejected");
         assert!(
             matches!(missing, BaseError::ParamInvalid(Some(message)) if message.contains("missing"))
         );
 
-        let invalid = parse_replay_preview_confirmation(Some("not-a-fingerprint"))
+        let invalid = parse_replay_preview_confirmation(Some("not-a-fingerprint"), &policy)
             .expect_err("invalid confirmation should be rejected");
         assert!(
             matches!(invalid, BaseError::ParamInvalid(Some(message)) if message.contains("invalid"))
@@ -277,7 +280,7 @@ mod tests {
             1,
             "0".repeat(64)
         );
-        let expired = parse_replay_preview_confirmation(Some(&expired))
+        let expired = parse_replay_preview_confirmation(Some(&expired), &policy)
             .expect_err("expired confirmation should be rejected");
         assert!(
             matches!(expired, BaseError::ParamInvalid(Some(message)) if message.contains("expired"))
@@ -290,7 +293,7 @@ mod tests {
             created_at,
             "a".repeat(64)
         );
-        let parsed = parse_replay_preview_confirmation(Some(&current))
+        let parsed = parse_replay_preview_confirmation(Some(&current), &policy)
             .expect("current confirmation should parse");
         assert_eq!(parsed.preview_created_at, created_at);
 

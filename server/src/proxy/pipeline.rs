@@ -253,7 +253,13 @@ async fn execute_generation_operation(
     operation: GenerationOperation,
     request: Request<Body>,
 ) -> Result<Response<Body>, ProxyError> {
-    let parsed_request = parse_json_request(request).await?;
+    let max_body_size = context
+        .app_state
+        .system_config
+        .runtime_snapshot()
+        .await
+        .max_body_size;
+    let parsed_request = parse_json_request(request, max_body_size).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
     let is_stream = resolve_stream_mode(operation.stream_mode, &parsed_request.data);
     let execution_plan =
@@ -298,7 +304,13 @@ async fn execute_utility_operation(
     operation: UtilityPipelineOperation,
     request: Request<Body>,
 ) -> Result<Response<Body>, ProxyError> {
-    let parsed_request = parse_json_request(request).await?;
+    let max_body_size = context
+        .app_state
+        .system_config
+        .runtime_snapshot()
+        .await
+        .max_body_size;
+    let parsed_request = parse_json_request(request, max_body_size).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
     let execution_plan =
         build_execution_plan(&context.app_state, context.api_key.id, &requested_model)

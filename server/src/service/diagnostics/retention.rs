@@ -10,7 +10,7 @@ use crate::{
     },
     schema::enum_def::StorageType,
     service::{
-        diagnostics::policy,
+        diagnostics::policy::DiagnosticsPolicy,
         storage::{Storage, get_local_storage, get_s3_storage_result},
     },
 };
@@ -83,31 +83,24 @@ pub struct DiagnosticsRetentionResponse {
 
 pub fn preview_retention(
     params: DiagnosticsRetentionParams,
+    policy: &DiagnosticsPolicy,
 ) -> Result<DiagnosticsRetentionResponse, BaseError> {
-    preview_retention_at(
-        params,
-        Utc::now().timestamp_millis(),
-        policy::retention_enabled(),
-    )
+    preview_retention_at(params, Utc::now().timestamp_millis(), policy)
 }
 
 pub async fn execute_retention(
     params: DiagnosticsRetentionParams,
+    policy: &DiagnosticsPolicy,
 ) -> Result<DiagnosticsRetentionResponse, BaseError> {
-    execute_retention_at(
-        params,
-        Utc::now().timestamp_millis(),
-        policy::retention_enabled(),
-    )
-    .await
+    execute_retention_at(params, Utc::now().timestamp_millis(), policy).await
 }
 
 fn preview_retention_at(
     params: DiagnosticsRetentionParams,
     now_ms: i64,
-    enabled: bool,
+    policy: &DiagnosticsPolicy,
 ) -> Result<DiagnosticsRetentionResponse, BaseError> {
-    let resolved = ResolvedRetentionParams::new(params, now_ms);
+    let resolved = ResolvedRetentionParams::new(params, now_ms, policy);
     let request_log_bundles = if resolved.include_request_log_bundles {
         preview_request_log_bundles(&resolved)?
     } else {
@@ -126,7 +119,7 @@ fn preview_retention_at(
     };
 
     Ok(DiagnosticsRetentionResponse {
-        enabled,
+        enabled: policy.retention_enabled(),
         executed: false,
         now_ms,
         delete_batch_size: resolved.delete_batch_size,
@@ -138,29 +131,29 @@ fn preview_retention_at(
 async fn execute_retention_at(
     params: DiagnosticsRetentionParams,
     now_ms: i64,
-    enabled: bool,
+    policy: &DiagnosticsPolicy,
 ) -> Result<DiagnosticsRetentionResponse, BaseError> {
     let storage_resolver = DefaultRetentionStorageResolver;
-    execute_retention_at_with_storage_resolver(params, now_ms, enabled, &storage_resolver).await
+    execute_retention_at_with_storage_resolver(params, now_ms, policy, &storage_resolver).await
 }
 
 async fn execute_retention_at_with_storage_resolver<R>(
     params: DiagnosticsRetentionParams,
     now_ms: i64,
-    enabled: bool,
+    policy: &DiagnosticsPolicy,
     storage_resolver: &R,
 ) -> Result<DiagnosticsRetentionResponse, BaseError>
 where
     R: RetentionStorageResolver + Sync,
 {
-    if !enabled {
+    if !policy.retention_enabled() {
         return Err(BaseError::ParamInvalid(Some(
             "Diagnostics retention execute is disabled by diagnostics.retention.enabled"
                 .to_string(),
         )));
     }
 
-    let resolved = ResolvedRetentionParams::new(params, now_ms);
+    let resolved = ResolvedRetentionParams::new(params, now_ms, policy);
     let request_log_bundles = if resolved.include_request_log_bundles {
         execute_request_log_bundle_retention(&resolved, storage_resolver).await?
     } else {
@@ -179,7 +172,7 @@ where
     };
 
     Ok(DiagnosticsRetentionResponse {
-        enabled,
+        enabled: policy.retention_enabled(),
         executed: true,
         now_ms,
         delete_batch_size: resolved.delete_batch_size,
@@ -201,16 +194,16 @@ struct ResolvedRetentionParams {
 }
 
 impl ResolvedRetentionParams {
-    fn new(params: DiagnosticsRetentionParams, now_ms: i64) -> Self {
+    fn new(params: DiagnosticsRetentionParams, now_ms: i64, policy: &DiagnosticsPolicy) -> Self {
         let request_log_bundle_retention_days = params
             .request_log_bundle_retention_days
-            .unwrap_or_else(policy::request_log_bundle_retention_days);
+            .unwrap_or_else(|| policy.request_log_bundle_retention_days());
         let replay_artifact_retention_days = params
             .replay_artifact_retention_days
-            .unwrap_or_else(policy::replay_artifact_retention_days);
+            .unwrap_or_else(|| policy.replay_artifact_retention_days());
         let delete_batch_size = params
             .delete_batch_size
-            .unwrap_or_else(policy::retention_delete_batch_size)
+            .unwrap_or_else(|| policy.retention_delete_batch_size())
             .max(1);
 
         Self {
@@ -644,6 +637,12 @@ mod tests {
         }
     }
 
+    fn policy(enabled: bool) -> DiagnosticsPolicy {
+        let mut config = crate::config::DiagnosticsConfig::default();
+        config.retention.enabled = enabled;
+        DiagnosticsPolicy::from_config(&config)
+    }
+
     #[tokio::test]
     async fn retention_preview_lists_candidates_without_deleting_objects() {
         let db = TestDbContext::new_sqlite("diagnostics-retention-preview.sqlite");
@@ -661,7 +660,8 @@ mod tests {
                 .await
                 .expect("replay object should write");
 
-            let response = preview_retention(params()).expect("preview should succeed");
+            let response =
+                preview_retention(params(), &policy(false)).expect("preview should succeed");
 
             assert!(!response.executed);
             assert_eq!(response.request_log_bundles.candidate_count, 1);
@@ -715,7 +715,7 @@ mod tests {
                     ..params()
                 },
                 1_000,
-                false,
+                &policy(false),
             )
             .expect("preview should succeed");
 
@@ -734,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn retention_execute_requires_enabled_policy() {
-        let err = execute_retention(params())
+        let err = execute_retention(params(), &policy(false))
             .await
             .expect_err("default retention execute should be disabled");
 
@@ -766,9 +766,10 @@ mod tests {
                 .await
                 .expect("replay object should write");
 
-            let response = execute_retention_at(params(), Utc::now().timestamp_millis(), true)
-                .await
-                .expect("enabled execute should succeed");
+            let response =
+                execute_retention_at(params(), Utc::now().timestamp_millis(), &policy(true))
+                    .await
+                    .expect("enabled execute should succeed");
 
             assert!(response.executed);
             assert_eq!(response.request_log_bundles.succeeded_count, 1);
@@ -813,7 +814,7 @@ mod tests {
             let response = execute_retention_at_with_storage_resolver(
                 params(),
                 Utc::now().timestamp_millis(),
-                true,
+                &policy(true),
                 &FailingS3RetentionStorageResolver,
             )
             .await

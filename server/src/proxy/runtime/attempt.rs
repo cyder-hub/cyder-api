@@ -4,7 +4,7 @@ use axum::{body::Body, response::Response};
 use serde_json::Value;
 
 use crate::{
-    config::CONFIG,
+    config::RoutingResilienceConfig,
     database::request_attempt::RequestAttempt,
     proxy::{
         ProxyError,
@@ -281,6 +281,7 @@ impl Default for RequestAttemptDraft {
 }
 
 pub(in crate::proxy) fn classify_attempt_failure(
+    routing_resilience: &RoutingResilienceConfig,
     attempt: &mut RequestAttemptDraft,
     proxy_error: &ProxyError,
     same_candidate_retry_count: u32,
@@ -297,7 +298,7 @@ pub(in crate::proxy) fn classify_attempt_failure(
     attempt.error_message = Some(truncate_error_message(proxy_error.message()));
 
     let decision = decide_retry(
-        &CONFIG.routing_resilience,
+        routing_resilience,
         RetryPolicyContext {
             failure: RetryFailureKind::ProxyError(proxy_error),
             same_candidate_retry_count,
@@ -314,6 +315,7 @@ pub(in crate::proxy) fn classify_attempt_failure(
 }
 
 pub(in crate::proxy) fn classify_provider_governance_skip(
+    routing_resilience: &RoutingResilienceConfig,
     attempt: &mut RequestAttemptDraft,
     rejection: ProviderGovernanceRejection,
     provider_label: &str,
@@ -333,7 +335,7 @@ pub(in crate::proxy) fn classify_provider_governance_skip(
     attempt.llm_response_capture_state = None;
 
     let decision = decide_retry(
-        &CONFIG.routing_resilience,
+        routing_resilience,
         RetryPolicyContext {
             failure: RetryFailureKind::ProviderGovernance(rejection),
             same_candidate_retry_count: 0,
@@ -519,6 +521,10 @@ mod tests {
         }
     }
 
+    fn routing_resilience() -> RoutingResilienceConfig {
+        RoutingResilienceConfig::default()
+    }
+
     #[test]
     fn skipped_for_capability_mismatch_preserves_candidate_identity_and_fallback_action() {
         let attempt =
@@ -570,7 +576,15 @@ mod tests {
         let error = ProxyError::UpstreamTimeout("timeout".to_string());
         let mut first_attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
 
-        classify_attempt_failure(&mut first_attempt, &error, 0, 1, true, None);
+        classify_attempt_failure(
+            &routing_resilience(),
+            &mut first_attempt,
+            &error,
+            0,
+            1,
+            true,
+            None,
+        );
 
         assert_eq!(first_attempt.attempt_status, RequestAttemptStatus::Error);
         assert_eq!(
@@ -584,7 +598,15 @@ mod tests {
         );
 
         let mut second_attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
-        classify_attempt_failure(&mut second_attempt, &error, 1, 1, true, None);
+        classify_attempt_failure(
+            &routing_resilience(),
+            &mut second_attempt,
+            &error,
+            1,
+            1,
+            true,
+            None,
+        );
 
         assert_eq!(
             second_attempt.scheduler_action,
@@ -594,13 +616,38 @@ mod tests {
     }
 
     #[test]
+    fn classify_attempt_failure_uses_supplied_routing_resilience_policy() {
+        let candidate = candidate(1);
+        let error = ProxyError::UpstreamTimeout("timeout".to_string());
+        let mut attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
+        let mut routing_resilience = routing_resilience();
+        routing_resilience.same_candidate_max_retries = 0;
+
+        classify_attempt_failure(&routing_resilience, &mut attempt, &error, 0, 1, true, None);
+
+        assert_eq!(
+            attempt.scheduler_action,
+            SchedulerAction::FallbackNextCandidate
+        );
+        assert_eq!(attempt.backoff_ms, None);
+    }
+
+    #[test]
     fn classify_attempt_failure_fails_fast_after_visible_streaming_output() {
         let candidate = candidate(1);
         let error = ProxyError::UpstreamTimeout("timeout after chunks".to_string());
         let mut attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
         attempt.response_started_to_client = true;
 
-        classify_attempt_failure(&mut attempt, &error, 0, 1, true, None);
+        classify_attempt_failure(
+            &routing_resilience(),
+            &mut attempt,
+            &error,
+            0,
+            1,
+            true,
+            None,
+        );
 
         assert_eq!(attempt.attempt_status, RequestAttemptStatus::Error);
         assert_eq!(attempt.scheduler_action, SchedulerAction::FailFast);
@@ -613,6 +660,7 @@ mod tests {
         let mut attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
 
         classify_provider_governance_skip(
+            &routing_resilience(),
             &mut attempt,
             ProviderGovernanceRejection::Open,
             "provider/model",
@@ -637,6 +685,7 @@ mod tests {
         let mut attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
 
         classify_provider_governance_skip(
+            &routing_resilience(),
             &mut attempt,
             ProviderGovernanceRejection::HalfOpenProbeInFlight,
             "provider/model",

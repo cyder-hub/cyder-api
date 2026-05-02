@@ -198,9 +198,10 @@ impl RuntimeStateBackendBundle {
             api_key_governance: Arc::new(ApiKeyGovernanceService::new(Arc::new(
                 MemoryApiKeyRuntimeStore::default(),
             ))),
-            provider_circuit: Arc::new(ProviderCircuitService::new(Arc::new(
-                MemoryProviderCircuitStore::default(),
-            ))),
+            provider_circuit: Arc::new(ProviderCircuitService::new_with_config(
+                Arc::new(MemoryProviderCircuitStore::default()),
+                config.provider_governance.clone(),
+            )),
             provider_key_cursor_store: Arc::new(MemoryProviderKeyCursorStore::default()),
             status,
         }
@@ -237,14 +238,15 @@ impl RuntimeStateBackendBundle {
                     state_ttl,
                 ),
             ))),
-            provider_circuit: Arc::new(ProviderCircuitService::new(Arc::new(
-                RedisProviderCircuitStore::new(
+            provider_circuit: Arc::new(ProviderCircuitService::new_with_config(
+                Arc::new(RedisProviderCircuitStore::new(
                     pool.clone(),
                     key_prefix.clone(),
                     config.runtime_state.provider_circuit_probe_lease_ttl(),
                     state_ttl,
-                ),
-            ))),
+                )),
+                config.provider_governance.clone(),
+            )),
             provider_key_cursor_store: Arc::new(RedisProviderKeyCursorStore::new(
                 pool, key_prefix, state_ttl,
             )),

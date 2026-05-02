@@ -8,7 +8,6 @@ use axum::{
 use tokio::time::sleep;
 
 use crate::{
-    config::CONFIG,
     proxy::{
         ProxyError,
         cancellation::ProxyCancellationContext,
@@ -235,7 +234,9 @@ pub(in crate::proxy) async fn schedule_execution(
     let resolved_name_scope = execution_plan.resolved_scope.as_str().to_string();
     let resolved_route_id = execution_plan.resolved_route_id;
     let resolved_route_name = execution_plan.resolved_route_name.clone();
-    let candidate_budget = CONFIG.routing_resilience.max_candidates_per_request.max(1) as usize;
+    let runtime_snapshot = app_state.system_config.runtime_snapshot().await;
+    let routing_resilience = runtime_snapshot.routing_resilience;
+    let candidate_budget = routing_resilience.max_candidates_per_request.max(1) as usize;
     let mut candidate_index = 0usize;
 
     while candidate_index < execution_plan.candidates.len() && candidate_index < candidate_budget {
@@ -275,6 +276,7 @@ pub(in crate::proxy) async fn schedule_execution(
                     same_candidate_retry_count,
                     attempted_candidate_count,
                     next_candidate_available,
+                    routing_resilience: routing_resilience.clone(),
                     log_mode,
                     execution_policy,
                     kind: kind.clone(),

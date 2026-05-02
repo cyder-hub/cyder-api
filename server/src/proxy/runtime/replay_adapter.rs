@@ -9,7 +9,7 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::{
-    config::CONFIG,
+    config::RoutingResilienceConfig,
     cost::UsageNormalization,
     proxy::{
         ProxyError,
@@ -452,7 +452,9 @@ async fn materialize_gateway_replay_request(
         )));
     }
 
-    let candidate_budget = CONFIG.routing_resilience.max_candidates_per_request.max(1) as usize;
+    let runtime_snapshot = app_state.system_config.runtime_snapshot().await;
+    let routing_resilience = runtime_snapshot.routing_resilience;
+    let candidate_budget = routing_resilience.max_candidates_per_request.max(1) as usize;
     let mut candidate_index = 0usize;
     while candidate_index < execution_plan.candidates.len() && candidate_index < candidate_budget {
         let candidate = execution_plan.candidates[candidate_index].clone();
@@ -468,6 +470,7 @@ async fn materialize_gateway_replay_request(
                 &execution_plan,
                 &candidate_manifest,
                 &candidate,
+                &routing_resilience,
                 same_candidate_retry_count,
                 attempted_candidate_count,
                 next_candidate_available,
@@ -521,6 +524,7 @@ enum GatewayReplayCandidateMaterialization {
 }
 
 fn rejected_gateway_replay_candidate(
+    routing_resilience: &RoutingResilienceConfig,
     mut attempt: RequestAttemptDraft,
     proxy_error: ProxyError,
     same_candidate_retry_count: u32,
@@ -529,6 +533,7 @@ fn rejected_gateway_replay_candidate(
 ) -> GatewayReplayCandidateMaterialization {
     attempt.completed_at = Some(Utc::now().timestamp_millis());
     classify_attempt_failure(
+        routing_resilience,
         &mut attempt,
         &proxy_error,
         same_candidate_retry_count,
@@ -548,6 +553,7 @@ async fn materialize_gateway_replay_candidate(
     execution_plan: &ExecutionPlan,
     candidate_manifest: &RequestLogBundleCandidateManifest,
     candidate: &ExecutionCandidate,
+    routing_resilience: &RoutingResilienceConfig,
     same_candidate_retry_count: u32,
     attempted_candidate_count: u32,
     next_candidate_available: bool,
@@ -558,6 +564,7 @@ async fn materialize_gateway_replay_candidate(
             Ok(credentials) => credentials,
             Err(proxy_error) => {
                 return Ok(rejected_gateway_replay_candidate(
+                    routing_resilience,
                     attempt,
                     proxy_error,
                     same_candidate_retry_count,
@@ -571,6 +578,7 @@ async fn materialize_gateway_replay_candidate(
     if let GatewayReplayAttemptKind::Utility { operation, .. } = &input.kind {
         if let Err(proxy_error) = validate_utility_target(operation, candidate.llm_api_type) {
             return Ok(rejected_gateway_replay_candidate(
+                routing_resilience,
                 attempt,
                 proxy_error,
                 same_candidate_retry_count,
@@ -589,6 +597,7 @@ async fn materialize_gateway_replay_candidate(
     .await
     {
         return Ok(rejected_gateway_replay_candidate(
+            routing_resilience,
             attempt,
             proxy_error,
             same_candidate_retry_count,
@@ -608,6 +617,7 @@ async fn materialize_gateway_replay_candidate(
         Ok(trace) => trace,
         Err(proxy_error) => {
             return Ok(rejected_gateway_replay_candidate(
+                routing_resilience,
                 attempt,
                 proxy_error,
                 same_candidate_retry_count,
@@ -621,6 +631,7 @@ async fn materialize_gateway_replay_candidate(
     attempt.request_patch_summary_json = request_patch_trace.request_patch_summary_json.clone();
     if let Some(proxy_error) = request_patch_trace.conflict_error(&candidate.model.model_name) {
         return Ok(rejected_gateway_replay_candidate(
+            routing_resilience,
             attempt,
             proxy_error,
             same_candidate_retry_count,
@@ -653,6 +664,7 @@ async fn materialize_gateway_replay_candidate(
             Ok(materialized) => materialized,
             Err(proxy_error) => {
                 return Ok(rejected_gateway_replay_candidate(
+                    routing_resilience,
                     attempt,
                     proxy_error,
                     same_candidate_retry_count,
@@ -676,6 +688,7 @@ async fn materialize_gateway_replay_candidate(
             Ok(materialized) => materialized,
             Err(proxy_error) => {
                 return Ok(rejected_gateway_replay_candidate(
+                    routing_resilience,
                     attempt,
                     proxy_error,
                     same_candidate_retry_count,
@@ -702,6 +715,7 @@ async fn materialize_gateway_replay_candidate(
             attempt.request_headers_json = None;
             attempt.llm_request_body_for_log = None;
             classify_provider_governance_skip(
+                routing_resilience,
                 &mut attempt,
                 rejection,
                 materialized.model_str.as_str(),

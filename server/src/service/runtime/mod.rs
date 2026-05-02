@@ -13,8 +13,9 @@ pub use backend::{
 };
 pub use provider_circuit::{
     ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitProbePermit,
-    ProviderCircuitRejection, ProviderCircuitService, ProviderCircuitStore, ProviderHealthSnapshot,
-    ProviderHealthStatus, RedisProviderCircuitStore,
+    ProviderCircuitRejection, ProviderCircuitService, ProviderCircuitStore,
+    ProviderGovernanceConfigManager, ProviderHealthSnapshot, ProviderHealthStatus,
+    RedisProviderCircuitStore,
 };
 pub use provider_key_selection::{
     GroupItemSelectionStrategy, MemoryProviderKeyCursorStore, ProviderKeyCursorStore,

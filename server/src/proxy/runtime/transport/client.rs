@@ -1,20 +1,20 @@
+use std::time::Duration;
+
 use axum::body::Bytes;
 use tokio::time::timeout;
 
-use crate::{
-    config::CONFIG,
-    proxy::{ProxyError, cancellation::ProxyCancellationContext, classify_reqwest_error},
-};
+use crate::proxy::{ProxyError, cancellation::ProxyCancellationContext, classify_reqwest_error};
 
 pub(crate) async fn send_with_first_byte_timeout(
     cancellation: &ProxyCancellationContext,
     request: reqwest::RequestBuilder,
     context: &str,
+    first_byte_timeout: Option<Duration>,
 ) -> Result<reqwest::Response, ProxyError> {
     if cancellation.is_cancelled() {
         return Err(cancellation.cancellation_error().await);
     }
-    match CONFIG.proxy_request.first_byte_timeout() {
+    match first_byte_timeout {
         Some(timeout_duration) => {
             tokio::select! {
                 _ = cancellation.cancelled() => Err(cancellation.cancellation_error().await),

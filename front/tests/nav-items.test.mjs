@@ -10,8 +10,10 @@ test("navigation keeps Provider as the default start item and groups advanced pa
   const byPath = new Map(navItems.map((item) => [item.path, item]));
 
   assert.equal(byPath.get("/model")?.section, "core");
+  assert.equal(byPath.get("/alerts")?.section, "core");
   assert.equal(byPath.get("/model_route")?.section, "advanced");
   assert.equal(byPath.get("/cost")?.section, "advanced");
   assert.equal(byPath.get("/api_key")?.section, "advanced");
+  assert.equal(byPath.get("/notifications")?.section, "advanced");
   assert.equal(byPath.has("/custom_fields"), false);
 });

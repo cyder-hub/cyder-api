@@ -37,8 +37,8 @@ use chrono::{Datelike, TimeZone, Utc};
 use flate2::{Compression, write::GzEncoder};
 use reqwest::StatusCode;
 use rmp_serde::to_vec_named;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::{env, io::Write, path::PathBuf, time::Duration};
 use tokio::{
     fs::{self, File},
@@ -508,10 +508,17 @@ pub(super) async fn record_request_completion_and_log(
     app_state.infra.log_manager().log(context).await;
 }
 
+#[async_trait::async_trait]
+#[allow(dead_code)]
+pub trait RequestLogPersistedSink: Send + Sync {
+    async fn on_request_log_persisted(&self, request_log_id: i64);
+}
+
 pub struct LogManager {
     sender: mpsc::Sender<LogCommand>,
     metrics: LogManagerMetrics,
     runtime: LogManagerRuntime,
+    request_log_persisted_sink: Arc<RwLock<Option<Arc<dyn RequestLogPersistedSink>>>>,
 }
 
 enum LogCommand {
@@ -579,7 +586,7 @@ pub struct LogManagerMetrics {
     compensation_needed: Arc<AtomicU64>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct LogManagerMetricsSnapshot {
     pub enqueued: u64,
     pub processed: u64,
@@ -617,13 +624,13 @@ impl LogManagerMetrics {
     }
 
     fn record_started(&self) {
-        self.pending.fetch_sub(1, Ordering::Relaxed);
+        saturating_decrement(&self.pending);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_processed(&self) {
         self.processed.fetch_add(1, Ordering::Relaxed);
-        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+        saturating_decrement(&self.in_flight);
     }
 
     fn record_retry(&self) {
@@ -636,7 +643,6 @@ impl LogManagerMetrics {
 
     fn record_enqueue_failure(&self) {
         self.enqueue_failures.fetch_add(1, Ordering::Relaxed);
-        self.pending.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn record_storage_failure(&self) {
@@ -672,6 +678,12 @@ impl LogManagerMetrics {
     }
 }
 
+fn saturating_decrement(counter: &AtomicU64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        value.checked_sub(1)
+    });
+}
+
 impl LogManager {
     pub fn new() -> Self {
         Self::new_with_runtime(LogManagerRuntime::Global)
@@ -687,6 +699,8 @@ impl LogManager {
         let metrics = LogManagerMetrics::new();
         let worker_metrics = metrics.clone();
         let worker_runtime = runtime.clone();
+        let request_log_persisted_sink = Arc::new(RwLock::new(None));
+        let worker_request_log_persisted_sink = Arc::clone(&request_log_persisted_sink);
 
         tokio::spawn(async move {
             while let Some(command) = receiver.recv().await {
@@ -694,7 +708,11 @@ impl LogManager {
                     LogCommand::Record(context) => {
                         worker_metrics.record_started();
                         worker_runtime
-                            .run(Self::process_log(context, &worker_metrics))
+                            .run(Self::process_log(
+                                context,
+                                &worker_metrics,
+                                Arc::clone(&worker_request_log_persisted_sink),
+                            ))
                             .await;
                         worker_metrics.record_processed();
                     }
@@ -711,6 +729,21 @@ impl LogManager {
             sender,
             metrics,
             runtime,
+            request_log_persisted_sink,
+        }
+    }
+
+    pub fn set_request_log_persisted_sink(&self, sink: Arc<dyn RequestLogPersistedSink>) {
+        match self.request_log_persisted_sink.write() {
+            Ok(mut guard) => {
+                *guard = Some(sink);
+            }
+            Err(err) => {
+                crate::error_event!(
+                    "logging.request_log_persisted_sink_register_failed",
+                    error = err.to_string()
+                );
+            }
         }
     }
 
@@ -748,7 +781,11 @@ impl LogManager {
                     );
                     self.metrics.record_started();
                     self.runtime
-                        .run(Self::process_log(context, &self.metrics))
+                        .run(Self::process_log(
+                            context,
+                            &self.metrics,
+                            Arc::clone(&self.request_log_persisted_sink),
+                        ))
                         .await;
                     self.metrics.record_processed();
                 }
@@ -766,7 +803,11 @@ impl LogManager {
                     );
                     self.metrics.record_started();
                     self.runtime
-                        .run(Self::process_log(context, &self.metrics))
+                        .run(Self::process_log(
+                            context,
+                            &self.metrics,
+                            Arc::clone(&self.request_log_persisted_sink),
+                        ))
                         .await;
                     self.metrics.record_processed();
                 }
@@ -785,7 +826,6 @@ impl LogManager {
         }
     }
 
-    #[cfg(test)]
     pub fn metrics(&self) -> LogManagerMetricsSnapshot {
         self.metrics.snapshot()
     }
@@ -1444,7 +1484,11 @@ impl LogManager {
         }
     }
 
-    async fn process_log(context: RequestLogContext, metrics: &LogManagerMetrics) {
+    async fn process_log(
+        context: RequestLogContext,
+        metrics: &LogManagerMetrics,
+        request_log_persisted_sink: Arc<RwLock<Option<Arc<dyn RequestLogPersistedSink>>>>,
+    ) {
         let log_id = context.id;
         let created_at = context.request_received_at;
         let skip_response_body_persistence =
@@ -1645,6 +1689,7 @@ impl LogManager {
                 LogProcessingStage::MetadataPersisted,
                 "request_log_and_attempts_inserted",
             );
+            Self::notify_request_log_persisted_sink(log_id, &request_log_persisted_sink).await;
             if Self::add_api_key_rollup_delta_with_retry(&request_log, metrics, log_id) {
                 Self::log_stage_event(metrics, log_id, LogProcessingStage::Completed, "done");
             } else {
@@ -1664,6 +1709,27 @@ impl LogManager {
                 LogProcessingStage::NeedsCompensation,
                 "request_log_insert_failed_after_retries",
             );
+        }
+    }
+
+    async fn notify_request_log_persisted_sink(
+        request_log_id: i64,
+        request_log_persisted_sink: &Arc<RwLock<Option<Arc<dyn RequestLogPersistedSink>>>>,
+    ) {
+        let sink = match request_log_persisted_sink.read() {
+            Ok(guard) => guard.clone(),
+            Err(err) => {
+                crate::warn_event!(
+                    "logging.request_log_persisted_sink_lock_failed",
+                    request_log_id = request_log_id,
+                    error = err.to_string()
+                );
+                None
+            }
+        };
+
+        if let Some(sink) = sink {
+            sink.on_request_log_persisted(request_log_id).await;
         }
     }
 
@@ -2783,6 +2849,22 @@ mod tests {
         assert_eq!(snapshot.storage_failures, 1);
         assert_eq!(snapshot.db_failures, 1);
         assert_eq!(snapshot.compensation_needed, 1);
+    }
+
+    #[test]
+    fn log_manager_metrics_enqueue_failure_inline_fallback_does_not_underflow_pending() {
+        let metrics = LogManagerMetrics::new();
+        metrics.record_enqueued();
+        metrics.record_enqueue_failure();
+        assert_eq!(metrics.snapshot().pending, 1);
+
+        metrics.record_started();
+        metrics.record_processed();
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.enqueue_failures, 1);
+        assert_eq!(snapshot.pending, 0);
+        assert_eq!(snapshot.in_flight, 0);
     }
 
     #[tokio::test]

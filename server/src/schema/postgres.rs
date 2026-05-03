@@ -71,6 +71,50 @@ diesel::table! {
 diesel::table! {
     use diesel::sql_types::{Int8, Text, Nullable};
 
+    alert_event (id) {
+        id -> Int8,
+        fingerprint -> Text,
+        rule_key -> Text,
+        severity -> Text,
+        status -> Text,
+        scope_type -> Text,
+        scope_id -> Text,
+        title -> Text,
+        summary -> Text,
+        details_json -> Text,
+        metrics_snapshot_json -> Nullable<Text>,
+        first_seen_at -> Int8,
+        last_seen_at -> Int8,
+        resolved_at -> Nullable<Int8>,
+        acknowledged_at -> Nullable<Int8>,
+        acknowledged_note -> Nullable<Text>,
+        suppressed_until -> Nullable<Int8>,
+        suppressed_reason -> Nullable<Text>,
+        occurrence_count -> Int8,
+        reopened_count -> Int8,
+        last_notification_at -> Nullable<Int8>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int8, Text, Nullable};
+
+    alert_rule_state (rule_key, scope_type, scope_id) {
+        rule_key -> Text,
+        scope_type -> Text,
+        scope_id -> Text,
+        last_evaluated_at -> Int8,
+        last_fired_at -> Nullable<Int8>,
+        last_resolved_at -> Nullable<Int8>,
+        cooldown_until -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int8, Text, Nullable};
+
     api_key_rollup_daily (api_key_id, day_bucket, currency) {
         api_key_id -> Int8,
         day_bucket -> Int8,
@@ -168,6 +212,50 @@ diesel::table! {
         expires_at -> Int8,
         revoked_at -> Nullable<Int8>,
         revoked_reason -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Bool, Int8, Text, Nullable};
+
+    notification_channel (id) {
+        id -> Int8,
+        channel_key -> Text,
+        channel_type -> Text,
+        name -> Text,
+        endpoint_url -> Text,
+        signing_secret -> Nullable<Text>,
+        headers_json -> Nullable<Text>,
+        cooldown_seconds -> Int8,
+        is_enabled -> Bool,
+        last_test_at -> Nullable<Int8>,
+        last_test_success -> Nullable<Bool>,
+        last_test_error -> Nullable<Text>,
+        deleted_at -> Nullable<Int8>,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int4, Int8, Text, Nullable};
+
+    notification_delivery (id) {
+        id -> Int8,
+        channel_id -> Int8,
+        alert_id -> Int8,
+        alert_fingerprint -> Text,
+        event_type -> Text,
+        status -> Text,
+        payload_json -> Text,
+        attempt_count -> Int4,
+        next_attempt_at -> Int8,
+        last_attempt_at -> Nullable<Int8>,
+        delivered_at -> Nullable<Int8>,
+        last_status_code -> Nullable<Int4>,
+        last_error -> Nullable<Text>,
+        created_at -> Int8,
+        updated_at -> Int8,
     }
 }
 
@@ -356,6 +444,104 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::{Int8, Nullable};
+
+    metric_ingested_request_log (request_log_id) {
+        request_log_id -> Int8,
+        request_received_at -> Int8,
+        completed_at -> Nullable<Int8>,
+        ingested_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int8, Nullable, Text};
+
+    metric_request_rollup_minute (bucket_start_ms, scope_type, scope_id) {
+        bucket_start_ms -> Int8,
+        scope_type -> Text,
+        scope_id -> Text,
+        scope_label -> Nullable<Text>,
+        request_count -> Int8,
+        success_count -> Int8,
+        error_count -> Int8,
+        cancelled_count -> Int8,
+        retry_count -> Int8,
+        fallback_count -> Int8,
+        first_byte_latency_sum_ms -> Int8,
+        first_byte_latency_count -> Int8,
+        total_latency_sum_ms -> Int8,
+        total_latency_count -> Int8,
+        input_tokens -> Int8,
+        output_tokens -> Int8,
+        reasoning_tokens -> Int8,
+        total_tokens -> Int8,
+        transform_diagnostic_count -> Int8,
+        transform_diagnostic_lossy_major_count -> Int8,
+        transform_diagnostic_reject_count -> Int8,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int8, Nullable, Text};
+
+    metric_attempt_rollup_minute (bucket_start_ms, scope_type, scope_id) {
+        bucket_start_ms -> Int8,
+        scope_type -> Text,
+        scope_id -> Text,
+        scope_label -> Nullable<Text>,
+        attempt_count -> Int8,
+        success_count -> Int8,
+        error_count -> Int8,
+        skipped_count -> Int8,
+        retry_same_candidate_count -> Int8,
+        fallback_next_candidate_count -> Int8,
+        fail_fast_count -> Int8,
+        first_byte_latency_sum_ms -> Int8,
+        first_byte_latency_count -> Int8,
+        total_latency_sum_ms -> Int8,
+        total_latency_count -> Int8,
+        input_tokens -> Int8,
+        output_tokens -> Int8,
+        reasoning_tokens -> Int8,
+        total_tokens -> Int8,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int4, Int8, Text};
+
+    metric_http_status_rollup_minute (bucket_start_ms, scope_type, scope_id, http_status) {
+        bucket_start_ms -> Int8,
+        scope_type -> Text,
+        scope_id -> Text,
+        http_status -> Int4,
+        count -> Int8,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{Int8, Text};
+
+    metric_cost_rollup_minute (bucket_start_ms, metric_kind, scope_type, scope_id, currency) {
+        bucket_start_ms -> Int8,
+        metric_kind -> Text,
+        scope_type -> Text,
+        scope_id -> Text,
+        currency -> Text,
+        amount_nanos -> Int8,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
     use crate::schema::enum_def::LlmApiTypeMapping;
     use crate::schema::enum_def::RequestAttemptStatusMapping;
     use crate::schema::enum_def::SchedulerActionMapping;
@@ -490,6 +676,8 @@ diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
 diesel::joinable!(model_route_candidate -> model (model_id));
 diesel::joinable!(model_route_candidate -> model_route (route_id));
+diesel::joinable!(notification_delivery -> alert_event (alert_id));
+diesel::joinable!(notification_delivery -> notification_channel (channel_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
 diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
 diesel::joinable!(request_attempt -> cost_catalog_versions (cost_catalog_version_id));
@@ -512,15 +700,24 @@ diesel::allow_tables_to_appear_in_same_query!(
     api_key,
     api_key_acl_rule,
     api_key_model_override,
+    alert_event,
+    alert_rule_state,
     api_key_rollup_daily,
     api_key_rollup_monthly,
     cost_catalogs,
     cost_catalog_versions,
     cost_components,
     manager_auth_instance,
+    metric_attempt_rollup_minute,
+    metric_cost_rollup_minute,
+    metric_http_status_rollup_minute,
+    metric_ingested_request_log,
+    metric_request_rollup_minute,
     model,
     model_route,
     model_route_candidate,
+    notification_channel,
+    notification_delivery,
     provider,
     provider_api_key,
     reasoning_config,

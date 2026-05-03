@@ -1,5 +1,6 @@
 use crate::service::app_state::{StateRouter, create_state_router};
 use crate::utils::auth::authorization_access_middleware;
+use alert::create_alert_router;
 use api_key::create_api_key_management_router;
 use auth::create_auth_router;
 use axum::{
@@ -8,8 +9,10 @@ use axum::{
     response::IntoResponse,
 };
 use cost::create_cost_router;
+use metrics::create_metrics_router;
 use model::create_model_router;
 use model_route::create_model_route_router;
+use notification::create_notification_router;
 use provider::create_provider_router;
 use provider_runtime::create_provider_runtime_router;
 use reasoning_config::create_reasoning_config_router;
@@ -26,10 +29,13 @@ use tower_http::{
 mod auth;
 mod cost;
 mod error;
+mod metrics;
 
+mod alert;
 mod api_key;
 mod model;
 mod model_route;
+mod notification;
 mod provider;
 mod provider_runtime;
 mod reasoning_config;
@@ -66,6 +72,9 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_request_patch_router())
             .merge(create_reasoning_config_router())
             .merge(create_cost_router())
+            .merge(create_metrics_router())
+            .merge(create_alert_router())
+            .merge(create_notification_router())
             .merge(create_stat_router())
             .merge(create_system_config_router())
             .layer(middleware::from_fn(authorization_access_middleware))

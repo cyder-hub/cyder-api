@@ -1,18 +1,19 @@
-use crate::controller::provider_runtime::{
-    ProviderRuntimeItem, ProviderRuntimeLevel, ProviderRuntimeWindow, build_provider_runtime_items,
-    runtime_backend_status_for_provider_items,
+use crate::service::alerts::read_model::{
+    DashboardAlertsReadModel, DashboardCostProviderAlertReadItem, DashboardProviderAlertReadItem,
+    DashboardTopProviderReadItem,
 };
 use crate::service::app_state::{AppState, StateRouter, create_state_router};
+use crate::service::metrics::dashboard::MetricsDashboardTodayStats;
+use crate::service::metrics::provider_runtime::{
+    ProviderRuntimeItem, ProviderRuntimeLevel, ProviderRuntimeSummary, ProviderRuntimeWindow,
+};
 use crate::service::runtime::RuntimeStateBackendOperatorStatus;
 use crate::{
     controller::error::BaseError,
     database::stat::{
-        DashboardOverviewStats as DbDashboardOverviewStats,
-        DashboardTodayStats as DbDashboardTodayStats, DashboardTopModelItem, SystemOverviewStats,
-        TodayRequestLogStats, UsageStatsGroupBy as DbUsageStatsGroupBy, UsageStatsQueryItem,
-        get_dashboard_cost_alert_models, get_dashboard_overview_stats, get_dashboard_today_stats,
-        get_dashboard_top_models, get_system_overview_stats, get_today_request_log_stats,
-        get_usage_stats_aggregates,
+        DashboardOverviewStats as DbDashboardOverviewStats, DashboardTopModelItem,
+        SystemOverviewStats, TodayRequestLogStats, UsageStatsGroupBy as DbUsageStatsGroupBy,
+        UsageStatsQueryItem, get_system_overview_stats, get_today_request_log_stats,
     },
     utils::HttpResult,
 };
@@ -221,8 +222,8 @@ pub struct DashboardTodayStats {
     active_api_key_count: i64,
 }
 
-impl From<DbDashboardTodayStats> for DashboardTodayStats {
-    fn from(value: DbDashboardTodayStats) -> Self {
+impl From<MetricsDashboardTodayStats> for DashboardTodayStats {
+    fn from(value: MetricsDashboardTodayStats) -> Self {
         Self {
             request_count: value.request_count,
             success_count: value.success_count,
@@ -290,6 +291,19 @@ pub struct DashboardRuntimeSummary {
     no_traffic_count: i64,
 }
 
+impl From<ProviderRuntimeSummary> for DashboardRuntimeSummary {
+    fn from(value: ProviderRuntimeSummary) -> Self {
+        Self {
+            window: value.window,
+            healthy_count: value.healthy_count,
+            degraded_count: value.degraded_count,
+            half_open_count: value.half_open_count,
+            open_count: value.open_count,
+            no_traffic_count: value.no_traffic_count,
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Default)]
 pub struct DashboardAlerts {
     open_providers: Vec<DashboardProviderAlertItem>,
@@ -348,6 +362,82 @@ pub struct DashboardTopProviderItem {
     success_rate: Option<f64>,
     total_cost: HashMap<String, i64>,
     avg_total_latency_ms: Option<f64>,
+}
+
+impl From<DashboardProviderAlertReadItem> for DashboardProviderAlertItem {
+    fn from(value: DashboardProviderAlertReadItem) -> Self {
+        Self {
+            provider_id: value.provider_id,
+            provider_key: value.provider_key,
+            provider_name: value.provider_name,
+            runtime_level: value.runtime_level,
+            request_count: value.request_count,
+            error_count: value.error_count,
+            success_rate: value.success_rate,
+            avg_total_latency_ms: value.avg_total_latency_ms,
+            last_error_at: value.last_error_at,
+            last_error_summary: value.last_error_summary,
+        }
+    }
+}
+
+impl From<DashboardCostProviderAlertReadItem> for DashboardCostProviderAlertItem {
+    fn from(value: DashboardCostProviderAlertReadItem) -> Self {
+        Self {
+            provider_id: value.provider_id,
+            provider_key: value.provider_key,
+            provider_name: value.provider_name,
+            request_count: value.request_count,
+            success_rate: value.success_rate,
+            avg_total_latency_ms: value.avg_total_latency_ms,
+            total_cost: value.total_cost,
+        }
+    }
+}
+
+impl From<DashboardTopProviderReadItem> for DashboardTopProviderItem {
+    fn from(value: DashboardTopProviderReadItem) -> Self {
+        Self {
+            provider_id: value.provider_id,
+            provider_key: value.provider_key,
+            provider_name: value.provider_name,
+            request_count: value.request_count,
+            success_count: value.success_count,
+            error_count: value.error_count,
+            success_rate: value.success_rate,
+            total_cost: value.total_cost,
+            avg_total_latency_ms: value.avg_total_latency_ms,
+        }
+    }
+}
+
+impl From<DashboardAlertsReadModel> for DashboardAlerts {
+    fn from(value: DashboardAlertsReadModel) -> Self {
+        Self {
+            open_providers: value.open_providers.into_iter().map(Into::into).collect(),
+            half_open_providers: value
+                .half_open_providers
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            degraded_providers: value
+                .degraded_providers
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            top_error_providers: value
+                .top_error_providers
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            top_cost_providers: value
+                .top_cost_providers
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            top_cost_models: Vec::new(),
+        }
+    }
 }
 
 fn usage_stat_item_from_query_item(item: UsageStatsQueryItem) -> UsageStatItem {
@@ -512,6 +602,7 @@ async fn current_runtime_timezone(app_state: &Arc<AppState>) -> Option<String> {
     app_state.system_config.runtime_snapshot().await.timezone
 }
 
+#[cfg(test)]
 fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntimeSummary {
     let mut summary = DashboardRuntimeSummary {
         window: ProviderRuntimeWindow::OneHour,
@@ -535,61 +626,6 @@ fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntime
     summary
 }
 
-fn alert_item_from_runtime_item(item: &ProviderRuntimeItem) -> DashboardProviderAlertItem {
-    DashboardProviderAlertItem {
-        provider_id: item.provider_id,
-        provider_key: item.provider_key.clone(),
-        provider_name: item.provider_name.clone(),
-        runtime_level: item.runtime_level,
-        request_count: item.request_count,
-        error_count: item.error_count,
-        success_rate: item.success_rate,
-        avg_total_latency_ms: item.avg_total_latency_ms,
-        last_error_at: item.last_error_at,
-        last_error_summary: item.last_error_summary.clone(),
-    }
-}
-
-fn top_provider_item_from_runtime_item(item: &ProviderRuntimeItem) -> DashboardTopProviderItem {
-    DashboardTopProviderItem {
-        provider_id: item.provider_id,
-        provider_key: item.provider_key.clone(),
-        provider_name: item.provider_name.clone(),
-        request_count: item.request_count,
-        success_count: item.success_count,
-        error_count: item.error_count,
-        success_rate: item.success_rate,
-        total_cost: item
-            .total_cost
-            .iter()
-            .map(|cost| (cost.currency.clone(), cost.amount_nanos))
-            .collect(),
-        avg_total_latency_ms: item.avg_total_latency_ms,
-    }
-}
-
-fn total_cost_rank_value(cost: &HashMap<String, i64>) -> i64 {
-    cost.values().copied().sum()
-}
-
-fn cost_provider_alert_item_from_runtime_item(
-    item: &ProviderRuntimeItem,
-) -> DashboardCostProviderAlertItem {
-    DashboardCostProviderAlertItem {
-        provider_id: item.provider_id,
-        provider_key: item.provider_key.clone(),
-        provider_name: item.provider_name.clone(),
-        request_count: item.request_count,
-        success_rate: item.success_rate,
-        avg_total_latency_ms: item.avg_total_latency_ms,
-        total_cost: item
-            .total_cost
-            .iter()
-            .map(|cost| (cost.currency.clone(), cost.amount_nanos))
-            .collect(),
-    }
-}
-
 fn cost_model_alert_item_from_top_model_item(
     item: DashboardTopModelItem,
 ) -> DashboardCostModelAlertItem {
@@ -605,117 +641,42 @@ fn cost_model_alert_item_from_top_model_item(
     }
 }
 
-fn dashboard_alerts_from_runtime_items(items: &[ProviderRuntimeItem]) -> DashboardAlerts {
-    let mut open_providers = items
-        .iter()
-        .filter(|item| item.runtime_level == ProviderRuntimeLevel::Open)
-        .map(alert_item_from_runtime_item)
-        .collect::<Vec<_>>();
-    open_providers.sort_by(|left, right| {
-        right
-            .error_count
-            .cmp(&left.error_count)
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-    });
-
-    let mut half_open_providers = items
-        .iter()
-        .filter(|item| item.runtime_level == ProviderRuntimeLevel::HalfOpen)
-        .map(alert_item_from_runtime_item)
-        .collect::<Vec<_>>();
-    half_open_providers.sort_by(|left, right| {
-        right
-            .error_count
-            .cmp(&left.error_count)
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-    });
-
-    let mut degraded_providers = items
-        .iter()
-        .filter(|item| item.runtime_level == ProviderRuntimeLevel::Degraded)
-        .map(alert_item_from_runtime_item)
-        .collect::<Vec<_>>();
-    degraded_providers.sort_by(|left, right| {
-        right
-            .error_count
-            .cmp(&left.error_count)
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-    });
-
-    let mut top_error_providers = items
-        .iter()
-        .filter(|item| item.error_count > 0)
-        .map(alert_item_from_runtime_item)
-        .collect::<Vec<_>>();
-    top_error_providers.sort_by(|left, right| {
-        right
-            .error_count
-            .cmp(&left.error_count)
-            .then_with(|| right.last_error_at.cmp(&left.last_error_at))
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-    });
-    top_error_providers.truncate(5);
-
-    let mut top_cost_providers = items
-        .iter()
-        .filter(|item| item.total_cost.iter().any(|cost| cost.amount_nanos > 0))
-        .map(cost_provider_alert_item_from_runtime_item)
-        .collect::<Vec<_>>();
-    top_cost_providers.sort_by(|left, right| {
-        total_cost_rank_value(&right.total_cost)
-            .cmp(&total_cost_rank_value(&left.total_cost))
-            .then_with(|| right.request_count.cmp(&left.request_count))
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-    });
-    top_cost_providers.truncate(5);
-
-    DashboardAlerts {
-        open_providers,
-        half_open_providers,
-        degraded_providers,
-        top_error_providers,
-        top_cost_providers,
-        top_cost_models: Vec::new(),
-    }
-}
-
-fn top_providers_from_runtime_items(
-    items: &[ProviderRuntimeItem],
-) -> Vec<DashboardTopProviderItem> {
-    let mut top_providers = items
-        .iter()
-        .map(top_provider_item_from_runtime_item)
-        .collect::<Vec<_>>();
-    top_providers.sort_by(|left, right| {
-        right
-            .request_count
-            .cmp(&left.request_count)
-            .then_with(|| left.provider_id.cmp(&right.provider_id))
-    });
-    top_providers.truncate(5);
-    top_providers
-}
-
 async fn build_dashboard_runtime_items(
     app_state: &Arc<AppState>,
 ) -> Result<Vec<ProviderRuntimeItem>, BaseError> {
-    build_provider_runtime_items(app_state, ProviderRuntimeWindow::OneHour, true).await
+    let window = app_state.metrics.default_provider_runtime_window();
+    app_state
+        .metrics
+        .build_provider_runtime_items(app_state, window, true)
+        .await
 }
 
-fn build_dashboard_alerts_section(
+async fn build_dashboard_alerts_section(
+    app_state: &Arc<AppState>,
     runtime_items: &[ProviderRuntimeItem],
     timezone: Option<&str>,
 ) -> Result<DashboardAlertsSection, BaseError> {
-    let mut alerts = dashboard_alerts_from_runtime_items(runtime_items);
-    alerts.top_cost_models = get_dashboard_cost_alert_models(5, timezone)?
+    let mut alerts =
+        DashboardAlerts::from(app_state.alerts.build_dashboard_alerts_from_runtime_items(
+            runtime_items,
+            Utc::now().timestamp_millis(),
+        )?);
+    alerts.top_cost_models = app_state
+        .metrics
+        .dashboard_cost_alert_models(5, timezone)?
         .into_iter()
         .map(cost_model_alert_item_from_top_model_item)
         .collect();
 
     Ok(DashboardAlertsSection {
         alerts,
-        top_providers: top_providers_from_runtime_items(runtime_items),
-        top_models: get_dashboard_top_models(5, timezone)?,
+        top_providers: app_state
+            .alerts
+            .top_providers_from_runtime_items(runtime_items)
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        top_models: app_state.metrics.dashboard_top_models(5, timezone)?,
     })
 }
 
@@ -724,18 +685,19 @@ async fn system_dashboard(
 ) -> Result<HttpResult<DashboardResponse>, BaseError> {
     let timezone = current_runtime_timezone(&app_state).await;
     let timezone = timezone.as_deref();
-    let overview = DashboardOverviewStats::from(get_dashboard_overview_stats()?);
-    let today = DashboardTodayStats::from(get_dashboard_today_stats(timezone)?);
+    let resources = app_state
+        .metrics
+        .build_dashboard_resources(&app_state, timezone)
+        .await?;
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
-    let runtime = runtime_summary_from_items(&runtime_items);
-    let runtime_state_backend =
-        runtime_backend_status_for_provider_items(&app_state, &runtime_items).await;
-    let alerts_section = build_dashboard_alerts_section(&runtime_items, timezone)?;
+    let alerts_section =
+        build_dashboard_alerts_section(&app_state, &runtime_items, timezone).await?;
+    let runtime_state_backend = resources.runtime.runtime_state_backend.clone();
 
     Ok(HttpResult::new(DashboardResponse {
-        overview,
-        today,
-        runtime,
+        overview: DashboardOverviewStats::from(resources.overview),
+        today: DashboardTodayStats::from(resources.today),
+        runtime: DashboardRuntimeSummary::from(resources.runtime),
         runtime_state_backend,
         alerts: alerts_section.alerts,
         top_providers: alerts_section.top_providers,
@@ -747,29 +709,31 @@ async fn system_dashboard_kpi(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardKpiSection>, BaseError> {
     let timezone = current_runtime_timezone(&app_state).await;
-    let today = DashboardTodayStats::from(get_dashboard_today_stats(timezone.as_deref())?);
-    let runtime_items = build_dashboard_runtime_items(&app_state).await?;
-    let runtime = runtime_summary_from_items(&runtime_items);
+    let kpi = app_state
+        .metrics
+        .build_dashboard_kpi(&app_state, timezone.as_deref())
+        .await?;
 
-    Ok(HttpResult::new(DashboardKpiSection { today, runtime }))
+    Ok(HttpResult::new(DashboardKpiSection {
+        today: DashboardTodayStats::from(kpi.today),
+        runtime: DashboardRuntimeSummary::from(kpi.runtime),
+    }))
 }
 
 async fn system_dashboard_resources(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardResourcesSection>, BaseError> {
     let timezone = current_runtime_timezone(&app_state).await;
-    let timezone = timezone.as_deref();
-    let overview = DashboardOverviewStats::from(get_dashboard_overview_stats()?);
-    let today = DashboardTodayStats::from(get_dashboard_today_stats(timezone)?);
-    let runtime_items = build_dashboard_runtime_items(&app_state).await?;
-    let runtime = runtime_summary_from_items(&runtime_items);
-    let runtime_state_backend =
-        runtime_backend_status_for_provider_items(&app_state, &runtime_items).await;
+    let resources = app_state
+        .metrics
+        .build_dashboard_resources(&app_state, timezone.as_deref())
+        .await?;
+    let runtime_state_backend = resources.runtime.runtime_state_backend.clone();
 
     Ok(HttpResult::new(DashboardResourcesSection {
-        overview,
-        today,
-        runtime,
+        overview: DashboardOverviewStats::from(resources.overview),
+        today: DashboardTodayStats::from(resources.today),
+        runtime: DashboardRuntimeSummary::from(resources.runtime),
         runtime_state_backend,
     }))
 }
@@ -779,13 +743,13 @@ async fn system_dashboard_alerts(
 ) -> Result<HttpResult<DashboardAlertsSection>, BaseError> {
     let timezone = current_runtime_timezone(&app_state).await;
     let runtime_items = build_dashboard_runtime_items(&app_state).await?;
-    Ok(HttpResult::new(build_dashboard_alerts_section(
-        &runtime_items,
-        timezone.as_deref(),
-    )?))
+    Ok(HttpResult::new(
+        build_dashboard_alerts_section(&app_state, &runtime_items, timezone.as_deref()).await?,
+    ))
 }
 
 async fn system_usage_stats(
+    State(app_state): State<Arc<AppState>>,
     Query(params): Query<UsageStatsParams>,
 ) -> Result<HttpResult<Vec<UsageStatsPeriod>>, BaseError> {
     let interval = params.interval;
@@ -829,7 +793,7 @@ async fn system_usage_stats(
         )));
     }
 
-    let usage_rows = get_usage_stats_aggregates(
+    let usage_rows = app_state.metrics.usage_stats_aggregates(
         params.start_time,
         params.end_time,
         interval.as_str(),
@@ -936,10 +900,12 @@ pub fn routes() -> StateRouter {
 mod tests {
     use super::{
         DashboardOverviewStats, DashboardRuntimeSummary, DbDashboardOverviewStats, UsageGroupBy,
-        UsageMetric, UsageStatItem, dashboard_alerts_from_runtime_items,
-        runtime_summary_from_items, top_group_keys, top_providers_from_runtime_items,
+        UsageMetric, UsageStatItem, runtime_summary_from_items, top_group_keys,
     };
-    use crate::controller::provider_runtime::{
+    use crate::config::AlertsConfig;
+    use crate::database::TestDbContext;
+    use crate::service::alerts::AlertsService;
+    use crate::service::metrics::provider_runtime::{
         ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeItem,
         ProviderRuntimeLevel, ProviderRuntimeStatusCodeStat, ProviderRuntimeWindow,
         first_runtime_backend_read_error,
@@ -1046,7 +1012,8 @@ mod tests {
             sample_runtime_item(3, ProviderRuntimeLevel::Healthy, 20, 2),
         ];
 
-        let top = top_providers_from_runtime_items(&items);
+        let top =
+            AlertsService::new(AlertsConfig::default()).top_providers_from_runtime_items(&items);
 
         let ids = top.iter().map(|item| item.provider_id).collect::<Vec<_>>();
         assert_eq!(ids, vec![2, 3, 1]);
@@ -1063,32 +1030,37 @@ mod tests {
         let mut steady = sample_runtime_item(3, ProviderRuntimeLevel::Healthy, 30, 1);
         steady.total_cost[0].amount_nanos = 900;
 
-        let alerts = dashboard_alerts_from_runtime_items(&[expensive, recovering, steady]);
+        let context = TestDbContext::new_sqlite("dashboard-alerts-controller.sqlite");
+        context.run_sync(|| {
+            let alerts = AlertsService::new(AlertsConfig::default())
+                .build_dashboard_alerts_from_runtime_items(&[expensive, recovering, steady], 1_000)
+                .unwrap();
 
-        assert_eq!(
-            alerts
-                .open_providers
-                .iter()
-                .map(|item| item.provider_id)
-                .collect::<Vec<_>>(),
-            vec![1]
-        );
-        assert_eq!(
-            alerts
-                .half_open_providers
-                .iter()
-                .map(|item| item.provider_id)
-                .collect::<Vec<_>>(),
-            vec![2]
-        );
-        assert_eq!(
-            alerts
-                .top_cost_providers
-                .iter()
-                .map(|item| item.provider_id)
-                .collect::<Vec<_>>(),
-            vec![3, 1, 2]
-        );
+            assert_eq!(
+                alerts
+                    .open_providers
+                    .iter()
+                    .map(|item| item.provider_id)
+                    .collect::<Vec<_>>(),
+                vec![1]
+            );
+            assert_eq!(
+                alerts
+                    .half_open_providers
+                    .iter()
+                    .map(|item| item.provider_id)
+                    .collect::<Vec<_>>(),
+                vec![2]
+            );
+            assert_eq!(
+                alerts
+                    .top_cost_providers
+                    .iter()
+                    .map(|item| item.provider_id)
+                    .collect::<Vec<_>>(),
+                vec![3, 1, 2]
+            );
+        });
     }
 
     #[test]

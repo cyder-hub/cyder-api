@@ -62,6 +62,16 @@ const router = createRouter({
           component: () => import("@/pages/ProviderRuntime.vue"),
         },
         {
+          path: "alerts",
+          name: "Alerts",
+          component: () => import("@/pages/Alerts.vue"),
+        },
+        {
+          path: "notifications",
+          name: "Notification",
+          component: () => import("@/pages/Notification.vue"),
+        },
+        {
           path: "record",
           name: "Record",
           component: () => import("@/pages/Record.vue"),

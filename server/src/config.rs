@@ -650,6 +650,274 @@ impl Default for DiagnosticsConfig {
     }
 }
 
+fn default_metrics_enabled() -> bool {
+    true
+}
+
+fn default_metrics_rollup_bucket_seconds() -> u64 {
+    60
+}
+
+fn default_metrics_ingest_batch_size() -> usize {
+    500
+}
+
+fn default_metrics_reconciliation_batch_size() -> usize {
+    500
+}
+
+fn default_metrics_provider_runtime_default_window_seconds() -> u64 {
+    3_600
+}
+
+fn default_metrics_request_log_query_fallback_enabled() -> bool {
+    true
+}
+
+fn default_metrics_reconciliation_worker_interval_seconds() -> u64 {
+    60
+}
+
+fn default_metrics_reconciliation_worker_recent_window_seconds() -> u64 {
+    3_600
+}
+
+fn default_metrics_reconciliation_worker_safety_lag_seconds() -> u64 {
+    5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetricsConfig {
+    #[serde(default = "default_metrics_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_rollup_bucket_seconds")]
+    pub rollup_bucket_seconds: u64,
+    #[serde(default = "default_metrics_ingest_batch_size")]
+    pub ingest_batch_size: usize,
+    #[serde(default = "default_metrics_reconciliation_batch_size")]
+    pub reconciliation_batch_size: usize,
+    #[serde(default = "default_metrics_provider_runtime_default_window_seconds")]
+    pub provider_runtime_default_window_seconds: u64,
+    #[serde(default = "default_metrics_request_log_query_fallback_enabled")]
+    pub request_log_query_fallback_enabled: bool,
+    #[serde(default = "default_metrics_reconciliation_worker_interval_seconds")]
+    pub reconciliation_worker_interval_seconds: u64,
+    #[serde(default = "default_metrics_reconciliation_worker_recent_window_seconds")]
+    pub reconciliation_worker_recent_window_seconds: u64,
+    #[serde(default = "default_metrics_reconciliation_worker_safety_lag_seconds")]
+    pub reconciliation_worker_safety_lag_seconds: u64,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_metrics_enabled(),
+            rollup_bucket_seconds: default_metrics_rollup_bucket_seconds(),
+            ingest_batch_size: default_metrics_ingest_batch_size(),
+            reconciliation_batch_size: default_metrics_reconciliation_batch_size(),
+            provider_runtime_default_window_seconds:
+                default_metrics_provider_runtime_default_window_seconds(),
+            request_log_query_fallback_enabled: default_metrics_request_log_query_fallback_enabled(
+            ),
+            reconciliation_worker_interval_seconds:
+                default_metrics_reconciliation_worker_interval_seconds(),
+            reconciliation_worker_recent_window_seconds:
+                default_metrics_reconciliation_worker_recent_window_seconds(),
+            reconciliation_worker_safety_lag_seconds:
+                default_metrics_reconciliation_worker_safety_lag_seconds(),
+        }
+    }
+}
+
+fn default_alerts_enabled() -> bool {
+    true
+}
+
+fn default_alerts_evaluation_interval_seconds() -> u64 {
+    60
+}
+
+fn default_alerts_default_cooldown_seconds() -> u64 {
+    900
+}
+
+fn default_alerts_provider_degraded_min_requests() -> i64 {
+    5
+}
+
+fn default_alerts_provider_degraded_error_rate() -> f64 {
+    0.2
+}
+
+fn default_alerts_provider_degraded_latency_ms() -> i64 {
+    10_000
+}
+
+fn default_alerts_high_error_min_requests() -> i64 {
+    20
+}
+
+fn default_alerts_high_error_rate() -> f64 {
+    0.3
+}
+
+fn default_alerts_high_latency_min_samples() -> i64 {
+    10
+}
+
+fn default_alerts_high_latency_ms() -> i64 {
+    10_000
+}
+
+fn default_alerts_transform_diagnostic_count_threshold() -> i64 {
+    20
+}
+
+fn default_alerts_transform_diagnostic_lossy_major_threshold() -> i64 {
+    1
+}
+
+fn default_alerts_logging_pending_threshold() -> u64 {
+    1_000
+}
+
+fn default_alerts_logging_in_flight_threshold() -> u64 {
+    100
+}
+
+fn default_alerts_runtime_state_backend_degraded_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AlertRulesConfig {
+    #[serde(default = "default_alerts_provider_degraded_min_requests")]
+    pub provider_degraded_min_requests: i64,
+    #[serde(default = "default_alerts_provider_degraded_error_rate")]
+    pub provider_degraded_error_rate: f64,
+    #[serde(default = "default_alerts_provider_degraded_latency_ms")]
+    pub provider_degraded_latency_ms: i64,
+    #[serde(default = "default_alerts_high_error_min_requests")]
+    pub high_error_min_requests: i64,
+    #[serde(default = "default_alerts_high_error_rate")]
+    pub high_error_rate: f64,
+    #[serde(default = "default_alerts_high_latency_min_samples")]
+    pub high_latency_min_samples: i64,
+    #[serde(default = "default_alerts_high_latency_ms")]
+    pub high_latency_ms: i64,
+    #[serde(default = "default_alerts_transform_diagnostic_count_threshold")]
+    pub transform_diagnostic_count_threshold: i64,
+    #[serde(default = "default_alerts_transform_diagnostic_lossy_major_threshold")]
+    pub transform_diagnostic_lossy_major_threshold: i64,
+    #[serde(default)]
+    pub cost_hotspot_amount_nanos: Option<i64>,
+    #[serde(default = "default_alerts_logging_pending_threshold")]
+    pub logging_pending_threshold: u64,
+    #[serde(default = "default_alerts_logging_in_flight_threshold")]
+    pub logging_in_flight_threshold: u64,
+    #[serde(default = "default_alerts_runtime_state_backend_degraded_enabled")]
+    pub runtime_state_backend_degraded_enabled: bool,
+}
+
+impl Default for AlertRulesConfig {
+    fn default() -> Self {
+        Self {
+            provider_degraded_min_requests: default_alerts_provider_degraded_min_requests(),
+            provider_degraded_error_rate: default_alerts_provider_degraded_error_rate(),
+            provider_degraded_latency_ms: default_alerts_provider_degraded_latency_ms(),
+            high_error_min_requests: default_alerts_high_error_min_requests(),
+            high_error_rate: default_alerts_high_error_rate(),
+            high_latency_min_samples: default_alerts_high_latency_min_samples(),
+            high_latency_ms: default_alerts_high_latency_ms(),
+            transform_diagnostic_count_threshold:
+                default_alerts_transform_diagnostic_count_threshold(),
+            transform_diagnostic_lossy_major_threshold:
+                default_alerts_transform_diagnostic_lossy_major_threshold(),
+            cost_hotspot_amount_nanos: None,
+            logging_pending_threshold: default_alerts_logging_pending_threshold(),
+            logging_in_flight_threshold: default_alerts_logging_in_flight_threshold(),
+            runtime_state_backend_degraded_enabled:
+                default_alerts_runtime_state_backend_degraded_enabled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AlertsConfig {
+    #[serde(default = "default_alerts_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_alerts_evaluation_interval_seconds")]
+    pub evaluation_interval_seconds: u64,
+    #[serde(default = "default_alerts_default_cooldown_seconds")]
+    pub default_cooldown_seconds: u64,
+    #[serde(default)]
+    pub rules: AlertRulesConfig,
+}
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_alerts_enabled(),
+            evaluation_interval_seconds: default_alerts_evaluation_interval_seconds(),
+            default_cooldown_seconds: default_alerts_default_cooldown_seconds(),
+            rules: AlertRulesConfig::default(),
+        }
+    }
+}
+
+fn default_notification_enabled() -> bool {
+    true
+}
+
+fn default_notification_worker_interval_seconds() -> u64 {
+    10
+}
+
+fn default_notification_webhook_timeout_seconds() -> u64 {
+    10
+}
+
+fn default_notification_max_delivery_attempts() -> u32 {
+    5
+}
+
+fn default_notification_retry_base_backoff_seconds() -> u64 {
+    30
+}
+
+fn default_notification_retry_max_backoff_seconds() -> u64 {
+    900
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationConfig {
+    #[serde(default = "default_notification_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_notification_worker_interval_seconds")]
+    pub worker_interval_seconds: u64,
+    #[serde(default = "default_notification_webhook_timeout_seconds")]
+    pub webhook_timeout_seconds: u64,
+    #[serde(default = "default_notification_max_delivery_attempts")]
+    pub max_delivery_attempts: u32,
+    #[serde(default = "default_notification_retry_base_backoff_seconds")]
+    pub retry_base_backoff_seconds: u64,
+    #[serde(default = "default_notification_retry_max_backoff_seconds")]
+    pub retry_max_backoff_seconds: u64,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_notification_enabled(),
+            worker_interval_seconds: default_notification_worker_interval_seconds(),
+            webhook_timeout_seconds: default_notification_webhook_timeout_seconds(),
+            max_delivery_attempts: default_notification_max_delivery_attempts(),
+            retry_base_backoff_seconds: default_notification_retry_base_backoff_seconds(),
+            retry_max_backoff_seconds: default_notification_retry_max_backoff_seconds(),
+        }
+    }
+}
+
 // The fully resolved configuration used by the application.
 // This is also the format for the default configuration file.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -670,6 +938,12 @@ pub struct FinalConfig {
     pub replay_response_capture_max_bytes: usize,
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub alerts: AlertsConfig,
+    #[serde(default)]
+    pub notification: NotificationConfig,
     pub db_pool_size: u32,
     pub redis: Option<RedisConfig>,
     #[serde(default)]
@@ -778,6 +1052,9 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         max_body_size: 100 * 1024 * 1024, // 100MB
         replay_response_capture_max_bytes: default_replay_response_capture_max_bytes(),
         diagnostics: DiagnosticsConfig::default(),
+        metrics: MetricsConfig::default(),
+        alerts: AlertsConfig::default(),
+        notification: NotificationConfig::default(),
         db_pool_size: 5,
         redis: None,
         deployment: DeploymentConfig::default(),
@@ -809,8 +1086,9 @@ pub(crate) fn finalize_loaded_config(mut final_config: FinalConfig) -> FinalConf
 #[cfg(test)]
 mod tests {
     use super::{
-        CacheBackendType, DeploymentMode, DiagnosticsConfig, FinalConfig, ProviderGovernanceConfig,
-        ProxyRequestConfig, RoutingResilienceConfig, RuntimeStateBackendType, StorageDriver,
+        AlertsConfig, CacheBackendType, DeploymentMode, DiagnosticsConfig, FinalConfig,
+        MetricsConfig, NotificationConfig, ProviderGovernanceConfig, ProxyRequestConfig,
+        RoutingResilienceConfig, RuntimeStateBackendType, StorageDriver,
         default_replay_response_capture_max_bytes, source::ConfigLayerKind,
     };
     use std::{ffi::OsString, fs, sync::Mutex};
@@ -885,6 +1163,46 @@ mod tests {
         );
         assert!(DiagnosticsConfig::default().raw_bundle_download_enabled);
         assert!(!DiagnosticsConfig::default().retention.enabled);
+    }
+
+    #[test]
+    fn metrics_alerts_notification_defaults_match_task_contract() {
+        let metrics = MetricsConfig::default();
+        assert!(metrics.enabled);
+        assert_eq!(metrics.rollup_bucket_seconds, 60);
+        assert_eq!(metrics.ingest_batch_size, 500);
+        assert_eq!(metrics.reconciliation_batch_size, 500);
+        assert_eq!(metrics.provider_runtime_default_window_seconds, 3_600);
+        assert!(metrics.request_log_query_fallback_enabled);
+        assert_eq!(metrics.reconciliation_worker_interval_seconds, 60);
+        assert_eq!(metrics.reconciliation_worker_recent_window_seconds, 3_600);
+        assert_eq!(metrics.reconciliation_worker_safety_lag_seconds, 5);
+
+        let alerts = AlertsConfig::default();
+        assert!(alerts.enabled);
+        assert_eq!(alerts.evaluation_interval_seconds, 60);
+        assert_eq!(alerts.default_cooldown_seconds, 900);
+        assert_eq!(alerts.rules.provider_degraded_min_requests, 5);
+        assert_eq!(alerts.rules.provider_degraded_error_rate, 0.2);
+        assert_eq!(alerts.rules.provider_degraded_latency_ms, 10_000);
+        assert_eq!(alerts.rules.high_error_min_requests, 20);
+        assert_eq!(alerts.rules.high_error_rate, 0.3);
+        assert_eq!(alerts.rules.high_latency_min_samples, 10);
+        assert_eq!(alerts.rules.high_latency_ms, 10_000);
+        assert_eq!(alerts.rules.transform_diagnostic_count_threshold, 20);
+        assert_eq!(alerts.rules.transform_diagnostic_lossy_major_threshold, 1);
+        assert_eq!(alerts.rules.cost_hotspot_amount_nanos, None);
+        assert_eq!(alerts.rules.logging_pending_threshold, 1_000);
+        assert_eq!(alerts.rules.logging_in_flight_threshold, 100);
+        assert!(alerts.rules.runtime_state_backend_degraded_enabled);
+
+        let notification = NotificationConfig::default();
+        assert!(notification.enabled);
+        assert_eq!(notification.worker_interval_seconds, 10);
+        assert_eq!(notification.webhook_timeout_seconds, 10);
+        assert_eq!(notification.max_delivery_attempts, 5);
+        assert_eq!(notification.retry_base_backoff_seconds, 30);
+        assert_eq!(notification.retry_max_backoff_seconds, 900);
     }
 
     #[test]
@@ -1411,6 +1729,103 @@ routing_resilience:
                 .map(|value| value.as_secs()),
             Some(600)
         );
+    }
+
+    #[test]
+    fn final_config_deserializes_metrics_alerts_notification_domains() {
+        let yaml = r#"
+host: 0.0.0.0
+port: 8000
+base_path: /ai
+secret_key: secret
+password_salt: salt
+jwt_secret: jwt
+api_key_jwt_secret: api-jwt
+db_url: ./storage/sqlite.db
+proxy: null
+log_level: info
+timezone: null
+max_body_size: 104857600
+db_pool_size: 5
+metrics:
+  enabled: false
+  rollup_bucket_seconds: 120
+  ingest_batch_size: 250
+  reconciliation_batch_size: 300
+  provider_runtime_default_window_seconds: 900
+  request_log_query_fallback_enabled: false
+  reconciliation_worker_interval_seconds: 15
+  reconciliation_worker_recent_window_seconds: 1800
+  reconciliation_worker_safety_lag_seconds: 12
+alerts:
+  enabled: false
+  evaluation_interval_seconds: 30
+  default_cooldown_seconds: 120
+  rules:
+    provider_degraded_min_requests: 9
+    provider_degraded_error_rate: 0.4
+    provider_degraded_latency_ms: 8000
+    high_error_min_requests: 50
+    high_error_rate: 0.5
+    high_latency_min_samples: 20
+    high_latency_ms: 12000
+    transform_diagnostic_count_threshold: 7
+    transform_diagnostic_lossy_major_threshold: 2
+    cost_hotspot_amount_nanos: 123
+    logging_pending_threshold: 44
+    logging_in_flight_threshold: 8
+    runtime_state_backend_degraded_enabled: false
+notification:
+  enabled: false
+  worker_interval_seconds: 5
+  webhook_timeout_seconds: 6
+  max_delivery_attempts: 3
+  retry_base_backoff_seconds: 4
+  retry_max_backoff_seconds: 60
+"#;
+
+        let config: FinalConfig = serde_yaml::from_str(yaml).expect("config should deserialize");
+
+        assert!(!config.metrics.enabled);
+        assert_eq!(config.metrics.rollup_bucket_seconds, 120);
+        assert_eq!(config.metrics.ingest_batch_size, 250);
+        assert_eq!(config.metrics.reconciliation_batch_size, 300);
+        assert_eq!(config.metrics.provider_runtime_default_window_seconds, 900);
+        assert!(!config.metrics.request_log_query_fallback_enabled);
+        assert_eq!(config.metrics.reconciliation_worker_interval_seconds, 15);
+        assert_eq!(
+            config.metrics.reconciliation_worker_recent_window_seconds,
+            1_800
+        );
+        assert_eq!(config.metrics.reconciliation_worker_safety_lag_seconds, 12);
+        assert!(!config.alerts.enabled);
+        assert_eq!(config.alerts.evaluation_interval_seconds, 30);
+        assert_eq!(config.alerts.default_cooldown_seconds, 120);
+        assert_eq!(config.alerts.rules.provider_degraded_min_requests, 9);
+        assert_eq!(config.alerts.rules.provider_degraded_error_rate, 0.4);
+        assert_eq!(config.alerts.rules.provider_degraded_latency_ms, 8_000);
+        assert_eq!(config.alerts.rules.high_error_min_requests, 50);
+        assert_eq!(config.alerts.rules.high_error_rate, 0.5);
+        assert_eq!(config.alerts.rules.high_latency_min_samples, 20);
+        assert_eq!(config.alerts.rules.high_latency_ms, 12_000);
+        assert_eq!(config.alerts.rules.transform_diagnostic_count_threshold, 7);
+        assert_eq!(
+            config
+                .alerts
+                .rules
+                .transform_diagnostic_lossy_major_threshold,
+            2
+        );
+        assert_eq!(config.alerts.rules.cost_hotspot_amount_nanos, Some(123));
+        assert_eq!(config.alerts.rules.logging_pending_threshold, 44);
+        assert_eq!(config.alerts.rules.logging_in_flight_threshold, 8);
+        assert!(!config.alerts.rules.runtime_state_backend_degraded_enabled);
+        assert!(!config.notification.enabled);
+        assert_eq!(config.notification.worker_interval_seconds, 5);
+        assert_eq!(config.notification.webhook_timeout_seconds, 6);
+        assert_eq!(config.notification.max_delivery_attempts, 3);
+        assert_eq!(config.notification.retry_base_backoff_seconds, 4);
+        assert_eq!(config.notification.retry_max_backoff_seconds, 60);
     }
 
     #[test]

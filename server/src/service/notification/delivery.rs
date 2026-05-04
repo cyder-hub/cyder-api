@@ -4,8 +4,8 @@ use crate::controller::BaseError;
 use crate::database::alert::{AlertEvent, mark_alert_notified};
 use crate::database::notification::{
     NOTIFICATION_CHANNEL_TYPE_WEBHOOK, NewNotificationDelivery, NotificationChannel,
-    NotificationDelivery, NotificationDeliveryListFilter, enqueue_delivery, list_channels,
-    list_deliveries,
+    NotificationDelivery, NotificationDeliveryListFilter, enqueue_delivery, get_channel_state,
+    list_channels, list_deliveries, upsert_channel_state,
 };
 use crate::service::alerts::lifecycle::is_alert_suppressed;
 
@@ -42,11 +42,7 @@ impl NotificationService {
         let mut enqueued = 0usize;
         for channel in channels {
             if event_type == NotificationEventType::AlertFired
-                && is_fire_cooldown_active(
-                    alert.last_notification_at,
-                    now_ms,
-                    channel.cooldown_seconds.max(0) as u64,
-                )
+                && is_channel_fire_cooldown_active(alert, &channel, now_ms)?
             {
                 continue;
             }
@@ -67,6 +63,16 @@ impl NotificationService {
                 },
                 now_ms,
             )?;
+            if event_type == NotificationEventType::AlertFired {
+                upsert_channel_state(
+                    alert.id,
+                    &alert.fingerprint,
+                    channel.id,
+                    event_type.as_str(),
+                    alert.reopened_count,
+                    now_ms,
+                )?;
+            }
             enqueued += 1;
         }
 
@@ -156,15 +162,40 @@ pub fn delivery_response(delivery: NotificationDelivery) -> NotificationDelivery
     }
 }
 
-fn is_fire_cooldown_active(
-    last_notification_at: Option<i64>,
+fn is_channel_fire_cooldown_active(
+    alert: &AlertEvent,
+    channel: &NotificationChannel,
     now_ms: i64,
-    fire_cooldown_seconds: u64,
-) -> bool {
-    let Some(last_notification_at) = last_notification_at else {
-        return false;
+) -> Result<bool, BaseError> {
+    let Some(state) = get_channel_state(
+        alert.id,
+        channel.id,
+        NotificationEventType::AlertFired.as_str(),
+    )?
+    else {
+        return Ok(alert
+            .last_notification_at
+            .is_some_and(|last_notification_at| {
+                is_fire_cooldown_active(last_notification_at, channel, now_ms)
+            }));
     };
-    let cooldown_ms = (fire_cooldown_seconds as i64).saturating_mul(1_000);
+    if state.occurrence_key != alert.reopened_count {
+        return Ok(false);
+    }
+    Ok(is_fire_cooldown_active(
+        state.last_notification_at,
+        channel,
+        now_ms,
+    ))
+}
+
+fn is_fire_cooldown_active(
+    last_notification_at: i64,
+    channel: &NotificationChannel,
+    now_ms: i64,
+) -> bool {
+    let fire_cooldown_seconds = channel.cooldown_seconds.max(0);
+    let cooldown_ms = fire_cooldown_seconds.saturating_mul(1_000);
     last_notification_at.saturating_add(cooldown_ms) > now_ms
 }
 
@@ -282,7 +313,107 @@ mod tests {
         });
     }
 
+    #[test]
+    fn fire_cooldown_is_tracked_per_channel() {
+        let context = TestDbContext::new_sqlite("notification-delivery-channel-cooldown.sqlite");
+        context.run_sync(|| {
+            let service = NotificationService::new(NotificationConfig::default());
+            let fast = create_enabled_channel_with_cooldown("fast", 1, 900);
+            let slow = create_enabled_channel_with_cooldown("slow", 10, 901);
+            let alert = fire_alert(&sample_fire_record(), 1_000).unwrap();
+
+            let first = service
+                .enqueue_alert_event(&alert, NotificationEventType::AlertFired, 1_000, 60)
+                .unwrap();
+            assert_eq!(first, 2);
+
+            let repeated = fire_alert(&sample_fire_record(), 2_500).unwrap();
+            let second = service
+                .enqueue_alert_event(&repeated, NotificationEventType::AlertFired, 2_500, 60)
+                .unwrap();
+            assert_eq!(second, 1);
+
+            let repeated_again = fire_alert(&sample_fire_record(), 11_500).unwrap();
+            let third = service
+                .enqueue_alert_event(
+                    &repeated_again,
+                    NotificationEventType::AlertFired,
+                    11_500,
+                    60,
+                )
+                .unwrap();
+            assert_eq!(third, 2);
+
+            let deliveries = list_delivery_rows(NotificationDeliveryListFilter {
+                alert_id: Some(alert.id),
+                ..NotificationDeliveryListFilter::default()
+            })
+            .unwrap();
+            assert_eq!(deliveries.len(), 5);
+            assert_eq!(
+                deliveries
+                    .iter()
+                    .filter(|delivery| delivery.channel_id == fast.id)
+                    .count(),
+                3
+            );
+            assert_eq!(
+                deliveries
+                    .iter()
+                    .filter(|delivery| delivery.channel_id == slow.id)
+                    .count(),
+                2
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_alert_notification_timestamp_preserves_cooldown_without_channel_state() {
+        let context = TestDbContext::new_sqlite("notification-delivery-legacy-cooldown.sqlite");
+        context.run_sync(|| {
+            let service = NotificationService::new(NotificationConfig::default());
+            create_enabled_channel_with_cooldown("ops", 10, 900);
+            let alert = fire_alert(&sample_fire_record(), 1_000).unwrap();
+            let legacy_notified = mark_alert_notified(alert.id, 2_000).unwrap();
+
+            let skipped = service
+                .enqueue_alert_event(
+                    &legacy_notified,
+                    NotificationEventType::AlertFired,
+                    11_999,
+                    60,
+                )
+                .unwrap();
+            assert_eq!(skipped, 0);
+
+            let deliveries = list_delivery_rows(NotificationDeliveryListFilter {
+                alert_id: Some(alert.id),
+                ..NotificationDeliveryListFilter::default()
+            })
+            .unwrap();
+            assert!(deliveries.is_empty());
+
+            let expired = service
+                .enqueue_alert_event(
+                    &legacy_notified,
+                    NotificationEventType::AlertFired,
+                    12_000,
+                    60,
+                )
+                .unwrap();
+            assert_eq!(expired, 1);
+        });
+    }
+
     fn create_enabled_channel(channel_key: &str, now_ms: i64) {
+        create_enabled_channel_with_cooldown(channel_key, 900, now_ms);
+    }
+
+    fn create_enabled_channel_with_cooldown(
+        channel_key: &str,
+        cooldown_seconds: i64,
+        now_ms: i64,
+    ) -> crate::database::notification::NotificationChannel {
         crate::database::notification::create_channel(
             &crate::database::notification::NewNotificationChannel {
                 channel_key: channel_key.to_string(),
@@ -291,12 +422,12 @@ mod tests {
                 endpoint_url: "https://example.com/webhook".to_string(),
                 signing_secret: None,
                 headers_json: None,
-                cooldown_seconds: 900,
+                cooldown_seconds,
                 is_enabled: true,
             },
             now_ms,
         )
-        .unwrap();
+        .unwrap()
     }
 
     #[test]

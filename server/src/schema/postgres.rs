@@ -238,6 +238,22 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::{Int8, Text};
+
+    notification_channel_state (id) {
+        id -> Int8,
+        alert_id -> Int8,
+        alert_fingerprint -> Text,
+        channel_id -> Int8,
+        event_type -> Text,
+        occurrence_key -> Int8,
+        last_notification_at -> Int8,
+        created_at -> Int8,
+        updated_at -> Int8,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::{Int4, Int8, Text, Nullable};
 
     notification_delivery (id) {
@@ -676,6 +692,8 @@ diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
 diesel::joinable!(model_route_candidate -> model (model_id));
 diesel::joinable!(model_route_candidate -> model_route (route_id));
+diesel::joinable!(notification_channel_state -> alert_event (alert_id));
+diesel::joinable!(notification_channel_state -> notification_channel (channel_id));
 diesel::joinable!(notification_delivery -> alert_event (alert_id));
 diesel::joinable!(notification_delivery -> notification_channel (channel_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
@@ -717,6 +735,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     model_route,
     model_route_candidate,
     notification_channel,
+    notification_channel_state,
     notification_delivery,
     provider,
     provider_api_key,

@@ -54,6 +54,20 @@ db_object! {
         pub created_at: i64,
         pub updated_at: i64,
     }
+
+    #[derive(Insertable, Queryable, Selectable, Debug, Clone, Serialize, Deserialize)]
+    #[diesel(table_name = notification_channel_state)]
+    pub struct NotificationChannelState {
+        pub id: i64,
+        pub alert_id: i64,
+        pub alert_fingerprint: String,
+        pub channel_id: i64,
+        pub event_type: String,
+        pub occurrence_key: i64,
+        pub last_notification_at: i64,
+        pub created_at: i64,
+        pub updated_at: i64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +231,77 @@ pub fn list_channels(include_deleted: bool) -> DbResult<Vec<NotificationChannel>
                 BaseError::DatabaseFatal(Some(format!(
                     "Failed to list notification channels: {}",
                     err
+                )))
+            })
+    })
+}
+
+pub fn get_channel_state(
+    alert_id: i64,
+    channel_id: i64,
+    event_type: &str,
+) -> DbResult<Option<NotificationChannelState>> {
+    let conn = &mut get_connection()?;
+    db_execute!(conn, {
+        notification_channel_state::table
+            .filter(notification_channel_state::dsl::alert_id.eq(alert_id))
+            .filter(notification_channel_state::dsl::channel_id.eq(channel_id))
+            .filter(notification_channel_state::dsl::event_type.eq(event_type))
+            .select(NotificationChannelStateDb::as_select())
+            .first::<NotificationChannelStateDb>(conn)
+            .optional()
+            .map(|row| row.map(NotificationChannelStateDb::from_db))
+            .map_err(|err| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to get notification channel state alert={} channel={} event={}: {}",
+                    alert_id, channel_id, event_type, err
+                )))
+            })
+    })
+}
+
+pub fn upsert_channel_state(
+    alert_id: i64,
+    alert_fingerprint: &str,
+    channel_id: i64,
+    event_type: &str,
+    occurrence_key: i64,
+    now_ms: i64,
+) -> DbResult<NotificationChannelState> {
+    let conn = &mut get_connection()?;
+    let state = NotificationChannelState {
+        id: ID_GENERATOR.generate_id(),
+        alert_id,
+        alert_fingerprint: alert_fingerprint.to_string(),
+        channel_id,
+        event_type: event_type.to_string(),
+        occurrence_key,
+        last_notification_at: now_ms,
+        created_at: now_ms,
+        updated_at: now_ms,
+    };
+    db_execute!(conn, {
+        diesel::insert_into(notification_channel_state::table)
+            .values(NotificationChannelStateDb::to_db(&state))
+            .on_conflict((
+                notification_channel_state::dsl::alert_id,
+                notification_channel_state::dsl::channel_id,
+                notification_channel_state::dsl::event_type,
+            ))
+            .do_update()
+            .set((
+                notification_channel_state::dsl::alert_fingerprint.eq(alert_fingerprint),
+                notification_channel_state::dsl::occurrence_key.eq(occurrence_key),
+                notification_channel_state::dsl::last_notification_at.eq(now_ms),
+                notification_channel_state::dsl::updated_at.eq(now_ms),
+            ))
+            .returning(NotificationChannelStateDb::as_returning())
+            .get_result::<NotificationChannelStateDb>(conn)
+            .map(NotificationChannelStateDb::from_db)
+            .map_err(|err| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to upsert notification channel state alert={} channel={} event={}: {}",
+                    alert_id, channel_id, event_type, err
                 )))
             })
     })

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::controller::BaseError;
 use crate::database::alert::{
-    ALERT_STATUS_ACTIVE, AlertEvent, AlertListFilter, AlertRuleState, get_rule_state, list_alerts,
+    AlertEvent, AlertRuleState, get_rule_state, list_active_alerts_for_evaluation,
 };
 use crate::service::app_state::AppState;
 use crate::service::metrics::MetricsService;
@@ -232,10 +232,7 @@ impl AlertsService {
             summary.fired += 1;
         }
 
-        for alert in list_alerts(AlertListFilter {
-            status: Some(ALERT_STATUS_ACTIVE.to_string()),
-            ..AlertListFilter::default()
-        })? {
+        for alert in list_active_alerts_for_evaluation()? {
             if !managed_rule_key_set.contains(alert.rule_key.as_str()) {
                 continue;
             }
@@ -500,7 +497,9 @@ mod tests {
     use super::*;
     use crate::config::{AlertsConfig, MetricsConfig, ProviderGovernanceConfig};
     use crate::database::TestDbContext;
-    use crate::database::alert::{ALERT_STATUS_RESOLVED, get_alert_by_fingerprint};
+    use crate::database::alert::{
+        ALERT_STATUS_ACTIVE, ALERT_STATUS_RESOLVED, get_alert_by_fingerprint,
+    };
     use crate::database::metrics::{
         MetricAttemptRollupMinute, MetricCostRollupMinute, MetricRequestRollupMinute,
         add_attempt_rollup_delta, add_cost_rollup_delta, add_request_rollup_delta,
@@ -602,6 +601,45 @@ mod tests {
                 .expect("alert should exist");
             assert_eq!(alert.occurrence_count, 2);
             assert_eq!(alert.last_seen_at, 2_000);
+        });
+    }
+
+    #[test]
+    fn engine_resolves_all_active_alerts_beyond_default_page_limit() {
+        let context = TestDbContext::new_sqlite("alert-engine-resolve-all-active.sqlite");
+        context.run_sync(|| {
+            let service = AlertsService::new(AlertsConfig::default());
+            let metrics = MetricsService::new(crate::config::MetricsConfig::default());
+            let candidates = (0..60).map(provider_open_candidate_for).collect::<Vec<_>>();
+
+            let fired = service
+                .apply_rule_candidates(candidates, &["provider_open"], 1_000)
+                .unwrap();
+            assert_eq!(fired.fired, 60);
+
+            let healthy_scopes = (0..60).map(|id| id.to_string()).collect::<HashSet<_>>();
+            let resolved = service
+                .apply_rule_candidates_with_notification(
+                    Vec::new(),
+                    &["provider_open"],
+                    2_000,
+                    None,
+                    0,
+                    &metrics,
+                    None,
+                    Some(&healthy_scopes),
+                )
+                .unwrap();
+            assert_eq!(resolved.resolved, 60);
+
+            for provider_id in 0..60 {
+                let alert =
+                    get_alert_by_fingerprint(&format!("provider_open:provider:{provider_id}"))
+                        .unwrap()
+                        .expect("alert should exist");
+                assert_eq!(alert.status, ALERT_STATUS_RESOLVED);
+                assert_eq!(alert.resolved_at, Some(2_000));
+            }
         });
     }
 
@@ -1130,12 +1168,16 @@ mod tests {
     }
 
     fn provider_open_candidate() -> AlertFireInput {
+        provider_open_candidate_for(7)
+    }
+
+    fn provider_open_candidate_for(provider_id: i64) -> AlertFireInput {
         AlertFireInput {
-            fingerprint: "provider_open:provider:7".to_string(),
+            fingerprint: format!("provider_open:provider:{provider_id}"),
             rule_key: "provider_open".to_string(),
             severity: AlertSeverity::Critical,
             scope_type: AlertScopeType::Provider,
-            scope_id: "7".to_string(),
+            scope_id: provider_id.to_string(),
             title: "Provider open".to_string(),
             summary: "Provider is open".to_string(),
             details_json: "{}".to_string(),

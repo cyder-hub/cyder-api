@@ -291,6 +291,23 @@ pub fn list_alerts(filter: AlertListFilter) -> DbResult<Vec<AlertEvent>> {
     })
 }
 
+pub fn list_active_alerts_for_evaluation() -> DbResult<Vec<AlertEvent>> {
+    let conn = &mut get_connection()?;
+    db_execute!(conn, {
+        alert_event::table
+            .filter(alert_event::dsl::status.eq(ALERT_STATUS_ACTIVE))
+            .order(alert_event::dsl::last_seen_at.desc())
+            .select(AlertEventDb::as_select())
+            .load::<AlertEventDb>(conn)
+            .map(|rows| rows.into_iter().map(AlertEventDb::from_db).collect())
+            .map_err(|err| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to list active alerts for evaluation: {err}"
+                )))
+            })
+    })
+}
+
 pub fn acknowledge_alert(alert_id: i64, note: Option<String>, now_ms: i64) -> DbResult<AlertEvent> {
     let conn = &mut get_connection()?;
     db_execute!(conn, {

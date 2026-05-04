@@ -25,13 +25,16 @@ use std::{
 #[cfg(test)]
 use tempfile::TempDir;
 
+pub mod alert;
 pub mod api_key;
 pub mod api_key_acl_rule;
 pub mod api_key_rollup;
 pub mod cost;
 pub mod manager_auth_instance;
+pub mod metrics;
 pub mod model;
 pub mod model_route;
+pub mod notification;
 pub mod provider;
 pub mod provider_runtime;
 pub mod reasoning_config;

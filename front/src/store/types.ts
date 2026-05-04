@@ -647,6 +647,161 @@ export interface ProviderRuntimeListParams {
   only_enabled?: boolean;
 }
 
+export type AlertSeverity = "info" | "warning" | "critical";
+export type AlertStatus = "active" | "resolved";
+export type AlertScopeType =
+  | "global"
+  | "provider"
+  | "model"
+  | "api_key"
+  | "provider_api_key"
+  | "provider_model"
+  | "system";
+
+export interface AlertEvent {
+  id: number;
+  fingerprint: string;
+  rule_key: string;
+  severity: AlertSeverity;
+  status: AlertStatus;
+  scope_type: AlertScopeType;
+  scope_id: string;
+  title: string;
+  summary: string;
+  details_json: string;
+  metrics_snapshot_json: string | null;
+  first_seen_at: number;
+  last_seen_at: number;
+  resolved_at: number | null;
+  acknowledged_at: number | null;
+  acknowledged_note: string | null;
+  suppressed_until: number | null;
+  suppressed_reason: string | null;
+  occurrence_count: number;
+  reopened_count: number;
+  last_notification_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AlertListParams {
+  status?: AlertStatus;
+  acknowledged?: boolean;
+  suppressed?: boolean;
+  severity?: AlertSeverity;
+  rule_key?: string;
+  scope_type?: AlertScopeType;
+  scope_id?: string;
+  start_time?: number;
+  end_time?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AlertListResponse {
+  items: AlertEvent[];
+  limit: number;
+  offset: number;
+  next_offset: number | null;
+}
+
+export interface AlertAckPayload {
+  note?: string | null;
+}
+
+export interface AlertSuppressPayload {
+  suppressed_until: number;
+  reason?: string | null;
+}
+
+export type NotificationChannelType = "webhook";
+
+export interface NotificationChannel {
+  id: number;
+  channel_key: string;
+  channel_type: NotificationChannelType;
+  name: string;
+  endpoint_url: string;
+  signing_secret_redacted: string | null;
+  headers_json: string | null;
+  cooldown_seconds: number;
+  is_enabled: boolean;
+  last_test_at: number | null;
+  last_test_success: boolean | null;
+  last_test_error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NotificationChannelCreatePayload {
+  channel_key: string;
+  name: string;
+  endpoint_url: string;
+  signing_secret?: string | null;
+  headers_json?: string | null;
+  cooldown_seconds?: number | null;
+  is_enabled?: boolean;
+}
+
+export interface NotificationChannelUpdatePayload {
+  name?: string;
+  endpoint_url?: string;
+  signing_secret?: string | null;
+  clear_signing_secret?: boolean;
+  headers_json?: string | null;
+  clear_headers?: boolean;
+  cooldown_seconds?: number | null;
+  is_enabled?: boolean;
+}
+
+export interface NotificationWebhookTestResult {
+  success: boolean;
+  status: number | null;
+  error: string | null;
+  response_body_preview: string | null;
+}
+
+export type NotificationDeliveryStatus =
+  | "pending"
+  | "in_progress"
+  | "retry_scheduled"
+  | "succeeded"
+  | "failed"
+  | "skipped";
+
+export type NotificationEventType = "alert_fired" | "alert_recovered" | "test";
+
+export interface NotificationDelivery {
+  id: number;
+  channel_id: number;
+  alert_id: number;
+  alert_fingerprint: string;
+  event_type: NotificationEventType;
+  status: NotificationDeliveryStatus;
+  payload_json: string;
+  attempt_count: number;
+  next_attempt_at: number;
+  last_attempt_at: number | null;
+  delivered_at: number | null;
+  last_status_code: number | null;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NotificationDeliveryListParams {
+  alert_id?: number;
+  channel_id?: number;
+  status?: NotificationDeliveryStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface NotificationDeliveryListResponse {
+  items: NotificationDelivery[];
+  next_offset: number | null;
+}
+
 // ========== Model Route Types ==========
 export interface ModelRouteItem {
   id: number;

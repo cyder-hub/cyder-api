@@ -30,6 +30,17 @@ import type {
   ProviderRuntimeItem,
   ProviderRuntimeListParams,
   ProviderRuntimeSummary,
+  AlertAckPayload,
+  AlertEvent,
+  AlertListParams,
+  AlertListResponse,
+  AlertSuppressPayload,
+  NotificationChannel,
+  NotificationChannelCreatePayload,
+  NotificationChannelUpdatePayload,
+  NotificationDeliveryListParams,
+  NotificationDeliveryListResponse,
+  NotificationWebhookTestResult,
   ModelRouteListItem,
   ModelRouteDetail,
   ModelRoutePayload,
@@ -128,6 +139,68 @@ export const Api = {
   },
   getUsageStats(params: URLSearchParams): Promise<UsageStatsPeriod[]> {
     return request(`/ai/manager/api/system/usage_stats?${params.toString()}`);
+  },
+  getAlerts(params: AlertListParams = {}): Promise<AlertListResponse> {
+    const validParams: Record<string, string> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        validParams[key] = String(value);
+      }
+    }
+    const qs = new URLSearchParams(validParams).toString();
+    return request.get(`/ai/manager/api/alerts/list${qs ? `?${qs}` : ""}`);
+  },
+  getAlert(id: number): Promise<AlertEvent> {
+    return request.get(`/ai/manager/api/alerts/${id}`);
+  },
+  acknowledgeAlert(id: number, payload: AlertAckPayload): Promise<AlertEvent> {
+    return request.post(`/ai/manager/api/alerts/${id}/ack`, payload);
+  },
+  suppressAlert(id: number, payload: AlertSuppressPayload): Promise<AlertEvent> {
+    return request.post(`/ai/manager/api/alerts/${id}/suppress`, payload);
+  },
+  unsuppressAlert(id: number): Promise<AlertEvent> {
+    return request.post(`/ai/manager/api/alerts/${id}/unsuppress`, {});
+  },
+  resolveAlert(id: number): Promise<AlertEvent> {
+    return request.post(`/ai/manager/api/alerts/${id}/resolve`, {});
+  },
+  getNotificationChannels(): Promise<NotificationChannel[]> {
+    return request.get("/ai/manager/api/notifications/channels");
+  },
+  getNotificationChannel(id: number): Promise<NotificationChannel> {
+    return request.get(`/ai/manager/api/notifications/channels/${id}`);
+  },
+  createNotificationChannel(
+    payload: NotificationChannelCreatePayload,
+  ): Promise<NotificationChannel> {
+    return request.post("/ai/manager/api/notifications/channels", payload);
+  },
+  updateNotificationChannel(
+    id: number,
+    payload: NotificationChannelUpdatePayload,
+  ): Promise<NotificationChannel> {
+    return request.put(`/ai/manager/api/notifications/channels/${id}`, payload);
+  },
+  deleteNotificationChannel(id: number): Promise<NotificationChannel> {
+    return request.delete(`/ai/manager/api/notifications/channels/${id}`);
+  },
+  testNotificationChannel(id: number): Promise<NotificationWebhookTestResult> {
+    return request.post(`/ai/manager/api/notifications/channels/${id}/test`, {});
+  },
+  getNotificationDeliveries(
+    params: NotificationDeliveryListParams = {},
+  ): Promise<NotificationDeliveryListResponse> {
+    const validParams: Record<string, string> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        validParams[key] = String(value);
+      }
+    }
+    const qs = new URLSearchParams(validParams).toString();
+    return request.get(
+      `/ai/manager/api/notifications/deliveries${qs ? `?${qs}` : ""}`,
+    );
   },
   getSystemConfig(): Promise<SystemConfigReport> {
     return request.get("/ai/manager/api/system/config");

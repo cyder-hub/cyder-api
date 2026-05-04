@@ -7,7 +7,9 @@ import {
   ClipboardList,
   Server,
   Activity,
+  BellRing,
   Settings,
+  Webhook,
 } from "lucide-vue-next";
 
 type NavItem = {
@@ -43,6 +45,12 @@ export const navItems: NavItem[] = [
     section: "core",
   },
   {
+    path: "/alerts",
+    i18nKey: "sidebar.alerts",
+    icon: BellRing,
+    section: "core",
+  },
+  {
     path: "/model",
     i18nKey: "sidebar.model",
     icon: ArrowRightLeft,
@@ -64,6 +72,12 @@ export const navItems: NavItem[] = [
     path: "/cost",
     i18nKey: "sidebar.cost",
     icon: DollarSign,
+    section: "advanced",
+  },
+  {
+    path: "/notifications",
+    i18nKey: "sidebar.notifications",
+    icon: Webhook,
     section: "advanced",
   },
   {

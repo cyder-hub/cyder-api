@@ -128,10 +128,13 @@ mod tests {
         controller::create_manager_router,
         service::{
             admin::AdminServices,
+            alerts::AlertsService,
             app_state::AppState,
             catalog::CatalogService,
             diagnostics::{DiagnosticsPolicy, DiagnosticsPolicyManager, DiagnosticsService},
             infra::AppInfra,
+            metrics::MetricsService,
+            notification::NotificationService,
             runtime::{ProviderKeySelector, RuntimeStateBackendBundle},
             system_config::SystemConfigService,
         },
@@ -176,6 +179,14 @@ mod tests {
             .register_diagnostics_policy_manager(Arc::clone(&diagnostics_policy_manager))
             .await;
         let diagnostics = Arc::new(DiagnosticsService::new(diagnostics_policy_manager));
+        let metrics = Arc::new(MetricsService::new(loaded.config.metrics.clone()));
+        let alerts = Arc::new(AlertsService::new(loaded.config.alerts.clone()));
+        let notification = Arc::new(
+            NotificationService::new_with_default_channel_cooldown_seconds(
+                loaded.config.notification.clone(),
+                loaded.config.alerts.default_cooldown_seconds,
+            ),
+        );
         let runtime_backend = RuntimeStateBackendBundle::from_config(&loaded.config, true)
             .await
             .expect("runtime backend should initialize");
@@ -199,6 +210,9 @@ mod tests {
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
             diagnostics,
+            metrics,
+            alerts,
+            notification,
             runtime_backend_status: Arc::new(runtime_backend.status),
             system_config,
         });

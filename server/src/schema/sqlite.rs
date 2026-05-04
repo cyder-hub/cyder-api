@@ -71,6 +71,50 @@ diesel::table! {
 diesel::table! {
     use diesel::sql_types::{BigInt, Text, Nullable};
 
+    alert_event (id) {
+        id -> BigInt,
+        fingerprint -> Text,
+        rule_key -> Text,
+        severity -> Text,
+        status -> Text,
+        scope_type -> Text,
+        scope_id -> Text,
+        title -> Text,
+        summary -> Text,
+        details_json -> Text,
+        metrics_snapshot_json -> Nullable<Text>,
+        first_seen_at -> BigInt,
+        last_seen_at -> BigInt,
+        resolved_at -> Nullable<BigInt>,
+        acknowledged_at -> Nullable<BigInt>,
+        acknowledged_note -> Nullable<Text>,
+        suppressed_until -> Nullable<BigInt>,
+        suppressed_reason -> Nullable<Text>,
+        occurrence_count -> BigInt,
+        reopened_count -> BigInt,
+        last_notification_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Text, Nullable};
+
+    alert_rule_state (rule_key, scope_type, scope_id) {
+        rule_key -> Text,
+        scope_type -> Text,
+        scope_id -> Text,
+        last_evaluated_at -> BigInt,
+        last_fired_at -> Nullable<BigInt>,
+        last_resolved_at -> Nullable<BigInt>,
+        cooldown_until -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Text, Nullable};
+
     api_key_rollup_daily (api_key_id, day_bucket, currency) {
         api_key_id -> BigInt,
         day_bucket -> BigInt,
@@ -168,6 +212,50 @@ diesel::table! {
         expires_at -> BigInt,
         revoked_at -> Nullable<BigInt>,
         revoked_reason -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Bool, Text, Nullable};
+
+    notification_channel (id) {
+        id -> BigInt,
+        channel_key -> Text,
+        channel_type -> Text,
+        name -> Text,
+        endpoint_url -> Text,
+        signing_secret -> Nullable<Text>,
+        headers_json -> Nullable<Text>,
+        cooldown_seconds -> BigInt,
+        is_enabled -> Bool,
+        last_test_at -> Nullable<BigInt>,
+        last_test_success -> Nullable<Bool>,
+        last_test_error -> Nullable<Text>,
+        deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Integer, Text, Nullable};
+
+    notification_delivery (id) {
+        id -> BigInt,
+        channel_id -> BigInt,
+        alert_id -> BigInt,
+        alert_fingerprint -> Text,
+        event_type -> Text,
+        status -> Text,
+        payload_json -> Text,
+        attempt_count -> Integer,
+        next_attempt_at -> BigInt,
+        last_attempt_at -> Nullable<BigInt>,
+        delivered_at -> Nullable<BigInt>,
+        last_status_code -> Nullable<Integer>,
+        last_error -> Nullable<Text>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
     }
 }
 
@@ -356,6 +444,104 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::{BigInt, Nullable};
+
+    metric_ingested_request_log (request_log_id) {
+        request_log_id -> BigInt,
+        request_received_at -> BigInt,
+        completed_at -> Nullable<BigInt>,
+        ingested_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Nullable, Text};
+
+    metric_request_rollup_minute (bucket_start_ms, scope_type, scope_id) {
+        bucket_start_ms -> BigInt,
+        scope_type -> Text,
+        scope_id -> Text,
+        scope_label -> Nullable<Text>,
+        request_count -> BigInt,
+        success_count -> BigInt,
+        error_count -> BigInt,
+        cancelled_count -> BigInt,
+        retry_count -> BigInt,
+        fallback_count -> BigInt,
+        first_byte_latency_sum_ms -> BigInt,
+        first_byte_latency_count -> BigInt,
+        total_latency_sum_ms -> BigInt,
+        total_latency_count -> BigInt,
+        input_tokens -> BigInt,
+        output_tokens -> BigInt,
+        reasoning_tokens -> BigInt,
+        total_tokens -> BigInt,
+        transform_diagnostic_count -> BigInt,
+        transform_diagnostic_lossy_major_count -> BigInt,
+        transform_diagnostic_reject_count -> BigInt,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Nullable, Text};
+
+    metric_attempt_rollup_minute (bucket_start_ms, scope_type, scope_id) {
+        bucket_start_ms -> BigInt,
+        scope_type -> Text,
+        scope_id -> Text,
+        scope_label -> Nullable<Text>,
+        attempt_count -> BigInt,
+        success_count -> BigInt,
+        error_count -> BigInt,
+        skipped_count -> BigInt,
+        retry_same_candidate_count -> BigInt,
+        fallback_next_candidate_count -> BigInt,
+        fail_fast_count -> BigInt,
+        first_byte_latency_sum_ms -> BigInt,
+        first_byte_latency_count -> BigInt,
+        total_latency_sum_ms -> BigInt,
+        total_latency_count -> BigInt,
+        input_tokens -> BigInt,
+        output_tokens -> BigInt,
+        reasoning_tokens -> BigInt,
+        total_tokens -> BigInt,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Integer, Text};
+
+    metric_http_status_rollup_minute (bucket_start_ms, scope_type, scope_id, http_status) {
+        bucket_start_ms -> BigInt,
+        scope_type -> Text,
+        scope_id -> Text,
+        http_status -> Integer,
+        count -> BigInt,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::{BigInt, Text};
+
+    metric_cost_rollup_minute (bucket_start_ms, metric_kind, scope_type, scope_id, currency) {
+        bucket_start_ms -> BigInt,
+        metric_kind -> Text,
+        scope_type -> Text,
+        scope_id -> Text,
+        currency -> Text,
+        amount_nanos -> BigInt,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     use crate::schema::enum_def::LlmApiTypeMapping;
     use crate::schema::enum_def::RequestAttemptStatusMapping;
     use crate::schema::enum_def::SchedulerActionMapping;
@@ -490,6 +676,8 @@ diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
 diesel::joinable!(model_route_candidate -> model (model_id));
 diesel::joinable!(model_route_candidate -> model_route (route_id));
+diesel::joinable!(notification_delivery -> alert_event (alert_id));
+diesel::joinable!(notification_delivery -> notification_channel (channel_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
 diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
 diesel::joinable!(request_attempt -> cost_catalog_versions (cost_catalog_version_id));
@@ -512,15 +700,24 @@ diesel::allow_tables_to_appear_in_same_query!(
     api_key,
     api_key_acl_rule,
     api_key_model_override,
+    alert_event,
+    alert_rule_state,
     api_key_rollup_daily,
     api_key_rollup_monthly,
     cost_catalogs,
     cost_catalog_versions,
     cost_components,
     manager_auth_instance,
+    metric_attempt_rollup_minute,
+    metric_cost_rollup_minute,
+    metric_http_status_rollup_minute,
+    metric_ingested_request_log,
+    metric_request_rollup_minute,
     model,
     model_route,
     model_route_candidate,
+    notification_channel,
+    notification_delivery,
     provider,
     provider_api_key,
     reasoning_config,

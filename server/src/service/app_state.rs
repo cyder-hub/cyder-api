@@ -9,9 +9,13 @@ use crate::config::{
     loader::{ConfigLoadOptions, LoadedConfig, load_effective_config},
     paths::ConfigPaths,
 };
+use crate::proxy::logging::RequestLogPersistedSink;
 use crate::service::cache::CacheError;
 use crate::service::{
+    alerts::AlertsService,
     diagnostics::{DiagnosticsPolicy, DiagnosticsPolicyManager, DiagnosticsService},
+    metrics::MetricsService,
+    notification::NotificationService,
     system_config::SystemConfigService,
 };
 
@@ -38,6 +42,9 @@ pub struct AppState {
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
     pub provider_circuit: Arc<ProviderCircuitService>,
     pub diagnostics: Arc<DiagnosticsService>,
+    pub metrics: Arc<MetricsService>,
+    pub alerts: Arc<AlertsService>,
+    pub notification: Arc<NotificationService>,
     pub runtime_backend_status: Arc<RuntimeStateBackendStatus>,
     pub system_config: Arc<SystemConfigService>,
 }
@@ -109,6 +116,18 @@ impl AppState {
             .register_diagnostics_policy_manager(Arc::clone(&diagnostics_policy_manager))
             .await;
         let diagnostics = Arc::new(DiagnosticsService::new(diagnostics_policy_manager));
+        let metrics = Arc::new(MetricsService::new(loaded_config.config.metrics.clone()));
+        let alerts = Arc::new(AlertsService::new(loaded_config.config.alerts.clone()));
+        let notification = Arc::new(
+            NotificationService::new_with_default_channel_cooldown_seconds(
+                loaded_config.config.notification.clone(),
+                loaded_config.config.alerts.default_cooldown_seconds,
+            ),
+        );
+        let metrics_sink: Arc<dyn RequestLogPersistedSink> = metrics.clone();
+        infra
+            .log_manager()
+            .set_request_log_persisted_sink(metrics_sink);
 
         let runtime_backend = RuntimeStateBackendBundle::from_config(
             &loaded_config.config,
@@ -136,6 +155,9 @@ impl AppState {
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
             diagnostics,
+            metrics,
+            alerts,
+            notification,
             runtime_backend_status: Arc::new(runtime_backend.status),
             system_config,
         })
@@ -179,6 +201,122 @@ impl AppState {
             checked_at,
         )
     }
+
+    #[cfg(not(test))]
+    pub fn start_background_workers(self: &Arc<Self>) {
+        self.spawn_metrics_reconciliation_worker();
+        self.spawn_alert_evaluation_worker();
+        self.spawn_notification_delivery_worker();
+    }
+
+    #[cfg(not(test))]
+    fn spawn_metrics_reconciliation_worker(self: &Arc<Self>) {
+        if !self.metrics.config().enabled {
+            return;
+        }
+        let app_state = Arc::clone(self);
+        let interval_seconds = app_state
+            .metrics
+            .config()
+            .reconciliation_worker_interval_seconds
+            .max(1);
+        self.infra.spawn_background_task(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
+            loop {
+                interval.tick().await;
+                let result = app_state.metrics.tick_reconciliation_worker().await;
+                if result.failed > 0 {
+                    crate::warn_event!(
+                        "metrics.reconciliation_worker_tick_degraded",
+                        processed = result.processed,
+                        skipped = result.skipped,
+                        failed = result.failed
+                    );
+                } else if result.processed > 0 || result.skipped > 0 {
+                    crate::debug_event!(
+                        "metrics.reconciliation_worker_tick_completed",
+                        processed = result.processed,
+                        skipped = result.skipped
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(not(test))]
+    fn spawn_alert_evaluation_worker(self: &Arc<Self>) {
+        if !self.alerts.config().enabled {
+            return;
+        }
+        let app_state = Arc::clone(self);
+        let interval_seconds = app_state.alerts.config().evaluation_interval_seconds.max(1);
+        self.infra.spawn_background_task(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
+            loop {
+                interval.tick().await;
+                let result = app_state.alerts.tick_evaluation_worker(&app_state).await;
+                if result.failed > 0 {
+                    crate::warn_event!(
+                        "alerts.evaluation_worker_tick_degraded",
+                        evaluated = result.evaluated,
+                        fired = result.fired,
+                        resolved = result.resolved,
+                        failed = result.failed
+                    );
+                } else if result.fired > 0 || result.resolved > 0 {
+                    crate::debug_event!(
+                        "alerts.evaluation_worker_tick_completed",
+                        evaluated = result.evaluated,
+                        fired = result.fired,
+                        resolved = result.resolved
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(not(test))]
+    fn spawn_notification_delivery_worker(self: &Arc<Self>) {
+        if !self.notification.config().enabled {
+            return;
+        }
+        let app_state = Arc::clone(self);
+        let interval_seconds = app_state
+            .notification
+            .config()
+            .worker_interval_seconds
+            .max(1);
+        self.infra.spawn_background_task(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
+            loop {
+                interval.tick().await;
+                let client = app_state.infra.client().await;
+                let result = app_state
+                    .notification
+                    .tick_delivery_worker(client.as_ref())
+                    .await;
+                if result.failed > 0 {
+                    crate::warn_event!(
+                        "notification.delivery_worker_tick_degraded",
+                        processed = result.processed,
+                        succeeded = result.succeeded,
+                        retry_scheduled = result.retry_scheduled,
+                        failed = result.failed
+                    );
+                } else if result.processed > 0 {
+                    crate::debug_event!(
+                        "notification.delivery_worker_tick_completed",
+                        processed = result.processed,
+                        succeeded = result.succeeded,
+                        retry_scheduled = result.retry_scheduled
+                    );
+                }
+            }
+        });
+    }
 }
 
 #[derive(Debug, Error)]
@@ -210,7 +348,10 @@ impl From<CacheError> for AppStoreError {
 }
 
 pub async fn create_app_state() -> Arc<AppState> {
-    create_configured_app_state(AppState::new().await).await
+    let app_state = create_configured_app_state(AppState::new().await).await;
+    #[cfg(not(test))]
+    app_state.start_background_workers();
+    app_state
 }
 
 #[cfg(test)]
@@ -245,11 +386,14 @@ mod tests {
     use super::AppState;
     use crate::config::{CONFIG, RuntimeStateBackendType};
     use crate::database::TestDbContext;
+    use crate::service::alerts::AlertsService;
     use crate::service::catalog::CatalogService;
     use crate::service::diagnostics::{
         DiagnosticsPolicy, DiagnosticsPolicyManager, DiagnosticsService,
     };
     use crate::service::infra::AppInfra;
+    use crate::service::metrics::MetricsService;
+    use crate::service::notification::NotificationService;
     use crate::service::runtime::{ProviderKeySelector, RuntimeStateBackendBundle};
     use crate::service::system_config::SystemConfigService;
     use std::sync::Arc;
@@ -279,6 +423,14 @@ mod tests {
             .register_diagnostics_policy_manager(Arc::clone(&diagnostics_policy_manager))
             .await;
         let diagnostics = Arc::new(DiagnosticsService::new(diagnostics_policy_manager));
+        let metrics = Arc::new(MetricsService::new(CONFIG.metrics.clone()));
+        let alerts = Arc::new(AlertsService::new(CONFIG.alerts.clone()));
+        let notification = Arc::new(
+            NotificationService::new_with_default_channel_cooldown_seconds(
+                CONFIG.notification.clone(),
+                CONFIG.alerts.default_cooldown_seconds,
+            ),
+        );
         let runtime_backend = RuntimeStateBackendBundle::from_config(&CONFIG, true)
             .await
             .expect("test runtime backend should initialize");
@@ -301,6 +453,9 @@ mod tests {
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
             diagnostics,
+            metrics,
+            alerts,
+            notification,
             runtime_backend_status: Arc::new(runtime_backend.status),
             system_config,
         }

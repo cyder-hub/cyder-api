@@ -1,6 +1,7 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,7 +10,8 @@ use cyder_api::service::transform::quality::{
     BenchmarkSummary, BenchmarkThresholds, TransformQualityReport, build_transform_quality_report,
 };
 
-const DEFAULT_THRESHOLDS_PATH: &str = "task/transform-quality-thresholds.json";
+const DEFAULT_THRESHOLDS_PATH: &str =
+    "server/src/service/transform/quality/default-thresholds.json";
 
 struct GateArgs {
     quick: bool,
@@ -38,11 +40,19 @@ fn run() -> Result<TransformQualityReport, String> {
     let args = parse_args(env::args_os().skip(1).collect())?;
     let workspace_root = workspace_root();
     let thresholds_path = absolutize(&workspace_root, &args.thresholds_path);
-    let thresholds: BenchmarkThresholds = serde_json::from_slice(
-        &fs::read(&thresholds_path)
-            .map_err(|err| format!("read thresholds {}: {err}", thresholds_path.display()))?,
-    )
-    .map_err(|err| format!("parse thresholds {}: {err}", thresholds_path.display()))?;
+    let threshold_bytes = fs::read(&thresholds_path).map_err(|err| {
+        if err.kind() == ErrorKind::NotFound {
+            format!(
+                "threshold file {} is missing; add the default {} asset or pass --thresholds <path>",
+                thresholds_path.display(),
+                DEFAULT_THRESHOLDS_PATH
+            )
+        } else {
+            format!("read thresholds {}: {err}", thresholds_path.display())
+        }
+    })?;
+    let thresholds: BenchmarkThresholds = serde_json::from_slice(&threshold_bytes)
+        .map_err(|err| format!("parse thresholds {}: {err}", thresholds_path.display()))?;
 
     let bench_json_path = temp_report_path("transform-benchmark-summary.json");
     let benchmark_summary = run_benchmark(&workspace_root, args.quick, &bench_json_path)?;

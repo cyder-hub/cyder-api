@@ -27,11 +27,13 @@ jobs:
       version: ${{ steps.validate.outputs.version }}
       major_minor: ${{ steps.validate.outputs.major_minor }}
       image_ghcr: ${{ steps.validate.outputs.image_ghcr }}
+      image_dockerhub: ${{ steps.validate.outputs.image_dockerhub }}
       source_sha: ${{ steps.validate.outputs.source_sha }}
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v4
@@ -57,13 +59,14 @@ jobs:
             exit 1
           fi
 
-          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
-            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets are required before building release images." >&2
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" || -z "$DOCKERHUB_NAMESPACE" ]]; then
+            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets plus DOCKERHUB_NAMESPACE variable are required before building release images." >&2
             exit 1
           fi
 
           major_minor="$(echo "$version" | cut -d. -f1,2)"
           image_ghcr="ghcr.io/${GITHUB_REPOSITORY}"
+          image_dockerhub="${DOCKERHUB_NAMESPACE}/cyder-api"
           source_sha="$(git rev-parse HEAD)"
 
           {
@@ -71,6 +74,7 @@ jobs:
             echo "version=$version"
             echo "major_minor=$major_minor"
             echo "image_ghcr=$image_ghcr"
+            echo "image_dockerhub=$image_dockerhub"
             echo "source_sha=$source_sha"
           } >> "$GITHUB_OUTPUT"
 
@@ -84,7 +88,7 @@ jobs:
             echo "- Version: ${{ steps.validate.outputs.version }}"
             echo "- Source SHA: ${{ steps.validate.outputs.source_sha }}"
             echo "- GHCR image: ${{ steps.validate.outputs.image_ghcr }}"
-            echo "- Docker Hub image: ${DOCKERHUB_USERNAME}/cyder-api"
+            echo "- Docker Hub image: ${{ steps.validate.outputs.image_dockerhub }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   transform-quality-gate:
@@ -107,7 +111,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == true
     runs-on: ubuntu-24.04
     env:
-      IMAGE_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/cyder-api
+      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v4

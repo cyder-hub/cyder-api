@@ -27,10 +27,12 @@ jobs:
       version: ${{ steps.validate.outputs.version }}
       major_minor: ${{ steps.validate.outputs.major_minor }}
       image_ghcr: ${{ steps.validate.outputs.image_ghcr }}
+      image_dockerhub: ${{ steps.validate.outputs.image_dockerhub }}
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
     steps:
       - name: Validate release metadata
         id: validate
@@ -44,20 +46,22 @@ jobs:
             exit 1
           fi
 
-          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
-            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets are required before promoting release images." >&2
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" || -z "$DOCKERHUB_NAMESPACE" ]]; then
+            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets plus DOCKERHUB_NAMESPACE variable are required before promoting release images." >&2
             exit 1
           fi
 
           version="${release_tag#v}"
           major_minor="$(echo "$version" | cut -d. -f1,2)"
           image_ghcr="ghcr.io/${GITHUB_REPOSITORY}"
+          image_dockerhub="${DOCKERHUB_NAMESPACE}/cyder-api"
 
           {
             echo "release_tag=$release_tag"
             echo "version=$version"
             echo "major_minor=$major_minor"
             echo "image_ghcr=$image_ghcr"
+            echo "image_dockerhub=$image_dockerhub"
           } >> "$GITHUB_OUTPUT"
 
       - name: Write validation summary
@@ -70,7 +74,7 @@ jobs:
             echo "- Version: ${{ steps.validate.outputs.version }}"
             echo "- Major/minor: ${{ steps.validate.outputs.major_minor }}"
             echo "- GHCR image: ${{ steps.validate.outputs.image_ghcr }}"
-            echo "- Docker Hub image: ${DOCKERHUB_USERNAME}/cyder-api"
+            echo "- Docker Hub image: ${{ steps.validate.outputs.image_dockerhub }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   verify-version-images:
@@ -79,7 +83,7 @@ jobs:
     env:
       VERSION: ${{ needs.validate-release.outputs.version }}
       IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
-      IMAGE_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/cyder-api
+      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -119,7 +123,7 @@ jobs:
       VERSION: ${{ needs.validate-release.outputs.version }}
       MAJOR_MINOR: ${{ needs.validate-release.outputs.major_minor }}
       IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
-      IMAGE_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/cyder-api
+      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3

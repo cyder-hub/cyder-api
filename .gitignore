@@ -22,4 +22,4 @@ diesel.toml
 .vscode
 .aider*
 
-task
+/task/

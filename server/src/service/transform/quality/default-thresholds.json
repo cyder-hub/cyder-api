@@ -1,0 +1,77 @@
+{
+  "format_version": 1,
+  "quick": true,
+  "require_native_schema_conformance": true,
+  "checks": [
+    {
+      "kind": "request",
+      "scenario": "openai_to_gemini_large_text",
+      "min_ops_per_sec": 900.0,
+      "max_p95_ms": 1.6,
+      "max_allocs_per_op": 650.0,
+      "max_reallocs_per_op": 25.0,
+      "max_alloc_mib_per_op": 2.5,
+      "max_peak_kib_per_op": 24.0
+    },
+    {
+      "kind": "request",
+      "scenario": "gemini_to_openai_multi_tool",
+      "min_ops_per_sec": 5500.0,
+      "max_p95_ms": 0.28,
+      "max_allocs_per_op": 1950.0,
+      "max_reallocs_per_op": 40.0,
+      "max_alloc_mib_per_op": 0.32,
+      "max_peak_kib_per_op": 7.0
+    },
+    {
+      "kind": "response",
+      "scenario": "openai_to_gemini_large_text",
+      "min_ops_per_sec": 10800.0,
+      "max_p95_ms": 0.14,
+      "max_allocs_per_op": 140.0,
+      "max_reallocs_per_op": 7.0,
+      "max_alloc_mib_per_op": 0.23,
+      "max_peak_kib_per_op": 2.5
+    },
+    {
+      "kind": "response",
+      "scenario": "responses_to_openai_reasoning_tool",
+      "min_ops_per_sec": 76000.0,
+      "max_p95_ms": 0.021,
+      "max_allocs_per_op": 230.0,
+      "max_reallocs_per_op": 4.0,
+      "max_alloc_mib_per_op": 0.03,
+      "max_peak_kib_per_op": 0.5
+    },
+    {
+      "kind": "stream",
+      "scenario": "anthropic_to_responses_fixture",
+      "min_ops_per_sec": 15300.0,
+      "max_p95_ms": 0.11,
+      "max_allocs_per_op": 675.0,
+      "max_reallocs_per_op": 38.0,
+      "max_alloc_mib_per_op": 0.08,
+      "max_peak_kib_per_op": 3.0
+    },
+    {
+      "kind": "stream",
+      "scenario": "responses_to_openai_long_session",
+      "min_ops_per_sec": 1000.0,
+      "max_p95_ms": 1.5,
+      "max_allocs_per_op": 11500.0,
+      "max_reallocs_per_op": 400.0,
+      "max_alloc_mib_per_op": 1.55,
+      "max_peak_kib_per_op": 19.0
+    },
+    {
+      "kind": "stream",
+      "scenario": "openai_to_gemini_long_text_stream",
+      "min_ops_per_sec": 2000.0,
+      "max_p95_ms": 0.75,
+      "max_allocs_per_op": 5300.0,
+      "max_reallocs_per_op": 18.0,
+      "max_alloc_mib_per_op": 1.2,
+      "max_peak_kib_per_op": 14.0
+    }
+  ]
+}

@@ -70,7 +70,7 @@ Commands:
   dev-backend     Runs the backend development server using 'cargo run'.
   build-backend        Builds the backend project in release mode using 'cargo build --release'.
   dev-front            Installs deps and runs the frontend development server using 'npm run dev' in './front'.
-  build-front          Installs deps and builds the frontend project using 'npm run build' in './front'.
+  build-front          Installs locked deps and builds the frontend project using 'npm run build' in './front'.
   install-front-deps   Installs frontend dependencies using 'npm install' in './front'.
   log-lint             Scans server runtime code for forbidden logging patterns.
   test                 Runs backend tests, with optional test name and arguments.
@@ -557,14 +557,10 @@ fn cmd_dev_front() -> Result<()> {
 }
 
 fn cmd_build_front() -> Result<()> {
-    // Install dependencies first
-    cmd_install_front_deps()?; // Add this line
+    cmd_install_front_deps_locked()?;
 
     println!("🏗️ Building frontend project...");
     let front_dir = project_root().join("front");
-    // Remove the following two lines:
-    // println!("▶️ Running: npm install (in ./front)");
-    // run_npm("install", &[], &front_dir)?;
     println!("▶️ Running: npm run build (in ./front)");
     run_npm("run", &["build"], &front_dir)?;
     println!("✅ Frontend build complete.");
@@ -576,6 +572,14 @@ fn cmd_install_front_deps() -> Result<()> {
     let front_dir = project_root().join("front");
     run_npm("install", &[], &front_dir)?;
     println!("✅ Frontend dependencies installed.");
+    Ok(())
+}
+
+fn cmd_install_front_deps_locked() -> Result<()> {
+    println!("📦 Installing locked frontend dependencies...");
+    let front_dir = project_root().join("front");
+    run_npm("ci", &[], &front_dir)?;
+    println!("✅ Locked frontend dependencies installed.");
     Ok(())
 }
 

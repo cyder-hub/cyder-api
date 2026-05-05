@@ -1,0 +1,111 @@
+name: Master Image
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: ["master"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref or SHA to build. Defaults to the dispatch ref.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: master-image-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  manual-transform-quality-gate:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Record CI-backed transform gate
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        run: |
+          {
+            echo "### Transform Quality Gate"
+            echo ""
+            echo "Skipped in Master Image because CI already passed for ${{ github.event.workflow_run.head_sha }}."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout repository
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Run transform quality gate
+        if: github.event_name == 'workflow_dispatch'
+        uses: ./.github/actions/transform-quality-gate
+
+  build-and-push:
+    needs: manual-transform-quality-gate
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.ref || github.sha }}
+
+      - name: Resolve source metadata
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_sha="$(git rev-parse HEAD)"
+          image="ghcr.io/${GITHUB_REPOSITORY}"
+
+          {
+            echo "source_sha=$source_sha"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.source.outputs.image }}:${{ steps.source.outputs.source_sha }}
+            ${{ steps.source.outputs.image }}:edge
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Write image summary
+        shell: bash
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "### Master Image"
+            echo ""
+            echo "- Workflow: ${WORKFLOW_NAME}"
+            echo "- Run: ${WORKFLOW_RUN_URL}"
+            echo "- Source SHA: ${{ steps.source.outputs.source_sha }}"
+            echo "- GHCR image: ${{ steps.source.outputs.image }}"
+            echo "- SHA tag: ${{ steps.source.outputs.image }}:${{ steps.source.outputs.source_sha }}"
+            echo "- Edge tag: ${{ steps.source.outputs.image }}:edge"
+            echo "- Digest: ${{ steps.build.outputs.digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"

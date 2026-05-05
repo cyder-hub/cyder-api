@@ -480,7 +480,8 @@ mod tests {
     use crate::{
         database::{DbConnection, TestDbContext, get_connection},
         service::storage::{
-            Storage, get_local_storage, get_s3_storage_result, types::ListObjectOptions,
+            Storage, get_local_storage, get_s3_storage_result, s3::S3Storage,
+            types::ListObjectOptions,
         },
     };
 
@@ -575,6 +576,38 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
         format!("inventory/{name}-{nanos}/")
+    }
+
+    async fn get_reachable_s3_storage() -> Option<&'static S3Storage> {
+        let storage = match get_s3_storage_result().await {
+            Ok(Some(storage)) => storage,
+            Ok(None) => {
+                println!("Skipping real S3 inventory test: S3 is not configured.");
+                return None;
+            }
+            Err(error) => {
+                println!("Skipping real S3 inventory test: {error}");
+                return None;
+            }
+        };
+
+        let probe_key = format!(
+            "{}probe.msgpack.gz",
+            unique_inventory_prefix("real-s3-probe")
+        );
+        match storage
+            .put_object(&probe_key, Bytes::from_static(b"s3-inventory-probe"), None)
+            .await
+        {
+            Ok(()) => {
+                let _ = storage.delete_object(&probe_key).await;
+                Some(storage)
+            }
+            Err(error) => {
+                println!("Skipping real S3 inventory test: S3 endpoint is not reachable: {error}");
+                None
+            }
+        }
     }
 
     #[tokio::test]
@@ -763,16 +796,9 @@ mod tests {
 
     #[tokio::test]
     async fn storage_inventory_checks_real_s3_when_configured() {
-        let storage = match get_s3_storage_result().await {
-            Ok(Some(storage)) => storage,
-            Ok(None) => {
-                println!("Skipping real S3 inventory test: S3 is not configured.");
-                return;
-            }
-            Err(error) => {
-                println!("Skipping real S3 inventory test: {}", error);
-                return;
-            }
+        let storage = match get_reachable_s3_storage().await {
+            Some(storage) => storage,
+            None => return,
         };
 
         let db = TestDbContext::new_sqlite("diagnostics-storage-inventory-real-s3.sqlite");

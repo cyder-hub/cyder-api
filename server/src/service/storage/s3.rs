@@ -363,17 +363,31 @@ mod tests {
         }
     }
 
-    // Helper to get S3 storage, skipping the test if not configured.
     async fn get_test_s3_storage() -> Option<S3Storage> {
         if CONFIG.storage.s3.is_none() {
             println!("Skipping S3 storage test: S3 not configured.");
             return None;
         }
         let s3_config = CONFIG.storage.s3.as_ref().unwrap();
-        match S3Storage::new(s3_config).await {
-            Ok(storage) => Some(storage),
+        let storage = match S3Storage::new(s3_config).await {
+            Ok(storage) => storage,
             Err(error) => {
                 println!("Skipping S3 storage test: {}", error);
+                return None;
+            }
+        };
+
+        let probe_key = format!("{}probe.txt", unique_s3_test_prefix("probe"));
+        match storage
+            .put_object(&probe_key, Bytes::from_static(b"s3-test-probe"), None)
+            .await
+        {
+            Ok(()) => {
+                let _ = storage.delete_object(&probe_key).await;
+                Some(storage)
+            }
+            Err(error) => {
+                println!("Skipping S3 storage test: S3 endpoint is not reachable: {error}");
                 None
             }
         }

@@ -1,21 +1,87 @@
-name: Promote Final Release
+name: Promote Release
 
 on:
   release:
-    # Triggers when a release is published or edited from pre-release to stable.
     types: [released]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to promote, for example v0.6.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: promote-release-${{ github.event.release.tag_name || inputs.release_tag }}
+  cancel-in-progress: false
 
 jobs:
-  promote:
-    # This condition ensures the job only runs for official releases, not pre-releases.
-    if: github.event.release.prerelease == false
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
+  validate-release:
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+      version: ${{ steps.validate.outputs.version }}
+      major_minor: ${{ steps.validate.outputs.major_minor }}
+      image_ghcr: ${{ steps.validate.outputs.image_ghcr }}
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
-      - name: Log in to GitHub Container Registry
+      - name: Validate release metadata
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="$RELEASE_TAG"
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vMAJOR.MINOR.PATCH: $release_tag" >&2
+            exit 1
+          fi
+
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets are required before promoting release images." >&2
+            exit 1
+          fi
+
+          version="${release_tag#v}"
+          major_minor="$(echo "$version" | cut -d. -f1,2)"
+          image_ghcr="ghcr.io/${GITHUB_REPOSITORY}"
+
+          {
+            echo "release_tag=$release_tag"
+            echo "version=$version"
+            echo "major_minor=$major_minor"
+            echo "image_ghcr=$image_ghcr"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write validation summary
+        shell: bash
+        run: |
+          {
+            echo "### Promote Release Validation"
+            echo ""
+            echo "- Release tag: ${{ steps.validate.outputs.release_tag }}"
+            echo "- Version: ${{ steps.validate.outputs.version }}"
+            echo "- Major/minor: ${{ steps.validate.outputs.major_minor }}"
+            echo "- GHCR image: ${{ steps.validate.outputs.image_ghcr }}"
+            echo "- Docker Hub image: ${DOCKERHUB_USERNAME}/cyder-api"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-version-images:
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.validate-release.outputs.version }}
+      IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
+      IMAGE_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/cyder-api
+    steps:
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -28,48 +94,105 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Set up version and image names
-        id: setup
+      - name: Verify version images exist
+        shell: bash
         run: |
-          # Extract the version number from the git tag (e.g., 'v1.2.3' -> '1.2.3').
-          VERSION=$(echo ${{ github.event.release.tag_name }} | sed 's/^v//')
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "IMAGE_GHCR=ghcr.io/${{ github.repository }}" >> $GITHUB_ENV
-          echo "IMAGE_DOCKERHUB=${{ secrets.DOCKERHUB_USERNAME }}/cyder-api" >> $GITHUB_ENV
+          set -euo pipefail
 
-      - name: Try to pull existing pre-release image from GHCR
-        id: pull_image
-        # If the pull command fails, the workflow continues instead of stopping.
-        continue-on-error: true
+          docker pull "${IMAGE_GHCR}:${VERSION}"
+          docker pull "${IMAGE_DOCKERHUB}:${VERSION}"
+
+          {
+            echo "### Promote Release Image Verification"
+            echo ""
+            echo "- Verified GHCR source: ${IMAGE_GHCR}:${VERSION}"
+            echo "- Verified Docker Hub source: ${IMAGE_DOCKERHUB}:${VERSION}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    needs:
+      - validate-release
+      - verify-version-images
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+      VERSION: ${{ needs.validate-release.outputs.version }}
+      MAJOR_MINOR: ${{ needs.validate-release.outputs.major_minor }}
+      IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
+      IMAGE_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/cyder-api
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull source images
+        shell: bash
         run: |
-          docker pull ${{ env.IMAGE_GHCR }}:${{ env.VERSION }}
+          set -euo pipefail
 
-      - name: Promote existing image if found
-        # This step runs only if the 'pull_image' step succeeded.
-        if: steps.pull_image.outcome == 'success'
+          docker pull "${IMAGE_GHCR}:${VERSION}"
+          docker pull "${IMAGE_DOCKERHUB}:${VERSION}"
+
+      - name: Promote image tags
+        shell: bash
         run: |
-          echo "Pre-release image found. Promoting to final release..."
-          MAJOR_MINOR=$(echo "${{ env.VERSION }}" | cut -d. -f1,2)
+          set -euo pipefail
 
-          # --- Retag and push to GHCR ---
-          docker tag ${{ env.IMAGE_GHCR }}:${{ env.VERSION }} ${{ env.IMAGE_GHCR }}:$MAJOR_MINOR
-          docker push ${{ env.IMAGE_GHCR }}:$MAJOR_MINOR
-          docker tag ${{ env.IMAGE_GHCR }}:${{ env.VERSION }} ${{ env.IMAGE_GHCR }}:latest
-          docker push ${{ env.IMAGE_GHCR }}:latest
+          docker tag "${IMAGE_GHCR}:${VERSION}" "${IMAGE_GHCR}:${MAJOR_MINOR}"
+          docker tag "${IMAGE_GHCR}:${VERSION}" "${IMAGE_GHCR}:latest"
+          docker tag "${IMAGE_DOCKERHUB}:${VERSION}" "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
+          docker tag "${IMAGE_DOCKERHUB}:${VERSION}" "${IMAGE_DOCKERHUB}:latest"
 
-          # --- Retag and push to Docker Hub ---
-          docker pull ${{ env.IMAGE_DOCKERHUB }}:${{ env.VERSION }}
-          docker tag ${{ env.IMAGE_DOCKERHUB }}:${{ env.VERSION }} ${{ env.IMAGE_DOCKERHUB }}:$MAJOR_MINOR
-          docker push ${{ env.IMAGE_DOCKERHUB }}:$MAJOR_MINOR
-          docker tag ${{ env.IMAGE_DOCKERHUB }}:${{ env.VERSION }} ${{ env.IMAGE_DOCKERHUB }}:latest
-          docker push ${{ env.IMAGE_DOCKERHUB }}:latest
+          docker push "${IMAGE_GHCR}:${MAJOR_MINOR}"
+          docker push "${IMAGE_GHCR}:latest"
+          docker push "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
+          docker push "${IMAGE_DOCKERHUB}:latest"
 
-      - name: Fail workflow if pre-release image is not found
-        # This step runs only if the 'pull_image' step failed.
-        if: steps.pull_image.outcome == 'failure'
+      - name: Verify promoted tags
+        shell: bash
         run: |
-          echo "::error title=Incorrect Release Process::Required pre-release Docker image for version ${{ env.VERSION }} was not found."
-          echo "::error::Please follow the correct process: "
-          echo "::error::1. Create a 'pre-release' first to trigger the build."
-          echo "::error::2. Once the build is successful, edit the release and uncheck 'This is a pre-release' to promote it."
-          exit 1
+          set -euo pipefail
+
+          docker pull "${IMAGE_GHCR}:${MAJOR_MINOR}"
+          docker pull "${IMAGE_GHCR}:latest"
+          docker pull "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
+          docker pull "${IMAGE_DOCKERHUB}:latest"
+
+          {
+            echo "### Promote Release Post-push Verification"
+            echo ""
+            echo "- Verified GHCR major/minor: ${IMAGE_GHCR}:${MAJOR_MINOR}"
+            echo "- Verified GHCR latest: ${IMAGE_GHCR}:latest"
+            echo "- Verified Docker Hub major/minor: ${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
+            echo "- Verified Docker Hub latest: ${IMAGE_DOCKERHUB}:latest"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write promote summary
+        shell: bash
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "### Promote Release"
+            echo ""
+            echo "- Workflow: ${WORKFLOW_NAME}"
+            echo "- Run: ${WORKFLOW_RUN_URL}"
+            echo "- Release tag: ${RELEASE_TAG}"
+            echo "- Version: ${VERSION}"
+            echo "- Major/minor: ${MAJOR_MINOR}"
+            echo "- GHCR source: ${IMAGE_GHCR}:${VERSION}"
+            echo "- GHCR promoted tags: ${IMAGE_GHCR}:${MAJOR_MINOR}, ${IMAGE_GHCR}:latest"
+            echo "- Docker Hub source: ${IMAGE_DOCKERHUB}:${VERSION}"
+            echo "- Docker Hub promoted tags: ${IMAGE_DOCKERHUB}:${MAJOR_MINOR}, ${IMAGE_DOCKERHUB}:latest"
+            echo "- Post-push verification: GHCR and Docker Hub major/minor and latest tags were pulled successfully."
+          } >> "$GITHUB_STEP_SUMMARY"

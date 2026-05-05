@@ -1,0 +1,251 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["master"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run_transform: ${{ steps.detect.outputs.run_transform }}
+      run_docker_smoke: ${{ steps.detect.outputs.run_docker_smoke }}
+      transform_reason: ${{ steps.detect.outputs.transform_reason }}
+      docker_smoke_reason: ${{ steps.detect.outputs.docker_smoke_reason }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: detect
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          run_transform=false
+          run_docker_smoke=false
+          transform_reason="No transform-sensitive paths changed."
+          docker_smoke_reason="No Docker packaging paths changed."
+          changed_files="$(mktemp)"
+          : > "$changed_files"
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed_files"
+
+            while IFS= read -r file; do
+              [[ -z "$file" ]] && continue
+
+              case "$file" in
+                Cargo.toml|Cargo.lock|server/*|xtask/*|.github/actions/transform-quality-gate/*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release-image.yml)
+                  run_transform=true
+                  transform_reason="Transform-sensitive path changed."
+                  ;;
+              esac
+
+              case "$file" in
+                Dockerfile|.dockerignore|Cargo.lock|Cargo.toml|server/Cargo.toml|xtask/*|front/package.json|front/package-lock.json|front/tsconfig*.json|front/vite.config.*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release-image.yml|.github/actions/*)
+                  run_docker_smoke=true
+                  docker_smoke_reason="Docker packaging path changed."
+                  ;;
+              esac
+            done < "$changed_files"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            run_transform=true
+            run_docker_smoke=false
+            transform_reason="master push always runs the transform gate."
+            docker_smoke_reason="master push skips Docker smoke because Master Image builds the real edge image after CI passes."
+          else
+            run_transform=true
+            run_docker_smoke=true
+            transform_reason="manual dispatch runs the transform gate."
+            docker_smoke_reason="manual dispatch runs Docker smoke."
+          fi
+
+          {
+            echo "run_transform=$run_transform"
+            echo "run_docker_smoke=$run_docker_smoke"
+            echo "transform_reason=$transform_reason"
+            echo "docker_smoke_reason=$docker_smoke_reason"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Change Detection"
+            echo ""
+            echo "- run_transform: $run_transform"
+            echo "- run_docker_smoke: $run_docker_smoke"
+            echo "- transform_reason: $transform_reason"
+            echo "- docker_smoke_reason: $docker_smoke_reason"
+            if [[ -s "$changed_files" ]]; then
+              echo ""
+              echo "Changed files:"
+              sed 's/^/- /' "$changed_files"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: raven-actions/actionlint@v2
+
+      - name: Parse workflow and action YAML
+        shell: bash
+        run: |
+          ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f); puts "ok #{f}" }' .github/workflows/*.yml .github/actions/**/*.yml
+
+  transform-quality-gate:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip transform quality gate
+        if: needs.detect-changes.outputs.run_transform != 'true'
+        shell: bash
+        run: |
+          {
+            echo "### Transform Quality Gate"
+            echo ""
+            echo "Skipped: ${{ needs.detect-changes.outputs.transform_reason }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout repository
+        if: needs.detect-changes.outputs.run_transform == 'true'
+        uses: actions/checkout@v4
+
+      - name: Run transform quality gate
+        if: needs.detect-changes.outputs.run_transform == 'true'
+        uses: ./.github/actions/transform-quality-gate
+
+  backend-static:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-backend-static-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-backend-static-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run log lint
+        run: cargo xtask log-lint
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-backend-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-backend-tests-
+
+      - name: Run backend tests
+        run: cargo xtask test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+  docker-smoke:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip Docker smoke
+        if: needs.detect-changes.outputs.run_docker_smoke != 'true'
+        shell: bash
+        run: |
+          {
+            echo "### Docker Smoke"
+            echo ""
+            echo "Skipped: ${{ needs.detect-changes.outputs.docker_smoke_reason }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout repository
+        if: needs.detect-changes.outputs.run_docker_smoke == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        if: needs.detect-changes.outputs.run_docker_smoke == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        if: needs.detect-changes.outputs.run_docker_smoke == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: cyder-api:ci-smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

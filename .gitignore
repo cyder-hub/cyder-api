@@ -1,6 +1,7 @@
 # develop resources
 /storage
 !/storage/.gitkeep
+/.cyder/
 *.sh
 
 # config files

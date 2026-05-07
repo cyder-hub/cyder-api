@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -511,9 +512,11 @@ fn cmd_build() -> Result<()> {
 // Renamed from cmd_dev
 fn cmd_dev_backend() -> Result<()> {
     println!("🚀 Starting backend development server...");
-    let server_dir = project_root().join("server");
+    let root = project_root();
+    let server_dir = root.join("server");
+    let dev_env = default_backend_dev_environment(&root);
     // Run 'cargo run' within the server directory
-    run_cargo("run", &[], &server_dir)?; // Remove -p flag, update directory
+    run_cargo_with_env("run", &[], &server_dir, &dev_env)?; // Remove -p flag, update directory
     Ok(())
 }
 
@@ -592,12 +595,35 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn default_backend_dev_environment(root: &Path) -> Vec<(&'static str, OsString)> {
+    if env::var_os("CYDER_DATA_DIR").is_some() || env::var_os("CYDER_CONFIG_PATH").is_some() {
+        return Vec::new();
+    }
+
+    vec![(
+        "CYDER_DATA_DIR",
+        root.join(".cyder").join("dev").into_os_string(),
+    )]
+}
+
 fn run_cargo(command: &str, args: &[&str], directory: &Path) -> Result<ExitStatus> {
+    run_cargo_with_env(command, args, directory, &[])
+}
+
+fn run_cargo_with_env(
+    command: &str,
+    args: &[&str],
+    directory: &Path,
+    envs: &[(&str, OsString)],
+) -> Result<ExitStatus> {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut cmd = Command::new(cargo);
     cmd.arg(command);
     cmd.args(args);
     cmd.current_dir(directory); // Set the working directory
+    for (key, value) in envs {
+        cmd.env(*key, value);
+    }
 
     println!("▶️ Running: {:?} in {:?}", cmd, directory.display());
 
@@ -641,10 +667,22 @@ fn run_npm(npm_command: &str, args: &[&str], directory: &Path) -> Result<ExitSta
 
 #[cfg(test)]
 mod tests {
+    use std::{env, ffi::OsString, path::PathBuf, sync::Mutex};
+
     use super::{
-        collect_log_lint_violations, compact_excerpt, extract_log_invocations,
-        logs_auth_header_value, project_root,
+        collect_log_lint_violations, compact_excerpt, default_backend_dev_environment,
+        extract_log_invocations, logs_auth_header_value, project_root,
     };
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn restore_env_var(name: &str, value: Option<OsString>) {
+        if let Some(value) = value {
+            env::set_var(name, value);
+        } else {
+            env::remove_var(name);
+        }
+    }
 
     #[test]
     fn extract_log_invocations_handles_multiline_event_macros() {
@@ -679,6 +717,44 @@ mod tests {
             compact_excerpt("  alpha\n beta\tgamma "),
             "alpha beta gamma"
         );
+    }
+
+    #[test]
+    fn backend_dev_env_injects_default_data_dir_when_paths_are_unset() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let old_data_dir = env::var_os("CYDER_DATA_DIR");
+        let old_config_path = env::var_os("CYDER_CONFIG_PATH");
+        env::remove_var("CYDER_DATA_DIR");
+        env::remove_var("CYDER_CONFIG_PATH");
+
+        let root = PathBuf::from("/repo/cyder-api");
+        let envs = default_backend_dev_environment(&root);
+
+        restore_env_var("CYDER_DATA_DIR", old_data_dir);
+        restore_env_var("CYDER_CONFIG_PATH", old_config_path);
+
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].0, "CYDER_DATA_DIR");
+        assert_eq!(
+            PathBuf::from(envs[0].1.clone()),
+            PathBuf::from("/repo/cyder-api/.cyder/dev")
+        );
+    }
+
+    #[test]
+    fn backend_dev_env_respects_explicit_path_environment() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let old_data_dir = env::var_os("CYDER_DATA_DIR");
+        let old_config_path = env::var_os("CYDER_CONFIG_PATH");
+        env::remove_var("CYDER_DATA_DIR");
+        env::set_var("CYDER_CONFIG_PATH", "/etc/cyder/config.yaml");
+
+        let envs = default_backend_dev_environment(&PathBuf::from("/repo/cyder-api"));
+
+        restore_env_var("CYDER_DATA_DIR", old_data_dir);
+        restore_env_var("CYDER_CONFIG_PATH", old_config_path);
+
+        assert!(envs.is_empty());
     }
 
     #[test]

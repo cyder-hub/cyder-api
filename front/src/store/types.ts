@@ -270,11 +270,33 @@ export interface SystemConfigOverrideFileReport {
   last_modified_ms: number | null;
 }
 
+export type SystemConfigPersistenceHealthStatus =
+  | "ok"
+  | "warning"
+  | "error"
+  | "skipped";
+
+export interface SystemConfigPersistenceHealthItem {
+  key: string;
+  path: string;
+  exists: boolean;
+  readable: boolean;
+  writable: boolean;
+  status: SystemConfigPersistenceHealthStatus;
+  message: string;
+}
+
+export interface SystemConfigPersistenceHealthReport {
+  status: SystemConfigPersistenceHealthStatus;
+  items: SystemConfigPersistenceHealthItem[];
+}
+
 export interface SystemConfigReport {
   summary: SystemConfigReportSummary;
   fields: SystemConfigField[];
   effective: JsonValue;
   override_file: SystemConfigOverrideFileReport;
+  persistence_health: SystemConfigPersistenceHealthReport;
 }
 
 export interface SystemConfigChangeRequest {

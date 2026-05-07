@@ -152,10 +152,12 @@ The frontend is a Vue admin console, not a Solid app.
 The app loads configuration from:
 
 - program defaults
-- `config.default.yaml`
-- `config.local.yaml` in development when present, otherwise `config.yaml`
+- `config.default.yaml` under the resolved data directory config path
+- base `config.yaml` under the resolved data directory config path, or `CYDER_CONFIG_PATH` when explicitly set
 - environment variables
-- `config.override.yaml`
+- `config.override.yaml` under the resolved data directory config path
+
+Repository/application-root `config.default.yaml`, `config.local.yaml`, `config.yaml`, `config.override.yaml`, and `config.override.history.jsonl` are not implicit persistence paths. Debug defaults derive from `.cyder/dev`; release defaults derive from `/data/cyder` unless `CYDER_DATA_DIR` is explicitly set.
 
 `config.override.yaml` is the highest-priority, manager UI managed override file. It must only contain the system-config hot-reload allowlist; non-allowlisted settings belong in the base config file and require restart. `config.override.history.jsonl` is audit history only and is not loaded as configuration. Multi-instance mode is read-only for manager UI override writes.
 

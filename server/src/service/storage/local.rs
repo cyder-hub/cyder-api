@@ -5,31 +5,46 @@ use crate::service::storage::types::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use cyder_tools::log::error;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::schema::enum_def::StorageType;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LocalStorage {
     root: PathBuf,
 }
 
 impl LocalStorage {
     pub fn new(root: &str) -> Self {
-        let root_path = Path::new(root);
-        if !root_path.exists() {
-            fs::create_dir_all(root_path).expect("Failed to create local storage directory");
-        }
-        Self {
-            root: root_path.to_path_buf(),
-        }
+        let storage = Self {
+            root: Path::new(root).to_path_buf(),
+        };
+        // Preserve the legacy infallible constructor contract for shared
+        // singleton callers; use try_new when initialization errors must be
+        // surfaced immediately.
+        let _ = storage.ensure_root();
+        storage
+    }
+
+    pub fn try_new(root: &str) -> StorageResult<Self> {
+        let storage = Self::new(root);
+        storage.ensure_root()?;
+        Ok(storage)
     }
 
     fn get_full_path(&self, key: &str) -> PathBuf {
         self.root.join(key)
+    }
+
+    fn ensure_root(&self) -> StorageResult<()> {
+        ensure_directory(
+            &self.root,
+            "create local storage root directory",
+            StorageErrorKind::Config,
+        )
     }
 
     fn metadata_for_path(&self, key: String, metadata: fs::Metadata) -> StorageObjectMetadata {
@@ -64,15 +79,18 @@ impl Storage for LocalStorage {
     ) -> StorageResult<()> {
         let full_path = self.get_full_path(key);
         if let Some(parent) = full_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    error!("Failed to create directory for local storage: {}", e);
-                    StorageError::Put("Failed to create directory".to_string())
-                })?;
-            }
+            ensure_directory(
+                parent,
+                "create local storage object parent directory",
+                StorageErrorKind::Put,
+            )?;
         }
-        fs::write(&full_path, data)
-            .map_err(|e| StorageError::Put(format!("Failed to write to file: {}", e)))
+        fs::write(&full_path, data).map_err(|source| {
+            StorageError::Put(format!(
+                "failed to write local storage object '{}': {source}",
+                full_path.display()
+            ))
+        })
     }
 
     async fn get_object(
@@ -82,10 +100,13 @@ impl Storage for LocalStorage {
     ) -> StorageResult<Bytes> {
         let full_path = self.get_full_path(key);
         let data = fs::read(&full_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
+            if e.kind() == io::ErrorKind::NotFound {
                 StorageError::NotFound
             } else {
-                StorageError::Get(format!("Failed to read file: {}", e))
+                StorageError::Get(format!(
+                    "failed to read local storage object '{}': {e}",
+                    full_path.display()
+                ))
             }
         })?;
 
@@ -107,8 +128,12 @@ impl Storage for LocalStorage {
 
     async fn delete_object(&self, key: &str) -> StorageResult<()> {
         let full_path = self.get_full_path(key);
-        fs::remove_file(full_path)
-            .map_err(|e| StorageError::Delete(format!("Failed to delete file: {}", e)))
+        fs::remove_file(&full_path).map_err(|e| {
+            StorageError::Delete(format!(
+                "failed to delete local storage object '{}': {e}",
+                full_path.display()
+            ))
+        })
     }
 
     async fn list_objects(
@@ -122,14 +147,25 @@ impl Storage for LocalStorage {
         let mut dirs = vec![self.root.clone()];
 
         'walk: while let Some(dir) = dirs.pop() {
-            let entries = fs::read_dir(&dir)
-                .map_err(|e| StorageError::Get(format!("Failed to list directory: {}", e)))?;
+            let entries = fs::read_dir(&dir).map_err(|e| {
+                StorageError::Get(format!(
+                    "failed to list local storage directory '{}': {e}",
+                    dir.display()
+                ))
+            })?;
             for entry in entries {
-                let entry = entry
-                    .map_err(|e| StorageError::Get(format!("Failed to read directory: {}", e)))?;
+                let entry = entry.map_err(|e| {
+                    StorageError::Get(format!(
+                        "failed to read local storage directory entry in '{}': {e}",
+                        dir.display()
+                    ))
+                })?;
                 let path = entry.path();
                 let metadata = entry.metadata().map_err(|e| {
-                    StorageError::Get(format!("Failed to read file metadata: {}", e))
+                    StorageError::Get(format!(
+                        "failed to read local storage metadata '{}': {e}",
+                        path.display()
+                    ))
                 })?;
 
                 if metadata.is_dir() {
@@ -167,10 +203,13 @@ impl Storage for LocalStorage {
     async fn get_object_metadata(&self, key: &str) -> StorageResult<StorageObjectMetadata> {
         let full_path = self.get_full_path(key);
         let metadata = fs::metadata(&full_path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
+            if e.kind() == io::ErrorKind::NotFound {
                 StorageError::NotFound
             } else {
-                StorageError::Get(format!("Failed to read file metadata: {}", e))
+                StorageError::Get(format!(
+                    "failed to read local storage metadata '{}': {e}",
+                    full_path.display()
+                ))
             }
         })?;
         if !metadata.is_file() {
@@ -180,6 +219,48 @@ impl Storage for LocalStorage {
             )));
         }
         Ok(self.metadata_for_path(key.to_string(), metadata))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StorageErrorKind {
+    Config,
+    Put,
+}
+
+fn ensure_directory(
+    path: &Path,
+    operation: &'static str,
+    error_kind: StorageErrorKind,
+) -> StorageResult<()> {
+    if path.exists() {
+        if path.is_dir() {
+            return Ok(());
+        }
+        return Err(storage_error(
+            error_kind,
+            operation,
+            path,
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "path exists but is not a directory",
+            ),
+        ));
+    }
+
+    fs::create_dir_all(path).map_err(|source| storage_error(error_kind, operation, path, source))
+}
+
+fn storage_error(
+    kind: StorageErrorKind,
+    operation: &'static str,
+    path: &Path,
+    source: io::Error,
+) -> StorageError {
+    let message = format!("failed to {operation} '{}': {source}", path.display());
+    match kind {
+        StorageErrorKind::Config => StorageError::Config(message),
+        StorageErrorKind::Put => StorageError::Put(message),
     }
 }
 
@@ -198,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn test_local_storage_gzip_compression() {
         let dir = tempdir().unwrap();
-        let storage = LocalStorage::new(dir.path().to_str().unwrap());
+        let storage = LocalStorage::try_new(dir.path().to_str().unwrap()).unwrap();
         let key = "test_gzip.txt";
         let original_data = Bytes::from("some data to be compressed");
 
@@ -228,5 +309,65 @@ mod tests {
         assert_eq!(raw_result, compressed_data);
 
         storage.delete_object(key).await.unwrap();
+    }
+
+    #[test]
+    fn local_storage_try_new_error_includes_operation_and_path() {
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked-storage-root");
+        fs::write(&blocked, "not a directory").expect("blocking file should be written");
+
+        let error = LocalStorage::try_new(blocked.to_str().expect("path should be utf8"))
+            .expect_err("blocked local storage root should fail");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("create local storage root directory"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(&blocked.display().to_string()),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_storage_new_materializes_root_for_empty_inventory() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("fresh-storage-root");
+
+        let storage = LocalStorage::new(root.to_str().expect("path should be utf8"));
+        let objects = storage
+            .list_objects(None)
+            .await
+            .expect("fresh local storage root should be listable");
+
+        assert!(root.is_dir());
+        assert!(objects.objects.is_empty());
+        assert!(!objects.limit_reached);
+    }
+
+    #[tokio::test]
+    async fn local_storage_put_error_includes_operation_and_path() {
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked-storage-root");
+        fs::write(&blocked, "not a directory").expect("blocking file should be written");
+        let storage = LocalStorage::new(blocked.to_str().expect("path should be utf8"));
+
+        let error = storage
+            .put_object("bundle.json", Bytes::from_static(b"{}"), None)
+            .await
+            .expect_err("blocked local storage root should fail object write");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("create local storage object parent directory")
+                || message.contains("write local storage object"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(&blocked.display().to_string()),
+            "unexpected error: {message}"
+        );
     }
 }

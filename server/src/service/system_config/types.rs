@@ -78,12 +78,39 @@ pub struct OverrideFileReport {
     pub last_modified_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistenceHealthStatus {
+    Ok,
+    Warning,
+    Error,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistenceHealthItem {
+    pub key: String,
+    pub path: String,
+    pub exists: bool,
+    pub readable: bool,
+    pub writable: bool,
+    pub status: PersistenceHealthStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistenceHealthReport {
+    pub status: PersistenceHealthStatus,
+    pub items: Vec<PersistenceHealthItem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedConfigReport {
     pub summary: SystemConfigReportSummary,
     pub fields: Vec<ConfigFieldReport>,
     pub effective: Value,
     pub override_file: OverrideFileReport,
+    pub persistence_health: PersistenceHealthReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

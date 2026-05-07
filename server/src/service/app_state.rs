@@ -5,9 +5,8 @@ use chrono::Utc;
 use thiserror::Error;
 
 use crate::config::{
-    RuntimeStateBackendType,
-    loader::{ConfigLoadOptions, LoadedConfig, load_effective_config},
-    paths::ConfigPaths,
+    LOADED_CONFIG, RuntimeStateBackendType,
+    loader::{ConfigLoadOptions, LoadedConfig},
 };
 use crate::proxy::logging::RequestLogPersistedSink;
 use crate::service::cache::CacheError;
@@ -373,18 +372,14 @@ pub fn create_state_router() -> StateRouter {
 }
 
 fn load_initial_config() -> Result<LoadedConfig, RuntimeStateBackendError> {
-    load_effective_config(
-        &ConfigPaths::for_current_build(),
-        ConfigLoadOptions::default(),
-    )
-    .map_err(|err| RuntimeStateBackendError::Config(err.to_string()))
+    Ok(LOADED_CONFIG.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::admin::AdminServices;
     use super::AppState;
-    use crate::config::{CONFIG, RuntimeStateBackendType};
+    use crate::config::{CONFIG, LOADED_CONFIG, RuntimeStateBackendType};
     use crate::database::TestDbContext;
     use crate::service::alerts::AlertsService;
     use crate::service::catalog::CatalogService;
@@ -514,12 +509,13 @@ mod tests {
                 .await;
 
         let snapshot = app_state.system_config.runtime_snapshot().await;
-        let expected = super::load_initial_config()
-            .expect("config should load")
-            .config
-            .log_level;
 
         assert_eq!(snapshot.version, 1);
-        assert_eq!(snapshot.log_level, expected);
+        assert_eq!(snapshot.log_level, LOADED_CONFIG.config.log_level);
+        assert_eq!(
+            &app_state.system_config.paths().default_config_path,
+            &LOADED_CONFIG.paths.default_config_path
+        );
+        assert_eq!(CONFIG.secret_key.as_str(), LOADED_CONFIG.config.secret_key);
     }
 }

@@ -1,8 +1,13 @@
 config.local.yaml
 config.yaml
+config.default.yaml
+config.override.yaml
+config.override.history.jsonl
 
 #.cargo
 /target
+/storage
+/.cyder
 
 #front
 front/node_modules

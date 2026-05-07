@@ -99,13 +99,41 @@ Current code already provides:
 
 ### Configuration
 
+For local development, the default command is zero-config:
+
+```bash
+cargo xtask dev
+```
+
+When `CYDER_DATA_DIR` and `CYDER_CONFIG_PATH` are not set, `cargo xtask dev` and `cargo xtask dev-backend` run the backend with:
+
+```txt
+CYDER_DATA_DIR=<repo>/.cyder/dev
+```
+
+Direct debug runs such as `cd server && cargo run` use the same `.cyder/dev` default. The directory is git-ignored and holds generated local state:
+
+- `.cyder/dev/config/config.default.yaml`
+- `.cyder/dev/config/config.yaml`, if you create one
+- `.cyder/dev/config/config.override.yaml`
+- `.cyder/dev/config/config.override.history.jsonl`
+- `.cyder/dev/db/cyder.sqlite`
+- `.cyder/dev/storage`
+- `.cyder/dev/tmp`
+
+Repository-root `config.local.yaml` and `config.yaml` are no longer read automatically for development. To migrate an older local setup, copy the old base config to `.cyder/dev/config/config.yaml`, or run with `CYDER_CONFIG_PATH=/path/to/config.yaml`.
+
+Release and packaged runs also do not use application-root `config.default.yaml`, `config.yaml`, `config.override.yaml`, or `config.override.history.jsonl` as implicit persistence paths. If `CYDER_DATA_DIR` is unset, persistent paths are still derived from `/data/cyder`; use `CYDER_CONFIG_PATH` only when the base config file must live outside that data directory.
+
 Runtime config is loaded in this order, from lowest to highest priority:
 
 1. program defaults compiled into the server
-2. `config.default.yaml`
-3. `config.local.yaml` in development if present, otherwise `config.yaml`
-4. environment variables
-5. `config.override.yaml`
+2. bootstrapped `config.default.yaml`
+3. base config, normally `${CYDER_DATA_DIR}/config/config.yaml`
+4. allowlisted environment variables
+5. managed `config.override.yaml`
+
+`config.default.yaml` is generated on first startup to persist random secrets and path-aware defaults. It is runtime state, not a tracked sample that should be hand-maintained.
 
 `config.override.yaml` is a managed override file written by the System Config page in the management console. It is only for the hot-reload allowlist exposed by that page, such as log level, timezone, proxy request timeout settings, routing resilience, provider governance, and diagnostics retention/capture settings.
 
@@ -126,7 +154,24 @@ Important config areas include:
 - cache: `cache`, optional `redis`
 - storage: local filesystem or S3-compatible object storage
 
+Current built-in database backends are SQLite and PostgreSQL; other database URL schemes are not supported.
+
 Default `base_path` is `/ai`.
+
+The only environment variables that can override final config fields are:
+
+- `CYDER_HOST`
+- `CYDER_PORT`
+- `CYDER_BASE_PATH`
+- `CYDER_LOG_LEVEL`
+- `CYDER_TIMEZONE`
+
+Startup path environment variables are separate:
+
+- `CYDER_DATA_DIR`: data directory root. Docker images set this to `/data/cyder`.
+- `CYDER_CONFIG_PATH`: optional migration hook for an external base config file. It changes only the base config path; default config, System Config override/history, SQLite defaults, and local storage still belong to the data directory.
+
+Database URLs, secrets, Redis/cache, S3, local storage roots, deployment mode, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
 
 ## Common Commands
 
@@ -202,6 +247,57 @@ Build the image from the repository root:
 ```bash
 docker build -t cyder-api:latest .
 ```
+
+Run it with the built-in zero-config defaults:
+
+```bash
+docker run --rm -p 8000:8000 cyder-api:latest
+```
+
+For persistent local state, mount one host directory to `/data/cyder`:
+
+```bash
+mkdir -p cyder-data
+docker run --rm -p 8000:8000 -v ./cyder-data:/data/cyder cyder-api:latest
+```
+
+The runtime image keeps application artifacts under `/opt/cyder`:
+
+- binary: `/opt/cyder/bin/cyder-api`
+- management UI assets: `/opt/cyder/public`
+
+Mutable local state is under `/data/cyder`:
+
+- config files and System Config override/history: `/data/cyder/config`
+- SQLite database files: `/data/cyder/db`
+- local request log and replay object storage: `/data/cyder/storage`
+
+The image sets `CYDER_DATA_DIR=/data/cyder`, declares `/data/cyder` as the only volume, and runs the service process as the non-root `cyder` user. Temporary request-log spool files use `/tmp/cyder-api` and are not persisted.
+
+Advanced deployments can override `CYDER_DATA_DIR`, but the default and recommended path remains `/data/cyder`. When overriding it, mount the replacement directory explicitly:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e CYDER_DATA_DIR=/var/lib/cyder \
+  -v ./cyder-data:/var/lib/cyder \
+  cyder-api:latest
+```
+
+Maintainer verification on 2026-05-06 built `cyder-api:task10` from this Dockerfile and confirmed zero-config startup, empty `/data/cyder` volume startup, container recreation with persisted `config.default.yaml`/SQLite/override/history, request-log bundle writes under `/data/cyder/storage`, read-only `/opt/cyder` behavior for the service user, and management UI asset loading from `/opt/cyder/public`. S3 persistence was not verified in this smoke test.
+
+PostgreSQL, S3-compatible object storage, and Redis are external state. Configure those services in `/data/cyder/config/config.yaml` and restart the container; do not pass database, secret, Redis, or S3 settings through environment variables.
+
+For an existing deployment, mount the old config file into the container and point `CYDER_CONFIG_PATH` at it while keeping `/data/cyder` as the persistent data root:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -v ./cyder-data:/data/cyder \
+  -v /path/to/config.yaml:/etc/cyder/config.yaml:ro \
+  -e CYDER_CONFIG_PATH=/etc/cyder/config.yaml \
+  cyder-api:latest
+```
+
+This migration hook only changes the base config file path. Managed override/history files and default local SQLite/storage paths remain under `/data/cyder`.
 
 ## Summary
 

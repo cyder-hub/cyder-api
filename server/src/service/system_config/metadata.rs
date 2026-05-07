@@ -1,12 +1,15 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::Value;
 
 use crate::config::{
+    StorageDriver,
     loader::LoadedConfig,
     override_policy,
     override_policy::OVERRIDE_ALLOWED_PATHS,
@@ -18,7 +21,8 @@ use super::{
     redaction::{is_sensitive_config_path, redact_config_tree_value},
     types::{
         ConfigFieldMetadata, ConfigFieldReport, ConfigFieldSourceReport, ConfigValueKind,
-        OverrideFileReport, ResolvedConfigReport, SystemConfigReportSummary,
+        OverrideFileReport, PersistenceHealthItem, PersistenceHealthReport,
+        PersistenceHealthStatus, ResolvedConfigReport, SystemConfigReportSummary,
     },
 };
 
@@ -111,21 +115,31 @@ pub fn config_field_metadata() -> Vec<ConfigFieldMetadata> {
             "host",
             ConfigValueKind::String,
             "Bind host for the management and proxy HTTP server.",
-            &["read-only", "restart required"],
+            &["CYDER_HOST env override", "read-only", "restart required"],
         ),
         meta(
             "server",
             "port",
             ConfigValueKind::U16,
             "Bind port for the management and proxy HTTP server.",
-            &["1..=65535", "read-only", "restart required"],
+            &[
+                "1..=65535",
+                "CYDER_PORT env override",
+                "read-only",
+                "restart required",
+            ],
         ),
         meta(
             "server",
             "base_path",
             ConfigValueKind::String,
             "Base path used to nest manager and proxy routes.",
-            &["must start with /", "read-only", "restart required"],
+            &[
+                "must start with /",
+                "CYDER_BASE_PATH env override",
+                "read-only",
+                "restart required",
+            ],
         ),
         meta(
             "security",
@@ -181,14 +195,17 @@ pub fn config_field_metadata() -> Vec<ConfigFieldMetadata> {
             "log_level",
             ConfigValueKind::String,
             "Backend log level.",
-            &["trace, debug, info, warn, or error"],
+            &[
+                "trace, debug, info, warn, or error",
+                "CYDER_LOG_LEVEL env override",
+            ],
         ),
         meta(
             "server",
             "timezone",
             ConfigValueKind::NullableString,
             "Optional timezone used by date-boundary statistics.",
-            &["null or IANA timezone name"],
+            &["null or IANA timezone name", "CYDER_TIMEZONE env override"],
         ),
         meta(
             "server",
@@ -884,6 +901,7 @@ pub fn build_resolved_config_report(
     let value = serde_json::to_value(&loaded.config).unwrap_or(Value::Null);
     let effective = redact_config_tree_value("", &value);
     let override_file = build_override_file_report(loaded);
+    let persistence_health = build_persistence_health_report(loaded);
     let fields = config_field_metadata()
         .into_iter()
         .map(|metadata| {
@@ -910,6 +928,7 @@ pub fn build_resolved_config_report(
         fields,
         effective,
         override_file,
+        persistence_health,
     }
 }
 
@@ -920,6 +939,7 @@ pub fn refresh_resolved_config_file_state(
     report.summary.override_exists = loaded.paths.override_config_path.exists();
     report.summary.history_exists = loaded.paths.override_history_path.exists();
     report.override_file = build_override_file_report(loaded);
+    report.persistence_health = build_persistence_health_report(loaded);
 }
 
 pub fn metadata_by_path() -> BTreeMap<String, ConfigFieldMetadata> {
@@ -1061,6 +1081,408 @@ fn build_override_file_report(loaded: &LoadedConfig) -> OverrideFileReport {
     }
 }
 
+fn build_persistence_health_report(loaded: &LoadedConfig) -> PersistenceHealthReport {
+    let mut items = Vec::new();
+    let data_dir = loaded
+        .paths
+        .persistence
+        .data_dir
+        .as_ref()
+        .unwrap_or(&loaded.paths.persistence.config_dir);
+
+    items.push(check_directory(
+        "data_dir",
+        data_dir,
+        DirectoryCheckMode::Existing,
+        "persistent data directory",
+    ));
+    items.push(check_directory(
+        "config_dir",
+        &loaded.paths.persistence.config_dir,
+        DirectoryCheckMode::Existing,
+        "configuration directory",
+    ));
+    items.push(check_file(
+        "default_config",
+        &loaded.paths.default_config_path,
+        FileCheckMode::RequiredReadable,
+        "default configuration file",
+    ));
+    items.push(check_user_config_file(
+        &loaded.paths.user_config_path,
+        loaded.paths.user_config_path_required,
+    ));
+    items.push(check_override_config_file(
+        &loaded.paths.override_config_path,
+    ));
+    items.push(check_file(
+        "override_history",
+        &loaded.paths.override_history_path,
+        FileCheckMode::RequiredReadableWritable,
+        "override history file",
+    ));
+
+    if sqlite_db_url_requires_local_directory(&loaded.config.db_url) {
+        items.push(check_directory(
+            "sqlite_db_dir",
+            sqlite_db_dir(&loaded.config.db_url).as_path(),
+            DirectoryCheckMode::Ensure,
+            "SQLite database directory",
+        ));
+    } else {
+        items.push(skipped_health_item(
+            "sqlite_db_dir",
+            "",
+            "external database configured; SQLite directory check is not required",
+        ));
+    }
+
+    match loaded.config.storage.driver {
+        StorageDriver::Local => items.push(check_directory(
+            "local_storage_root",
+            Path::new(&loaded.config.storage.local.root),
+            DirectoryCheckMode::Ensure,
+            "local object storage root",
+        )),
+        StorageDriver::S3 => items.push(skipped_health_item(
+            "local_storage_root",
+            &loaded.config.storage.local.root,
+            "S3 storage driver is active; local storage root is not required for current writes",
+        )),
+    }
+
+    items.push(check_directory(
+        "request_log_spool",
+        &loaded.paths.persistence.request_log_spool_dir,
+        DirectoryCheckMode::Ensure,
+        "request log spool directory",
+    ));
+
+    let status = aggregate_persistence_status(&items);
+    PersistenceHealthReport { status, items }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DirectoryCheckMode {
+    Existing,
+    // This mode is intentionally not read-only: diagnostics may materialize
+    // runtime directories to prove the configured owner can create and write them.
+    Ensure,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FileCheckMode {
+    RequiredReadable,
+    RequiredReadableWritable,
+}
+
+fn check_directory(
+    key: &str,
+    path: &Path,
+    mode: DirectoryCheckMode,
+    description: &str,
+) -> PersistenceHealthItem {
+    if matches!(mode, DirectoryCheckMode::Ensure) {
+        if let Err(err) = fs::create_dir_all(path) {
+            return health_item(
+                key,
+                path,
+                path.exists(),
+                false,
+                false,
+                PersistenceHealthStatus::Error,
+                format!("failed to create {description} '{}': {err}", path.display()),
+            );
+        }
+    }
+
+    let exists = path.exists();
+    if !exists {
+        return health_item(
+            key,
+            path,
+            false,
+            false,
+            false,
+            PersistenceHealthStatus::Error,
+            format!("{description} '{}' does not exist", path.display()),
+        );
+    }
+    if !path.is_dir() {
+        return health_item(
+            key,
+            path,
+            true,
+            false,
+            false,
+            PersistenceHealthStatus::Error,
+            format!("{description} '{}' is not a directory", path.display()),
+        );
+    }
+
+    let readable = fs::read_dir(path).is_ok();
+    let writable = probe_directory_writable(path).is_ok();
+    let mut failures = Vec::new();
+    if !readable {
+        failures.push(format!("read directory '{}'", path.display()));
+    }
+    if !writable {
+        failures.push(format!("write probe file in '{}'", path.display()));
+    }
+    if failures.is_empty() {
+        health_item(
+            key,
+            path,
+            true,
+            true,
+            true,
+            PersistenceHealthStatus::Ok,
+            format!("{description} is readable and writable"),
+        )
+    } else {
+        health_item(
+            key,
+            path,
+            true,
+            readable,
+            writable,
+            PersistenceHealthStatus::Error,
+            format!("failed to {} for {description}", failures.join(" and ")),
+        )
+    }
+}
+
+fn check_file(
+    key: &str,
+    path: &Path,
+    mode: FileCheckMode,
+    description: &str,
+) -> PersistenceHealthItem {
+    let exists = path.exists();
+    if !exists {
+        return health_item(
+            key,
+            path,
+            false,
+            false,
+            false,
+            PersistenceHealthStatus::Error,
+            format!("{description} '{}' does not exist", path.display()),
+        );
+    }
+    if !path.is_file() {
+        return health_item(
+            key,
+            path,
+            true,
+            false,
+            false,
+            PersistenceHealthStatus::Error,
+            format!("{description} '{}' is not a file", path.display()),
+        );
+    }
+
+    let readable = fs::File::open(path).is_ok();
+    let writable = fs::OpenOptions::new().append(true).open(path).is_ok();
+    let writable_required = matches!(mode, FileCheckMode::RequiredReadableWritable);
+    if readable && (!writable_required || writable) {
+        return health_item(
+            key,
+            path,
+            true,
+            readable,
+            writable,
+            PersistenceHealthStatus::Ok,
+            if writable_required {
+                format!("{description} is readable and writable")
+            } else {
+                format!("{description} is readable")
+            },
+        );
+    }
+
+    let mut failures = Vec::new();
+    if !readable {
+        failures.push(format!("read file '{}'", path.display()));
+    }
+    if writable_required && !writable {
+        failures.push(format!("open file for append '{}'", path.display()));
+    }
+
+    health_item(
+        key,
+        path,
+        true,
+        readable,
+        writable,
+        PersistenceHealthStatus::Error,
+        format!("failed to {} for {description}", failures.join(" and ")),
+    )
+}
+
+fn check_user_config_file(path: &Path, required: bool) -> PersistenceHealthItem {
+    if !path.exists() {
+        return health_item(
+            "user_config",
+            path,
+            false,
+            false,
+            false,
+            if required {
+                PersistenceHealthStatus::Error
+            } else {
+                PersistenceHealthStatus::Ok
+            },
+            if required {
+                "required user configuration file is absent"
+            } else {
+                "user configuration file is absent; effective config uses defaults and managed overrides"
+            },
+        );
+    }
+    check_file(
+        "user_config",
+        path,
+        FileCheckMode::RequiredReadable,
+        "user configuration file",
+    )
+}
+
+fn check_override_config_file(path: &Path) -> PersistenceHealthItem {
+    let mut item = check_file(
+        "override_config",
+        path,
+        FileCheckMode::RequiredReadableWritable,
+        "override configuration file",
+    );
+    if item.status == PersistenceHealthStatus::Error {
+        return item;
+    }
+
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) => {
+            item.status = PersistenceHealthStatus::Error;
+            item.readable = false;
+            item.message = format!(
+                "failed to read override configuration file '{}': {err}",
+                path.display()
+            );
+            return item;
+        }
+    };
+    if content.trim().is_empty() {
+        item.message = "override configuration file is empty and valid".to_string();
+        return item;
+    }
+
+    let yaml_value: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        Ok(value) => value,
+        Err(err) => {
+            item.status = PersistenceHealthStatus::Error;
+            item.message = format!(
+                "failed to parse override configuration file '{}': {err}",
+                path.display()
+            );
+            return item;
+        }
+    };
+    if let Err(invalid_paths) = override_policy::validate_override_document(&yaml_value) {
+        item.status = PersistenceHealthStatus::Error;
+        item.message = format!(
+            "override configuration file contains unsupported paths: {}",
+            invalid_paths.join(", ")
+        );
+        return item;
+    }
+
+    item.message = "override configuration file is readable, writable, and allowlisted".to_string();
+    item
+}
+
+fn skipped_health_item(key: &str, path: &str, message: &str) -> PersistenceHealthItem {
+    PersistenceHealthItem {
+        key: key.to_string(),
+        path: path.to_string(),
+        exists: false,
+        readable: false,
+        writable: false,
+        status: PersistenceHealthStatus::Skipped,
+        message: message.to_string(),
+    }
+}
+
+fn health_item(
+    key: &str,
+    path: &Path,
+    exists: bool,
+    readable: bool,
+    writable: bool,
+    status: PersistenceHealthStatus,
+    message: impl Into<String>,
+) -> PersistenceHealthItem {
+    PersistenceHealthItem {
+        key: key.to_string(),
+        path: path.display().to_string(),
+        exists,
+        readable,
+        writable,
+        status,
+        message: message.into(),
+    }
+}
+
+fn aggregate_persistence_status(items: &[PersistenceHealthItem]) -> PersistenceHealthStatus {
+    if items
+        .iter()
+        .any(|item| item.status == PersistenceHealthStatus::Error)
+    {
+        PersistenceHealthStatus::Error
+    } else if items
+        .iter()
+        .any(|item| item.status == PersistenceHealthStatus::Warning)
+    {
+        PersistenceHealthStatus::Warning
+    } else if items
+        .iter()
+        .all(|item| item.status == PersistenceHealthStatus::Skipped)
+    {
+        PersistenceHealthStatus::Skipped
+    } else {
+        PersistenceHealthStatus::Ok
+    }
+}
+
+fn probe_directory_writable(path: &Path) -> io::Result<()> {
+    let probe_path = path.join(format!(
+        ".cyder-health-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe_path)?;
+    file.write_all(b"health")?;
+    drop(file);
+    fs::remove_file(probe_path)
+}
+
+fn sqlite_db_url_requires_local_directory(db_url: &str) -> bool {
+    !db_url.starts_with("postgres://") && !db_url.starts_with("postgresql://")
+}
+
+fn sqlite_db_dir(db_url: &str) -> PathBuf {
+    let path = Path::new(db_url);
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 fn system_time_to_millis(value: SystemTime) -> Option<i64> {
     value
         .duration_since(UNIX_EPOCH)
@@ -1111,17 +1533,19 @@ fn value_at_path(value: &Value, path: &str) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, fs};
+    use std::{collections::BTreeSet, fs, path::Path};
 
     use crate::config::{
         loader::{ConfigLoadOptions, load_effective_config},
         override_policy::OVERRIDE_ALLOWED_PATHS,
         paths::ConfigPaths,
+        persistence::bootstrap_config_paths,
         programmatic_default_config,
         source::flatten_json_paths,
     };
 
     use super::{
+        PersistenceHealthItem, PersistenceHealthStatus, ResolvedConfigReport,
         SystemConfigReportSummary, build_resolved_config_report, config_field_metadata,
         is_ui_write_forbidden_path, metadata_by_path,
     };
@@ -1148,6 +1572,22 @@ mod tests {
             history_exists: paths.override_history_path.exists(),
             deployment_mode: "single_instance".to_string(),
         }
+    }
+
+    fn health_item<'a>(report: &'a ResolvedConfigReport, key: &str) -> &'a PersistenceHealthItem {
+        report
+            .persistence_health
+            .items
+            .iter()
+            .find(|item| item.key == key)
+            .unwrap_or_else(|| panic!("missing persistence health item {key}"))
+    }
+
+    fn write_test_config(path: &Path, yaml: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("config parent should be created");
+        }
+        fs::write(path, yaml).expect("config file should be written");
     }
 
     #[test]
@@ -1201,8 +1641,9 @@ mod tests {
     #[test]
     fn resolved_report_redacts_sensitive_values() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.yaml"),
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
             r#"
 secret_key: manager-super-secret
 password_salt: password-salt-secret
@@ -1226,9 +1667,7 @@ storage:
     force_path_style: true
     public_url: null
 "#,
-        )
-        .expect("user config should be written");
-        let paths = ConfigPaths::for_test(temp_dir.path());
+        );
         let loaded = load_without_environment(&paths);
         let report = build_resolved_config_report(&loaded, test_summary(&paths));
         let serialized = serde_json::to_string(&report).expect("report should serialize");
@@ -1255,15 +1694,14 @@ storage:
     #[test]
     fn resolved_report_effective_tree_redacts_sensitive_values() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.yaml"),
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
             r#"
 secret_key: manager-super-secret
 proxy: http://proxy-user:proxy-password-secret@localhost:8080
 "#,
-        )
-        .expect("user config should be written");
-        let paths = ConfigPaths::for_test(temp_dir.path());
+        );
         let loaded = load_without_environment(&paths);
         let report = build_resolved_config_report(&loaded, test_summary(&paths));
         let serialized = serde_json::to_string(&report.effective).expect("effective serializes");
@@ -1280,12 +1718,8 @@ proxy: http://proxy-user:proxy-password-secret@localhost:8080
     #[test]
     fn override_file_report_contains_only_current_override_document() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.override.yaml"),
-            "log_level: debug\n",
-        )
-        .expect("override config should be written");
         let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.override_config_path, "log_level: debug\n");
         let loaded = load_without_environment(&paths);
         let report = build_resolved_config_report(&loaded, test_summary(&paths));
 
@@ -1294,6 +1728,230 @@ proxy: http://proxy-user:proxy-password-secret@localhost:8080
         assert!(report.override_file.yaml.contains("log_level: debug"));
         assert!(!report.override_file.yaml.contains("secret_key"));
         assert!(!report.override_file.yaml.contains("db_url"));
+    }
+
+    #[test]
+    fn resolved_report_includes_persistence_health() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        let loaded = load_without_environment(&paths);
+        let report = build_resolved_config_report(&loaded, test_summary(&paths));
+
+        assert_eq!(
+            report.persistence_health.status,
+            PersistenceHealthStatus::Ok
+        );
+        assert_eq!(report.persistence_health.items.len(), 9);
+
+        let data_dir = health_item(&report, "data_dir");
+        assert_eq!(data_dir.status, PersistenceHealthStatus::Ok);
+        assert!(data_dir.exists);
+        assert!(data_dir.readable);
+        assert!(data_dir.writable);
+
+        let user_config = health_item(&report, "user_config");
+        assert_eq!(user_config.status, PersistenceHealthStatus::Ok);
+        assert!(!user_config.exists);
+        assert!(
+            user_config
+                .message
+                .contains("effective config uses defaults")
+        );
+
+        let sqlite_db_dir = health_item(&report, "sqlite_db_dir");
+        assert_eq!(sqlite_db_dir.status, PersistenceHealthStatus::Ok);
+        assert!(paths.persistence.db_dir.is_dir());
+
+        let local_storage = health_item(&report, "local_storage_root");
+        assert_eq!(local_storage.status, PersistenceHealthStatus::Ok);
+        assert!(paths.persistence.local_storage_root.is_dir());
+    }
+
+    #[test]
+    fn persistence_health_reports_invalid_override_allowlist() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        let loaded = load_without_environment(&paths);
+        fs::write(&paths.override_config_path, "db_url: sqlite.db\n")
+            .expect("invalid override should write");
+
+        let report = build_resolved_config_report(&loaded, test_summary(&paths));
+        let override_config = health_item(&report, "override_config");
+
+        assert_eq!(
+            report.persistence_health.status,
+            PersistenceHealthStatus::Error
+        );
+        assert_eq!(override_config.status, PersistenceHealthStatus::Error);
+        assert!(override_config.message.contains("unsupported paths"));
+        assert!(override_config.message.contains("db_url"));
+    }
+
+    #[test]
+    fn persistence_health_reports_missing_required_user_config() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let mut paths = ConfigPaths::for_test(temp_dir.path());
+        paths.user_config_path_required = true;
+        bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        fs::write(&paths.user_config_path, "log_level: debug\n").expect("user config should write");
+        let loaded = load_without_environment(&paths);
+        fs::remove_file(&paths.user_config_path).expect("user config should be removed");
+
+        let report = build_resolved_config_report(&loaded, test_summary(&paths));
+        let user_config = health_item(&report, "user_config");
+
+        assert_eq!(
+            report.persistence_health.status,
+            PersistenceHealthStatus::Error
+        );
+        assert_eq!(user_config.status, PersistenceHealthStatus::Error);
+        assert!(user_config.message.contains("required"));
+        assert!(user_config.message.contains("absent"));
+    }
+
+    #[test]
+    fn persistence_health_reports_spool_create_failure() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        fs::remove_dir_all(&paths.persistence.request_log_spool_dir)
+            .expect("spool dir should be removed");
+        fs::write(&paths.persistence.request_log_spool_dir, "not a directory")
+            .expect("blocking spool file should write");
+        let loaded = load_without_environment(&paths);
+
+        let report = build_resolved_config_report(&loaded, test_summary(&paths));
+        let spool = health_item(&report, "request_log_spool");
+
+        assert_eq!(
+            report.persistence_health.status,
+            PersistenceHealthStatus::Error
+        );
+        assert_eq!(spool.status, PersistenceHealthStatus::Error);
+        assert!(spool.message.contains("failed to create"));
+        assert!(
+            spool.message.contains(
+                &paths
+                    .persistence
+                    .request_log_spool_dir
+                    .display()
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn persistence_health_reports_history_append_failure() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        fs::remove_file(&paths.override_history_path).expect("history file should be removed");
+        fs::create_dir(&paths.override_history_path)
+            .expect("history path directory should force append failure");
+        let loaded = load_without_environment(&paths);
+
+        let report = build_resolved_config_report(&loaded, test_summary(&paths));
+        let history = health_item(&report, "override_history");
+
+        assert_eq!(
+            report.persistence_health.status,
+            PersistenceHealthStatus::Error
+        );
+        assert_eq!(history.status, PersistenceHealthStatus::Error);
+        assert!(history.message.contains("not a file"));
+        assert!(
+            history
+                .message
+                .contains(&paths.override_history_path.display().to_string())
+        );
+    }
+
+    #[test]
+    fn persistence_health_reports_blocked_sqlite_and_local_storage_paths() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        let blocked_db_dir = temp_dir.path().join("blocked-db-dir");
+        let blocked_storage_root = temp_dir.path().join("blocked-storage-root");
+        fs::write(&blocked_db_dir, "not a directory").expect("blocked db file should be written");
+        fs::write(&blocked_storage_root, "not a directory")
+            .expect("blocked storage file should be written");
+        fs::write(
+            &paths.user_config_path,
+            format!(
+                r#"
+db_url: {}
+storage:
+  driver: local
+  local:
+    root: {}
+"#,
+                blocked_db_dir.join("cyder.sqlite").display(),
+                blocked_storage_root.display()
+            ),
+        )
+        .expect("user config should write");
+        let loaded = load_without_environment(&paths);
+
+        let report = build_resolved_config_report(&loaded, test_summary(&paths));
+        let sqlite = health_item(&report, "sqlite_db_dir");
+        let local_storage = health_item(&report, "local_storage_root");
+
+        assert_eq!(
+            report.persistence_health.status,
+            PersistenceHealthStatus::Error
+        );
+        assert_eq!(sqlite.status, PersistenceHealthStatus::Error);
+        assert!(sqlite.message.contains("failed to create"));
+        assert!(
+            sqlite
+                .message
+                .contains(&blocked_db_dir.display().to_string())
+        );
+        assert_eq!(local_storage.status, PersistenceHealthStatus::Error);
+        assert!(local_storage.message.contains("failed to create"));
+        assert!(
+            local_storage
+                .message
+                .contains(&blocked_storage_root.display().to_string())
+        );
+    }
+
+    #[test]
+    fn persistence_health_skips_external_database_and_s3_without_secret_leak() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        fs::write(
+            &paths.user_config_path,
+            r#"
+db_url: postgres://cyder:secret-password@localhost/cyder
+storage:
+  driver: s3
+  local:
+    root: /tmp/legacy-local-root
+  s3:
+    bucket: bundles
+"#,
+        )
+        .expect("user config should write");
+        let loaded = load_without_environment(&paths);
+
+        let report = build_resolved_config_report(&loaded, test_summary(&paths));
+        let serialized = serde_json::to_string(&report.persistence_health)
+            .expect("health report should serialize");
+
+        assert_eq!(
+            health_item(&report, "sqlite_db_dir").status,
+            PersistenceHealthStatus::Skipped
+        );
+        assert_eq!(
+            health_item(&report, "local_storage_root").status,
+            PersistenceHealthStatus::Skipped
+        );
+        assert!(!serialized.contains("secret-password"));
     }
 
     #[test]

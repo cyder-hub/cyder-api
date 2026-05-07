@@ -1,10 +1,12 @@
 use rand::{Rng, distr::Alphanumeric, rng};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{sync::LazyLock, time::Duration};
+use std::{fmt, sync::LazyLock, time::Duration};
 
+pub mod env;
 pub mod loader;
 pub mod override_policy;
 pub mod paths;
+pub mod persistence;
 pub mod source;
 
 // --- START DEPLOYMENT CONFIG ---
@@ -550,7 +552,7 @@ fn default_redis_url() -> String {
 }
 
 fn default_local_storage_root() -> String {
-    "storage/storage".to_string()
+    "/data/cyder/storage".to_string()
 }
 
 fn default_replay_response_capture_max_bytes() -> usize {
@@ -1027,14 +1029,36 @@ fn generate_random_string(len: usize) -> String {
         .collect()
 }
 
-pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| {
-    loader::load_effective_config(
-        &paths::ConfigPaths::for_current_build(),
-        loader::ConfigLoadOptions::default(),
-    )
-    .unwrap_or_else(|err| panic!("Failed to load configuration: {}", err))
-    .config
+#[derive(Debug)]
+pub enum ConfigInitError {
+    Bootstrap(persistence::ConfigBootstrapError),
+    Load(loader::ConfigLoadError),
+}
+
+impl fmt::Display for ConfigInitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bootstrap(err) => write!(f, "failed to bootstrap configuration paths: {err}"),
+            Self::Load(err) => write!(f, "failed to load configuration: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigInitError {}
+
+pub fn load_bootstrapped_config() -> Result<loader::LoadedConfig, ConfigInitError> {
+    let paths = paths::ConfigPaths::for_current_build();
+    persistence::bootstrap_config_paths(&paths).map_err(ConfigInitError::Bootstrap)?;
+    loader::load_effective_config(&paths, loader::ConfigLoadOptions::default())
+        .map_err(ConfigInitError::Load)
+}
+
+pub static LOADED_CONFIG: LazyLock<loader::LoadedConfig> = LazyLock::new(|| {
+    load_bootstrapped_config()
+        .unwrap_or_else(|err| panic!("Failed to initialize configuration: {err}"))
 });
+
+pub static CONFIG: LazyLock<FinalConfig> = LazyLock::new(|| LOADED_CONFIG.config.clone());
 
 pub(crate) fn programmatic_default_config() -> FinalConfig {
     FinalConfig {
@@ -1045,7 +1069,7 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         password_salt: generate_random_string(48),
         jwt_secret: generate_random_string(48),
         api_key_jwt_secret: generate_random_string(48),
-        db_url: "./storage/sqlite.db".to_string(),
+        db_url: "/data/cyder/db/cyder.sqlite".to_string(),
         proxy: None,
         log_level: "info".to_string(),
         timezone: None,
@@ -1065,6 +1089,15 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         runtime_state: RuntimeStateConfig::default(),
         storage: StorageConfig::default(),
     }
+}
+
+pub(crate) fn programmatic_default_config_for_paths(paths: &paths::ConfigPaths) -> FinalConfig {
+    let mut config = programmatic_default_config();
+    if paths.persistence.data_dir.is_some() {
+        config.db_url = paths.persistence.sqlite_db_path.display().to_string();
+        config.storage.local.root = paths.persistence.local_storage_root.display().to_string();
+    }
+    config
 }
 
 pub(crate) fn finalize_loaded_config(mut final_config: FinalConfig) -> FinalConfig {
@@ -1091,9 +1124,7 @@ mod tests {
         RoutingResilienceConfig, RuntimeStateBackendType, StorageDriver,
         default_replay_response_capture_max_bytes, source::ConfigLayerKind,
     };
-    use std::{ffi::OsString, fs, sync::Mutex};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use std::{fs, path::Path};
 
     fn load_without_environment(paths: &super::paths::ConfigPaths) -> super::loader::LoadedConfig {
         super::loader::load_effective_config(
@@ -1106,12 +1137,49 @@ mod tests {
         .expect("config should load")
     }
 
-    fn restore_env_var(key: &str, old_value: Option<OsString>) {
-        unsafe {
-            match old_value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
+    fn write_test_config(path: &Path, yaml: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("config parent should be created");
+        }
+        fs::write(path, yaml).expect("config file should be written");
+    }
+
+    fn load_with_test_environment(
+        paths: &super::paths::ConfigPaths,
+        pairs: &[(&str, &str)],
+        include_override: bool,
+    ) -> Result<super::loader::LoadedConfig, super::loader::ConfigLoadError> {
+        let environment_source =
+            super::env::source_from_pairs(pairs).expect("test environment should parse");
+        super::loader::load_effective_config_with_environment_source(
+            paths,
+            super::loader::ConfigLoadOptions {
+                include_environment: true,
+                include_override,
+            },
+            environment_source,
+        )
+    }
+
+    fn test_paths_from_persistence_env(
+        data_dir: Option<&str>,
+        config_path: Option<&str>,
+        current_dir: &Path,
+    ) -> super::paths::ConfigPaths {
+        let resolved = super::persistence::resolve_path_set(
+            super::persistence::PersistenceEnvironment::from_values(data_dir, config_path),
+            super::persistence::BuildProfile::Release,
+            current_dir.to_path_buf(),
+            current_dir.join(".cyder").join("dev"),
+        );
+        super::paths::ConfigPaths {
+            default_config_path: resolved.default_config_path,
+            user_config_path: resolved.user_config_path,
+            user_config_path_required: resolved.user_config_path_required,
+            override_config_path: resolved.override_config_path,
+            override_history_path: resolved.override_history_path,
+            persistence: resolved.persistence,
+            ignored_empty_environment_variables: resolved.ignored_empty_environment_variables,
         }
     }
 
@@ -1206,19 +1274,18 @@ mod tests {
     }
 
     #[test]
-    fn config_loader_preserves_existing_behavior_without_override_file() {
+    fn config_loader_reads_user_config_without_bootstrap_side_effects() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.local.yaml"),
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
             r#"
 port: 3456
 log_level: debug
 proxy_request:
   first_byte_timeout_seconds: 45
 "#,
-        )
-        .expect("user config should be written");
-        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        );
 
         let loaded = load_without_environment(&paths);
 
@@ -1229,34 +1296,30 @@ proxy_request:
             Some(45)
         );
         assert_eq!(loaded.config.proxy_request.connect_timeout_seconds, 10);
-        assert!(paths.default_config_path.exists());
+        assert!(!paths.default_config_path.exists());
     }
 
     #[test]
-    fn config_loader_prefers_local_config_in_test_paths() {
+    fn config_loader_uses_dev_config_path_in_test_paths() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
         fs::write(temp_dir.path().join("config.yaml"), "port: 1111\n")
-            .expect("fallback config should be written");
+            .expect("root config should be written");
         fs::write(temp_dir.path().join("config.local.yaml"), "port: 2222\n")
-            .expect("local config should be written");
+            .expect("root local config should be written");
         let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.user_config_path, "port: 3333\n");
 
         let loaded = load_without_environment(&paths);
 
-        assert!(paths.user_config_path.ends_with("config.local.yaml"));
-        assert_eq!(loaded.config.port, 2222);
-    }
-
-    #[test]
-    fn config_loader_falls_back_to_config_yaml_when_local_is_absent() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(temp_dir.path().join("config.yaml"), "port: 3333\n")
-            .expect("fallback config should be written");
-        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
-
-        let loaded = load_without_environment(&paths);
-
-        assert!(paths.user_config_path.ends_with("config.yaml"));
+        assert_eq!(
+            paths.user_config_path,
+            temp_dir
+                .path()
+                .join(".cyder")
+                .join("dev")
+                .join("config")
+                .join("config.yaml")
+        );
         assert_eq!(loaded.config.port, 3333);
     }
 
@@ -1272,28 +1335,129 @@ proxy_request:
     }
 
     #[test]
-    fn config_loader_override_file_wins_over_environment() {
-        let _guard = ENV_LOCK.lock().expect("env lock should be available");
-        let old_log_level = std::env::var_os("LOG_LEVEL");
-        unsafe {
-            std::env::set_var("LOG_LEVEL", "warn");
-        }
-
+    fn config_loader_uses_persistence_paths_for_default_local_state() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(temp_dir.path().join("config.yaml"), "log_level: debug\n")
-            .expect("user config should be written");
-        fs::write(
-            temp_dir.path().join("config.override.yaml"),
-            "log_level: error\n",
-        )
-        .expect("override config should be written");
         let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
-        let loaded = super::loader::load_effective_config(
+
+        let loaded = load_without_environment(&paths);
+
+        assert_eq!(
+            loaded.config.db_url,
+            paths.persistence.sqlite_db_path.display().to_string()
+        );
+        assert_eq!(
+            loaded.config.storage.local.root,
+            paths.persistence.local_storage_root.display().to_string()
+        );
+    }
+
+    #[test]
+    fn explicit_postgres_and_s3_config_are_not_overridden_by_persistence_defaults() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        super::persistence::bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        fs::write(
+            &paths.user_config_path,
+            r#"
+db_url: postgres://cyder:secret@localhost/cyder
+storage:
+  driver: s3
+  s3:
+    bucket: gateway-bundles
+"#,
+        )
+        .expect("user config should be written");
+
+        let loaded = load_without_environment(&paths);
+
+        assert_eq!(
+            loaded.config.db_url,
+            "postgres://cyder:secret@localhost/cyder"
+        );
+        assert_eq!(loaded.config.storage.driver, StorageDriver::S3);
+        assert_eq!(
+            loaded
+                .config
+                .storage
+                .s3
+                .as_ref()
+                .expect("s3 config should be present")
+                .bucket,
+            "gateway-bundles"
+        );
+        assert!(!paths.persistence.sqlite_db_path.exists());
+        assert!(!paths.persistence.local_storage_root.exists());
+    }
+
+    #[test]
+    fn bootstrapped_config_load_is_stable_across_repeated_reads() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let data_dir = temp_dir.path().to_str().expect("temp path should be utf8");
+        let paths = test_paths_from_persistence_env(Some(data_dir), None, temp_dir.path());
+        super::persistence::bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+
+        let first = load_without_environment(&paths);
+        let first_default = fs::read_to_string(&paths.default_config_path)
+            .expect("default config should be written");
+        let second = load_without_environment(&paths);
+        let second_default = fs::read_to_string(&paths.default_config_path)
+            .expect("default config should be readable");
+
+        assert_eq!(first_default, second_default);
+        assert_eq!(first.config.secret_key, second.config.secret_key);
+        assert_eq!(first.config.jwt_secret, second.config.jwt_secret);
+        assert_eq!(
+            first.config.db_url,
+            temp_dir
+                .path()
+                .join("db")
+                .join("cyder.sqlite")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn bootstrapped_config_requires_explicit_user_config_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let data_dir = temp_dir.path().join("data");
+        let missing_config_path = temp_dir.path().join("missing-config.yaml");
+        let paths = test_paths_from_persistence_env(
+            Some(data_dir.to_str().expect("data dir should be utf8")),
+            Some(
+                missing_config_path
+                    .to_str()
+                    .expect("config path should be utf8"),
+            ),
+            temp_dir.path(),
+        );
+        super::persistence::bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+
+        let error = super::loader::load_effective_config(
             &paths,
             super::loader::ConfigLoadOptions::default(),
-        );
+        )
+        .expect_err("missing explicit user config should fail");
 
-        restore_env_var("LOG_LEVEL", old_log_level);
+        let message = error.to_string();
+        assert!(
+            message.contains("required user configuration file"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(&missing_config_path.display().to_string()),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn config_loader_override_file_wins_over_environment() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.user_config_path, "log_level: debug\n");
+        write_test_config(&paths.override_config_path, "log_level: error\n");
+        let loaded =
+            load_with_test_environment(&paths, &[(super::env::CYDER_LOG_LEVEL_ENV, "warn")], true);
 
         let loaded = loaded.expect("config should load");
         assert_eq!(loaded.config.log_level, "error");
@@ -1330,12 +1494,8 @@ proxy_request:
     #[test]
     fn config_source_ignores_default_file_values_that_match_program_defaults() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.default.yaml"),
-            "log_level: info\n",
-        )
-        .expect("default config should be written");
         let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.default_config_path, "log_level: info\n");
 
         let loaded = load_without_environment(&paths);
 
@@ -1350,12 +1510,8 @@ proxy_request:
     #[test]
     fn config_source_marks_default_file_true_overrides_as_configured() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.default.yaml"),
-            "log_level: debug\n",
-        )
-        .expect("default config should be written");
         let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.default_config_path, "log_level: debug\n");
 
         let loaded = load_without_environment(&paths);
 
@@ -1371,8 +1527,9 @@ proxy_request:
     #[test]
     fn config_source_tracks_user_file_over_default_config() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.yaml"),
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
             r#"
 log_level: debug
 storage:
@@ -1380,9 +1537,7 @@ storage:
   s3:
     bucket: gateway-bundles
 "#,
-        )
-        .expect("user config should be written");
-        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        );
 
         let loaded = load_without_environment(&paths);
 
@@ -1402,6 +1557,10 @@ storage:
             .resolve_field_source("log_level")
             .expect("log_level source should be resolved");
         assert_eq!(log_level.kind, ConfigLayerKind::UserFile);
+        assert_eq!(
+            log_level.source_path.as_ref(),
+            Some(&paths.user_config_path)
+        );
         assert!(log_level.configured);
 
         let storage_bucket = loaded
@@ -1409,6 +1568,10 @@ storage:
             .resolve_field_source("storage.s3.bucket")
             .expect("storage bucket source should be resolved");
         assert_eq!(storage_bucket.kind, ConfigLayerKind::UserFile);
+        assert_eq!(
+            storage_bucket.source_path.as_ref(),
+            Some(&paths.user_config_path)
+        );
         assert!(storage_bucket.configured);
 
         let storage = loaded
@@ -1421,25 +1584,11 @@ storage:
 
     #[test]
     fn config_source_tracks_environment_over_user_file() {
-        let _guard = ENV_LOCK.lock().expect("env lock should be available");
-        let old_log_level = std::env::var_os("LOG_LEVEL");
-        unsafe {
-            std::env::set_var("LOG_LEVEL", "warn");
-        }
-
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(temp_dir.path().join("config.yaml"), "log_level: debug\n")
-            .expect("user config should be written");
         let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
-        let loaded = super::loader::load_effective_config(
-            &paths,
-            super::loader::ConfigLoadOptions {
-                include_environment: true,
-                include_override: false,
-            },
-        );
-
-        restore_env_var("LOG_LEVEL", old_log_level);
+        write_test_config(&paths.user_config_path, "log_level: debug\n");
+        let loaded =
+            load_with_test_environment(&paths, &[(super::env::CYDER_LOG_LEVEL_ENV, "warn")], false);
 
         let loaded = loaded.expect("config should load");
         assert_eq!(loaded.config.log_level, "warn");
@@ -1452,14 +1601,124 @@ storage:
     }
 
     #[test]
+    fn config_source_ignores_unallowlisted_environment_variables() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
+            r#"
+log_level: debug
+db_url: sqlite-from-yaml
+secret_key: file-secret
+"#,
+        );
+        let loaded = load_with_test_environment(
+            &paths,
+            &[
+                ("LOG_LEVEL", "warn"),
+                ("DB_URL", "postgres://env-should-not-win"),
+                ("CYDER_DB_URL", "postgres://cyder-env-should-not-win"),
+                ("SECRET_KEY", "env-secret-should-not-win"),
+            ],
+            false,
+        );
+
+        let loaded = loaded.expect("config should load");
+        assert_eq!(loaded.config.log_level, "debug");
+        assert_eq!(loaded.config.db_url, "sqlite-from-yaml");
+        assert_eq!(loaded.config.secret_key, "file-secret");
+        let source = loaded
+            .source_report
+            .resolve_field_source("log_level")
+            .expect("log_level source should be resolved");
+        assert_eq!(source.kind, ConfigLayerKind::UserFile);
+    }
+
+    #[test]
+    fn config_source_ignores_unknown_cyder_environment_variables() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
+            r#"
+storage:
+  driver: local
+  local:
+    root: /yaml/storage
+redis:
+  url: redis://yaml/
+  pool_size: 2
+  key_prefix: "yaml:"
+"#,
+        );
+        let loaded = load_with_test_environment(
+            &paths,
+            &[
+                ("CYDER_STORAGE__LOCAL__ROOT", "/env/ignored-storage"),
+                ("CYDER_RUNTIME_STATE__BACKEND", "redis"),
+                ("STORAGE__LOCAL__ROOT", "/env/bare-storage"),
+                ("REDIS_URL", "redis://env-ignored/"),
+            ],
+            false,
+        );
+
+        let loaded = loaded.expect("config should load");
+        assert_eq!(loaded.config.storage.local.root, "/yaml/storage");
+        assert_eq!(
+            loaded
+                .config
+                .redis
+                .as_ref()
+                .expect("redis config should load")
+                .url,
+            "redis://yaml/"
+        );
+        assert_eq!(
+            loaded.config.runtime_state.backend,
+            RuntimeStateBackendType::Memory
+        );
+
+        let storage_root = loaded
+            .source_report
+            .resolve_field_source("storage.local.root")
+            .expect("storage root source should be resolved");
+        assert_eq!(storage_root.kind, ConfigLayerKind::UserFile);
+        let redis_url = loaded
+            .source_report
+            .resolve_field_source("redis.url")
+            .expect("redis url source should be resolved");
+        assert_eq!(redis_url.kind, ConfigLayerKind::UserFile);
+        let runtime_backend = loaded
+            .source_report
+            .resolve_field_source("runtime_state.backend")
+            .expect("runtime state backend source should be resolved");
+        assert_eq!(runtime_backend.kind, ConfigLayerKind::ProgramDefault);
+    }
+
+    #[test]
+    fn allowlisted_environment_source_rejects_invalid_value() {
+        let error = super::env::source_from_pairs(&[(super::env::CYDER_PORT_ENV, "not-a-port")])
+            .expect_err("invalid environment value should fail");
+
+        let message = error.to_string();
+        assert!(
+            message.contains(super::env::CYDER_PORT_ENV),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("not-a-port"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
     fn config_source_marks_legacy_replay_capture_alias_as_derived() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.yaml"),
-            "replay_response_capture_max_bytes: 2048\n",
-        )
-        .expect("user config should be written");
         let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
+            "replay_response_capture_max_bytes: 2048\n",
+        );
 
         let loaded = load_without_environment(&paths);
 
@@ -1492,17 +1751,16 @@ storage:
     #[test]
     fn config_loader_rejects_non_whitelisted_override_paths() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.override.yaml"),
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.override_config_path,
             r#"
 db_url: postgres://example
 secret_key: should-not-be-here
 storage:
   driver: s3
 "#,
-        )
-        .expect("override config should be written");
-        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        );
 
         let error = super::loader::load_effective_config(
             &paths,

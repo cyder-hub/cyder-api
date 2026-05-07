@@ -1,4 +1,4 @@
-import type { ModelSummaryItem, ProviderSummaryItem } from "./types";
+import type { ModelSummaryItem, ProviderSummaryItem } from "@/services/types";
 
 export const buildProviderOptions = (providers: ProviderSummaryItem[]) =>
   providers.map((provider) => ({

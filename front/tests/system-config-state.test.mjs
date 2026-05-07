@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { access, readFile } from "node:fs/promises";
 
 import {
   SYSTEM_CONFIG_ALL_FILTER,
@@ -14,7 +15,9 @@ import {
   formatSystemConfigValue,
   sortSystemConfigPersistenceHealthItems,
   systemConfigPayloadsMatch,
-} from "../src/pages/systemConfigState.ts";
+} from "../src/pages/system-config/composables/systemConfigState.ts";
+
+const ROOT = new URL("../", import.meta.url);
 
 const baseField = {
   path: "log_level",
@@ -329,4 +332,15 @@ test("system config payload comparison is canonical and ignores reason", () => {
     ),
     true,
   );
+});
+
+test("system config page uses page-local entry point and composable state", async () => {
+  const routerSource = await readFile(new URL("src/router/index.ts", ROOT), "utf8");
+
+  assert.match(routerSource, /pages\/system-config\/SystemConfigPage\.vue/);
+  assert.equal(routerSource.includes("@/pages/SystemConfig.vue"), false);
+  assert.equal(routerSource.includes("@/pages/systemConfigState"), false);
+
+  await assert.rejects(() => access(new URL("src/pages/SystemConfig.vue", ROOT)));
+  await assert.rejects(() => access(new URL("src/pages/systemConfigState.ts", ROOT)));
 });

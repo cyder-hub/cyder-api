@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ToastTitle } from "reka-ui";
-import { cn } from "@/lib/utils";
+import { cn } from "@/utils/cn";
 import type { ToastTitleProps } from "./types";
 
 const props = defineProps<ToastTitleProps>();

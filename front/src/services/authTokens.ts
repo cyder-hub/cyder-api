@@ -1,4 +1,4 @@
-import type { AuthTokenPair } from "../store/types";
+import type { AuthTokenPair } from "./types";
 
 export const REFRESH_TOKEN_STORAGE_KEY = "auth_token";
 

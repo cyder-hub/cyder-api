@@ -4,8 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CardDescription } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { formatTimestamp } from "@/lib/utils";
-import type { CostTemplateSummary } from "@/store/types";
+import { formatTimestamp } from "@/utils/datetime";
+import type { CostTemplateSummary } from "@/services/types/cost";
 
 defineProps<{
   open: boolean;

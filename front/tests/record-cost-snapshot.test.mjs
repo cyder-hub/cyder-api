@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   costSnapshotDetailLines,
   costSnapshotIssueCount,
-} from "../src/components/record/recordCostSnapshot.ts";
+} from "../src/pages/record/composables/recordCostSnapshot.ts";
 
 test("cost snapshot issue count tolerates missing legacy arrays", () => {
   assert.equal(costSnapshotIssueCount(null), 0);

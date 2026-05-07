@@ -1,27 +1,13 @@
-import { computed, reactive, ref } from "vue";
+import { computed, ref } from "vue";
 import { defineStore } from "pinia";
-import type { LocationQuery, LocationQueryRaw } from "vue-router";
 
-import { normalizeError } from "@/lib/error";
-import { Api } from "@/services/request";
+import { normalizeError } from "@/utils/error";
+import * as providerRuntimeService from "@/services/providerRuntime";
 import type {
   ProviderRuntimeItem,
   ProviderRuntimeListParams,
   ProviderRuntimeSummary,
-  ProviderRuntimeWindow,
-} from "./types";
-import {
-  DEFAULT_PROVIDER_RUNTIME_FILTERS as DEFAULT_FILTERS,
-  buildProviderRuntimeApiParamsFromFilters,
-  buildProviderRuntimeFiltersFromQuery,
-  buildProviderRuntimeRouteQueryFromFilters,
-  normalizeProviderRuntimeDirection,
-  normalizeProviderRuntimeSearch,
-  normalizeProviderRuntimeSortField,
-  normalizeProviderRuntimeStatusFilter,
-  normalizeProviderRuntimeWindow,
-  type ProviderRuntimeFilters,
-} from "./providerRuntimeQuery";
+} from "@/services/types";
 
 export const useProviderRuntimeStore = defineStore("providerRuntime", () => {
   const items = ref<ProviderRuntimeItem[]>([]);
@@ -29,65 +15,14 @@ export const useProviderRuntimeStore = defineStore("providerRuntime", () => {
   const loadingList = ref(false);
   const loadingSummary = ref(false);
   const error = ref<string | null>(null);
-  const filters = reactive<ProviderRuntimeFilters>({ ...DEFAULT_FILTERS });
 
   const isLoading = computed(() => loadingList.value || loadingSummary.value);
-  const hasActiveFilters = computed(
-    () =>
-      filters.window !== DEFAULT_FILTERS.window ||
-      filters.status !== DEFAULT_FILTERS.status ||
-      filters.search !== DEFAULT_FILTERS.search ||
-      filters.sort !== DEFAULT_FILTERS.sort ||
-      filters.direction !== DEFAULT_FILTERS.direction ||
-      filters.only_enabled !== DEFAULT_FILTERS.only_enabled,
-  );
 
-  function setFilters(next: Partial<ProviderRuntimeFilters>) {
-    if (next.window !== undefined) {
-      filters.window = normalizeProviderRuntimeWindow(next.window);
-    }
-    if (next.status !== undefined) {
-      filters.status = normalizeProviderRuntimeStatusFilter(next.status);
-    }
-    if (next.search !== undefined) {
-      filters.search = normalizeProviderRuntimeSearch(next.search);
-    }
-    if (next.sort !== undefined) {
-      filters.sort = normalizeProviderRuntimeSortField(next.sort);
-    }
-    if (next.direction !== undefined) {
-      filters.direction = normalizeProviderRuntimeDirection(next.direction);
-    }
-    if (next.only_enabled !== undefined) {
-      filters.only_enabled = Boolean(next.only_enabled);
-    }
-  }
-
-  function resetFilters() {
-    Object.assign(filters, DEFAULT_FILTERS);
-  }
-
-  function applyQuery(query: LocationQuery) {
-    Object.assign(filters, buildProviderRuntimeFiltersFromQuery(query));
-  }
-
-  function toRouteQuery(): LocationQueryRaw {
-    return buildProviderRuntimeRouteQueryFromFilters(filters);
-  }
-
-  function toApiParams(): ProviderRuntimeListParams {
-    return buildProviderRuntimeApiParamsFromFilters(filters);
-  }
-
-  async function fetchList(params?: Partial<ProviderRuntimeFilters>) {
-    if (params) {
-      setFilters(params);
-    }
-
+  async function fetchList(params: ProviderRuntimeListParams = {}) {
     loadingList.value = true;
     error.value = null;
     try {
-      const data = await Api.getProviderRuntimeList(toApiParams());
+      const data = await providerRuntimeService.getProviderRuntimeList(params);
       items.value = data || [];
       return items.value;
     } catch (err) {
@@ -100,15 +35,11 @@ export const useProviderRuntimeStore = defineStore("providerRuntime", () => {
     }
   }
 
-  async function fetchSummary(window?: ProviderRuntimeWindow) {
-    if (window) {
-      filters.window = normalizeProviderRuntimeWindow(window);
-    }
-
+  async function fetchSummary(window?: ProviderRuntimeListParams["window"]) {
     loadingSummary.value = true;
     error.value = null;
     try {
-      summary.value = await Api.getProviderRuntimeSummary(filters.window);
+      summary.value = await providerRuntimeService.getProviderRuntimeSummary(window);
       return summary.value;
     } catch (err) {
       const normalizedError = normalizeError(err);
@@ -120,12 +51,8 @@ export const useProviderRuntimeStore = defineStore("providerRuntime", () => {
     }
   }
 
-  async function refresh(params?: Partial<ProviderRuntimeFilters>) {
-    if (params) {
-      setFilters(params);
-    }
-
-    await Promise.all([fetchSummary(filters.window), fetchList()]);
+  async function refresh(params: ProviderRuntimeListParams = {}) {
+    await Promise.all([fetchSummary(params.window), fetchList(params)]);
   }
 
   return {
@@ -135,13 +62,6 @@ export const useProviderRuntimeStore = defineStore("providerRuntime", () => {
     loadingSummary,
     isLoading,
     error,
-    filters,
-    hasActiveFilters,
-    setFilters,
-    resetFilters,
-    applyQuery,
-    toRouteQuery,
-    toApiParams,
     fetchList,
     fetchSummary,
     refresh,

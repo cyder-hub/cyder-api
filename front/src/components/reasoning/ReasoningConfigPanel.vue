@@ -273,9 +273,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Loader2, RefreshCw, Save, Trash2 } from "lucide-vue-next";
-import { normalizeError } from "@/lib/error";
-import { toastController } from "@/lib/toastController";
-import { Api } from "@/services/request";
+import { normalizeError } from "@/utils/error";
+import { toastController } from "@/services/uiFeedback";
 import type {
   ModelReasoningConfigWriteMode,
   ModelReasoningConfigPayload,
@@ -286,7 +285,12 @@ import type {
   ReasoningConfigResponse,
   ReasoningPatchFamilyKey,
   ReasoningPresetKey,
-} from "@/store/types";
+} from "@/services/types";
+import type {
+  ReasoningConfigActions,
+  ReasoningDraftPreviewPayload,
+  ReasoningOwnerKind,
+} from "./types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -306,8 +310,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-type OwnerKind = "provider" | "model";
 
 interface PresetDraft {
   is_enabled: boolean;
@@ -356,8 +358,9 @@ interface MatrixRow {
 
 const props = withDefaults(
   defineProps<{
-    ownerKind: OwnerKind;
+    ownerKind: ReasoningOwnerKind;
     ownerId: number | null;
+    actions: ReasoningConfigActions;
     title?: string;
     modelSupportsReasoning?: boolean;
     providerType?: string | null;
@@ -877,16 +880,11 @@ async function refreshDraftPreview(requestId: number) {
   }
 
   try {
-    const response =
+    const payload: ReasoningDraftPreviewPayload =
       props.ownerKind === "provider"
-        ? await Api.previewProviderReasoningConfigDraft(
-            props.ownerId,
-            buildProviderDraftPreviewPayload(),
-          )
-        : await Api.previewModelReasoningConfigDraft(
-            props.ownerId,
-            buildModelDraftPreviewPayload(),
-          );
+        ? buildProviderDraftPreviewPayload()
+        : buildModelDraftPreviewPayload();
+    const response = await props.actions.previewDraft(props.ownerId, payload);
     if (requestId !== draftPreviewRequestId) return;
     draftPreview.value = response;
     previewError.value = null;
@@ -910,13 +908,9 @@ async function load() {
   error.value = null;
   try {
     const [catalogResponse, configResponse, previewResponse] = await Promise.all([
-      Api.getReasoningConfigCatalog(),
-      props.ownerKind === "provider"
-        ? Api.getProviderReasoningConfig(props.ownerId)
-        : Api.getModelReasoningConfig(props.ownerId),
-      props.ownerKind === "provider"
-        ? Api.previewProviderReasoningConfig(props.ownerId)
-        : Api.previewModelReasoningConfig(props.ownerId),
+      props.actions.getCatalog(),
+      props.actions.getConfig(props.ownerId),
+      props.actions.previewSaved(props.ownerId),
     ]);
 
     catalog.value = catalogResponse;
@@ -947,16 +941,16 @@ async function saveConfig() {
   isSaving.value = true;
   try {
     if (props.ownerKind === "provider") {
-      await Api.updateProviderReasoningConfig(props.ownerId, {
+      await props.actions.updateConfig(props.ownerId, {
         family_key: familyKeyDraft.value,
         presets: buildPresetPayload(),
       });
     } else if (modeDraft.value === "inherit") {
-      await Api.updateModelReasoningConfig(props.ownerId, { mode: "inherit" });
+      await props.actions.updateConfig(props.ownerId, { mode: "inherit" });
     } else if (modeDraft.value === "disabled") {
-      await Api.updateModelReasoningConfig(props.ownerId, { mode: "disabled" });
+      await props.actions.updateConfig(props.ownerId, { mode: "disabled" });
     } else {
-      await Api.updateModelReasoningConfig(props.ownerId, {
+      await props.actions.updateConfig(props.ownerId, {
         mode: "custom",
         family_key: familyKeyDraft.value,
         presets: buildPresetPayload(),
@@ -990,11 +984,7 @@ async function clearConfig() {
 
   isSaving.value = true;
   try {
-    if (props.ownerKind === "provider") {
-      await Api.deleteProviderReasoningConfig(props.ownerId);
-    } else {
-      await Api.deleteModelReasoningConfig(props.ownerId);
-    }
+    await props.actions.deleteConfig(props.ownerId);
     await load();
     emit("saved");
     toastController.success(t("reasoningConfigPanel.alert.cleared"));

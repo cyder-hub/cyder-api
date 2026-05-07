@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ToastRoot } from "reka-ui";
-import { cn } from "@/lib/utils";
+import { cn } from "@/utils/cn";
 import type { ToastProps } from "./types";
 
 const props = defineProps<ToastProps>();

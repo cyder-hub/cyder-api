@@ -1,9 +1,9 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { normalizeError } from "@/lib/error";
-import { Api } from "@/services/request";
-import type { ApiKeyItem, ApiKeyRuntimeSnapshot } from "./types";
-import { formatTimestamp } from "@/lib/utils";
+import { normalizeError } from "@/utils/error";
+import * as apiKeyService from "@/services/apiKeys";
+import type { ApiKeyItem, ApiKeyRuntimeSnapshot } from "@/services/types";
+import { formatTimestamp } from "@/utils/datetime";
 
 export const useApiKeyStore = defineStore("apiKey", () => {
   const apiKeys = ref<ApiKeyItem[]>([]);
@@ -17,7 +17,7 @@ export const useApiKeyStore = defineStore("apiKey", () => {
     loading.value = true;
     error.value = null;
     try {
-      const data = await Api.getApiKeyList();
+      const data = await apiKeyService.getApiKeyList();
       apiKeys.value = (data || []).map((key) => ({
         ...key,
         created_at_formatted: formatTimestamp(key.created_at),
@@ -38,7 +38,7 @@ export const useApiKeyStore = defineStore("apiKey", () => {
     runtimeLoading.value = true;
     runtimeError.value = null;
     try {
-      runtimeSnapshots.value = await Api.getApiKeyRuntimeList();
+      runtimeSnapshots.value = await apiKeyService.getApiKeyRuntimeList();
       return runtimeSnapshots.value;
     } catch (err) {
       const normalizedError = normalizeError(err);

@@ -5,7 +5,7 @@ import {
   RECORD_DETAIL_TABS,
   shouldLoadRecordArtifacts,
   shouldRenderPayloadViewer,
-} from "../src/components/record/recordDetailState.ts";
+} from "../src/pages/record/composables/useRecordDetail.ts";
 import {
   buildAttemptReplayPayload,
   canExecuteReplay,
@@ -19,7 +19,13 @@ import {
   replayableAttempts,
   resolveReplayArtifactViewState,
   shouldShowProviderApiKeyOverrideError,
-} from "../src/components/record/recordReplayState.ts";
+} from "../src/pages/record/composables/useRecordReplay.ts";
+import {
+  DEFAULT_RECORD_FILTERS,
+  buildRecordListParams,
+  buildRecordQueryFromState,
+  parseRecordQueryState,
+} from "../src/pages/record/composables/useRecordQuery.ts";
 
 const artifactResponse = {
   payload_manifest: {
@@ -96,6 +102,107 @@ test("record detail workbench exposes fixed tabs and lazy-load boundaries", () =
   assert.equal(shouldRenderPayloadViewer("overview", "FILE_SYSTEM"), false);
   assert.equal(shouldRenderPayloadViewer("payloads", null), false);
   assert.equal(shouldRenderPayloadViewer("payloads", "FILE_SYSTEM"), true);
+});
+
+test("record workbench query restores filters and deep-linked detail state", () => {
+  const parsed = parseRecordQueryState(
+    {
+      page: "3",
+      page_size: "25",
+      api_key_id: "12",
+      provider_id: "7",
+      model_id: "9",
+      status: "ERROR",
+      has_retry: "true",
+      search: "timeout",
+      record_id: "42",
+      tab: "replay",
+      attempt_id: "101",
+      replay_run_id: "9001",
+    },
+    10,
+    {
+      hasApiKeyId: (id) => id === 12,
+      hasProviderId: (id) => id === 7,
+      hasModelId: (id) => id === 9,
+    },
+  );
+
+  assert.equal(parsed.page, 3);
+  assert.equal(parsed.pageSize, 25);
+  assert.equal(parsed.filters.status, "ERROR");
+  assert.equal(parsed.filters.has_retry, "true");
+  assert.equal(parsed.filters.search, "timeout");
+  assert.equal(parsed.recordId, 42);
+  assert.equal(parsed.tab, "replay");
+  assert.equal(parsed.attemptId, 101);
+  assert.equal(parsed.replayRunId, 9001);
+
+  assert.deepEqual(
+    buildRecordQueryFromState({
+      page: parsed.page,
+      pageSize: parsed.pageSize,
+      filters: parsed.filters,
+      recordId: parsed.recordId,
+      tab: parsed.tab,
+      attemptId: parsed.attemptId,
+      replayRunId: parsed.replayRunId,
+    }),
+    {
+      page: "3",
+      page_size: "25",
+      api_key_id: "12",
+      provider_id: "7",
+      model_id: "9",
+      status: "ERROR",
+      has_retry: "true",
+      search: "timeout",
+      record_id: "42",
+      tab: "replay",
+      attempt_id: "101",
+      replay_run_id: "9001",
+    },
+  );
+
+  assert.deepEqual(
+    buildRecordListParams(parsed.page, parsed.pageSize, parsed.filters),
+    {
+      page: 3,
+      page_size: 25,
+      api_key_id: 12,
+      provider_id: 7,
+      model_id: 9,
+      status: "ERROR",
+      user_api_type: undefined,
+      resolved_name_scope: undefined,
+      final_error_code: undefined,
+      has_retry: true,
+      has_fallback: undefined,
+      has_transform_diagnostics: undefined,
+      latency_ms_min: undefined,
+      latency_ms_max: undefined,
+      total_tokens_min: undefined,
+      total_tokens_max: undefined,
+      estimated_cost_nanos_min: undefined,
+      estimated_cost_nanos_max: undefined,
+      start_time: undefined,
+      end_time: undefined,
+      search: "timeout",
+    },
+  );
+
+  assert.deepEqual(
+    buildRecordQueryFromState({
+      page: 1,
+      pageSize: 10,
+      filters: { ...DEFAULT_RECORD_FILTERS },
+      recordId: 42,
+      tab: "overview",
+      attemptId: null,
+      replayRunId: null,
+    }),
+    { record_id: "42" },
+  );
 });
 
 test("record replay state uses server capability and selected attempt for preview", () => {

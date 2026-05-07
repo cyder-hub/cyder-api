@@ -1,8 +1,8 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { normalizeError } from "@/lib/error";
-import { Api } from "@/services/request";
-import type { ProviderSummaryItem } from "./types";
+import { normalizeError } from "@/utils/error";
+import * as providerService from "@/services/providers";
+import type { ProviderSummaryItem } from "@/services/types";
 import {
   buildProviderNameById,
   buildProviderOptions,
@@ -20,7 +20,7 @@ export const useProviderStore = defineStore("provider", () => {
     loading.value = true;
     error.value = null;
     try {
-      const data = await Api.getProviderSummaryList();
+      const data = await providerService.getProviderSummaryList();
       providers.value = data || [];
       return providers.value;
     } catch (err) {

@@ -16,13 +16,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { formatPriceFromNanos, formatTimestamp } from "@/lib/utils";
+import { formatTimestamp } from "@/utils/datetime";
+import { formatPriceFromNanos } from "@/utils/money";
 import type {
   CostCatalogListItem,
   CostCatalogVersion,
   CostComponent,
   CostPreviewResponse,
-} from "@/store/types";
+} from "@/services/types/cost";
 import CostPreviewSection from "./CostPreviewSection.vue";
 import { parseTierConfig } from "./helpers";
 import type { PreviewDraft } from "./types";

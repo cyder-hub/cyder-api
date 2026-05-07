@@ -35,6 +35,7 @@ export const zhDict = {
     deleteFailed: "删除渠道失败: {error}",
   },
   dashboard: {
+    title: "仪表盘",
     description: "查看系统整体运行状态、资源统计及各种日常耗费指标。",
     sections: {
       resources: {
@@ -243,10 +244,10 @@ export const zhDict = {
     notifications: "通知",
     systemConfig: "系统配置",
     sections: {
-      start: "从这里开始",
-      overview: "总览",
-      core: "基础",
-      advanced: "高级",
+      operations: "运行",
+      traffic: "流量",
+      resources: "资源",
+      governance: "治理",
     },
   },
   alertsPage: {
@@ -435,6 +436,12 @@ export const zhDict = {
       editable: "可编辑",
       hotReloadable: "热更新",
       overrideFields: "覆盖项",
+    },
+    sourcePriority: {
+      title: "配置来源优先级",
+      description:
+        "有效值按程序默认、默认配置、用户配置、环境变量 allowlist、受管覆盖文件和派生运行时值解析。",
+      configured: "{count} 个已配置",
     },
     fieldCount: "字段数量",
     deploymentMode: "部署模式",
@@ -648,6 +655,10 @@ export const zhDict = {
       lastError: "最近错误",
       proxy: "代理",
       sortScore: "排序分",
+    },
+    table: {
+      provider: "渠道",
+      health: "健康",
     },
     detail: {
       statusCode: "状态码",
@@ -1343,6 +1354,19 @@ export const zhDict = {
       monthlyTokens: "当月 Token 数",
       dailyBudgetUsage: "当日预算消耗",
       monthlyBudgetUsage: "当月预算消耗",
+      runtimeRejectionReason: "运行时拒绝原因",
+    },
+    runtimeRejection: {
+      none: "当前未拒绝",
+      disabled: "拒绝：Key 已禁用",
+      expired: "拒绝：Key 已过期",
+      rpm: "已达到每分钟限速",
+      concurrency: "已达到并发上限",
+      dailyRequests: "已达到每日请求配额",
+      dailyTokens: "已达到每日 Token 配额",
+      monthlyTokens: "已达到每月 Token 配额",
+      dailyBudget: "已达到每日预算",
+      monthlyBudget: "已达到每月预算",
     },
     currencyUnit: {
       cny: "元",
@@ -1369,6 +1393,9 @@ export const zhDict = {
     rotateFailed: "轮换 API Key 失败: {error}",
     deleteFailed: "删除 API Key 失败: {error}",
     confirmDelete: '确定要删除 API Key "{name}" 吗？',
+    confirmReveal: '显示 API Key "{name}" 的完整密钥？',
+    confirmRevealDescription:
+      "完整密钥会显示在下一个面板中。请只在准备安全处理密钥时执行该操作。",
     confirmRotate: '确定要轮换 API Key "{name}" 吗？旧密钥会立即失效。',
     copyFailed: "复制 API Key 失败。",
   },
@@ -1478,12 +1505,20 @@ export const zhDict = {
     loading: "正在加载模型路由...",
     errorPrefix: "加载模型路由错误。",
     noData: "未找到模型路由。",
+    summary: {
+      total: "路由总数",
+      enabled: "启用",
+      exposed: "已暴露",
+      candidates: "候选数",
+    },
     table: {
       routeName: "路由名称",
       candidateCount: "候选数",
       exposeInModels: "暴露到 /models",
       enabled: "启用",
       primaryCandidate: "主 Candidate",
+      reasoning: "Reasoning",
+      preview: "预览",
     },
     modal: {
       titleEdit: "编辑模型路由",
@@ -1507,15 +1542,33 @@ export const zhDict = {
       candidateMoveDown: "下移",
       candidateRemove: "删除",
     },
+    queue: {
+      description:
+        "顺序会作为提交给网关的候选队列；priority 数值越小越靠前。",
+      priority: "Priority",
+      candidateCount: "{count} 个候选",
+      disabledModel: "已停用",
+    },
+    reasoning: {
+      title: "Reasoning 后缀预览",
+      loading: "正在加载预览...",
+      stable: "stable",
+      incomplete: "incomplete",
+      staleSkipped: "stale skipped",
+      supported: "Supported",
+      unsupported: "Unsupported",
+    },
     alert: {
       loadDetailFailed: "加载模型路由详情失败。",
       routeNameRequired: "路由名称不能为空。",
       candidateRequired: "至少需要一个 candidate。",
       candidateModelRequired: "所有 candidate 都必须选择模型。",
       duplicateCandidate: "同一个模型不能重复出现在一个 route 中。",
+      saveSuccess: "模型路由已保存。",
       saveFailed: "保存模型路由失败: {error}",
       toggleFailed: "切换模型路由状态失败: {error}",
       toggleExposeFailed: "切换路由暴露状态失败: {error}",
+      deleteSuccess: "模型路由已删除。",
       deleteFailed: "删除模型路由失败: {error}",
     },
     confirmDelete: '您确定要删除模型路由 "{name}" 吗？',
@@ -1684,6 +1737,89 @@ export const zhDict = {
       description: "请选择一个API密钥以使用所选模型执行检查。",
       target: "当前模型：{target}",
       selectPlaceholder: "选择一个API密钥",
+    },
+    requestPatch: {
+      title: "请求改写",
+      description:
+        "管理会被下游模型继承的渠道直接规则。模型级 explain 和冲突诊断仍在模型页面查看。",
+      directTitle: "渠道直接规则",
+      directDescription:
+        "渠道规则会被下游模型继承；完全相同目标上的模型规则可以覆盖它们。",
+      addRule: "新增规则",
+      emptyDirect: "当前渠道还没有配置直接请求改写规则。",
+      noDescription: "无描述",
+      placements: {
+        HEADER: "请求头",
+        QUERY: "查询参数",
+        BODY: "请求体 JSON",
+      },
+      operations: {
+        SET: "设置",
+        REMOVE: "移除",
+      },
+      fields: {
+        value: "值",
+        description: "描述",
+        trace: "说明",
+        enabled: "启用",
+        ruleId: "规则 ID",
+      },
+      states: {
+        disabled: "已停用",
+        enabled: "已启用",
+      },
+      messages: {
+        providerDirect:
+          "渠道直接规则。继承、生效和冲突诊断请在对应模型页面查看。",
+      },
+      editor: {
+        addTitle: "新增渠道请求改写",
+        editTitle: "编辑渠道请求改写",
+        description:
+          "为请求头、查询参数或请求体 JSON Pointer 目标创建渠道直接规则。",
+        placement: "位置",
+        operation: "操作",
+        selectPlacement: "选择位置",
+        selectOperation: "选择操作",
+        target: "目标",
+        targetPlaceholderHeader: "authorization",
+        targetPlaceholderQuery: "api-version",
+        targetPlaceholderBody: "/generationConfig/temperature",
+        valueJson: "JSON 值",
+        valueHelp:
+          "请求头和查询参数只接受 JSON 标量值；请求体可以使用任意 JSON 值。",
+        descriptionLabel: "描述",
+        descriptionPlaceholder: "给运维或后续排障留下可读备注。",
+        enabledTitle: "已启用",
+        enabledDescription: "关闭后规则仍保留，但运行时不会应用。",
+        targetHelpHeader:
+          "填写请求头名称。保留的传输层请求头会被后端直接拒绝。",
+        targetHelpQuery: "填写查询参数名，不要包含 ?, &, = 或空白字符。",
+        targetHelpBody:
+          "填写 JSON Pointer，例如 /model 或 /generationConfig/temperature。",
+        removeValuePlaceholder: "移除操作不接受 value_json。",
+        valuePlaceholder: '填写合法 JSON，例如: "Bearer token", true, 1, null',
+        create: "创建规则",
+        save: "保存修改",
+        dangerousTitle: "确认危险目标",
+        dangerousDescription:
+          "这条规则会操作上游敏感目标，必须再次确认后才能保存。",
+        saveAnyway: "仍然保存",
+      },
+      alert: {
+        saveBeforeEdit: "请先保存渠道，再编辑请求改写规则。",
+        saveFailed: "保存请求改写规则失败。",
+        createSuccess: "渠道请求改写已创建。",
+        updateSuccess: "渠道请求改写已更新。",
+        deleteSuccess: "渠道请求改写已删除。",
+        deleteFailed: "删除渠道请求改写失败。",
+        toggleFailed: "更新请求改写启停状态失败。",
+        enableSuccess: "请求改写已启用。",
+        disableSuccess: "请求改写已停用。",
+        dangerousConfirmFailed: "确认危险请求改写目标失败。",
+        targetRequired: "目标不能为空。",
+        valueRequired: "设置规则必须填写 JSON 值。",
+      },
     },
     labelName: "名称",
     labelProviderKey: "渠道标识",

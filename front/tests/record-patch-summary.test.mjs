@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   patchSourceItemsFromRaw,
   reasoningSourceDetail,
-} from "../src/components/record/recordPatchSummary.ts";
+} from "../src/pages/record/composables/recordPatchSummary.ts";
 
 const translate = (key, params = {}) => {
   switch (key) {

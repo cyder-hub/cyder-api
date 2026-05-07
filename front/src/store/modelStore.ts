@@ -1,9 +1,9 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
 
-import { normalizeError } from "@/lib/error";
-import { Api } from "@/services/request";
-import type { ModelSummaryItem } from "./types";
+import { normalizeError } from "@/utils/error";
+import * as modelService from "@/services/models";
+import type { ModelSummaryItem } from "@/services/types";
 import {
   buildModelNameById,
   buildModelOptions,
@@ -20,7 +20,7 @@ export const useModelStore = defineStore("model", () => {
     loading.value = true;
     error.value = null;
     try {
-      const data = await Api.getModelSummaryList();
+      const data = await modelService.getModelSummaryList();
       models.value = data || [];
       return models.value;
     } catch (err) {

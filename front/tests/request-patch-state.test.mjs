@@ -5,7 +5,7 @@ import {
   buildRequestPatchPayloadFromEditor,
   formatRequestPatchValueForDisplay,
   formatRequestPatchValueForEditor,
-} from "../src/lib/requestPatch.ts";
+} from "../src/utils/requestPatch.ts";
 
 test("request patch editor payload preserves JSON object, scalar, and null values", () => {
   assert.deepEqual(

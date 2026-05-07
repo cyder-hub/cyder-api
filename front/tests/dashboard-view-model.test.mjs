@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 
 import {
   buildEmptyDashboard,
-  buildRuntimeStateBackendRows,
+} from "../src/pages/dashboard/composables/useDashboardData.ts";
+import {
   getUnstableProviders,
   hasCostHotspots,
-} from "../src/pages/dashboardViewModel.js";
+} from "../src/pages/dashboard/composables/useDashboardAlerts.ts";
+import { buildRuntimeStateBackendRows } from "../src/utils/runtimeBackend.ts";
 
 test("buildEmptyDashboard returns stable zero-state dashboard data", () => {
   const dashboard = buildEmptyDashboard();

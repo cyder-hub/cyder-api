@@ -124,7 +124,13 @@ pub async fn new_storage(config: &StorageConfig) -> Box<dyn Storage> {
 
     #[cfg(not(test))]
     match config.driver {
-        crate::config::StorageDriver::Local => Box::new(LocalStorage::new(&config.local.root)),
+        crate::config::StorageDriver::Local => match LocalStorage::try_new(&config.local.root) {
+            Ok(storage) => Box::new(storage),
+            Err(error) => Box::new(UnavailableStorage::new(
+                StorageType::FileSystem,
+                error.to_string(),
+            )),
+        },
         crate::config::StorageDriver::S3 => match config.s3.as_ref() {
             Some(s3_config) => match S3Storage::new(s3_config).await {
                 Ok(storage) => Box::new(storage),

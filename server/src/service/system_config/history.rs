@@ -4,7 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use chrono::Utc;
+
+use crate::config::persistence::set_owner_read_write_permissions;
 
 use super::{
     redaction::redact_config_tree_value,
@@ -81,14 +86,26 @@ pub fn append_history_item(
         path: parent.to_path_buf(),
         source,
     })?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
+    let existed = path.exists();
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
         .open(path)
         .map_err(|source| SystemConfigHistoryError::Io {
             path: path.to_path_buf(),
             source,
         })?;
+    if !existed {
+        if let Err(source) = set_owner_read_write_permissions(path) {
+            let _ = fs::remove_file(path);
+            return Err(SystemConfigHistoryError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    }
     let line = serde_json::to_string(item).map_err(SystemConfigHistoryError::Serialize)?;
     file.write_all(line.as_bytes())
         .and_then(|_| file.write_all(b"\n"))
@@ -214,5 +231,34 @@ mod tests {
         assert!(!content.contains("old-secret-value"));
         assert!(!content.contains("new-secret-value"));
         assert!(content.contains("sha256_prefix"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_file_created_by_append_is_owner_read_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let path = temp_dir.path().join("config.override.history.jsonl");
+        let item = build_history_item(
+            SystemConfigHistoryOperation::Apply,
+            Some("audit permissions".to_string()),
+            1,
+            2,
+            vec![SystemConfigDiffItem {
+                path: "log_level".to_string(),
+                old_value: json!("info"),
+                new_value: json!("debug"),
+            }],
+        );
+
+        append_history_item(&path, &item).expect("history item should append");
+
+        let mode = std::fs::metadata(&path)
+            .expect("history metadata should read")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

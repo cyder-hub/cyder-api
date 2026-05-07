@@ -6,11 +6,13 @@ import {
   buildSystemConfigHistoryDiffDisplay,
   buildSystemConfigDiffDisplay,
   buildSystemConfigOverrideDocumentText,
+  countSystemConfigPersistenceIssues,
   canApplySystemConfigPreview,
   createDefaultSystemConfigFilters,
   filterSystemConfigFields,
   formatSystemConfigDocument,
   formatSystemConfigValue,
+  sortSystemConfigPersistenceHealthItems,
   systemConfigPayloadsMatch,
 } from "../src/pages/systemConfigState.ts";
 
@@ -174,6 +176,53 @@ test("override document text shows invalid path summary instead of empty YAML", 
   assert.match(text, /db_url/);
   assert.match(text, /storage\.s3\.secret_key/);
   assert.notEqual(text, "{}");
+});
+
+test("persistence health helpers prioritize abnormal items", () => {
+  const items = [
+    {
+      key: "local_storage_root",
+      path: "/data/cyder/storage",
+      exists: true,
+      readable: true,
+      writable: true,
+      status: "ok",
+      message: "ok",
+    },
+    {
+      key: "sqlite_db_dir",
+      path: "/data/cyder/db",
+      exists: true,
+      readable: true,
+      writable: false,
+      status: "error",
+      message: "failed to write probe file",
+    },
+    {
+      key: "s3_storage",
+      path: "",
+      exists: false,
+      readable: false,
+      writable: false,
+      status: "skipped",
+      message: "not required",
+    },
+    {
+      key: "override_history",
+      path: "/data/cyder/config/config.override.history.jsonl",
+      exists: true,
+      readable: true,
+      writable: false,
+      status: "warning",
+      message: "append is degraded",
+    },
+  ];
+
+  assert.deepEqual(
+    sortSystemConfigPersistenceHealthItems(items).map((item) => item.key),
+    ["sqlite_db_dir", "override_history", "local_storage_root", "s3_storage"],
+  );
+  assert.equal(countSystemConfigPersistenceIssues(items), 2);
 });
 
 const validPreview = {

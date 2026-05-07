@@ -544,7 +544,7 @@ fn issue(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use serde_json::json;
 
@@ -564,6 +564,13 @@ mod tests {
             },
         )
         .expect("config should load")
+    }
+
+    fn write_test_config(path: &Path, yaml: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("config parent should be created");
+        }
+        fs::write(path, yaml).expect("config file should be written");
     }
 
     fn change_request(changes: &[(&str, Value)]) -> SystemConfigChangeRequest {
@@ -733,12 +740,11 @@ mod tests {
     #[test]
     fn preview_warns_when_provider_governance_runtime_fields_change_while_disabled() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.yaml"),
-            "provider_governance:\n  enabled: false\n",
-        )
-        .expect("base config should be written");
         let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
+            "provider_governance:\n  enabled: false\n",
+        );
         let loaded = load_test_config(&paths);
 
         let response = preview_override_changes(
@@ -795,12 +801,8 @@ mod tests {
     #[test]
     fn preview_preserves_existing_legal_override_fields() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.override.yaml"),
-            "log_level: debug\n",
-        )
-        .expect("override should be written");
         let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.override_config_path, "log_level: debug\n");
         let loaded = load_test_config(&paths);
 
         let response = preview_override_changes(

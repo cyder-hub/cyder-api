@@ -6,6 +6,7 @@ import {
   Check,
   Clock3,
   FileText,
+  HardDrive,
   Loader2,
   Pencil,
   RefreshCcw,
@@ -34,12 +35,16 @@ import {
   formatSystemConfigDocument,
   buildSystemConfigOverrideDocumentText,
   canApplySystemConfigPreview,
+  countSystemConfigPersistenceIssues,
+  sortSystemConfigPersistenceHealthItems,
 } from "@/pages/systemConfigState";
 import type {
   JsonValue,
   SystemConfigChangeRequest,
   SystemConfigField,
   SystemConfigHistoryItem,
+  SystemConfigPersistenceHealthItem,
+  SystemConfigPersistenceHealthStatus,
   SystemConfigPreviewResponse,
   SystemConfigReport,
   SystemConfigReportSummary,
@@ -236,6 +241,13 @@ const configDocumentText = computed(() => {
 const configDocumentInvalidPaths = computed(
   () => report.value?.override_file.invalid_paths ?? [],
 );
+const persistenceHealth = computed(() => report.value?.persistence_health ?? null);
+const persistenceHealthItems = computed<SystemConfigPersistenceHealthItem[]>(() =>
+  sortSystemConfigPersistenceHealthItems(persistenceHealth.value?.items ?? []),
+);
+const persistenceIssueCount = computed(() =>
+  countSystemConfigPersistenceIssues(persistenceHealthItems.value),
+);
 const configDocumentPath = computed(() =>
   configViewMode.value === "override"
     ? report.value?.override_file.path
@@ -309,6 +321,42 @@ function formatTimestamp(value: number | null | undefined): string {
 
 function formatFileState(value: boolean | null | undefined): string {
   return value ? $t("systemConfigPage.exists") : $t("systemConfigPage.missing");
+}
+
+function formatHealthBoolean(value: boolean): string {
+  return value ? $t("systemConfigPage.persistence.yes") : $t("systemConfigPage.persistence.no");
+}
+
+function persistenceStatusLabel(status: SystemConfigPersistenceHealthStatus): string {
+  return $t(`systemConfigPage.persistence.status.${status}`);
+}
+
+function persistenceItemLabel(item: SystemConfigPersistenceHealthItem): string {
+  return $t(`systemConfigPage.persistence.items.${item.key}`);
+}
+
+function persistenceStatusClass(status: SystemConfigPersistenceHealthStatus): string {
+  switch (status) {
+    case "error":
+      return "border-red-200 bg-red-50 text-red-700";
+    case "warning":
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    case "ok":
+      return "border-gray-200 bg-gray-50 text-gray-700";
+    case "skipped":
+      return "border-gray-200 bg-white text-gray-500";
+  }
+}
+
+function persistenceRowClass(status: SystemConfigPersistenceHealthStatus): string {
+  switch (status) {
+    case "error":
+      return "bg-red-50/50";
+    case "warning":
+      return "bg-amber-50/50";
+    default:
+      return "bg-white";
+  }
 }
 
 function sourceLabel(kind: string): string {
@@ -893,6 +941,94 @@ function writeDisabledReasonLabel(reason: string): string {
               </div>
             </div>
           </dl>
+        </div>
+
+        <div class="rounded-xl border border-gray-200 bg-white">
+          <div class="flex flex-col gap-3 border-b border-gray-100 px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2">
+                <HardDrive class="h-4 w-4 text-gray-400" />
+                <h2 class="text-base font-semibold text-gray-900">
+                  {{ $t("systemConfigPage.persistence.title") }}
+                </h2>
+              </div>
+              <p class="mt-1 text-sm text-gray-500">
+                {{ $t("systemConfigPage.persistence.description") }}
+              </p>
+            </div>
+            <div class="flex shrink-0 items-center gap-2">
+              <Badge
+                variant="outline"
+                :class="persistenceStatusClass(persistenceHealth?.status ?? 'skipped')"
+              >
+                {{ persistenceStatusLabel(persistenceHealth?.status ?? "skipped") }}
+              </Badge>
+              <span class="text-xs text-gray-500">
+                {{
+                  persistenceIssueCount
+                    ? $t("systemConfigPage.persistence.issueCount", { count: persistenceIssueCount })
+                    : $t("systemConfigPage.persistence.noIssues")
+                }}
+              </span>
+            </div>
+          </div>
+
+          <div v-if="persistenceHealthItems.length" class="divide-y divide-gray-100">
+            <article
+              v-for="item in persistenceHealthItems"
+              :key="item.key"
+              :class="['px-4 py-4', persistenceRowClass(item.status)]"
+            >
+              <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div class="min-w-0">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <h3 class="text-sm font-medium text-gray-900">
+                      {{ persistenceItemLabel(item) }}
+                    </h3>
+                    <Badge variant="outline" :class="persistenceStatusClass(item.status)">
+                      {{ persistenceStatusLabel(item.status) }}
+                    </Badge>
+                  </div>
+                  <p v-if="item.path" class="mt-1 break-all font-mono text-xs text-gray-500">
+                    {{ item.path }}
+                  </p>
+                  <p class="mt-2 break-words text-sm text-gray-600">
+                    {{ item.message }}
+                  </p>
+                </div>
+
+                <dl class="grid grid-cols-3 gap-2 text-xs text-gray-500 sm:min-w-64">
+                  <div>
+                    <dt class="font-medium uppercase tracking-wide">
+                      {{ $t("systemConfigPage.persistence.exists") }}
+                    </dt>
+                    <dd class="mt-1 font-mono text-gray-800">
+                      {{ formatHealthBoolean(item.exists) }}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt class="font-medium uppercase tracking-wide">
+                      {{ $t("systemConfigPage.persistence.readable") }}
+                    </dt>
+                    <dd class="mt-1 font-mono text-gray-800">
+                      {{ formatHealthBoolean(item.readable) }}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt class="font-medium uppercase tracking-wide">
+                      {{ $t("systemConfigPage.persistence.writable") }}
+                    </dt>
+                    <dd class="mt-1 font-mono text-gray-800">
+                      {{ formatHealthBoolean(item.writable) }}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            </article>
+          </div>
+          <div v-else class="px-4 py-4 text-sm text-gray-500">
+            {{ $t("systemConfigPage.persistence.empty") }}
+          </div>
         </div>
 
         <div class="rounded-xl border border-gray-200 bg-white">

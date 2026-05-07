@@ -1,11 +1,11 @@
-use std::{fmt, fs, path::PathBuf};
+use std::{fmt, fs, io, path::PathBuf};
 
 use config::{Config, File, FileFormat};
 use serde_json::Value;
 
 use super::{
     FinalConfig, finalize_loaded_config, override_policy, paths::ConfigPaths,
-    programmatic_default_config, source,
+    programmatic_default_config_for_paths, source,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub enum ConfigLoadError {
     BuildDefault(String),
     DeserializeDefault(String),
     SerializeDefault(String),
-    WriteDefault {
+    ReadUser {
         path: PathBuf,
         source: std::io::Error,
     },
@@ -63,6 +63,7 @@ pub enum ConfigLoadError {
         path: PathBuf,
         paths: Vec<String>,
     },
+    Environment(super::env::EnvironmentConfigError),
     TraceSources(source::ConfigSourceError),
 }
 
@@ -78,9 +79,9 @@ impl fmt::Display for ConfigLoadError {
             ConfigLoadError::SerializeDefault(err) => {
                 write!(f, "failed to serialize default configuration: {err}")
             }
-            ConfigLoadError::WriteDefault { path, source } => write!(
+            ConfigLoadError::ReadUser { path, source } => write!(
                 f,
-                "failed to write default configuration file '{}': {source}",
+                "failed to read required user configuration file '{}': {source}",
                 path.display()
             ),
             ConfigLoadError::BuildEffective(err) => {
@@ -105,6 +106,9 @@ impl fmt::Display for ConfigLoadError {
                 path.display(),
                 paths.join(", ")
             ),
+            ConfigLoadError::Environment(err) => {
+                write!(f, "failed to read environment configuration: {err}")
+            }
             ConfigLoadError::TraceSources(err) => {
                 write!(f, "failed to trace configuration sources: {err}")
             }
@@ -115,7 +119,7 @@ impl fmt::Display for ConfigLoadError {
 impl std::error::Error for ConfigLoadError {}
 
 pub fn load_default_config(paths: &ConfigPaths) -> Result<LoadedDefaultConfig, ConfigLoadError> {
-    let program_default_config = programmatic_default_config();
+    let program_default_config = programmatic_default_config_for_paths(paths);
     let default_yaml_str = serde_yaml::to_string(&program_default_config)
         .map_err(|err| ConfigLoadError::SerializeDefault(err.to_string()))?;
 
@@ -136,13 +140,6 @@ pub fn load_default_config(paths: &ConfigPaths) -> Result<LoadedDefaultConfig, C
     let merged_yaml = serde_yaml::to_string(&default_config)
         .map_err(|err| ConfigLoadError::SerializeDefault(err.to_string()))?;
 
-    fs::write(&paths.default_config_path, &merged_yaml).map_err(|source| {
-        ConfigLoadError::WriteDefault {
-            path: paths.default_config_path.clone(),
-            source,
-        }
-    })?;
-
     Ok(LoadedDefaultConfig {
         program_default_config,
         config: default_config,
@@ -154,7 +151,7 @@ pub fn load_effective_config(
     paths: &ConfigPaths,
     options: ConfigLoadOptions,
 ) -> Result<LoadedConfig, ConfigLoadError> {
-    load_effective_config_inner(paths, options, None)
+    load_effective_config_inner(paths, options, None, None)
 }
 
 pub fn load_effective_config_with_override_document(
@@ -162,25 +159,46 @@ pub fn load_effective_config_with_override_document(
     options: ConfigLoadOptions,
     override_document: &Value,
 ) -> Result<LoadedConfig, ConfigLoadError> {
-    load_effective_config_inner(paths, options, Some(override_document))
+    load_effective_config_inner(paths, options, Some(override_document), None)
+}
+
+#[cfg(test)]
+pub(crate) fn load_effective_config_with_environment_source(
+    paths: &ConfigPaths,
+    options: ConfigLoadOptions,
+    environment_source: super::env::EnvironmentConfigSource,
+) -> Result<LoadedConfig, ConfigLoadError> {
+    load_effective_config_inner(paths, options, None, Some(environment_source))
 }
 
 fn load_effective_config_inner(
     paths: &ConfigPaths,
     options: ConfigLoadOptions,
     override_document: Option<&Value>,
+    runtime_environment_source: Option<super::env::EnvironmentConfigSource>,
 ) -> Result<LoadedConfig, ConfigLoadError> {
     let default = load_default_config(paths)?;
 
     let mut builder =
         Config::builder().add_source(File::from_str(&default.merged_yaml, FileFormat::Yaml));
 
-    if paths.user_config_path.exists() {
+    if paths.user_config_path_required {
+        validate_required_user_config_file(paths)?;
+        builder = builder.add_source(File::from(paths.user_config_path.as_path()).required(true));
+    } else if paths.user_config_path.exists() {
         builder = builder.add_source(File::from(paths.user_config_path.as_path()).required(false));
     }
 
-    if options.include_environment {
-        builder = builder.add_source(source::environment_source());
+    let environment_source = if options.include_environment {
+        Some(match runtime_environment_source {
+            Some(environment_source) => environment_source,
+            None => source::environment_source().map_err(ConfigLoadError::Environment)?,
+        })
+    } else {
+        None
+    };
+    if let Some(environment_source) = environment_source.clone() {
+        builder = builder.add_source(environment_source);
     }
 
     let override_report_value = if options.include_override {
@@ -223,23 +241,15 @@ fn load_effective_config_inner(
         .map_err(|err| ConfigLoadError::DeserializeEffective(err.to_string()))?;
     let final_config = finalize_loaded_config(final_config);
 
-    let source_report = match override_report_value {
-        Some(value) => source::build_config_source_report_with_override_value(
-            paths,
-            &default.program_default_config,
-            &default.config,
-            &final_config,
-            source_trace_options,
-            value,
-        ),
-        None => source::build_config_source_report(
-            paths,
-            &default.program_default_config,
-            &default.config,
-            &final_config,
-            source_trace_options,
-        ),
-    }
+    let source_report = source::build_config_source_report_with_runtime_sources(
+        paths,
+        &default.program_default_config,
+        &default.config,
+        &final_config,
+        source_trace_options,
+        override_report_value,
+        environment_source,
+    )
     .map_err(ConfigLoadError::TraceSources)?;
 
     Ok(LoadedConfig {
@@ -250,6 +260,26 @@ fn load_effective_config_inner(
         merged_default_yaml: default.merged_yaml,
         paths: paths.clone(),
     })
+}
+
+fn validate_required_user_config_file(paths: &ConfigPaths) -> Result<(), ConfigLoadError> {
+    let metadata =
+        fs::metadata(&paths.user_config_path).map_err(|source| ConfigLoadError::ReadUser {
+            path: paths.user_config_path.clone(),
+            source,
+        })?;
+    if !metadata.is_file() {
+        return Err(ConfigLoadError::ReadUser {
+            path: paths.user_config_path.clone(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "path is not a file"),
+        });
+    }
+    fs::File::open(&paths.user_config_path)
+        .map(|_| ())
+        .map_err(|source| ConfigLoadError::ReadUser {
+            path: paths.user_config_path.clone(),
+            source,
+        })
 }
 
 fn validate_override_file(paths: &ConfigPaths) -> Result<(), ConfigLoadError> {

@@ -7,9 +7,13 @@ use diesel::{
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use sha2::{Digest, Sha256};
 use std::error::Error as StdError;
+use std::fmt;
 use std::fs::File;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::LazyLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::{config::CONFIG, controller::BaseError};
 use serde::Serialize;
@@ -77,8 +81,43 @@ pub fn get_connection() -> DbResult<DbConnection> {
 
     #[cfg(not(test))]
     {
-        get_connection_from_pool(&DB_POOL)
+        match global_db_pool() {
+            Ok(pool) => get_connection_from_pool(pool),
+            Err(err) => Err(BaseError::DatabaseFatal(Some(err.to_string()))),
+        }
     }
+}
+
+#[cfg(not(test))]
+fn global_db_pool() -> Result<&'static DbPool, DatabaseInitError> {
+    get_or_try_init_retryable(&DB_POOL, &DB_POOL_INIT_LOCK, DbPool::establish)
+}
+
+fn get_or_try_init_retryable<T: 'static, E>(
+    cell: &'static OnceLock<T>,
+    init_lock: &'static Mutex<()>,
+    init: impl FnOnce() -> Result<T, E>,
+) -> Result<&'static T, E> {
+    if let Some(value) = cell.get() {
+        return Ok(value);
+    }
+
+    let _guard = init_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(value) = cell.get() {
+        return Ok(value);
+    }
+
+    let value = init()?;
+    if cell.set(value).is_err() {
+        return Ok(cell
+            .get()
+            .expect("retryable global initializer should be set"));
+    }
+    Ok(cell
+        .get()
+        .expect("retryable global initializer should be set"))
 }
 
 fn get_connection_from_pool(pool: &DbPool) -> DbResult<DbConnection> {
@@ -261,23 +300,103 @@ fn parse_db_type(db_url: &str) -> DbType {
     }
 }
 
+#[derive(Debug)]
+pub enum DatabaseInitError {
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+    SqliteConnection {
+        path: PathBuf,
+        source: diesel::ConnectionError,
+    },
+    PostgresConnection {
+        source: diesel::ConnectionError,
+    },
+    SqlitePragma {
+        path: PathBuf,
+        source: diesel::result::Error,
+    },
+    Migration {
+        backend: &'static str,
+        source: String,
+    },
+    Backfill {
+        backend: &'static str,
+        source: diesel::result::Error,
+    },
+    Pool {
+        backend: &'static str,
+        source: String,
+    },
+}
+
+impl fmt::Display for DatabaseInitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io {
+                operation,
+                path,
+                source,
+            } => write!(f, "failed to {operation} '{}': {source}", path.display()),
+            Self::SqliteConnection { path, source } => write!(
+                f,
+                "failed to establish sqlite migration connection for '{}': {source}",
+                path.display()
+            ),
+            Self::PostgresConnection { source } => {
+                write!(
+                    f,
+                    "failed to establish postgres migration connection: {source}"
+                )
+            }
+            Self::SqlitePragma { path, source } => write!(
+                f,
+                "failed to apply sqlite pragmas for '{}': {source}",
+                path.display()
+            ),
+            Self::Migration { backend, source } => {
+                write!(f, "failed to run {backend} migrations: {source}")
+            }
+            Self::Backfill { backend, source } => {
+                write!(
+                    f,
+                    "failed to backfill {backend} api_key shadow table: {source}"
+                )
+            }
+            Self::Pool { backend, source } => {
+                write!(f, "failed to create {backend} database pool: {source}")
+            }
+        }
+    }
+}
+
+impl StdError for DatabaseInitError {}
+
 impl DbPool {
-    pub fn establish() -> Self {
-        Self::establish_for_url(&CONFIG.db_url)
+    pub fn establish() -> Result<Self, DatabaseInitError> {
+        Self::try_establish_for_url(&CONFIG.db_url)
     }
 
+    #[cfg(test)]
     fn establish_for_url(db_url: &str) -> Self {
+        Self::try_establish_for_url(db_url)
+            .unwrap_or_else(|err| panic!("failed to initialize database: {err}"))
+    }
+
+    fn try_establish_for_url(db_url: &str) -> Result<Self, DatabaseInitError> {
         let db_type = parse_db_type(db_url);
-        match db_type {
+        Ok(match db_type {
             DbType::Postgres => {
-                let pool = init_pg_pool(db_url);
+                let pool = init_pg_pool(db_url)?;
                 DbPool::Postgres(pool)
             }
             DbType::Sqlite => {
-                let pool = init_sqlite_pool(db_url);
+                let pool = init_sqlite_pool(db_url)?;
                 DbPool::Sqlite(pool)
             }
-        }
+        })
     }
 }
 
@@ -365,7 +484,9 @@ macro_rules! db_execute {
 }
 
 #[cfg_attr(test, allow(dead_code))]
-static DB_POOL: LazyLock<DbPool> = LazyLock::new(DbPool::establish);
+static DB_POOL: OnceLock<DbPool> = OnceLock::new();
+#[cfg_attr(test, allow(dead_code))]
+static DB_POOL_INIT_LOCK: Mutex<()> = Mutex::new(());
 const SQLITE_UPGRADE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 const POSTGRES_UPGRADE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
 const SQLITE_CLEAN_BASELINE_MIGRATIONS: EmbeddedMigrations =
@@ -612,16 +733,48 @@ fn run_postgres_migrations(connection: &mut PgConnection) -> MigrationBootstrapR
     Ok(())
 }
 
-fn ensure_sqlite_db_file(db_url: &str) {
+fn ensure_sqlite_db_file(db_url: &str) -> Result<(), DatabaseInitError> {
     let db_path = Path::new(db_url);
-    if !db_path.exists() {
-        if let Some(parent_dir) = db_path.parent() {
-            if !parent_dir.exists() {
-                std::fs::create_dir_all(parent_dir).expect("failed to create database directory");
-            }
+    if db_path.exists() {
+        if db_path.is_file() {
+            return Ok(());
         }
-        File::create(db_path).expect("failed to create database file");
+        return Err(DatabaseInitError::Io {
+            operation: "create sqlite database file",
+            path: db_path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "path exists but is not a file",
+            ),
+        });
     }
+
+    if let Some(parent_dir) = db_path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        if parent_dir.exists() && !parent_dir.is_dir() {
+            return Err(DatabaseInitError::Io {
+                operation: "create sqlite database directory",
+                path: parent_dir.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "path exists but is not a directory",
+                ),
+            });
+        }
+        if !parent_dir.exists() {
+            std::fs::create_dir_all(parent_dir).map_err(|source| DatabaseInitError::Io {
+                operation: "create sqlite database directory",
+                path: parent_dir.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+
+    File::create(db_path).map_err(|source| DatabaseInitError::Io {
+        operation: "create sqlite database file",
+        path: db_path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -640,7 +793,7 @@ fn create_test_sqlite_db(file_name: &str) -> (TempDir, String) {
         .join(file_name)
         .to_string_lossy()
         .into_owned();
-    ensure_sqlite_db_file(&db_url);
+    ensure_sqlite_db_file(&db_url).expect("test sqlite db file should be created");
     (temp_dir, db_url)
 }
 
@@ -653,14 +806,26 @@ fn apply_test_sqlite_pragmas(
     ))
 }
 
-fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
-    ensure_sqlite_db_file(db_url);
+fn init_sqlite_pool(
+    db_url: &str,
+) -> Result<Pool<ConnectionManager<SqliteConnection>>, DatabaseInitError> {
+    ensure_sqlite_db_file(db_url)?;
+    let db_path = PathBuf::from(db_url);
 
-    let mut connection =
-        SqliteConnection::establish(db_url).expect("failed to establish migration connection");
+    let mut connection = SqliteConnection::establish(db_url).map_err(|source| {
+        DatabaseInitError::SqliteConnection {
+            path: db_path.clone(),
+            source,
+        }
+    })?;
 
     #[cfg(test)]
-    apply_test_sqlite_pragmas(&mut connection).expect("sqlite test pragmas should apply");
+    apply_test_sqlite_pragmas(&mut connection).map_err(|source| {
+        DatabaseInitError::SqlitePragma {
+            path: db_path.clone(),
+            source,
+        }
+    })?;
 
     {
         use diesel::prelude::*;
@@ -675,9 +840,16 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
         }
     }
 
-    run_sqlite_migrations(&mut connection).expect("failed to run sqlite migrations");
-    backfill_api_key_shadow_sqlite(&mut connection)
-        .expect("failed to backfill api_key shadow table");
+    run_sqlite_migrations(&mut connection).map_err(|source| DatabaseInitError::Migration {
+        backend: "sqlite",
+        source: source.to_string(),
+    })?;
+    backfill_api_key_shadow_sqlite(&mut connection).map_err(|source| {
+        DatabaseInitError::Backfill {
+            backend: "sqlite",
+            source,
+        }
+    })?;
 
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);
     Pool::builder()
@@ -694,22 +866,35 @@ fn init_sqlite_pool(db_url: &str) -> Pool<ConnectionManager<SqliteConnection>> {
             }
         })
         .build(manager)
-        .expect("Failed to create pool.")
+        .map_err(|source| DatabaseInitError::Pool {
+            backend: "sqlite",
+            source: source.to_string(),
+        })
 }
 
-fn init_pg_pool(db_url: &str) -> Pool<ConnectionManager<PgConnection>> {
-    let mut connection =
-        PgConnection::establish(db_url).expect("failed to establish migration connection");
+fn init_pg_pool(db_url: &str) -> Result<Pool<ConnectionManager<PgConnection>>, DatabaseInitError> {
+    let mut connection = PgConnection::establish(db_url)
+        .map_err(|source| DatabaseInitError::PostgresConnection { source })?;
 
-    run_postgres_migrations(&mut connection).expect("failed to run postgres migrations");
-    backfill_api_key_shadow_postgres(&mut connection)
-        .expect("failed to backfill api_key shadow table");
+    run_postgres_migrations(&mut connection).map_err(|source| DatabaseInitError::Migration {
+        backend: "postgres",
+        source: source.to_string(),
+    })?;
+    backfill_api_key_shadow_postgres(&mut connection).map_err(|source| {
+        DatabaseInitError::Backfill {
+            backend: "postgres",
+            source,
+        }
+    })?;
 
     let manager = ConnectionManager::<PgConnection>::new(db_url);
     Pool::builder()
         .max_size(CONFIG.db_pool_size)
         .build(manager)
-        .expect("Failed to create pool.")
+        .map_err(|source| DatabaseInitError::Pool {
+            backend: "postgres",
+            source: source.to_string(),
+        })
 }
 
 pub type DbResult<T> = Result<T, BaseError>;
@@ -725,6 +910,7 @@ pub struct ListResult<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn apply_sql(connection: &mut SqliteConnection, sql_text: &str) {
         if let Err(err) = connection.batch_execute(sql_text) {
@@ -753,6 +939,113 @@ mod tests {
         .bind::<diesel::sql_types::Text, _>("https://example.com")
         .execute(connection)
         .expect("provider marker should insert");
+    }
+
+    #[test]
+    fn sqlite_db_file_creation_creates_parent_directory_and_file() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let db_path = temp_dir.path().join("db").join("cyder.sqlite");
+
+        ensure_sqlite_db_file(db_path.to_str().expect("db path should be utf8"))
+            .expect("sqlite db file should be created");
+
+        assert!(db_path.is_file());
+    }
+
+    #[test]
+    fn sqlite_db_file_creation_error_includes_operation_and_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let blocked_parent = temp_dir.path().join("blocked");
+        std::fs::write(&blocked_parent, "not a directory")
+            .expect("blocking file should be written");
+        let db_path = blocked_parent.join("cyder.sqlite");
+
+        let error = ensure_sqlite_db_file(db_path.to_str().expect("db path should be utf8"))
+            .expect_err("blocked parent should fail sqlite db file creation");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("create sqlite database directory"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(&blocked_parent.display().to_string()),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn sqlite_pool_initialization_creates_configured_db_file() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let db_path = temp_dir.path().join("db").join("cyder.sqlite");
+
+        let _pool =
+            DbPool::try_establish_for_url(db_path.to_str().expect("db path should be utf8"))
+                .expect("sqlite pool should initialize");
+
+        assert!(db_path.is_file());
+    }
+
+    #[test]
+    fn sqlite_pool_initialization_error_includes_operation_and_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let blocked_parent = temp_dir.path().join("blocked-db-dir");
+        std::fs::write(&blocked_parent, "not a directory")
+            .expect("blocking file should be written");
+        let db_path = blocked_parent.join("cyder.sqlite");
+
+        let error = match DbPool::try_establish_for_url(
+            db_path.to_str().expect("db path should be utf8"),
+        ) {
+            Ok(_) => panic!("sqlite pool should fail before panic when db dir is blocked"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+
+        assert!(
+            message.contains("create sqlite database directory"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(&blocked_parent.display().to_string()),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn retryable_global_initializer_does_not_cache_failed_attempts() {
+        static CELL: OnceLock<&'static str> = OnceLock::new();
+        static LOCK: Mutex<()> = Mutex::new(());
+        static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+        let first = get_or_try_init_retryable(&CELL, &LOCK, || {
+            ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+            Err::<&'static str, &'static str>("database is temporarily unavailable")
+        });
+        assert_eq!(
+            first,
+            Err("database is temporarily unavailable"),
+            "first initialization should surface the transient error"
+        );
+        assert!(
+            CELL.get().is_none(),
+            "failed initialization must not populate the global cell"
+        );
+
+        let second = get_or_try_init_retryable(&CELL, &LOCK, || {
+            ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+            Ok::<&'static str, &'static str>("ready")
+        })
+        .expect("second initialization should retry and succeed");
+        assert_eq!(*second, "ready");
+
+        let third = get_or_try_init_retryable(&CELL, &LOCK, || {
+            ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+            Ok::<&'static str, &'static str>("wrong")
+        })
+        .expect("initialized value should be reused");
+        assert_eq!(*third, "ready");
+        assert_eq!(ATTEMPTS.load(Ordering::SeqCst), 2);
     }
 
     fn mark_sqlite_migration_applied(connection: &mut SqliteConnection, version: &str) {

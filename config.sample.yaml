@@ -1,14 +1,27 @@
 # Base configuration sample.
 #
+# Docker and packaged deployments use CYDER_DATA_DIR=/data/cyder by default.
 # Runtime load priority is:
-# program defaults < config.default.yaml < config.local.yaml/config.yaml <
-# environment variables < config.override.yaml.
+# program defaults < generated config.default.yaml < base config.yaml <
+# allowlisted CYDER_* environment variables < managed config.override.yaml.
+#
+# config.default.yaml is generated on first startup to persist random secrets
+# and path-aware defaults. It is runtime state, not a tracked sample to edit.
+#
+# The only environment variables that override final config fields are
+# CYDER_HOST, CYDER_PORT, CYDER_BASE_PATH, CYDER_LOG_LEVEL, and CYDER_TIMEZONE.
+# Use YAML for secrets, database, Redis/cache, storage, deployment, runtime
+# state, proxy, and governance settings.
 #
 # config.override.yaml is managed by the System Config page and should only
 # contain the hot-reload allowlist fields accepted by the backend. Do not copy
 # override-only edits into this sample; use the base config for restart-required
 # settings such as bind, secrets, database, Redis/cache, storage, deployment, and
 # runtime state backend.
+#
+# Local development is zero-config through cargo xtask dev. Generated files live
+# under .cyder/dev, which is git-ignored. To migrate an old local config, copy it
+# to .cyder/dev/config/config.yaml or set CYDER_CONFIG_PATH explicitly.
 host: 0.0.0.0
 port: 8000
 base_path: /ai
@@ -16,9 +29,9 @@ secret_key: your_secret_key
 password_salt: jKnDj%pNoJerZGPA&AG7Rwuwo&8tC6QW
 jwt_secret: uCK6g1EBERjj2U7FT8sGlMFFzL2M3ufW
 # api_key_jwt_secret: another_secret_key
-db_url: storage/database.db
+db_url: /data/cyder/db/cyder.sqlite
 # db_url: postgres://user:pass@host:port/schema_name
-# db_url: mysql://user:pass@host:port/database_name
+# Supported database URL forms are SQLite paths and PostgreSQL URLs.
 redis:
   url: "redis://127.0.0.1:6379/"
   pool_size: 10
@@ -44,7 +57,7 @@ routing_resilience:
 storage:
   driver: local # local/s3
   local:
-    root: storage/storage
+    root: /data/cyder/storage
   s3:
     endpoint: s3.amazonaws.com
     region: us-east-1

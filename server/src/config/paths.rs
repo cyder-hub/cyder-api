@@ -1,11 +1,20 @@
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
+
+use cyder_tools::log::warn;
+
+use super::persistence::{self, PersistencePaths, ResolvedPathSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigPaths {
     pub default_config_path: PathBuf,
     pub user_config_path: PathBuf,
+    pub user_config_path_required: bool,
     pub override_config_path: PathBuf,
     pub override_history_path: PathBuf,
+    pub persistence: PersistencePaths,
+    pub ignored_empty_environment_variables: Vec<String>,
 }
 
 impl ConfigPaths {
@@ -18,50 +27,52 @@ impl ConfigPaths {
         Self {
             default_config_path: default_config_path.into(),
             user_config_path: user_config_path.into(),
+            user_config_path_required: false,
             override_config_path: override_config_path.into(),
             override_history_path: override_history_path.into(),
+            persistence: default_release_persistence_paths(),
+            ignored_empty_environment_variables: Vec::new(),
         }
     }
 
     pub fn for_current_build() -> Self {
-        if cfg!(debug_assertions) {
-            let user_config_path = if Path::new("../config.local.yaml").exists() {
-                "../config.local.yaml"
-            } else {
-                "../config.yaml"
-            };
+        let paths = Self::from_resolved_path_set(persistence::resolve_current_path_set());
+        for name in &paths.ignored_empty_environment_variables {
+            warn!("ignoring empty environment variable {name}; treating it as unset");
+        }
+        paths
+    }
 
-            Self::new(
-                "../config.default.yaml",
-                user_config_path,
-                "../config.override.yaml",
-                "../config.override.history.jsonl",
-            )
-        } else {
-            Self::new(
-                "config.default.yaml",
-                "config.yaml",
-                "config.override.yaml",
-                "config.override.history.jsonl",
-            )
+    fn from_resolved_path_set(resolved: ResolvedPathSet) -> Self {
+        Self {
+            default_config_path: resolved.default_config_path,
+            user_config_path: resolved.user_config_path,
+            user_config_path_required: resolved.user_config_path_required,
+            override_config_path: resolved.override_config_path,
+            override_history_path: resolved.override_history_path,
+            persistence: resolved.persistence,
+            ignored_empty_environment_variables: resolved.ignored_empty_environment_variables,
         }
     }
 
     #[cfg(test)]
-    pub fn for_test(base_dir: impl AsRef<Path>) -> Self {
-        let base_dir = base_dir.as_ref();
-        let local_config_path = base_dir.join("config.local.yaml");
-        let user_config_path = if local_config_path.exists() {
-            local_config_path
-        } else {
-            base_dir.join("config.yaml")
-        };
-
-        Self::new(
-            base_dir.join("config.default.yaml"),
-            user_config_path,
-            base_dir.join("config.override.yaml"),
-            base_dir.join("config.override.history.jsonl"),
-        )
+    pub fn for_test(repo_root: impl AsRef<Path>) -> Self {
+        let repo_root = repo_root.as_ref();
+        Self::from_resolved_path_set(persistence::resolve_path_set(
+            persistence::PersistenceEnvironment::default(),
+            persistence::BuildProfile::Debug,
+            repo_root.to_path_buf(),
+            repo_root.join(".cyder").join("dev"),
+        ))
     }
+}
+
+fn default_release_persistence_paths() -> PersistencePaths {
+    persistence::resolve_path_set(
+        persistence::PersistenceEnvironment::default(),
+        persistence::BuildProfile::Release,
+        PathBuf::from("."),
+        PathBuf::from(".cyder").join("dev"),
+    )
+    .persistence
 }

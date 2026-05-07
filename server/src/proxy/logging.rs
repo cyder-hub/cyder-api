@@ -39,7 +39,11 @@ use reqwest::StatusCode;
 use rmp_serde::to_vec_named;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::{env, io::Write, path::PathBuf, time::Duration};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
@@ -104,10 +108,24 @@ pub struct StreamingBodyWriter {
 
 impl StreamingBodyWriter {
     pub async fn new(kind: LogBodyKind, log_id: i64) -> std::io::Result<Self> {
-        let mut dir = env::temp_dir();
-        dir.push("cyder-api");
-        dir.push("request-log-spool");
-        fs::create_dir_all(&dir).await?;
+        Self::new_in_spool_dir(
+            kind,
+            log_id,
+            &crate::config::LOADED_CONFIG
+                .paths
+                .persistence
+                .request_log_spool_dir,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_in_spool_dir(
+        kind: LogBodyKind,
+        log_id: i64,
+        spool_dir: impl AsRef<Path>,
+    ) -> std::io::Result<Self> {
+        let dir = spool_dir.as_ref();
+        fs::create_dir_all(dir).await?;
 
         let path = dir.join(format!(
             "{}-{}-{}.body",
@@ -2154,6 +2172,11 @@ mod tests {
         LogBodyKind, LogManager, LogManagerMetrics, LoggedBody, RequestLogContext,
         StreamingBodyWriter, response_capture_state_for_bundle, should_persist_response_bodies,
     };
+    use crate::config::{
+        loader::{ConfigLoadOptions, load_effective_config},
+        paths::ConfigPaths,
+        persistence::{BuildProfile, PersistenceEnvironment, bootstrap_config_paths},
+    };
     use crate::cost::UsageNormalization;
     use crate::proxy::runtime::attempt::{
         CAPABILITY_MISMATCH_SKIPPED_ERROR, NO_CANDIDATE_AVAILABLE_ERROR, RequestAttemptDraft,
@@ -2790,9 +2813,12 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_body_writer_spools_and_finishes() {
-        let mut writer = StreamingBodyWriter::new(LogBodyKind::LlmResponse, 42)
-            .await
-            .unwrap();
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let spool_dir = temp_dir.path().join("request-log-spool");
+        let mut writer =
+            StreamingBodyWriter::new_in_spool_dir(LogBodyKind::LlmResponse, 42, &spool_dir)
+                .await
+                .unwrap();
         writer.append(b"hello ").await.unwrap();
         writer.append(b"world").await.unwrap();
 
@@ -2800,6 +2826,10 @@ mod tests {
             .finish(LogBodyCaptureState::Incomplete)
             .await
             .unwrap();
+        let LoggedBody::Spooled { path, .. } = &logged_body else {
+            panic!("streaming body should be spooled");
+        };
+        assert_eq!(path.parent(), Some(spool_dir.as_path()));
         let body_bytes = LogManager::read_logged_body(&logged_body, 42)
             .await
             .unwrap();
@@ -2811,13 +2841,79 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_body_writer_abort_removes_spooled_file() {
-        let writer = StreamingBodyWriter::new(LogBodyKind::LlmResponse, 43)
-            .await
-            .unwrap();
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let spool_dir = temp_dir.path().join("request-log-spool");
+        let writer =
+            StreamingBodyWriter::new_in_spool_dir(LogBodyKind::LlmResponse, 43, &spool_dir)
+                .await
+                .unwrap();
         let snapshot = writer.snapshot(LogBodyCaptureState::Incomplete);
+        let LoggedBody::Spooled { path, .. } = &snapshot else {
+            panic!("streaming body should be spooled");
+        };
+        assert_eq!(path.parent(), Some(spool_dir.as_path()));
         writer.abort().await.unwrap();
 
         assert!(LogManager::read_logged_body(&snapshot, 43).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_body_writer_follows_debug_persistence_spool_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let debug_data_dir = temp_dir.path().join(".cyder").join("dev");
+        let resolved = crate::config::persistence::resolve_path_set(
+            PersistenceEnvironment::default(),
+            BuildProfile::Debug,
+            temp_dir.path().to_path_buf(),
+            debug_data_dir.clone(),
+        );
+        let paths = ConfigPaths {
+            default_config_path: resolved.default_config_path,
+            user_config_path: resolved.user_config_path,
+            user_config_path_required: resolved.user_config_path_required,
+            override_config_path: resolved.override_config_path,
+            override_history_path: resolved.override_history_path,
+            persistence: resolved.persistence,
+            ignored_empty_environment_variables: resolved.ignored_empty_environment_variables,
+        };
+        bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        let loaded = load_effective_config(
+            &paths,
+            ConfigLoadOptions {
+                include_environment: false,
+                include_override: true,
+            },
+        )
+        .expect("config should load");
+        let expected_spool_dir = debug_data_dir.join("tmp").join("request-log-spool");
+        assert_eq!(
+            loaded.paths.persistence.request_log_spool_dir,
+            expected_spool_dir
+        );
+
+        let mut writer = StreamingBodyWriter::new_in_spool_dir(
+            LogBodyKind::UserResponse,
+            44,
+            &loaded.paths.persistence.request_log_spool_dir,
+        )
+        .await
+        .expect("spool writer should be created");
+        writer.append(b"debug path").await.unwrap();
+        let logged_body = writer
+            .finish(LogBodyCaptureState::Complete)
+            .await
+            .expect("spooled body should finish");
+        let LoggedBody::Spooled { path, .. } = &logged_body else {
+            panic!("streaming body should be spooled");
+        };
+        assert_eq!(path.parent(), Some(expected_spool_dir.as_path()));
+        assert!(path.starts_with(debug_data_dir));
+        assert_eq!(
+            LogManager::read_logged_body(&logged_body, 44).await,
+            Some(Bytes::from_static(b"debug path"))
+        );
+
+        LogManager::cleanup_logged_body(&logged_body, 44).await;
     }
 
     #[test]

@@ -110,7 +110,7 @@ pub fn create_system_config_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{fs, path::Path, sync::Arc};
 
     use axum::{
         body::{Body, to_bytes},
@@ -151,6 +151,9 @@ mod tests {
         let temp_dir = temp_dir.keep();
         let paths = ConfigPaths::for_test(&temp_dir);
         if let Some(user_config_yaml) = user_config_yaml {
+            if let Some(parent) = paths.user_config_path.parent() {
+                fs::create_dir_all(parent).expect("user config parent should create");
+            }
             fs::write(&paths.user_config_path, user_config_yaml).expect("user config should write");
         }
         let load_options = ConfigLoadOptions {
@@ -218,6 +221,13 @@ mod tests {
         });
 
         (app_state, paths)
+    }
+
+    fn write_test_config(path: &Path, yaml: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("config parent should create");
+        }
+        fs::write(path, yaml).expect("config file should write");
     }
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
@@ -320,8 +330,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(app_state.system_config.version().await, 3);
 
-        fs::write(&paths.override_config_path, "timezone: Asia/Shanghai\n")
-            .expect("manual override should write");
+        write_test_config(&paths.override_config_path, "timezone: Asia/Shanghai\n");
         let response = send(
             &app_state,
             request(Method::POST, "/system/config/reload", Some(json!({}))),
@@ -370,8 +379,7 @@ mod tests {
         let (app_state, paths) = test_app_state().await;
         let before = app_state.system_config.runtime_snapshot().await;
 
-        fs::write(&paths.override_config_path, "log_level: debug\n")
-            .expect("manual override should write");
+        write_test_config(&paths.override_config_path, "log_level: debug\n");
 
         let response = send(&app_state, request(Method::GET, "/system/config", None)).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -392,6 +400,23 @@ mod tests {
                 .and_then(Value::as_i64)
                 .is_some()
         );
+        assert!(
+            body.pointer("/data/persistence_health/status")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        assert!(
+            body.pointer("/data/persistence_health/items")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.pointer("/key") == Some(&json!("override_config"))
+                        && item.pointer("/status") == Some(&json!("ok"))
+                        && item.pointer("/path")
+                            == Some(&json!(paths.override_config_path.display().to_string()))
+                        && item.pointer("/readable") == Some(&json!(true))
+                        && item.pointer("/writable") == Some(&json!(true))
+                }))
+        );
         assert_eq!(app_state.system_config.version().await, 1);
         assert_eq!(app_state.system_config.runtime_snapshot().await, before);
     }
@@ -401,11 +426,10 @@ mod tests {
         let (app_state, paths) = test_app_state().await;
         let before = app_state.system_config.runtime_snapshot().await;
 
-        fs::write(
+        write_test_config(
             &paths.override_config_path,
             "db_url: postgres://secret@example/cyder\nlog_level: debug\n",
-        )
-        .expect("invalid manual override should write");
+        );
 
         let response = send(&app_state, request(Method::GET, "/system/config", None)).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -422,6 +446,22 @@ mod tests {
             body.pointer("/data/override_file/invalid_paths")
                 .and_then(Value::as_array)
                 .is_some_and(|paths| paths.iter().any(|path| path == "db_url"))
+        );
+        assert_eq!(
+            body.pointer("/data/persistence_health/status"),
+            Some(&json!("error"))
+        );
+        assert!(
+            body.pointer("/data/persistence_health/items")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| {
+                    item.pointer("/key") == Some(&json!("override_config"))
+                        && item.pointer("/status") == Some(&json!("error"))
+                        && item
+                            .pointer("/message")
+                            .and_then(Value::as_str)
+                            .is_some_and(|message| message.contains("unsupported paths"))
+                }))
         );
         assert!(!serialized.contains("postgres://secret"));
         assert!(!serialized.contains("log_level: debug"));

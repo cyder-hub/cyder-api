@@ -4,11 +4,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use config::{Config, Environment, File, Source};
+use config::{Config, File, Source};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{FinalConfig, paths::ConfigPaths};
+use super::{FinalConfig, env, paths::ConfigPaths};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +86,7 @@ pub enum ConfigSourceError {
         source_name: String,
         source: config::ConfigError,
     },
+    Environment(env::EnvironmentConfigError),
 }
 
 impl fmt::Display for ConfigSourceError {
@@ -116,14 +117,17 @@ impl fmt::Display for ConfigSourceError {
                 layer.as_str(),
                 source_name
             ),
+            ConfigSourceError::Environment(err) => {
+                write!(f, "failed to read environment configuration source: {err}")
+            }
         }
     }
 }
 
 impl std::error::Error for ConfigSourceError {}
 
-pub fn environment_source() -> Environment {
-    Environment::default().try_parsing(true).ignore_empty(true)
+pub fn environment_source() -> Result<env::EnvironmentConfigSource, env::EnvironmentConfigError> {
+    env::EnvironmentConfigSource::current()
 }
 
 pub fn build_config_source_report(
@@ -139,6 +143,7 @@ pub fn build_config_source_report(
         default_config,
         final_config,
         options,
+        None,
         None,
     )
 }
@@ -158,6 +163,27 @@ pub fn build_config_source_report_with_override_value(
         final_config,
         options,
         Some(override_value),
+        None,
+    )
+}
+
+pub fn build_config_source_report_with_runtime_sources(
+    paths: &ConfigPaths,
+    program_default_config: &FinalConfig,
+    default_config: &FinalConfig,
+    final_config: &FinalConfig,
+    options: ConfigSourceTraceOptions,
+    override_value: Option<Value>,
+    runtime_environment_source: Option<env::EnvironmentConfigSource>,
+) -> Result<ConfigSourceReport, ConfigSourceError> {
+    build_config_source_report_inner(
+        paths,
+        program_default_config,
+        default_config,
+        final_config,
+        options,
+        override_value,
+        runtime_environment_source,
     )
 }
 
@@ -168,6 +194,7 @@ fn build_config_source_report_inner(
     final_config: &FinalConfig,
     options: ConfigSourceTraceOptions,
     override_value: Option<Value>,
+    runtime_environment_source: Option<env::EnvironmentConfigSource>,
 ) -> Result<ConfigSourceReport, ConfigSourceError> {
     let program_default_value =
         serialize_config_layer(ConfigLayerKind::ProgramDefault, program_default_config)?;
@@ -218,14 +245,18 @@ fn build_config_source_report_inner(
     };
 
     let environment_layer = if options.include_environment {
+        let environment_source = match runtime_environment_source {
+            Some(environment_source) => environment_source,
+            None => environment_source().map_err(ConfigSourceError::Environment)?,
+        };
         let value = read_source_layer_value(
             ConfigLayerKind::Environment,
-            "the environment",
-            environment_source(),
+            env::ENVIRONMENT_SOURCE_NAME,
+            environment_source,
         )?;
         LoadedConfigLayer {
             kind: ConfigLayerKind::Environment,
-            source_name: "the environment".to_string(),
+            source_name: env::ENVIRONMENT_SOURCE_NAME.to_string(),
             source_path: None,
             fields: flatten_json_paths(&value),
             value,
@@ -233,7 +264,7 @@ fn build_config_source_report_inner(
     } else {
         empty_layer(
             ConfigLayerKind::Environment,
-            "the environment".to_string(),
+            env::ENVIRONMENT_SOURCE_NAME.to_string(),
             None,
         )
     };

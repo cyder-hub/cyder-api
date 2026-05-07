@@ -23,14 +23,34 @@ COPY . .
 RUN cargo xtask build
 
 # Prepare final artifacts
-RUN mkdir -p /app && \
-    cp /work/target/release/cyder-api /app && \
-    cp -r /work/front/dist /app/public
+RUN mkdir -p /opt/cyder/bin && \
+    cp /work/target/release/cyder-api /opt/cyder/bin/cyder-api && \
+    cp -r /work/front/dist /opt/cyder/public
 
 # Stage 4: Final runtime image
 FROM alpine:3.21.3
-COPY --from=builder /app /app/
-RUN mkdir -p /app/storage
-WORKDIR /app
 
-CMD ["/app/cyder-api"]
+RUN apk add --no-cache ca-certificates su-exec && \
+    addgroup -g 1000 -S cyder && \
+    adduser -u 1000 -S -D -H -G cyder -s /sbin/nologin cyder && \
+    mkdir -p \
+        /opt/cyder/bin \
+        /opt/cyder/public \
+        /data/cyder/config \
+        /data/cyder/db \
+        /data/cyder/storage \
+        /tmp/cyder-api && \
+    chown -R cyder:cyder /data/cyder /tmp/cyder-api
+
+COPY --from=builder /opt/cyder /opt/cyder/
+COPY docker-entrypoint /usr/local/bin/cyder-entrypoint
+RUN chmod 0755 /usr/local/bin/cyder-entrypoint && \
+    chmod -R a+rX /opt/cyder
+
+ENV CYDER_DATA_DIR=/data/cyder
+WORKDIR /opt/cyder
+VOLUME ["/data/cyder"]
+EXPOSE 8000
+
+ENTRYPOINT ["/usr/local/bin/cyder-entrypoint"]
+CMD ["/opt/cyder/bin/cyder-api"]

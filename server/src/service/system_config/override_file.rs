@@ -6,9 +6,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use serde_json::Value;
 
-use crate::config::override_policy;
+use crate::config::{override_policy, persistence::set_owner_read_write_permissions};
 
 use super::override_model::{
     OverrideModelError, empty_override_document, load_override_document, override_document_to_yaml,
@@ -146,14 +149,15 @@ fn write_override_document_atomic_inner(
 }
 
 fn write_temp_file(path: &Path, bytes: &[u8]) -> Result<(), OverrideFileError> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(|source| OverrideFileError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut file = options.open(path).map_err(|source| OverrideFileError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
     file.write_all(bytes)
         .map_err(|source| OverrideFileError::Io {
             path: path.to_path_buf(),
@@ -175,19 +179,6 @@ fn temp_path_for(path: &Path) -> PathBuf {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     path.with_file_name(format!(".{file_name}.{}.{}.tmp", std::process::id(), nanos))
-}
-
-#[cfg(unix)]
-fn set_owner_read_write_permissions(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let permissions = fs::Permissions::from_mode(0o600);
-    fs::set_permissions(path, permissions)
-}
-
-#[cfg(not(unix))]
-fn set_owner_read_write_permissions(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 fn sync_parent_dir(parent: &Path) {
@@ -337,5 +328,23 @@ log_level: debug
 
         let loaded = read_override_document(&path).expect("old override should still parse");
         assert_eq!(loaded["log_level"], json!("info"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_override_file_is_created_owner_read_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let path = temp_dir.path().join(".config.override.yaml.tmp");
+
+        write_temp_file(&path, b"log_level: debug\n").expect("temp override should write");
+
+        let mode = std::fs::metadata(&path)
+            .expect("temp override metadata should read")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

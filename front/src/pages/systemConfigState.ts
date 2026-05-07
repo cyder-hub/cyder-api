@@ -6,6 +6,8 @@ import type {
   SystemConfigField,
   SystemConfigLayerKind,
   SystemConfigOverrideFileReport,
+  SystemConfigPersistenceHealthItem,
+  SystemConfigPersistenceHealthStatus,
   SystemConfigPreviewResponse,
 } from "@/store/types";
 
@@ -151,6 +153,26 @@ export function buildSystemConfigOverrideDocumentText(
   return overrideFile.yaml || "{}";
 }
 
+export function sortSystemConfigPersistenceHealthItems(
+  items: SystemConfigPersistenceHealthItem[],
+): SystemConfigPersistenceHealthItem[] {
+  return [...items].sort((left, right) => {
+    const statusRank =
+      persistenceHealthStatusRank(left.status) - persistenceHealthStatusRank(right.status);
+    if (statusRank !== 0) {
+      return statusRank;
+    }
+    return left.key.localeCompare(right.key);
+  });
+}
+
+export function countSystemConfigPersistenceIssues(
+  items: SystemConfigPersistenceHealthItem[],
+): number {
+  return items.filter((item) => item.status === "error" || item.status === "warning")
+    .length;
+}
+
 export function systemConfigPayloadsMatch(
   left: SystemConfigChangeRequest | null,
   right: SystemConfigChangeRequest | null,
@@ -182,6 +204,19 @@ function matchesBooleanFilter(value: boolean, filter: SystemConfigBooleanFilter)
 
 function collectSortedUnique<T extends string>(items: T[]): T[] {
   return Array.from(new Set(items)).sort((left, right) => left.localeCompare(right));
+}
+
+function persistenceHealthStatusRank(status: SystemConfigPersistenceHealthStatus): number {
+  switch (status) {
+    case "error":
+      return 0;
+    case "warning":
+      return 1;
+    case "ok":
+      return 2;
+    case "skipped":
+      return 3;
+  }
 }
 
 function canonicalizeSystemConfigChanges(payload: SystemConfigChangeRequest): string {

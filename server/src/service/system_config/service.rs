@@ -281,7 +281,7 @@ impl SystemConfigService {
         write_override_document_atomic(&self.paths.override_config_path, &document)?;
 
         let loaded = self.reload_loaded_config()?;
-        let next_state = build_state(loaded, version_after, None);
+        let mut next_state = build_state(loaded, version_after, None);
         let diff = preview.diff;
         let history = build_history_item(
             SystemConfigHistoryOperation::Apply,
@@ -299,6 +299,7 @@ impl SystemConfigService {
         )
         .await;
 
+        refresh_resolved_config_file_state(&mut next_state.report, &next_state.loaded);
         let report = next_state.report.clone();
         *self.state.write().await = next_state;
         Ok(report)
@@ -340,7 +341,7 @@ impl SystemConfigService {
             .await?;
 
         write_override_document_atomic(&self.paths.override_config_path, &document)?;
-        let next_state = build_state(loaded, version_after, None);
+        let mut next_state = build_state(loaded, version_after, None);
         let mut history = build_history_item(
             SystemConfigHistoryOperation::Reset,
             Some(reason),
@@ -360,6 +361,7 @@ impl SystemConfigService {
         )
         .await;
 
+        refresh_resolved_config_file_state(&mut next_state.report, &next_state.loaded);
         let report = next_state.report.clone();
         *self.state.write().await = next_state;
         Ok(report)
@@ -376,7 +378,7 @@ impl SystemConfigService {
         let old_loaded = current_state.loaded.clone();
         let loaded = self.reload_loaded_config()?;
         let diff = diff_all_metadata_paths(&old_loaded, &loaded);
-        let next_state = build_state(loaded, version_after, None);
+        let mut next_state = build_state(loaded, version_after, None);
         let old_snapshot = RuntimeConfigSnapshot::from_config(version_before, &old_loaded.config);
         let prepared_runtime = self
             .prepare_runtime_snapshot_effects(&old_snapshot, &next_state.snapshot, &diff)
@@ -397,6 +399,7 @@ impl SystemConfigService {
         )
         .await;
 
+        refresh_resolved_config_file_state(&mut next_state.report, &next_state.loaded);
         let report = next_state.report.clone();
         *self.state.write().await = next_state;
         Ok(report)
@@ -713,7 +716,7 @@ pub type SharedSystemConfigService = Arc<SystemConfigService>;
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc, sync::Mutex};
+    use std::{fs, path::Path, sync::Arc, sync::Mutex};
 
     use log::LevelFilter;
     use serde_json::json;
@@ -752,6 +755,13 @@ mod tests {
         )
     }
 
+    fn write_test_config(path: &Path, yaml: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("config parent should be created");
+        }
+        fs::write(path, yaml).expect("config file should be written");
+    }
+
     #[tokio::test]
     async fn apply_success_increments_version_and_snapshot() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
@@ -777,6 +787,38 @@ mod tests {
         assert!(report.fields.iter().any(|field| {
             field.path == "max_body_size" && field.value == json!(2 * 1024 * 1024)
         }));
+    }
+
+    #[tokio::test]
+    async fn apply_returned_report_reflects_new_history_file_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        let service = service_for_paths(&paths);
+        assert!(!paths.override_history_path.exists());
+
+        let report = service
+            .apply_changes(SystemConfigChangeRequest {
+                changes: [("max_body_size".to_string(), json!(2 * 1024 * 1024))]
+                    .into_iter()
+                    .collect(),
+                reason: Some("raise body limit".to_string()),
+            })
+            .await
+            .expect("apply should succeed");
+
+        assert!(report.summary.history_exists);
+        let history = report
+            .persistence_health
+            .items
+            .iter()
+            .find(|item| item.key == "override_history")
+            .expect("history health item should exist");
+        assert!(history.exists);
+        assert!(history.readable);
+        assert!(history.writable);
+
+        let refreshed = service.report().await;
+        assert!(refreshed.summary.history_exists);
     }
 
     #[tokio::test]
@@ -874,12 +916,8 @@ mod tests {
     #[tokio::test]
     async fn reset_paths_returns_field_to_base_config_value() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.yaml"),
-            "max_body_size: 1048576\n",
-        )
-        .expect("base config should be written");
         let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.user_config_path, "max_body_size: 1048576\n");
         let service = service_for_paths(&paths);
 
         service
@@ -984,14 +1022,9 @@ mod tests {
     #[tokio::test]
     async fn reset_allows_source_only_override_file_change() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(temp_dir.path().join("config.yaml"), "log_level: debug\n")
-            .expect("base config should be written");
-        fs::write(
-            temp_dir.path().join("config.override.yaml"),
-            "log_level: debug\n",
-        )
-        .expect("override config should be written");
         let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.user_config_path, "log_level: debug\n");
+        write_test_config(&paths.override_config_path, "log_level: debug\n");
         let service = service_for_paths(&paths);
 
         service
@@ -1017,17 +1050,12 @@ mod tests {
     #[tokio::test]
     async fn reset_rejects_candidate_config_invalid_after_override_removal() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.yaml"),
-            "proxy: socks5://127.0.0.1:1080\n",
-        )
-        .expect("base config should be written");
-        fs::write(
-            temp_dir.path().join("config.override.yaml"),
-            "proxy: http://127.0.0.1:1080\n",
-        )
-        .expect("override config should be written");
         let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(&paths.user_config_path, "proxy: socks5://127.0.0.1:1080\n");
+        write_test_config(
+            &paths.override_config_path,
+            "proxy: http://127.0.0.1:1080\n",
+        );
         let service = service_for_paths(&paths);
         let before = service.runtime_snapshot().await;
         let before_override =
@@ -1161,6 +1189,9 @@ mod tests {
         let paths = ConfigPaths::for_test(temp_dir.path());
         let service = service_for_paths(&paths);
         let before = service.runtime_snapshot().await;
+        if let Some(parent) = paths.override_history_path.parent() {
+            fs::create_dir_all(parent).expect("history parent should be created");
+        }
         fs::create_dir(&paths.override_history_path)
             .expect("history path directory should force append failure");
 
@@ -1233,11 +1264,10 @@ mod tests {
         let paths = ConfigPaths::for_test(temp_dir.path());
         let service = service_for_paths(&paths);
         let before = service.runtime_snapshot().await;
-        fs::write(
+        write_test_config(
             &paths.override_config_path,
             "db_url: postgres://example\nlog_level: debug\n",
-        )
-        .expect("invalid manual override should write");
+        );
 
         let err = service
             .reload_override_file()
@@ -1265,8 +1295,7 @@ mod tests {
         let service = service_for_paths(&paths);
         let before = service.runtime_snapshot().await;
 
-        fs::write(&paths.override_config_path, "log_level: debug\n")
-            .expect("manual override should write");
+        write_test_config(&paths.override_config_path, "log_level: debug\n");
 
         let report = service.report().await;
 
@@ -1292,11 +1321,10 @@ mod tests {
         let service = service_for_paths(&paths);
         let before = service.runtime_snapshot().await;
 
-        fs::write(
+        write_test_config(
             &paths.override_config_path,
             "db_url: postgres://secret@example/cyder\nlog_level: debug\n",
-        )
-        .expect("invalid manual override should write");
+        );
 
         let report = service.report().await;
         let serialized = serde_json::to_string(&report).expect("report should serialize");
@@ -1321,12 +1349,11 @@ mod tests {
     #[tokio::test]
     async fn multi_instance_rejects_write_operations() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        fs::write(
-            temp_dir.path().join("config.yaml"),
-            "deployment:\n  mode: multi_instance\n",
-        )
-        .expect("base config should be written");
         let paths = ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
+            "deployment:\n  mode: multi_instance\n",
+        );
         let service = service_for_paths(&paths);
 
         let err = service

@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildV2AttemptRows, decodeBundleView } from "../src/components/record/bodyBundleView.ts";
+import {
+  buildV2AttemptRows,
+  decodeBundleView,
+} from "../src/pages/record/composables/useRecordDiagnostics.ts";
 
 const encoder = new TextEncoder();
 const bytes = (value) => encoder.encode(value);

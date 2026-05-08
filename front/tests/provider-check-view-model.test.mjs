@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildCheckOptions } from "../src/composables/providerCheckViewModel.ts";
+import { buildCheckOptions } from "../src/pages/provider-edit/composables/providerCheckViewModel.ts";
 
 test("buildCheckOptions keeps selection empty until the user chooses a target", () => {
   const result = buildCheckOptions(["first", "second"], (item, index) => {

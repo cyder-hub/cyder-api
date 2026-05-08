@@ -10,7 +10,7 @@ import {
   hydrateEditingProviderDataFromBootstrap,
   normalizeBootstrapCheckResult,
   syncProviderBootstrapFormState,
-} from "../src/pages/providerEditState.ts";
+} from "../src/pages/provider-edit/composables/providerEditState.ts";
 
 test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () => {
   const payload = buildProviderBootstrapPayload(

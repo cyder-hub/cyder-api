@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   calculateRecordTps,
   resolveVisibleOutputTokens,
-} from "../src/pages/recordTps.ts";
+} from "../src/pages/record/composables/useRecordList.ts";
 
 test("record TPS uses streaming tail duration when the stream has a meaningful tail", () => {
   const result = calculateRecordTps({

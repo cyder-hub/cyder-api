@@ -12,7 +12,7 @@ import type {
   CostCatalogVersion,
   CostComponent,
   CostPreviewResponse,
-} from "@/store/types";
+} from "@/services/types/cost";
 import CostVersionSection from "./CostVersionSection.vue";
 import type { PreviewDraft } from "./types";
 

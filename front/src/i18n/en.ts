@@ -35,6 +35,7 @@ export const enDict = {
     deleteFailed: "Failed to delete provider: {error}",
   },
   dashboard: {
+    title: "Dashboard",
     description:
       "View overall system status, resource statistics, and daily consumption metrics.",
     sections: {
@@ -249,10 +250,10 @@ export const enDict = {
     notifications: "Notifications",
     systemConfig: "System Config",
     sections: {
-      start: "Start here",
-      overview: "Overview",
-      core: "Core",
-      advanced: "Advanced",
+      operations: "Operations",
+      traffic: "Traffic",
+      resources: "Resources",
+      governance: "Governance",
     },
   },
   alertsPage: {
@@ -442,6 +443,12 @@ export const enDict = {
       editable: "Editable",
       hotReloadable: "Hot Reload",
       overrideFields: "Overrides",
+    },
+    sourcePriority: {
+      title: "Source Priority",
+      description:
+        "Effective values are resolved from program defaults, default config, user config, environment allowlist, managed override, then derived runtime values.",
+      configured: "{count} configured",
     },
     fieldCount: "Field Count",
     deploymentMode: "Deployment Mode",
@@ -661,6 +668,10 @@ export const enDict = {
       lastError: "Last error",
       proxy: "Proxy",
       sortScore: "Sort score",
+    },
+    table: {
+      provider: "Provider",
+      health: "Health",
     },
     detail: {
       statusCode: "Status code",
@@ -1380,6 +1391,19 @@ export const enDict = {
       monthlyTokens: "Monthly Tokens",
       dailyBudgetUsage: "Daily Budget Usage",
       monthlyBudgetUsage: "Monthly Budget Usage",
+      runtimeRejectionReason: "Runtime Rejection Reason",
+    },
+    runtimeRejection: {
+      none: "No active rejection",
+      disabled: "Rejected: key disabled",
+      expired: "Rejected: key expired",
+      rpm: "At RPM limit",
+      concurrency: "At concurrency limit",
+      dailyRequests: "At daily request quota",
+      dailyTokens: "At daily token quota",
+      monthlyTokens: "At monthly token quota",
+      dailyBudget: "At daily budget",
+      monthlyBudget: "At monthly budget",
     },
     currencyUnit: {
       cny: "yuan",
@@ -1407,6 +1431,9 @@ export const enDict = {
     rotateFailed: "Failed to rotate API key: {error}",
     deleteFailed: "Failed to delete API key: {error}",
     confirmDelete: "Are you sure you want to delete API Key '{name}'?",
+    confirmReveal: "Reveal API Key '{name}'?",
+    confirmRevealDescription:
+      "The full secret can be copied from the next panel. Only reveal it when you are ready to handle it securely.",
     confirmRotate:
       "Are you sure you want to rotate API Key '{name}'? The old secret will stop working immediately.",
     copyFailed: "Failed to copy API key.",
@@ -1523,12 +1550,20 @@ export const enDict = {
     loading: "Loading model routes...",
     errorPrefix: "Error loading model routes.",
     noData: "No model routes found.",
+    summary: {
+      total: "Routes",
+      enabled: "Enabled",
+      exposed: "Exposed",
+      candidates: "Candidates",
+    },
     table: {
       routeName: "Route Name",
       candidateCount: "Candidates",
       exposeInModels: "Expose in /models",
       enabled: "Enabled",
       primaryCandidate: "Primary Candidate",
+      reasoning: "Reasoning",
+      preview: "Preview",
     },
     modal: {
       titleEdit: "Edit Model Route",
@@ -1552,15 +1587,33 @@ export const enDict = {
       candidateMoveDown: "Move down",
       candidateRemove: "Remove",
     },
+    queue: {
+      description:
+        "Order defines the candidate queue submitted to the gateway. Lower priority values run first.",
+      priority: "Priority",
+      candidateCount: "{count} candidates",
+      disabledModel: "disabled",
+    },
+    reasoning: {
+      title: "Reasoning suffix preview",
+      loading: "Loading preview...",
+      stable: "stable",
+      incomplete: "incomplete",
+      staleSkipped: "stale skipped",
+      supported: "Supported",
+      unsupported: "Unsupported",
+    },
     alert: {
       loadDetailFailed: "Failed to load model route details.",
       routeNameRequired: "Route name cannot be empty.",
       candidateRequired: "At least one candidate is required.",
       candidateModelRequired: "Every candidate must select a model.",
       duplicateCandidate: "A model can only appear once in the same route.",
+      saveSuccess: "Model route saved.",
       saveFailed: "Failed to save model route: {error}",
       toggleFailed: "Failed to toggle route enabled state: {error}",
       toggleExposeFailed: "Failed to toggle route exposure: {error}",
+      deleteSuccess: "Model route deleted.",
       deleteFailed: "Failed to delete model route: {error}",
     },
     confirmDelete: "Are you sure you want to delete model route '{name}'?",
@@ -1744,6 +1797,94 @@ export const enDict = {
         "Please select an API key to perform the check with the selected model.",
       target: "Selected model: {target}",
       selectPlaceholder: "Select an API key",
+    },
+    requestPatch: {
+      title: "Request Patches",
+      description:
+        "Manage direct provider rules inherited by downstream models. Model explain and conflict views remain on the model page.",
+      directTitle: "Direct Provider Rules",
+      directDescription:
+        "Provider rules are inherited by downstream models, and exact-target model rules can override them.",
+      addRule: "Add Rule",
+      emptyDirect: "No direct request patches configured for this provider yet.",
+      noDescription: "No description",
+      placements: {
+        HEADER: "Header",
+        QUERY: "Query Parameter",
+        BODY: "Body JSON",
+      },
+      operations: {
+        SET: "Set",
+        REMOVE: "Remove",
+      },
+      fields: {
+        value: "Value",
+        description: "Description",
+        trace: "Trace",
+        enabled: "Enabled",
+        ruleId: "Rule ID",
+      },
+      states: {
+        disabled: "Disabled",
+        enabled: "Enabled",
+      },
+      messages: {
+        providerDirect:
+          "Direct provider rule. Inherited/effective diagnostics are shown on each model.",
+      },
+      editor: {
+        addTitle: "Add Provider Request Patch",
+        editTitle: "Edit Provider Request Patch",
+        description:
+          "Create direct provider rules for headers, query parameters, or body JSON Pointer targets.",
+        placement: "Placement",
+        operation: "Operation",
+        selectPlacement: "Select placement",
+        selectOperation: "Select operation",
+        target: "Target",
+        targetPlaceholderHeader: "authorization",
+        targetPlaceholderQuery: "api-version",
+        targetPlaceholderBody: "/generationConfig/temperature",
+        valueJson: "Value JSON",
+        valueHelp:
+          "HEADER and QUERY rules only accept JSON scalar values. BODY rules can use any JSON value.",
+        descriptionLabel: "Description",
+        descriptionPlaceholder:
+          "Optional note for operators and future debugging.",
+        enabledTitle: "Enabled",
+        enabledDescription:
+          "Disabled rules stay on the provider but are skipped at runtime.",
+        targetHelpHeader:
+          "Use a header name. Reserved transport headers are rejected by the backend.",
+        targetHelpQuery:
+          "Use a query parameter key without ?, &, =, or whitespace.",
+        targetHelpBody:
+          "Use a JSON Pointer target, for example /model or /generationConfig/temperature.",
+        removeValuePlaceholder: "REMOVE does not accept value_json.",
+        valuePlaceholder:
+          'Use valid JSON, for example: "Bearer token", true, 1, null',
+        create: "Create Rule",
+        save: "Save Changes",
+        dangerousTitle: "Confirm Dangerous Target",
+        dangerousDescription:
+          "This rule touches an upstream-sensitive target and needs an explicit confirmation.",
+        saveAnyway: "Save Anyway",
+      },
+      alert: {
+        saveBeforeEdit: "Save the provider before editing request patch rules.",
+        saveFailed: "Failed to save request patch rule.",
+        createSuccess: "Provider request patch created.",
+        updateSuccess: "Provider request patch updated.",
+        deleteSuccess: "Provider request patch deleted.",
+        deleteFailed: "Failed to delete provider request patch.",
+        toggleFailed: "Failed to update request patch status.",
+        enableSuccess: "Request patch enabled.",
+        disableSuccess: "Request patch disabled.",
+        dangerousConfirmFailed:
+          "Failed to confirm dangerous request patch target.",
+        targetRequired: "Target is required.",
+        valueRequired: "Value JSON is required for SET rules.",
+      },
     },
     labelName: "Name",
     labelProviderKey: "Provider Key",

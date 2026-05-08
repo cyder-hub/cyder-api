@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import LanguageSwitcher from "@/components/LanguageSwitcher.vue";
-import { navItems } from "@/lib/nav-items";
+import { navItems, navSectionOrder, type NavSection } from "@/router/nav-items";
 import { logout as logoutSession } from "@/services/auth";
 import {
   LogOut,
@@ -19,6 +19,15 @@ const router = useRouter();
 
 const isCollapsed = ref(false);
 const isMobileNavOpen = ref(false);
+
+type ManagerRouteMeta = {
+  titleKey?: string;
+  navKey?: string;
+  parentNavKey?: string;
+  navGroup?: NavSection;
+};
+
+const currentRouteMeta = computed(() => route.meta as ManagerRouteMeta);
 
 const toggleSidebar = () => {
   isCollapsed.value = !isCollapsed.value;
@@ -45,14 +54,19 @@ const translateNavItem = (item: { text?: string; i18nKey?: string }) => {
   return item.text || "";
 };
 
-const isLinkActive = (itemPath: string) => {
-  return route.path === itemPath || route.path.startsWith(`${itemPath}/`);
+const activeNavKey = computed(
+  () => currentRouteMeta.value.parentNavKey || currentRouteMeta.value.navKey || "",
+);
+
+const isLinkActive = (item: { path: string; navKey: string }) => {
+  if (activeNavKey.value) {
+    return item.navKey === activeNavKey.value;
+  }
+  return route.path === item.path || route.path.startsWith(`${item.path}/`);
 };
 
-const sectionOrder = ["start", "overview", "core", "advanced"] as const;
-
 const groupedNavItems = computed(() =>
-  sectionOrder
+  navSectionOrder
     .map((section) => ({
       section,
       items: navItems.filter((item) => item.section === section),
@@ -61,27 +75,26 @@ const groupedNavItems = computed(() =>
 );
 
 const currentPageTitle = computed(() => {
-  const matchedNavItem = [...navItems]
-    .sort((a, b) => b.path.length - a.path.length)
-    .find((item) => isLinkActive(item.path));
+  if (currentRouteMeta.value.titleKey) {
+    return t(currentRouteMeta.value.titleKey);
+  }
 
+  const matchedNavItem = activeNavKey.value
+    ? navItems.find((item) => item.navKey === activeNavKey.value)
+    : [...navItems]
+        .sort((a, b) => b.path.length - a.path.length)
+        .find((item) => isLinkActive(item));
   if (matchedNavItem) {
     return translateNavItem(matchedNavItem);
   }
 
-  if (route.name === "ProviderNew") {
-    return t("providerEditPage.titleAdd");
-  }
-
-  if (route.name === "ProviderEdit") {
-    return t("providerEditPage.titleEdit");
-  }
-
-  if (route.name === "ModelEdit") {
-    return t("modelEditPage.title");
-  }
-
   return t("app.header");
+});
+
+const documentTitle = computed(() => {
+  const pageTitle = currentPageTitle.value;
+  const appTitle = t("app.header");
+  return pageTitle && pageTitle !== appTitle ? `${pageTitle} - ${appTitle}` : appTitle;
 });
 
 watch(
@@ -93,6 +106,18 @@ watch(
 
 watch(isMobileNavOpen, (open) => {
   document.body.style.overflow = open ? "hidden" : "";
+});
+
+watch(
+  documentTitle,
+  (title) => {
+    document.title = title;
+  },
+  { immediate: true },
+);
+
+onBeforeUnmount(() => {
+  document.body.style.overflow = "";
 });
 </script>
 
@@ -143,9 +168,9 @@ watch(isMobileNavOpen, (open) => {
                 :to="item.path"
                 class="group flex items-center rounded-md py-2 px-3 text-sm font-medium transition-colors duration-200"
                 :class="{
-                  'bg-blue-50 text-blue-700': isLinkActive(item.path),
+                  'bg-blue-50 text-blue-700': isLinkActive(item),
                   'text-gray-600 hover:bg-gray-100 hover:text-gray-900':
-                    !isLinkActive(item.path),
+                    !isLinkActive(item),
                   'justify-center px-0': isCollapsed,
                 }"
                 :title="isCollapsed ? translateNavItem(item) : undefined"
@@ -153,7 +178,7 @@ watch(isMobileNavOpen, (open) => {
                 <span
                   class="flex flex-shrink-0 items-center justify-center"
                   :class="
-                    isLinkActive(item.path)
+                    isLinkActive(item)
                       ? 'text-blue-700'
                       : 'text-gray-400 group-hover:text-gray-500'
                   "
@@ -287,7 +312,7 @@ watch(isMobileNavOpen, (open) => {
                     :to="item.path"
                     class="flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors"
                     :class="
-                      isLinkActive(item.path)
+                      isLinkActive(item)
                         ? 'bg-blue-50 text-blue-700'
                         : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
                     "

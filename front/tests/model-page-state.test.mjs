@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildModelPageState } from "../src/pages/modelViewModel.ts";
+import { buildModelPageState } from "../src/pages/model/composables/modelViewModel.ts";
 
 const models = [
   {

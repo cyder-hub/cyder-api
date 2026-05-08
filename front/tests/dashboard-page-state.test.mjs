@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createDashboardPageState } from "../src/pages/dashboardPageState.js";
 import {
   buildEmptyDashboardAlertsSection,
   buildEmptyDashboardKpiSection,
   buildEmptyDashboardResourcesSection,
-} from "../src/pages/dashboardViewModel.js";
+  useDashboardData,
+} from "../src/pages/dashboard/composables/useDashboardData.ts";
+import { useDashboardAlerts } from "../src/pages/dashboard/composables/useDashboardAlerts.ts";
 
 function createApiMock(overrides = {}) {
   return {
@@ -139,7 +140,7 @@ function buildAlertsSection(overrides = {}) {
 }
 
 test("dashboard page state loads all sections and derives alert-focused state", async () => {
-  const state = createDashboardPageState({
+  const state = useDashboardData({
     api: createApiMock({
       getSystemDashboardKpi: async () => buildKpiSection(),
       getSystemDashboardResources: async () => buildResourcesSection(),
@@ -149,6 +150,7 @@ test("dashboard page state loads all sections and derives alert-focused state", 
   });
 
   await state.fetchDashboard();
+  const alerts = useDashboardAlerts(state.alertsSection);
 
   assert.equal(state.kpiError.value, null);
   assert.equal(state.resourcesError.value, null);
@@ -160,9 +162,9 @@ test("dashboard page state loads all sections and derives alert-focused state", 
     "memory",
   );
   assert.equal(state.alertsSection.value.top_providers.length, 1);
-  assert.equal(state.showCostHotspots.value, true);
+  assert.equal(alerts.showCostHotspots.value, true);
   assert.deepEqual(
-    state.unstableProviders.value.map((item) => [item.provider_id, item.runtime_level]),
+    alerts.unstableProviders.value.map((item) => [item.provider_id, item.runtime_level]),
     [
       [1, "half_open"],
       [2, "open"],
@@ -172,7 +174,7 @@ test("dashboard page state loads all sections and derives alert-focused state", 
 });
 
 test("dashboard page state preserves catalog configured effective fallback status", async () => {
-  const state = createDashboardPageState({
+  const state = useDashboardData({
     api: createApiMock({
       getSystemDashboardKpi: async () => buildKpiSection(),
       getSystemDashboardResources: async () =>
@@ -198,7 +200,7 @@ test("dashboard page state preserves catalog configured effective fallback statu
 });
 
 test("dashboard page state preserves stable empty sections without errors", async () => {
-  const state = createDashboardPageState({
+  const state = useDashboardData({
     api: createApiMock({
       getSystemDashboardKpi: async () => buildEmptyDashboardKpiSection(),
       getSystemDashboardResources: async () => buildEmptyDashboardResourcesSection(),
@@ -207,16 +209,17 @@ test("dashboard page state preserves stable empty sections without errors", asyn
   });
 
   await state.fetchDashboard();
+  const alerts = useDashboardAlerts(state.alertsSection);
 
   assert.equal(state.kpiSection.value.today.request_count, 0);
   assert.equal(state.resourcesSection.value.overview.provider_count, 0);
   assert.deepEqual(state.alertsSection.value.alerts.top_error_providers, []);
-  assert.equal(state.showCostHotspots.value, false);
-  assert.deepEqual(state.unstableProviders.value, []);
+  assert.equal(alerts.showCostHotspots.value, false);
+  assert.deepEqual(alerts.unstableProviders.value, []);
 });
 
 test("dashboard page state degrades only the failed section", async () => {
-  const state = createDashboardPageState({
+  const state = useDashboardData({
     api: createApiMock({
       getSystemDashboardKpi: async () => buildKpiSection({ today: { request_count: 8 } }),
       getSystemDashboardResources: async () => {
@@ -230,6 +233,7 @@ test("dashboard page state degrades only the failed section", async () => {
   });
 
   await state.fetchDashboard();
+  const alerts = useDashboardAlerts(state.alertsSection);
 
   assert.equal(state.kpiError.value, null);
   assert.equal(state.alertsError.value, null);
@@ -237,12 +241,12 @@ test("dashboard page state degrades only the failed section", async () => {
   assert.equal(state.kpiSection.value.today.request_count, 8);
   assert.equal(state.resourcesSection.value.overview.provider_count, 0);
   assert.equal(state.alertsSection.value.top_models.length, 1);
-  assert.equal(state.showCostHotspots.value, false);
+  assert.equal(alerts.showCostHotspots.value, false);
 });
 
 test("dashboard page state clears stale section errors after a successful refresh", async () => {
   let alertsCallCount = 0;
-  const state = createDashboardPageState({
+  const state = useDashboardData({
     api: createApiMock({
       getSystemDashboardKpi: async () => buildKpiSection(),
       getSystemDashboardResources: async () => buildResourcesSection(),
@@ -270,9 +274,10 @@ test("dashboard page state clears stale section errors after a successful refres
   assert.equal(state.alertsSection.value.top_providers.length, 0);
 
   await state.fetchDashboard();
+  const alerts = useDashboardAlerts(state.alertsSection);
 
   assert.equal(state.alertsError.value, null);
   assert.equal(state.alertsSection.value.top_providers.length, 0);
-  assert.equal(state.showCostHotspots.value, false);
-  assert.deepEqual(state.unstableProviders.value, []);
+  assert.equal(alerts.showCostHotspots.value, false);
+  assert.deepEqual(alerts.unstableProviders.value, []);
 });

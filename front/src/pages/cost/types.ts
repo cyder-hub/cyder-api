@@ -4,7 +4,7 @@ import type {
   CostPreviewResponse,
   CostTemplateSummary,
   UsageNormalization,
-} from "@/store/types";
+} from "@/services/types/cost";
 
 export type ChargeKind = "per_unit" | "flat" | "tiered_per_unit";
 export type TierBasis = "meter_quantity" | "total_input_tokens";

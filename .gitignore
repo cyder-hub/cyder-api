@@ -5,10 +5,6 @@
 *.sh
 
 # config files
-config.local.yaml
-config.default.yaml
-config.override.yaml
-config.override.history.jsonl
 diesel.toml
 .env
 

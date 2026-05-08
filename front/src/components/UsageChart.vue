@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { formatPriceFromNanos, nanosToMajorUnit } from "@/lib/utils";
-import { Api } from "@/services/request";
-import type { UsageStatItem, UsageStatsPeriod } from "@/store/types";
+import { formatPriceFromNanos, nanosToMajorUnit } from "@/utils/money";
+import * as dashboardService from "@/services/dashboard";
+import type { UsageStatItem, UsageStatsPeriod } from "@/services/types";
 import ECharts from "./ECharts.vue";
 import { Button } from "./ui/button";
 import {
@@ -222,7 +222,7 @@ const fetchUsageStats = async () => {
       top_n: selectedTopN.value,
       include_others: "true",
     });
-    const data = await Api.getUsageStats(params);
+    const data = await dashboardService.getUsageStats(params);
     usageData.value = { stats: data || [], interval, startTime, endTime };
   } catch (e: any) {
     error.value = e?.message || t("common.unknownError");

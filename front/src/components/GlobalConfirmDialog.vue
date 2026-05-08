@@ -14,7 +14,7 @@ import {
   markCancelIntent,
   markConfirmIntent,
   useConfirmState,
-} from '@/lib/confirmController'
+} from '@/services/uiFeedback'
 
 const state = useConfirmState()
 </script>

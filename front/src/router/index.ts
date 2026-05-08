@@ -15,81 +15,164 @@ const router = createRouter({
       children: [
         {
           path: "",
-          name: "Index",
-          component: () => import("@/pages/Index.vue"),
-          beforeEnter: (_to, _from, next) => {
-            next({ name: "Provider" });
-          },
+          redirect: { name: "Dashboard" },
         },
         {
           path: "dashboard",
           name: "Dashboard",
-          component: () => import("@/pages/Dashboard.vue"),
+          component: () => import("@/pages/dashboard/DashboardPage.vue"),
+          meta: {
+            titleKey: "dashboard.title",
+            navKey: "dashboard",
+            navGroup: "operations",
+            operatorPriority: "primary",
+          },
         },
         {
           path: "api_key",
           name: "ApiKey",
-          component: () => import("@/pages/ApiKey.vue"),
+          component: () => import("@/pages/api-key/ApiKeyPage.vue"),
+          meta: {
+            titleKey: "apiKeyPage.title",
+            navKey: "apiKey",
+            navGroup: "resources",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "model_route",
           name: "ModelRoute",
-          component: () => import("@/pages/ModelRoute.vue"),
+          component: () => import("@/pages/model-route/ModelRoutePage.vue"),
+          meta: {
+            titleKey: "modelRoutePage.title",
+            navKey: "modelRoute",
+            navGroup: "traffic",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "cost",
           name: "Cost",
-          component: () => import("@/pages/Cost.vue"),
+          component: () => import("@/pages/cost/CostPage.vue"),
+          meta: {
+            titleKey: "costPage.title",
+            navKey: "cost",
+            navGroup: "governance",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "system/config",
           name: "SystemConfig",
-          component: () => import("@/pages/SystemConfig.vue"),
+          component: () => import("@/pages/system-config/SystemConfigPage.vue"),
+          meta: {
+            titleKey: "systemConfigPage.title",
+            navKey: "systemConfig",
+            navGroup: "governance",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "provider",
           name: "Provider",
-          component: () => import("@/pages/Provider.vue"),
+          component: () => import("@/pages/provider/ProviderPage.vue"),
+          meta: {
+            titleKey: "providerPage.title",
+            navKey: "provider",
+            navGroup: "resources",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "model",
           name: "Model",
-          component: () => import("@/pages/Model.vue"),
+          component: () => import("@/pages/model/ModelPage.vue"),
+          meta: {
+            titleKey: "modelPage.title",
+            navKey: "model",
+            navGroup: "resources",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "provider/runtime",
           name: "ProviderRuntime",
-          component: () => import("@/pages/ProviderRuntime.vue"),
+          component: () => import("@/pages/provider-runtime/ProviderRuntimePage.vue"),
+          meta: {
+            titleKey: "providerRuntimePage.title",
+            navKey: "providerRuntime",
+            navGroup: "operations",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "alerts",
           name: "Alerts",
-          component: () => import("@/pages/Alerts.vue"),
+          component: () => import("@/pages/alerts/AlertsPage.vue"),
+          meta: {
+            titleKey: "alertsPage.title",
+            navKey: "alerts",
+            navGroup: "operations",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "notifications",
           name: "Notification",
-          component: () => import("@/pages/Notification.vue"),
+          component: () => import("@/pages/notifications/NotificationsPage.vue"),
+          meta: {
+            titleKey: "notificationPage.title",
+            navKey: "notifications",
+            navGroup: "operations",
+            operatorPriority: "secondary",
+          },
         },
         {
           path: "record",
           name: "Record",
-          component: () => import("@/pages/Record.vue"),
+          component: () => import("@/pages/record/RecordPage.vue"),
+          meta: {
+            titleKey: "recordPage.title",
+            navKey: "record",
+            navGroup: "traffic",
+            operatorPriority: "primary",
+          },
         },
         {
           path: "provider/new",
           name: "ProviderNew",
-          component: () => import("@/pages/ProviderEdit.vue"),
+          component: () => import("@/pages/provider-edit/ProviderEditPage.vue"),
+          meta: {
+            titleKey: "providerEditPage.titleAdd",
+            navKey: "providerNew",
+            parentNavKey: "provider",
+            navGroup: "resources",
+            operatorPriority: "detail",
+          },
         },
         {
           path: "provider/edit/:id",
           name: "ProviderEdit",
-          component: () => import("@/pages/ProviderEdit.vue"),
+          component: () => import("@/pages/provider-edit/ProviderEditPage.vue"),
+          meta: {
+            titleKey: "providerEditPage.titleEdit",
+            navKey: "providerEdit",
+            parentNavKey: "provider",
+            navGroup: "resources",
+            operatorPriority: "detail",
+          },
         },
         {
           path: "model/edit/:id",
           name: "ModelEdit",
-          component: () => import("@/pages/ModelEdit.vue"),
+          component: () => import("@/pages/model-edit/ModelEditPage.vue"),
+          meta: {
+            titleKey: "modelEditPage.title",
+            navKey: "modelEdit",
+            parentNavKey: "model",
+            navGroup: "resources",
+            operatorPriority: "detail",
+          },
         },
       ],
     },
@@ -105,7 +188,10 @@ const router = createRouter({
         {
           path: "",
           name: "Login",
-          component: () => import("@/pages/Login.vue"),
+          component: () => import("@/pages/login/LoginPage.vue"),
+          meta: {
+            titleKey: "loginPage.title",
+          },
         },
       ],
     },
@@ -135,7 +221,7 @@ router.beforeEach(async (to, _from, next) => {
       }
     }
   } else if (to.name === "Login" && isAuthenticated) {
-    next({ name: "Provider" });
+    next({ name: "Dashboard" });
   } else {
     next();
   }

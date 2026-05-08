@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ToastClose } from "reka-ui";
 import { XIcon } from "lucide-vue-next";
-import { cn } from "@/lib/utils";
+import { cn } from "@/utils/cn";
 import type { ToastCloseProps } from "./types";
 
 const props = defineProps<ToastCloseProps>();

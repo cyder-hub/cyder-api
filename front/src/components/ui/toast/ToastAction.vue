@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ToastAction } from "reka-ui";
-import { cn } from "@/lib/utils";
+import { cn } from "@/utils/cn";
 import { buttonVariants } from "@/components/ui/button";
 import type { ToastActionProps } from "./types";
 

@@ -154,6 +154,17 @@ struct NormalizedRequestPatchInput {
     confirm_dangerous_target: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RequestPatchImportValidation {
+    pub placement: RequestPatchPlacement,
+    pub target: String,
+    pub operation: RequestPatchOperation,
+    pub value_json: Option<String>,
+    pub description: Option<String>,
+    pub is_enabled: bool,
+    pub confirmation: Option<RequestPatchDangerousTargetConfirmation>,
+}
+
 fn parse_json_text(raw: &str, context: &str) -> DbResult<Value> {
     serde_json::from_str(raw).map_err(|err| {
         BaseError::DatabaseFatal(Some(format!("{context} contains invalid JSON: {err}")))
@@ -534,6 +545,28 @@ fn resolve_create_payload(
         description: payload.description.clone(),
         is_enabled: payload.is_enabled.unwrap_or(true),
         confirm_dangerous_target: payload.confirm_dangerous_target.unwrap_or(false),
+    })
+}
+
+pub(crate) fn validate_request_patch_import_payload(
+    payload: &CreateRequestPatchPayload,
+) -> DbResult<RequestPatchImportValidation> {
+    let normalized = resolve_create_payload(payload)?;
+    let confirmation = requires_confirmation(None, &normalized)?;
+    let value_json = validate_value_for_placement(
+        normalized.placement,
+        normalized.operation,
+        &normalized.value_json,
+    )?;
+
+    Ok(RequestPatchImportValidation {
+        placement: normalized.placement,
+        target: normalized.target,
+        operation: normalized.operation,
+        value_json,
+        description: normalized.description,
+        is_enabled: normalized.is_enabled,
+        confirmation,
     })
 }
 

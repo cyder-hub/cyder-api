@@ -8,6 +8,7 @@ use self::cost::CostAdminService;
 use self::model::ModelAdminService;
 use self::model_route::ModelRouteAdminService;
 use self::mutation::AdminMutationRunner;
+use self::portable_config::PortableConfigAdminService;
 use self::provider::ProviderAdminService;
 use self::reasoning_config::ReasoningConfigAdminService;
 use self::request_patch::RequestPatchAdminService;
@@ -19,6 +20,7 @@ pub mod cost;
 pub mod model;
 pub mod model_route;
 pub mod mutation;
+pub mod portable_config;
 pub mod provider;
 pub mod reasoning_config;
 pub mod request_patch;
@@ -35,6 +37,7 @@ pub struct AdminServices {
     pub request_patch: Arc<RequestPatchAdminService>,
     pub cost: Arc<CostAdminService>,
     pub reasoning_config: Arc<ReasoningConfigAdminService>,
+    pub portable_config: Arc<PortableConfigAdminService>,
 }
 
 impl AdminServices {
@@ -50,6 +53,9 @@ impl AdminServices {
             request_patch: Arc::new(RequestPatchAdminService::new(Arc::clone(&mutation_runner))),
             cost: Arc::new(CostAdminService::new(Arc::clone(&mutation_runner))),
             reasoning_config: Arc::new(ReasoningConfigAdminService::new(Arc::clone(
+                &mutation_runner,
+            ))),
+            portable_config: Arc::new(PortableConfigAdminService::new(Arc::clone(
                 &mutation_runner,
             ))),
         }
@@ -92,6 +98,10 @@ mod tests {
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
             services.reasoning_config.mutation_runner(),
+        ));
+        assert!(Arc::ptr_eq(
+            services.provider.mutation_runner(),
+            services.portable_config.mutation_runner(),
         ));
         assert_eq!(Arc::strong_count(&catalog), 2);
     }

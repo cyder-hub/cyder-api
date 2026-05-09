@@ -62,6 +62,17 @@ const router = createRouter({
           },
         },
         {
+          path: "system/portable",
+          name: "PortableConfig",
+          component: () => import("@/pages/export-import/ExportImportPage.vue"),
+          meta: {
+            titleKey: "portableConfigPage.title",
+            navKey: "portableConfig",
+            navGroup: "governance",
+            operatorPriority: "secondary",
+          },
+        },
+        {
           path: "system/config",
           name: "SystemConfig",
           component: () => import("@/pages/system-config/SystemConfigPage.vue"),

@@ -7,9 +7,12 @@ default-run = "cyder-api"
 [dependencies]
 async-stream = "0.3.6"
 async-trait = "0.1.89"
+argon2 = "0.5.3"
 axum = { version = "0.8.8", features = ["macros"] }
+base64 = "0.22.1"
 bincode = "2.0.1"
 bytes = { version = "1.11.0", features = ["serde"] }
+chacha20poly1305 = "0.10.1"
 chrono = "0.4.43"
 chrono-tz = "0.10.4"
 cyder-tools = { version = "0.1.2", features = ["auth"] }
@@ -41,6 +44,7 @@ tokio = { version = "1.49.0", features = ["full"] }
 tokio-util = "0.7.16"
 tower-http = { version = "0.6.8", features = ["fs", "set-header", "cors"] }
 uuid = { version = "1.20.0", features = ["v4"] }
+zeroize = "1.8.2"
 aws-sdk-s3 = "1.121.0"
 strum = { version = "0.27.2", features = ["derive"] }
 strum_macros = "0.27.2"

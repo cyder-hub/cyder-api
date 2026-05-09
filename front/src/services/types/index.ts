@@ -12,3 +12,4 @@ export * from "./modelRoutes";
 export * from "./requestPatch";
 export * from "./cost";
 export * from "./records";
+export * from "./portableConfig";

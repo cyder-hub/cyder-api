@@ -1,6 +1,7 @@
 import type { Component } from "vue";
 import {
   Activity,
+  Archive,
   ArrowRightLeft,
   BellRing,
   ClipboardList,
@@ -98,6 +99,13 @@ export const navItems: NavItem[] = [
     navKey: "cost",
     i18nKey: "sidebar.cost",
     icon: DollarSign,
+    section: "governance",
+  },
+  {
+    path: "/system/portable",
+    navKey: "portableConfig",
+    i18nKey: "sidebar.portableConfig",
+    icon: Archive,
     section: "governance",
   },
   {

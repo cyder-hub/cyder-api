@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod infra;
 pub mod metrics;
 pub mod notification;
+pub mod portable_config;
 pub mod redis;
 pub mod request_log_artifact;
 pub mod request_patch;

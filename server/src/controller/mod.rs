@@ -13,6 +13,7 @@ use metrics::create_metrics_router;
 use model::create_model_router;
 use model_route::create_model_route_router;
 use notification::create_notification_router;
+use portable_config::create_portable_config_router;
 use provider::create_provider_router;
 use provider_runtime::create_provider_runtime_router;
 use reasoning_config::create_reasoning_config_router;
@@ -36,6 +37,7 @@ mod api_key;
 mod model;
 mod model_route;
 mod notification;
+mod portable_config;
 mod provider;
 mod provider_runtime;
 mod reasoning_config;
@@ -77,6 +79,7 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_notification_router())
             .merge(create_stat_router())
             .merge(create_system_config_router())
+            .merge(create_portable_config_router())
             .layer(middleware::from_fn(authorization_access_middleware))
             .merge(create_auth_router()),
     );

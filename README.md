@@ -194,6 +194,48 @@ Useful direct frontend commands:
 - `cd front && npm run build`
 - `cd front && npm test`
 
+## Portable Config Export And Import
+
+Portable Config is the v1 migration and backup path for gateway configuration. It exports a `.cyd` bundle from the manager API and imports it into a fresh or existing environment through a required preview step.
+
+Manager API endpoints:
+
+- `GET /ai/manager/api/system/portable/modules`
+- `POST /ai/manager/api/system/portable/export`
+- `POST /ai/manager/api/system/portable/import/preview`
+- `POST /ai/manager/api/system/portable/import/apply`
+
+Supported modules:
+
+- `provider_profile`: providers, provider API keys, provider models, request patch rules, and reasoning config.
+- `api_keys`: downstream API keys, ACL rules, and model override references to routes that already exist in the target environment.
+- `cost_catalogs`: cost catalogs, versions, and components.
+- `cost_bindings`: model-to-cost-catalog bindings through `model.cost_catalog_id`.
+
+Export files can be plaintext JSON or password-encrypted armored `.cyd` files. Use password encryption when the bundle contains provider keys or downstream API keys. The encrypted format hides the whole JSON bundle; plaintext export intentionally contains raw secrets so the target environment can preserve existing downstream keys.
+
+Import always starts with preview. Preview validates the schema, password and integrity status, module versions, dependencies, conflicts, missing provider/model/route/cost references, and dangerous request patch targets. Apply must submit the same bundle digest returned by preview.
+
+For existing downstream API keys, `overwrite_existing` updates API key metadata and governance limits only. Bundle ACL rules and model overrides for an already-existing raw API key are counted as skipped and are not appended, upserted, replaced, or used to delete target-environment child rows. ACL rules and model overrides are imported only when the API key itself is newly created.
+
+Portable Config intentionally does not migrate these runtime, history, audit, or deployment records:
+
+- `request_log`, `request_attempt`, `request_replay_run`, replay artifacts, object-storage bundles, and object-storage artifacts.
+- `metric_ingested_request_log`, `metric_request_rollup_minute`, `metric_attempt_rollup_minute`, `metric_http_status_rollup_minute`, and `metric_cost_rollup_minute`.
+- `alert_event`, `alert_rule_state`, `notification_channel`, `notification_channel_state`, `notification_delivery`, and notification test results.
+- `api_key_rollup_daily`, `api_key_rollup_monthly`, `manager_auth_instance`, refresh sessions, and manager login rate-limit runtime.
+- Provider circuit runtime state, provider key cursors, API key concurrency windows, API key RPM windows, and Redis-backed runtime state.
+- `config.default.yaml`, `config.yaml`, `config.override.yaml`, and `config.override.history.jsonl`.
+
+Those are runtime facts or deployment configuration, not portable gateway configuration.
+
+Release verification for this feature must include:
+
+- plaintext core bundle export/import into fresh SQLite
+- password-encrypted full bundle export/import into fresh SQLite
+- provider/provider key/model/API key/cost catalog/model cost binding lookups after import
+- frontend export/import state tests
+
 ## Main Routes
 
 Assuming `base_path: /ai`:

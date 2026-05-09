@@ -1,4 +1,6 @@
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use crate::logging::event_message_with_fields;
 use crate::service::app_state::AppStoreError;
@@ -146,6 +148,8 @@ impl AdminMutationReport {
 pub(crate) struct AdminMutationRunner {
     catalog: Arc<CatalogService>,
     audit_logger: AdminAuditLogger,
+    #[cfg(test)]
+    emitted_audit_events: Mutex<Vec<AdminAuditEvent>>,
 }
 
 impl AdminMutationRunner {
@@ -153,6 +157,8 @@ impl AdminMutationRunner {
         Self {
             catalog,
             audit_logger: AdminAuditLogger,
+            #[cfg(test)]
+            emitted_audit_events: Mutex::new(Vec::new()),
         }
     }
 
@@ -173,10 +179,29 @@ impl AdminMutationRunner {
         for effect in effects {
             if let AdminMutationEffect::Audit(event) = effect {
                 self.audit_logger.emit(event);
+                #[cfg(test)]
+                self.record_audit_event_for_test(event.clone());
             }
         }
 
         report
+    }
+
+    #[cfg(test)]
+    fn record_audit_event_for_test(&self, event: AdminAuditEvent) {
+        self.emitted_audit_events
+            .lock()
+            .expect("admin mutation audit test sink should lock")
+            .push(event);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_audit_events(&self) -> Vec<AdminAuditEvent> {
+        let mut events = self
+            .emitted_audit_events
+            .lock()
+            .expect("admin mutation audit test sink should lock");
+        std::mem::take(&mut *events)
     }
 
     async fn apply_catalog_invalidation(

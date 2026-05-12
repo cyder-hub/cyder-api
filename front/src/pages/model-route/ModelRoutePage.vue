@@ -2,6 +2,7 @@
 import { AlertCircle, Inbox, Loader2, Plus, RefreshCcw } from "lucide-vue-next";
 
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
+import StatsStrip from "@/components/StatsStrip.vue";
 import { Button } from "@/components/ui/button";
 import ModelRouteEditorDialog from "./components/ModelRouteEditorDialog.vue";
 import ModelRouteReasoningPreviewDialog from "./components/ModelRouteReasoningPreviewDialog.vue";
@@ -51,7 +52,6 @@ const {
 <template>
   <CrudPageLayout
     :title="$t('modelRoutePage.title')"
-    :description="$t('modelRoutePage.description')"
     :loading="loading"
     :error="error"
     :empty="!routes.length"
@@ -93,16 +93,7 @@ const {
       </div>
     </template>
 
-    <div class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-100 sm:grid-cols-4">
-      <div v-for="card in summaryCards" :key="card.key" class="bg-white px-4 py-3">
-        <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-          {{ card.label }}
-        </p>
-        <p class="mt-1 text-lg font-semibold tracking-tight text-gray-900">
-          {{ card.value }}
-        </p>
-      </div>
-    </div>
+    <StatsStrip :items="summaryCards" grid-class="grid-cols-2 sm:grid-cols-4" />
 
     <ModelRouteTable
       :routes="routes"

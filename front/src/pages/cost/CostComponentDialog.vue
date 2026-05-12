@@ -188,7 +188,7 @@ const emit = defineEmits<{
                   <div class="text-sm font-medium text-gray-900">
                     {{ $t("costPage.componentEditor.tiers.title") }}
                   </div>
-                  <div class="mt-1 text-sm text-gray-500">
+                  <div class="mt-1 text-xs leading-5 text-gray-500">
                     {{ $t("costPage.componentEditor.tiers.description") }}
                   </div>
                   <div class="mt-1 text-xs text-gray-500">

@@ -1,15 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { Archive, Copy, Edit, Eye, RotateCcw, Sparkles, Trash2 } from "lucide-vue-next";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -192,7 +186,7 @@ watch(isPreviewOpen, (open, previousOpen) => {
                       {{ version.currency }}
                     </Badge>
                   </div>
-                  <p class="mt-1 text-sm text-gray-500">
+                  <p class="mt-1 text-xs text-gray-500">
                     {{ version.source || $t("costPage.versionDetail.manualSource") }}
                   </p>
                 </div>
@@ -314,25 +308,25 @@ watch(isPreviewOpen, (open, previousOpen) => {
         </div>
       </section>
 
-      <Card class="flex min-h-0 flex-col overflow-hidden rounded-2xl border-gray-200">
-        <CardHeader class="space-y-5 border-b border-gray-100">
+      <section class="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white">
+        <div class="space-y-5 border-b border-gray-100 p-4 sm:p-6">
           <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
             <div class="min-w-0 space-y-4">
               <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div class="min-w-0">
-                  <CardTitle class="text-lg font-semibold text-gray-900 tracking-tight">
+                  <h2 class="text-lg font-semibold text-gray-900 tracking-tight">
                     {{
                       selectedVersionSummary?.version ||
                       $t("costPage.versionDetail.emptyTitle")
                     }}
-                  </CardTitle>
-                  <CardDescription class="mt-1 text-sm text-gray-500">
+                  </h2>
+                  <p class="mt-1 text-xs text-gray-500">
                     {{
                       selectedVersionSummary
                         ? `${selectedVersionSummary.currency} · ${selectedVersionSummary.source || $t("costPage.versionDetail.manualSource")}`
                         : $t("costPage.versionDetail.emptyDescription")
                     }}
-                  </CardDescription>
+                  </p>
                 </div>
                 <Badge
                   v-if="selectedVersionSummary"
@@ -457,15 +451,14 @@ watch(isPreviewOpen, (open, previousOpen) => {
             </div>
           </div>
           <div class="border-t border-gray-100 pt-4">
-            <h3 class="text-base font-semibold text-gray-900">
-              {{ $t("costPage.versionDetail.componentsTitle") }}
-            </h3>
-            <p class="mt-1 text-sm text-gray-500">
-              {{ $t("costPage.versionDetail.componentsDescription") }}
-            </p>
+            <SectionHeader
+              :title="$t('costPage.versionDetail.componentsTitle')"
+              :help="$t('costPage.versionDetail.componentsDescription')"
+              :help-label="$t('costPage.versionDetail.componentsTitle')"
+            />
           </div>
-        </CardHeader>
-        <CardContent class="min-h-0 flex-1 space-y-6 overflow-y-auto pt-6">
+        </div>
+        <div class="min-h-0 flex-1 space-y-6 overflow-y-auto p-4 sm:p-6">
           <div
             v-if="selectedVersionSummary"
             class="rounded-xl bg-gray-50 px-4 py-3 text-sm text-gray-500"
@@ -489,7 +482,7 @@ watch(isPreviewOpen, (open, previousOpen) => {
             <div
               v-for="component in components"
               :key="component.id"
-              class="rounded-2xl border border-gray-200 bg-white p-4 sm:p-5"
+              class="rounded-xl bg-gray-50/70 p-4 sm:p-5"
             >
               <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div class="min-w-0">
@@ -613,7 +606,7 @@ watch(isPreviewOpen, (open, previousOpen) => {
                       selectedVersionSummary?.currency,
                     )?.tiers || []"
                     :key="`${component.id}-${index}`"
-                    class="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-700"
+                    class="rounded-lg bg-white px-3 py-2.5 text-sm text-gray-700"
                   >
                     <div class="font-medium text-gray-900">
                       {{ $t("costPage.componentEditor.tiers.rowLabel", { index: index + 1 }) }}
@@ -643,8 +636,8 @@ watch(isPreviewOpen, (open, previousOpen) => {
               </div>
             </div>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     </div>
 
     <Dialog v-model:open="isPreviewOpen">

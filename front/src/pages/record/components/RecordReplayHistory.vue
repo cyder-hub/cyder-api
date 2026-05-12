@@ -7,7 +7,7 @@
         <h3 class="text-base font-semibold text-gray-900">
           {{ $t("recordPage.detailDialog.replay.historyTitle") }}
         </h3>
-        <p class="mt-1 text-sm text-gray-500">
+        <p class="mt-1 text-xs leading-5 text-gray-500">
           {{ $t("recordPage.detailDialog.replay.historyDescription") }}
         </p>
       </div>

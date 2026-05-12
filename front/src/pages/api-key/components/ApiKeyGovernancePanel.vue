@@ -43,8 +43,8 @@ const runtimeRejection = computed(() =>
           {{ t("apiKeyPage.sections.identityTitle") }}
         </h3>
       </div>
-      <dl class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+      <dl class="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-100 sm:grid-cols-2">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.table.status") }}
           </dt>
@@ -52,7 +52,7 @@ const runtimeRejection = computed(() =>
             {{ lifecycleLabel(detail, t) }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.table.defaultAction") }}
           </dt>
@@ -60,7 +60,7 @@ const runtimeRejection = computed(() =>
             {{ actionLabel(detail.default_action, t) }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.table.createdAt") }}
           </dt>
@@ -68,7 +68,7 @@ const runtimeRejection = computed(() =>
             {{ formatTimestamp(detail.created_at) || t("common.notAvailable") }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.table.updatedAt") }}
           </dt>
@@ -76,7 +76,7 @@ const runtimeRejection = computed(() =>
             {{ formatTimestamp(detail.updated_at) || t("common.notAvailable") }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3 sm:col-span-2">
+        <div class="bg-white px-3 py-3 sm:col-span-2">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.table.description") }}
           </dt>
@@ -94,11 +94,11 @@ const runtimeRejection = computed(() =>
           {{ t("apiKeyPage.sections.governanceTitle") }}
         </h3>
       </div>
-      <dl class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <dl class="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-100 sm:grid-cols-2">
         <div
           v-for="item in governanceItems"
           :key="item.key"
-          class="rounded-lg border border-gray-200 px-3 py-3"
+          class="bg-white px-3 py-3"
         >
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ item.label }}
@@ -129,7 +129,7 @@ const runtimeRejection = computed(() =>
         <div
           v-for="rule in detail.acl_rules"
           :key="rule.id"
-          class="rounded-lg border border-gray-200 px-4 py-3"
+          class="rounded-lg bg-gray-50/70 px-4 py-3"
         >
           <div class="flex flex-wrap items-center gap-2">
             <Badge variant="outline" class="text-[11px]">
@@ -188,7 +188,7 @@ const runtimeRejection = computed(() =>
         <div
           v-for="item in detail.model_overrides"
           :key="item.id"
-          class="rounded-lg border border-gray-200 px-4 py-3"
+          class="rounded-lg bg-gray-50/70 px-4 py-3"
         >
           <div class="flex flex-wrap items-center gap-2">
             <Badge variant="outline" class="text-[11px]">
@@ -219,7 +219,7 @@ const runtimeRejection = computed(() =>
               })
             }}
           </p>
-          <p v-if="item.description" class="mt-1 text-sm text-gray-500">
+          <p v-if="item.description" class="mt-2 text-sm text-gray-500">
             {{ item.description }}
           </p>
         </div>
@@ -239,8 +239,8 @@ const runtimeRejection = computed(() =>
         </Badge>
       </div>
 
-      <dl class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+      <dl class="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-100 sm:grid-cols-2">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.runtime.currentConcurrency") }}
           </dt>
@@ -248,7 +248,7 @@ const runtimeRejection = computed(() =>
             {{ runtime.current_concurrency }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.runtime.currentMinuteRequests") }}
           </dt>
@@ -256,7 +256,7 @@ const runtimeRejection = computed(() =>
             {{ runtime.current_minute_request_count }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.runtime.dailyRequests") }}
           </dt>
@@ -264,7 +264,7 @@ const runtimeRejection = computed(() =>
             {{ runtime.daily_request_count }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.runtime.dailyTokens") }}
           </dt>
@@ -272,7 +272,7 @@ const runtimeRejection = computed(() =>
             {{ runtime.daily_token_count }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.runtime.monthlyTokens") }}
           </dt>
@@ -280,7 +280,7 @@ const runtimeRejection = computed(() =>
             {{ runtime.monthly_token_count }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.runtime.runtimeRejectionReason") }}
           </dt>
@@ -288,7 +288,7 @@ const runtimeRejection = computed(() =>
             {{ runtimeRejection.label }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.runtime.dailyBudgetUsage") }}
           </dt>
@@ -296,7 +296,7 @@ const runtimeRejection = computed(() =>
             {{ billedAmountLabel(runtime.daily_billed_amounts, t) }}
           </dd>
         </div>
-        <div class="rounded-lg border border-gray-200 px-3 py-3">
+        <div class="bg-white px-3 py-3">
           <dt class="text-xs uppercase tracking-wide text-gray-500">
             {{ t("apiKeyPage.runtime.monthlyBudgetUsage") }}
           </dt>

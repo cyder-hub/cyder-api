@@ -26,7 +26,7 @@ defineProps<{
         <h3 class="text-base font-semibold text-gray-900">
           {{ $t("systemConfigPage.preview.title") }}
         </h3>
-        <p class="mt-1 text-sm text-gray-500">
+        <p class="mt-1 text-xs leading-5 text-gray-500">
           {{
             $t("systemConfigPage.preview.diffSummary", {
               count: preview.diff.length,

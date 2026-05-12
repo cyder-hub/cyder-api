@@ -1,14 +1,11 @@
 <template>
   <div class="space-y-3">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div class="min-w-0">
-        <h4 class="text-base font-semibold text-gray-900">
-          {{ t(`${textPrefix}.directTitle`) }}
-        </h4>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ t(`${textPrefix}.directDescription`) }}
-        </p>
-      </div>
+    <SectionHeader
+      :title="t(`${textPrefix}.directTitle`)"
+      :help="t(`${textPrefix}.directDescription`)"
+      :help-label="t(`${textPrefix}.directTitle`)"
+    >
+      <template #actions>
       <Button
         variant="outline"
         size="sm"
@@ -19,7 +16,8 @@
         <Plus class="mr-1.5 h-4 w-4" />
         {{ t(`${textPrefix}.addRule`) }}
       </Button>
-    </div>
+      </template>
+    </SectionHeader>
 
     <div
       v-if="rules.length === 0"
@@ -33,12 +31,12 @@
 
     <div
       v-else
-      class="overflow-hidden rounded-lg border border-gray-200 bg-white"
+      class="divide-y divide-gray-100 border-y border-gray-100"
     >
       <div
         v-for="rule in rules"
         :key="rule.id"
-        class="border-t border-gray-100 px-4 py-4 first:border-t-0"
+        class="py-4"
       >
         <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div class="min-w-0 flex-1 space-y-3">
@@ -96,7 +94,7 @@
           </div>
 
           <div class="flex flex-wrap items-center gap-2 sm:ml-4 sm:justify-end">
-            <div class="flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2">
+            <div class="flex items-center gap-2 rounded-md bg-gray-50/80 px-3 py-2">
               <span class="text-xs font-medium text-gray-500">
                 {{ t(`${textPrefix}.fields.enabled`) }}
               </span>
@@ -231,7 +229,7 @@
             />
           </div>
 
-          <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5">
+          <div class="flex items-center justify-between rounded-md bg-gray-50/80 p-3.5">
             <div>
               <p class="text-sm font-medium text-gray-900">
                 {{ t(`${textPrefix}.editor.enabledTitle`) }}
@@ -282,7 +280,7 @@
         </DialogHeader>
 
         <div class="space-y-4 px-4 py-4 sm:px-6">
-          <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-3">
+          <div class="rounded-md bg-gray-50/80 px-4 py-3">
             <p class="text-xs font-medium uppercase tracking-wider text-gray-500">
               {{ t(`${textPrefix}.editor.target`) }}
             </p>
@@ -328,6 +326,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { normalizeError } from "@/utils/error";
+import SectionHeader from "@/components/SectionHeader.vue";
 import {
   buildRequestPatchPayloadFromEditor,
   formatRequestPatchValueForDisplay,

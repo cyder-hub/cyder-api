@@ -1,14 +1,11 @@
 <template>
   <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div>
-        <h3 class="text-lg font-semibold text-gray-900">
-          {{ $t("providerEditPage.sectionModels") }}
-        </h3>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("providerEditPage.sections.modelsDescription") }}
-        </p>
-      </div>
+    <SectionHeader
+      :title="$t('providerEditPage.sectionModels')"
+      :help="$t('providerEditPage.sections.modelsDescription')"
+      :help-label="$t('providerEditPage.sectionModels')"
+    >
+      <template #actions>
       <div class="flex flex-col gap-2 sm:w-auto sm:flex-row">
         <Button
           variant="outline"
@@ -31,7 +28,8 @@
           {{ $t("providerEditPage.buttonFetchRemote") }}
         </Button>
       </div>
-    </div>
+      </template>
+    </SectionHeader>
 
     <div
       v-if="editingData.models.length === 0"
@@ -315,6 +313,7 @@ import type {
   ProviderRemoteModelsResponse,
 } from "@/services/types";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

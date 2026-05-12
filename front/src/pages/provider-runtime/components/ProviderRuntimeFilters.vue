@@ -65,7 +65,7 @@ function handleOnlyEnabledChange(value: boolean | "indeterminate") {
         <h2 class="text-base font-semibold text-gray-900">
           {{ $t("providerRuntimePage.filter.title") }}
         </h2>
-        <p class="mt-1 text-sm text-gray-500">
+        <p class="mt-1 text-xs leading-5 text-gray-500">
           {{ props.activeFilterSummary }}
         </p>
       </div>

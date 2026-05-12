@@ -1,11 +1,7 @@
 <template>
   <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div class="min-w-0">
-        <h2 class="text-base font-semibold text-gray-900">
-          {{ title }}
-        </h2>
-      </div>
+    <SectionHeader :title="title">
+      <template #actions>
       <div class="flex flex-wrap gap-2">
         <Badge v-if="currentTargetApiType" variant="outline" class="font-mono text-[11px]">
           {{ currentTargetApiType }}
@@ -18,7 +14,8 @@
           {{ t("common.refresh") }}
         </Button>
       </div>
-    </div>
+      </template>
+    </SectionHeader>
 
     <div v-if="!ownerId" class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500">
       {{ t("reasoningConfigPanel.messages.saveOwnerFirst") }}
@@ -113,7 +110,7 @@
           </Badge>
         </div>
 
-        <div class="rounded-lg border border-gray-200">
+        <div class="border-y border-gray-100">
           <div class="hidden md:block">
             <div class="app-scroll-x">
               <Table>
@@ -210,7 +207,7 @@
                 </Badge>
               </div>
               <div class="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2">
-                <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3">
+                <div class="flex items-center justify-between rounded-md bg-gray-50/80 px-3 py-2.5">
                   <Label class="text-sm text-gray-700">{{ t("reasoningConfigPanel.fields.enabled") }}</Label>
                   <Checkbox
                     :model-value="row.enabled"
@@ -218,7 +215,7 @@
                     @update:model-value="(value) => setPresetEnabled(row.preset_key, value)"
                   />
                 </div>
-                <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3">
+                <div class="flex items-center justify-between rounded-md bg-gray-50/80 px-3 py-2.5">
                   <Label class="text-sm text-gray-700">{{ t("reasoningConfigPanel.fields.models") }}</Label>
                   <Checkbox
                     :model-value="row.expose_in_models"
@@ -244,7 +241,7 @@
         </div>
       </div>
 
-      <div v-else-if="modeDraft === 'disabled'" class="rounded-lg border border-gray-200 bg-gray-50/60 px-4 py-4 text-sm text-gray-600">
+      <div v-else-if="modeDraft === 'disabled'" class="rounded-md bg-gray-50/80 px-4 py-4 text-sm text-gray-600">
         {{ t("reasoningConfigPanel.messages.disabledMode") }}
       </div>
 
@@ -273,6 +270,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Loader2, RefreshCw, Save, Trash2 } from "lucide-vue-next";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { normalizeError } from "@/utils/error";
 import { toastController } from "@/services/uiFeedback";
 import type {

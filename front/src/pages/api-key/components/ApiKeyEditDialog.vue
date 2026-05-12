@@ -3,6 +3,7 @@ import { toRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { Plus, Trash2 } from "lucide-vue-next";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -99,14 +100,11 @@ const {
       <form class="flex min-h-0 flex-1 flex-col" @submit.prevent="handleCommit">
         <div class="flex-1 space-y-6 overflow-y-auto px-4 py-4 sm:px-6">
           <section class="space-y-4">
-            <div>
-              <h3 class="text-base font-semibold text-gray-900">
-                {{ t("apiKeyEditModal.sections.identity") }}
-              </h3>
-              <p class="mt-1 text-sm text-gray-500">
-                {{ t("apiKeyEditModal.sections.identityDescription") }}
-              </p>
-            </div>
+            <SectionHeader
+              :title="t('apiKeyEditModal.sections.identity')"
+              :help="t('apiKeyEditModal.sections.identityDescription')"
+              :help-label="t('apiKeyEditModal.sections.identity')"
+            />
 
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div class="space-y-1.5 sm:col-span-2">
@@ -176,22 +174,19 @@ const {
           </section>
 
           <section class="space-y-4 border-t border-gray-100 pt-6">
-            <div>
-              <h3 class="text-base font-semibold text-gray-900">
-                {{ t("apiKeyEditModal.sections.governance") }}
-              </h3>
-              <p class="mt-1 text-sm text-gray-500">
-                {{ t("apiKeyEditModal.sections.governanceDescription") }}
-              </p>
-            </div>
+            <SectionHeader
+              :title="t('apiKeyEditModal.sections.governance')"
+              :help="t('apiKeyEditModal.sections.governanceDescription')"
+              :help-label="t('apiKeyEditModal.sections.governance')"
+            />
 
-            <div class="rounded-lg border border-gray-200 p-4">
-              <h4 class="text-sm font-semibold text-gray-900">
-                {{ t("apiKeyEditModal.groups.throughputTitle") }}
-              </h4>
-              <p class="mt-1 text-sm text-gray-500">
-                {{ t("apiKeyEditModal.groups.throughputDescription") }}
-              </p>
+            <div class="border-t border-gray-100 pt-4">
+              <SectionHeader
+                :title="t('apiKeyEditModal.groups.throughputTitle')"
+                :help="t('apiKeyEditModal.groups.throughputDescription')"
+                :help-label="t('apiKeyEditModal.groups.throughputTitle')"
+                title-class="text-sm"
+              />
 
               <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div class="space-y-1.5">
@@ -218,16 +213,14 @@ const {
               </div>
             </div>
 
-            <div class="rounded-lg border border-gray-200 p-4">
-              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <h4 class="text-sm font-semibold text-gray-900">
-                    {{ t("apiKeyEditModal.groups.quotaTitle") }}
-                  </h4>
-                  <p class="mt-1 text-sm text-gray-500">
-                    {{ t("apiKeyEditModal.groups.quotaDescription") }}
-                  </p>
-                </div>
+            <div class="border-t border-gray-100 pt-4">
+              <SectionHeader
+                :title="t('apiKeyEditModal.groups.quotaTitle')"
+                :help="t('apiKeyEditModal.groups.quotaDescription')"
+                :help-label="t('apiKeyEditModal.groups.quotaTitle')"
+                title-class="text-sm"
+              >
+                <template #actions>
                 <Button
                   type="button"
                   variant="ghost"
@@ -237,7 +230,8 @@ const {
                 >
                   {{ t("apiKeyEditModal.clearQuota") }}
                 </Button>
-              </div>
+                </template>
+              </SectionHeader>
 
               <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div class="space-y-1.5">
@@ -275,16 +269,14 @@ const {
               </div>
             </div>
 
-            <div class="rounded-lg border border-gray-200 p-4">
-              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <h4 class="text-sm font-semibold text-gray-900">
-                    {{ t("apiKeyEditModal.groups.budgetTitle") }}
-                  </h4>
-                  <p class="mt-1 text-sm text-gray-500">
-                    {{ t("apiKeyEditModal.groups.budgetDescription") }}
-                  </p>
-                </div>
+            <div class="border-t border-gray-100 pt-4">
+              <SectionHeader
+                :title="t('apiKeyEditModal.groups.budgetTitle')"
+                :help="t('apiKeyEditModal.groups.budgetDescription')"
+                :help-label="t('apiKeyEditModal.groups.budgetTitle')"
+                title-class="text-sm"
+              >
+                <template #actions>
                 <Button
                   type="button"
                   variant="ghost"
@@ -294,7 +286,8 @@ const {
                 >
                   {{ t("apiKeyEditModal.clearBudget") }}
                 </Button>
-              </div>
+                </template>
+              </SectionHeader>
 
               <div class="mt-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">
                 {{ t("apiKeyEditModal.budgetMajorUnitHint") }}
@@ -393,15 +386,12 @@ const {
           </section>
 
           <section class="space-y-4 border-t border-gray-100 pt-6">
-            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <h3 class="text-base font-semibold text-gray-900">
-                  {{ t("apiKeyEditModal.sections.overrides") }}
-                </h3>
-                <p class="mt-1 text-sm text-gray-500">
-                  {{ t("apiKeyEditModal.sections.overridesDescription") }}
-                </p>
-              </div>
+            <SectionHeader
+              :title="t('apiKeyEditModal.sections.overrides')"
+              :help="t('apiKeyEditModal.sections.overridesDescription')"
+              :help-label="t('apiKeyEditModal.sections.overrides')"
+            >
+              <template #actions>
               <Button
                 type="button"
                 variant="outline"
@@ -412,7 +402,8 @@ const {
                 <Plus class="mr-1.5 h-4 w-4" />
                 {{ t("apiKeyEditModal.addOverride") }}
               </Button>
-            </div>
+              </template>
+            </SectionHeader>
 
             <div
               v-if="!routeOptions.length"
@@ -432,16 +423,13 @@ const {
               <div
                 v-for="(item, index) in editingData.model_overrides"
                 :key="item.local_id"
-                class="rounded-lg border border-gray-200 bg-gray-50/50 p-4"
+                class="rounded-lg bg-gray-50/70 p-4"
               >
                 <div class="flex items-center justify-between gap-3">
                   <div>
                     <h4 class="text-sm font-semibold text-gray-900">
                       {{ t("apiKeyEditModal.overrideTitle", { index: index + 1 }) }}
                     </h4>
-                    <p class="mt-1 text-xs text-gray-500">
-                      {{ t("apiKeyEditModal.overrideDescription") }}
-                    </p>
                   </div>
                   <Button
                     type="button"
@@ -517,15 +505,12 @@ const {
           </section>
 
           <section class="space-y-4 border-t border-gray-100 pt-6">
-            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <h3 class="text-base font-semibold text-gray-900">
-                  {{ t("apiKeyEditModal.sections.acl") }}
-                </h3>
-                <p class="mt-1 text-sm text-gray-500">
-                  {{ t("apiKeyEditModal.sections.aclDescription") }}
-                </p>
-              </div>
+            <SectionHeader
+              :title="t('apiKeyEditModal.sections.acl')"
+              :help="t('apiKeyEditModal.sections.aclDescription')"
+              :help-label="t('apiKeyEditModal.sections.acl')"
+            >
+              <template #actions>
               <Button
                 type="button"
                 variant="outline"
@@ -535,7 +520,8 @@ const {
                 <Plus class="mr-1.5 h-4 w-4" />
                 {{ t("apiKeyEditModal.addRule") }}
               </Button>
-            </div>
+              </template>
+            </SectionHeader>
 
             <div
               v-if="!editingData.acl_rules.length"
@@ -548,16 +534,13 @@ const {
               <div
                 v-for="(rule, index) in editingData.acl_rules"
                 :key="rule.id ?? `new-${index}`"
-                class="rounded-lg border border-gray-200 bg-gray-50/50 p-4"
+                class="rounded-lg bg-gray-50/70 p-4"
               >
                 <div class="flex items-center justify-between gap-3">
                   <div>
                     <h4 class="text-sm font-semibold text-gray-900">
                       {{ t("apiKeyEditModal.ruleTitle", { index: index + 1 }) }}
                     </h4>
-                    <p class="mt-1 text-xs text-gray-500">
-                      {{ t("apiKeyEditModal.ruleDescription") }}
-                    </p>
                   </div>
                   <Button
                     type="button"

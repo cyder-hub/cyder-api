@@ -1,14 +1,12 @@
 <template>
   <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div>
-        <h3 class="text-lg font-semibold text-gray-900">
-          {{ $t("providerEditPage.sectionApiKeys") }}
-        </h3>
-        <p class="mt-1 text-sm text-gray-500">
+    <SectionHeader :title="$t('providerEditPage.sectionApiKeys')">
+      <template #meta>
+        <p class="mt-1 text-xs text-gray-500">
           {{ editingData.provider_keys.length }} items
         </p>
-      </div>
+      </template>
+      <template #actions>
       <Button
         variant="outline"
         size="sm"
@@ -19,7 +17,8 @@
         <Check class="mr-1.5 h-4 w-4" />
         {{ $t("providerEditPage.alert.buttonCheckAll") }}
       </Button>
-    </div>
+      </template>
+    </SectionHeader>
 
     <div v-if="editingData.provider_keys.length === 0" class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10">
       <Key class="mb-2 h-10 w-10 stroke-1 text-gray-400" />
@@ -238,6 +237,7 @@ import * as providerService from "@/services/providers";
 import { toastController } from "@/services/uiFeedback";
 import type { EditingProviderData } from "../types";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

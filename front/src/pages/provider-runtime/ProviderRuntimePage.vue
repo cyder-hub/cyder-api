@@ -4,9 +4,10 @@ import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import { RefreshCcw } from "lucide-vue-next";
 
+import PageHeader from "@/components/PageHeader.vue";
+import StatsStrip from "@/components/StatsStrip.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { formatTimestamp } from "@/utils/datetime";
 import { formatPriceFromNanos } from "@/utils/money";
 import { buildRuntimeStateBackendRows } from "@/utils/runtimeBackend";
@@ -435,16 +436,8 @@ onMounted(() => {
 <template>
   <div class="app-page">
     <div class="app-page-shell">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold tracking-tight text-gray-900 sm:text-xl">
-            {{ $t("providerRuntimePage.title") }}
-          </h1>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ $t("providerRuntimePage.description") }}
-          </p>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+      <PageHeader :title="$t('providerRuntimePage.title')">
+        <template #actions>
           <Button
             variant="outline"
             class="w-full sm:w-auto"
@@ -457,25 +450,10 @@ onMounted(() => {
             <RefreshCcw class="mr-1.5 h-4 w-4" :class="{ 'animate-spin': isLoading }" />
             {{ $t("providerRuntimePage.refresh") }}
           </Button>
-        </div>
-      </div>
+        </template>
+      </PageHeader>
 
-      <div class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        <Card
-          v-for="summaryCard in summaryCards"
-          :key="summaryCard.key"
-          class="border border-gray-200 shadow-none"
-        >
-          <CardContent class="px-4 py-4">
-            <p class="text-xs font-medium uppercase tracking-wide text-gray-500">
-              {{ summaryCard.label }}
-            </p>
-            <p class="mt-2 text-2xl font-semibold tracking-tight text-gray-900">
-              {{ summaryCard.value }}
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+      <StatsStrip :items="summaryCards" />
 
       <div
         v-if="runtimeBackendStatus"

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-vue-next";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type {
@@ -30,20 +31,19 @@ const emit = defineEmits<{
 
 <template>
   <section class="space-y-3">
-    <div class="flex flex-col gap-3 border-b border-gray-100 pb-3 sm:flex-row sm:items-center sm:justify-between">
-      <div>
-        <h3 class="text-base font-semibold text-gray-900">
-          {{ $t("modelRoutePage.modal.candidatesTitle") }}
-        </h3>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("modelRoutePage.queue.description") }}
-        </p>
-      </div>
+    <SectionHeader
+      :title="$t('modelRoutePage.modal.candidatesTitle')"
+      :help="$t('modelRoutePage.queue.description')"
+      :help-label="$t('modelRoutePage.modal.candidatesTitle')"
+      class="border-b border-gray-100 pb-3"
+    >
+      <template #actions>
       <Button variant="outline" class="w-full sm:w-auto" @click="emit('addCandidate')">
         <Plus class="mr-1.5 h-4 w-4" />
         {{ $t("modelRoutePage.modal.addCandidate") }}
       </Button>
-    </div>
+      </template>
+    </SectionHeader>
 
     <div
       v-if="route.candidates.length === 0"

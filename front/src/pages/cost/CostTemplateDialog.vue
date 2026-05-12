@@ -2,8 +2,8 @@
 import { Sparkles } from "lucide-vue-next";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { CardDescription } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import HelpHint from "@/components/HelpHint.vue";
 import { formatTimestamp } from "@/utils/datetime";
 import type { CostTemplateSummary } from "@/services/types/cost";
 
@@ -30,9 +30,10 @@ const emit = defineEmits<{
             <DialogTitle class="text-lg font-semibold text-gray-900">
               {{ $t("costPage.templates.title") }}
             </DialogTitle>
-            <CardDescription class="mt-1">
-              {{ $t("costPage.templates.description") }}
-            </CardDescription>
+            <HelpHint
+              :label="$t('costPage.templates.title')"
+              :content="$t('costPage.templates.description')"
+            />
           </div>
           <Button variant="outline" @click="emit('refresh')">
             {{ $t("common.refresh") }}

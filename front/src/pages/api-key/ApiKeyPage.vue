@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { KeyRound, Loader2, Plus, RefreshCcw } from "lucide-vue-next";
 
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
+import StatsStrip from "@/components/StatsStrip.vue";
 import { Button } from "@/components/ui/button";
 import ApiKeyDetailDrawer from "./components/ApiKeyDetailDrawer.vue";
 import ApiKeyEditDialog from "./components/ApiKeyEditDialog.vue";
@@ -75,7 +76,6 @@ onMounted(() => {
 <template>
   <CrudPageLayout
     :title="t('apiKeyPage.title')"
-    :description="t('apiKeyPage.description')"
     :loading="loading"
     :error="error"
     :empty="!apiKeys.length"
@@ -123,20 +123,7 @@ onMounted(() => {
       </div>
     </template>
 
-    <div class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-100 sm:grid-cols-3 xl:grid-cols-5">
-      <div
-        v-for="card in summaryCards"
-        :key="card.key"
-        class="bg-white px-4 py-3"
-      >
-        <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-          {{ card.label }}
-        </p>
-        <p class="mt-1 text-lg font-semibold tracking-tight text-gray-900">
-          {{ card.value }}
-        </p>
-      </div>
-    </div>
+    <StatsStrip :items="summaryCards" grid-class="grid-cols-2 sm:grid-cols-3 xl:grid-cols-5" />
 
     <div class="grid grid-cols-1 gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-12">
       <div class="xl:col-span-4 xl:min-h-0 2xl:col-span-3">

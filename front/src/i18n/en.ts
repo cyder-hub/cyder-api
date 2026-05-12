@@ -2,8 +2,6 @@ export const enDict = {
   providerPage: {
     editModel: "Edit model: {model_name}",
     title: "Providers Management",
-    description:
-      "Default start page for provider onboarding. Manage AI model providers, API keys, and model lists from here.",
     addProvider: "Add New Provider",
     viewModels: "Open Model Library",
     viewRuntime: "View Runtime",
@@ -36,8 +34,6 @@ export const enDict = {
   },
   dashboard: {
     title: "Dashboard",
-    description:
-      "View overall system status, resource statistics, and daily consumption metrics.",
     sections: {
       resources: {
         title: "Resources",
@@ -259,7 +255,6 @@ export const enDict = {
   },
   alertsPage: {
     title: "Alerts",
-    description: "Review runtime alerts, lifecycle state, and recent notification deliveries.",
     loading: "Loading alerts...",
     empty: "No alerts match the current filters.",
     summary: {
@@ -348,7 +343,6 @@ export const enDict = {
   },
   notificationPage: {
     title: "Notifications",
-    description: "Manage webhook channels and inspect alert delivery state.",
     loading: "Loading notification settings...",
     summary: {
       channels: "Channels",
@@ -428,8 +422,6 @@ export const enDict = {
   },
   systemConfigPage: {
     title: "System Config",
-    description:
-      "Inspect effective configuration, source layers, override file state, and deployment mode.",
     loading: "Loading system config...",
     refresh: "Refresh",
     reload: "Reload Override",
@@ -606,7 +598,6 @@ export const enDict = {
   },
   portableConfigPage: {
     title: "Config Import / Export",
-    description: "Export or import portable gateway configuration bundles.",
     tabs: {
       export: "Export",
       import: "Import",
@@ -726,8 +717,6 @@ export const enDict = {
   },
   providerRuntimePage: {
     title: "Provider Runtime",
-    description:
-      "Inspect provider health, error trends, and latency by time window.",
     loading: "Loading runtime data...",
     refresh: "Refresh",
     reset: "Reset filters",
@@ -818,8 +807,6 @@ export const enDict = {
   },
   recordPage: {
     title: "Request Records",
-    description:
-      "Inspect request diagnostics, retry/fallback traces, payloads, and controlled replay.",
     filter: {
       title: "Filters",
       all: "All",
@@ -1336,8 +1323,6 @@ export const enDict = {
   },
   modelPage: {
     title: "Model Library",
-    description:
-      "Browse model summaries across all providers. Use this page to inspect, edit, and jump into model details without opening provider detail views first.",
     actions: {
       backToProviders: "Back to Providers",
     },
@@ -1445,8 +1430,6 @@ export const enDict = {
   },
   apiKeyPage: {
     title: "API Key Management",
-    description:
-      "Advanced key governance for identity, ACL, lifecycle, quotas, and runtime controls.",
     addApiKey: "Add API Key",
     loading: "Loading API keys...",
     loadingDetail: "Loading API key detail...",
@@ -1665,8 +1648,6 @@ export const enDict = {
   },
   modelRoutePage: {
     title: "Logical Model Routes",
-    description:
-      "Advanced routing: manage shared logical model names, primary candidate order, and whether they are exposed to /models.",
     addRoute: "Add Route",
     loading: "Loading model routes...",
     errorPrefix: "Error loading model routes.",
@@ -1793,10 +1774,6 @@ export const enDict = {
   providerEditPage: {
     titleEdit: "Edit Provider",
     titleAdd: "Add New Provider",
-    descriptionEdit:
-      "Edit the saved provider quick start fields, then continue with the advanced sections below.",
-    descriptionAdd:
-      "Use Quick Start to bootstrap a new provider, then continue with models, API keys, and request patches.",
     loadingData: "Loading provider data...",
     buttonSaveOnly: "Save Only",
     buttonSaveAndTest: "Save & Test",
@@ -2225,8 +2202,6 @@ export const enDict = {
   },
   costPage: {
     title: "Cost Management",
-    description:
-      "Advanced billing and pricing controls. Review the catalog list first, then open a dialog workspace to manage versions, components, and preview runs.",
     confirmDeleteCatalog: "Delete cost catalog '{name}'?",
     confirmDeleteCatalogDescription:
       "Catalogs can only be removed after all versions are cleared on the backend.",

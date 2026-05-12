@@ -4,6 +4,8 @@ import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import { RefreshCcw } from "lucide-vue-next";
 
+import PageHeader from "@/components/PageHeader.vue";
+import SectionHeader from "@/components/SectionHeader.vue";
 import UsageChart from "@/components/UsageChart.vue";
 import { Button } from "@/components/ui/button";
 import * as dashboardService from "@/services/dashboard";
@@ -85,22 +87,14 @@ onMounted(() => {
 <template>
   <div class="app-page">
     <div class="app-page-shell">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold tracking-tight text-gray-900 sm:text-xl">
-            {{ $t("sidebar.dashboard") }}
-          </h1>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ $t("dashboard.description") }}
-          </p>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+      <PageHeader :title="$t('sidebar.dashboard')">
+        <template #actions>
           <Button class="w-full sm:w-auto" :disabled="isRefreshing" @click="fetchDashboard">
             <RefreshCcw class="mr-1.5 h-4 w-4" :class="{ 'animate-spin': isRefreshing }" />
             {{ $t("common.refresh") }}
           </Button>
-        </div>
-      </div>
+        </template>
+      </PageHeader>
 
       <div class="app-section">
         <DashboardKpiGrid
@@ -126,16 +120,15 @@ onMounted(() => {
           @view-records="goToRecords"
         />
 
-        <div class="border border-gray-200 bg-white rounded-lg">
-          <div class="px-4 py-4 sm:px-6">
-            <h2 class="text-base font-semibold text-gray-900">
-              {{ $t("dashboard.sections.trends.title") }}
-            </h2>
-          </div>
+        <section class="rounded-lg border border-gray-200 bg-white">
+          <SectionHeader
+            :title="$t('dashboard.sections.trends.title')"
+            class="border-b border-gray-100 px-4 py-4 sm:px-6"
+          />
           <div class="px-0 pb-0">
             <UsageChart />
           </div>
-        </div>
+        </section>
 
         <DashboardAlertPanel
           :loading="alertsLoading"

@@ -2,16 +2,7 @@
   <div class="app-page flex h-full min-h-0 flex-col overflow-hidden">
     <div class="app-page-shell flex min-h-0 flex-1 flex-col">
       <div class="flex min-h-0 flex-1 flex-col gap-4 sm:gap-6">
-        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div class="min-w-0">
-            <h1 class="text-lg font-semibold tracking-tight text-gray-900 sm:text-xl">
-              {{ $t("recordPage.title") }}
-            </h1>
-            <p class="mt-1 text-sm text-gray-500">
-              {{ $t("recordPage.description") }}
-            </p>
-          </div>
-        </div>
+        <PageHeader :title="$t('recordPage.title')" />
 
         <RecordFilters
           v-model:search-input="searchInput"
@@ -77,6 +68,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
+import PageHeader from "@/components/PageHeader.vue";
 import RecordDetailDialog from "./components/RecordDetailDialog.vue";
 import RecordFilters from "./components/RecordFilters.vue";
 import RecordTable from "./components/RecordTable.vue";

@@ -1,14 +1,9 @@
 <script setup lang="ts">
 import { Sparkles } from "lucide-vue-next";
+import SectionHeader from "@/components/SectionHeader.vue";
+import StatsStrip from "@/components/StatsStrip.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatPriceFromNanos } from "@/utils/money";
@@ -44,18 +39,16 @@ const emit = defineEmits<{
     v-if="selectedVersionSummary"
     :class="embedded ? '' : 'border-t border-gray-100 pt-6'"
   >
-    <Card
-      class="rounded-2xl border-gray-200"
-      :class="embedded ? 'rounded-none border-0' : ''"
+    <section
+      class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5"
+      :class="embedded ? 'rounded-none border-0 p-0' : ''"
     >
-      <CardHeader>
-        <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <CardTitle>{{ $t("costPage.preview.title") }}</CardTitle>
-            <CardDescription class="mt-1">
-              {{ $t("costPage.preview.description") }}
-            </CardDescription>
-          </div>
+      <SectionHeader
+        :title="$t('costPage.preview.title')"
+        :help="$t('costPage.preview.description')"
+        :help-label="$t('costPage.preview.title')"
+      >
+        <template #actions>
           <div class="flex flex-col gap-2 sm:flex-row">
             <Button variant="outline" @click="emit('apply-sample')">
               <Sparkles class="mr-1.5 h-4 w-4" />
@@ -65,9 +58,9 @@ const emit = defineEmits<{
               {{ isRunningPreview ? $t("costPage.preview.running") : $t("costPage.preview.run") }}
             </Button>
           </div>
-        </div>
-      </CardHeader>
-      <CardContent class="space-y-5">
+        </template>
+      </SectionHeader>
+      <div class="mt-5 space-y-5">
         <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           <div class="space-y-1.5">
             <Label for="preview-total-input">{{ $t("costPage.preview.fields.totalInputTokens") }}</Label>
@@ -111,31 +104,30 @@ const emit = defineEmits<{
           v-if="previewResponse"
           class="space-y-5 rounded-2xl border border-gray-200 bg-gray-50/60 p-4"
         >
-          <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
-            <div class="rounded-xl border border-white bg-white px-4 py-3">
-              <div class="text-xs text-gray-500">{{ $t("costPage.preview.result.totalCost") }}</div>
-              <div class="mt-1 text-lg font-semibold text-gray-900">
-                {{
-                  formatPriceFromNanos(
-                    previewResponse.result.total_cost_nanos,
-                    previewResponse.result.currency,
-                  )
-                }}
-              </div>
-            </div>
-            <div class="rounded-xl border border-white bg-white px-4 py-3">
-              <div class="text-xs text-gray-500">{{ $t("costPage.preview.result.currency") }}</div>
-              <div class="mt-1 font-mono text-lg font-semibold text-gray-900">
-                {{ previewResponse.result.currency }}
-              </div>
-            </div>
-            <div class="rounded-xl border border-white bg-white px-4 py-3">
-              <div class="text-xs text-gray-500">{{ $t("costPage.preview.result.detailLines") }}</div>
-              <div class="mt-1 text-lg font-semibold text-gray-900">
-                {{ previewResponse.result.detail_lines.length }}
-              </div>
-            </div>
-          </div>
+          <StatsStrip
+            :items="[
+              {
+                key: 'total',
+                label: $t('costPage.preview.result.totalCost'),
+                value: formatPriceFromNanos(
+                  previewResponse.result.total_cost_nanos,
+                  previewResponse.result.currency,
+                ),
+              },
+              {
+                key: 'currency',
+                label: $t('costPage.preview.result.currency'),
+                value: previewResponse.result.currency,
+                mono: true,
+              },
+              {
+                key: 'detail-lines',
+                label: $t('costPage.preview.result.detailLines'),
+                value: previewResponse.result.detail_lines.length,
+              },
+            ]"
+            grid-class="grid-cols-1 md:grid-cols-3"
+          />
 
           <div class="space-y-2">
             <h3 class="text-sm font-semibold text-gray-900">
@@ -145,7 +137,7 @@ const emit = defineEmits<{
               <div
                 v-for="(item, index) in previewResponse.ledger.items"
                 :key="`${item.meter_key}-${index}`"
-                class="rounded-xl border border-white bg-white px-4 py-3"
+                class="rounded-lg bg-white px-4 py-3"
               >
                 <div class="flex flex-wrap items-center gap-2">
                   <span class="text-sm font-medium text-gray-900">
@@ -174,7 +166,7 @@ const emit = defineEmits<{
               <div
                 v-for="(line, index) in previewResponse.result.detail_lines"
                 :key="`${line.component_id}-${index}`"
-                class="rounded-xl border border-white bg-white px-4 py-3"
+                class="rounded-lg bg-white px-4 py-3"
               >
                 <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                   <div>
@@ -263,7 +255,7 @@ const emit = defineEmits<{
             </div>
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   </div>
 </template>

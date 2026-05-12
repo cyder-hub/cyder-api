@@ -1,22 +1,14 @@
 <template>
   <div class="app-page">
     <div class="app-page-shell app-page-shell--narrow">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold text-gray-900 tracking-tight sm:text-xl">
-            {{ pageTitle }}
-          </h1>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ pageDescription }}
-          </p>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto">
+      <PageHeader :title="pageTitle" actions-class="sm:flex-col">
+        <template #actions>
           <Button variant="outline" @click="router.push('/provider')">
             <ArrowLeft class="h-4 w-4 mr-1.5" />
             {{ $t("providerEditPage.buttonBackToList") }}
           </Button>
-        </div>
-      </div>
+        </template>
+      </PageHeader>
 
       <div v-if="isLoading" class="flex items-center justify-center py-16">
         <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
@@ -44,16 +36,12 @@
             :provider-type="editingData.provider_type"
             @saved="handleReasoningConfigSaved"
           />
-          <div class="space-y-3 pt-1">
-            <div class="border-t border-gray-200 pt-5">
-              <h2 class="text-base font-semibold text-gray-900">
-                {{ $t("providerEditPage.sections.advanced.title") }}
-              </h2>
-              <p class="mt-1 text-sm text-gray-500">
-                {{ $t("providerEditPage.sections.advanced.description") }}
-              </p>
-            </div>
-          </div>
+          <SectionHeader
+            :title="$t('providerEditPage.sections.advanced.title')"
+            :help="$t('providerEditPage.sections.advanced.description')"
+            :help-label="$t('providerEditPage.sections.advanced.title')"
+            class="border-t border-gray-200 pt-5"
+          />
           <ProviderModelList 
             v-model:editingData="editingData"
             @check-single="(index) => handleCheck('model', index)"
@@ -68,7 +56,7 @@
 
           <ProviderRequestPatchPanel v-model:editingData="editingData" />
 
-          <div class="flex flex-col gap-2 rounded-xl border border-gray-200 bg-white p-4 sm:flex-row sm:justify-end">
+          <div class="flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row sm:justify-end">
             <Button variant="secondary" class="w-full sm:w-auto" @click="router.push('/provider')">{{
               $t("providerEditPage.buttonBackToList")
             }}</Button>
@@ -191,6 +179,8 @@
 import type { Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
+import PageHeader from "@/components/PageHeader.vue";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -228,7 +218,6 @@ const {
   errorMsg,
   editingData,
   pageTitle,
-  pageDescription,
   reasoningActions,
   handleReasoningConfigSaved,
 } = useProviderEdit();

@@ -2,9 +2,9 @@
 import { useI18n } from "vue-i18n";
 import { AlertCircle, Loader2 } from "lucide-vue-next";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type {
   DashboardFormatDateTime,
   DashboardResourceItem,
@@ -38,23 +38,22 @@ const { t: $t } = useI18n();
 
 <template>
   <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-    <Card class="border border-gray-200 shadow-none">
-      <CardHeader class="px-4 pb-4 sm:px-6">
-        <CardTitle class="text-base">
-          {{ $t("dashboard.sections.resources.title") }}
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="px-4 sm:px-6">
+    <section class="rounded-lg border border-gray-200 bg-white">
+      <SectionHeader
+        :title="$t('dashboard.sections.resources.title')"
+        class="border-b border-gray-100 px-4 py-4 sm:px-6"
+      />
+      <div class="px-4 py-4 sm:px-6">
         <div
           v-if="props.loading"
-          class="flex items-center justify-center rounded-lg border border-dashed border-gray-200 py-12"
+          class="flex items-center justify-center py-12"
         >
           <Loader2 class="mr-2 h-4 w-4 animate-spin text-gray-400" />
           <span class="text-sm text-gray-500">{{ $t("common.loading") }}</span>
         </div>
         <div
           v-else-if="props.error"
-          class="flex flex-col items-center justify-center rounded-lg border border-red-200 bg-red-50 px-4 py-10 text-center"
+          class="flex flex-col items-center justify-center rounded-md bg-red-50 px-4 py-10 text-center"
         >
           <AlertCircle class="mb-3 h-8 w-8 stroke-1 text-red-500" />
           <p class="text-sm font-medium text-red-500">
@@ -78,26 +77,25 @@ const { t: $t } = useI18n();
             </div>
           </li>
         </ul>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
 
-    <Card class="border border-gray-200 shadow-none">
-      <CardHeader class="px-4 pb-4 sm:px-6">
-        <CardTitle class="text-base">
-          {{ $t("dashboard.sections.runtime.title") }}
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="px-4 sm:px-6">
+    <section class="rounded-lg border border-gray-200 bg-white">
+      <SectionHeader
+        :title="$t('dashboard.sections.runtime.title')"
+        class="border-b border-gray-100 px-4 py-4 sm:px-6"
+      />
+      <div class="px-4 py-4 sm:px-6">
         <div
           v-if="props.loading"
-          class="flex items-center justify-center rounded-lg border border-dashed border-gray-200 py-12"
+          class="flex items-center justify-center py-12"
         >
           <Loader2 class="mr-2 h-4 w-4 animate-spin text-gray-400" />
           <span class="text-sm text-gray-500">{{ $t("common.loading") }}</span>
         </div>
         <div
           v-else-if="props.error"
-          class="flex flex-col items-center justify-center rounded-lg border border-red-200 bg-red-50 px-4 py-10 text-center"
+          class="flex flex-col items-center justify-center rounded-md bg-red-50 px-4 py-10 text-center"
         >
           <AlertCircle class="mb-3 h-8 w-8 stroke-1 text-red-500" />
           <p class="text-sm font-medium text-red-500">
@@ -105,11 +103,11 @@ const { t: $t } = useI18n();
           </p>
         </div>
         <template v-else>
-          <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <div class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-100 sm:grid-cols-3">
             <div
               v-for="item in props.runtimeItems"
               :key="item.key"
-              class="rounded-lg border border-gray-100 px-3 py-3"
+              class="bg-white px-3 py-3"
             >
               <div class="flex items-center justify-between gap-2">
                 <p class="text-xs font-medium uppercase tracking-wide text-gray-500">
@@ -195,7 +193,7 @@ const { t: $t } = useI18n();
             </Button>
           </div>
         </template>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   </div>
 </template>

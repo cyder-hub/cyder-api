@@ -2,9 +2,9 @@
 import { useI18n } from "vue-i18n";
 import { AlertCircle, Loader2 } from "lucide-vue-next";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type {
   DashboardAlertsSection,
   DashboardProviderAlertItem,
@@ -45,37 +45,32 @@ const { t: $t } = useI18n();
 </script>
 
 <template>
-  <div v-if="props.loading" class="grid grid-cols-1 gap-4 xl:grid-cols-3">
-    <Card
-      v-for="placeholder in 3"
-      :key="`alerts-loading-${placeholder}`"
-      class="border border-gray-200 shadow-none"
-    >
-      <CardContent class="flex items-center justify-center px-4 py-16">
-        <Loader2 class="mr-2 h-4 w-4 animate-spin text-gray-400" />
-        <span class="text-sm text-gray-500">{{ $t("common.loading") }}</span>
-      </CardContent>
-    </Card>
+  <div
+    v-if="props.loading"
+    class="flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-16"
+  >
+    <Loader2 class="mr-2 h-4 w-4 animate-spin text-gray-400" />
+    <span class="text-sm text-gray-500">{{ $t("common.loading") }}</span>
   </div>
 
-  <Card v-else-if="props.error" class="border border-red-200 bg-red-50 shadow-none">
-    <CardContent class="flex flex-col items-center justify-center px-4 py-16 text-center">
-      <AlertCircle class="mb-3 h-8 w-8 stroke-1 text-red-500" />
-      <p class="text-sm font-medium text-red-500">
-        {{ $t("dashboard.errorLoading", { error: props.error }) }}
-      </p>
-    </CardContent>
-  </Card>
+  <div
+    v-else-if="props.error"
+    class="flex flex-col items-center justify-center rounded-lg border border-red-200 bg-red-50 px-4 py-16 text-center"
+  >
+    <AlertCircle class="mb-3 h-8 w-8 stroke-1 text-red-500" />
+    <p class="text-sm font-medium text-red-500">
+      {{ $t("dashboard.errorLoading", { error: props.error }) }}
+    </p>
+  </div>
 
   <div v-else class="grid grid-cols-1 gap-4 xl:grid-cols-3">
-    <Card class="border border-gray-200 shadow-none">
-      <CardHeader class="px-4 pb-4 sm:px-6">
-        <CardTitle class="text-base">
-          {{ $t("dashboard.sections.alerts.title") }}
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="app-stack-sm px-4 sm:px-6">
-        <div class="rounded-lg border border-gray-100">
+    <section class="rounded-lg border border-gray-200 bg-white">
+      <SectionHeader
+        :title="$t('dashboard.sections.alerts.title')"
+        class="border-b border-gray-100 px-4 py-4 sm:px-6"
+      />
+      <div class="app-stack-sm px-4 py-4 sm:px-6">
+        <div class="border-b border-gray-100 pb-4">
           <div class="border-b border-gray-100 px-4 py-3">
             <p class="text-sm font-medium text-gray-900">
               {{ $t("dashboard.alertGroups.unstable") }}
@@ -112,7 +107,7 @@ const { t: $t } = useI18n();
           </div>
         </div>
 
-        <div class="rounded-lg border border-gray-100">
+        <div class="border-b border-gray-100 pb-4">
           <div class="border-b border-gray-100 px-4 py-3">
             <p class="text-sm font-medium text-gray-900">
               {{ $t("dashboard.alertGroups.topErrors") }}
@@ -154,7 +149,7 @@ const { t: $t } = useI18n();
           </div>
         </div>
 
-        <div class="rounded-lg border border-gray-100">
+        <div>
           <div class="border-b border-gray-100 px-4 py-3">
             <p class="text-sm font-medium text-gray-900">
               {{ $t("dashboard.alertGroups.costHotspots") }}
@@ -271,16 +266,15 @@ const { t: $t } = useI18n();
             {{ $t("dashboard.empty.noCostHotspots") }}
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
 
-    <Card class="border border-gray-200 shadow-none">
-      <CardHeader class="px-4 pb-4 sm:px-6">
-        <CardTitle class="text-base">
-          {{ $t("dashboard.sections.topProviders.title") }}
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="px-4 sm:px-6">
+    <section class="rounded-lg border border-gray-200 bg-white">
+      <SectionHeader
+        :title="$t('dashboard.sections.topProviders.title')"
+        class="border-b border-gray-100 px-4 py-4 sm:px-6"
+      />
+      <div class="px-4 py-4 sm:px-6">
         <ul v-if="props.alertsSection.top_providers.length" class="divide-y divide-gray-100">
           <li
             v-for="item in props.alertsSection.top_providers"
@@ -320,16 +314,15 @@ const { t: $t } = useI18n();
         <div v-else class="py-12 text-center text-sm text-gray-500">
           {{ $t("dashboard.empty.noTopProviders") }}
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
 
-    <Card class="border border-gray-200 shadow-none">
-      <CardHeader class="px-4 pb-4 sm:px-6">
-        <CardTitle class="text-base">
-          {{ $t("dashboard.sections.topModels.title") }}
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="px-4 sm:px-6">
+    <section class="rounded-lg border border-gray-200 bg-white">
+      <SectionHeader
+        :title="$t('dashboard.sections.topModels.title')"
+        class="border-b border-gray-100 px-4 py-4 sm:px-6"
+      />
+      <div class="px-4 py-4 sm:px-6">
         <ul v-if="props.alertsSection.top_models.length" class="divide-y divide-gray-100">
           <li
             v-for="item in props.alertsSection.top_models"
@@ -366,7 +359,7 @@ const { t: $t } = useI18n();
         <div v-else class="py-12 text-center text-sm text-gray-500">
           {{ $t("dashboard.empty.noTopModels") }}
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   </div>
 </template>

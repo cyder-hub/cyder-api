@@ -1,8 +1,12 @@
 <script setup lang="ts">
+import PageHeader from "@/components/PageHeader.vue";
+
 withDefaults(
   defineProps<{
     title: string;
     description?: string;
+    help?: string;
+    helpLabel?: string;
     loading?: boolean;
     error?: string | null;
     empty?: boolean;
@@ -13,6 +17,8 @@ withDefaults(
   }>(),
   {
     description: "",
+    help: "",
+    helpLabel: "Page help",
     loading: false,
     error: null,
     empty: false,
@@ -28,19 +34,19 @@ withDefaults(
 <template>
   <div class="app-page" :class="pageClass">
     <div class="app-page-shell" :class="shellClass">
-      <div :class="headerClass">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold text-gray-900 tracking-tight sm:text-xl">
-            {{ title }}
-          </h1>
-          <p v-if="description" class="mt-1 text-sm text-gray-500">
-            {{ description }}
-          </p>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+      <PageHeader
+        :title="title"
+        :help="help"
+        :help-label="helpLabel"
+        :class="headerClass"
+      >
+        <template v-if="$slots.help" #help>
+          <slot name="help" />
+        </template>
+        <template #actions>
           <slot name="actions" />
-        </div>
-      </div>
+        </template>
+      </PageHeader>
 
       <div class="app-section" :class="contentClass">
         <template v-if="loading">

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Copy, Plus, Sparkles, Trash2 } from "lucide-vue-next";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,15 +34,14 @@ const emit = defineEmits<{
 
 <template>
   <div class="space-y-6">
-    <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-      <div>
-        <h2 class="text-lg font-medium text-gray-900">
-          {{ $t("costPage.catalogs.title") }}
-        </h2>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("costPage.catalogs.description") }}
-        </p>
-      </div>
+    <SectionHeader
+      :title="$t('costPage.catalogs.title')"
+      :help="$t('costPage.catalogs.description')"
+      :help-label="$t('costPage.catalogs.title')"
+      title-class="text-lg font-medium"
+      class="lg:items-start"
+    >
+      <template #actions>
       <div class="flex flex-col gap-2 sm:flex-row">
         <Button variant="outline" @click="emit('open-template')">
           <Sparkles class="mr-1.5 h-4 w-4" />
@@ -55,7 +55,8 @@ const emit = defineEmits<{
           {{ $t("costPage.catalogs.add") }}
         </Button>
       </div>
-    </div>
+      </template>
+    </SectionHeader>
 
     <div
       v-if="isLoading"

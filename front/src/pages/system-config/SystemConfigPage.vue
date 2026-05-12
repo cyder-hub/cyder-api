@@ -12,6 +12,8 @@ import {
   X,
 } from "lucide-vue-next";
 
+import PageHeader from "@/components/PageHeader.vue";
+import StatsStrip from "@/components/StatsStrip.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -159,16 +161,8 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
 <template>
   <div class="app-page">
     <div class="app-page-shell">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold tracking-tight text-gray-900 sm:text-xl">
-            {{ $t("systemConfigPage.title") }}
-          </h1>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ $t("systemConfigPage.description") }}
-          </p>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+      <PageHeader :title="$t('systemConfigPage.title')">
+        <template #actions>
           <Button
             variant="outline"
             class="w-full sm:w-auto"
@@ -196,8 +190,8 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
             <RefreshCcw class="mr-1.5 h-4 w-4" :class="{ 'animate-spin': isLoading }" />
             {{ $t("systemConfigPage.refresh") }}
           </Button>
-        </div>
-      </div>
+        </template>
+      </PageHeader>
 
       <div
         v-if="errorMessage"
@@ -215,16 +209,10 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
       </div>
 
       <template v-else-if="report">
-        <div class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-100 md:grid-cols-5">
-          <div v-for="card in summaryCards" :key="card.key" class="bg-white px-4 py-3">
-            <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-              {{ card.label }}
-            </p>
-            <p class="mt-1 font-mono text-lg font-semibold tracking-tight text-gray-900">
-              {{ card.value }}
-            </p>
-          </div>
-        </div>
+        <StatsStrip
+          :items="summaryCards.map((card) => ({ ...card, mono: true }))"
+          grid-class="grid-cols-2 md:grid-cols-5"
+        />
 
         <SystemConfigSourcePanel
           v-model:config-view-mode="configViewMode"
@@ -259,7 +247,7 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
                   {{ $t("systemConfigPage.filters.title") }}
                 </h2>
               </div>
-              <p class="mt-1 text-sm text-gray-500">
+              <p class="mt-1 text-xs leading-5 text-gray-500">
                 {{
                   $t("systemConfigPage.filters.activeSummary", {
                     shown: rows.length,

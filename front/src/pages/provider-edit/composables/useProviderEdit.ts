@@ -35,12 +35,6 @@ export function useProviderEdit() {
       : t("providerEditPage.titleAdd"),
   );
 
-  const pageDescription = computed(() =>
-    providerId.value || editingData.value?.id
-      ? t("providerEditPage.descriptionEdit")
-      : t("providerEditPage.descriptionAdd"),
-  );
-
   const reasoningActions: ReasoningConfigActions = {
     getCatalog: requestPatchService.getReasoningConfigCatalog,
     getConfig: requestPatchService.getProviderReasoningConfig,
@@ -141,7 +135,6 @@ export function useProviderEdit() {
     errorMsg,
     editingData,
     pageTitle,
-    pageDescription,
     reasoningActions,
     handleReasoningConfigSaved,
     loadProvider,

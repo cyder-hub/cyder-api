@@ -59,7 +59,7 @@ const emit = defineEmits<{
             <div class="text-sm font-medium text-gray-900">
               {{ $t("costPage.versions.modal.enabled") }}
             </div>
-            <div class="mt-1 text-sm text-gray-500">
+            <div class="mt-1 text-xs leading-5 text-gray-500">
               {{ $t("costPage.versions.modal.enabledDescription") }}
             </div>
           </div>

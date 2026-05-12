@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { AlertCircle, Loader2, RefreshCcw } from "lucide-vue-next";
 
+import PageHeader from "@/components/PageHeader.vue";
+import StatsStrip from "@/components/StatsStrip.vue";
 import { Button } from "@/components/ui/button";
 import AlertDetailDrawer from "./components/AlertDetailDrawer.vue";
 import AlertFilters from "./components/AlertFilters.vue";
@@ -56,16 +58,8 @@ const {
 <template>
   <div class="app-page">
     <div class="app-page-shell">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold tracking-tight text-gray-900 sm:text-xl">
-            {{ $t("alertsPage.title") }}
-          </h1>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ $t("alertsPage.description") }}
-          </p>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+      <PageHeader :title="$t('alertsPage.title')">
+        <template #actions>
           <Button
             variant="outline"
             class="w-full sm:w-auto"
@@ -75,19 +69,10 @@ const {
             <RefreshCcw class="mr-1.5 h-4 w-4" :class="{ 'animate-spin': isRefreshing }" />
             {{ $t("common.refresh") }}
           </Button>
-        </div>
-      </div>
+        </template>
+      </PageHeader>
 
-      <div class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-100 sm:grid-cols-4">
-        <div v-for="card in summaryCards" :key="card.key" class="bg-white px-4 py-3">
-          <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-            {{ card.label }}
-          </p>
-          <p class="mt-1 text-lg font-semibold tracking-tight text-gray-900">
-            {{ card.value }}
-          </p>
-        </div>
-      </div>
+      <StatsStrip :items="summaryCards" grid-class="grid-cols-2 sm:grid-cols-4" />
 
       <AlertFilters
         v-model:filters="filters"

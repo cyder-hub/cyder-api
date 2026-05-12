@@ -2,6 +2,7 @@
 import { AlertTriangle, FileText, HardDrive, Settings } from "lucide-vue-next";
 import { useI18n } from "vue-i18n";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type {
@@ -157,14 +158,12 @@ function sourceLabel(kind: string): string {
     </div>
 
     <div class="rounded-xl border border-gray-200 bg-white">
-      <div class="border-b border-gray-100 px-4 py-3">
-        <h2 class="text-base font-semibold text-gray-900">
-          {{ $t("systemConfigPage.sourcePriority.title") }}
-        </h2>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("systemConfigPage.sourcePriority.description") }}
-        </p>
-      </div>
+      <SectionHeader
+        :title="$t('systemConfigPage.sourcePriority.title')"
+        :help="$t('systemConfigPage.sourcePriority.description')"
+        :help-label="$t('systemConfigPage.sourcePriority.title')"
+        class="border-b border-gray-100 px-4 py-3"
+      />
       <div class="grid grid-cols-1 divide-y divide-gray-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-6">
         <div v-for="layer in sourceLayers" :key="layer.kind" class="px-4 py-3">
           <p class="text-xs font-medium uppercase tracking-wide text-gray-500">
@@ -189,7 +188,7 @@ function sourceLabel(kind: string): string {
               {{ $t("systemConfigPage.persistence.title") }}
             </h2>
           </div>
-          <p class="mt-1 text-sm text-gray-500">
+          <p class="mt-1 text-xs leading-5 text-gray-500">
             {{ $t("systemConfigPage.persistence.description") }}
           </p>
         </div>

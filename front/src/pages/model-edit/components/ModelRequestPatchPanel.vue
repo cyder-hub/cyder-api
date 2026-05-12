@@ -1,14 +1,11 @@
 <template>
   <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div class="min-w-0">
-        <h3 class="text-lg font-semibold text-gray-900">
-          {{ t("modelEditPage.requestPatch.title") }}
-        </h3>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ t("modelEditPage.requestPatch.description") }}
-        </p>
-      </div>
+    <SectionHeader
+      :title="t('modelEditPage.requestPatch.title')"
+      :help="t('modelEditPage.requestPatch.description')"
+      :help-label="t('modelEditPage.requestPatch.title')"
+    >
+      <template #actions>
       <Button
         variant="ghost"
         size="sm"
@@ -22,7 +19,8 @@
         />
         {{ t("modelEditPage.requestPatch.refresh") }}
       </Button>
-    </div>
+      </template>
+    </SectionHeader>
 
     <div v-if="isLoading" class="flex items-center justify-center py-16">
       <Loader2 class="mr-2 h-5 w-5 animate-spin text-gray-400" />
@@ -112,14 +110,11 @@
 
       <div class="border-t border-gray-100 pt-5">
         <div class="space-y-3">
-          <div class="min-w-0">
-            <h4 class="text-base font-semibold text-gray-900">
-              {{ t("modelEditPage.requestPatch.inheritedTitle") }}
-            </h4>
-            <p class="mt-1 text-sm text-gray-500">
-              {{ t("modelEditPage.requestPatch.inheritedDescription", { provider: providerLabel }) }}
-            </p>
-          </div>
+          <SectionHeader
+            :title="t('modelEditPage.requestPatch.inheritedTitle')"
+            :help="t('modelEditPage.requestPatch.inheritedDescription', { provider: providerLabel })"
+            :help-label="t('modelEditPage.requestPatch.inheritedTitle')"
+          />
 
           <div
             v-if="inheritedRules.length === 0"
@@ -130,12 +125,12 @@
 
           <div
             v-else
-            class="overflow-hidden rounded-lg border border-gray-200 bg-white"
+            class="divide-y divide-gray-100 border-y border-gray-100"
           >
             <div
               v-for="item in inheritedRules"
               :key="item.rule.id"
-              class="border-t border-gray-100 px-4 py-4 first:border-t-0"
+              class="py-4"
             >
               <div class="space-y-3">
                 <div class="flex flex-wrap items-center gap-2">
@@ -202,14 +197,11 @@
 
       <div class="border-t border-gray-100 pt-5">
         <div class="space-y-3">
-          <div class="min-w-0">
-            <h4 class="text-base font-semibold text-gray-900">
-              {{ t("modelEditPage.requestPatch.effectiveTitle") }}
-            </h4>
-            <p class="mt-1 text-sm text-gray-500">
-              {{ t("modelEditPage.requestPatch.effectiveDescription") }}
-            </p>
-          </div>
+          <SectionHeader
+            :title="t('modelEditPage.requestPatch.effectiveTitle')"
+            :help="t('modelEditPage.requestPatch.effectiveDescription')"
+            :help-label="t('modelEditPage.requestPatch.effectiveTitle')"
+          />
 
           <div
             v-if="effectiveRules.length === 0"
@@ -220,12 +212,12 @@
 
           <div
             v-else
-            class="overflow-hidden rounded-lg border border-gray-200 bg-white"
+            class="divide-y divide-gray-100 border-y border-gray-100"
           >
             <div
               v-for="rule in effectiveRules"
               :key="`${rule.source_rule_id}-${rule.target}`"
-              class="border-t border-gray-100 px-4 py-4 first:border-t-0"
+              class="py-4"
             >
               <div class="space-y-3">
                 <div class="flex flex-wrap items-center gap-2">
@@ -286,14 +278,11 @@
 
       <div class="border-t border-gray-100 pt-5">
         <div class="space-y-3">
-          <div class="min-w-0">
-            <h4 class="text-base font-semibold text-gray-900">
-              {{ t("modelEditPage.requestPatch.explainTitle") }}
-            </h4>
-            <p class="mt-1 text-sm text-gray-500">
-              {{ t("modelEditPage.requestPatch.explainDescription") }}
-            </p>
-          </div>
+          <SectionHeader
+            :title="t('modelEditPage.requestPatch.explainTitle')"
+            :help="t('modelEditPage.requestPatch.explainDescription')"
+            :help-label="t('modelEditPage.requestPatch.explainTitle')"
+          />
 
           <div
             v-if="explainEntries.length === 0"
@@ -304,12 +293,12 @@
 
           <div
             v-else
-            class="overflow-hidden rounded-lg border border-gray-200 bg-white"
+            class="divide-y divide-gray-100 border-y border-gray-100"
           >
             <div
               v-for="entry in explainEntries"
               :key="entry.rule.id"
-              class="border-t border-gray-100 px-4 py-4 first:border-t-0"
+              class="py-4"
             >
               <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div class="min-w-0 flex-1 space-y-3">
@@ -401,6 +390,7 @@
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { formatRequestPatchValueForDisplay } from "@/utils/requestPatch";
+import SectionHeader from "@/components/SectionHeader.vue";
 import RequestPatchRulesPanel from "@/components/request-patch/RequestPatchRulesPanel.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

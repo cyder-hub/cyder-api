@@ -2,8 +2,6 @@ export const zhDict = {
   providerPage: {
     editModel: "编辑模型: {model_name}",
     title: "渠道管理",
-    description:
-      "这是默认起步页。先在这里完成渠道接入，再继续处理模型、密钥和高级配置。",
     addProvider: "添加新渠道",
     viewModels: "打开模型库",
     viewRuntime: "查看 Runtime",
@@ -36,7 +34,6 @@ export const zhDict = {
   },
   dashboard: {
     title: "仪表盘",
-    description: "查看系统整体运行状态、资源统计及各种日常耗费指标。",
     sections: {
       resources: {
         title: "系统资源",
@@ -253,7 +250,6 @@ export const zhDict = {
   },
   alertsPage: {
     title: "告警",
-    description: "查看运行告警、处理状态和最近通知投递。",
     loading: "正在加载告警...",
     empty: "当前筛选条件下没有告警。",
     summary: {
@@ -342,7 +338,6 @@ export const zhDict = {
   },
   notificationPage: {
     title: "通知",
-    description: "管理 webhook 通道并查看告警通知投递状态。",
     loading: "正在加载通知配置...",
     summary: {
       channels: "通道",
@@ -422,7 +417,6 @@ export const zhDict = {
   },
   systemConfigPage: {
     title: "系统配置",
-    description: "查看当前有效配置、来源、覆盖文件状态和运行模式。",
     loading: "正在加载系统配置...",
     refresh: "刷新",
     reload: "重新加载覆盖文件",
@@ -594,7 +588,6 @@ export const zhDict = {
   },
   portableConfigPage: {
     title: "配置导入导出",
-    description: "导出或导入可迁移的网关配置 bundle。",
     tabs: {
       export: "导出",
       import: "导入",
@@ -712,7 +705,6 @@ export const zhDict = {
   },
   providerRuntimePage: {
     title: "渠道 Runtime",
-    description: "按时间窗口查看渠道运行状态、错误趋势和延迟表现。",
     loading: "正在加载 Runtime 数据...",
     refresh: "刷新",
     reset: "重置筛选",
@@ -803,7 +795,6 @@ export const zhDict = {
   },
   recordPage: {
     title: "请求记录",
-    description: "查看请求诊断、重试/回退轨迹、载荷和受控重放。",
     filter: {
       title: "筛选",
       all: "全部",
@@ -1303,8 +1294,6 @@ export const zhDict = {
   },
   modelPage: {
     title: "模型库",
-    description:
-      "跨渠道浏览模型摘要。这个页面用于查看、编辑并跳转到模型详情，而不是替代渠道接入流程。",
     actions: {
       backToProviders: "返回渠道",
     },
@@ -1410,7 +1399,6 @@ export const zhDict = {
   },
   apiKeyPage: {
     title: "API Key 管理",
-    description: "高级密钥治理，包含身份、ACL、生命周期、配额和运行时控制。",
     addApiKey: "添加 API Key",
     loading: "正在加载 API Key...",
     loadingDetail: "正在加载 API Key 详情...",
@@ -1618,8 +1606,6 @@ export const zhDict = {
   },
   modelRoutePage: {
     title: "逻辑模型路由",
-    description:
-      "高级路由：管理共享逻辑模型名、主 candidate 顺序，以及是否暴露到 /models。",
     addRoute: "添加路由",
     loading: "正在加载模型路由...",
     errorPrefix: "加载模型路由错误。",
@@ -1745,10 +1731,6 @@ export const zhDict = {
   providerEditPage: {
     titleEdit: "编辑渠道",
     titleAdd: "新增渠道",
-    descriptionEdit:
-      "编辑已保存的渠道快速接入字段，然后继续处理下面的高级配置。",
-    descriptionAdd:
-      "使用 Quick Start 一步完成新渠道初始化，然后继续管理模型、API Key 和 request patch。",
     loadingData: "正在加载渠道数据...",
     buttonSaveOnly: "仅保存",
     buttonSaveAndTest: "保存并测试",
@@ -2149,8 +2131,6 @@ export const zhDict = {
   },
   costPage: {
     title: "成本管理",
-    description:
-      "高级计费与价格控制。先查看成本目录列表，再通过弹窗进入方案编辑，维护版本、组件与成本试算。",
     confirmDeleteCatalog: "确定删除成本目录“{name}”吗？",
     confirmDeleteCatalogDescription:
       "后端只有在该目录不再包含任何版本时才允许删除。",

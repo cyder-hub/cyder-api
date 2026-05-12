@@ -80,10 +80,7 @@ const {
 </script>
 
 <template>
-  <CrudPageLayout
-    :title="$t('costPage.title')"
-    :description="$t('costPage.description')"
-  >
+  <CrudPageLayout :title="$t('costPage.title')">
     <div class="space-y-6">
       <CostCatalogSection
         :catalogs="catalogs"

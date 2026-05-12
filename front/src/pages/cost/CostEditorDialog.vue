@@ -82,7 +82,7 @@ const emit = defineEmits<{
             <DialogTitle class="text-lg font-semibold text-gray-900">
               {{ selectedCatalog?.catalog.name || $t("costPage.editor.title") }}
             </DialogTitle>
-            <p class="mt-1 text-sm text-gray-500">
+            <p class="mt-1 text-xs leading-5 text-gray-500">
               {{
                 selectedCatalog?.catalog.description ||
                 $t("costPage.editor.description")

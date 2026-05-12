@@ -1,9 +1,6 @@
 <template>
-  <Card>
-    <CardHeader>
-      <CardTitle>{{ t("common.basicInfo") }}</CardTitle>
-    </CardHeader>
-    <CardContent class="space-y-4">
+  <section class="space-y-4 rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+    <SectionHeader :title="t('common.basicInfo')" />
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div class="grid gap-1.5">
           <Label for="model_name" class="text-gray-700">
@@ -29,14 +26,12 @@
       </div>
 
       <div class="space-y-3">
-        <div>
-          <h3 class="text-sm font-semibold text-gray-900">
-            {{ t("modelEditPage.capabilities.title") }}
-          </h3>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ t("modelEditPage.capabilities.description") }}
-          </p>
-        </div>
+        <SectionHeader
+          :title="t('modelEditPage.capabilities.title')"
+          :help="t('modelEditPage.capabilities.description')"
+          :help-label="t('modelEditPage.capabilities.title')"
+          title-class="text-sm"
+        />
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div
             v-for="capability in capabilityItems"
@@ -56,14 +51,13 @@
           </div>
         </div>
       </div>
-    </CardContent>
-  </Card>
+  </section>
 </template>
 
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

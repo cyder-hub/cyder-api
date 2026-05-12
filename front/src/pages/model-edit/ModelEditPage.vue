@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 
+import PageHeader from "@/components/PageHeader.vue";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import { formatTimestamp } from "@/utils/datetime";
@@ -62,21 +63,16 @@ const {
 <template>
   <div class="app-page">
     <div class="app-page-shell app-page-shell--narrow">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold text-gray-900 tracking-tight sm:text-xl">
-            {{ t("modelEditPage.title") }}
-          </h1>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto">
+      <PageHeader :title="t('modelEditPage.title')" actions-class="sm:flex-col">
+        <template #actions>
           <Button variant="outline" @click="handleNavigateToModels">
             {{ t("modelEditPage.buttonBackToModels") }}
           </Button>
           <Button variant="ghost" @click="handleNavigateToProviders">
             {{ t("modelEditPage.buttonBackToProviders") }}
           </Button>
-        </div>
-      </div>
+        </template>
+      </PageHeader>
 
       <div v-if="isLoading" class="flex items-center justify-center py-16">
         <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
@@ -100,7 +96,7 @@ const {
       </div>
 
       <div v-else-if="editingData" class="space-y-6">
-        <div class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+        <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div class="min-w-0">
               <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
@@ -124,10 +120,7 @@ const {
               }}
             </Badge>
           </div>
-          <p class="mt-2 text-sm text-gray-500">
-            {{ t("modelEditPage.providerSummary.description") }}
-          </p>
-        </div>
+        </section>
 
         <ModelRoutePreviewPanel
           :route-references="modelDetail.route_references"
@@ -147,12 +140,9 @@ const {
         @saved="handleReasoningConfigSaved"
       />
 
-      <!-- Cost Catalog Section -->
-      <Card>
-        <CardHeader>
-          <CardTitle>{{ t("modelEditPage.priceSection.title") }}</CardTitle>
-        </CardHeader>
-        <CardContent class="space-y-6">
+      <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+        <SectionHeader :title="t('modelEditPage.priceSection.title')" />
+        <div class="mt-4 space-y-6">
           <div class="grid gap-1.5">
             <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div class="grid gap-1.5">
@@ -332,8 +322,8 @@ const {
               {{ t("costPage.versions.empty") }}
             </div>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
         <ModelRequestPatchPanel
           :model-id="editingData.id"

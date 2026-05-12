@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Inbox, Send, Trash2, Webhook } from "lucide-vue-next";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { NotificationChannel } from "@/services/types";
@@ -23,16 +24,12 @@ defineEmits<{
 
 <template>
   <section class="rounded-lg border border-gray-200 bg-white">
-    <div class="flex flex-col gap-3 border-b border-gray-100 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-      <div class="min-w-0">
-        <h2 class="text-base font-semibold text-gray-900">
-          {{ $t("notificationPage.channels.title") }}
-        </h2>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("notificationPage.channels.description") }}
-        </p>
-      </div>
-    </div>
+    <SectionHeader
+      :title="$t('notificationPage.channels.title')"
+      :help="$t('notificationPage.channels.description')"
+      :help-label="$t('notificationPage.channels.title')"
+      class="border-b border-gray-100 px-4 py-4"
+    />
 
     <div v-if="!channels.length" class="flex flex-col items-center justify-center py-20 text-gray-500">
       <Inbox class="mb-3 h-10 w-10 stroke-1 text-gray-400" />

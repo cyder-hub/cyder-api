@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { Clock3, Loader2, RefreshCcw } from "lucide-vue-next";
+import { Loader2, RefreshCcw } from "lucide-vue-next";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { SystemConfigHistoryItem } from "@/services/types";
@@ -26,17 +27,11 @@ defineEmits<{
 <template>
   <div class="rounded-xl border border-gray-200 bg-white">
     <div class="flex flex-col gap-3 border-b border-gray-100 px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
-      <div class="min-w-0">
-        <div class="flex items-center gap-2">
-          <Clock3 class="h-4 w-4 text-gray-400" />
-          <h2 class="text-base font-semibold text-gray-900">
-            {{ $t("systemConfigPage.history.title") }}
-          </h2>
-        </div>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("systemConfigPage.history.description") }}
-        </p>
-      </div>
+      <SectionHeader
+        :title="$t('systemConfigPage.history.title')"
+        :help="$t('systemConfigPage.history.description')"
+        :help-label="$t('systemConfigPage.history.title')"
+      />
       <Button
         variant="outline"
         class="w-full sm:w-auto"

@@ -3,6 +3,8 @@ import { computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { AlertCircle, Loader2, Plus, RefreshCcw } from "lucide-vue-next";
 
+import PageHeader from "@/components/PageHeader.vue";
+import StatsStrip from "@/components/StatsStrip.vue";
 import { Button } from "@/components/ui/button";
 import NotificationChannelDialog from "./components/NotificationChannelDialog.vue";
 import NotificationChannelTable from "./components/NotificationChannelTable.vue";
@@ -65,16 +67,8 @@ onMounted(() => {
 <template>
   <div class="app-page">
     <div class="app-page-shell">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h1 class="text-lg font-semibold tracking-tight text-gray-900 sm:text-xl">
-            {{ $t("notificationPage.title") }}
-          </h1>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ $t("notificationPage.description") }}
-          </p>
-        </div>
-        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+      <PageHeader :title="$t('notificationPage.title')">
+        <template #actions>
           <Button
             variant="outline"
             class="w-full sm:w-auto"
@@ -91,19 +85,10 @@ onMounted(() => {
             <Plus class="mr-1.5 h-4 w-4" />
             {{ $t("notificationPage.actions.newChannel") }}
           </Button>
-        </div>
-      </div>
+        </template>
+      </PageHeader>
 
-      <div class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-100 sm:grid-cols-4">
-        <div v-for="card in summaryCards" :key="card.key" class="bg-white px-4 py-3">
-          <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-            {{ card.label }}
-          </p>
-          <p class="mt-1 text-lg font-semibold tracking-tight text-gray-900">
-            {{ card.value }}
-          </p>
-        </div>
-      </div>
+      <StatsStrip :items="summaryCards" grid-class="grid-cols-2 sm:grid-cols-4" />
 
       <div v-if="channelState.isLoading.value" class="flex items-center justify-center rounded-lg border border-gray-200 bg-white py-16">
         <Loader2 class="mr-2 h-5 w-5 animate-spin text-gray-400" />

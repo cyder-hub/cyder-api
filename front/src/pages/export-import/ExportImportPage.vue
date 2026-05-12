@@ -15,6 +15,7 @@ import {
 } from "lucide-vue-next";
 
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -197,7 +198,6 @@ function applyStatusClass(status: PortableApplyModuleStatus): string {
 <template>
   <CrudPageLayout
     :title="t('portableConfigPage.title')"
-    :description="t('portableConfigPage.description')"
     content-class="space-y-5"
   >
     <div class="flex flex-col gap-2 sm:w-fit sm:flex-row">
@@ -220,15 +220,13 @@ function applyStatusClass(status: PortableApplyModuleStatus): string {
     </div>
 
     <section v-if="activeTab === 'export'" class="rounded-xl border border-gray-200 bg-white">
-      <div class="flex flex-col gap-3 border-b border-gray-100 px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:px-5">
-        <div class="min-w-0">
-          <h2 class="text-base font-semibold text-gray-900">
-            {{ t("portableConfigPage.export.title") }}
-          </h2>
-          <p class="mt-1 text-sm text-gray-500">
-            {{ t("portableConfigPage.export.description") }}
-          </p>
-        </div>
+      <SectionHeader
+        :title="t('portableConfigPage.export.title')"
+        :help="t('portableConfigPage.export.description')"
+        :help-label="t('portableConfigPage.export.title')"
+        class="border-b border-gray-100 px-4 py-4 sm:px-5"
+      >
+        <template #actions>
         <Button
           variant="outline"
           class="w-full sm:w-auto"
@@ -238,7 +236,8 @@ function applyStatusClass(status: PortableApplyModuleStatus): string {
           <RefreshCcw class="mr-1.5 h-4 w-4" :class="{ 'animate-spin': isLoadingModules }" />
           {{ t("common.refresh") }}
         </Button>
-      </div>
+        </template>
+      </SectionHeader>
 
       <div class="space-y-5 px-4 py-4 sm:px-5">
         <div v-if="exportError" class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -404,14 +403,12 @@ function applyStatusClass(status: PortableApplyModuleStatus): string {
     </section>
 
     <section v-else class="rounded-xl border border-gray-200 bg-white">
-      <div class="border-b border-gray-100 px-4 py-4 sm:px-5">
-        <h2 class="text-base font-semibold text-gray-900">
-          {{ t("portableConfigPage.import.title") }}
-        </h2>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ t("portableConfigPage.import.description") }}
-        </p>
-      </div>
+      <SectionHeader
+        :title="t('portableConfigPage.import.title')"
+        :help="t('portableConfigPage.import.description')"
+        :help-label="t('portableConfigPage.import.title')"
+        class="border-b border-gray-100 px-4 py-4 sm:px-5"
+      />
 
       <div class="space-y-5 px-4 py-4 sm:px-5">
         <div v-if="importError" class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -684,7 +681,7 @@ function applyStatusClass(status: PortableApplyModuleStatus): string {
                     {{ applyStatusLabel(module.status) }}
                   </Badge>
                 </div>
-                <p v-if="module.messages.length" class="mt-1 text-sm text-gray-500">
+                <p v-if="module.messages.length" class="mt-1 text-xs leading-5 text-gray-500">
                   {{ module.messages.join("; ") }}
                 </p>
               </div>

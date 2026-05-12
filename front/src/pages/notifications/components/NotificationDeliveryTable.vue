@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { BellRing, Loader2, RefreshCcw } from "lucide-vue-next";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,14 +42,11 @@ const deliveryChannel = defineModel<string>("channel", { required: true });
 <template>
   <section class="rounded-lg border border-gray-200 bg-white">
     <div class="flex flex-col gap-3 border-b border-gray-100 px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
-      <div class="min-w-0">
-        <h2 class="text-base font-semibold text-gray-900">
-          {{ $t("notificationPage.delivery.title") }}
-        </h2>
-        <p class="mt-1 text-sm text-gray-500">
-          {{ $t("notificationPage.delivery.description") }}
-        </p>
-      </div>
+      <SectionHeader
+        :title="$t('notificationPage.delivery.title')"
+        :help="$t('notificationPage.delivery.description')"
+        :help-label="$t('notificationPage.delivery.title')"
+      />
       <div class="grid grid-cols-1 gap-2 sm:grid-cols-[10rem_12rem_auto]">
         <Select v-model="deliveryStatus" @update:model-value="$emit('refresh')">
           <SelectTrigger class="w-full">

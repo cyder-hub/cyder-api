@@ -710,13 +710,10 @@ const chartOptions = computed<EChartsOption>(() => {
 </script>
 
 <template>
-  <div class="app-stack-md rounded-xl bg-white p-4 sm:p-6">
+  <div class="app-stack-md p-4 sm:p-6">
     <div class="flex flex-col gap-3 sm:gap-4">
       <div class="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
-        <div class="min-w-0">
-          <h2 class="text-lg font-semibold text-gray-900">
-            {{ t("dashboard.usageStats.title") }}
-          </h2>
+        <div v-if="totalMetricSumText" class="min-w-0">
           <p v-if="totalMetricSumText" class="mt-1 text-sm leading-6 text-gray-500">
             {{ t("dashboard.usageStats.total") }}: {{ totalMetricSumText }}
           </p>
@@ -810,7 +807,7 @@ const chartOptions = computed<EChartsOption>(() => {
       <p>{{ t("dashboard.errorLoading", { error }) }}</p>
     </div>
     <div v-else-if="usageData" class="app-stack-md">
-      <div class="rounded-lg border border-gray-200 bg-gray-50/30 p-2 sm:p-3">
+      <div class="bg-white p-0">
         <ECharts :option="chartOptions" :style="{ height: `${chartHeight}px` }" />
       </div>
 

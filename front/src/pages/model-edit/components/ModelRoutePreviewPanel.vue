@@ -1,21 +1,21 @@
 <template>
   <div class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div class="min-w-0">
-        <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+    <SectionHeader
+      :title="t('modelEditPage.routeReferences.heading')"
+      :help="t('modelEditPage.routeReferences.description')"
+      :help-label="t('modelEditPage.routeReferences.heading')"
+    >
+      <template #meta>
+        <p class="mt-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">
           {{ t("modelEditPage.routeReferences.title") }}
         </p>
-        <h2 class="mt-1 text-base font-semibold text-gray-900">
-          {{ t("modelEditPage.routeReferences.heading") }}
-        </h2>
-        <p class="mt-2 text-sm text-gray-500">
-          {{ t("modelEditPage.routeReferences.description") }}
-        </p>
-      </div>
+      </template>
+      <template #actions>
       <Button variant="ghost" @click="$emit('open-routes')">
         {{ t("modelEditPage.routeReferences.openRoutes") }}
       </Button>
-    </div>
+      </template>
+    </SectionHeader>
 
     <div
       v-if="!routeReferences.length"
@@ -64,6 +64,7 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 
+import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { ModelRouteReferenceItem } from "@/services/types";

@@ -3,6 +3,7 @@ import { useRouter } from "vue-router";
 import { ArrowLeftRight, Loader2, RefreshCcw, Search } from "lucide-vue-next";
 
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
+import StatsStrip from "@/components/StatsStrip.vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import ModelCards from "./components/ModelCards.vue";
@@ -28,7 +29,6 @@ const openModel = (id: number) => {
 <template>
   <CrudPageLayout
     :title="$t('modelPage.title')"
-    :description="$t('modelPage.description')"
     :loading="modelStore.loading"
     :error="modelStore.error"
     :empty="modelPageState.isPageEmpty"
@@ -65,16 +65,7 @@ const openModel = (id: number) => {
       </div>
     </template>
 
-    <div class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-gray-200 bg-gray-100 sm:grid-cols-4">
-      <div v-for="card in summaryCards" :key="card.key" class="bg-white px-4 py-3">
-        <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
-          {{ card.label }}
-        </p>
-        <p class="mt-1 text-lg font-semibold tracking-tight text-gray-900">
-          {{ card.value }}
-        </p>
-      </div>
-    </div>
+    <StatsStrip :items="summaryCards" grid-class="grid-cols-2 sm:grid-cols-4" />
 
     <div class="relative">
       <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />

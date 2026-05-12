@@ -4,7 +4,6 @@ import { FileText, Pencil } from "lucide-vue-next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { ProviderRuntimeItem, ProviderRuntimeLevel } from "@/services/types";
 import type { ProviderRuntimeMetric } from "../types";
 
@@ -27,18 +26,18 @@ const { t: $t } = useI18n();
 
 <template>
   <div class="grid grid-cols-1 gap-4 xl:hidden">
-    <Card
+    <article
       v-for="item in props.items"
       :key="item.provider_id"
-      class="border border-gray-200 shadow-none"
+      class="rounded-xl border border-gray-200 bg-white"
     >
-      <CardHeader class="flex flex-col gap-4 px-4 py-4 sm:px-5">
+      <div class="flex flex-col gap-4 px-4 py-4 sm:px-5">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
-              <CardTitle class="text-base text-gray-900">
+              <h3 class="text-base font-semibold text-gray-900">
                 {{ item.provider_name }}
-              </CardTitle>
+              </h3>
               <Badge :class="props.runtimeBadgeClass(item.runtime_level)">
                 {{ props.runtimeLevelLabel(item.runtime_level) }}
               </Badge>
@@ -82,9 +81,9 @@ const { t: $t } = useI18n();
             </Badge>
           </div>
         </div>
-      </CardHeader>
+      </div>
 
-      <CardContent class="space-y-4 px-4 pb-4 sm:px-5">
+      <div class="space-y-4 px-4 pb-4 sm:px-5">
         <div
           v-if="item.runtime_state_backend_degraded && item.runtime_state_backend_error"
           class="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs text-orange-700"
@@ -96,11 +95,11 @@ const { t: $t } = useI18n();
           }}
         </div>
 
-        <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div class="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-100 sm:grid-cols-4">
           <div
             v-for="metric in props.buildPrimaryMetrics(item)"
             :key="metric.label"
-            class="rounded-lg border border-gray-100 bg-gray-50/70 px-3 py-3"
+            class="bg-white px-3 py-3"
           >
             <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
               {{ metric.label }}
@@ -111,20 +110,20 @@ const { t: $t } = useI18n();
           </div>
         </div>
 
-        <div class="grid grid-cols-1 gap-3 text-sm text-gray-600 sm:grid-cols-2">
-          <div class="rounded-lg border border-gray-100 px-3 py-3">
+        <div class="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-gray-200 bg-gray-100 text-sm text-gray-600 sm:grid-cols-2">
+          <div class="bg-white px-3 py-3">
             <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
               {{ $t("providerRuntimePage.metrics.lastRequest") }}
             </p>
             <p class="mt-1 text-gray-900">{{ props.formatDateTime(item.last_request_at) }}</p>
           </div>
-          <div class="rounded-lg border border-gray-100 px-3 py-3">
+          <div class="bg-white px-3 py-3">
             <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
               {{ $t("providerRuntimePage.metrics.lastSuccess") }}
             </p>
             <p class="mt-1 text-gray-900">{{ props.formatDateTime(item.last_success_at) }}</p>
           </div>
-          <div class="rounded-lg border border-gray-100 px-3 py-3 sm:col-span-2">
+          <div class="bg-white px-3 py-3 sm:col-span-2">
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
                 <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
@@ -148,7 +147,7 @@ const { t: $t } = useI18n();
         </div>
 
         <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          <div class="rounded-lg border border-gray-100 px-3 py-3">
+          <div class="rounded-lg bg-gray-50/70 px-3 py-3">
             <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
               {{ $t("providerRuntimePage.detail.statusCode") }}
             </p>
@@ -167,7 +166,7 @@ const { t: $t } = useI18n();
             </p>
           </div>
 
-          <div class="rounded-lg border border-gray-100 px-3 py-3">
+          <div class="rounded-lg bg-gray-50/70 px-3 py-3">
             <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
               {{ $t("providerRuntimePage.metrics.cost") }}
             </p>
@@ -181,7 +180,7 @@ const { t: $t } = useI18n();
             </p>
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </article>
   </div>
 </template>

@@ -5,7 +5,7 @@
         <h2 class="text-base font-semibold text-gray-900">
           {{ $t("recordPage.filter.title") }}
         </h2>
-        <p class="mt-1 text-sm text-gray-500">{{ filterSummary }}</p>
+        <p class="mt-1 text-xs leading-5 text-gray-500">{{ filterSummary }}</p>
       </div>
       <div class="flex w-full flex-col gap-2 sm:flex-row md:w-auto md:items-center">
         <Button

@@ -6,6 +6,7 @@ import type {
 } from "../../../services/types";
 import { formatTimestamp } from "../../../utils/datetime.ts";
 import { formatPriceFromNanos } from "../../../utils/money.ts";
+import { formatNumberValue } from "../../../utils/number.ts";
 import type { DashboardTranslator } from "../types";
 
 const identityTranslate: DashboardTranslator = (key) => key;
@@ -37,7 +38,7 @@ export function useDashboardAlerts(
   const showCostHotspots = computed(() => hasCostHotspots(alertsSection.value.alerts));
 
   const formatCount = (value: number | null | undefined) =>
-    (value ?? 0).toLocaleString();
+    formatNumberValue(value ?? 0);
 
   const formatPercentage = (value: number | null | undefined) =>
     value == null ? "0%" : `${(value * 100).toFixed(1)}%`;
@@ -45,7 +46,7 @@ export function useDashboardAlerts(
   const formatLatency = (value: number | null | undefined) =>
     value == null
       ? t("dashboard.empty.noLatency")
-      : `${Math.round(value).toLocaleString()} ms`;
+      : `${formatNumberValue(Math.round(value))} ms`;
 
   const formatDateTime = (value: number | null | undefined) =>
     formatTimestamp(value) || "-";

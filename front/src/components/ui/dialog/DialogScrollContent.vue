@@ -11,6 +11,7 @@ import {
   useForwardPropsEmits,
 } from "reka-ui";
 import { cn } from "@/utils/cn";
+import { useAppI18n } from "@/i18n";
 
 defineOptions({
   inheritAttrs: false,
@@ -24,6 +25,7 @@ const emits = defineEmits<DialogContentEmits>();
 const delegatedProps = reactiveOmit(props, "class");
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
+const { t } = useAppI18n();
 </script>
 
 <template>
@@ -58,7 +60,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
           class="absolute top-3 right-3 rounded-md p-2 transition-colors hover:bg-secondary sm:top-4 sm:right-4 sm:p-1"
         >
           <X class="w-4 h-4" />
-          <span class="sr-only">Close</span>
+          <span class="sr-only">{{ t("ui.dialog.close") }}</span>
         </DialogClose>
       </DialogContent>
     </DialogOverlay>

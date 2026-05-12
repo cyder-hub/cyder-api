@@ -72,9 +72,9 @@
 </template>
 
 <script setup lang="ts">
-import { useI18n } from "vue-i18n";
 import { Activity, Server, Trash2 } from "lucide-vue-next";
 
+import { useAppI18n } from "@/i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { ProviderSummaryItem } from "@/services/types";
@@ -101,5 +101,5 @@ defineEmits<{
   delete: [provider: ProviderSummaryItem];
 }>();
 
-const { t } = useI18n();
+const { t } = useAppI18n();
 </script>

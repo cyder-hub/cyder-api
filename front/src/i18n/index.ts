@@ -1,25 +1,41 @@
 import { createI18n } from "vue-i18n";
-import { enDict } from "./en";
-import { zhDict } from "./zh";
-
-export const LANG_STORAGE_KEY = "lang";
+import enMessages from "./locales/en/messages.json";
+import zhMessages from "./locales/zh/messages.json";
+import { DEFAULT_APP_LOCALE, getStoredAppLocale } from "./locale";
 
 const getInitialLocale = () => {
-  const storedLang = localStorage.getItem(LANG_STORAGE_KEY);
-  if (storedLang && (storedLang === "en" || storedLang === "zh")) {
-    return storedLang;
-  }
-  return "en";
+  return getStoredAppLocale();
 };
 
 const i18n = createI18n({
   legacy: false, // Use Composition API
   locale: getInitialLocale(),
-  fallbackLocale: "en",
+  fallbackLocale: DEFAULT_APP_LOCALE,
   messages: {
-    en: enDict,
-    zh: zhDict,
+    en: enMessages,
+    zh: zhMessages,
   },
 });
+
+export {
+  APP_LOCALES,
+  DEFAULT_APP_LOCALE,
+  LANG_STORAGE_KEY,
+  getStoredAppLocale,
+  isAppLocale,
+  resolveIntlLocale,
+  resolveAppLocale,
+  setStoredAppLocale,
+} from "./locale";
+export {
+  useAppI18n,
+} from "./typed";
+export type {
+  AppI18nKey,
+  AppI18nParamName,
+  AppI18nParams,
+  AppTranslate,
+} from "./typed";
+export type { AppLocale } from "./locale";
 
 export default i18n;

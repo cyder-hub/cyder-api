@@ -1,9 +1,4 @@
-const LANG_STORAGE_KEY = "lang";
-
-const INTL_LOCALE_BY_APP_LOCALE: Record<string, string> = {
-  en: "en-US",
-  zh: "zh-CN",
-};
+import { resolveIntlLocale } from "../i18n/locale.ts";
 
 const dateTimeFormatOptions: Intl.DateTimeFormatOptions = {
   year: "numeric",
@@ -15,30 +10,14 @@ const dateTimeFormatOptions: Intl.DateTimeFormatOptions = {
   hour12: false,
 };
 
-function getCurrentAppLocale(): string {
-  if (typeof localStorage === "undefined") {
-    return "en";
-  }
-
-  return localStorage.getItem(LANG_STORAGE_KEY) || "en";
-}
-
-function resolveIntlLocale(locale?: string | null): string {
-  if (!locale) {
-    return INTL_LOCALE_BY_APP_LOCALE[getCurrentAppLocale()] ?? "en-US";
-  }
-
-  return INTL_LOCALE_BY_APP_LOCALE[locale] ?? locale;
-}
-
 export function formatTimestamp(
-  ms: number | undefined | null,
+  ms: number | string | Date | undefined | null,
   locale?: string | null,
 ): string {
   if (!ms) return "";
 
   try {
-    const date = new Date(ms);
+    const date = ms instanceof Date ? ms : new Date(ms);
     if (Number.isNaN(date.getTime())) return "";
 
     return new Intl.DateTimeFormat(

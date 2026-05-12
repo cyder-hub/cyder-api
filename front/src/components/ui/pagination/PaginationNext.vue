@@ -7,6 +7,7 @@ import { ChevronRightIcon } from "lucide-vue-next";
 import { PaginationNext, useForwardProps } from "reka-ui";
 import { cn } from "@/utils/cn";
 import { buttonVariants } from "@/components/ui/button";
+import { useAppI18n } from "@/i18n";
 
 const props = withDefaults(
   defineProps<
@@ -22,6 +23,7 @@ const props = withDefaults(
 
 const delegatedProps = reactiveOmit(props, "class", "size");
 const forwarded = useForwardProps(delegatedProps);
+const { t } = useAppI18n();
 </script>
 
 <template>
@@ -37,7 +39,7 @@ const forwarded = useForwardProps(delegatedProps);
     v-bind="forwarded"
   >
     <slot>
-      <span class="hidden sm:block">Next</span>
+      <span class="hidden sm:block">{{ t("ui.pagination.nextPage") }}</span>
       <ChevronRightIcon />
     </slot>
   </PaginationNext>

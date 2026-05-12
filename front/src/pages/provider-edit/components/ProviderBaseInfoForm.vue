@@ -121,7 +121,7 @@
     >
       <div class="space-y-1">
         <h3 class="text-sm font-semibold text-gray-900">
-          {{ $t("providerEditPage.quickStart.identityTitle") }}
+          {{ $t("providerEditPage.sections.quickStart.identityTitle") }}
         </h3>
       </div>
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">

@@ -3,6 +3,7 @@ import type { HTMLAttributes } from "vue";
 import { DialogClose } from "reka-ui";
 import { cn } from "@/utils/cn";
 import { Button } from "@/components/ui/button";
+import { useAppI18n } from "@/i18n";
 
 const props = withDefaults(
   defineProps<{
@@ -13,6 +14,7 @@ const props = withDefaults(
     showCloseButton: false,
   },
 );
+const { t } = useAppI18n();
 </script>
 
 <template>
@@ -27,7 +29,7 @@ const props = withDefaults(
   >
     <slot />
     <DialogClose v-if="showCloseButton" as-child>
-      <Button variant="outline"> Close </Button>
+      <Button variant="outline">{{ t("ui.dialog.close") }}</Button>
     </DialogClose>
   </div>
 </template>

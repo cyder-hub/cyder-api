@@ -8,22 +8,17 @@
           404
         </p>
         <h1 class="mt-4 text-4xl font-semibold tracking-tight text-gray-900 sm:text-5xl">
-          {{ $t("common.pageNotFound", "Page Not Found") }}
+          {{ t("common.pageNotFound") }}
         </h1>
         <p class="mt-4 max-w-md text-sm leading-6 text-gray-500">
-          {{
-            $t(
-              "common.pageNotFoundDescription",
-              "The page you are looking for does not exist or has been moved.",
-            )
-          }}
+          {{ t("common.pageNotFoundDescription") }}
         </p>
         <Button
           @click="$router.push('/')"
           variant="default"
           class="mt-6 w-full sm:w-auto"
         >
-          {{ $t("common.goHome", "Go Home") }}
+          {{ t("common.goHome") }}
         </Button>
       </section>
     </div>
@@ -31,5 +26,8 @@
 </template>
 
 <script setup lang="ts">
+import { useAppI18n } from "@/i18n";
 import { Button } from "@/components/ui/button";
+
+const { t } = useAppI18n();
 </script>

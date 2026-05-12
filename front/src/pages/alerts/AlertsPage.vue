@@ -102,7 +102,7 @@ const {
           />
           <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <p class="text-xs text-gray-500">
-              {{ $t("pagination.items") }}
+              {{ $t("ui.pagination.items") }}
               {{ visibleAlerts.length ? offset + 1 : offset }} - {{ offset + visibleAlerts.length }}
             </p>
             <div class="flex gap-2">
@@ -112,7 +112,7 @@ const {
                 :disabled="!canGoPrevious || isRefreshing"
                 @click="goToPreviousPage"
               >
-                {{ $t("pagination.previousPage") }}
+                {{ $t("ui.pagination.previousPage") }}
               </Button>
               <Button
                 variant="outline"
@@ -120,7 +120,7 @@ const {
                 :disabled="!canGoNext || isRefreshing"
                 @click="goToNextPage"
               >
-                {{ $t("pagination.nextPage") }}
+                {{ $t("ui.pagination.nextPage") }}
               </Button>
             </div>
           </div>

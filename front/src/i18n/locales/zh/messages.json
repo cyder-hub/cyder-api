@@ -1,0 +1,2417 @@
+{
+  "providerPage": {
+    "editModel": "编辑模型: {model_name}",
+    "title": "渠道管理",
+    "addProvider": "添加新渠道",
+    "viewModels": "打开模型库",
+    "viewRuntime": "查看 Runtime",
+    "loading": "正在加载渠道...",
+    "error": "加载渠道错误: {error}",
+    "noData": "未找到渠道。点击\"添加新渠道\"开始。",
+    "subtitle": "新集成的默认起步页。",
+    "deleteSuccess": "删除成功",
+    "summary": {
+      "total": "渠道总数",
+      "enabled": "启用",
+      "disabled": "停用",
+      "runtimeIssues": "运行异常"
+    },
+    "state": {
+      "enabled": "启用",
+      "disabled": "停用"
+    },
+    "table": {
+      "key": "密钥",
+      "name": "名称",
+      "type": "类型",
+      "useProxy": "使用代理",
+      "limitModel": "限制模型",
+      "models": "模型",
+      "apiKeys": "API密钥",
+      "status": "状态"
+    },
+    "confirmDelete": "您确定要删除渠道\"{name}\"吗？",
+    "deleteFailed": "删除渠道失败: {error}"
+  },
+  "dashboard": {
+    "title": "仪表盘",
+    "sections": {
+      "resources": {
+        "title": "系统资源"
+      },
+      "runtime": {
+        "title": "运行健康"
+      },
+      "trends": {
+        "title": "趋势区"
+      },
+      "alerts": {
+        "title": "异常与行动提示"
+      },
+      "topProviders": {
+        "title": "热门渠道"
+      },
+      "topModels": {
+        "title": "热门模型"
+      }
+    },
+    "actions": {
+      "viewRuntime": "查看 Runtime",
+      "viewRecords": "查看请求记录"
+    },
+    "kpi": {
+      "requests": "今日请求",
+      "success": "成功",
+      "errors": "失败",
+      "successRate": "今日成功率",
+      "totalTokens": "今日总 Tokens",
+      "inputTokens": "输入",
+      "totalCost": "今日总成本",
+      "avgLatency": "平均总耗时",
+      "firstByte": "平均首包",
+      "runtimeIssues": "运行异常渠道",
+      "runtimeWindow": "统计窗口",
+      "windowToday": "统计口径：今日",
+      "multiCurrencyHint": "支持多币种并列展示"
+    },
+    "resources": {
+      "providers": "渠道",
+      "models": "模型",
+      "providerKeys": "渠道 Key",
+      "apiKeys": "API Key",
+      "enabledTotal": "启用数 / 总数",
+      "activeToday": "今日活跃"
+    },
+    "runtime": {
+      "windowDetail": "窗口：{window}",
+      "degradedHint": "存在错误率或延迟劣化",
+      "halfOpenHint": "处于半开探测恢复阶段",
+      "openHint": "已进入熔断打开状态",
+      "noTrafficHint": "当前窗口内无请求流量",
+      "activeProviders": "今日活跃渠道",
+      "activeModels": "活跃模型"
+    },
+    "runtimeState": {
+      "title": "Runtime State 后端",
+      "backend": {
+        "memory": "Memory",
+        "redis": "Redis"
+      },
+      "deployment": {
+        "single_instance": "单实例",
+        "multi_instance": "多实例"
+      },
+      "status": {
+        "recommended": "推荐",
+        "shared": "共享",
+        "nonShared": "非共享",
+        "degraded": "异常"
+      },
+      "scope": {
+        "runtime": "Runtime state",
+        "catalog": "Catalog cache"
+      },
+      "configured": "配置值",
+      "effective": "实际值",
+      "description": "{deployment}；runtime {runtime}；catalog cache {catalog}。",
+      "recommendedHint": "Memory runtime state 是单实例部署的推荐默认值。",
+      "sharedHint": "Runtime 治理状态通过 Redis 共享。",
+      "nonSharedHint": "Runtime 治理状态仅保存在当前实例。",
+      "fallback": "Runtime fallback：{reason}",
+      "catalogFallback": "Catalog cache fallback：{reason}",
+      "lastError": "后端错误：{error}",
+      "lastChecked": "检查时间 {time}"
+    },
+    "alertGroups": {
+      "unstable": "当前异常渠道",
+      "topErrors": "最近错误最多",
+      "costHotspots": "成本热点",
+      "costProviders": "高成本渠道",
+      "costModels": "高成本模型"
+    },
+    "metrics": {
+      "requests": "请求",
+      "successRate": "成功率",
+      "totalTokens": "总 Tokens",
+      "errors": "错误",
+      "lastError": "最近错误"
+    },
+    "empty": {
+      "noUnstableProviders": "当前没有处于 open 或 half-open 的渠道。",
+      "noErrors": "当前没有错误热点渠道。",
+      "noCostHotspots": "当前没有明显的成本热点。",
+      "noCostProviders": "当前没有高成本渠道。",
+      "noCostModels": "当前没有高成本模型。",
+      "noTopProviders": "暂无渠道排行数据。",
+      "noTopModels": "暂无模型排行数据。",
+      "noLatency": "暂无"
+    },
+    "systemOverview": {
+      "title": "系统总览",
+      "providers": "渠道总数",
+      "models": "模型总数",
+      "providerKeys": "渠道API密钥总数"
+    },
+    "todayLogStats": {
+      "title": "今日请求日志统计",
+      "requests": "今日请求数",
+      "promptTokens": "今日Prompt Tokens",
+      "completionTokens": "今日Completion Tokens",
+      "reasoningTokens": "今日Reasoning Tokens",
+      "totalTokens": "今日Total Tokens",
+      "totalCost": "今日总费用"
+    },
+    "usageStats": {
+      "title": "使用情况统计",
+      "noData": "此期间无可用数据",
+      "total": "总计",
+      "others": "其他",
+      "chartTypeLabel": "图表类型",
+      "metricLabel": "指标",
+      "groupByLabel": "维度",
+      "topNLabel": "序列数量",
+      "timeRangeLabel": "时间范围",
+      "topNHint": "默认展示 Top {topN}，其余合并为“其他”。",
+      "summary": {
+        "title": "汇总排行",
+        "entity": "对象",
+        "detail": "补充信息"
+      },
+      "groupBy": {
+        "provider": "按渠道",
+        "model": "按模型",
+        "api_key": "按 API Key"
+      },
+      "intervals": {
+        "hour": "每小时",
+        "day": "每天",
+        "month": "每月"
+      },
+      "timeRanges": {
+        "last_1_hour": "过去1小时",
+        "last_3_hours": "过去3小时",
+        "last_6_hours": "过去6小时",
+        "last_24_hours": "过去24小时",
+        "today": "今天",
+        "yesterday": "昨天",
+        "this_week": "本周",
+        "last_7_days": "过去7天",
+        "previous_week": "上周",
+        "this_month": "本月",
+        "last_30_days": "过去30天",
+        "previous_month": "上个月",
+        "last_6_months": "过去6个月",
+        "this_year": "今年",
+        "last_1_year": "过去一年"
+      },
+      "metrics": {
+        "total_input_tokens": "输入 Tokens",
+        "total_output_tokens": "输出 Tokens",
+        "total_reasoning_tokens": "推理 Tokens",
+        "total_tokens": "总 Tokens",
+        "request_count": "请求数",
+        "total_cost": "总费用",
+        "success_rate": "成功率",
+        "avg_latency": "平均延迟",
+        "error_count": "错误数"
+      },
+      "chartTypes": {
+        "line": "折线图",
+        "bar": "柱状图"
+      }
+    },
+    "errorLoading": "加载统计数据错误: {error}"
+  },
+  "currencies": {
+    "USD": "美元",
+    "CNY": "人民币"
+  },
+  "sidebar": {
+    "dashboard": "仪表盘",
+    "model": "模型库",
+    "record": "记录",
+    "provider": "渠道",
+    "providerRuntime": "渠道 Runtime",
+    "alerts": "告警",
+    "apiKey": "API密钥",
+    "modelRoute": "模型路由",
+    "accessControlPolicy": "访问控制",
+    "cost": "成本",
+    "notifications": "通知",
+    "systemConfig": "系统配置",
+    "portableConfig": "导入导出",
+    "sections": {
+      "operations": "运行",
+      "traffic": "流量",
+      "resources": "资源",
+      "governance": "治理"
+    }
+  },
+  "alertsPage": {
+    "title": "告警",
+    "loading": "正在加载告警...",
+    "empty": "当前筛选条件下没有告警。",
+    "summary": {
+      "active": "活跃",
+      "critical": "严重",
+      "suppressed": "抑制中",
+      "acknowledged": "已确认"
+    },
+    "filter": {
+      "status": "状态",
+      "severity": "级别",
+      "scope": "范围",
+      "search": "搜索",
+      "searchPlaceholder": "按 fingerprint、规则、标题或范围搜索",
+      "acknowledged": "确认",
+      "suppressed": "抑制",
+      "all": "全部",
+      "allStatuses": "全部状态",
+      "statusActive": "活跃",
+      "statusResolved": "已恢复",
+      "allSeverities": "全部级别",
+      "allScopes": "全部范围"
+    },
+    "severity": {
+      "critical": "严重",
+      "warning": "警告",
+      "info": "信息"
+    },
+    "status": {
+      "active": "活跃",
+      "resolved": "已恢复"
+    },
+    "scope": {
+      "global": "全局",
+      "provider": "渠道",
+      "model": "模型",
+      "api_key": "API Key",
+      "provider_api_key": "上游 Key",
+      "provider_model": "渠道模型",
+      "system": "系统"
+    },
+    "flags": {
+      "suppressed": "suppressed",
+      "acknowledged": "acknowledged"
+    },
+    "detail": {
+      "empty": "选择一条告警查看详情。",
+      "fingerprint": "Fingerprint",
+      "scope": "范围",
+      "count": "次数",
+      "firstSeen": "首次出现",
+      "lastSeen": "最近出现"
+    },
+    "action": {
+      "ackNote": "确认备注",
+      "ackNotePlaceholder": "记录处理说明",
+      "acknowledge": "确认告警",
+      "suppressUntil": "抑制到",
+      "suppressReasonPlaceholder": "抑制原因",
+      "suppress": "抑制",
+      "unsuppress": "取消抑制",
+      "resolve": "手动恢复"
+    },
+    "delivery": {
+      "title": "通知投递",
+      "empty": "暂无投递记录。",
+      "attempts": "{count} 次尝试",
+      "nextAttempt": "下次尝试",
+      "status": {
+        "pending": "待投递",
+        "in_progress": "投递中",
+        "retry_scheduled": "等待重试",
+        "succeeded": "已成功",
+        "failed": "已失败",
+        "skipped": "已跳过"
+      }
+    },
+    "toast": {
+      "acknowledged": "告警已确认。",
+      "suppressed": "告警已抑制。",
+      "unsuppressed": "告警已取消抑制。",
+      "resolved": "告警已恢复。",
+      "actionFailed": "操作失败：{error}",
+      "invalidSuppressUntil": "请输入未来的抑制截止时间。"
+    }
+  },
+  "notificationPage": {
+    "title": "通知",
+    "loading": "正在加载通知配置...",
+    "summary": {
+      "channels": "通道",
+      "enabled": "启用",
+      "failed": "失败",
+      "retrying": "重试中"
+    },
+    "actions": {
+      "newChannel": "新建通道",
+      "test": "测试"
+    },
+    "channels": {
+      "title": "Webhook 通道",
+      "description": "当前主动通知通道。",
+      "empty": "尚未配置 webhook 通道。",
+      "enabled": "启用",
+      "disabled": "停用",
+      "secret": "签名密钥",
+      "headers": "自定义 Headers",
+      "cooldown": "冷却",
+      "configured": "已配置",
+      "notConfigured": "未配置",
+      "lastTest": "最近测试"
+    },
+    "delivery": {
+      "title": "投递历史",
+      "description": "按状态查看 delivery queue 中的告警通知。",
+      "loading": "正在加载投递记录...",
+      "empty": "当前筛选条件下没有投递记录。",
+      "allChannels": "全部通道",
+      "table": {
+        "alert": "告警",
+        "status": "状态",
+        "attempt": "尝试",
+        "nextAttempt": "下次尝试",
+        "deliveredAt": "投递时间",
+        "error": "错误"
+      },
+      "status": {
+        "all": "全部状态",
+        "pending": "待投递",
+        "in_progress": "投递中",
+        "retry_scheduled": "等待重试",
+        "succeeded": "已成功",
+        "failed": "已失败",
+        "skipped": "已跳过"
+      }
+    },
+    "dialog": {
+      "createTitle": "新建 webhook 通道",
+      "editTitle": "编辑 webhook 通道",
+      "channelKey": "Channel Key",
+      "name": "名称",
+      "endpointUrl": "Endpoint URL",
+      "signingSecret": "Signing Secret",
+      "headersJson": "Headers JSON",
+      "cooldownSeconds": "Cooldown Seconds",
+      "enabled": "启用",
+      "clearSecret": "清除签名密钥",
+      "clearHeaders": "清除自定义 Headers"
+    },
+    "confirmDelete": "确定删除通知通道“{name}”吗？",
+    "toast": {
+      "required": "请填写名称和 endpoint URL。",
+      "channelKeyRequired": "请填写 channel key。",
+      "headersInvalid": "Headers JSON 必须是合法 JSON 对象。",
+      "cooldownInvalid": "冷却时间必须是 0 到 86400 之间的整数。",
+      "created": "通知通道已创建。",
+      "updated": "通知通道已更新。",
+      "deleted": "通知通道已删除。",
+      "saveFailed": "保存失败：{error}",
+      "deleteFailed": "删除失败：{error}",
+      "testSucceeded": "测试发送成功。",
+      "testFailed": "测试发送失败。",
+      "testFailedWithError": "测试发送失败：{error}"
+    }
+  },
+  "systemConfigPage": {
+    "title": "系统配置",
+    "loading": "正在加载系统配置...",
+    "refresh": "刷新",
+    "reload": "重新加载覆盖文件",
+    "reloading": "正在重新加载",
+    "resetFilters": "重置筛选",
+    "resetOverrides": "重置覆盖项",
+    "summaryTitle": "配置摘要",
+    "summaryDescription": "当前服务端加载的配置报告。",
+    "summary": {
+      "version": "版本",
+      "fields": "字段",
+      "editable": "可编辑",
+      "hotReloadable": "热更新",
+      "overrideFields": "覆盖项"
+    },
+    "sourcePriority": {
+      "title": "配置来源优先级",
+      "description": "有效值按程序默认、默认配置、用户配置、环境变量 allowlist、受管覆盖文件和派生运行时值解析。",
+      "configured": "{count} 个已配置"
+    },
+    "fieldCount": "字段数量",
+    "deploymentMode": "部署模式",
+    "overridePath": "覆盖文件",
+    "historyPath": "历史文件",
+    "lastLoaded": "最近加载",
+    "lastError": "最近错误",
+    "exists": "文件存在",
+    "missing": "文件不存在",
+    "loadFailed": "加载系统配置失败：{error}",
+    "multiInstanceTitle": "多实例模式下写入已禁用",
+    "multiInstanceDescription": "当前页面只读展示有效配置，避免多个实例写入本地覆盖文件后产生分叉。",
+    "providerGovernanceDisabled": "Provider governance 当前已关闭；阈值和冷却时间的调整只有在重新启用后才会影响 circuit 决策。",
+    "noFields": "当前没有可展示的配置字段。",
+    "noMatchingFields": "没有字段符合当前筛选条件。",
+    "redactedConfigured": "已配置",
+    "redactedMissing": "未配置",
+    "persistence": {
+      "title": "持久化健康",
+      "description": "检查容器数据目录、配置文件、SQLite/local storage 和请求日志临时目录权限。",
+      "empty": "当前没有持久化健康检查项。",
+      "noIssues": "无异常",
+      "issueCount": "{count} 个异常",
+      "exists": "存在",
+      "readable": "可读",
+      "writable": "可写",
+      "yes": "是",
+      "no": "否",
+      "status": {
+        "ok": "正常",
+        "warning": "警告",
+        "error": "异常",
+        "skipped": "跳过"
+      },
+      "items": {
+        "data_dir": "数据目录",
+        "config_dir": "配置目录",
+        "default_config": "默认配置",
+        "user_config": "用户配置",
+        "override_config": "覆盖配置",
+        "override_history": "覆盖历史",
+        "sqlite_db_dir": "SQLite 目录",
+        "local_storage_root": "本地存储",
+        "request_log_spool": "请求日志临时目录"
+      }
+    },
+    "filters": {
+      "title": "筛选",
+      "activeSummary": "显示 {shown} / {total} 个字段",
+      "search": "搜索",
+      "searchPlaceholder": "按 path、section、描述或来源搜索",
+      "section": "分组",
+      "source": "来源",
+      "editable": "可编辑",
+      "hotReloadable": "热更新",
+      "restartRequired": "需要重启",
+      "sensitive": "敏感字段",
+      "all": "全部",
+      "yes": "是",
+      "no": "否",
+      "allSections": "全部分组",
+      "allSources": "全部来源"
+    },
+    "table": {
+      "path": "路径",
+      "value": "当前值",
+      "source": "来源",
+      "status": "状态",
+      "description": "说明",
+      "actions": "操作"
+    },
+    "source": {
+      "program_default": "程序默认",
+      "default_file": "默认文件",
+      "user_file": "用户配置",
+      "environment": "环境变量白名单",
+      "override_file": "覆盖文件",
+      "derived": "最终值"
+    },
+    "status": {
+      "override": "override",
+      "environment": "environment",
+      "hotReload": "hot reload",
+      "restartRequired": "restart",
+      "readonly": "readonly",
+      "sensitive": "sensitive"
+    },
+    "actions": {
+      "edit": "编辑",
+      "preview": "预览",
+      "apply": "应用",
+      "reset": "重置"
+    },
+    "edit": {
+      "title": "编辑配置字段",
+      "value": "配置值",
+      "booleanValue": "启用",
+      "setNull": "设为 null",
+      "reason": "变更原因",
+      "reasonPlaceholder": "记录本次调整原因",
+      "invalidNumber": "请输入非负整数。",
+      "invalidU16": "请输入 0 到 65535 之间的整数。",
+      "invalidU32": "请输入 0 到 4294967295 之间的整数。",
+      "invalidJson": "请输入合法 JSON。"
+    },
+    "preview": {
+      "title": "变更预览",
+      "diffSummary": "{count} 个字段将发生变化",
+      "valid": "校验通过",
+      "invalid": "校验失败",
+      "writeDisabled": {
+        "multi_instance_not_supported": "多实例模式支持预览，但禁止写入本地覆盖文件。"
+      },
+      "runtimeSnapshot": "更新运行时快照",
+      "logLevel": "更新日志级别",
+      "httpClient": "重建 HTTP client",
+      "hotPaths": "{count} 个热更新字段",
+      "noChanges": "预览结果没有字段变化。",
+      "nextOverride": "下一版覆盖文件"
+    },
+    "configView": {
+      "title": "配置 YAML",
+      "effective": "有效配置",
+      "override": "覆盖文件",
+      "effectivePath": "effective config",
+      "invalidOverride": "当前覆盖文件包含不受支持的路径："
+    },
+    "history": {
+      "title": "变更历史",
+      "description": "按最近优先查看后台覆盖文件的审计记录。",
+      "loading": "正在加载历史记录...",
+      "empty": "当前没有历史记录。",
+      "loadMore": "加载更多",
+      "noMore": "没有更多记录",
+      "noReason": "未记录原因",
+      "operation": {
+        "apply": "应用",
+        "reset": "重置",
+        "reload": "重载"
+      }
+    },
+    "reset": {
+      "title": "重置覆盖字段",
+      "description": "从后台覆盖文件中移除所选字段，随后重新加载有效配置。",
+      "paths": "字段路径",
+      "reason": "重置原因",
+      "reasonPlaceholder": "记录本次重置原因"
+    }
+  },
+  "portableConfigPage": {
+    "title": "配置导入导出",
+    "tabs": {
+      "export": "导出",
+      "import": "导入"
+    },
+    "modules": {
+      "provider_profile": "渠道执行配置",
+      "api_keys": "下游 API Key",
+      "cost_catalogs": "成本目录",
+      "cost_bindings": "成本绑定"
+    },
+    "subranges": {
+      "provider_core": "渠道基础",
+      "provider_keys": "渠道 Key",
+      "provider_models": "渠道模型",
+      "provider_request_patches": "请求 Patch",
+      "provider_reasoning_config": "推理配置",
+      "api_key_core": "API Key 基础",
+      "api_key_acl": "ACL 规则",
+      "api_key_model_override": "模型覆盖",
+      "cost_catalog_core": "目录基础",
+      "cost_catalog_versions": "目录版本",
+      "cost_components": "计费组件",
+      "cost_model_bindings": "模型绑定"
+    },
+    "badges": {
+      "secrets": "含密钥",
+      "deferred": "延期",
+      "required": "必选"
+    },
+    "fileProtection": {
+      "plaintext": "明文 JSON",
+      "password_encrypted": "密码加密 .cyd"
+    },
+    "conflictStrategy": {
+      "fail_on_conflict": "遇到冲突则停止",
+      "skip_existing": "跳过已有配置",
+      "overwrite_existing": "覆盖已有配置"
+    },
+    "summary": {
+      "total": "总数",
+      "create": "新增",
+      "update": "更新",
+      "skip": "跳过",
+      "blocked": "阻塞",
+      "conflict": "冲突"
+    },
+    "fields": {
+      "filename": "文件名",
+      "digest": "Digest",
+      "exportedAt": "导出时间",
+      "protection": "保护方式",
+      "blocking": "阻塞状态"
+    },
+    "state": {
+      "blocked": "有阻塞",
+      "clear": "可继续",
+      "conflict": "有冲突"
+    },
+    "applyStatus": {
+      "applied": "已应用",
+      "skipped": "已跳过",
+      "blocked": "已阻塞",
+      "failed": "失败"
+    },
+    "export": {
+      "title": "导出配置",
+      "description": "选择模块和文件保护方式，生成 portable config bundle。",
+      "loadingModules": "正在加载模块...",
+      "loadFailed": "加载导出模块失败",
+      "protection": "文件保护",
+      "plaintextWarning": "明文文件会包含渠道 Key 和下游 API Key 原文。",
+      "passwordPlaceholder": "输入导出密码",
+      "autoGeneratePassword": "由服务端生成一次性密码",
+      "passwordRequired": "请输入密码，或启用自动生成密码。",
+      "result": "导出结果",
+      "generatedPassword": "生成的密码",
+      "download": "导出并下载",
+      "exporting": "正在导出",
+      "success": "导出完成",
+      "failed": "导出失败"
+    },
+    "import": {
+      "title": "导入配置",
+      "description": "先预览 bundle，再选择模块和冲突策略执行导入。",
+      "bundleFile": "Bundle 文件",
+      "passwordPlaceholder": "加密文件密码",
+      "preview": "预览",
+      "previewSummary": "预览摘要",
+      "previewReady": "预览完成",
+      "previewBlocked": "预览存在阻塞项",
+      "previewFailed": "预览失败",
+      "readFailed": "读取文件失败",
+      "blockingIssues": "阻塞项",
+      "applyOptions": "应用选项",
+      "reasonPlaceholder": "记录本次导入原因",
+      "dangerousPatchConfirmations": "危险 Patch 确认",
+      "noDangerousPatchConfirmations": "没有需要确认的危险 Patch。",
+      "readyToApply": "预览完成后可以应用所选模块。",
+      "selectModule": "请选择至少一个模块。",
+      "applyDisabledReason": {
+        "no_preview": "请先预览 bundle。",
+        "top_level_blocking": "请先解决顶层阻塞项。",
+        "no_selected_modules": "请选择至少一个模块。",
+        "missing_reason": "请先填写操作原因。",
+        "module_blocking": "请先解决所选模块的阻塞项。",
+        "dangerous_patch_confirmation": "请先确认危险请求改写目标。"
+      },
+      "apply": "应用导入",
+      "applying": "正在导入",
+      "applyResult": "导入结果",
+      "applySuccess": "导入完成",
+      "applyFailed": "导入失败",
+      "applyNotReady": "导入条件未满足。"
+    }
+  },
+  "providerRuntimePage": {
+    "title": "渠道 Runtime",
+    "loading": "正在加载 Runtime 数据...",
+    "refresh": "刷新",
+    "reset": "重置筛选",
+    "editProvider": "编辑渠道",
+    "viewRecords": "查看请求记录",
+    "activeOnly": "仅看启用渠道",
+    "searchPlaceholder": "按渠道名称或 Provider Key 搜索",
+    "empty": "当前筛选条件下没有可展示的渠道。",
+    "noData": "当前没有可用的渠道运行数据。",
+    "summary": {
+      "total": "渠道总数",
+      "healthy": "健康",
+      "degraded": "降级",
+      "halfOpen": "半开",
+      "open": "熔断打开",
+      "noTraffic": "无流量"
+    },
+    "filter": {
+      "title": "筛选与排序",
+      "status": "状态",
+      "sort": "排序",
+      "direction": "方向",
+      "all": "全部状态",
+      "asc": "升序",
+      "desc": "降序"
+    },
+    "window": {
+      "15m": "15 分钟",
+      "1h": "1 小时",
+      "6h": "6 小时",
+      "24h": "24 小时"
+    },
+    "status": {
+      "healthy": "健康",
+      "degraded": "降级",
+      "open": "熔断打开",
+      "half_open": "半开探测",
+      "no_traffic": "无流量"
+    },
+    "sort": {
+      "health": "健康优先级",
+      "error_rate": "错误率",
+      "latency": "平均耗时",
+      "last_error_at": "最近错误时间",
+      "request_count": "请求量"
+    },
+    "metrics": {
+      "requests": "请求",
+      "successRate": "成功率",
+      "firstByte": "首包",
+      "totalLatency": "总耗时",
+      "errors": "错误",
+      "failures": "连续失败",
+      "models": "模型",
+      "keys": "Key",
+      "cost": "成本",
+      "lastRequest": "最近请求",
+      "lastSuccess": "最近成功",
+      "lastError": "最近错误",
+      "proxy": "代理",
+      "sortScore": "排序分"
+    },
+    "table": {
+      "provider": "渠道",
+      "health": "健康"
+    },
+    "detail": {
+      "statusCode": "状态码",
+      "noStatusCode": "暂无状态码分布",
+      "noCost": "暂无成本记录",
+      "noError": "暂无错误摘要"
+    },
+    "backendStatus": {
+      "itemError": "Runtime state 后端读取失败：{error}"
+    }
+  },
+  "app": {
+    "header": "AI网关管理器",
+    "footer": "© 2025 AI网关管理器. 版权所有.",
+    "toggleSidebar": "切换侧边栏",
+    "logout": "退出登录"
+  },
+  "language": {
+    "change": "切换语言",
+    "english": "英文",
+    "chinese": "中文",
+    "englishShort": "En",
+    "chineseShort": "中"
+  },
+  "recordPage": {
+    "title": "请求记录",
+    "filter": {
+      "title": "筛选",
+      "all": "全部",
+      "apiKeyPlaceholder": "选择API Key",
+      "allApiKeys": "所有API Keys",
+      "apiKeyLabel": "API Key",
+      "providerPlaceholder": "选择渠道",
+      "allProviders": "所有渠道",
+      "providerLabel": "渠道",
+      "allModels": "所有模型",
+      "modelLabel": "模型",
+      "modelNameLabel": "模型名称",
+      "searchLabel": "搜索",
+      "searchPlaceholder": "模型、路由、渠道、错误...",
+      "clearSearch": "清空搜索",
+      "statusPlaceholder": "选择状态",
+      "allStatuses": "所有状态",
+      "statusLabel": "状态",
+      "status": {
+        "SUCCESS": "成功",
+        "PENDING": "处理中",
+        "ERROR": "失败",
+        "CANCELLED": "已取消"
+      },
+      "allApis": "所有 API",
+      "allScopes": "所有范围",
+      "resolvedScopes": {
+        "direct": "直连",
+        "globalRoute": "全局路由",
+        "apiKeyOverride": "API Key 覆盖"
+      },
+      "userApiLabel": "用户 API",
+      "resolvedScopeLabel": "解析范围",
+      "retryLabel": "重试",
+      "fallbackLabel": "回退",
+      "diagnosticsLabel": "诊断",
+      "errorCodeLabel": "错误码",
+      "latencyMinLabel": "最小延迟",
+      "latencyMaxLabel": "最大延迟",
+      "tokensMinLabel": "最小 Tokens",
+      "tokensMaxLabel": "最大 Tokens",
+      "costMinLabel": "最小成本",
+      "costMaxLabel": "最大成本",
+      "startTimeLabel": "开始时间",
+      "endTimeLabel": "结束时间",
+      "msPlaceholder": "ms",
+      "nanosPlaceholder": "nanos",
+      "showFilters": "展开筛选",
+      "hideFilters": "收起筛选",
+      "advancedFilters": "高级筛选",
+      "expand": "展开",
+      "collapse": "收起",
+      "summaryAll": "当前显示全部请求记录，未应用筛选。",
+      "summaryActive": "已启用 {count} 个筛选条件。",
+      "helpText": "列表筛选只使用 request_log 摘要字段，不会加载载荷包。",
+      "applyButton": "应用筛选",
+      "resetButton": "重置"
+    },
+    "loading": "正在加载记录...",
+    "errorPrefix": "加载记录错误：",
+    "unknownError": "未知错误",
+    "fetchFailed": "获取请求记录失败",
+    "loadFailed": "加载请求记录页面失败",
+    "diagnostics": {
+      "retentionFailed": "运行记录保留诊断失败",
+      "storageInventoryFailed": "运行存储清单诊断失败"
+    },
+    "table": {
+      "model": "模型",
+      "modelName": "模型名称",
+      "provider": "渠道",
+      "apiKey": "API Key",
+      "channel": "渠道",
+      "externalId": "外部ID",
+      "status": "状态",
+      "promptTokens": "输入tokens",
+      "completionTokens": "输出tokens",
+      "reasoningTokens": "思考tokens",
+      "totalTokens": "总计",
+      "tokens": "Tokens",
+      "stream": "流式",
+      "firstByte": "首字节",
+      "firstResp": "首次响应",
+      "totalResp": "总耗时",
+      "tps": "TPS",
+      "cost": "费用",
+      "attempts": "尝试",
+      "diagnostics": "诊断",
+      "performance": "性能",
+      "time": "时间",
+      "requestTime": "请求时间",
+      "noRecordsMatch": "未找到符合条件的记录。",
+      "noRecordsAvailable": "无可用记录。",
+      "view": "查看",
+      "viewDetails": "查看详情",
+      "details": "操作"
+    },
+    "detailModal": {
+      "title": "请求详情",
+      "fetchFailed": "获取记录详情失败",
+      "general": "通用信息",
+      "timings": "时间信息 (UTC)",
+      "usageSummary": "Usage 摘要",
+      "requestPatch": "Request Patch",
+      "effectiveRules": "生效规则",
+      "appliedRuleIds": "已应用规则 ID",
+      "conflicts": "冲突",
+      "conflictDetected": "当前请求存在 request patch 冲突，运行时未应用这些规则。",
+      "sourceRule": "来源规则",
+      "trace": "解析轨迹",
+      "origin": "来源",
+      "value": "值",
+      "description": "说明",
+      "noRuleDescription": "暂无说明",
+      "noRequestPatchTrace": "当前请求没有记录 request patch 追踪摘要。",
+      "noEffectiveRules": "当前请求没有记录生效的 request patch 规则。",
+      "invalidRequestPatchTrace": "已存储的 request patch 追踪摘要不是合法 JSON。",
+      "rawTraceSummary": "原始追踪摘要",
+      "originProviderDirect": "Provider 直连规则",
+      "originModelDirect": "Model 直连规则",
+      "costSnapshot": "成本快照",
+      "totalInputTokens": "总输入 Token",
+      "totalOutputTokens": "总输出 Token",
+      "inputTextTokens": "文本输入 Token",
+      "outputTextTokens": "文本输出 Token",
+      "inputImageTokens": "图片输入 Token",
+      "outputImageTokens": "图片输出 Token",
+      "cacheReadTokens": "缓存读取 Token",
+      "cacheWriteTokens": "缓存写入 Token",
+      "reasoningTokens": "推理 Token",
+      "totalTokens": "总 Token",
+      "storageType": "存储类型",
+      "totalCost": "总成本",
+      "catalogId": "目录 ID",
+      "versionId": "目录版本 ID",
+      "componentId": "组件",
+      "detailLines": "命中的计费明细",
+      "billingItem": "计费项",
+      "quantity": "数量",
+      "unitPrice": "单价",
+      "finalPrice": "最终价格",
+      "noDetailLines": "当前请求未记录命中的成本明细。",
+      "unmatchedItems": "未命中的账本项",
+      "warnings": "警告",
+      "fallbackPricingApplied": "已使用回退计价",
+      "fallbackPricingDescription": "该明细未命中专属价格，按以下 meter 的价格完成计费：",
+      "noDescription": "暂无描述",
+      "noCostSnapshot": "当前请求未记录成本快照。",
+      "invalidCostSnapshot": "已存储的成本快照不是合法 JSON。"
+    },
+    "detailDialog": {
+      "title": "请求诊断",
+      "loading": "正在加载请求详情...",
+      "noRecord": "未选择请求记录。",
+      "summary": {
+        "status": "状态",
+        "attempts": "尝试",
+        "provider": "渠道",
+        "model": "模型",
+        "diagnostics": "诊断"
+      },
+      "tabs": {
+        "overview": "概览",
+        "attempts": "尝试",
+        "diagnostics": "诊断",
+        "payloads": "载荷",
+        "replay": "重放"
+      },
+      "payloads": {
+        "title": "载荷",
+        "description": "原始请求和响应载荷只会在打开该标签页时加载。",
+        "empty": "当前请求没有可用的载荷包。"
+      },
+      "overview": {
+        "sections": {
+          "request": "请求",
+          "finalError": "最终错误",
+          "usage": "用量",
+          "timings": "耗时",
+          "costSnapshot": "成本快照"
+        },
+        "totalCost": "总成本",
+        "warningCount": "{count} 条警告",
+        "noCostDetailLines": "当前请求未记录成本明细。",
+        "noCostSnapshot": "当前请求没有可用的成本快照。",
+        "attemptsSummary": "{attempts} 次尝试 / {retries} 次重试 / {fallbacks} 次回退",
+        "labels": {
+          "id": "ID",
+          "apiKey": "API Key",
+          "requestedModel": "请求模型",
+          "baseRequestedModel": "基础模型",
+          "reasoningSuffix": "Reasoning 后缀",
+          "reasoningPreset": "Reasoning 预设",
+          "resolvedScope": "解析范围",
+          "resolvedRoute": "解析路由",
+          "finalProvider": "最终渠道",
+          "selectedModel": "选中模型",
+          "realModel": "真实模型",
+          "attempts": "尝试",
+          "userApiType": "用户 API 类型",
+          "llmApiType": "LLM API 类型",
+          "clientIp": "客户端 IP"
+        },
+        "resolvedScope": {
+          "direct": "直连",
+          "globalRoute": "全局路由",
+          "apiKeyOverride": "API Key 覆盖"
+        },
+        "usage": {
+          "totalInputTokens": "总输入 Token",
+          "totalOutputTokens": "总输出 Token",
+          "reasoningTokens": "推理 Token",
+          "totalTokens": "总 Token",
+          "inputTextTokens": "文本输入 Token",
+          "outputTextTokens": "文本输出 Token",
+          "inputImageTokens": "图片输入 Token",
+          "outputImageTokens": "图片输出 Token",
+          "cacheReadTokens": "缓存读取 Token",
+          "cacheWriteTokens": "缓存写入 Token"
+        },
+        "timings": {
+          "requestReceived": "收到请求",
+          "firstAttemptStarted": "首次尝试开始",
+          "firstByteToClient": "首字节返回客户端",
+          "completed": "完成",
+          "firstByteLatency": "首字节延迟",
+          "totalLatency": "总延迟"
+        },
+        "costColumns": {
+          "quantity": "数量",
+          "unit": "单价",
+          "amount": "金额"
+        },
+        "unitPrice": {
+          "tokens": "tokens",
+          "unit": "单位"
+        }
+      },
+      "attempts": {
+        "title": "尝试时间线",
+        "count": "{count} 次尝试",
+        "empty": "当前请求未记录尝试详情。",
+        "attemptTitle": "第 {index} 次尝试",
+        "candidate": "候选 {position}",
+        "requestUri": "请求 URI",
+        "patchSources": {
+          "title": "Request Patch 来源",
+          "providerRule": "渠道规则 {id}",
+          "modelRule": "模型规则 {id}",
+          "reasoningPreset": "reasoning {preset} (-{suffix}) / {family} / {source}",
+          "unknown": "未知来源 {kind}"
+        },
+        "labels": {
+          "started": "开始",
+          "firstByte": "首字节",
+          "completed": "完成",
+          "firstByteLatency": "首字节延迟",
+          "clientVisible": "客户端可见",
+          "backoff": "退避",
+          "llmApi": "LLM API",
+          "tokens": "Tokens",
+          "cost": "成本"
+        },
+        "blocks": {
+          "requestHeaders": "请求头",
+          "responseHeaders": "响应头",
+          "patchTrace": "Patch 轨迹",
+          "appliedPatchRules": "已应用 Patch 规则"
+        }
+      },
+      "diagnostics": {
+        "loading": "正在加载诊断...",
+        "failed": "加载诊断失败",
+        "requestSnapshot": "请求快照",
+        "noRequestSnapshot": "当前记录没有可用的请求快照。",
+        "queryParams": "查询参数",
+        "sanitizedOriginalHeaders": "脱敏原始请求头",
+        "candidateManifest": "候选清单",
+        "candidateCount": "{count} 个候选",
+        "routeFallback": "路由 {id}",
+        "noCandidateManifest": "当前记录未捕获候选清单。",
+        "transformDiagnostics": "转换诊断",
+        "itemCount": "{count} 项",
+        "noTransformDiagnostics": "当前记录未捕获转换诊断。",
+        "lazyEmpty": "诊断数据只会在打开该标签页时加载。",
+        "labels": {
+          "path": "路径",
+          "operation": "操作",
+          "kinds": "类型",
+          "phases": "阶段",
+          "maxLoss": "最大损失"
+        }
+      },
+      "payloadViewer": {
+        "loadingBodies": "正在加载内容...",
+        "title": "载荷包",
+        "description": "已存储的请求与响应载荷。",
+        "userRequestBody": "用户请求体",
+        "llmRequestBody": "LLM 请求体",
+        "llmRequestBodyPatched": "LLM 请求体（已应用 Patch）",
+        "llmRequestBodyRawPatch": "LLM 请求体（原始 Patch）",
+        "requestBody": "请求体",
+        "llmResponseBody": "LLM 响应体",
+        "userResponseBody": "用户响应体",
+        "responseBody": "响应体",
+        "showRawPatch": "显示原始 Patch",
+        "showPatchedBody": "显示已应用 Patch 的请求体",
+        "userExchange": "用户交换",
+        "responseCapture": "响应捕获：{state}",
+        "noRequestLevelPayload": "该载荷包未捕获请求级载荷。",
+        "attemptPayloads": "尝试载荷",
+        "attemptCount": "{count} 次尝试",
+        "noAttemptPayloads": "该载荷包未记录尝试载荷分段。",
+        "attemptTitle": "第 {index} 次尝试",
+        "requestBlob": "请求 blob：{value}",
+        "patchBlob": "patch：{value}",
+        "responseBlob": "响应 blob：{value}",
+        "noAttemptBody": "本次尝试未捕获 LLM 请求体或响应体。",
+        "responseCaptureSentence": "响应捕获：{state}。",
+        "bundleEmpty": "当前请求没有可用的载荷包。",
+        "unsupportedBundleVersion": "当前仅支持读取 V2 request bundle，检测到版本 {version}。",
+        "fetchError": "获取或解码请求内容失败：{error}",
+        "patchMissing": "无法应用 JSON Patch，因为目标 blob 缺失。",
+        "patchFailed": "无法应用 JSON Patch：{error}",
+        "unknownProvider": "未知渠道",
+        "unknownModel": "未知模型",
+        "unknownStatus": "未知",
+        "noAction": "无动作"
+      },
+      "sse": {
+        "event": "事件：{name}"
+      },
+      "replay": {
+        "loading": "正在加载重放 artifact...",
+        "failed": "加载重放 artifact 失败",
+        "lazyEmpty": "重放能力会在打开该标签页时从 artifact API 加载。",
+        "noBundle": "当前请求没有可用的载荷包。",
+        "noBundleDescription": "重放需要已持久化的请求 bundle，才能执行 Preview 或实际重放。",
+        "unavailableSummary": "当前所选重放类型不可用。",
+        "controlTitle": "重放控制",
+        "controlDescription": "Preview 会先生成重放请求，然后再保存 dry-run 证据或发送实时重放。",
+        "available": "可用",
+        "unavailable": "不可用",
+        "kinds": {
+          "attemptUpstream": "尝试重放",
+          "gatewayRequest": "网关重放"
+        },
+        "selectAttempt": "选择尝试",
+        "providerKeyPlaceholder": "可选渠道 Key ID",
+        "confirmLiveRequest": "确认实时请求",
+        "confirmLiveRequestDescription": "执行前必须确认。",
+        "unavailableReasons": "不可用原因",
+        "reasons": {
+          "artifact_not_loaded": "重放 artifact 尚未加载。",
+          "bundle_missing": "当前记录没有可用的持久化请求 bundle。",
+          "request_snapshot_missing": "网关重放需要 v2 bundle 中的请求快照。",
+          "user_request_body_missing": "网关重放需要已捕获的用户请求体。",
+          "no_attempt_with_complete_downstream_request_snapshot": "当前没有具备完整下游请求快照的尝试可供重放。"
+        },
+        "overrideInvalid": "渠道 Key 覆盖值必须是正整数。",
+        "actions": {
+          "previewing": "Preview 中...",
+          "preview": "Preview",
+          "saving": "保存中...",
+          "saveDryRun": "保存 Dry-Run 结果",
+          "executing": "执行中...",
+          "executeLive": "执行实时重放",
+          "reloadHistory": "刷新历史",
+          "loadingHistory": "加载中...",
+          "retryHistory": "重试",
+          "openHistory": "查看",
+          "openingHistory": "打开中..."
+        },
+        "historyTitle": "重放历史",
+        "historyDescription": "这里展示当前请求已持久化的 dry-run 与实时重放记录。",
+        "historyLoading": "正在加载已持久化的重放记录...",
+        "historyEmpty": "当前请求还没有已持久化的重放记录。",
+        "previewTitle": "Preview",
+        "runTitle": "重放运行",
+        "artifactTitle": "重放 Artifact",
+        "persistedInputBaseline": "已持久化输入基线",
+        "persistedExecutionPreview": "已持久化执行 Preview",
+        "resultSummary": "结果摘要",
+        "responseHeaders": "响应头",
+        "responseBody": "响应体",
+        "diffSummary": "差异摘要",
+        "noAttemptSelected": "未选择尝试。",
+        "costDeltaNanos": "{value} nanos",
+        "inputBaseline": "输入基线",
+        "sanitizedRequestHeaders": "脱敏请求头",
+        "llmRequestBody": "LLM 请求体",
+        "queryParams": "查询参数",
+        "sanitizedOriginalHeaders": "脱敏原始请求头",
+        "userRequestBody": "用户请求体",
+        "executionPreview": "执行 Preview",
+        "finalRequestHeaders": "最终请求头",
+        "finalRequestBody": "最终请求体",
+        "candidateDecisions": "候选决策",
+        "appliedRequestPatchSummary": "已应用 Request Patch 摘要",
+        "historicalBaseline": "历史基线",
+        "capture": "捕获",
+        "labels": {
+          "replayKind": "重放类型",
+          "attempt": "尝试",
+          "providerKeyOverride": "渠道 Key 覆盖",
+          "runId": "运行 ID",
+          "kind": "类型",
+          "mode": "模式",
+          "http": "HTTP",
+          "route": "路由",
+          "provider": "渠道",
+          "model": "模型",
+          "tokens": "Tokens",
+          "cost": "成本",
+          "started": "开始",
+          "created": "创建",
+          "firstByte": "首字节",
+          "completed": "完成",
+          "artifact": "Artifact",
+          "status": "状态",
+          "bodyCapture": "响应体捕获",
+          "capturedBytes": "已捕获字节",
+          "captureLimit": "捕获上限",
+          "originalSize": "原始大小",
+          "captureEncoding": "捕获编码",
+          "captureTruncated": "已截断",
+          "transformDiagnostics": "转换诊断",
+          "baseline": "基线",
+          "statusChanged": "状态变更",
+          "headersChanged": "请求头变更",
+          "bodyChanged": "响应体变更",
+          "tokenDelta": "Token 差值",
+          "costDelta": "成本差值",
+          "requestUri": "请求 URI",
+          "realModel": "真实模型",
+          "requestPath": "请求路径",
+          "semanticBasis": "语义基准",
+          "requestedModel": "请求模型",
+          "baseRequestedModel": "基础模型",
+          "reasoningSuffix": "Reasoning 后缀",
+          "reasoningPreset": "Reasoning 预设",
+          "candidate": "候选",
+          "llmApi": "LLM API",
+          "finalUri": "最终 URI",
+          "attemptStatus": "尝试状态",
+          "overallStatus": "整体状态",
+          "errorCode": "错误码"
+        }
+      }
+    },
+    "copy": {
+      "action": "复制",
+      "copied": "已复制",
+      "failed": "复制文本失败。"
+    },
+    "pagination": {
+      "summary": "第 {page} / {totalPages} 页（共 {total} 条）",
+      "previousPage": "上一页",
+      "nextPage": "下一页",
+      "page": "第",
+      "of": "页, 共",
+      "items": "条",
+      "itemsPerPage": "每页显示条数：",
+      "selectItemsPerPage": "选择每页显示条数"
+    }
+  },
+  "ui": {
+    "dialog": {
+      "close": "关闭"
+    },
+    "pagination": {
+      "items": "条目",
+      "firstPage": "第一页",
+      "previousPage": "上一页",
+      "nextPage": "下一页",
+      "lastPage": "最后一页",
+      "morePages": "更多页面"
+    }
+  },
+  "common": {
+    "unknownError": "发生未知错误。",
+    "loading": "加载中...",
+    "basicInfo": "基础信息",
+    "yes": "是",
+    "no": "否",
+    "edit": "编辑",
+    "delete": "删除",
+    "save": "保存更改",
+    "cancel": "取消",
+    "select": "选择",
+    "selected": "已选择",
+    "notAvailable": "无",
+    "noData": "暂无数据",
+    "refresh": "刷新",
+    "retry": "重试",
+    "check": "检查",
+    "close": "关闭",
+    "confirm": "确认",
+    "actions": "操作",
+    "saving": "保存中...",
+    "pageNotFound": "页面不存在",
+    "pageNotFoundDescription": "你访问的页面不存在或已被移动。",
+    "goHome": "返回首页"
+  },
+  "loginPage": {
+    "title": "管理员登录",
+    "description": "请输入管理员密码以继续访问系统。",
+    "passwordLabel": "密码",
+    "passwordPlaceholder": "请输入密码",
+    "submit": "确认",
+    "submitting": "登录中...",
+    "loginFailed": "登录失败，请检查密码是否正确。"
+  },
+  "modelPage": {
+    "title": "模型库",
+    "actions": {
+      "backToProviders": "返回渠道"
+    },
+    "loading": "正在加载模型摘要...",
+    "noData": "当前还没有模型摘要。",
+    "noSearchResults": "没有匹配的模型。",
+    "noMappedModel": "未映射模型",
+    "searchPlaceholder": "按渠道、渠道 Key、模型名或真实模型名搜索",
+    "summary": {
+      "total": "模型总数",
+      "enabled": "启用",
+      "providers": "渠道数",
+      "mapped": "已映射"
+    },
+    "table": {
+      "provider": "渠道",
+      "model": "模型",
+      "realModel": "真实模型",
+      "capabilities": "能力",
+      "enabled": "启用"
+    }
+  },
+  "modelCapabilities": {
+    "streaming": "流式",
+    "tools": "工具",
+    "reasoning": "推理",
+    "imageInput": "图像输入",
+    "embeddings": "向量",
+    "rerank": "重排"
+  },
+  "reasoningConfigPanel": {
+    "titles": {
+      "provider": "渠道推理配置",
+      "model": "模型推理配置"
+    },
+    "actions": {
+      "save": "保存推理配置",
+      "clearProvider": "清空渠道配置",
+      "clearModel": "清空模型覆盖"
+    },
+    "summary": {
+      "ownerConfig": "当前配置",
+      "providerDefault": "渠道默认",
+      "effectiveConfig": "最终配置"
+    },
+    "fields": {
+      "patchFamily": "Patch 类型",
+      "preset": "预设",
+      "suffix": "后缀",
+      "runtime": "运行时",
+      "enabled": "启用",
+      "models": "/models",
+      "patch": "Patch",
+      "reasoning": "推理"
+    },
+    "modes": {
+      "inherit": "继承渠道",
+      "disabled": "停用",
+      "custom": "自定义"
+    },
+    "states": {
+      "unsaved": "未保存",
+      "review": "预览",
+      "supported": "支持",
+      "blocked": "阻断"
+    },
+    "sources": {
+      "providerDefault": "渠道默认",
+      "modelCustom": "模型自定义",
+      "modelDisabled": "模型停用",
+      "missing": "未配置",
+      "unknown": "未知"
+    },
+    "messages": {
+      "saveOwnerFirst": "请先保存对象，再配置推理后缀。",
+      "loading": "正在加载推理配置",
+      "modelReasoningUnsupported": "当前模型标记为不支持推理。仍可保存需要推理的预设，但运行时预览会标记为不支持。",
+      "selectPatchFamily": "选择 Patch 类型",
+      "previewRefreshing": "正在刷新 Patch 预览。",
+      "familyTargets": "适用目标: {targets}。",
+      "familyIncompatible": "适用目标: {targets}；当前渠道解析为 {current}。",
+      "familyTargetsShort": "适用 {targets}",
+      "familyCompatibleShort": "兼容 {current}",
+      "presetUnsupported": "当前 Patch 类型不支持这个预设。",
+      "reviewOnly": "启用这个预设后，保存时才会在运行时应用。",
+      "presetDisabled": "这个预设未启用。",
+      "runtimeUnsupported": "运行时预览标记为不支持。",
+      "runtimeSupported": "运行时预览可用。",
+      "disabledMode": "当前模型已停用推理后缀。",
+      "none": "无"
+    },
+    "alert": {
+      "selectPatchFamily": "请先选择推理 Patch 类型。",
+      "previewFailed": "预览推理配置草稿失败。",
+      "loadFailed": "加载推理配置失败。",
+      "saveFailed": "保存推理配置失败。",
+      "clearFailed": "清空推理配置失败。",
+      "saved": "推理配置已保存。",
+      "draftCleared": "推理配置草稿已清空。",
+      "cleared": "推理配置已清空。"
+    }
+  },
+  "apiKeyPage": {
+    "title": "API Key 管理",
+    "addApiKey": "添加 API Key",
+    "loading": "正在加载 API Key...",
+    "loadingDetail": "正在加载 API Key 详情...",
+    "noData": "暂无 API Key 数据。",
+    "noSelection": "选择左侧 API Key 后，可在右侧查看治理配置和运行时状态。",
+    "unlimited": "不限",
+    "neverExpires": "永不过期",
+    "summary": {
+      "total": "总 Key 数",
+      "enabled": "已启用",
+      "governed": "已配置限制",
+      "activeConcurrency": "当前并发",
+      "expiringSoon": "即将过期"
+    },
+    "sections": {
+      "listTitle": "Key 列表",
+      "listDescription": "选择一个 Key，直接查看、展示、轮换或编辑其治理配置。",
+      "detailTitle": "Key 详情",
+      "detailDescription": "右侧面板展示所选 Key 的生命周期、ACL 和运行时统计。",
+      "identityTitle": "身份与生命周期",
+      "governanceTitle": "治理限制",
+      "aclTitle": "访问规则",
+      "overrideTitle": "模型私有重命名",
+      "overrideDescription": "仅对当前 API Key 生效的私有名称映射，适合 Claude Code、Gemini CLI 这类固定模型名客户端。",
+      "runtimeTitle": "运行时快照"
+    },
+    "actions": {
+      "reveal": "显示密钥",
+      "rotate": "轮换密钥",
+      "copySecret": "复制密钥"
+    },
+    "status": {
+      "active": "可用",
+      "disabled": "已禁用",
+      "expired": "已过期",
+      "expiringSoon": "即将过期"
+    },
+    "table": {
+      "description": "描述",
+      "status": "状态",
+      "defaultAction": "默认动作",
+      "createdAt": "创建时间",
+      "updatedAt": "更新时间",
+      "expiresAt": "过期时间",
+      "rateLimitRpm": "每分钟限速",
+      "maxConcurrency": "最大并发",
+      "currentConcurrency": "当前并发",
+      "quotaDailyRequests": "每日请求配额",
+      "quotaDailyTokens": "每日 Token 配额",
+      "quotaMonthlyTokens": "每月 Token 配额",
+      "budgetDaily": "每日预算",
+      "budgetMonthly": "每月预算"
+    },
+    "runtime": {
+      "currentConcurrency": "当前并发",
+      "currentMinuteRequests": "当前分钟请求数",
+      "dailyRequests": "当日请求数",
+      "dailyTokens": "当日 Token 数",
+      "monthlyTokens": "当月 Token 数",
+      "dailyBudgetUsage": "当日预算消耗",
+      "monthlyBudgetUsage": "当月预算消耗",
+      "runtimeRejectionReason": "运行时拒绝原因"
+    },
+    "runtimeRejection": {
+      "none": "当前未拒绝",
+      "disabled": "拒绝：Key 已禁用",
+      "expired": "拒绝：Key 已过期",
+      "rpm": "已达到每分钟限速",
+      "concurrency": "已达到并发上限",
+      "dailyRequests": "已达到每日请求配额",
+      "dailyTokens": "已达到每日 Token 配额",
+      "monthlyTokens": "已达到每月 Token 配额",
+      "dailyBudget": "已达到每日预算",
+      "monthlyBudget": "已达到每月预算"
+    },
+    "currencyUnit": {
+      "cny": "元",
+      "usd": "美元"
+    },
+    "rule": {
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "priority": "优先级 {value}"
+    },
+    "override": {
+      "targetRoute": "目标路由：{value}"
+    },
+    "secret": {
+      "title": "当前密钥",
+      "description": "完整密钥只会在这里展示一次，请在需要分发时立即复制。",
+      "copied": "已复制 API Key 密钥。"
+    },
+    "noRules": "当前没有配置 ACL 规则，将按默认动作执行。",
+    "noOverrides": "当前 API Key 没有配置私有模型重命名。",
+    "loadDetailFailed": "加载 API Key 详情失败: {error}",
+    "loadEditFailed": "加载 API Key 编辑数据失败: {error}",
+    "revealFailed": "显示 API Key 密钥失败: {error}",
+    "rotateFailed": "轮换 API Key 失败: {error}",
+    "deleteFailed": "删除 API Key 失败: {error}",
+    "confirmDelete": "确定要删除 API Key \"{name}\" 吗？",
+    "confirmReveal": "显示 API Key \"{name}\" 的完整密钥？",
+    "confirmRevealDescription": "完整密钥会显示在下一个面板中。请只在准备安全处理密钥时执行该操作。",
+    "confirmRotate": "确定要轮换 API Key \"{name}\" 吗？旧密钥会立即失效。",
+    "copyFailed": "复制 API Key 失败。"
+  },
+  "apiKeyEditModal": {
+    "titleEdit": "编辑 API Key",
+    "titleAdd": "新增 API Key",
+    "sections": {
+      "identity": "身份与生命周期",
+      "identityDescription": "定义这个 Key 的名称、启停状态和过期时间。",
+      "governance": "治理限制",
+      "governanceDescription": "可选配置限速、并发、配额和预算；留空代表不限。",
+      "overrides": "私有模型重命名",
+      "overridesDescription": "为当前 API Key 单独定义客户端名称到逻辑模型路由的映射。",
+      "acl": "ACL 规则",
+      "aclDescription": "规则按优先级匹配；未命中任何规则时，回退到默认动作。"
+    },
+    "action": {
+      "ALLOW": "允许",
+      "DENY": "拒绝"
+    },
+    "scope": {
+      "PROVIDER": "渠道",
+      "MODEL": "模型"
+    },
+    "labelName": "名称",
+    "labelDescription": "描述",
+    "labelDefaultAction": "默认动作",
+    "labelEnabled": "启用",
+    "labelExpiresAt": "过期时间",
+    "labelRateLimitRpm": "每分钟限速",
+    "labelMaxConcurrency": "最大并发",
+    "labelQuotaDailyRequests": "每日请求配额",
+    "labelQuotaDailyTokens": "每日 Token 配额",
+    "labelQuotaMonthlyTokens": "每月 Token 配额",
+    "labelBudgetDaily": "每日预算",
+    "labelBudgetMonthly": "每月预算",
+    "labelBudgetAmount": "金额",
+    "labelBudgetCurrency": "币种",
+    "budgetMajorUnitHint": "预算金额按主货币单位填写。CNY 按元填写，USD 按美元填写。",
+    "placeholderBudgetAmount": "例如 25.5",
+    "placeholderCurrency": "选择币种",
+    "clearQuota": "清空配额",
+    "clearBudget": "清空预算",
+    "groups": {
+      "throughputTitle": "吞吐限制",
+      "throughputDescription": "控制每分钟请求速率和同时处理的并发数。",
+      "quotaTitle": "请求与 Token 配额",
+      "quotaDescription": "用于限制每日请求量、每日 Token 和每月 Token 消耗。",
+      "budgetTitle": "预算限制",
+      "budgetDescription": "预算会按元或美元展示与录入，避免直接编辑 nanos 原值。"
+    },
+    "currency": {
+      "CNY": "人民币（元）",
+      "USD": "美元"
+    },
+    "addRule": "添加规则",
+    "addOverride": "添加重命名",
+    "noRules": "当前还没有 ACL 规则。",
+    "noOverrides": "当前还没有配置私有重命名。",
+    "noRoutes": "当前还没有可用的逻辑模型路由。请先创建 route，再在这里绑定私有名称。",
+    "overrideTitle": "重命名 {index}",
+    "overrideDescription": "填写客户端侧名称，并将其指向一个逻辑模型路由。",
+    "ruleTitle": "规则 {index}",
+    "ruleDescription": "设置 effect、scope 和目标对象。禁用规则会保留，但不会参与匹配。",
+    "labelOverrideSourceName": "来源名称",
+    "labelOverrideTargetRoute": "目标路由",
+    "labelOverrideDescription": "描述",
+    "labelOverrideEnabled": "启用重命名",
+    "labelRuleEffect": "动作",
+    "labelRuleScope": "范围",
+    "labelRulePriority": "优先级",
+    "labelRuleProvider": "渠道",
+    "labelRuleModel": "模型",
+    "labelRuleDescription": "描述",
+    "labelRuleEnabled": "规则启用",
+    "placeholderOverrideSourceName": "例如 manual-cli-model",
+    "placeholderOverrideTargetRoute": "选择路由",
+    "placeholderProvider": "选择渠道",
+    "placeholderModel": "选择模型",
+    "allProviders": "当前目录中的所有渠道",
+    "selectModel": "选择一个模型",
+    "alert": {
+      "nameRequired": "名称 不能为空。",
+      "invalidNumber": "一个或多个数值治理字段格式无效。",
+      "invalidBudgetAmount": "{label} 金额格式无效。",
+      "budgetCurrencyRequired": "{label} 需要先选择币种。",
+      "overrideSourceNameRequired": "重命名 {index} 需要填写来源名称。",
+      "overrideTargetRouteRequired": "重命名 {index} 需要选择目标路由。",
+      "duplicateOverrideSourceName": "存在重复的重命名来源名称：{name}。",
+      "rulePriorityRequired": "规则 {index} 需要填写数字优先级。",
+      "ruleProviderRequired": "规则 {index} 需要选择渠道。",
+      "ruleModelRequired": "规则 {index} 需要选择模型。",
+      "saveSuccess": "保存成功。",
+      "saveFailed": "保存失败: {error}"
+    }
+  },
+  "modelRoutePage": {
+    "title": "逻辑模型路由",
+    "addRoute": "添加路由",
+    "loading": "正在加载模型路由...",
+    "errorPrefix": "加载模型路由错误。",
+    "noData": "未找到模型路由。",
+    "summary": {
+      "total": "路由总数",
+      "enabled": "启用",
+      "exposed": "已暴露",
+      "candidates": "候选数"
+    },
+    "table": {
+      "routeName": "路由名称",
+      "candidateCount": "候选数",
+      "exposeInModels": "暴露到 /models",
+      "enabled": "启用",
+      "primaryCandidate": "主 Candidate",
+      "reasoning": "Reasoning",
+      "preview": "预览"
+    },
+    "modal": {
+      "titleEdit": "编辑模型路由",
+      "titleAdd": "添加模型路由",
+      "labelRouteName": "路由名称",
+      "placeholderRouteName": "例如 manual-smoke-route",
+      "labelDescription": "描述",
+      "placeholderDescription": "可选，用于说明该 route 的用途",
+      "labelExposeInModels": "暴露到 /models",
+      "labelEnabled": "启用路由",
+      "candidatesTitle": "候选列表",
+      "addCandidate": "添加 Candidate",
+      "emptyCandidates": "至少需要一个 candidate。",
+      "candidateOrder": "顺序",
+      "candidateProvider": "渠道",
+      "candidateModel": "模型",
+      "candidateEnabled": "启用",
+      "placeholderProvider": "选择渠道",
+      "placeholderModel": "选择模型",
+      "candidateMoveUp": "上移",
+      "candidateMoveDown": "下移",
+      "candidateRemove": "删除"
+    },
+    "queue": {
+      "description": "顺序会作为提交给网关的候选队列；priority 数值越小越靠前。",
+      "priority": "Priority",
+      "candidateCount": "{count} 个候选",
+      "disabledModel": "已停用"
+    },
+    "reasoning": {
+      "title": "Reasoning 后缀预览",
+      "loading": "正在加载预览...",
+      "stable": "stable",
+      "incomplete": "incomplete",
+      "staleSkipped": "stale skipped",
+      "supported": "Supported",
+      "unsupported": "Unsupported"
+    },
+    "alert": {
+      "loadDetailFailed": "加载模型路由详情失败。",
+      "routeNameRequired": "路由名称不能为空。",
+      "candidateRequired": "至少需要一个 candidate。",
+      "candidateModelRequired": "所有 candidate 都必须选择模型。",
+      "duplicateCandidate": "同一个模型不能重复出现在一个 route 中。",
+      "saveSuccess": "模型路由已保存。",
+      "saveFailed": "保存模型路由失败: {error}",
+      "toggleFailed": "切换模型路由状态失败: {error}",
+      "toggleExposeFailed": "切换路由暴露状态失败: {error}",
+      "deleteSuccess": "模型路由已删除。",
+      "deleteFailed": "删除模型路由失败: {error}"
+    },
+    "confirmDelete": "您确定要删除模型路由 \"{name}\" 吗？"
+  },
+  "accessControlPage": {
+    "title": "访问控制策略",
+    "description": "管理基于模型或渠道的访问控制权限。",
+    "addPolicy": "添加策略",
+    "loading": "正在加载策略...",
+    "error": "加载策略失败。",
+    "noData": "未找到任何策略。",
+    "table": {
+      "name": "名称",
+      "defaultAction": "默认操作",
+      "description": "描述",
+      "rules": "规则数",
+      "actions": "操作",
+      "rulesCount": "{count} 项"
+    },
+    "modal": {
+      "titleEdit": "编辑策略",
+      "titleAdd": "添加策略",
+      "labelName": "策略名称",
+      "labelDefaultAction": "默认操作",
+      "placeholderDefaultAction": "选择默认操作",
+      "labelDescription": "描述",
+      "optionALLOW": "允许",
+      "optionDENY": "拒绝"
+    },
+    "rules": {
+      "title": "规则",
+      "addRule": "添加规则",
+      "noRules": "未定义规则。",
+      "labelRuleType": "类型",
+      "labelPriority": "优先级",
+      "labelScope": "范围",
+      "labelProvider": "渠道",
+      "labelModel": "模型",
+      "placeholderProvider": "选择 Provider",
+      "placeholderModel": "选择 Model",
+      "labelDescription": "描述",
+      "labelEnabled": "启用",
+      "scopePROVIDER": "渠道",
+      "scopeMODEL": "模型",
+      "deleteRule": "删除"
+    },
+    "alert": {
+      "nameRequired": "策略名称不能为空。",
+      "saveFailed": "保存策略失败: {error}",
+      "deleteFailed": "删除策略失败: {error}",
+      "loadDetailFailed": "加载策略详情失败。"
+    },
+    "confirmDelete": "您确定要删除策略 '{name}' 吗？"
+  },
+  "providerEditPage": {
+    "titleEdit": "编辑渠道",
+    "titleAdd": "新增渠道",
+    "loadingData": "正在加载渠道数据...",
+    "buttonSaveOnly": "仅保存",
+    "buttonSaveAndTest": "保存并测试",
+    "alert": {
+      "fetchDetailFailed": "获取渠道详情失败，ID {providerId}",
+      "loadDataFailed": "加载渠道数据失败，ID: {providerId}。",
+      "providerTypeRequired": "渠道类型不能为空。",
+      "nameRequired": "名称 不能为空。",
+      "providerKeyRequired": "渠道标识 不能为空。",
+      "endpointRequired": "地址 不能为空。",
+      "apiKeyRequired": "API Key 不能为空。",
+      "modelNameRequired": "模型名称 不能为空。",
+      "baseInfoUpdateSuccess": "渠道基本信息更新成功。",
+      "createSuccess": "渠道创建成功。现在您可以添加模型和 API Keys。",
+      "baseInfoSaveFailed": "保存渠道基本信息失败: {error}",
+      "bootstrapSaveSuccess": "渠道保存成功。",
+      "bootstrapSaveAndTestSuccess": "渠道保存并测试成功。",
+      "bootstrapSaveAndTestFailed": "渠道已保存，但 bootstrap 测试失败: {error}",
+      "bootstrapFailed": "bootstrap 渠道失败: {error}",
+      "providerNotSavedForApiKey": "必须先保存渠道，然后才能添加 API Key。",
+      "apiKeyRequiredWithIndex": "API Key #{index} 不能为空。",
+      "vertexApiKeyMissingFields": "Vertex API Key #{index} (JSON) 缺少或为空的字段: {fields}。",
+      "vertexApiKeyInvalidJson": "Vertex API Key #{index} 必须是有效的 JSON 格式。",
+      "saveApiKeyFailed": "保存 API Key 失败: {error}",
+      "providerNotSavedForModel": "必须先保存渠道，然后才能添加或编辑模型。",
+      "modelIdRequiredWithIndex": "模型 #{index} 的模型ID不能为空。",
+      "saveModelFailed": "保存模型失败: {error}",
+      "modelUpdateSuccess": "模型更新成功。",
+      "providerNotSavedForModelDelete": "渠道未保存，无法从后端删除模型。",
+      "deleteModelFailed": "删除模型失败: {error}",
+      "deleteApiKeyFailed": "删除 API Key 失败: {error}",
+      "fetchRemoteModelsFailed": "获取远程模型失败: {error}",
+      "noRemoteModels": "无法从远程获取模型，或列表为空。",
+      "newModelsAdded": "已添加 {count} 个新模型。",
+      "noNewModels": "没有新模型可添加。所有远程模型可能已存在。",
+      "uncommittedCleared": "已清除未提交的模型。",
+      "noUncommittedToClear": "没有未提交的模型可清除。",
+      "noModels": "暂无模型",
+      "noApiKeys": "暂无 API Key",
+      "apiKeySaveSuccess": "API 密钥保存成功。",
+      "modelSaveSuccess": "模型保存成功。",
+      "modelDeleteSuccess": "模型删除成功。",
+      "providerIdNotFound": "未找到渠道ID。",
+      "apiKeyDeleteSuccess": "API 密钥删除成功。",
+      "providerNotSavedForCheck": "必须先保存渠道，然后才能执行检查。",
+      "noApiKeyForCheck": "必须至少保存一个API密钥才能执行模型检查。",
+      "noModelForCheck": "必须至少保存一个模型才能执行API密钥检查。",
+      "checking": "正在执行检查...",
+      "checkSuccess": "检查成功。连接有效。",
+      "checkFailed": "检查失败: {error}",
+      "buttonCheckAll": "全部检查",
+      "noModelsToCheck": "没有已保存的模型可供检查。",
+      "noApiKeysToCheck": "没有已保存的API密钥可供检查。",
+      "batchChecking": "正在对 {type} 进行批量检查...",
+      "checkSuccessShort": "检查成功。",
+      "batchCheckComplete": "批量检查完成: {type} {success}/{total} 成功。",
+      "apiKeyNameFallback": "以...{lastKeyChars}结尾的密钥",
+      "checkTypeModels": "模型",
+      "checkTypeApiKeys": "API密钥"
+    },
+    "sections": {
+      "quickStart": {
+        "title": "Quick Start",
+        "editTitle": "Quick Start",
+        "description": "填写最小连接字段，一步完成渠道初始化。",
+        "editDescription": "更新最小连接字段，然后继续处理下面的高级管理区。",
+        "identityTitle": "渠道身份",
+        "identityDescription": "bootstrap 之后，渠道名称和 Key 仍然可以继续调整。"
+      },
+      "advanced": {
+        "title": "高级",
+        "description": "在这里管理额外 API Key、更多模型、request patch 和远端模型同步。"
+      },
+      "modelsDescription": "这里可直接编辑模型名称、映射模型名称、能力和启用状态。完整配置仍然留在 ModelEdit。"
+    },
+    "modelCapabilities": {
+      "title": "能力"
+    },
+    "preview": {
+      "title": "生成预览",
+      "description": "基于当前 Quick Start 输入自动生成。",
+      "autoGenerated": "自动生成",
+      "providerName": "渠道名称",
+      "providerKey": "渠道 Key"
+    },
+    "quickStart": {
+      "labelApiKey": "API Key",
+      "labelModelName": "模型名称",
+      "labelApiKeyDescription": "API Key 描述",
+      "placeholderApiKeyDescription": "可选：给首个 API Key 填一个描述"
+    },
+    "modalSelectModel": {
+      "title": "选择检查模型",
+      "description": "请选择一个模型以使用所选的API密钥执行检查。",
+      "target": "当前 API Key：{target}",
+      "selectPlaceholder": "选择一个模型"
+    },
+    "modalSelectApiKey": {
+      "title": "选择检查的API密钥",
+      "description": "请选择一个API密钥以使用所选模型执行检查。",
+      "target": "当前模型：{target}",
+      "selectPlaceholder": "选择一个API密钥"
+    },
+    "requestPatch": {
+      "title": "请求改写",
+      "description": "管理会被下游模型继承的渠道直接规则。模型级 explain 和冲突诊断仍在模型页面查看。",
+      "directTitle": "渠道直接规则",
+      "directDescription": "渠道规则会被下游模型继承；完全相同目标上的模型规则可以覆盖它们。",
+      "addRule": "新增规则",
+      "emptyDirect": "当前渠道还没有配置直接请求改写规则。",
+      "noDescription": "无描述",
+      "placements": {
+        "HEADER": "请求头",
+        "QUERY": "查询参数",
+        "BODY": "请求体 JSON"
+      },
+      "operations": {
+        "SET": "设置",
+        "REMOVE": "移除"
+      },
+      "fields": {
+        "value": "值",
+        "description": "描述",
+        "trace": "说明",
+        "enabled": "启用",
+        "ruleId": "规则 ID"
+      },
+      "states": {
+        "disabled": "已停用",
+        "enabled": "已启用"
+      },
+      "messages": {
+        "providerDirect": "渠道直接规则。继承、生效和冲突诊断请在对应模型页面查看。"
+      },
+      "editor": {
+        "addTitle": "新增渠道请求改写",
+        "editTitle": "编辑渠道请求改写",
+        "description": "为请求头、查询参数或请求体 JSON Pointer 目标创建渠道直接规则。",
+        "placement": "位置",
+        "operation": "操作",
+        "selectPlacement": "选择位置",
+        "selectOperation": "选择操作",
+        "target": "目标",
+        "targetPlaceholderHeader": "authorization",
+        "targetPlaceholderQuery": "api-version",
+        "targetPlaceholderBody": "/generationConfig/temperature",
+        "valueJson": "JSON 值",
+        "valueHelp": "请求头和查询参数只接受 JSON 标量值；请求体可以使用任意 JSON 值。",
+        "descriptionLabel": "描述",
+        "descriptionPlaceholder": "给运维或后续排障留下可读备注。",
+        "enabledTitle": "已启用",
+        "enabledDescription": "关闭后规则仍保留，但运行时不会应用。",
+        "targetHelpHeader": "填写请求头名称。保留的传输层请求头会被后端直接拒绝。",
+        "targetHelpQuery": "填写查询参数名，不要包含 ?, &, = 或空白字符。",
+        "targetHelpBody": "填写 JSON Pointer，例如 /model 或 /generationConfig/temperature。",
+        "removeValuePlaceholder": "移除操作不接受 value_json。",
+        "valuePlaceholder": "填写合法 JSON，例如: \"Bearer token\", true, 1, null",
+        "create": "创建规则",
+        "save": "保存修改",
+        "dangerousTitle": "确认危险目标",
+        "dangerousDescription": "这条规则会操作上游敏感目标，必须再次确认后才能保存。",
+        "saveAnyway": "仍然保存"
+      },
+      "alert": {
+        "saveBeforeEdit": "请先保存渠道，再编辑请求改写规则。",
+        "saveFailed": "保存请求改写规则失败。",
+        "createSuccess": "渠道请求改写已创建。",
+        "updateSuccess": "渠道请求改写已更新。",
+        "deleteSuccess": "渠道请求改写已删除。",
+        "deleteFailed": "删除渠道请求改写失败。",
+        "toggleFailed": "更新请求改写启停状态失败。",
+        "enableSuccess": "请求改写已启用。",
+        "disableSuccess": "请求改写已停用。",
+        "dangerousConfirmFailed": "确认危险请求改写目标失败。",
+        "targetRequired": "目标不能为空。",
+        "valueRequired": "设置规则必须填写 JSON 值。"
+      }
+    },
+    "labelName": "名称",
+    "labelProviderKey": "渠道标识",
+    "labelProviderType": "渠道类型",
+    "labelEndpoint": "地址",
+    "labelUseProxy": "使用代理",
+    "labelEnabled": "启用",
+    "labelLimitModel": "限制模型",
+    "placeholderProviderType": "选择渠道类型",
+    "buttonUpdateBaseInfo": "更新渠道基本信息",
+    "buttonCreateBaseInfo": "创建渠道并保存基本信息",
+    "sectionModels": "模型",
+    "tableHeaderModelId": "模型ID",
+    "tableHeaderMappedModelId": "映射模型ID",
+    "placeholderModelId": "例如 gpt-3.5-turbo",
+    "placeholderMappedModelId": "例如 azure-gpt-35 (可选)",
+    "buttonSaveModel": "保存模型",
+    "buttonAddModel": "添加模型",
+    "buttonFetchRemote": "获取远程模型",
+    "buttonClearUncommitted": "清除未提交",
+    "sectionApiKeys": "API Keys",
+    "tableHeaderApiKey": "API Key",
+    "tableHeaderDescription": "描述",
+    "tableHeaderActions": "操作",
+    "placeholderApiKey": "输入 API Key",
+    "placeholderDescription": "可选描述",
+    "buttonSaveThisKey": "保存此Key",
+    "buttonAddApiKey": "添加API Key",
+    "buttonBackToList": "返回列表"
+  },
+  "modelEditPage": {
+    "title": "编辑模型",
+    "loading": "正在加载模型数据...",
+    "buttonBackToModels": "返回模型库",
+    "buttonBackToProviders": "查看渠道",
+    "providerSummary": {
+      "title": "渠道上下文",
+      "unknown": "未知渠道",
+      "enabled": "启用",
+      "disabled": "停用",
+      "description": "这个模型属于上方渠道。这里仅保留最小模型字段编辑，路由、成本和 request patch 属于高级配置。"
+    },
+    "routeReferences": {
+      "title": "路由引用",
+      "heading": "直接引用这个模型的路由",
+      "description": "下面这些逻辑路由当前直接引用了这个模型。调整模型名称或启停前，先确认这些路由是否需要同步处理。",
+      "openRoutes": "打开路由页",
+      "noRoutes": "当前还没有逻辑路由直接引用这个模型。即使没有 route，外部仍然可以直接使用 provider/model 地址。",
+      "enabled": "启用",
+      "disabled": "停用"
+    },
+    "labelModelName": "模型名称",
+    "labelRealModelName": "真实模型名称",
+    "labelEnabled": "已启用",
+    "capabilities": {
+      "title": "模型能力",
+      "description": "路由 prefilter 会读取这些显式运行时能力。启用 retry / fallback 前，请让它们与真实渠道行为保持一致。"
+    },
+    "alert": {
+      "missingId": "缺少模型ID，无法编辑。",
+      "loadDataFailed": "加载模型数据失败，ID: {modelId}。",
+      "nameRequired": "模型名称不能为空。",
+      "updateSuccess": "模型更新成功。",
+      "saveFailed": "保存模型失败: {error}"
+    },
+    "priceSection": {
+      "title": "成本目录",
+      "labelCatalog": "成本目录",
+      "placeholderCatalog": "选择一个成本目录",
+      "noCatalog": "无 (未绑定目录)",
+      "unboundHint": "当前模型未绑定成本目录。请求仍可正常处理，但不会生成成本快照。",
+      "versionTitle": "已发布版本",
+      "version": "版本号",
+      "enabled": "启用",
+      "effectiveFrom": "生效开始",
+      "effectiveUntil": "生效结束"
+    },
+    "requestPatch": {
+      "title": "请求改写",
+      "description": "在一个页面里直接编辑模型级规则，并同时查看渠道继承规则、最终生效结果和诊断信息。",
+      "refresh": "刷新",
+      "loading": "正在加载请求改写状态...",
+      "providerFallback": "渠道",
+      "directTitle": "模型直接规则",
+      "directDescription": "模型规则只会在完全相同的目标上覆盖渠道继承规则。",
+      "addRule": "新增规则",
+      "emptyDirect": "当前模型还没有配置直接请求改写规则。",
+      "inheritedTitle": "继承的渠道规则",
+      "inheritedDescription": "这些是从 {provider} 继承到当前模型的渠道直接规则。即使被覆盖，也会保留显示。",
+      "emptyInherited": "当前模型没有继承任何启用中的渠道请求改写规则。",
+      "effectiveTitle": "运行时生效结果",
+      "effectiveDescription": "这里展示的是该模型当前会尝试应用到运行时请求上的最终规则集。",
+      "emptyEffective": "当前模型没有任何有效的请求改写规则。",
+      "explainTitle": "诊断与冲突",
+      "explainDescription": "查看每条启用规则的最终状态、覆盖关系，以及是否存在不安全的跨作用域冲突。",
+      "emptyExplain": "当前模型还没有可展示的请求改写诊断信息。",
+      "details": "详情",
+      "noDescription": "无描述",
+      "conflictBannerTitle": "当前请求改写配置不安全",
+      "conflictBannerDescription": "这个模型当前存在渠道/模型跨作用域冲突。处理完成前，不应认为该模型可以安全生效。",
+      "conflictFields": {
+        "providerTarget": "渠道目标",
+        "modelTarget": "模型目标"
+      },
+      "placements": {
+        "HEADER": "请求头",
+        "QUERY": "查询参数",
+        "BODY": "请求体 JSON"
+      },
+      "operations": {
+        "SET": "设置",
+        "REMOVE": "移除"
+      },
+      "fields": {
+        "value": "值",
+        "description": "描述",
+        "source": "来源",
+        "trace": "说明",
+        "enabled": "启用",
+        "ruleId": "规则 ID",
+        "sourceRule": "来源规则",
+        "effectiveRule": "最终规则",
+        "conflictsWith": "冲突对象"
+      },
+      "states": {
+        "effective": "生效中",
+        "overridden": "已覆盖",
+        "conflicted": "冲突中",
+        "disabled": "已停用",
+        "enabled": "已启用"
+      },
+      "origin": {
+        "ProviderDirect": "渠道直接规则",
+        "ModelDirect": "模型直接规则"
+      },
+      "messages": {
+        "directEffective": "这条模型直接规则已经进入当前运行时生效集合。",
+        "disabledSkipped": "已停用规则会继续保留在模型上，但运行时会跳过。",
+        "inheritedEffective": "这条规则来自渠道，并且当前仍对该模型生效。",
+        "overriddenByRule": "已被模型规则 {id} 覆盖。",
+        "conflictsWithRules": "与规则 {ids} 存在冲突。",
+        "overridesProviderRules": "覆盖了渠道规则 {ids}。",
+        "effectiveFromOrigin": "当前由 {origin} 规则 {id} 生效。",
+        "noRuntimeTrace": "当前没有额外诊断信息。"
+      },
+      "editor": {
+        "addTitle": "新增模型请求改写",
+        "editTitle": "编辑模型请求改写",
+        "description": "为请求头、查询参数或请求体 JSON Pointer 目标创建模型直接规则。",
+        "placement": "位置",
+        "operation": "操作",
+        "selectPlacement": "选择位置",
+        "selectOperation": "选择操作",
+        "target": "目标",
+        "targetPlaceholderHeader": "authorization",
+        "targetPlaceholderQuery": "api-version",
+        "targetPlaceholderBody": "/generationConfig/temperature",
+        "valueJson": "JSON 值",
+        "valueHelp": "请求头和查询参数只接受 JSON 标量值；请求体可以使用任意 JSON 值。",
+        "descriptionLabel": "描述",
+        "descriptionPlaceholder": "给运维或后续排障留下可读备注。",
+        "enabledTitle": "已启用",
+        "enabledDescription": "关闭后规则仍保留，但运行时不会应用。",
+        "targetHelpHeader": "填写请求头名称。保留的传输层请求头会被后端直接拒绝。",
+        "targetHelpQuery": "填写查询参数名，不要包含 ?, &, = 或空白字符。",
+        "targetHelpBody": "填写 JSON Pointer，例如 /model 或 /generationConfig/temperature。",
+        "removeValuePlaceholder": "移除操作不接受 value_json。",
+        "valuePlaceholder": "填写合法 JSON，例如: \"Bearer token\", true, 1, null",
+        "create": "创建规则",
+        "save": "保存修改",
+        "dangerousTitle": "确认危险目标",
+        "dangerousDescription": "这条规则会操作上游敏感目标，必须再次确认后才能保存。",
+        "saveAnyway": "仍然保存"
+      },
+      "alert": {
+        "loadFailed": "加载请求改写状态失败。",
+        "saveBeforeEdit": "请先保存模型，再编辑请求改写规则。",
+        "saveFailed": "保存请求改写规则失败。",
+        "createSuccess": "模型请求改写已创建。",
+        "updateSuccess": "模型请求改写已更新。",
+        "deleteSuccess": "模型请求改写已删除。",
+        "deleteFailed": "删除请求改写规则失败。",
+        "toggleFailed": "更新请求改写启停状态失败。",
+        "enableSuccess": "请求改写已启用。",
+        "disableSuccess": "请求改写已停用。",
+        "dangerousConfirmFailed": "确认危险请求改写目标失败。",
+        "targetRequired": "目标不能为空。",
+        "valueRequired": "设置规则必须填写 JSON 值。"
+      }
+    }
+  },
+  "costPage": {
+    "title": "成本管理",
+    "confirmDeleteCatalog": "确定删除成本目录“{name}”吗？",
+    "confirmDeleteCatalogDescription": "后端只有在该目录不再包含任何版本时才允许删除。",
+    "confirmEnableVersion": "确定启用目录版本“{version}”吗？",
+    "confirmEnableVersionDescription": "这是危险操作。启用后，同一目录下其他已启用版本会被同时停用。",
+    "confirmDisableVersion": "确定停用目录版本“{version}”吗？",
+    "confirmDisableVersionDescription": "这是危险操作。停用后，新请求将不再匹配该目录版本。",
+    "confirmArchiveVersion": "确定归档目录版本“{version}”吗？",
+    "confirmArchiveVersionDescription": "归档后该版本将默认从主列表隐藏，且不能直接启用或编辑。",
+    "confirmUnarchiveVersion": "确定取消归档目录版本“{version}”吗？",
+    "confirmUnarchiveVersionDescription": "取消归档后，该版本会恢复为冻结状态并重新显示在主列表中。",
+    "confirmDeleteVersion": "确定删除草稿版本“{version}”吗？",
+    "confirmDeleteVersionDescription": "只有未启用且未冻结的草稿版本允许删除，删除后不能恢复。",
+    "confirmDeleteComponent": "确定删除组件“{meter}”吗？",
+    "confirmDeleteComponentDescription": "删除后会立即从当前目录版本中移除该计费组件。",
+    "alert": {
+      "loadFailed": "加载成本目录失败。",
+      "templateImportSuccess": "成本模板已导入到“{name}”。",
+      "templateImportFailed": "导入成本模板失败。",
+      "catalogNameRequired": "成本目录名称不能为空。",
+      "catalogCreateSuccess": "成本目录创建成功。",
+      "catalogUpdateSuccess": "成本目录更新成功。",
+      "catalogDuplicateSuccess": "副本方案创建成功。",
+      "catalogSaveFailed": "保存成本目录失败。",
+      "catalogDuplicateFailed": "创建副本方案失败。",
+      "catalogDeleteSuccess": "成本目录删除成功。",
+      "catalogDeleteFailed": "删除成本目录失败。",
+      "selectCatalogFirst": "请先选择一个成本目录。",
+      "selectVersionFirst": "请先选择一个目录版本。",
+      "versionNameRequired": "版本号不能为空。",
+      "versionCurrencyRequired": "币种不能为空。",
+      "versionEffectiveFromRequired": "生效开始时间不能为空。",
+      "invalidDateTime": "请输入有效的日期时间。",
+      "invalidEffectiveRange": "失效时间必须晚于生效开始时间。",
+      "versionCreateSuccess": "目录版本创建成功。",
+      "versionDuplicateSuccess": "已将目录版本“{version}”复制为新的草稿。",
+      "versionEnableSuccess": "目录版本已启用。",
+      "versionDisableSuccess": "目录版本已停用。",
+      "versionArchiveSuccess": "目录版本已归档。",
+      "versionUnarchiveSuccess": "目录版本已恢复为冻结状态。",
+      "versionDeleteSuccess": "草稿版本已删除。",
+      "versionToggleFailed": "切换目录版本启用状态失败。",
+      "versionArchiveFailed": "归档目录版本失败。",
+      "versionUnarchiveFailed": "取消归档目录版本失败。",
+      "versionDuplicateFailed": "复制目录版本失败。",
+      "versionDeleteFailed": "删除草稿版本失败。",
+      "versionSaveFailed": "创建目录版本失败。",
+      "invalidMatchAttributes": "匹配属性必须是合法的 JSON 对象。",
+      "invalidComponentNumber": "组件字段必须使用合法的非负数字。",
+      "tier.multiple_unbounded": "阶梯价格只能包含一个无限上界阶梯。",
+      "tier.unbounded_not_last": "无限上界阶梯必须放在最后一行。",
+      "tier.not_increasing": "阶梯上界必须严格递增。",
+      "componentCreateSuccess": "计费组件创建成功。",
+      "componentUpdateSuccess": "计费组件更新成功。",
+      "componentSaveFailed": "保存计费组件失败。",
+      "componentDeleteSuccess": "计费组件删除成功。",
+      "componentDeleteFailed": "删除计费组件失败。",
+      "invalidPreviewNumber": "试算字段必须使用非负整数。",
+      "previewFailed": "成本试算失败。"
+    },
+    "state": {
+      "draft": "草稿",
+      "active": "生效中",
+      "enabled": "已启用",
+      "disabled": "未启用",
+      "frozen": "已冻结",
+      "archived": "已归档"
+    },
+    "actions": {
+      "viewDetail": "查看详情",
+      "enableVersion": "启用版本",
+      "disableVersion": "停用版本",
+      "copyVersion": "复制版本",
+      "archiveVersion": "归档版本",
+      "unarchiveVersion": "取消归档",
+      "deleteDraftVersion": "删除草稿",
+      "showArchivedVersions": "查看归档版本 ({count})",
+      "hideArchivedVersions": "隐藏归档版本"
+    },
+    "templates": {
+      "title": "内置模板",
+      "description": "直接导入常见文本模型和 token 型生图模型的成本目录初始配置。",
+      "loading": "正在加载成本模板...",
+      "empty": "当前没有可用的内置成本模板。",
+      "import": "一键导入",
+      "importing": "导入中...",
+      "catalogName": "目录名称",
+      "version": "版本号",
+      "effectiveFrom": "生效开始",
+      "source": "来源",
+      "supportedMeters": "已覆盖 Meter"
+    },
+    "catalogs": {
+      "title": "成本目录",
+      "description": "目录用于承载一组可复用的成本策略，供模型绑定与请求计费复用。",
+      "add": "新建目录",
+      "duplicate": "创建副本",
+      "editMeta": "编辑目录",
+      "openEditor": "进入编辑",
+      "openCurrent": "继续编辑",
+      "copyName": "{name} 副本",
+      "loading": "正在加载成本目录...",
+      "versionCount": "个版本",
+      "latestVersion": "最新版本",
+      "latestPublishedAt": "最近发布时间",
+      "emptyDescription": "暂无描述",
+      "table": {
+        "name": "名称",
+        "description": "描述",
+        "versions": "版本数",
+        "latestVersion": "最新版本",
+        "latestPublishedAt": "最近发布时间"
+      },
+      "modal": {
+        "titleAdd": "新建成本目录",
+        "titleEdit": "编辑成本目录",
+        "name": "目录名称",
+        "description": "描述"
+      }
+    },
+    "editor": {
+      "title": "成本方案编辑",
+      "description": "在这里维护目录版本、计费组件，并直接进行成本试算。",
+      "currentVersion": "当前版本",
+      "emptyTitle": "尚未选择成本目录",
+      "emptyDescription": "请先从列表中打开一个目录，或新建/导入一个方案后再进入编辑。"
+    },
+    "versions": {
+      "title": "目录版本",
+      "add": "发布版本",
+      "empty": "当前选中的成本目录还没有已发布版本。",
+      "hiddenArchivedOnly": "当前目录只有已归档版本，点击上方按钮可查看。",
+      "publishedAt": "发布时间",
+      "effectiveFrom": "生效开始",
+      "effectiveUntil": "生效结束",
+      "currency": "币种",
+      "modal": {
+        "titleAdd": "新建目录版本",
+        "version": "版本号",
+        "currency": "币种",
+        "source": "来源",
+        "effectiveFrom": "生效开始",
+        "effectiveUntil": "生效结束",
+        "enabled": "启用版本",
+        "enabledDescription": "关闭后版本仍保留用于审计，但不会匹配新的请求。"
+      }
+    },
+    "versionDetail": {
+      "emptyTitle": "尚未选择版本",
+      "emptyDescription": "选择一个目录版本以查看该快照下的计费组件。",
+      "manualSource": "手动录入",
+      "loading": "正在加载版本详情...",
+      "emptyComponents": "该版本还没有计费组件。",
+      "componentsTitle": "计费组件",
+      "componentsDescription": "组件围绕 meter key 与 charge kind 建模，并按优先级进行匹配。",
+      "draftDescription": "草稿版本可以继续编辑组件，也可以直接删除。",
+      "activeDescription": "生效中的版本会参与请求匹配；若尚未被请求使用，仍可继续编辑。",
+      "frozenDescription": "冻结版本已被历史请求引用，当前只读；如需改价，请复制为新草稿。",
+      "archivedDescription": "归档版本默认隐藏，不可直接启用或编辑；只能取消归档恢复为冻结版本。",
+      "addComponent": "新增组件",
+      "chargeKind": "计费方式",
+      "unitPrice": "单价",
+      "flatFee": "固定费用",
+      "matchAttributes": "匹配属性",
+      "hasMatchAttributes": "已配置",
+      "noDescription": "暂无描述"
+    },
+    "componentEditor": {
+      "titleAdd": "新建计费组件",
+      "titleEdit": "编辑计费组件",
+      "meterKey": "Meter Key",
+      "chargeKind": "计费方式",
+      "priority": "优先级",
+      "description": "描述",
+      "unitPrice": "单价",
+      "flatFee": "固定费用",
+      "unitPriceHintPerMillion": "按每百万 tokens 的 {currency} 价格输入，例如 3 表示 {currency} 3 / 1M tokens。",
+      "unitPriceHintPerUnit": "按每个计量单位的实际 {currency} 价格输入，支持小数。",
+      "flatFeeHint": "输入实际固定费用，单位为 {currency}，支持小数。",
+      "matchAttributes": "匹配属性 JSON",
+      "matchAttributesPlaceholder": "示例：{\"spec_key\":\"1024x1024\"}",
+      "previewConfig": "匹配预览",
+      "previewConfigEmpty": "若不填写匹配属性，则该组件会匹配此 meter 下的所有账本项。",
+      "meters": {
+        "inputText": "文本输入 Token",
+        "outputText": "文本输出 Token",
+        "inputImage": "图片输入 Token",
+        "outputImage": "图片输出 Token",
+        "cacheRead": "缓存读取 Token",
+        "cacheWrite": "缓存写入 Token",
+        "reasoning": "推理 Token",
+        "requestCalls": "请求调用次数",
+        "custom": "自定义 Meter"
+      },
+      "chargeKinds": {
+        "perUnit": "按量计费",
+        "flat": "固定费用",
+        "tieredPerUnit": "阶梯按量计费",
+        "custom": "自定义计费方式"
+      },
+      "tiers": {
+        "title": "阶梯价格",
+        "description": "按递增阈值配置价格。最后一行若留空上界，则表示无限上界阶梯。",
+        "add": "新增阶梯",
+        "basis": "阶梯依据",
+        "basisMeterQuantity": "当前 meter 数量",
+        "basisTotalInputTokens": "总输入 Token",
+        "upTo": "到达上界",
+        "upToValue": "到 {value}",
+        "unitPrice": "单价",
+        "unitPriceHintPerMillion": "阶梯单价按每百万 tokens 的 {currency} 价格输入。",
+        "unitPriceHintPerUnit": "阶梯单价按每个计量单位的实际 {currency} 价格输入。",
+        "unbounded": "无上界",
+        "unboundedPlaceholder": "留空表示无上界",
+        "rowLabel": "阶梯 {index}"
+      }
+    },
+    "preview": {
+      "title": "成本试算",
+      "description": "直接复用后端的 normalization -> ledger -> rating 主链路验证样例请求成本。",
+      "applySample": "填充示例",
+      "run": "开始试算",
+      "running": "试算中...",
+      "ledgerTitle": "生成的 ledger",
+      "detailLinesTitle": "命中的计费明细",
+      "unmatchedTitle": "未命中的 ledger 项",
+      "warningsTitle": "Warning",
+      "fields": {
+        "totalInputTokens": "总输入 Token",
+        "totalOutputTokens": "总输出 Token",
+        "inputTextTokens": "文本输入 Token",
+        "outputTextTokens": "文本输出 Token",
+        "inputImageTokens": "图片输入 Token",
+        "outputImageTokens": "图片输出 Token",
+        "cacheReadTokens": "缓存读取 Token",
+        "cacheWriteTokens": "缓存写入 Token",
+        "reasoningTokens": "推理 Token"
+      },
+      "result": {
+        "totalCost": "总成本",
+        "currency": "币种",
+        "detailLines": "明细行数"
+      }
+    }
+  },
+  "pricePage": {
+    "title": "价格管理",
+    "description": "配置计费计划和模型访问的价格规则。",
+    "confirmDeletePlan": "您确定要删除计费计划\"{name}\"吗？",
+    "confirmDeleteRule": "您确定要删除此价格规则吗？",
+    "alert": {
+      "planNameRequired": "计划名称是必填项。",
+      "planSaveSuccess": "计费计划保存成功。",
+      "planSaveFailed": "保存计费计划失败: {error}",
+      "planDeleteSuccess": "计费计划删除成功。",
+      "planDeleteFailed": "删除计费计划失败: {error}",
+      "selectPlanFirst": "请先选择一个计费计划。",
+      "ruleSaveSuccess": "价格规则保存成功。",
+      "ruleSaveFailed": "保存价格规则失败: {error}",
+      "ruleDeleteSuccess": "价格规则删除成功。",
+      "ruleDeleteFailed": "删除价格规则失败: {error}"
+    },
+    "plans": {
+      "title": "计费计划",
+      "add": "添加计费计划",
+      "loading": "正在加载计费计划...",
+      "table": {
+        "name": "名称",
+        "description": "描述",
+        "currency": "货币",
+        "actions": "操作"
+      },
+      "modal": {
+        "titleEdit": "编辑计费计划",
+        "titleAdd": "新建计费计划",
+        "name": "名称",
+        "description": "描述",
+        "currency": "货币"
+      }
+    },
+    "rules": {
+      "title": "价格规则",
+      "add": "添加价格规则",
+      "loading": "正在加载价格规则...",
+      "table": {
+        "description": "描述",
+        "enabled": "已启用",
+        "usageType": "使用类型",
+        "mediaType": "媒体类型",
+        "price": "价格",
+        "effectiveFrom": "生效时间",
+        "actions": "操作"
+      },
+      "modal": {
+        "titleEdit": "编辑价格规则",
+        "titleAdd": "新建价格规则",
+        "description": "描述",
+        "enabled": "已启用",
+        "usageType": "使用类型",
+        "mediaType": "媒体类型",
+        "mediaTypeDefault": "默认 (任何)",
+        "price": "价格 ($ / 百万 tokens)",
+        "currency": "货币",
+        "effectiveFrom": "生效时间",
+        "effectiveUntil": "失效时间"
+      }
+    }
+  }
+}

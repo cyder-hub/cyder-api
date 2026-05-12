@@ -2,6 +2,7 @@ import { computed, reactive, ref, shallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 
 import * as systemConfigService from "@/services/systemConfig";
+import { formatTimestamp } from "@/utils/datetime";
 import type {
   SystemConfigField,
   SystemConfigLayerKind,
@@ -335,11 +336,12 @@ export function useSystemConfigReport(
 
 export function formatSystemConfigTimestamp(
   value: number | null | undefined,
+  locale?: string | null,
 ): string {
   if (!value) {
     return "-";
   }
-  return new Date(value).toLocaleString();
+  return formatTimestamp(value, locale) || "-";
 }
 
 export function formatSystemConfigFileState(

@@ -1,3 +1,5 @@
+import { resolveIntlLocale } from "../i18n/locale.ts";
+
 const DEFAULT_CURRENCY_MINOR_UNIT_DIGITS = 2;
 
 const CURRENCY_MINOR_UNIT_DIGITS: Record<string, number> = {
@@ -148,16 +150,17 @@ export function formatCostRateFromNanos(
   mode: CostRateInputMode,
   currency?: string | null,
   fallback = "-",
+  locale?: string | null,
 ): string {
   if (mode === "money") {
-    return formatPriceFromNanos(nanos, currency, fallback);
+    return formatPriceFromNanos(nanos, currency, fallback, locale);
   }
 
   if (nanos === null || nanos === undefined) {
     return fallback;
   }
 
-  const value = new Intl.NumberFormat(undefined, {
+  const value = new Intl.NumberFormat(resolveIntlLocale(locale), {
     minimumFractionDigits: 0,
     maximumFractionDigits: getCurrencyMinorUnitDigits(currency) + 3,
   }).format(nanos / getPerMillionRateScale(currency));
@@ -168,12 +171,13 @@ export function formatPriceFromNanos(
   nanos: number | null | undefined,
   currency?: string | null,
   fallback = "-",
+  locale?: string | null,
 ): string {
   if (nanos === null || nanos === undefined) {
     return fallback;
   }
 
-  const value = new Intl.NumberFormat(undefined, {
+  const value = new Intl.NumberFormat(resolveIntlLocale(locale), {
     minimumFractionDigits: 0,
     maximumFractionDigits: getCurrencyMinorUnitDigits(currency) + 9,
   }).format(nanosToMajorUnit(nanos, currency));

@@ -37,10 +37,11 @@ import type {
 } from "@/services/types";
 import { usePortableExport } from "./composables/usePortableExport";
 import { usePortableImport } from "./composables/usePortableImport";
+import { formatTimestamp } from "@/utils/datetime";
 
 type ActiveTab = "export" | "import";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const activeTab = ref<ActiveTab>("export");
 
 const {
@@ -167,7 +168,7 @@ function formatDateTime(value: number): string {
   if (!value) {
     return t("common.notAvailable");
   }
-  return new Date(value).toLocaleString();
+  return formatTimestamp(value, locale.value) || t("common.notAvailable");
 }
 
 function fileProtectionLabel(mode: FileProtectionMode): string {

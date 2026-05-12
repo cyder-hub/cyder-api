@@ -5,12 +5,14 @@ import { reactiveOmit } from "@vueuse/core";
 import { MoreHorizontal } from "lucide-vue-next";
 import { PaginationEllipsis } from "reka-ui";
 import { cn } from "@/utils/cn";
+import { useAppI18n } from "@/i18n";
 
 const props = defineProps<
   PaginationEllipsisProps & { class?: HTMLAttributes["class"] }
 >();
 
 const delegatedProps = reactiveOmit(props, "class");
+const { t } = useAppI18n();
 </script>
 
 <template>
@@ -21,7 +23,7 @@ const delegatedProps = reactiveOmit(props, "class");
   >
     <slot>
       <MoreHorizontal class="size-4" />
-      <span class="sr-only">More pages</span>
+      <span class="sr-only">{{ t("ui.pagination.morePages") }}</span>
     </slot>
   </PaginationEllipsis>
 </template>

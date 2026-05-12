@@ -1,0 +1,2417 @@
+{
+  "providerPage": {
+    "editModel": "Edit model: {model_name}",
+    "title": "Providers Management",
+    "addProvider": "Add New Provider",
+    "viewModels": "Open Model Library",
+    "viewRuntime": "View Runtime",
+    "loading": "Loading providers...",
+    "error": "Error loading providers: {error}",
+    "noData": "No providers found. Click 'Add New Provider' to get started.",
+    "subtitle": "Default start page for new integrations.",
+    "deleteSuccess": "Deleted successfully",
+    "summary": {
+      "total": "Total Providers",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "runtimeIssues": "Runtime Issues"
+    },
+    "state": {
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "table": {
+      "key": "Key",
+      "name": "Name",
+      "type": "Type",
+      "useProxy": "Use Proxy",
+      "limitModel": "Limit Model",
+      "models": "Models",
+      "apiKeys": "API Keys",
+      "status": "Status"
+    },
+    "confirmDelete": "Are you sure you want to delete the provider '{name}'?",
+    "deleteFailed": "Failed to delete provider: {error}"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "sections": {
+      "resources": {
+        "title": "Resources"
+      },
+      "runtime": {
+        "title": "Runtime Health"
+      },
+      "trends": {
+        "title": "Trends"
+      },
+      "alerts": {
+        "title": "Alerts and Actions"
+      },
+      "topProviders": {
+        "title": "Top Providers"
+      },
+      "topModels": {
+        "title": "Top Models"
+      }
+    },
+    "actions": {
+      "viewRuntime": "View Runtime",
+      "viewRecords": "View Records"
+    },
+    "kpi": {
+      "requests": "Requests Today",
+      "success": "Success",
+      "errors": "Errors",
+      "successRate": "Success Rate",
+      "totalTokens": "Total Tokens",
+      "inputTokens": "Input",
+      "totalCost": "Total Cost",
+      "avgLatency": "Average Latency",
+      "firstByte": "First Byte",
+      "runtimeIssues": "Runtime Issues",
+      "runtimeWindow": "Window",
+      "windowToday": "Window: today",
+      "multiCurrencyHint": "Multiple currencies shown side by side"
+    },
+    "resources": {
+      "providers": "Providers",
+      "models": "Models",
+      "providerKeys": "Provider Keys",
+      "apiKeys": "API Keys",
+      "enabledTotal": "Enabled / Total",
+      "activeToday": "Active today"
+    },
+    "runtime": {
+      "windowDetail": "Window: {window}",
+      "degradedHint": "Observed latency or error-rate degradation",
+      "halfOpenHint": "In half-open recovery probing",
+      "openHint": "Currently circuit-open",
+      "noTrafficHint": "No traffic in this window",
+      "activeProviders": "Active Providers Today",
+      "activeModels": "Active Models"
+    },
+    "runtimeState": {
+      "title": "Runtime State Backend",
+      "backend": {
+        "memory": "Memory",
+        "redis": "Redis"
+      },
+      "deployment": {
+        "single_instance": "Single instance",
+        "multi_instance": "Multi-instance"
+      },
+      "status": {
+        "recommended": "Recommended",
+        "shared": "Shared",
+        "nonShared": "Non-shared",
+        "degraded": "Degraded"
+      },
+      "scope": {
+        "runtime": "Runtime state",
+        "catalog": "Catalog cache"
+      },
+      "configured": "Configured",
+      "effective": "Effective",
+      "description": "{deployment}; runtime {runtime}; catalog cache {catalog}.",
+      "recommendedHint": "Memory runtime state is the recommended default for single-instance deployments.",
+      "sharedHint": "Runtime governance state is shared through Redis.",
+      "nonSharedHint": "Runtime governance state is local to this instance.",
+      "fallback": "Runtime fallback: {reason}",
+      "catalogFallback": "Catalog cache fallback: {reason}",
+      "lastError": "Backend error: {error}",
+      "lastChecked": "Checked {time}"
+    },
+    "alertGroups": {
+      "unstable": "Unstable Providers",
+      "topErrors": "Top Error Providers",
+      "costHotspots": "Cost Hotspots",
+      "costProviders": "Costliest Providers",
+      "costModels": "Costliest Models"
+    },
+    "metrics": {
+      "requests": "Requests",
+      "successRate": "Success rate",
+      "totalTokens": "Total tokens",
+      "errors": "Errors",
+      "lastError": "Last error"
+    },
+    "empty": {
+      "noUnstableProviders": "No providers are currently in open or half-open state.",
+      "noErrors": "No providers are currently surfacing error hotspots.",
+      "noCostHotspots": "No clear cost hotspots were found.",
+      "noCostProviders": "No provider cost hotspots were found.",
+      "noCostModels": "No model cost hotspots were found.",
+      "noTopProviders": "No provider ranking data yet.",
+      "noTopModels": "No model ranking data yet.",
+      "noLatency": "N/A"
+    },
+    "systemOverview": {
+      "title": "System Overview",
+      "providers": "Total Providers",
+      "models": "Total Models",
+      "providerKeys": "Total Provider API Keys"
+    },
+    "todayLogStats": {
+      "title": "Today's Request Log Stats",
+      "requests": "Requests Today",
+      "promptTokens": "Prompt Tokens Today",
+      "completionTokens": "Completion Tokens Today",
+      "reasoningTokens": "Reasoning Tokens Today",
+      "totalTokens": "Total Tokens Today",
+      "totalCost": "Total Cost Today"
+    },
+    "usageStats": {
+      "title": "Usage Statistics",
+      "noData": "No data available for this period",
+      "total": "Total",
+      "others": "Others",
+      "chartTypeLabel": "Chart Type",
+      "metricLabel": "Metric",
+      "groupByLabel": "Dimension",
+      "topNLabel": "Series Count",
+      "timeRangeLabel": "Time Range",
+      "topNHint": "Shows the top {topN} series by default and merges the rest into Others.",
+      "summary": {
+        "title": "Ranking Summary",
+        "entity": "Entity",
+        "detail": "Detail"
+      },
+      "groupBy": {
+        "provider": "By Provider",
+        "model": "By Model",
+        "api_key": "By API Key"
+      },
+      "intervals": {
+        "hour": "Hourly",
+        "day": "Daily",
+        "month": "Monthly"
+      },
+      "timeRanges": {
+        "last_1_hour": "Last 1 hour",
+        "last_3_hours": "Last 3 hours",
+        "last_6_hours": "Last 6 hours",
+        "last_24_hours": "Last 24 hours",
+        "today": "Today",
+        "yesterday": "Yesterday",
+        "this_week": "This week",
+        "last_7_days": "Last 7 days",
+        "previous_week": "Previous week",
+        "this_month": "This month",
+        "last_30_days": "Last 30 days",
+        "previous_month": "Previous month",
+        "last_6_months": "Last 6 months",
+        "this_year": "This year",
+        "last_1_year": "Last year"
+      },
+      "metrics": {
+        "total_input_tokens": "Prompt Tokens",
+        "total_output_tokens": "Completion Tokens",
+        "total_reasoning_tokens": "Reasoning Tokens",
+        "total_tokens": "Total Tokens",
+        "request_count": "Request Count",
+        "total_cost": "Total Cost",
+        "success_rate": "Success Rate",
+        "avg_latency": "Average Latency",
+        "error_count": "Error Count"
+      },
+      "chartTypes": {
+        "line": "Line",
+        "bar": "Bar"
+      }
+    },
+    "errorLoading": "Error loading stats: {error}"
+  },
+  "currencies": {
+    "USD": "USD",
+    "CNY": "CNY"
+  },
+  "sidebar": {
+    "dashboard": "Dashboard",
+    "model": "Model Library",
+    "record": "Record",
+    "provider": "Provider",
+    "providerRuntime": "Provider Runtime",
+    "alerts": "Alerts",
+    "apiKey": "API Key",
+    "modelRoute": "Model Routes",
+    "accessControlPolicy": "Access Control",
+    "cost": "Cost",
+    "notifications": "Notifications",
+    "systemConfig": "System Config",
+    "portableConfig": "Import / Export",
+    "sections": {
+      "operations": "Operations",
+      "traffic": "Traffic",
+      "resources": "Resources",
+      "governance": "Governance"
+    }
+  },
+  "alertsPage": {
+    "title": "Alerts",
+    "loading": "Loading alerts...",
+    "empty": "No alerts match the current filters.",
+    "summary": {
+      "active": "Active",
+      "critical": "Critical",
+      "suppressed": "Suppressed",
+      "acknowledged": "Acknowledged"
+    },
+    "filter": {
+      "status": "Status",
+      "severity": "Severity",
+      "scope": "Scope",
+      "search": "Search",
+      "searchPlaceholder": "Search fingerprint, rule, title, or scope",
+      "acknowledged": "Acknowledged",
+      "suppressed": "Suppressed",
+      "all": "All",
+      "allStatuses": "All statuses",
+      "statusActive": "Active",
+      "statusResolved": "Resolved",
+      "allSeverities": "All severities",
+      "allScopes": "All scopes"
+    },
+    "severity": {
+      "critical": "Critical",
+      "warning": "Warning",
+      "info": "Info"
+    },
+    "status": {
+      "active": "Active",
+      "resolved": "Resolved"
+    },
+    "scope": {
+      "global": "Global",
+      "provider": "Provider",
+      "model": "Model",
+      "api_key": "API Key",
+      "provider_api_key": "Provider Key",
+      "provider_model": "Provider Model",
+      "system": "System"
+    },
+    "flags": {
+      "suppressed": "suppressed",
+      "acknowledged": "acknowledged"
+    },
+    "detail": {
+      "empty": "Select an alert to inspect it.",
+      "fingerprint": "Fingerprint",
+      "scope": "Scope",
+      "count": "Count",
+      "firstSeen": "First seen",
+      "lastSeen": "Last seen"
+    },
+    "action": {
+      "ackNote": "Acknowledge note",
+      "ackNotePlaceholder": "Add operator context",
+      "acknowledge": "Acknowledge",
+      "suppressUntil": "Suppress until",
+      "suppressReasonPlaceholder": "Suppression reason",
+      "suppress": "Suppress",
+      "unsuppress": "Unsuppress",
+      "resolve": "Resolve"
+    },
+    "delivery": {
+      "title": "Notification Deliveries",
+      "empty": "No delivery records yet.",
+      "attempts": "{count} attempts",
+      "nextAttempt": "Next attempt",
+      "status": {
+        "pending": "pending",
+        "in_progress": "in progress",
+        "retry_scheduled": "retry",
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "skipped": "skipped"
+      }
+    },
+    "toast": {
+      "acknowledged": "Alert acknowledged.",
+      "suppressed": "Alert suppressed.",
+      "unsuppressed": "Alert unsuppressed.",
+      "resolved": "Alert resolved.",
+      "actionFailed": "Action failed: {error}",
+      "invalidSuppressUntil": "Enter a future suppression time."
+    }
+  },
+  "notificationPage": {
+    "title": "Notifications",
+    "loading": "Loading notification settings...",
+    "summary": {
+      "channels": "Channels",
+      "enabled": "Enabled",
+      "failed": "Failed",
+      "retrying": "Retrying"
+    },
+    "actions": {
+      "newChannel": "New Channel",
+      "test": "Test"
+    },
+    "channels": {
+      "title": "Webhook Channels",
+      "description": "Current proactive notification channels.",
+      "empty": "No webhook channels have been configured.",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "secret": "Signing secret",
+      "headers": "Custom headers",
+      "cooldown": "Cooldown",
+      "configured": "configured",
+      "notConfigured": "not configured",
+      "lastTest": "Last test"
+    },
+    "delivery": {
+      "title": "Delivery History",
+      "description": "Inspect alert notification rows in the delivery queue.",
+      "loading": "Loading delivery records...",
+      "empty": "No delivery records match the current filters.",
+      "allChannels": "All channels",
+      "table": {
+        "alert": "Alert",
+        "status": "Status",
+        "attempt": "Attempt",
+        "nextAttempt": "Next attempt",
+        "deliveredAt": "Delivered at",
+        "error": "Error"
+      },
+      "status": {
+        "all": "All statuses",
+        "pending": "pending",
+        "in_progress": "in progress",
+        "retry_scheduled": "retry",
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "skipped": "skipped"
+      }
+    },
+    "dialog": {
+      "createTitle": "Create webhook channel",
+      "editTitle": "Edit webhook channel",
+      "channelKey": "Channel Key",
+      "name": "Name",
+      "endpointUrl": "Endpoint URL",
+      "signingSecret": "Signing Secret",
+      "headersJson": "Headers JSON",
+      "cooldownSeconds": "Cooldown Seconds",
+      "enabled": "Enabled",
+      "clearSecret": "Clear signing secret",
+      "clearHeaders": "Clear custom headers"
+    },
+    "confirmDelete": "Delete notification channel \"{name}\"?",
+    "toast": {
+      "required": "Name and endpoint URL are required.",
+      "channelKeyRequired": "Channel key is required.",
+      "headersInvalid": "Headers JSON must be a valid JSON object.",
+      "cooldownInvalid": "Cooldown seconds must be an integer from 0 to 86400.",
+      "created": "Notification channel created.",
+      "updated": "Notification channel updated.",
+      "deleted": "Notification channel deleted.",
+      "saveFailed": "Save failed: {error}",
+      "deleteFailed": "Delete failed: {error}",
+      "testSucceeded": "Test sent successfully.",
+      "testFailed": "Test send failed.",
+      "testFailedWithError": "Test send failed: {error}"
+    }
+  },
+  "systemConfigPage": {
+    "title": "System Config",
+    "loading": "Loading system config...",
+    "refresh": "Refresh",
+    "reload": "Reload Override",
+    "reloading": "Reloading",
+    "resetFilters": "Reset filters",
+    "resetOverrides": "Reset overrides",
+    "summaryTitle": "Config Summary",
+    "summaryDescription": "Configuration report loaded by the server.",
+    "summary": {
+      "version": "Version",
+      "fields": "Fields",
+      "editable": "Editable",
+      "hotReloadable": "Hot Reload",
+      "overrideFields": "Overrides"
+    },
+    "sourcePriority": {
+      "title": "Source Priority",
+      "description": "Effective values are resolved from program defaults, default config, user config, environment allowlist, managed override, then derived runtime values.",
+      "configured": "{count} configured"
+    },
+    "fieldCount": "Field Count",
+    "deploymentMode": "Deployment Mode",
+    "overridePath": "Override File",
+    "historyPath": "History File",
+    "lastLoaded": "Last Loaded",
+    "lastError": "Last Error",
+    "exists": "File exists",
+    "missing": "File missing",
+    "loadFailed": "Failed to load system config: {error}",
+    "multiInstanceTitle": "Writes are disabled in multi-instance mode",
+    "multiInstanceDescription": "This page shows the effective configuration in read-only mode to avoid divergent local override files across instances.",
+    "providerGovernanceDisabled": "Provider governance is currently disabled; threshold and cooldown changes only affect circuit decisions after governance is enabled again.",
+    "noFields": "No configuration fields are available.",
+    "noMatchingFields": "No fields match the current filters.",
+    "redactedConfigured": "Configured",
+    "redactedMissing": "Not configured",
+    "persistence": {
+      "title": "Persistence Health",
+      "description": "Checks container data paths, config files, SQLite/local storage, and request-log spool access.",
+      "empty": "No persistence health checks are available.",
+      "noIssues": "No issues",
+      "issueCount": "{count} issues",
+      "exists": "Exists",
+      "readable": "Readable",
+      "writable": "Writable",
+      "yes": "yes",
+      "no": "no",
+      "status": {
+        "ok": "OK",
+        "warning": "Warning",
+        "error": "Error",
+        "skipped": "Skipped"
+      },
+      "items": {
+        "data_dir": "Data directory",
+        "config_dir": "Config directory",
+        "default_config": "Default config",
+        "user_config": "User config",
+        "override_config": "Override config",
+        "override_history": "Override history",
+        "sqlite_db_dir": "SQLite directory",
+        "local_storage_root": "Local storage",
+        "request_log_spool": "Request log spool"
+      }
+    },
+    "filters": {
+      "title": "Filters",
+      "activeSummary": "Showing {shown} / {total} fields",
+      "search": "Search",
+      "searchPlaceholder": "Search by path, section, description, or source",
+      "section": "Section",
+      "source": "Source",
+      "editable": "Editable",
+      "hotReloadable": "Hot reload",
+      "restartRequired": "Restart required",
+      "sensitive": "Sensitive",
+      "all": "All",
+      "yes": "Yes",
+      "no": "No",
+      "allSections": "All sections",
+      "allSources": "All sources"
+    },
+    "table": {
+      "path": "Path",
+      "value": "Current Value",
+      "source": "Source",
+      "status": "Status",
+      "description": "Description",
+      "actions": "Actions"
+    },
+    "source": {
+      "program_default": "Program default",
+      "default_file": "Default file",
+      "user_file": "User config",
+      "environment": "Environment allowlist",
+      "override_file": "Override file",
+      "derived": "Effective"
+    },
+    "status": {
+      "override": "override",
+      "environment": "environment",
+      "hotReload": "hot reload",
+      "restartRequired": "restart",
+      "readonly": "readonly",
+      "sensitive": "sensitive"
+    },
+    "actions": {
+      "edit": "Edit",
+      "preview": "Preview",
+      "apply": "Apply",
+      "reset": "Reset"
+    },
+    "edit": {
+      "title": "Edit Config Field",
+      "value": "Config Value",
+      "booleanValue": "Enabled",
+      "setNull": "Set null",
+      "reason": "Change Reason",
+      "reasonPlaceholder": "Record why this change is being made",
+      "invalidNumber": "Enter a non-negative integer.",
+      "invalidU16": "Enter an integer from 0 to 65535.",
+      "invalidU32": "Enter an integer from 0 to 4294967295.",
+      "invalidJson": "Enter valid JSON."
+    },
+    "preview": {
+      "title": "Change Preview",
+      "diffSummary": "{count} fields will change",
+      "valid": "Valid",
+      "invalid": "Invalid",
+      "writeDisabled": {
+        "multi_instance_not_supported": "Multi-instance mode allows preview, but local override writes are disabled."
+      },
+      "runtimeSnapshot": "Update runtime snapshot",
+      "logLevel": "Update log level",
+      "httpClient": "Rebuild HTTP client",
+      "hotPaths": "{count} hot reload fields",
+      "noChanges": "Preview did not produce field changes.",
+      "nextOverride": "Next Override File"
+    },
+    "configView": {
+      "title": "Config YAML",
+      "effective": "Effective Config",
+      "override": "Override File",
+      "effectivePath": "effective config",
+      "invalidOverride": "Current override file contains unsupported paths:"
+    },
+    "history": {
+      "title": "Change History",
+      "description": "Review managed override audit records, newest first.",
+      "loading": "Loading history...",
+      "empty": "No history records yet.",
+      "loadMore": "Load more",
+      "noMore": "No more records",
+      "noReason": "No reason recorded",
+      "operation": {
+        "apply": "Apply",
+        "reset": "Reset",
+        "reload": "Reload"
+      }
+    },
+    "reset": {
+      "title": "Reset Override Fields",
+      "description": "Remove selected fields from the managed override file, then reload effective configuration.",
+      "paths": "Field Paths",
+      "reason": "Reset Reason",
+      "reasonPlaceholder": "Record why this reset is being made"
+    }
+  },
+  "portableConfigPage": {
+    "title": "Config Import / Export",
+    "tabs": {
+      "export": "Export",
+      "import": "Import"
+    },
+    "modules": {
+      "provider_profile": "Provider Profile",
+      "api_keys": "Downstream API Keys",
+      "cost_catalogs": "Cost Catalogs",
+      "cost_bindings": "Cost Bindings"
+    },
+    "subranges": {
+      "provider_core": "Provider Core",
+      "provider_keys": "Provider Keys",
+      "provider_models": "Provider Models",
+      "provider_request_patches": "Request Patches",
+      "provider_reasoning_config": "Reasoning Config",
+      "api_key_core": "API Key Core",
+      "api_key_acl": "ACL Rules",
+      "api_key_model_override": "Model Overrides",
+      "cost_catalog_core": "Catalog Core",
+      "cost_catalog_versions": "Catalog Versions",
+      "cost_components": "Cost Components",
+      "cost_model_bindings": "Model Bindings"
+    },
+    "badges": {
+      "secrets": "Secrets",
+      "deferred": "Deferred",
+      "required": "Required"
+    },
+    "fileProtection": {
+      "plaintext": "Plain JSON",
+      "password_encrypted": "Password encrypted .cyd"
+    },
+    "conflictStrategy": {
+      "fail_on_conflict": "Stop on conflict",
+      "skip_existing": "Skip existing",
+      "overwrite_existing": "Overwrite existing"
+    },
+    "summary": {
+      "total": "Total",
+      "create": "Create",
+      "update": "Update",
+      "skip": "Skip",
+      "blocked": "Blocked",
+      "conflict": "Conflict"
+    },
+    "fields": {
+      "filename": "Filename",
+      "digest": "Digest",
+      "exportedAt": "Exported At",
+      "protection": "Protection",
+      "blocking": "Blocking"
+    },
+    "state": {
+      "blocked": "Blocked",
+      "clear": "Clear",
+      "conflict": "Conflict"
+    },
+    "applyStatus": {
+      "applied": "Applied",
+      "skipped": "Skipped",
+      "blocked": "Blocked",
+      "failed": "Failed"
+    },
+    "export": {
+      "title": "Export Config",
+      "description": "Select modules and file protection for the portable config bundle.",
+      "loadingModules": "Loading modules...",
+      "loadFailed": "Failed to load export modules",
+      "protection": "File Protection",
+      "plaintextWarning": "Plain files include raw provider keys and downstream API keys.",
+      "passwordPlaceholder": "Enter export password",
+      "autoGeneratePassword": "Generate one-time password on the server",
+      "passwordRequired": "Enter a password or enable generated password.",
+      "result": "Export Result",
+      "generatedPassword": "Generated Password",
+      "download": "Export and Download",
+      "exporting": "Exporting",
+      "success": "Export completed",
+      "failed": "Export failed"
+    },
+    "import": {
+      "title": "Import Config",
+      "description": "Preview the bundle before applying selected modules and conflict policy.",
+      "bundleFile": "Bundle File",
+      "passwordPlaceholder": "Encrypted file password",
+      "preview": "Preview",
+      "previewSummary": "Preview Summary",
+      "previewReady": "Preview ready",
+      "previewBlocked": "Preview has blocking issues",
+      "previewFailed": "Preview failed",
+      "readFailed": "Failed to read file",
+      "blockingIssues": "Blocking Issues",
+      "applyOptions": "Apply Options",
+      "reasonPlaceholder": "Record why this import is being applied",
+      "dangerousPatchConfirmations": "Dangerous Patch Confirmations",
+      "noDangerousPatchConfirmations": "No dangerous patches require confirmation.",
+      "readyToApply": "Preview is ready for the selected modules.",
+      "selectModule": "Select at least one module.",
+      "applyDisabledReason": {
+        "no_preview": "Preview a bundle before applying.",
+        "top_level_blocking": "Resolve the top-level blocking issue before applying.",
+        "no_selected_modules": "Select at least one module.",
+        "missing_reason": "Record an operator reason before applying.",
+        "module_blocking": "Resolve blocking issues for the selected modules before applying.",
+        "dangerous_patch_confirmation": "Confirm dangerous request patch targets before applying."
+      },
+      "apply": "Apply Import",
+      "applying": "Applying",
+      "applyResult": "Apply Result",
+      "applySuccess": "Import completed",
+      "applyFailed": "Import failed",
+      "applyNotReady": "Import is not ready to apply."
+    }
+  },
+  "providerRuntimePage": {
+    "title": "Provider Runtime",
+    "loading": "Loading runtime data...",
+    "refresh": "Refresh",
+    "reset": "Reset filters",
+    "editProvider": "Edit Provider",
+    "viewRecords": "View Records",
+    "activeOnly": "Enabled providers only",
+    "searchPlaceholder": "Search by provider name or provider key",
+    "empty": "No providers match the current filters.",
+    "noData": "No provider runtime data is available yet.",
+    "summary": {
+      "total": "Total Providers",
+      "healthy": "Healthy",
+      "degraded": "Degraded",
+      "halfOpen": "Half Open",
+      "open": "Open",
+      "noTraffic": "No Traffic"
+    },
+    "filter": {
+      "title": "Filters and Sorting",
+      "status": "Status",
+      "sort": "Sort",
+      "direction": "Direction",
+      "all": "All statuses",
+      "asc": "Ascending",
+      "desc": "Descending"
+    },
+    "window": {
+      "15m": "15 min",
+      "1h": "1 hour",
+      "6h": "6 hours",
+      "24h": "24 hours"
+    },
+    "status": {
+      "healthy": "Healthy",
+      "degraded": "Degraded",
+      "open": "Open",
+      "half_open": "Half-open",
+      "no_traffic": "No traffic"
+    },
+    "sort": {
+      "health": "Health priority",
+      "error_rate": "Error rate",
+      "latency": "Average latency",
+      "last_error_at": "Last error time",
+      "request_count": "Request count"
+    },
+    "metrics": {
+      "requests": "Requests",
+      "successRate": "Success rate",
+      "firstByte": "First byte",
+      "totalLatency": "Total latency",
+      "errors": "Errors",
+      "failures": "Consecutive failures",
+      "models": "Models",
+      "keys": "Keys",
+      "cost": "Cost",
+      "lastRequest": "Last request",
+      "lastSuccess": "Last success",
+      "lastError": "Last error",
+      "proxy": "Proxy",
+      "sortScore": "Sort score"
+    },
+    "table": {
+      "provider": "Provider",
+      "health": "Health"
+    },
+    "detail": {
+      "statusCode": "Status code",
+      "noStatusCode": "No status code breakdown",
+      "noCost": "No cost data",
+      "noError": "No error summary"
+    },
+    "backendStatus": {
+      "itemError": "Runtime state backend read failed: {error}"
+    }
+  },
+  "app": {
+    "header": "AI Gateway Manager",
+    "footer": "© 2025 AI Gateway Manager. All rights reserved.",
+    "toggleSidebar": "Toggle Sidebar",
+    "logout": "Log out"
+  },
+  "language": {
+    "change": "Change language",
+    "english": "English",
+    "chinese": "Chinese",
+    "englishShort": "En",
+    "chineseShort": "Zh"
+  },
+  "recordPage": {
+    "title": "Request Records",
+    "filter": {
+      "title": "Filters",
+      "all": "All",
+      "apiKeyPlaceholder": "Select API Key",
+      "allApiKeys": "All API Keys",
+      "apiKeyLabel": "API Key",
+      "providerPlaceholder": "Select Provider",
+      "allProviders": "All Providers",
+      "providerLabel": "Provider",
+      "allModels": "All Models",
+      "modelLabel": "Model",
+      "modelNameLabel": "Model Name",
+      "searchLabel": "Search",
+      "searchPlaceholder": "Model, route, provider, error...",
+      "clearSearch": "Clear search",
+      "statusPlaceholder": "Select Status",
+      "allStatuses": "All Statuses",
+      "statusLabel": "Status",
+      "status": {
+        "SUCCESS": "Success",
+        "PENDING": "Pending",
+        "ERROR": "Error",
+        "CANCELLED": "Cancelled"
+      },
+      "allApis": "All APIs",
+      "allScopes": "All scopes",
+      "resolvedScopes": {
+        "direct": "Direct",
+        "globalRoute": "Global Route",
+        "apiKeyOverride": "API Key Override"
+      },
+      "userApiLabel": "User API",
+      "resolvedScopeLabel": "Resolved Scope",
+      "retryLabel": "Retry",
+      "fallbackLabel": "Fallback",
+      "diagnosticsLabel": "Diagnostics",
+      "errorCodeLabel": "Error Code",
+      "latencyMinLabel": "Latency Min",
+      "latencyMaxLabel": "Latency Max",
+      "tokensMinLabel": "Tokens Min",
+      "tokensMaxLabel": "Tokens Max",
+      "costMinLabel": "Cost Min",
+      "costMaxLabel": "Cost Max",
+      "startTimeLabel": "Start Time",
+      "endTimeLabel": "End Time",
+      "msPlaceholder": "ms",
+      "nanosPlaceholder": "nanos",
+      "showFilters": "Show filters",
+      "hideFilters": "Hide filters",
+      "advancedFilters": "Advanced filters",
+      "expand": "Expand",
+      "collapse": "Collapse",
+      "summaryAll": "All request records, no filters applied.",
+      "summaryActive": "{count} filters active.",
+      "helpText": "List filtering uses request_log summary fields and does not load payload bundles.",
+      "applyButton": "Apply Filter",
+      "resetButton": "Reset"
+    },
+    "loading": "Loading records...",
+    "errorPrefix": "Error loading records:",
+    "unknownError": "Unknown error",
+    "fetchFailed": "Failed to fetch records",
+    "loadFailed": "Failed to load record page",
+    "diagnostics": {
+      "retentionFailed": "Failed to run record retention diagnostics",
+      "storageInventoryFailed": "Failed to run storage inventory diagnostics"
+    },
+    "table": {
+      "model": "Model",
+      "modelName": "Model Name",
+      "provider": "Provider",
+      "apiKey": "API Key",
+      "channel": "Channel",
+      "externalId": "External ID",
+      "status": "Status",
+      "promptTokens": "Prompt Tokens",
+      "completionTokens": "Completion Tokens",
+      "reasoningTokens": "Reasoning Tokens",
+      "totalTokens": "Total Tokens",
+      "tokens": "Tokens",
+      "stream": "Stream",
+      "firstByte": "First Byte",
+      "firstResp": "First Resp (s)",
+      "totalResp": "Total Resp (s)",
+      "tps": "TPS",
+      "cost": "Cost",
+      "attempts": "Attempts",
+      "diagnostics": "Diagnostics",
+      "performance": "Performance",
+      "time": "Time",
+      "requestTime": "Request Time",
+      "noRecordsMatch": "No records found matching your criteria.",
+      "noRecordsAvailable": "No records available.",
+      "view": "View",
+      "viewDetails": "View Details",
+      "details": "Details"
+    },
+    "detailModal": {
+      "title": "Log Details",
+      "fetchFailed": "Failed to fetch record detail",
+      "general": "General",
+      "timings": "Timings (UTC)",
+      "usageSummary": "Usage Summary",
+      "requestPatch": "Request Patch",
+      "effectiveRules": "Effective Rules",
+      "appliedRuleIds": "Applied Rule IDs",
+      "conflicts": "Conflicts",
+      "conflictDetected": "Conflicts prevented request patch application for this request.",
+      "sourceRule": "Source Rule",
+      "trace": "Trace",
+      "origin": "Origin",
+      "value": "Value",
+      "description": "Description",
+      "noRuleDescription": "No description",
+      "noRequestPatchTrace": "No request patch trace was recorded for this request.",
+      "noEffectiveRules": "No effective request patch rules were recorded for this request.",
+      "invalidRequestPatchTrace": "The stored request patch trace is not valid JSON.",
+      "rawTraceSummary": "Raw Trace Summary",
+      "originProviderDirect": "Provider direct",
+      "originModelDirect": "Model direct",
+      "costSnapshot": "Cost Snapshot",
+      "totalInputTokens": "Total Input Tokens",
+      "totalOutputTokens": "Total Output Tokens",
+      "inputTextTokens": "Input Text Tokens",
+      "outputTextTokens": "Output Text Tokens",
+      "inputImageTokens": "Input Image Tokens",
+      "outputImageTokens": "Output Image Tokens",
+      "cacheReadTokens": "Cache Read Tokens",
+      "cacheWriteTokens": "Cache Write Tokens",
+      "reasoningTokens": "Reasoning Tokens",
+      "totalTokens": "Total Tokens",
+      "storageType": "Storage Type",
+      "totalCost": "Total Cost",
+      "catalogId": "Catalog ID",
+      "versionId": "Catalog Version ID",
+      "componentId": "Component",
+      "detailLines": "Rated Detail Lines",
+      "billingItem": "Billing Item",
+      "quantity": "Quantity",
+      "unitPrice": "Unit Price",
+      "finalPrice": "Final Price",
+      "noDetailLines": "No matched cost detail lines were recorded.",
+      "unmatchedItems": "Unmatched Items",
+      "warnings": "Warnings",
+      "fallbackPricingApplied": "Fallback pricing applied",
+      "fallbackPricingDescription": "This line item was priced using the matched fallback meter:",
+      "noDescription": "No description",
+      "noCostSnapshot": "No cost snapshot was recorded for this request.",
+      "invalidCostSnapshot": "The stored cost snapshot is not valid JSON."
+    },
+    "detailDialog": {
+      "title": "Request Diagnostics",
+      "loading": "Loading request detail...",
+      "noRecord": "No record is selected.",
+      "summary": {
+        "status": "Status",
+        "attempts": "Attempts",
+        "provider": "Provider",
+        "model": "Model",
+        "diagnostics": "Diagnostics"
+      },
+      "tabs": {
+        "overview": "Overview",
+        "attempts": "Attempts",
+        "diagnostics": "Diagnostics",
+        "payloads": "Payloads",
+        "replay": "Replay"
+      },
+      "payloads": {
+        "title": "Payloads",
+        "description": "Raw payload bundles are loaded only while this tab is active.",
+        "empty": "No payload bundle is available for this request."
+      },
+      "overview": {
+        "sections": {
+          "request": "Request",
+          "finalError": "Final Error",
+          "usage": "Usage",
+          "timings": "Timings",
+          "costSnapshot": "Cost Snapshot"
+        },
+        "totalCost": "Total Cost",
+        "warningCount": "{count} warnings",
+        "noCostDetailLines": "No cost detail lines were recorded.",
+        "noCostSnapshot": "No cost snapshot is available for this request.",
+        "attemptsSummary": "{attempts} attempts / {retries} retries / {fallbacks} fallbacks",
+        "labels": {
+          "id": "ID",
+          "apiKey": "API Key",
+          "requestedModel": "Requested Model",
+          "baseRequestedModel": "Base Model",
+          "reasoningSuffix": "Reasoning Suffix",
+          "reasoningPreset": "Reasoning Preset",
+          "resolvedScope": "Resolved Scope",
+          "resolvedRoute": "Resolved Route",
+          "finalProvider": "Final Provider",
+          "selectedModel": "Selected Model",
+          "realModel": "Real Model",
+          "attempts": "Attempts",
+          "userApiType": "User API Type",
+          "llmApiType": "LLM API Type",
+          "clientIp": "Client IP"
+        },
+        "resolvedScope": {
+          "direct": "Direct",
+          "globalRoute": "Global Route",
+          "apiKeyOverride": "API Key Override"
+        },
+        "usage": {
+          "totalInputTokens": "Total input tokens",
+          "totalOutputTokens": "Total output tokens",
+          "reasoningTokens": "Reasoning tokens",
+          "totalTokens": "Total tokens",
+          "inputTextTokens": "Input text tokens",
+          "outputTextTokens": "Output text tokens",
+          "inputImageTokens": "Input image tokens",
+          "outputImageTokens": "Output image tokens",
+          "cacheReadTokens": "Cache read tokens",
+          "cacheWriteTokens": "Cache write tokens"
+        },
+        "timings": {
+          "requestReceived": "Request Received",
+          "firstAttemptStarted": "First Attempt Started",
+          "firstByteToClient": "First Byte To Client",
+          "completed": "Completed",
+          "firstByteLatency": "First Byte Latency",
+          "totalLatency": "Total Latency"
+        },
+        "costColumns": {
+          "quantity": "Quantity",
+          "unit": "Unit",
+          "amount": "Amount"
+        },
+        "unitPrice": {
+          "tokens": "tokens",
+          "unit": "unit"
+        }
+      },
+      "attempts": {
+        "title": "Attempts Timeline",
+        "count": "{count} attempts",
+        "empty": "No attempt details were recorded for this request.",
+        "attemptTitle": "Attempt #{index}",
+        "candidate": "candidate {position}",
+        "requestUri": "Request URI",
+        "patchSources": {
+          "title": "Request Patch Sources",
+          "providerRule": "provider rule {id}",
+          "modelRule": "model rule {id}",
+          "reasoningPreset": "reasoning {preset} (-{suffix}) / {family} / {source}",
+          "unknown": "unknown source {kind}"
+        },
+        "labels": {
+          "started": "Started",
+          "firstByte": "First byte",
+          "completed": "Completed",
+          "firstByteLatency": "First byte latency",
+          "clientVisible": "Client visible",
+          "backoff": "Backoff",
+          "llmApi": "LLM API",
+          "tokens": "Tokens",
+          "cost": "Cost"
+        },
+        "blocks": {
+          "requestHeaders": "Request headers",
+          "responseHeaders": "Response headers",
+          "patchTrace": "Patch trace",
+          "appliedPatchRules": "Applied patch rules"
+        }
+      },
+      "diagnostics": {
+        "loading": "Loading diagnostics...",
+        "failed": "Failed to load diagnostics",
+        "requestSnapshot": "Request Snapshot",
+        "noRequestSnapshot": "No request snapshot is available for this record.",
+        "queryParams": "Query Params",
+        "sanitizedOriginalHeaders": "Sanitized Original Headers",
+        "candidateManifest": "Candidate Manifest",
+        "candidateCount": "{count} candidates",
+        "routeFallback": "route {id}",
+        "noCandidateManifest": "No candidate manifest was captured for this record.",
+        "transformDiagnostics": "Transform Diagnostics",
+        "itemCount": "{count} items",
+        "noTransformDiagnostics": "No transform diagnostics were captured for this record.",
+        "lazyEmpty": "Diagnostics are loaded only when this tab is opened.",
+        "labels": {
+          "path": "Path",
+          "operation": "Operation",
+          "kinds": "Kinds",
+          "phases": "Phases",
+          "maxLoss": "Max Loss"
+        }
+      },
+      "payloadViewer": {
+        "loadingBodies": "Loading bodies...",
+        "title": "Payload bundle",
+        "description": "Stored request and response payloads.",
+        "userRequestBody": "User Request Body",
+        "llmRequestBody": "LLM Request Body",
+        "llmRequestBodyPatched": "LLM Request Body (Patched)",
+        "llmRequestBodyRawPatch": "LLM Request Body (Raw Patch)",
+        "requestBody": "Request Body",
+        "llmResponseBody": "LLM Response Body",
+        "userResponseBody": "User Response Body",
+        "responseBody": "Response Body",
+        "showRawPatch": "Show Raw Patch",
+        "showPatchedBody": "Show Patched Body",
+        "userExchange": "User exchange",
+        "responseCapture": "Response capture: {state}",
+        "noRequestLevelPayload": "No request-level payload was captured for this bundle.",
+        "attemptPayloads": "Attempt payloads",
+        "attemptCount": "{count} attempts",
+        "noAttemptPayloads": "No attempt payload sections were recorded for this bundle.",
+        "attemptTitle": "Attempt #{index}",
+        "requestBlob": "request blob: {value}",
+        "patchBlob": "patch: {value}",
+        "responseBlob": "response blob: {value}",
+        "noAttemptBody": "No LLM request or response body was captured for this attempt.",
+        "responseCaptureSentence": "Response capture: {state}.",
+        "bundleEmpty": "No payload bundle is available for this request.",
+        "unsupportedBundleVersion": "Only request log bundle version 2 is supported. Found version {version}.",
+        "fetchError": "Failed to fetch or decode body content: {error}",
+        "patchMissing": "Unable to apply JSON patch because the target blob is missing.",
+        "patchFailed": "Unable to apply JSON patch: {error}",
+        "unknownProvider": "unknown provider",
+        "unknownModel": "unknown model",
+        "unknownStatus": "UNKNOWN",
+        "noAction": "NO_ACTION"
+      },
+      "sse": {
+        "event": "event: {name}"
+      },
+      "replay": {
+        "loading": "Loading replay artifacts...",
+        "failed": "Failed to load replay artifacts",
+        "lazyEmpty": "Replay capability is loaded from the artifact API when this tab is opened.",
+        "noBundle": "No payload bundle is available for this request.",
+        "noBundleDescription": "Replay requires a persisted request bundle before preview or execute can run.",
+        "unavailableSummary": "Replay is unavailable for the selected kind.",
+        "controlTitle": "Replay Control",
+        "controlDescription": "Preview materializes the replay request before saving dry-run evidence or sending live replay.",
+        "available": "available",
+        "unavailable": "unavailable",
+        "kinds": {
+          "attemptUpstream": "Attempt Replay",
+          "gatewayRequest": "Gateway Replay"
+        },
+        "selectAttempt": "Select attempt",
+        "providerKeyPlaceholder": "Optional provider key id",
+        "confirmLiveRequest": "Confirm live request",
+        "confirmLiveRequestDescription": "Required before execute.",
+        "unavailableReasons": "Unavailable reasons",
+        "reasons": {
+          "artifact_not_loaded": "Replay artifacts have not been loaded.",
+          "bundle_missing": "No persisted request bundle is available for this record.",
+          "request_snapshot_missing": "Gateway replay requires a request snapshot in a v2 bundle.",
+          "user_request_body_missing": "Gateway replay requires a captured user request body.",
+          "no_attempt_with_complete_downstream_request_snapshot": "No attempt has a complete downstream request snapshot for replay."
+        },
+        "overrideInvalid": "Provider key override must be a positive integer.",
+        "actions": {
+          "previewing": "Previewing...",
+          "preview": "Preview",
+          "saving": "Saving...",
+          "saveDryRun": "Save Dry-Run Result",
+          "executing": "Executing...",
+          "executeLive": "Execute Live Replay",
+          "reloadHistory": "Reload History",
+          "loadingHistory": "Loading...",
+          "retryHistory": "Retry",
+          "openHistory": "Open",
+          "openingHistory": "Opening..."
+        },
+        "historyTitle": "Replay History",
+        "historyDescription": "Persisted dry-run and live replay runs for this request are listed here.",
+        "historyLoading": "Loading persisted replay runs...",
+        "historyEmpty": "No persisted replay runs are available for this request yet.",
+        "previewTitle": "Preview",
+        "runTitle": "Replay Run",
+        "artifactTitle": "Replay Artifact",
+        "persistedInputBaseline": "Persisted Input Baseline",
+        "persistedExecutionPreview": "Persisted Execution Preview",
+        "resultSummary": "Result Summary",
+        "responseHeaders": "Response Headers",
+        "responseBody": "Response Body",
+        "diffSummary": "Diff Summary",
+        "noAttemptSelected": "No attempt selected.",
+        "costDeltaNanos": "{value} nanos",
+        "inputBaseline": "Input Baseline",
+        "sanitizedRequestHeaders": "Sanitized Request Headers",
+        "llmRequestBody": "LLM Request Body",
+        "queryParams": "Query Params",
+        "sanitizedOriginalHeaders": "Sanitized Original Headers",
+        "userRequestBody": "User Request Body",
+        "executionPreview": "Execution Preview",
+        "finalRequestHeaders": "Final Request Headers",
+        "finalRequestBody": "Final Request Body",
+        "candidateDecisions": "Candidate Decisions",
+        "appliedRequestPatchSummary": "Applied Request Patch Summary",
+        "historicalBaseline": "Historical Baseline",
+        "capture": "capture",
+        "labels": {
+          "replayKind": "Replay Kind",
+          "attempt": "Attempt",
+          "providerKeyOverride": "Provider Key Override",
+          "runId": "Run ID",
+          "kind": "Kind",
+          "mode": "Mode",
+          "http": "HTTP",
+          "route": "Route",
+          "provider": "Provider",
+          "model": "Model",
+          "tokens": "Tokens",
+          "cost": "Cost",
+          "started": "Started",
+          "created": "Created",
+          "firstByte": "First Byte",
+          "completed": "Completed",
+          "artifact": "Artifact",
+          "status": "Status",
+          "bodyCapture": "Body Capture",
+          "capturedBytes": "Captured Bytes",
+          "captureLimit": "Capture Limit",
+          "originalSize": "Original Size",
+          "captureEncoding": "Capture Encoding",
+          "captureTruncated": "truncated",
+          "transformDiagnostics": "Transform Diagnostics",
+          "baseline": "Baseline",
+          "statusChanged": "Status Changed",
+          "headersChanged": "Headers Changed",
+          "bodyChanged": "Body Changed",
+          "tokenDelta": "Token Delta",
+          "costDelta": "Cost Delta",
+          "requestUri": "Request URI",
+          "realModel": "Real Model",
+          "requestPath": "Request Path",
+          "semanticBasis": "Semantic Basis",
+          "requestedModel": "Requested Model",
+          "baseRequestedModel": "Base Model",
+          "reasoningSuffix": "Reasoning Suffix",
+          "reasoningPreset": "Reasoning Preset",
+          "candidate": "Candidate",
+          "llmApi": "LLM API",
+          "finalUri": "Final URI",
+          "attemptStatus": "Attempt Status",
+          "overallStatus": "Overall Status",
+          "errorCode": "Error Code"
+        }
+      }
+    },
+    "copy": {
+      "action": "Copy",
+      "copied": "Copied",
+      "failed": "Failed to copy text."
+    },
+    "pagination": {
+      "summary": "Page {page} of {totalPages} ({total} items)",
+      "previousPage": "Previous Page",
+      "nextPage": "Next Page",
+      "page": "Page",
+      "of": "of",
+      "items": "items",
+      "itemsPerPage": "Items per page:",
+      "selectItemsPerPage": "Select number of items per page"
+    }
+  },
+  "ui": {
+    "dialog": {
+      "close": "Close"
+    },
+    "pagination": {
+      "items": "Items",
+      "firstPage": "First",
+      "previousPage": "Previous",
+      "nextPage": "Next",
+      "lastPage": "Last",
+      "morePages": "More pages"
+    }
+  },
+  "common": {
+    "unknownError": "An unknown error occurred.",
+    "loading": "Loading...",
+    "basicInfo": "Basic Information",
+    "yes": "Yes",
+    "no": "No",
+    "edit": "Edit",
+    "delete": "Delete",
+    "save": "Save Changes",
+    "cancel": "Cancel",
+    "select": "Select",
+    "selected": "Selected",
+    "notAvailable": "N/A",
+    "noData": "No data",
+    "refresh": "Refresh",
+    "retry": "Retry",
+    "check": "Check",
+    "close": "Close",
+    "confirm": "Confirm",
+    "actions": "Actions",
+    "saving": "Saving...",
+    "pageNotFound": "Page Not Found",
+    "pageNotFoundDescription": "The page you are looking for does not exist or has been moved.",
+    "goHome": "Go Home"
+  },
+  "loginPage": {
+    "title": "Admin Login",
+    "description": "Sign in with the administrator password to continue.",
+    "passwordLabel": "Password",
+    "passwordPlaceholder": "Enter your password",
+    "submit": "Confirm",
+    "submitting": "Logging in...",
+    "loginFailed": "Login failed. Please check your password."
+  },
+  "modelPage": {
+    "title": "Model Library",
+    "actions": {
+      "backToProviders": "Back to Providers"
+    },
+    "loading": "Loading model summaries...",
+    "noData": "No model summaries found yet.",
+    "noSearchResults": "No matching models found.",
+    "noMappedModel": "Unmapped model",
+    "searchPlaceholder": "Search by provider, provider key, model name, or real model name",
+    "summary": {
+      "total": "Total Models",
+      "enabled": "Enabled",
+      "providers": "Providers",
+      "mapped": "Mapped"
+    },
+    "table": {
+      "provider": "Provider",
+      "model": "Model",
+      "realModel": "Real Model",
+      "capabilities": "Capabilities",
+      "enabled": "Enabled"
+    }
+  },
+  "modelCapabilities": {
+    "streaming": "Streaming",
+    "tools": "Tools",
+    "reasoning": "Reasoning",
+    "imageInput": "Image Input",
+    "embeddings": "Embeddings",
+    "rerank": "Rerank"
+  },
+  "reasoningConfigPanel": {
+    "titles": {
+      "provider": "Provider reasoning config",
+      "model": "Model reasoning config"
+    },
+    "actions": {
+      "save": "Save reasoning config",
+      "clearProvider": "Clear provider config",
+      "clearModel": "Clear model override"
+    },
+    "summary": {
+      "ownerConfig": "Owner config",
+      "providerDefault": "Provider default",
+      "effectiveConfig": "Effective config"
+    },
+    "fields": {
+      "patchFamily": "Patch family",
+      "preset": "Preset",
+      "suffix": "Suffix",
+      "runtime": "Runtime",
+      "enabled": "Enabled",
+      "models": "/models",
+      "patch": "Patch",
+      "reasoning": "Reasoning"
+    },
+    "modes": {
+      "inherit": "Inherit provider",
+      "disabled": "Disabled",
+      "custom": "Custom"
+    },
+    "states": {
+      "unsaved": "unsaved",
+      "review": "review",
+      "supported": "supported",
+      "blocked": "blocked"
+    },
+    "sources": {
+      "providerDefault": "provider default",
+      "modelCustom": "model custom",
+      "modelDisabled": "model disabled",
+      "missing": "missing config",
+      "unknown": "unknown"
+    },
+    "messages": {
+      "saveOwnerFirst": "Save the owner before configuring reasoning suffixes.",
+      "loading": "Loading reasoning config",
+      "modelReasoningUnsupported": "This model is marked as not supporting reasoning. Reasoning-required presets can still be saved, but runtime preview will mark them unsupported.",
+      "selectPatchFamily": "Select a patch family",
+      "previewRefreshing": "Refreshing patch preview.",
+      "familyTargets": "Targets: {targets}.",
+      "familyIncompatible": "Targets: {targets}; current provider resolves to {current}.",
+      "familyTargetsShort": "targets {targets}",
+      "familyCompatibleShort": "compatible with {current}",
+      "presetUnsupported": "Preset is not supported by the selected family.",
+      "reviewOnly": "Enable this preset before saving to apply it at runtime.",
+      "presetDisabled": "Preset is not enabled.",
+      "runtimeUnsupported": "Runtime preview marks this preset unsupported.",
+      "runtimeSupported": "Runtime preview is supported.",
+      "disabledMode": "Model reasoning suffixes are disabled.",
+      "none": "none"
+    },
+    "alert": {
+      "selectPatchFamily": "Select a reasoning patch family first.",
+      "previewFailed": "Failed to preview reasoning config draft.",
+      "loadFailed": "Failed to load reasoning config.",
+      "saveFailed": "Failed to save reasoning config.",
+      "clearFailed": "Failed to clear reasoning config.",
+      "saved": "Reasoning config saved.",
+      "draftCleared": "Reasoning config draft cleared.",
+      "cleared": "Reasoning config cleared."
+    }
+  },
+  "apiKeyPage": {
+    "title": "API Key Management",
+    "addApiKey": "Add API Key",
+    "loading": "Loading API keys...",
+    "loadingDetail": "Loading API key detail...",
+    "noData": "No API Key data available.",
+    "noSelection": "Select an API key to inspect its governance and runtime state.",
+    "unlimited": "Unlimited",
+    "neverExpires": "Never",
+    "summary": {
+      "total": "Total Keys",
+      "enabled": "Enabled",
+      "governed": "With Limits",
+      "activeConcurrency": "Active Concurrency",
+      "expiringSoon": "Expiring Soon"
+    },
+    "sections": {
+      "listTitle": "Key Catalog",
+      "listDescription": "Select a key to inspect, reveal, rotate, or edit its governance settings.",
+      "detailTitle": "Key Detail",
+      "detailDescription": "The right panel shows lifecycle, ACL, and runtime usage for the selected key.",
+      "identityTitle": "Identity",
+      "governanceTitle": "Governance",
+      "aclTitle": "Access Rules",
+      "overrideTitle": "Model Overrides",
+      "overrideDescription": "Private rename rules only affect this API key. They are useful for fixed-model-name clients such as Claude Code or Gemini CLI.",
+      "runtimeTitle": "Runtime Snapshot"
+    },
+    "actions": {
+      "reveal": "Reveal",
+      "rotate": "Rotate",
+      "copySecret": "Copy Secret"
+    },
+    "status": {
+      "active": "Active",
+      "disabled": "Disabled",
+      "expired": "Expired",
+      "expiringSoon": "Expiring Soon"
+    },
+    "table": {
+      "description": "Description",
+      "status": "Status",
+      "defaultAction": "Default Action",
+      "createdAt": "Created At",
+      "updatedAt": "Updated At",
+      "expiresAt": "Expires At",
+      "rateLimitRpm": "Rate Limit RPM",
+      "maxConcurrency": "Max Concurrency",
+      "currentConcurrency": "Current Concurrency",
+      "quotaDailyRequests": "Daily Request Quota",
+      "quotaDailyTokens": "Daily Token Quota",
+      "quotaMonthlyTokens": "Monthly Token Quota",
+      "budgetDaily": "Daily Budget",
+      "budgetMonthly": "Monthly Budget"
+    },
+    "runtime": {
+      "currentConcurrency": "Current Concurrency",
+      "currentMinuteRequests": "Current Minute Requests",
+      "dailyRequests": "Daily Requests",
+      "dailyTokens": "Daily Tokens",
+      "monthlyTokens": "Monthly Tokens",
+      "dailyBudgetUsage": "Daily Budget Usage",
+      "monthlyBudgetUsage": "Monthly Budget Usage",
+      "runtimeRejectionReason": "Runtime Rejection Reason"
+    },
+    "runtimeRejection": {
+      "none": "No active rejection",
+      "disabled": "Rejected: key disabled",
+      "expired": "Rejected: key expired",
+      "rpm": "At RPM limit",
+      "concurrency": "At concurrency limit",
+      "dailyRequests": "At daily request quota",
+      "dailyTokens": "At daily token quota",
+      "monthlyTokens": "At monthly token quota",
+      "dailyBudget": "At daily budget",
+      "monthlyBudget": "At monthly budget"
+    },
+    "currencyUnit": {
+      "cny": "yuan",
+      "usd": "USD"
+    },
+    "rule": {
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "priority": "Priority {value}"
+    },
+    "override": {
+      "targetRoute": "Target Route: {value}"
+    },
+    "secret": {
+      "title": "Current Secret",
+      "description": "The full secret is only shown here. Copy it now if you need to distribute it.",
+      "copied": "API key secret copied."
+    },
+    "noRules": "No ACL rules configured. The key follows its default action.",
+    "noOverrides": "No private model overrides configured for this API key.",
+    "loadDetailFailed": "Failed to load API key detail: {error}",
+    "loadEditFailed": "Failed to load API key for editing: {error}",
+    "revealFailed": "Failed to reveal API key secret: {error}",
+    "rotateFailed": "Failed to rotate API key: {error}",
+    "deleteFailed": "Failed to delete API key: {error}",
+    "confirmDelete": "Are you sure you want to delete API Key '{name}'?",
+    "confirmReveal": "Reveal API Key '{name}'?",
+    "confirmRevealDescription": "The full secret can be copied from the next panel. Only reveal it when you are ready to handle it securely.",
+    "confirmRotate": "Are you sure you want to rotate API Key '{name}'? The old secret will stop working immediately.",
+    "copyFailed": "Failed to copy API key."
+  },
+  "apiKeyEditModal": {
+    "titleEdit": "Edit API Key",
+    "titleAdd": "Add API Key",
+    "sections": {
+      "identity": "Identity & Lifecycle",
+      "identityDescription": "Define how this key is named, whether it is enabled, and when it expires.",
+      "governance": "Governance Limits",
+      "governanceDescription": "Optional limits for rate, concurrency, quota, and budget. Leave blank for unlimited.",
+      "overrides": "Private Model Overrides",
+      "overridesDescription": "Map fixed client-facing names to logical model routes for this API key only.",
+      "acl": "ACL Rules",
+      "aclDescription": "Rules are matched by priority. If no rule matches, the key falls back to its default action."
+    },
+    "action": {
+      "ALLOW": "Allow",
+      "DENY": "Deny"
+    },
+    "scope": {
+      "PROVIDER": "Provider",
+      "MODEL": "Model"
+    },
+    "labelName": "Name",
+    "labelDescription": "Description",
+    "labelDefaultAction": "Default Action",
+    "labelEnabled": "Enabled",
+    "labelExpiresAt": "Expires At",
+    "labelRateLimitRpm": "Rate Limit RPM",
+    "labelMaxConcurrency": "Max Concurrency",
+    "labelQuotaDailyRequests": "Daily Request Quota",
+    "labelQuotaDailyTokens": "Daily Token Quota",
+    "labelQuotaMonthlyTokens": "Monthly Token Quota",
+    "labelBudgetDaily": "Daily Budget",
+    "labelBudgetMonthly": "Monthly Budget",
+    "labelBudgetAmount": "Amount",
+    "labelBudgetCurrency": "Currency",
+    "budgetMajorUnitHint": "Budget amounts are entered in major currency units. Use yuan for CNY and dollars for USD.",
+    "placeholderBudgetAmount": "e.g. 25.5",
+    "placeholderCurrency": "Select currency",
+    "clearQuota": "Clear Quotas",
+    "clearBudget": "Clear Budgets",
+    "groups": {
+      "throughputTitle": "Throughput Limits",
+      "throughputDescription": "Control the request rate per minute and the maximum in-flight concurrency.",
+      "quotaTitle": "Request & Token Quotas",
+      "quotaDescription": "Cap daily requests, daily tokens, and monthly token consumption.",
+      "budgetTitle": "Budget Limits",
+      "budgetDescription": "Budgets are shown and edited in major currency units instead of raw nanos."
+    },
+    "currency": {
+      "CNY": "Chinese Yuan (CNY)",
+      "USD": "US Dollar (USD)"
+    },
+    "addRule": "Add Rule",
+    "addOverride": "Add Override",
+    "noRules": "No ACL rules configured yet.",
+    "noOverrides": "No private overrides configured yet.",
+    "noRoutes": "No logical model routes are available yet. Create a route first, then assign overrides here.",
+    "overrideTitle": "Override {index}",
+    "overrideDescription": "Use a client-facing source name and point it to one logical model route.",
+    "ruleTitle": "Rule {index}",
+    "ruleDescription": "Configure effect, scope, and target. Disabled rules remain saved but do not match.",
+    "labelOverrideSourceName": "Source Name",
+    "labelOverrideTargetRoute": "Target Route",
+    "labelOverrideDescription": "Description",
+    "labelOverrideEnabled": "Override Enabled",
+    "labelRuleEffect": "Effect",
+    "labelRuleScope": "Scope",
+    "labelRulePriority": "Priority",
+    "labelRuleProvider": "Provider",
+    "labelRuleModel": "Model",
+    "labelRuleDescription": "Description",
+    "labelRuleEnabled": "Rule Enabled",
+    "placeholderOverrideSourceName": "e.g. manual-cli-model",
+    "placeholderOverrideTargetRoute": "Select route",
+    "placeholderProvider": "Select provider",
+    "placeholderModel": "Select model",
+    "allProviders": "All providers in current catalog",
+    "selectModel": "Select a model",
+    "alert": {
+      "nameRequired": "Name cannot be empty.",
+      "invalidNumber": "One or more numeric governance fields are invalid.",
+      "invalidBudgetAmount": "{label} amount is invalid.",
+      "budgetCurrencyRequired": "{label} requires a currency selection.",
+      "overrideSourceNameRequired": "Override {index} requires a source name.",
+      "overrideTargetRouteRequired": "Override {index} requires a target route.",
+      "duplicateOverrideSourceName": "Duplicate override source name: {name}.",
+      "rulePriorityRequired": "Rule {index} requires a numeric priority.",
+      "ruleProviderRequired": "Rule {index} requires a provider selection.",
+      "ruleModelRequired": "Rule {index} requires a model selection.",
+      "saveSuccess": "Saved successfully.",
+      "saveFailed": "Save failed: {error}"
+    }
+  },
+  "modelRoutePage": {
+    "title": "Logical Model Routes",
+    "addRoute": "Add Route",
+    "loading": "Loading model routes...",
+    "errorPrefix": "Error loading model routes.",
+    "noData": "No model routes found.",
+    "summary": {
+      "total": "Routes",
+      "enabled": "Enabled",
+      "exposed": "Exposed",
+      "candidates": "Candidates"
+    },
+    "table": {
+      "routeName": "Route Name",
+      "candidateCount": "Candidates",
+      "exposeInModels": "Expose in /models",
+      "enabled": "Enabled",
+      "primaryCandidate": "Primary Candidate",
+      "reasoning": "Reasoning",
+      "preview": "Preview"
+    },
+    "modal": {
+      "titleEdit": "Edit Model Route",
+      "titleAdd": "Add Model Route",
+      "labelRouteName": "Route Name",
+      "placeholderRouteName": "e.g. manual-smoke-route",
+      "labelDescription": "Description",
+      "placeholderDescription": "Optional context for this route",
+      "labelExposeInModels": "Expose in /models",
+      "labelEnabled": "Route enabled",
+      "candidatesTitle": "Candidates",
+      "addCandidate": "Add Candidate",
+      "emptyCandidates": "At least one candidate is required.",
+      "candidateOrder": "Order",
+      "candidateProvider": "Provider",
+      "candidateModel": "Model",
+      "candidateEnabled": "Enabled",
+      "placeholderProvider": "Select Provider",
+      "placeholderModel": "Select Model",
+      "candidateMoveUp": "Move up",
+      "candidateMoveDown": "Move down",
+      "candidateRemove": "Remove"
+    },
+    "queue": {
+      "description": "Order defines the candidate queue submitted to the gateway. Lower priority values run first.",
+      "priority": "Priority",
+      "candidateCount": "{count} candidates",
+      "disabledModel": "disabled"
+    },
+    "reasoning": {
+      "title": "Reasoning suffix preview",
+      "loading": "Loading preview...",
+      "stable": "stable",
+      "incomplete": "incomplete",
+      "staleSkipped": "stale skipped",
+      "supported": "Supported",
+      "unsupported": "Unsupported"
+    },
+    "alert": {
+      "loadDetailFailed": "Failed to load model route details.",
+      "routeNameRequired": "Route name cannot be empty.",
+      "candidateRequired": "At least one candidate is required.",
+      "candidateModelRequired": "Every candidate must select a model.",
+      "duplicateCandidate": "A model can only appear once in the same route.",
+      "saveSuccess": "Model route saved.",
+      "saveFailed": "Failed to save model route: {error}",
+      "toggleFailed": "Failed to toggle route enabled state: {error}",
+      "toggleExposeFailed": "Failed to toggle route exposure: {error}",
+      "deleteSuccess": "Model route deleted.",
+      "deleteFailed": "Failed to delete model route: {error}"
+    },
+    "confirmDelete": "Are you sure you want to delete model route '{name}'?"
+  },
+  "accessControlPage": {
+    "title": "Access Control Policies",
+    "description": "Manage access control permissions based on models or providers.",
+    "addPolicy": "Add Policy",
+    "loading": "Loading policies...",
+    "error": "Error loading policies.",
+    "noData": "No policies found.",
+    "table": {
+      "name": "Name",
+      "defaultAction": "Default Action",
+      "description": "Description",
+      "rules": "Rules",
+      "actions": "Actions",
+      "rulesCount": "{count} items"
+    },
+    "modal": {
+      "titleEdit": "Edit Policy",
+      "titleAdd": "Add Policy",
+      "labelName": "Policy Name",
+      "labelDefaultAction": "Default Action",
+      "placeholderDefaultAction": "Select default action",
+      "labelDescription": "Description",
+      "optionALLOW": "Allow",
+      "optionDENY": "Deny"
+    },
+    "rules": {
+      "title": "Rules",
+      "addRule": "Add Rule",
+      "noRules": "No rules defined.",
+      "labelRuleType": "Type",
+      "labelPriority": "Priority",
+      "labelScope": "Scope",
+      "labelProvider": "Provider",
+      "labelModel": "Model",
+      "placeholderProvider": "Select Provider",
+      "placeholderModel": "Select Model",
+      "labelDescription": "Description",
+      "labelEnabled": "Enabled",
+      "scopePROVIDER": "Provider",
+      "scopeMODEL": "Model",
+      "deleteRule": "Delete"
+    },
+    "alert": {
+      "nameRequired": "Policy name cannot be empty.",
+      "saveFailed": "Failed to save policy: {error}",
+      "deleteFailed": "Failed to delete policy: {error}",
+      "loadDetailFailed": "Failed to load policy details."
+    },
+    "confirmDelete": "Are you sure you want to delete policy '{name}'?"
+  },
+  "providerEditPage": {
+    "titleEdit": "Edit Provider",
+    "titleAdd": "Add New Provider",
+    "loadingData": "Loading provider data...",
+    "buttonSaveOnly": "Save Only",
+    "buttonSaveAndTest": "Save & Test",
+    "alert": {
+      "fetchDetailFailed": "Failed to fetch provider detail for ID {providerId}",
+      "loadDataFailed": "Failed to load provider data for ID: {providerId}.",
+      "providerTypeRequired": "Provider Type cannot be empty.",
+      "nameRequired": "Name cannot be empty.",
+      "providerKeyRequired": "Provider Key cannot be empty.",
+      "endpointRequired": "Endpoint cannot be empty.",
+      "apiKeyRequired": "API Key cannot be empty.",
+      "modelNameRequired": "Model Name cannot be empty.",
+      "baseInfoUpdateSuccess": "Provider base information updated successfully.",
+      "createSuccess": "Provider created successfully. You can now add models and API Keys.",
+      "baseInfoSaveFailed": "Failed to save provider base information: {error}",
+      "bootstrapSaveSuccess": "Provider saved successfully.",
+      "bootstrapSaveAndTestSuccess": "Provider saved and tested successfully.",
+      "bootstrapSaveAndTestFailed": "Provider saved, but the bootstrap test failed: {error}",
+      "bootstrapFailed": "Failed to bootstrap provider: {error}",
+      "providerNotSavedForApiKey": "Provider must be saved before API Keys can be added.",
+      "apiKeyRequiredWithIndex": "API Key #{index} cannot be empty.",
+      "vertexApiKeyMissingFields": "Vertex API Key #{index} (JSON) is missing or has empty fields: {fields}.",
+      "vertexApiKeyInvalidJson": "Vertex API Key #{index} must be a valid JSON format.",
+      "saveApiKeyFailed": "Failed to save API Key: {error}",
+      "providerNotSavedForModel": "Provider must be saved before models can be added or edited.",
+      "modelIdRequiredWithIndex": "Model ID for model #{index} cannot be empty.",
+      "saveModelFailed": "Failed to save model: {error}",
+      "modelUpdateSuccess": "Model updated successfully.",
+      "providerNotSavedForModelDelete": "Provider not saved, cannot delete model from backend.",
+      "deleteModelFailed": "Failed to delete model: {error}",
+      "deleteApiKeyFailed": "Failed to delete API Key: {error}",
+      "fetchRemoteModelsFailed": "Failed to fetch remote models: {error}",
+      "noRemoteModels": "Could not get models from remote, or the list is empty.",
+      "newModelsAdded": "{count} new models added.",
+      "noNewModels": "No new models to add. All remote models may already exist.",
+      "uncommittedCleared": "Uncommitted models have been cleared.",
+      "noUncommittedToClear": "No uncommitted models to clear.",
+      "noModels": "No models available.",
+      "noApiKeys": "No API Keys available.",
+      "apiKeySaveSuccess": "API Key saved successfully.",
+      "modelSaveSuccess": "Model saved successfully.",
+      "modelDeleteSuccess": "Model deleted successfully.",
+      "providerIdNotFound": "Provider ID not found.",
+      "apiKeyDeleteSuccess": "API Key deleted successfully.",
+      "providerNotSavedForCheck": "Provider must be saved before a check can be performed.",
+      "noApiKeyForCheck": "At least one API Key must be saved to perform a model check.",
+      "noModelForCheck": "At least one model must be saved to perform an API key check.",
+      "checking": "Performing check...",
+      "checkSuccess": "Check successful. The connection is valid.",
+      "checkFailed": "Check failed: {error}",
+      "buttonCheckAll": "Check All",
+      "noModelsToCheck": "No saved models to check.",
+      "noApiKeysToCheck": "No saved API keys to check.",
+      "batchChecking": "Performing batch check for {type}...",
+      "checkSuccessShort": "Check successful.",
+      "batchCheckComplete": "Batch check complete: {success}/{total} successful for {type}.",
+      "apiKeyNameFallback": "Key ending in ...{lastKeyChars}",
+      "checkTypeModels": "Models",
+      "checkTypeApiKeys": "API Keys"
+    },
+    "sections": {
+      "quickStart": {
+        "title": "Quick Start",
+        "editTitle": "Quick Start",
+        "description": "Fill the minimum connection fields to bootstrap a provider in one step.",
+        "editDescription": "Update the minimum connection fields, then continue into advanced management below.",
+        "identityTitle": "Provider Identity",
+        "identityDescription": "The provider name and key can still be adjusted after bootstrap."
+      },
+      "advanced": {
+        "title": "Advanced",
+        "description": "Manage extra API keys, more models, request patches, and remote model sync here."
+      },
+      "modelsDescription": "Edit model name, mapped model name, capabilities, and enabled state inline. Full configuration still lives in ModelEdit."
+    },
+    "modelCapabilities": {
+      "title": "Capabilities"
+    },
+    "preview": {
+      "title": "Generated Preview",
+      "description": "Auto-generated from the current Quick Start inputs.",
+      "autoGenerated": "Auto generated",
+      "providerName": "Provider Name",
+      "providerKey": "Provider Key"
+    },
+    "quickStart": {
+      "labelApiKey": "API Key",
+      "labelModelName": "Model Name",
+      "labelApiKeyDescription": "API Key Description",
+      "placeholderApiKeyDescription": "Optional description for the first API key"
+    },
+    "modalSelectModel": {
+      "title": "Select Model for Check",
+      "description": "Please select a model to perform the check with the selected API key.",
+      "target": "Selected API key: {target}",
+      "selectPlaceholder": "Select a model"
+    },
+    "modalSelectApiKey": {
+      "title": "Select API Key for Check",
+      "description": "Please select an API key to perform the check with the selected model.",
+      "target": "Selected model: {target}",
+      "selectPlaceholder": "Select an API key"
+    },
+    "requestPatch": {
+      "title": "Request Patches",
+      "description": "Manage direct provider rules inherited by downstream models. Model explain and conflict views remain on the model page.",
+      "directTitle": "Direct Provider Rules",
+      "directDescription": "Provider rules are inherited by downstream models, and exact-target model rules can override them.",
+      "addRule": "Add Rule",
+      "emptyDirect": "No direct request patches configured for this provider yet.",
+      "noDescription": "No description",
+      "placements": {
+        "HEADER": "Header",
+        "QUERY": "Query Parameter",
+        "BODY": "Body JSON"
+      },
+      "operations": {
+        "SET": "Set",
+        "REMOVE": "Remove"
+      },
+      "fields": {
+        "value": "Value",
+        "description": "Description",
+        "trace": "Trace",
+        "enabled": "Enabled",
+        "ruleId": "Rule ID"
+      },
+      "states": {
+        "disabled": "Disabled",
+        "enabled": "Enabled"
+      },
+      "messages": {
+        "providerDirect": "Direct provider rule. Inherited/effective diagnostics are shown on each model."
+      },
+      "editor": {
+        "addTitle": "Add Provider Request Patch",
+        "editTitle": "Edit Provider Request Patch",
+        "description": "Create direct provider rules for headers, query parameters, or body JSON Pointer targets.",
+        "placement": "Placement",
+        "operation": "Operation",
+        "selectPlacement": "Select placement",
+        "selectOperation": "Select operation",
+        "target": "Target",
+        "targetPlaceholderHeader": "authorization",
+        "targetPlaceholderQuery": "api-version",
+        "targetPlaceholderBody": "/generationConfig/temperature",
+        "valueJson": "Value JSON",
+        "valueHelp": "HEADER and QUERY rules only accept JSON scalar values. BODY rules can use any JSON value.",
+        "descriptionLabel": "Description",
+        "descriptionPlaceholder": "Optional note for operators and future debugging.",
+        "enabledTitle": "Enabled",
+        "enabledDescription": "Disabled rules stay on the provider but are skipped at runtime.",
+        "targetHelpHeader": "Use a header name. Reserved transport headers are rejected by the backend.",
+        "targetHelpQuery": "Use a query parameter key without ?, &, =, or whitespace.",
+        "targetHelpBody": "Use a JSON Pointer target, for example /model or /generationConfig/temperature.",
+        "removeValuePlaceholder": "REMOVE does not accept value_json.",
+        "valuePlaceholder": "Use valid JSON, for example: \"Bearer token\", true, 1, null",
+        "create": "Create Rule",
+        "save": "Save Changes",
+        "dangerousTitle": "Confirm Dangerous Target",
+        "dangerousDescription": "This rule touches an upstream-sensitive target and needs an explicit confirmation.",
+        "saveAnyway": "Save Anyway"
+      },
+      "alert": {
+        "saveBeforeEdit": "Save the provider before editing request patch rules.",
+        "saveFailed": "Failed to save request patch rule.",
+        "createSuccess": "Provider request patch created.",
+        "updateSuccess": "Provider request patch updated.",
+        "deleteSuccess": "Provider request patch deleted.",
+        "deleteFailed": "Failed to delete provider request patch.",
+        "toggleFailed": "Failed to update request patch status.",
+        "enableSuccess": "Request patch enabled.",
+        "disableSuccess": "Request patch disabled.",
+        "dangerousConfirmFailed": "Failed to confirm dangerous request patch target.",
+        "targetRequired": "Target is required.",
+        "valueRequired": "Value JSON is required for SET rules."
+      }
+    },
+    "labelName": "Name",
+    "labelProviderKey": "Provider Key",
+    "labelProviderType": "Provider Type",
+    "labelEndpoint": "Endpoint",
+    "labelUseProxy": "Use Proxy",
+    "labelEnabled": "Enabled",
+    "labelLimitModel": "Limit Model",
+    "placeholderProviderType": "Select Provider Type",
+    "buttonUpdateBaseInfo": "Update Provider Base Info",
+    "buttonCreateBaseInfo": "Create Provider & Save Base Info",
+    "sectionModels": "Models",
+    "tableHeaderModelId": "Model ID",
+    "tableHeaderMappedModelId": "Mapped Model ID",
+    "placeholderModelId": "e.g., gpt-3.5-turbo",
+    "placeholderMappedModelId": "e.g., azure-gpt-35 (optional)",
+    "buttonSaveModel": "Save Model",
+    "buttonAddModel": "Add Model",
+    "buttonFetchRemote": "Fetch Remote Models",
+    "buttonClearUncommitted": "Clear Uncommitted",
+    "sectionApiKeys": "API Keys",
+    "tableHeaderApiKey": "API Key",
+    "tableHeaderDescription": "Description",
+    "tableHeaderActions": "Actions",
+    "placeholderApiKey": "Enter API Key",
+    "placeholderDescription": "Optional description",
+    "buttonSaveThisKey": "Save This Key",
+    "buttonAddApiKey": "Add API Key",
+    "buttonBackToList": "Back to List"
+  },
+  "modelEditPage": {
+    "title": "Edit Model",
+    "loading": "Loading model data...",
+    "buttonBackToModels": "Back to Model Library",
+    "buttonBackToProviders": "View Providers",
+    "providerSummary": {
+      "title": "Provider Context",
+      "unknown": "Unknown Provider",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "description": "This model belongs to the provider above. Basic model fields stay editable here; routing, cost, and request patches are treated as advanced configuration."
+    },
+    "routeReferences": {
+      "title": "Route References",
+      "heading": "Direct route usage",
+      "description": "These logical routes currently reference this model directly. Review them before renaming or disabling the model.",
+      "openRoutes": "Open Routes",
+      "noRoutes": "No logical routes reference this model directly yet. Direct provider/model addresses can still be used without a route.",
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "labelModelName": "Model Name",
+    "labelRealModelName": "Real Model Name",
+    "labelEnabled": "Enabled",
+    "capabilities": {
+      "title": "Model Capabilities",
+      "description": "Explicit runtime capabilities used by routing prefilter. Keep these aligned with provider behavior before enabling retry and fallback."
+    },
+    "alert": {
+      "missingId": "Model ID is missing. Cannot edit.",
+      "loadDataFailed": "Failed to load model data for ID: {modelId}.",
+      "nameRequired": "Model Name cannot be empty.",
+      "updateSuccess": "Model updated successfully.",
+      "saveFailed": "Failed to save model: {error}"
+    },
+    "priceSection": {
+      "title": "Cost Catalog",
+      "labelCatalog": "Cost Catalog",
+      "placeholderCatalog": "Select a cost catalog",
+      "noCatalog": "None (No catalog)",
+      "unboundHint": "This model is currently unbound. Requests can still be served, but no cost snapshot will be produced.",
+      "versionTitle": "Published Versions",
+      "version": "Version",
+      "enabled": "Enabled",
+      "effectiveFrom": "Effective from",
+      "effectiveUntil": "Effective until"
+    },
+    "requestPatch": {
+      "title": "Request Patches",
+      "description": "Edit direct model rules and review inherited provider rules, effective runtime output, and explain diagnostics from one place.",
+      "refresh": "Refresh",
+      "loading": "Loading request patch state...",
+      "providerFallback": "Provider",
+      "directTitle": "Direct Model Rules",
+      "directDescription": "Model rules can override inherited provider rules only on the exact same target.",
+      "addRule": "Add Rule",
+      "emptyDirect": "No direct request patches configured for this model yet.",
+      "inheritedTitle": "Inherited Provider Rules",
+      "inheritedDescription": "Active provider direct rules inherited by this model from {provider}. Overridden rules stay visible.",
+      "emptyInherited": "This model is not inheriting any active provider request patches.",
+      "effectiveTitle": "Effective Runtime Result",
+      "effectiveDescription": "This is the resolved rule set the runtime will try to apply for this model.",
+      "emptyEffective": "No effective request patches are active for this model.",
+      "explainTitle": "Explain and Conflict",
+      "explainDescription": "Review how each active rule resolves, which rules are overridden, and whether any unsafe cross-scope conflicts remain.",
+      "emptyExplain": "No active request patch diagnostics are available for this model.",
+      "details": "Details",
+      "noDescription": "No description",
+      "conflictBannerTitle": "Unsafe request patch configuration",
+      "conflictBannerDescription": "This model currently has provider/model cross-scope conflicts. Resolve them before treating the model as safe to use.",
+      "conflictFields": {
+        "providerTarget": "Provider Target",
+        "modelTarget": "Model Target"
+      },
+      "placements": {
+        "HEADER": "Header",
+        "QUERY": "Query Parameter",
+        "BODY": "Body JSON"
+      },
+      "operations": {
+        "SET": "Set",
+        "REMOVE": "Remove"
+      },
+      "fields": {
+        "value": "Value",
+        "description": "Description",
+        "source": "Source",
+        "trace": "Trace",
+        "enabled": "Enabled",
+        "ruleId": "Rule ID",
+        "sourceRule": "Source Rule",
+        "effectiveRule": "Effective Rule",
+        "conflictsWith": "Conflicts With"
+      },
+      "states": {
+        "effective": "Effective",
+        "overridden": "Overridden",
+        "conflicted": "Conflicted",
+        "disabled": "Disabled",
+        "enabled": "Enabled"
+      },
+      "origin": {
+        "ProviderDirect": "Provider Direct",
+        "ModelDirect": "Model Direct"
+      },
+      "messages": {
+        "directEffective": "This direct model rule is part of the effective runtime set.",
+        "disabledSkipped": "Disabled rules stay stored on the model but are skipped at runtime.",
+        "inheritedEffective": "Inherited from the provider and currently effective for this model.",
+        "overriddenByRule": "Overridden by model rule {id}.",
+        "conflictsWithRules": "Conflicts with rule(s) {ids}.",
+        "overridesProviderRules": "Overrides provider rule(s) {ids}.",
+        "effectiveFromOrigin": "Applied from {origin} rule {id}.",
+        "noRuntimeTrace": "No additional diagnostic message."
+      },
+      "editor": {
+        "addTitle": "Add Model Request Patch",
+        "editTitle": "Edit Model Request Patch",
+        "description": "Create direct model rules for headers, query parameters, or body JSON Pointer targets.",
+        "placement": "Placement",
+        "operation": "Operation",
+        "selectPlacement": "Select placement",
+        "selectOperation": "Select operation",
+        "target": "Target",
+        "targetPlaceholderHeader": "authorization",
+        "targetPlaceholderQuery": "api-version",
+        "targetPlaceholderBody": "/generationConfig/temperature",
+        "valueJson": "Value JSON",
+        "valueHelp": "HEADER and QUERY rules only accept JSON scalar values. BODY rules can use any JSON value.",
+        "descriptionLabel": "Description",
+        "descriptionPlaceholder": "Optional note for operators and future debugging.",
+        "enabledTitle": "Enabled",
+        "enabledDescription": "Disabled rules stay on the model but are skipped at runtime.",
+        "targetHelpHeader": "Use a header name. Reserved transport headers are rejected by the backend.",
+        "targetHelpQuery": "Use a query parameter key without ?, &, =, or whitespace.",
+        "targetHelpBody": "Use a JSON Pointer target, for example /model or /generationConfig/temperature.",
+        "removeValuePlaceholder": "REMOVE does not accept value_json.",
+        "valuePlaceholder": "Use valid JSON, for example: \"Bearer token\", true, 1, null",
+        "create": "Create Rule",
+        "save": "Save Changes",
+        "dangerousTitle": "Confirm Dangerous Target",
+        "dangerousDescription": "This rule touches an upstream-sensitive target and needs an explicit confirmation.",
+        "saveAnyway": "Save Anyway"
+      },
+      "alert": {
+        "loadFailed": "Failed to load request patch state.",
+        "saveBeforeEdit": "Save the model before editing request patch rules.",
+        "saveFailed": "Failed to save request patch rule.",
+        "createSuccess": "Model request patch created.",
+        "updateSuccess": "Model request patch updated.",
+        "deleteSuccess": "Model request patch deleted.",
+        "deleteFailed": "Failed to delete request patch rule.",
+        "toggleFailed": "Failed to update request patch status.",
+        "enableSuccess": "Request patch enabled.",
+        "disableSuccess": "Request patch disabled.",
+        "dangerousConfirmFailed": "Failed to confirm dangerous request patch target.",
+        "targetRequired": "Target is required.",
+        "valueRequired": "Value JSON is required for SET rules."
+      }
+    }
+  },
+  "costPage": {
+    "title": "Cost Management",
+    "confirmDeleteCatalog": "Delete cost catalog '{name}'?",
+    "confirmDeleteCatalogDescription": "Catalogs can only be removed after all versions are cleared on the backend.",
+    "confirmEnableVersion": "Enable catalog version '{version}'?",
+    "confirmEnableVersionDescription": "This is a dangerous operation. Enabling it will disable other enabled versions in the same catalog.",
+    "confirmDisableVersion": "Disable catalog version '{version}'?",
+    "confirmDisableVersionDescription": "This is a dangerous operation. New requests will no longer match this catalog version.",
+    "confirmArchiveVersion": "Archive catalog version '{version}'?",
+    "confirmArchiveVersionDescription": "Archived versions are hidden from the default list and cannot be enabled or edited directly.",
+    "confirmUnarchiveVersion": "Restore archived version '{version}'?",
+    "confirmUnarchiveVersionDescription": "This returns the version to the frozen state and shows it in the main list again.",
+    "confirmDeleteVersion": "Delete draft version '{version}'?",
+    "confirmDeleteVersionDescription": "Only unused disabled drafts can be deleted, and the action cannot be undone.",
+    "confirmDeleteComponent": "Delete component '{meter}'?",
+    "confirmDeleteComponentDescription": "This removes the component from the current catalog version immediately.",
+    "alert": {
+      "loadFailed": "Failed to load cost catalogs.",
+      "templateImportSuccess": "Cost template imported into '{name}'.",
+      "templateImportFailed": "Failed to import cost template.",
+      "catalogNameRequired": "Catalog name is required.",
+      "catalogCreateSuccess": "Cost catalog created successfully.",
+      "catalogUpdateSuccess": "Cost catalog updated successfully.",
+      "catalogDuplicateSuccess": "Catalog copy created successfully.",
+      "catalogSaveFailed": "Failed to save cost catalog.",
+      "catalogDuplicateFailed": "Failed to create the catalog copy.",
+      "catalogDeleteSuccess": "Cost catalog deleted successfully.",
+      "catalogDeleteFailed": "Failed to delete cost catalog.",
+      "selectCatalogFirst": "Select a cost catalog first.",
+      "selectVersionFirst": "Select a catalog version first.",
+      "versionNameRequired": "Version name is required.",
+      "versionCurrencyRequired": "Currency is required.",
+      "versionEffectiveFromRequired": "Effective from time is required.",
+      "invalidDateTime": "Please enter a valid date and time.",
+      "invalidEffectiveRange": "Effective until must be later than effective from.",
+      "versionCreateSuccess": "Catalog version created successfully.",
+      "versionDuplicateSuccess": "Catalog version '{version}' copied as a new draft.",
+      "versionEnableSuccess": "Catalog version enabled successfully.",
+      "versionDisableSuccess": "Catalog version disabled successfully.",
+      "versionArchiveSuccess": "Catalog version archived successfully.",
+      "versionUnarchiveSuccess": "Catalog version restored to the frozen state.",
+      "versionDeleteSuccess": "Draft version deleted successfully.",
+      "versionToggleFailed": "Failed to toggle catalog version status.",
+      "versionArchiveFailed": "Failed to archive catalog version.",
+      "versionUnarchiveFailed": "Failed to restore the archived catalog version.",
+      "versionDuplicateFailed": "Failed to copy catalog version.",
+      "versionDeleteFailed": "Failed to delete draft version.",
+      "versionSaveFailed": "Failed to create catalog version.",
+      "invalidMatchAttributes": "Match attributes must be a valid JSON object.",
+      "invalidComponentNumber": "Component fields must use valid non-negative numbers.",
+      "tier.multiple_unbounded": "Tiered pricing can only define one unbounded tier.",
+      "tier.unbounded_not_last": "The unbounded tier must be the final tier.",
+      "tier.not_increasing": "Tier upper bounds must increase strictly.",
+      "componentCreateSuccess": "Cost component created successfully.",
+      "componentUpdateSuccess": "Cost component updated successfully.",
+      "componentSaveFailed": "Failed to save cost component.",
+      "componentDeleteSuccess": "Cost component deleted successfully.",
+      "componentDeleteFailed": "Failed to delete cost component.",
+      "invalidPreviewNumber": "Preview fields must use non-negative integers.",
+      "previewFailed": "Failed to run cost preview."
+    },
+    "state": {
+      "draft": "Draft",
+      "active": "Active",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "frozen": "Frozen",
+      "archived": "Archived"
+    },
+    "actions": {
+      "viewDetail": "View detail",
+      "enableVersion": "Enable version",
+      "disableVersion": "Disable version",
+      "copyVersion": "Copy version",
+      "archiveVersion": "Archive version",
+      "unarchiveVersion": "Restore version",
+      "deleteDraftVersion": "Delete draft",
+      "showArchivedVersions": "Show archived ({count})",
+      "hideArchivedVersions": "Hide archived"
+    },
+    "templates": {
+      "title": "Built-in Templates",
+      "description": "Import maintained starter catalogs for common text models and token-image models.",
+      "loading": "Loading cost templates...",
+      "empty": "No built-in cost templates are available.",
+      "import": "Import",
+      "importing": "Importing...",
+      "catalogName": "Catalog name",
+      "version": "Version",
+      "effectiveFrom": "Effective from",
+      "source": "Source",
+      "supportedMeters": "Supported meters"
+    },
+    "catalogs": {
+      "title": "Cost Catalogs",
+      "description": "Catalogs define reusable cost policies for groups of models.",
+      "add": "New Catalog",
+      "duplicate": "Create Copy",
+      "editMeta": "Edit Catalog",
+      "openEditor": "Open Editor",
+      "openCurrent": "Continue Editing",
+      "copyName": "{name} Copy",
+      "loading": "Loading cost catalogs...",
+      "versionCount": "versions",
+      "latestVersion": "Latest version",
+      "latestPublishedAt": "Latest published",
+      "emptyDescription": "No description",
+      "table": {
+        "name": "Name",
+        "description": "Description",
+        "versions": "Versions",
+        "latestVersion": "Latest Version",
+        "latestPublishedAt": "Latest Published"
+      },
+      "modal": {
+        "titleAdd": "Create Cost Catalog",
+        "titleEdit": "Edit Cost Catalog",
+        "name": "Catalog Name",
+        "description": "Description"
+      }
+    },
+    "editor": {
+      "title": "Cost Catalog Editor",
+      "description": "Maintain catalog versions, cost components, and run previews from one workspace.",
+      "currentVersion": "Current version",
+      "emptyTitle": "No cost catalog selected",
+      "emptyDescription": "Open a catalog from the list first, or create/import one before editing."
+    },
+    "versions": {
+      "title": "Catalog Versions",
+      "add": "Publish Version",
+      "empty": "The selected cost catalog has no published versions yet.",
+      "hiddenArchivedOnly": "This catalog only has archived versions. Use the toggle above to inspect them.",
+      "publishedAt": "Published at",
+      "effectiveFrom": "Effective from",
+      "effectiveUntil": "Effective until",
+      "currency": "Currency",
+      "modal": {
+        "titleAdd": "Create Catalog Version",
+        "version": "Version",
+        "currency": "Currency",
+        "source": "Source",
+        "effectiveFrom": "Effective from",
+        "effectiveUntil": "Effective until",
+        "enabled": "Enabled",
+        "enabledDescription": "Disabled versions stay visible for audit but will not match new requests."
+      }
+    },
+    "versionDetail": {
+      "emptyTitle": "No version selected",
+      "emptyDescription": "Select a catalog version to inspect its component snapshot.",
+      "manualSource": "manual",
+      "loading": "Loading version details...",
+      "emptyComponents": "This version has no cost components yet.",
+      "componentsTitle": "Cost Components",
+      "componentsDescription": "Components are matched by meter key and rated by charge kind.",
+      "draftDescription": "Draft versions remain editable and can still be deleted.",
+      "activeDescription": "Active versions are used for request matching; if still unused, they remain editable.",
+      "frozenDescription": "Frozen versions are read-only because request logs already reference them. Copy to a new draft to change pricing.",
+      "archivedDescription": "Archived versions are hidden by default and cannot be enabled or edited directly. Restore them to return to the frozen state.",
+      "addComponent": "Add Component",
+      "chargeKind": "Charge kind",
+      "unitPrice": "Unit price",
+      "flatFee": "Flat fee",
+      "matchAttributes": "Match attributes",
+      "hasMatchAttributes": "Configured",
+      "noDescription": "No description"
+    },
+    "componentEditor": {
+      "titleAdd": "Create Cost Component",
+      "titleEdit": "Edit Cost Component",
+      "meterKey": "Meter key",
+      "chargeKind": "Charge kind",
+      "priority": "Priority",
+      "description": "Description",
+      "unitPrice": "Unit price",
+      "flatFee": "Flat fee",
+      "unitPriceHintPerMillion": "Enter the price in {currency} per 1M tokens. Example: 3 means {currency} 3 / 1M tokens.",
+      "unitPriceHintPerUnit": "Enter the actual price per unit in {currency}. Decimals are allowed.",
+      "flatFeeHint": "Enter the actual fixed fee in {currency}. Decimals are allowed.",
+      "matchAttributes": "Match attributes JSON",
+      "matchAttributesPlaceholder": "Example: {\"spec_key\":\"1024x1024\"}",
+      "previewConfig": "Matching preview",
+      "previewConfigEmpty": "Leave match attributes empty to rate every ledger item for this meter.",
+      "meters": {
+        "inputText": "Text input tokens",
+        "outputText": "Text output tokens",
+        "inputImage": "Image input tokens",
+        "outputImage": "Image output tokens",
+        "cacheRead": "Cache read tokens",
+        "cacheWrite": "Cache write tokens",
+        "reasoning": "Reasoning tokens",
+        "requestCalls": "Request calls",
+        "custom": "Custom meter"
+      },
+      "chargeKinds": {
+        "perUnit": "Per unit",
+        "flat": "Flat fee",
+        "tieredPerUnit": "Tiered per unit",
+        "custom": "Custom charge kind"
+      },
+      "tiers": {
+        "title": "Tiered pricing",
+        "description": "Define ascending thresholds. Leave the last upper bound empty for the open-ended tier.",
+        "add": "Add tier",
+        "basis": "Tier basis",
+        "basisMeterQuantity": "Current meter quantity",
+        "basisTotalInputTokens": "Total input tokens",
+        "upTo": "Up to",
+        "upToValue": "Up to {value}",
+        "unitPrice": "Unit price",
+        "unitPriceHintPerMillion": "Tier prices are entered in {currency} per 1M tokens.",
+        "unitPriceHintPerUnit": "Tier prices are entered as actual per-unit prices in {currency}.",
+        "unbounded": "No upper bound",
+        "unboundedPlaceholder": "Leave empty for no upper bound",
+        "rowLabel": "Tier {index}"
+      }
+    },
+    "preview": {
+      "title": "Cost Preview",
+      "description": "Run the same normalization-to-ledger-to-rating pipeline used by the backend.",
+      "applySample": "Apply sample",
+      "run": "Run preview",
+      "running": "Running...",
+      "ledgerTitle": "Generated ledger",
+      "detailLinesTitle": "Rated detail lines",
+      "unmatchedTitle": "Unmatched ledger items",
+      "warningsTitle": "Warnings",
+      "fields": {
+        "totalInputTokens": "Total input tokens",
+        "totalOutputTokens": "Total output tokens",
+        "inputTextTokens": "Input text tokens",
+        "outputTextTokens": "Output text tokens",
+        "inputImageTokens": "Input image tokens",
+        "outputImageTokens": "Output image tokens",
+        "cacheReadTokens": "Cache read tokens",
+        "cacheWriteTokens": "Cache write tokens",
+        "reasoningTokens": "Reasoning tokens"
+      },
+      "result": {
+        "totalCost": "Total cost",
+        "currency": "Currency",
+        "detailLines": "Detail lines"
+      }
+    }
+  },
+  "pricePage": {
+    "title": "Price Management",
+    "description": "Configure billing plans and price rules for model access.",
+    "confirmDeletePlan": "Are you sure you want to delete billing plan '{name}'?",
+    "confirmDeleteRule": "Are you sure you want to delete this price rule?",
+    "alert": {
+      "planNameRequired": "Plan name is required.",
+      "planSaveSuccess": "Billing plan saved successfully.",
+      "planSaveFailed": "Failed to save billing plan: {error}",
+      "planDeleteSuccess": "Billing plan deleted successfully.",
+      "planDeleteFailed": "Failed to delete billing plan: {error}",
+      "selectPlanFirst": "Please select a billing plan first.",
+      "ruleSaveSuccess": "Price rule saved successfully.",
+      "ruleSaveFailed": "Failed to save price rule: {error}",
+      "ruleDeleteSuccess": "Price rule deleted successfully.",
+      "ruleDeleteFailed": "Failed to delete price rule: {error}"
+    },
+    "plans": {
+      "title": "Billing Plans",
+      "add": "Add Billing Plan",
+      "loading": "Loading billing plans...",
+      "table": {
+        "name": "Name",
+        "description": "Description",
+        "currency": "Currency",
+        "actions": "Actions"
+      },
+      "modal": {
+        "titleEdit": "Edit Billing Plan",
+        "titleAdd": "New Billing Plan",
+        "name": "Name",
+        "description": "Description",
+        "currency": "Currency"
+      }
+    },
+    "rules": {
+      "title": "Price Rules",
+      "add": "Add Price Rule",
+      "loading": "Loading price rules...",
+      "table": {
+        "description": "Description",
+        "enabled": "Enabled",
+        "usageType": "Usage Type",
+        "mediaType": "Media Type",
+        "price": "Price",
+        "effectiveFrom": "Effective From",
+        "actions": "Actions"
+      },
+      "modal": {
+        "titleEdit": "Edit Price Rule",
+        "titleAdd": "New Price Rule",
+        "description": "Description",
+        "enabled": "Enabled",
+        "usageType": "Usage Type",
+        "mediaType": "Media Type",
+        "mediaTypeDefault": "Default (Any)",
+        "price": "Price ($ / 1M tokens)",
+        "currency": "Currency",
+        "effectiveFrom": "Effective From",
+        "effectiveUntil": "Effective Until"
+      }
+    }
+  }
+}

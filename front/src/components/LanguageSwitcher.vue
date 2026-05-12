@@ -4,7 +4,6 @@ defineOptions({
 });
 
 import { ref } from "vue";
-import { useI18n } from "vue-i18n";
 import {
   Popover,
   PopoverContent,
@@ -12,7 +11,13 @@ import {
 } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { Globe } from "lucide-vue-next";
-import { LANG_STORAGE_KEY } from "@/i18n";
+import {
+  isAppLocale,
+  setStoredAppLocale,
+  useAppI18n,
+  type AppI18nKey,
+  type AppLocale,
+} from "@/i18n";
 
 interface LanguageSwitcherProps {
   isCollapsed?: boolean;
@@ -24,21 +29,26 @@ const props = withDefaults(defineProps<LanguageSwitcherProps>(), {
   compact: false,
 });
 
-const { locale } = useI18n();
+const { t, locale } = useAppI18n();
 const languages = [
-  { code: "en", name: "English" },
-  { code: "zh", name: "中文" },
-];
+  { code: "en", nameKey: "language.english" },
+  { code: "zh", nameKey: "language.chinese" },
+] as const satisfies ReadonlyArray<{ code: AppLocale; nameKey: AppI18nKey }>;
 const isOpen = ref(false);
 
 const handleLanguageSelect = (langCode: string) => {
+  if (!isAppLocale(langCode)) {
+    return;
+  }
+
   locale.value = langCode;
-  localStorage.setItem(LANG_STORAGE_KEY, langCode);
+  setStoredAppLocale(langCode);
   isOpen.value = false;
 };
 
 const currentLanguageName = () => {
-  return languages.find((lang) => lang.code === locale.value)?.name;
+  const currentLanguage = languages.find((lang) => lang.code === locale.value);
+  return currentLanguage ? t(currentLanguage.nameKey) : "";
 };
 </script>
 
@@ -59,7 +69,7 @@ const currentLanguageName = () => {
             'justify-center': props.isCollapsed,
             'justify-start': !props.isCollapsed,
           }"
-          aria-label="Change language"
+          :aria-label="t('language.change')"
         >
           <Globe class="h-4 w-4 flex-shrink-0" />
           <span
@@ -85,7 +95,7 @@ const currentLanguageName = () => {
             }"
             @click="handleLanguageSelect(lang.code)"
           >
-            {{ lang.name }}
+            {{ t(lang.nameKey) }}
           </Button>
         </div>
       </PopoverContent>

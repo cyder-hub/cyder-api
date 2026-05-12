@@ -8,6 +8,11 @@ async function readSource(path) {
   return readFile(new URL(path, ROOT), "utf8");
 }
 
+async function readMessages(locale) {
+  const source = await readSource(`src/i18n/locales/${locale}/messages.json`);
+  return JSON.parse(source);
+}
+
 test("legacy custom fields route and page are removed from the manager UI", async () => {
   const [routerSource, navSource, providerEditSource] = await Promise.all([
     readSource("src/router/index.ts"),
@@ -50,13 +55,13 @@ test("shared request patch and reasoning components do not call services directl
 });
 
 test("legacy custom field i18n sections are removed after request patch migration", async () => {
-  const [enSource, zhSource] = await Promise.all([
-    readSource("src/i18n/en.ts"),
-    readSource("src/i18n/zh.ts"),
+  const [enMessages, zhMessages] = await Promise.all([
+    readMessages("en"),
+    readMessages("zh"),
   ]);
 
-  assert.equal(enSource.includes("customFieldsPage"), false);
-  assert.equal(zhSource.includes("customFieldsPage"), false);
-  assert.match(enSource, /requestPatch/);
-  assert.match(zhSource, /requestPatch/);
+  assert.equal("customFieldsPage" in enMessages, false);
+  assert.equal("customFieldsPage" in zhMessages, false);
+  assert.match(JSON.stringify(enMessages), /requestPatch/);
+  assert.match(JSON.stringify(zhMessages), /requestPatch/);
 });

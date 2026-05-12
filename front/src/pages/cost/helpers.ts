@@ -3,6 +3,7 @@ import {
   formatCostRateInputFromNanos,
   parseCostRateInputToNanos,
 } from "../../utils/money.ts";
+import { formatNumberValue } from "../../utils/number.ts";
 import type {
   CatalogDraft,
   ChargeKind,
@@ -263,11 +264,14 @@ export const formatRateDisplay = (
   return isMillionTokenMeter(meterKey) ? `${base} tokens` : `${base}/unit`;
 };
 
-export const formatNumber = (value: number | null | undefined) => {
+export const formatNumber = (
+  value: number | null | undefined,
+  locale?: string | null,
+) => {
   if (value === null || value === undefined) {
     return "-";
   }
-  return new Intl.NumberFormat().format(value);
+  return formatNumberValue(value, undefined, locale);
 };
 
 export const prettyJson = (value: string | null | undefined) => {

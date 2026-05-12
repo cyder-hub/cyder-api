@@ -10,6 +10,7 @@ import {
   useForwardPropsEmits,
 } from "reka-ui";
 import { cn } from "@/utils/cn";
+import { useAppI18n } from "@/i18n";
 import DialogOverlay from "./DialogOverlay.vue";
 
 defineOptions({
@@ -32,6 +33,7 @@ const emits = defineEmits<DialogContentEmits>();
 const delegatedProps = reactiveOmit(props, "class");
 
 const forwarded = useForwardPropsEmits(delegatedProps, emits);
+const { t } = useAppI18n();
 </script>
 
 <template>
@@ -55,7 +57,7 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
         class="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute top-3 right-3 rounded-md p-2 opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none sm:top-4 sm:right-4 sm:p-1 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
       >
         <X />
-        <span class="sr-only">Close</span>
+        <span class="sr-only">{{ t("ui.dialog.close") }}</span>
       </DialogClose>
     </DialogContent>
   </DialogPortal>

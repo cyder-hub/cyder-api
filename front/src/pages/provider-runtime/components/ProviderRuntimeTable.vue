@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { useI18n } from "vue-i18n";
 import { FileText, Pencil } from "lucide-vue-next";
 
+import { useAppI18n } from "@/i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,7 +30,7 @@ const emit = defineEmits<{
   viewRecords: [item: ProviderRuntimeItem];
 }>();
 
-const { t: $t } = useI18n();
+const { t: $t } = useAppI18n();
 </script>
 
 <template>
@@ -41,7 +41,7 @@ const { t: $t } = useI18n();
           <TableHead>{{ $t("providerRuntimePage.table.provider") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.table.health") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.requests") }}</TableHead>
-          <TableHead>{{ $t("providerRuntimePage.metrics.latency") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.metrics.totalLatency") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.lastError") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.cost") }}</TableHead>
           <TableHead class="text-right">{{ $t("common.actions") }}</TableHead>

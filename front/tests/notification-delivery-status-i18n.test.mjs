@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
-import { enDict } from "../src/i18n/en.ts";
-import { zhDict } from "../src/i18n/zh.ts";
+const ROOT = new URL("../", import.meta.url);
 
 const DELIVERY_STATUSES = [
   "pending",
@@ -17,10 +17,23 @@ function getPath(source, path) {
   return path.split(".").reduce((value, key) => value?.[key], source);
 }
 
+async function readMessages(locale) {
+  const source = await readFile(
+    new URL(`src/i18n/locales/${locale}/messages.json`, ROOT),
+    "utf8",
+  );
+  return JSON.parse(source);
+}
+
+const messagesByLocale = await Promise.all([
+  readMessages("en"),
+  readMessages("zh"),
+]);
+
 test("alert and notification pages translate every delivery status", () => {
   for (const [locale, dict] of [
-    ["en", enDict],
-    ["zh", zhDict],
+    ["en", messagesByLocale[0]],
+    ["zh", messagesByLocale[1]],
   ]) {
     for (const namespace of [
       "alertsPage.delivery.status",

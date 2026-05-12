@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { formatTimestamp } from "@/utils/datetime";
 import { formatPriceFromNanos, nanosToMajorUnit } from "@/utils/money";
+import { formatNumberValue } from "@/utils/number";
 import * as dashboardService from "@/services/dashboard";
 import type { UsageStatItem, UsageStatsPeriod } from "@/services/types";
 import ECharts from "./ECharts.vue";
@@ -79,7 +81,7 @@ type TooltipAxisParam = CallbackDataParams & {
   value: [number, number];
 };
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const timeRange = ref<TimeRange>("last_24_hours");
 const selectedMetric = ref<UsageMetric>("total_tokens");
 const selectedGroupBy = ref<UsageGroupBy>("model");
@@ -303,29 +305,29 @@ const timeRangeOptions = computed(() => [
 const formatMetric = (value: number, metric: UsageMetric, currency?: string) => {
   switch (metric) {
     case "total_cost":
-      return formatPriceFromNanos(value, currency, "-");
+      return formatPriceFromNanos(value, currency, "-", locale.value);
     case "success_rate":
       return `${(value * 100).toFixed(1)}%`;
     case "avg_latency":
-      return `${Math.round(value).toLocaleString()} ms`;
+      return `${formatNumberValue(Math.round(value), undefined, locale.value)} ms`;
     default:
-      return value.toLocaleString();
+      return formatNumberValue(value, undefined, locale.value);
   }
 };
 
 const formatCostAxisLabel = (value: number) =>
-  new Intl.NumberFormat(undefined, {
+  formatNumberValue(nanosToMajorUnit(value), {
     minimumFractionDigits: 0,
     maximumFractionDigits: 6,
     notation:
       Math.abs(nanosToMajorUnit(value)) >= 100000 ? "compact" : "standard",
-  }).format(nanosToMajorUnit(value));
+  }, locale.value);
 
 const formatAxisLabel = (value: number, metric: UsageMetric) => {
   if (metric === "total_cost") return formatCostAxisLabel(value);
   if (metric === "success_rate") return `${(value * 100).toFixed(0)}%`;
   if (metric === "avg_latency") return `${Math.round(value)}ms`;
-  return value.toLocaleString();
+  return formatNumberValue(value, undefined, locale.value);
 };
 
 const displayGroupLabel = (item: UsageStatItem) =>
@@ -648,9 +650,7 @@ const chartOptions = computed<EChartsOption>(() => {
         const params = Array.isArray(rawParams) ? rawParams : [rawParams];
         const rows = getTooltipRows(params.filter(isTooltipAxisParam));
         if (!rows.length) return "";
-        const date = new Date(rows[0].axisValue);
-
-        return `${date.toLocaleString()}<br/>${rows
+        return `${formatTimestamp(rows[0].axisValue, locale.value)}<br/>${rows
           .map((row) => {
             const currency =
               selectedMetric.value === "total_cost"

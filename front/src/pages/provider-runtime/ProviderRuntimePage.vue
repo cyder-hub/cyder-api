@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatTimestamp } from "@/utils/datetime";
 import { formatPriceFromNanos } from "@/utils/money";
+import { formatNumberValue } from "@/utils/number";
 import { buildRuntimeStateBackendRows } from "@/utils/runtimeBackend";
 import type {
   ProviderRuntimeItem,
@@ -29,7 +30,7 @@ import {
   type ProviderRuntimeQueryValue,
 } from "./composables/useProviderRuntimeFilters";
 
-const { t: $t } = useI18n();
+const { t: $t, locale } = useI18n();
 const route = useRoute();
 const router = useRouter();
 
@@ -258,22 +259,22 @@ function formatLatency(value: number | null) {
   if (value == null) {
     return "-";
   }
-  return `${Math.round(value).toLocaleString()} ms`;
+  return `${formatNumberValue(Math.round(value), undefined, locale.value)} ms`;
 }
 
 function formatCount(value: number | null | undefined) {
   if (value == null) {
     return "-";
   }
-  return value.toLocaleString();
+  return formatNumberValue(value, undefined, locale.value);
 }
 
 function formatDateTime(value: number | null | undefined) {
-  return formatTimestamp(value) || "-";
+  return formatTimestamp(value, locale.value) || "-";
 }
 
 function formatCost(nanos: number, currency: string) {
-  return formatPriceFromNanos(nanos, currency, "-");
+  return formatPriceFromNanos(nanos, currency, "-", locale.value);
 }
 
 function runtimeLevelLabel(level: ProviderRuntimeLevel) {

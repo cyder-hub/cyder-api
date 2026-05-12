@@ -12,13 +12,13 @@
 </template>
 
 <script setup lang="ts">
-import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
+import { useAppI18n } from "@/i18n";
 import { login } from "@/services/auth";
 import LoginForm from "./components/LoginForm.vue";
 import { useLoginForm } from "./composables/useLoginForm";
 
-const { t } = useI18n();
+const { t } = useAppI18n();
 const router = useRouter();
 
 const { password, isLoading, error, handleLogin } = useLoginForm({

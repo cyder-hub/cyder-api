@@ -86,7 +86,7 @@ Current code already provides:
 
 ### Workspace Utilities
 
-- `xtask`: project management commands for dev/build/test
+- `justfile`: optional local shortcuts for dev/build/test
 - `task`: internal analysis and planning notes
 
 ## Local Development
@@ -96,22 +96,23 @@ Current code already provides:
 - Rust toolchain with Cargo
 - Node.js 24+
 - npm
+- `just`
 
 ### Configuration
 
 For local development, the default command is zero-config:
 
 ```bash
-cargo xtask dev
+just dev
 ```
 
-When `CYDER_DATA_DIR` and `CYDER_CONFIG_PATH` are not set, `cargo xtask dev` and `cargo xtask dev-backend` run the backend with:
+When `CYDER_DATA_DIR` and `CYDER_CONFIG_PATH` are not set, `just dev` and `just dev-backend` run the backend with:
 
 ```txt
 CYDER_DATA_DIR=<repo>/.cyder/dev
 ```
 
-Direct debug runs such as `cd server && cargo run` use the same `.cyder/dev` default. The directory is git-ignored and holds generated local state:
+The directory is git-ignored and holds generated local state:
 
 - `.cyder/dev/config/config.default.yaml`
 - `.cyder/dev/config/config.yaml`, if you create one
@@ -175,24 +176,29 @@ Database URLs, secrets, Redis/cache, S3, local storage roots, deployment mode, r
 
 ## Common Commands
 
-Use `cargo xtask` from the repository root.
+Human local shortcuts are available through `just` from the repository root:
 
 | Command | Purpose |
 | --- | --- |
-| `cargo xtask dev` | Run backend and frontend dev servers together |
-| `cargo xtask dev-backend` | Run backend dev server |
-| `cargo xtask dev-front` | Install frontend deps and run Vite dev server |
-| `cargo xtask build` | Build backend and frontend |
-| `cargo xtask build-backend` | Build backend only |
-| `cargo xtask build-front` | Install frontend deps and build frontend |
-| `cargo xtask install-front-deps` | Install frontend dependencies |
-| `cargo xtask test` | Run backend test suite |
-
-Useful direct frontend commands:
-
-- `cd front && npm run dev`
-- `cd front && npm run build`
-- `cd front && npm test`
+| `just --list` | Show available shortcuts |
+| `just dev` | Run backend and frontend dev servers together |
+| `just dev-backend` | Run backend dev server |
+| `just dev-front` | Ensure frontend deps and run Vite dev server |
+| `just install-front-deps` | Ensure frontend dependencies for development |
+| `just front-ci-deps` | Install locked frontend dependencies |
+| `just build` | Build backend and frontend |
+| `just build-backend` | Build backend |
+| `just build-front` | Build frontend |
+| `just test` | Run backend and frontend tests |
+| `just test-backend` | Run backend tests |
+| `just test-front` | Run frontend tests |
+| `just check` | Run local aggregate checks |
+| `just fmt` | Format Rust sources |
+| `just fmt-check` | Check Rust formatting |
+| `just log-lint` | Run backend log lint |
+| `just i18n-check` | Check frontend i18n coverage |
+| `just transform-gate` | Run transform quality gate |
+| `just transform-gate-report` | Run transform quality gate and write a JSON report |
 
 ## Portable Config Export And Import
 
@@ -262,12 +268,13 @@ Assuming `base_path: /ai`:
 
 Primary backend verification:
 
-- `cargo xtask test`
+- `just check`
 
 Frontend verification:
 
-- `cd front && npm test`
-- `cd front && npm run build`
+- `just i18n-check`
+- `just test-front`
+- `just build-front`
 
 Current test coverage is strong across transform, proxy, cost, governance, and runtime logic. However, storage integration around S3 may require a working S3-compatible environment when configured. Do not assume object-storage paths are verified unless you have run the relevant tests in a valid environment.
 

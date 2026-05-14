@@ -1,7 +1,5 @@
 [workspace]
 members = [
     "server",
-    "xtask",
 ]
 resolver = "2"
-

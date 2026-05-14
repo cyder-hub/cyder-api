@@ -19,9 +19,9 @@
 # settings such as bind, secrets, database, Redis/cache, storage, deployment, and
 # runtime state backend.
 #
-# Local development is zero-config through cargo xtask dev. Generated files live
-# under .cyder/dev, which is git-ignored. To migrate an old local config, copy it
-# to .cyder/dev/config/config.yaml or set CYDER_CONFIG_PATH explicitly.
+# Local development is zero-config through just dev. Generated files live under
+# .cyder/dev, which is git-ignored. To migrate an old local config, copy it to
+# .cyder/dev/config/config.yaml or set CYDER_CONFIG_PATH explicitly.
 host: 0.0.0.0
 port: 8000
 base_path: /ai

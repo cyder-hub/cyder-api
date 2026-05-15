@@ -192,9 +192,7 @@ fn third_party_debug_enabled() -> bool {
 }
 
 fn is_app_target(target: &str) -> bool {
-    target.starts_with("cyder_api")
-        || target.starts_with("cyder_tools")
-        || target.starts_with("xtask")
+    target.starts_with("cyder_api") || target.starts_with("cyder_tools")
 }
 
 #[doc(hidden)]

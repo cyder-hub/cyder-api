@@ -51,14 +51,14 @@ jobs:
               [[ -z "$file" ]] && continue
 
               case "$file" in
-                Cargo.toml|Cargo.lock|server/*|xtask/*|.github/actions/transform-quality-gate/*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release-image.yml)
+                Cargo.toml|Cargo.lock|server/*|.github/actions/transform-quality-gate/*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release-image.yml)
                   run_transform=true
                   transform_reason="Transform-sensitive path changed."
                   ;;
               esac
 
               case "$file" in
-                Dockerfile|.dockerignore|Cargo.lock|Cargo.toml|server/Cargo.toml|xtask/*|front/package.json|front/package-lock.json|front/tsconfig*.json|front/vite.config.*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release-image.yml|.github/actions/*)
+                Dockerfile|.dockerignore|Cargo.lock|Cargo.toml|justfile|server/Cargo.toml|server/src/bin/*|front/package.json|front/package-lock.json|front/tsconfig*.json|front/vite.config.*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release-image.yml|.github/actions/*)
                   run_docker_smoke=true
                   docker_smoke_reason="Docker packaging path changed."
                   ;;
@@ -162,7 +162,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Run log lint
-        run: cargo xtask log-lint
+        run: cargo run -p cyder-api --bin log_lint
 
   backend-tests:
     runs-on: ubuntu-latest
@@ -190,7 +190,7 @@ jobs:
             ${{ runner.os }}-cargo-backend-tests-
 
       - name: Run backend tests
-        run: cargo xtask test
+        run: cargo test -p cyder-api
 
   frontend:
     runs-on: ubuntu-latest
@@ -213,6 +213,9 @@ jobs:
 
       - name: Run frontend tests
         run: npm test
+
+      - name: Check frontend i18n
+        run: npm run i18n:check
 
       - name: Build frontend
         run: npm run build

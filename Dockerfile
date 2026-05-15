@@ -16,11 +16,15 @@ COPY --from=planner /work/recipe.json recipe.json
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 RUN cargo chef cook --release --all-targets --recipe-path recipe.json
 
-# Copy all source files (including the small frontend project)
+# Install frontend dependencies in their own cacheable layer.
+COPY front/package.json front/package-lock.json front/
+RUN npm --prefix front ci
+
+# Copy the remaining project source. .dockerignore excludes build outputs and deps.
 COPY . .
 
-# Execute the custom build task
-RUN cargo xtask build
+RUN npm --prefix front run build
+RUN cargo build -p cyder-api --release
 
 # Prepare final artifacts
 RUN mkdir -p /opt/cyder/bin && \

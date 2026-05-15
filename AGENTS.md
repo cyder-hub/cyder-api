@@ -176,20 +176,26 @@ Proxy routes are under:
 - `/ai/gemini/*`
 - `/ai/ollama/*`
 
-## Use Cargo Xtask To Manage The Project
+## Command Entry Points
 
-This repository uses `cargo xtask` for common workflows.
+AI agent / vibe coding work must use native Cargo, npm, and Docker commands directly. Do not use `just` or `rtk just ...` unless the user explicitly allows `just` for the current task.
+
+For Codex/AI agent execution, keep `rtk` as the outer command runner and do not write it into project files. Default to commands such as `rtk cargo ...`, `rtk npm --prefix front ...`, and `rtk docker ...`.
 
 | Command | Purpose |
 | --- | --- |
-| `cargo xtask dev` | Start backend and frontend dev servers |
-| `cargo xtask dev-backend` | Start backend dev server |
-| `cargo xtask dev-front` | Install frontend deps and start frontend dev server |
-| `cargo xtask build` | Build backend and frontend |
-| `cargo xtask build-backend` | Build backend only |
-| `cargo xtask build-front` | Build frontend only |
-| `cargo xtask install-front-deps` | Install frontend dependencies |
-| `cargo xtask test` | Run backend tests |
+| `cargo run -p cyder-api` | Run backend dev server |
+| `cargo build -p cyder-api --release` | Build backend release binary |
+| `cargo fmt --check` | Check Rust formatting |
+| `cargo run -p cyder-api --bin log_lint` | Run backend log lint |
+| `cargo test -p cyder-api` | Run backend tests |
+| `cargo run -p cyder-api --bin transform_quality_gate -- --quick` | Run transform quality gate |
+| `npm --prefix front install` | Install frontend dependencies for development |
+| `npm --prefix front ci` | Install locked frontend dependencies for CI/release builds |
+| `npm --prefix front run dev` | Start frontend dev server |
+| `npm --prefix front run i18n:check` | Check frontend i18n coverage |
+| `npm --prefix front test` | Run frontend tests |
+| `npm --prefix front run build` | Build frontend assets |
 
 ## Testing And Verification
 

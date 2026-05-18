@@ -1,0 +1,458 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to build and publish, for example v0.7.0. Defaults to the dispatch ref.
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-release:
+    runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+      version: ${{ steps.validate.outputs.version }}
+      major_minor: ${{ steps.validate.outputs.major_minor }}
+      image_ghcr: ${{ steps.validate.outputs.image_ghcr }}
+      image_dockerhub: ${{ steps.validate.outputs.image_dockerhub }}
+      source_sha: ${{ steps.validate.outputs.source_sha }}
+      ci_run_id: ${{ steps.validate.outputs.ci_run_id }}
+    env:
+      RELEASE_TAG_INPUT: ${{ inputs.release_tag || '' }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Validate release metadata
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="${RELEASE_TAG_INPUT:-${GITHUB_REF_NAME}}"
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vMAJOR.MINOR.PATCH: $release_tag" >&2
+            exit 1
+          fi
+
+          git fetch --force origin "refs/heads/master:refs/remotes/origin/master"
+          git fetch --force origin "refs/tags/${release_tag}:refs/tags/${release_tag}"
+
+          source_sha="$(git rev-list -n 1 "$release_tag")"
+          git checkout --detach "$source_sha"
+
+          if ! git merge-base --is-ancestor "$source_sha" origin/master; then
+            echo "Release tag ${release_tag} must point to a commit reachable from master." >&2
+            exit 1
+          fi
+
+          version="${release_tag#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' server/Cargo.toml | head -n 1)"
+          if [[ "$cargo_version" != "$version" ]]; then
+            echo "server/Cargo.toml version ($cargo_version) must match release tag version ($version)." >&2
+            exit 1
+          fi
+
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" || -z "$DOCKERHUB_NAMESPACE" ]]; then
+            echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets plus DOCKERHUB_NAMESPACE variable are required before publishing release images." >&2
+            exit 1
+          fi
+
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$release_tag" --json isDraft --jq .isDraft)"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release ${release_tag} already exists and is not a draft." >&2
+              exit 1
+            fi
+          fi
+
+          ci_run_id="$(
+            gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f branch=master \
+              -f event=push \
+              -f head_sha="$source_sha" \
+              -f status=success \
+              --jq '.workflow_runs[0].id // empty'
+          )"
+          if [[ -z "$ci_run_id" ]]; then
+            echo "No successful CI push run was found for master commit ${source_sha}." >&2
+            echo "Wait for CI to pass on master, or rerun the release after CI is green." >&2
+            exit 1
+          fi
+
+          major_minor="$(echo "$version" | cut -d. -f1,2)"
+          image_ghcr="ghcr.io/${GITHUB_REPOSITORY}"
+          image_dockerhub="${DOCKERHUB_NAMESPACE}/cyder-api"
+
+          {
+            echo "release_tag=$release_tag"
+            echo "version=$version"
+            echo "major_minor=$major_minor"
+            echo "image_ghcr=$image_ghcr"
+            echo "image_dockerhub=$image_dockerhub"
+            echo "source_sha=$source_sha"
+            echo "ci_run_id=$ci_run_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write validation summary
+        shell: bash
+        run: |
+          {
+            echo "### Release Validation"
+            echo ""
+            echo "- Release tag: ${{ steps.validate.outputs.release_tag }}"
+            echo "- Version: ${{ steps.validate.outputs.version }}"
+            echo "- Source SHA: ${{ steps.validate.outputs.source_sha }}"
+            echo "- CI run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.validate.outputs.ci_run_id }}"
+            echo "- GHCR image: ${{ steps.validate.outputs.image_ghcr }}"
+            echo "- Docker Hub image: ${{ steps.validate.outputs.image_dockerhub }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  transform-quality-gate:
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_tag }}
+
+      - name: Run transform quality gate
+        uses: ./.github/actions/transform-quality-gate
+
+  build-version-image:
+    needs:
+      - validate-release
+      - transform-quality-gate
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_tag }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push immutable release image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ needs.validate-release.outputs.image_ghcr }}:${{ needs.validate-release.outputs.version }}
+            ${{ env.IMAGE_DOCKERHUB }}:${{ needs.validate-release.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Write image summary
+        shell: bash
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "### Release Image"
+            echo ""
+            echo "- Workflow: ${WORKFLOW_NAME}"
+            echo "- Run: ${WORKFLOW_RUN_URL}"
+            echo "- Release tag: ${{ needs.validate-release.outputs.release_tag }}"
+            echo "- Version: ${{ needs.validate-release.outputs.version }}"
+            echo "- Source SHA: ${{ needs.validate-release.outputs.source_sha }}"
+            echo "- GHCR version tag: ${{ needs.validate-release.outputs.image_ghcr }}:${{ needs.validate-release.outputs.version }}"
+            echo "- Docker Hub version tag: ${IMAGE_DOCKERHUB}:${{ needs.validate-release.outputs.version }}"
+            echo "- Build digest: ${{ steps.build.outputs.digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-version-images:
+    needs:
+      - validate-release
+      - build-version-image
+    runs-on: ubuntu-24.04
+    outputs:
+      ghcr_digest_ref: ${{ steps.verify.outputs.ghcr_digest_ref }}
+      dockerhub_digest_ref: ${{ steps.verify.outputs.dockerhub_digest_ref }}
+    env:
+      VERSION: ${{ needs.validate-release.outputs.version }}
+      IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
+      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify immutable version images
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker pull "${IMAGE_GHCR}:${VERSION}"
+          docker pull "${IMAGE_DOCKERHUB}:${VERSION}"
+
+          ghcr_digest_ref="$(docker image inspect --format='{{index .RepoDigests 0}}' "${IMAGE_GHCR}:${VERSION}")"
+          dockerhub_digest_ref="$(docker image inspect --format='{{index .RepoDigests 0}}' "${IMAGE_DOCKERHUB}:${VERSION}")"
+
+          {
+            echo "ghcr_digest_ref=$ghcr_digest_ref"
+            echo "dockerhub_digest_ref=$dockerhub_digest_ref"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release Image Verification"
+            echo ""
+            echo "- Verified GHCR version image: ${IMAGE_GHCR}:${VERSION}"
+            echo "- GHCR digest ref: ${ghcr_digest_ref}"
+            echo "- Verified Docker Hub version image: ${IMAGE_DOCKERHUB}:${VERSION}"
+            echo "- Docker Hub digest ref: ${dockerhub_digest_ref}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  create-draft-release:
+    needs:
+      - validate-release
+      - verify-version-images
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+      VERSION: ${{ needs.validate-release.outputs.version }}
+      IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
+      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
+      SOURCE_SHA: ${{ needs.validate-release.outputs.source_sha }}
+      CI_RUN_ID: ${{ needs.validate-release.outputs.ci_run_id }}
+      GHCR_DIGEST_REF: ${{ needs.verify-version-images.outputs.ghcr_digest_ref }}
+      DOCKERHUB_DIGEST_REF: ${{ needs.verify-version-images.outputs.dockerhub_digest_ref }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-release.outputs.release_tag }}
+
+      - name: Build release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/release-assets
+          cat > dist/release-assets/release-manifest.json <<EOF
+          {
+            "package": "cyder-api",
+            "version": "${VERSION}",
+            "tag": "${RELEASE_TAG}",
+            "commit": "${SOURCE_SHA}",
+            "ciRun": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${CI_RUN_ID}",
+            "workflowRun": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "images": [
+              {
+                "registry": "ghcr",
+                "tag": "${IMAGE_GHCR}:${VERSION}",
+                "digestRef": "${GHCR_DIGEST_REF}"
+              },
+              {
+                "registry": "dockerhub",
+                "tag": "${IMAGE_DOCKERHUB}:${VERSION}",
+                "digestRef": "${DOCKERHUB_DIGEST_REF}"
+              }
+            ]
+          }
+          EOF
+
+          (
+            cd dist/release-assets
+            sha256sum release-manifest.json > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Create or update draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$RELEASE_TAG" \
+            -f target_commitish="$SOURCE_SHA" \
+            --jq .body > "$notes_file"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release ${RELEASE_TAG} already exists and is not a draft." >&2
+              exit 1
+            fi
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$notes_file"
+          else
+            gh release create "$RELEASE_TAG" --draft --verify-tag --target "$SOURCE_SHA" --title "$RELEASE_TAG" --notes-file "$notes_file"
+          fi
+
+          gh release upload "$RELEASE_TAG" dist/release-assets/* --clobber
+
+      - name: Write draft summary
+        shell: bash
+        run: |
+          {
+            echo "### Draft Release"
+            echo ""
+            echo "- Draft release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+            echo "- Manifest: release-manifest.json"
+            echo "- Checksum: SHA256SUMS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-release:
+    needs:
+      - validate-release
+      - create-draft-release
+    runs-on: ubuntu-24.04
+    environment: release
+    env:
+      RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
+      VERSION: ${{ needs.validate-release.outputs.version }}
+      MAJOR_MINOR: ${{ needs.validate-release.outputs.major_minor }}
+      IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
+      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull immutable version images
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker pull "${IMAGE_GHCR}:${VERSION}"
+          docker pull "${IMAGE_DOCKERHUB}:${VERSION}"
+
+      - name: Promote release image tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker tag "${IMAGE_GHCR}:${VERSION}" "${IMAGE_GHCR}:${MAJOR_MINOR}"
+          docker tag "${IMAGE_GHCR}:${VERSION}" "${IMAGE_GHCR}:latest"
+          docker tag "${IMAGE_DOCKERHUB}:${VERSION}" "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
+          docker tag "${IMAGE_DOCKERHUB}:${VERSION}" "${IMAGE_DOCKERHUB}:latest"
+
+          docker push "${IMAGE_GHCR}:${MAJOR_MINOR}"
+          docker push "${IMAGE_GHCR}:latest"
+          docker push "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
+          docker push "${IMAGE_DOCKERHUB}:latest"
+
+      - name: Verify promoted tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker pull "${IMAGE_GHCR}:${MAJOR_MINOR}"
+          docker pull "${IMAGE_GHCR}:latest"
+          docker pull "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
+          docker pull "${IMAGE_DOCKERHUB}:latest"
+
+          {
+            echo "### Release Promotion Verification"
+            echo ""
+            echo "- Verified GHCR major/minor: ${IMAGE_GHCR}:${MAJOR_MINOR}"
+            echo "- Verified GHCR latest: ${IMAGE_GHCR}:latest"
+            echo "- Verified Docker Hub major/minor: ${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
+            echo "- Verified Docker Hub latest: ${IMAGE_DOCKERHUB}:latest"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Unable to find draft release for ${RELEASE_TAG}." >&2
+            exit 1
+          fi
+
+          is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+          if [[ "$is_draft" != "true" ]]; then
+            echo "Release ${RELEASE_TAG} is already published." >&2
+            exit 1
+          fi
+
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+
+          latest_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
+          if [[ "$latest_tag" != "$RELEASE_TAG" ]]; then
+            echo "Expected ${RELEASE_TAG} to be latest release, but GitHub reports ${latest_tag}." >&2
+            exit 1
+          fi
+
+      - name: Write publish summary
+        shell: bash
+        run: |
+          {
+            echo "### Published Release"
+            echo ""
+            echo "- Release tag: ${RELEASE_TAG}"
+            echo "- Version: ${VERSION}"
+            echo "- Major/minor: ${MAJOR_MINOR}"
+            echo "- GHCR source: ${IMAGE_GHCR}:${VERSION}"
+            echo "- GHCR promoted tags: ${IMAGE_GHCR}:${MAJOR_MINOR}, ${IMAGE_GHCR}:latest"
+            echo "- Docker Hub source: ${IMAGE_DOCKERHUB}:${VERSION}"
+            echo "- Docker Hub promoted tags: ${IMAGE_DOCKERHUB}:${MAJOR_MINOR}, ${IMAGE_DOCKERHUB}:latest"
+            echo "- GitHub release is published and marked latest."
+          } >> "$GITHUB_STEP_SUMMARY"

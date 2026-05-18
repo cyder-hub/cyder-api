@@ -36,6 +36,9 @@ redis:
   url: "redis://127.0.0.1:6379/"
   pool_size: 10
   key_prefix: "cyder:"
+id:
+  # Snowflake worker id. Keep each running instance that shares a database on a distinct value in 0..=31.
+  worker_id: 1
 proxy: http://10.0.0.2:1081
 proxy_request:
   connect_timeout_seconds: 10

@@ -284,8 +284,8 @@ mod tests {
 
     use crate::config::{
         AlertsConfig, CacheCatalogConfig, CacheConfig, CacheRedisConfig, DeploymentConfig,
-        DiagnosticsConfig, MetricsConfig, NotificationConfig, RedisConfig, RuntimeStateConfig,
-        RuntimeStateRedisConfig, StorageConfig,
+        DiagnosticsConfig, IdConfig, MetricsConfig, NotificationConfig, RedisConfig,
+        RuntimeStateConfig, RuntimeStateRedisConfig, StorageConfig,
     };
 
     fn base_config() -> FinalConfig {
@@ -310,6 +310,7 @@ mod tests {
             db_pool_size: 5,
             redis: None,
             deployment: DeploymentConfig::default(),
+            id: IdConfig::default(),
             proxy_request: Default::default(),
             provider_governance: Default::default(),
             routing_resilience: Default::default(),

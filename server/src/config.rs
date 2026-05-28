@@ -2,6 +2,8 @@ use rand::{Rng, distr::Alphanumeric, rng};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{fmt, sync::LazyLock, time::Duration};
 
+use crate::utils::ID_MAX_WORKER_ID;
+
 pub mod env;
 pub mod loader;
 pub mod override_policy;
@@ -37,6 +39,49 @@ impl DeploymentMode {
 pub struct DeploymentConfig {
     #[serde(default)]
     pub mode: DeploymentMode,
+}
+
+// --- START ID CONFIG ---
+
+fn default_id_worker_id() -> u64 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IdConfig {
+    pub worker_id: u64,
+}
+
+impl Default for IdConfig {
+    fn default() -> Self {
+        Self {
+            worker_id: default_id_worker_id(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for IdConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawIdConfig {
+            #[serde(default = "default_id_worker_id")]
+            worker_id: u64,
+        }
+
+        let raw = RawIdConfig::deserialize(deserializer)?;
+        if raw.worker_id > ID_MAX_WORKER_ID {
+            return Err(serde::de::Error::custom(format!(
+                "id.worker_id must be in 0..={ID_MAX_WORKER_ID}"
+            )));
+        }
+
+        Ok(Self {
+            worker_id: raw.worker_id,
+        })
+    }
 }
 
 // --- START REDIS CONFIG ---
@@ -951,6 +996,8 @@ pub struct FinalConfig {
     #[serde(default)]
     pub deployment: DeploymentConfig,
     #[serde(default)]
+    pub id: IdConfig,
+    #[serde(default)]
     pub proxy_request: ProxyRequestConfig,
     #[serde(default)]
     pub provider_governance: ProviderGovernanceConfig,
@@ -1082,6 +1129,7 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         db_pool_size: 5,
         redis: None,
         deployment: DeploymentConfig::default(),
+        id: IdConfig::default(),
         proxy_request: ProxyRequestConfig::default(),
         provider_governance: ProviderGovernanceConfig::default(),
         routing_resilience: RoutingResilienceConfig::default(),
@@ -1119,7 +1167,7 @@ pub(crate) fn finalize_loaded_config(mut final_config: FinalConfig) -> FinalConf
 #[cfg(test)]
 mod tests {
     use super::{
-        AlertsConfig, CacheBackendType, DeploymentMode, DiagnosticsConfig, FinalConfig,
+        AlertsConfig, CacheBackendType, DeploymentMode, DiagnosticsConfig, FinalConfig, IdConfig,
         MetricsConfig, NotificationConfig, ProviderGovernanceConfig, ProxyRequestConfig,
         RoutingResilienceConfig, RuntimeStateBackendType, StorageDriver,
         default_replay_response_capture_max_bytes, source::ConfigLayerKind,
@@ -1215,6 +1263,12 @@ mod tests {
     }
 
     #[test]
+    fn id_config_defaults_to_worker_one() {
+        assert_eq!(IdConfig::default().worker_id, 1);
+        assert_eq!(super::programmatic_default_config().id.worker_id, 1);
+    }
+
+    #[test]
     fn replay_response_capture_default_is_independent_from_request_body_limit() {
         assert_eq!(default_replay_response_capture_max_bytes(), 4 * 1024 * 1024);
         assert_eq!(
@@ -1297,6 +1351,51 @@ proxy_request:
         );
         assert_eq!(loaded.config.proxy_request.connect_timeout_seconds, 10);
         assert!(!paths.default_config_path.exists());
+    }
+
+    #[test]
+    fn config_loader_reads_id_worker_id_from_user_config() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
+            r#"
+id:
+  worker_id: 31
+"#,
+        );
+
+        let loaded = load_without_environment(&paths);
+
+        assert_eq!(loaded.config.id.worker_id, 31);
+    }
+
+    #[test]
+    fn config_loader_rejects_out_of_range_id_worker_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = super::paths::ConfigPaths::for_test(temp_dir.path());
+        write_test_config(
+            &paths.user_config_path,
+            r#"
+id:
+  worker_id: 32
+"#,
+        );
+
+        let error = super::loader::load_effective_config(
+            &paths,
+            super::loader::ConfigLoadOptions {
+                include_environment: false,
+                include_override: true,
+            },
+        )
+        .expect_err("out of range worker id should fail");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("id.worker_id must be in 0..=31"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

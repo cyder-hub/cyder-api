@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cyder_api::config::persistence::{CYDER_CONFIG_PATH_ENV, CYDER_DATA_DIR_ENV};
 use cyder_api::service::transform::quality::{
     BenchmarkSummary, BenchmarkThresholds, TransformQualityReport, build_transform_quality_report,
 };
@@ -124,21 +125,8 @@ fn run_benchmark(
     quick: bool,
     json_out: &Path,
 ) -> Result<BenchmarkSummary, String> {
-    let mut command = Command::new("cargo");
-    command.current_dir(workspace_root);
-    command.args([
-        "bench",
-        "-p",
-        "cyder-api",
-        "--bench",
-        "transform_benchmark",
-        "--",
-    ]);
-    if quick {
-        command.arg("--quick");
-    }
-    command.arg("--json-out");
-    command.arg(json_out);
+    let benchmark_data_dir = temp_report_path("transform-benchmark-data");
+    let mut command = build_benchmark_command(workspace_root, quick, json_out, &benchmark_data_dir);
 
     let status = command
         .status()
@@ -152,6 +140,32 @@ fn run_benchmark(
             .map_err(|err| format!("read benchmark summary {}: {err}", json_out.display()))?,
     )
     .map_err(|err| format!("parse benchmark summary {}: {err}", json_out.display()))
+}
+
+fn build_benchmark_command(
+    workspace_root: &Path,
+    quick: bool,
+    json_out: &Path,
+    benchmark_data_dir: &Path,
+) -> Command {
+    let mut command = Command::new("cargo");
+    command.current_dir(workspace_root);
+    command.env(CYDER_DATA_DIR_ENV, benchmark_data_dir);
+    command.env_remove(CYDER_CONFIG_PATH_ENV);
+    command.args([
+        "bench",
+        "-p",
+        "cyder-api",
+        "--bench",
+        "transform_benchmark",
+        "--",
+    ]);
+    if quick {
+        command.arg("--quick");
+    }
+    command.arg("--json-out");
+    command.arg(json_out);
+    command
 }
 
 fn workspace_root() -> PathBuf {
@@ -196,6 +210,52 @@ fn print_report_summary(report: &TransformQualityReport) {
             check.kind,
             check.scenario,
             check.failures.join("; ")
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    #[test]
+    fn benchmark_command_uses_isolated_data_dir() {
+        let workspace = Path::new("/workspace");
+        let json_out = Path::new("/tmp/summary.json");
+        let data_dir = Path::new("/tmp/transform-benchmark-data");
+
+        let command = build_benchmark_command(workspace, true, json_out, data_dir);
+
+        assert_eq!(command.get_current_dir(), Some(workspace));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new("bench"),
+                OsStr::new("-p"),
+                OsStr::new("cyder-api"),
+                OsStr::new("--bench"),
+                OsStr::new("transform_benchmark"),
+                OsStr::new("--"),
+                OsStr::new("--quick"),
+                OsStr::new("--json-out"),
+                json_out.as_os_str(),
+            ]
+        );
+
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.iter().any(|(name, value)| {
+                *name == OsStr::new(CYDER_DATA_DIR_ENV)
+                    && value.as_deref() == Some(data_dir.as_os_str())
+            }),
+            "benchmark must not inherit the release default /data/cyder path"
+        );
+        assert!(
+            envs.iter()
+                .any(|(name, value)| *name == OsStr::new(CYDER_CONFIG_PATH_ENV) && value.is_none()),
+            "benchmark must ignore caller-specific config files"
         );
     }
 }

@@ -51,14 +51,14 @@ jobs:
               [[ -z "$file" ]] && continue
 
               case "$file" in
-                Cargo.toml|Cargo.lock|server/*|.github/actions/transform-quality-gate/*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release-image.yml)
+                Cargo.toml|Cargo.lock|server/*|.github/actions/transform-quality-gate/*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release.yml)
                   run_transform=true
                   transform_reason="Transform-sensitive path changed."
                   ;;
               esac
 
               case "$file" in
-                Dockerfile|.dockerignore|Cargo.lock|Cargo.toml|justfile|server/Cargo.toml|server/src/bin/*|front/package.json|front/package-lock.json|front/tsconfig*.json|front/vite.config.*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release-image.yml|.github/actions/*)
+                Dockerfile|.dockerignore|Cargo.lock|Cargo.toml|justfile|server/Cargo.toml|server/src/bin/*|front/package.json|front/package-lock.json|front/tsconfig*.json|front/vite.config.*|.github/workflows/ci.yml|.github/workflows/master-image.yml|.github/workflows/release.yml|.github/actions/*)
                   run_docker_smoke=true
                   docker_smoke_reason="Docker packaging path changed."
                   ;;

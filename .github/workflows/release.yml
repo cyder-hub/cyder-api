@@ -7,14 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release tag to build and publish, for example v0.7.0. Defaults to the dispatch ref.
-        required: false
+        description: Release tag to build and publish, for example v0.7.0.
+        required: true
         type: string
 
 permissions:
-  actions: read
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   group: release-${{ inputs.release_tag || github.ref_name }}
@@ -23,6 +21,9 @@ concurrency:
 jobs:
   validate-release:
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
     outputs:
       release_tag: ${{ steps.validate.outputs.release_tag }}
       version: ${{ steps.validate.outputs.version }}
@@ -88,14 +89,40 @@ jobs:
             fi
           fi
 
-          ci_run_id="$(
-            gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-              -f branch=master \
-              -f event=push \
-              -f head_sha="$source_sha" \
-              -f status=success \
-              --jq '.workflow_runs[0].id // empty'
-          )"
+          deadline=$((SECONDS + 1800))
+          ci_run_id=""
+          while true; do
+            ci_run_tsv="$(
+              gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+                -f branch=master \
+                -f event=push \
+                -f head_sha="$source_sha" \
+                --jq '.workflow_runs[0] | if . == null then "" else [.id, .status, (.conclusion // "")] | @tsv end'
+            )"
+
+            if [[ -n "$ci_run_tsv" ]]; then
+              IFS=$'\t' read -r ci_run_id ci_status ci_conclusion <<< "$ci_run_tsv"
+              if [[ "$ci_status" == "completed" && "$ci_conclusion" == "success" ]]; then
+                break
+              fi
+
+              if [[ "$ci_status" == "completed" ]]; then
+                echo "CI run ${ci_run_id} for ${source_sha} completed with conclusion ${ci_conclusion}, not success." >&2
+                exit 1
+              fi
+
+              echo "Waiting for CI run ${ci_run_id} to complete; current status is ${ci_status}."
+            else
+              echo "Waiting for CI push run to appear for master commit ${source_sha}."
+            fi
+
+            if (( SECONDS >= deadline )); then
+              echo "Timed out waiting for successful CI push run for master commit ${source_sha}." >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
           if [[ -z "$ci_run_id" ]]; then
             echo "No successful CI push run was found for master commit ${source_sha}." >&2
             echo "Wait for CI to pass on master, or rerun the release after CI is green." >&2
@@ -103,7 +130,8 @@ jobs:
           fi
 
           major_minor="$(echo "$version" | cut -d. -f1,2)"
-          image_ghcr="ghcr.io/${GITHUB_REPOSITORY}"
+          repository_slug="${GITHUB_REPOSITORY,,}"
+          image_ghcr="ghcr.io/${repository_slug}"
           image_dockerhub="${DOCKERHUB_NAMESPACE}/cyder-api"
 
           {
@@ -133,6 +161,8 @@ jobs:
   transform-quality-gate:
     needs: validate-release
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v4
@@ -142,11 +172,87 @@ jobs:
       - name: Run transform quality gate
         uses: ./.github/actions/transform-quality-gate
 
+  version-image-preflight:
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: read
+    outputs:
+      build_version_image: ${{ steps.preflight.outputs.build_version_image }}
+      preflight_reason: ${{ steps.preflight.outputs.preflight_reason }}
+    env:
+      VERSION: ${{ needs.validate-release.outputs.version }}
+      IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
+      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Check immutable version images
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ghcr_exists=false
+          dockerhub_exists=false
+
+          if docker manifest inspect "${IMAGE_GHCR}:${VERSION}" >/dev/null 2>&1; then
+            ghcr_exists=true
+          fi
+
+          if docker manifest inspect "${IMAGE_DOCKERHUB}:${VERSION}" >/dev/null 2>&1; then
+            dockerhub_exists=true
+          fi
+
+          if [[ "$ghcr_exists" == "true" && "$dockerhub_exists" == "true" ]]; then
+            build_version_image=false
+            preflight_reason="Both immutable version images already exist; release will reuse and verify them."
+          elif [[ "$ghcr_exists" == "false" && "$dockerhub_exists" == "false" ]]; then
+            build_version_image=true
+            preflight_reason="No immutable version images exist; release will build and push them."
+          else
+            echo "Immutable version image state is inconsistent." >&2
+            echo "GHCR ${IMAGE_GHCR}:${VERSION} exists: ${ghcr_exists}" >&2
+            echo "Docker Hub ${IMAGE_DOCKERHUB}:${VERSION} exists: ${dockerhub_exists}" >&2
+            echo "Refusing to overwrite ${VERSION}; fix the missing registry artifact manually, then rerun." >&2
+            exit 1
+          fi
+
+          {
+            echo "build_version_image=$build_version_image"
+            echo "preflight_reason=$preflight_reason"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Version Image Preflight"
+            echo ""
+            echo "- GHCR ${IMAGE_GHCR}:${VERSION} exists: ${ghcr_exists}"
+            echo "- Docker Hub ${IMAGE_DOCKERHUB}:${VERSION} exists: ${dockerhub_exists}"
+            echo "- Build version image: ${build_version_image}"
+            echo "- Reason: ${preflight_reason}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build-version-image:
     needs:
       - validate-release
       - transform-quality-gate
+      - version-image-preflight
+    if: needs.version-image-preflight.outputs.build_version_image == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     env:
       IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
     steps:
@@ -206,8 +312,13 @@ jobs:
   verify-version-images:
     needs:
       - validate-release
+      - transform-quality-gate
+      - version-image-preflight
       - build-version-image
+    if: always() && needs.validate-release.result == 'success' && needs.transform-quality-gate.result == 'success' && needs.version-image-preflight.result == 'success' && (needs.build-version-image.result == 'success' || needs.build-version-image.result == 'skipped')
     runs-on: ubuntu-24.04
+    permissions:
+      packages: read
     outputs:
       ghcr_digest_ref: ${{ steps.verify.outputs.ghcr_digest_ref }}
       dockerhub_digest_ref: ${{ steps.verify.outputs.dockerhub_digest_ref }}
@@ -229,6 +340,9 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Verify immutable version images
         id: verify
         shell: bash
@@ -238,8 +352,10 @@ jobs:
           docker pull "${IMAGE_GHCR}:${VERSION}"
           docker pull "${IMAGE_DOCKERHUB}:${VERSION}"
 
-          ghcr_digest_ref="$(docker image inspect --format='{{index .RepoDigests 0}}' "${IMAGE_GHCR}:${VERSION}")"
-          dockerhub_digest_ref="$(docker image inspect --format='{{index .RepoDigests 0}}' "${IMAGE_DOCKERHUB}:${VERSION}")"
+          ghcr_digest="$(docker buildx imagetools inspect "${IMAGE_GHCR}:${VERSION}" --format '{{.Manifest.Digest}}')"
+          dockerhub_digest="$(docker buildx imagetools inspect "${IMAGE_DOCKERHUB}:${VERSION}" --format '{{.Manifest.Digest}}')"
+          ghcr_digest_ref="${IMAGE_GHCR}@${ghcr_digest}"
+          dockerhub_digest_ref="${IMAGE_DOCKERHUB}@${dockerhub_digest}"
 
           {
             echo "ghcr_digest_ref=$ghcr_digest_ref"
@@ -260,6 +376,8 @@ jobs:
       - validate-release
       - verify-version-images
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     env:
       RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
       VERSION: ${{ needs.validate-release.outputs.version }}
@@ -353,6 +471,9 @@ jobs:
       - create-draft-release
     runs-on: ubuntu-24.04
     environment: release
+    permissions:
+      contents: write
+      packages: write
     env:
       RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
       VERSION: ${{ needs.validate-release.outputs.version }}

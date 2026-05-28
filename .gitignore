@@ -18,5 +18,6 @@ diesel.toml
 .idea
 .vscode
 .aider*
+.antigravitycli/
 
 /task/

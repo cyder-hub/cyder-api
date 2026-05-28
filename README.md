@@ -348,6 +348,18 @@ docker run --rm -p 8000:8000 \
 
 This migration hook only changes the base config file path. Managed override/history files and default local SQLite/storage paths remain under `/data/cyder`.
 
+## Release Workflow
+
+Release publishing is tag-driven. Push a semver tag that matches `server/Cargo.toml`, for example `v0.7.0`, and the `Release` workflow will:
+
+1. verify the tag is on `master` and that CI passed for the tagged commit
+2. run the transform quality gate
+3. build and push GHCR/Docker Hub `X.Y.Z` images
+4. create or update a draft GitHub Release with a release manifest and checksum
+5. after the `release` environment gate, promote `X.Y` and `latest` image tags and publish the GitHub Release
+
+Do not publish releases directly from the GitHub Release UI. Use the same tag with `workflow_dispatch` only to recover a failed release run. Recovery reruns reuse existing `X.Y.Z` images only when both registries already contain them; if only one registry has the version image, the workflow fails instead of overwriting an immutable tag.
+
 ## Summary
 
 Cyder API is already beyond the "CRUD plus proxy" stage. It now has the core shape of a serious single-admin LLM gateway, with strong transformation logic and a growing operations console. The next stage is not more platform surface area; it is resilience, replay, alerting, and tighter operational feedback loops.

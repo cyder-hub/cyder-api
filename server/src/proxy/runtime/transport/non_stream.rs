@@ -8,6 +8,7 @@ use chrono::Utc;
 
 use super::{
     ProxyRequestFailure, ProxyRequestOutcome, ProxyResponseMode,
+    ReasoningContinuationCaptureContext,
     client::read_response_bytes_with_cancellation,
     response::{
         build_response_builder, decode_response_body, process_success_response_body,
@@ -28,18 +29,42 @@ use crate::{
                 record_immediate_completion_if_allowed,
             },
             policy::{RuntimeExecutionPolicy, RuntimeLogMode},
+            reasoning_content_repair::{
+                ReasoningContentRepairResultKey, continuation_snapshots_from_openai_response_body,
+            },
         },
         util::{
             json_top_level_field_count_from_bytes, parse_utility_usage_normalization, sha256_hex,
         },
     },
-    schema::enum_def::RequestStatus,
+    schema::enum_def::{LlmApiType, RequestStatus},
     service::{
-        app_state::AppState, cache::types::CacheCostCatalogVersion,
-        runtime::ProviderCircuitProbePermit,
+        app_state::AppState,
+        cache::types::CacheCostCatalogVersion,
+        runtime::{ProviderCircuitProbePermit, ReasoningContinuationCacheKey},
+        transform::unified::{
+            UnifiedTransformDiagnostic, UnifiedTransformDiagnosticAction,
+            UnifiedTransformDiagnosticKind, UnifiedTransformDiagnosticLossLevel,
+        },
     },
 };
+use serde::Serialize;
 use tokio::sync::Mutex as TokioMutex;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub(super) struct ReasoningContentCaptureReport {
+    pub captured_count: usize,
+    pub diagnostics: Vec<ReasoningContentCaptureDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct ReasoningContentCaptureDiagnostic {
+    pub result: ReasoningContentRepairResultKey,
+    pub captured_count: usize,
+    pub tool_call_ids: Vec<String>,
+    pub tool_calls_hash: Option<String>,
+    pub detail: Option<String>,
+}
 
 pub(super) async fn handle_non_streaming_response(
     app_state: &Arc<AppState>,
@@ -53,6 +78,7 @@ pub(super) async fn handle_non_streaming_response(
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     response_mode: ProxyResponseMode,
+    reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
     log_mode: RuntimeLogMode,
     execution_policy: RuntimeExecutionPolicy,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
@@ -121,6 +147,14 @@ pub(super) async fn handle_non_streaming_response(
     let llm_response_completed_at = Utc::now().timestamp_millis();
 
     if status_code.is_success() {
+        let reasoning_capture_report = capture_non_stream_reasoning_continuation(
+            app_state,
+            reasoning_capture,
+            response_mode,
+            &decompressed_body,
+            llm_response_completed_at,
+        )
+        .await;
         let (final_body, parsed_usage_info, parsed_usage_normalization, transform_diagnostics) =
             match response_mode {
                 ProxyResponseMode::Generation {
@@ -155,6 +189,9 @@ pub(super) async fn handle_non_streaming_response(
             final_body.clone(),
         );
         append_response_transform_diagnostics(&mut context, &transform_diagnostics);
+        let reasoning_capture_diagnostics =
+            reasoning_capture_transform_diagnostics(&reasoning_capture_report);
+        append_response_transform_diagnostics(&mut context, &reasoning_capture_diagnostics);
         record_immediate_completion_if_allowed(app_state, &context, log_mode, execution_policy)
             .await;
         if execution_policy.records_provider_runtime() {
@@ -224,5 +261,142 @@ pub(super) async fn handle_non_streaming_response(
             log_context: context.clone(),
             response_headers: Some(response_headers),
         })
+    }
+}
+
+pub(super) async fn capture_non_stream_reasoning_continuation(
+    app_state: &Arc<AppState>,
+    reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
+    response_mode: ProxyResponseMode,
+    body: &Bytes,
+    observed_at_ms: i64,
+) -> ReasoningContentCaptureReport {
+    let Some(reasoning_capture) = reasoning_capture else {
+        return single_capture_result(ReasoningContentRepairResultKey::Disabled, 0, None);
+    };
+    if !reasoning_capture.feature_enabled {
+        return single_capture_result(ReasoningContentRepairResultKey::Disabled, 0, None);
+    }
+    if !target_is_openai_compatible_generation(response_mode) {
+        return single_capture_result(ReasoningContentRepairResultKey::NotApplicable, 0, None);
+    }
+
+    let snapshots = match continuation_snapshots_from_openai_response_body(
+        reasoning_capture.scope.clone(),
+        body,
+        observed_at_ms,
+    ) {
+        Ok(snapshots) => snapshots,
+        Err(result) => return single_capture_result(result, 0, Some("response_body".to_string())),
+    };
+    if snapshots.is_empty() {
+        return single_capture_result(ReasoningContentRepairResultKey::NotApplicable, 0, None);
+    }
+
+    let mut report = ReasoningContentCaptureReport::default();
+    for snapshot in snapshots {
+        let key = snapshot.key.clone();
+        match app_state
+            .reasoning_continuation_store
+            .insert(snapshot, observed_at_ms)
+            .await
+        {
+            Ok(()) => {
+                report.captured_count += 1;
+                report.diagnostics.push(capture_diagnostic_for_key(
+                    ReasoningContentRepairResultKey::Matched,
+                    1,
+                    &key,
+                    None,
+                ));
+            }
+            Err(err) => {
+                report.diagnostics.push(capture_diagnostic_for_key(
+                    ReasoningContentRepairResultKey::CacheMiss,
+                    0,
+                    &key,
+                    Some(format!("store_error={err}")),
+                ));
+            }
+        }
+    }
+
+    report
+}
+
+fn target_is_openai_compatible_generation(response_mode: ProxyResponseMode) -> bool {
+    matches!(
+        response_mode,
+        ProxyResponseMode::Generation {
+            target_api_type: LlmApiType::Openai | LlmApiType::GeminiOpenai,
+            ..
+        }
+    )
+}
+
+fn single_capture_result(
+    result: ReasoningContentRepairResultKey,
+    captured_count: usize,
+    detail: Option<String>,
+) -> ReasoningContentCaptureReport {
+    ReasoningContentCaptureReport {
+        captured_count,
+        diagnostics: vec![ReasoningContentCaptureDiagnostic {
+            result,
+            captured_count,
+            tool_call_ids: Vec::new(),
+            tool_calls_hash: None,
+            detail,
+        }],
+    }
+}
+
+fn capture_diagnostic_for_key(
+    result: ReasoningContentRepairResultKey,
+    captured_count: usize,
+    key: &ReasoningContinuationCacheKey,
+    detail: Option<String>,
+) -> ReasoningContentCaptureDiagnostic {
+    ReasoningContentCaptureDiagnostic {
+        result,
+        captured_count,
+        tool_call_ids: key.tool_call_ids.clone(),
+        tool_calls_hash: Some(key.tool_calls_hash.clone()),
+        detail,
+    }
+}
+
+pub(super) fn reasoning_capture_transform_diagnostics(
+    report: &ReasoningContentCaptureReport,
+) -> Vec<UnifiedTransformDiagnostic> {
+    report
+        .diagnostics
+        .iter()
+        .map(reasoning_capture_transform_diagnostic)
+        .collect()
+}
+
+fn reasoning_capture_transform_diagnostic(
+    diagnostic: &ReasoningContentCaptureDiagnostic,
+) -> UnifiedTransformDiagnostic {
+    UnifiedTransformDiagnostic {
+        type_: "runtime_feature_diagnostic".to_string(),
+        diagnostic_kind: UnifiedTransformDiagnosticKind::CapabilityDowngrade,
+        provider: "openai_compatible".to_string(),
+        target_provider: "openai_compatible".to_string(),
+        source: "upstream_response".to_string(),
+        target: "continuation_cache".to_string(),
+        stream_id: None,
+        stage: Some("response_capture".to_string()),
+        loss_level: UnifiedTransformDiagnosticLossLevel::Lossless,
+        action: UnifiedTransformDiagnosticAction::Send,
+        semantic_unit: "reasoning_content".to_string(),
+        reason: format!(
+            "openai_reasoning_content_capture:{}",
+            diagnostic.result.as_key()
+        ),
+        context: serde_json::to_string(diagnostic).ok(),
+        raw_data_summary: None,
+        recovery_hint: None,
     }
 }

@@ -12,6 +12,7 @@ use self::portable_config::PortableConfigAdminService;
 use self::provider::ProviderAdminService;
 use self::reasoning_config::ReasoningConfigAdminService;
 use self::request_patch::RequestPatchAdminService;
+use self::runtime_feature_config::RuntimeFeatureConfigAdminService;
 
 pub mod api_key;
 pub mod audit;
@@ -24,6 +25,7 @@ pub mod portable_config;
 pub mod provider;
 pub mod reasoning_config;
 pub mod request_patch;
+pub mod runtime_feature_config;
 
 // Management write paths must be owned here. Controllers may parse HTTP payloads and
 // shape responses, but cache invalidation, audit emission, and write orchestration
@@ -37,6 +39,7 @@ pub struct AdminServices {
     pub request_patch: Arc<RequestPatchAdminService>,
     pub cost: Arc<CostAdminService>,
     pub reasoning_config: Arc<ReasoningConfigAdminService>,
+    pub runtime_feature_config: Arc<RuntimeFeatureConfigAdminService>,
     pub portable_config: Arc<PortableConfigAdminService>,
 }
 
@@ -53,6 +56,9 @@ impl AdminServices {
             request_patch: Arc::new(RequestPatchAdminService::new(Arc::clone(&mutation_runner))),
             cost: Arc::new(CostAdminService::new(Arc::clone(&mutation_runner))),
             reasoning_config: Arc::new(ReasoningConfigAdminService::new(Arc::clone(
+                &mutation_runner,
+            ))),
+            runtime_feature_config: Arc::new(RuntimeFeatureConfigAdminService::new(Arc::clone(
                 &mutation_runner,
             ))),
             portable_config: Arc::new(PortableConfigAdminService::new(Arc::clone(
@@ -98,6 +104,10 @@ mod tests {
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
             services.reasoning_config.mutation_runner(),
+        ));
+        assert!(Arc::ptr_eq(
+            services.provider.mutation_runner(),
+            services.runtime_feature_config.mutation_runner(),
         ));
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),

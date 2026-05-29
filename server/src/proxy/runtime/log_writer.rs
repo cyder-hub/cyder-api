@@ -533,7 +533,10 @@ mod tests {
         proxy::runtime::{
             attempt::RequestAttemptDraft,
             log_writer::{build_candidate_manifest, finalize_attempt_failure_context},
-            route_resolver::{ExecutionCandidate, ExecutionPlan, ResolvedNameScope},
+            route_resolver::{
+                CandidateRuntimeFeatures, ExecutionCandidate, ExecutionPlan, ResolvedNameScope,
+                RuntimeFeatureConfigSource,
+            },
         },
         schema::enum_def::{
             LlmApiType, ProviderApiKeyMode, ProviderType, RequestAttemptStatus, SchedulerAction,
@@ -616,6 +619,10 @@ mod tests {
             reasoning_family: None,
             reasoning_preset: None,
             reasoning_suffix: None,
+            runtime_features: CandidateRuntimeFeatures {
+                openai_reasoning_content_repair_enabled: false,
+                openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
+            },
         }
     }
 

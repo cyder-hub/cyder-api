@@ -7,6 +7,7 @@ pub(crate) mod facade;
 pub(crate) mod log_writer;
 pub(crate) mod materializer;
 pub(crate) mod policy;
+pub(crate) mod reasoning_content_repair;
 pub(crate) mod replay_adapter;
 pub(crate) mod request_patch;
 pub(crate) mod route_resolver;

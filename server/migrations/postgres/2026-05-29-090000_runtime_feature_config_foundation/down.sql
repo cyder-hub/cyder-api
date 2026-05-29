@@ -1,0 +1,4 @@
+DROP INDEX IF EXISTS idx_runtime_feature_config_scope_owner;
+DROP INDEX IF EXISTS idx_runtime_feature_config_model_feature_uq_active;
+DROP INDEX IF EXISTS idx_runtime_feature_config_provider_feature_uq_active;
+DROP TABLE IF EXISTS runtime_feature_config;

@@ -303,6 +303,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    runtime_feature_config (id) {
+        id -> BigInt,
+        scope_kind -> Text,
+        provider_id -> Nullable<BigInt>,
+        model_id -> Nullable<BigInt>,
+        feature_key -> Text,
+        enabled -> Bool,
+        deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     model (id) {
         id -> BigInt,
         provider_id -> BigInt,
@@ -698,6 +712,8 @@ diesel::joinable!(notification_delivery -> alert_event (alert_id));
 diesel::joinable!(notification_delivery -> notification_channel (channel_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
 diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
+diesel::joinable!(runtime_feature_config -> model (model_id));
+diesel::joinable!(runtime_feature_config -> provider (provider_id));
 diesel::joinable!(request_attempt -> cost_catalog_versions (cost_catalog_version_id));
 diesel::joinable!(request_attempt -> model (model_id));
 diesel::joinable!(request_attempt -> provider (provider_id));
@@ -741,6 +757,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     provider_api_key,
     reasoning_config,
     reasoning_config_preset,
+    runtime_feature_config,
     request_attempt,
     request_log,
     request_replay_run,

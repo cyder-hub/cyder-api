@@ -1411,6 +1411,58 @@
       "cleared": "推理配置已清空。"
     }
   },
+  "runtimeFeatureConfigPanel": {
+    "titles": {
+      "provider": "渠道运行时特性",
+      "model": "模型运行时特性"
+    },
+    "features": {
+      "openaiReasoningContentRepair": {
+        "label": "Reasoning 回调",
+        "description": "为兼容 OpenAI 工具续写请求恢复缓存的 reasoning_content。"
+      }
+    },
+    "actions": {
+      "saveProvider": "保存渠道默认",
+      "saveModel": "保存模型覆盖",
+      "clearProvider": "清空渠道默认",
+      "clearModel": "继承渠道"
+    },
+    "summary": {
+      "ownerConfig": "当前配置",
+      "providerDefault": "渠道默认",
+      "effective": "最终值"
+    },
+    "fields": {
+      "providerDefault": "渠道默认",
+      "modelOverride": "模型覆盖"
+    },
+    "sources": {
+      "defaultFalse": "默认关闭",
+      "providerDefault": "渠道默认",
+      "modelOverride": "模型覆盖",
+      "unknown": "未知"
+    },
+    "values": {
+      "enabled": "启用",
+      "disabled": "停用",
+      "missing": "未配置"
+    },
+    "messages": {
+      "reasoningIndependent": "推理后缀配置与运行时修复相互独立。启用 reasoning_config 不会自动启用 reasoning_content 修复。",
+      "saveOwnerFirst": "请先保存对象，再配置运行时特性。",
+      "loading": "正在加载运行时特性配置",
+      "providerDefaultHelp": "这个默认值会应用到未配置模型覆盖的下游模型。",
+      "modelOverrideHelp": "保存后会创建模型覆盖。清空后会重新继承渠道默认值。"
+    },
+    "alert": {
+      "loadFailed": "加载运行时特性配置失败。",
+      "saveFailed": "保存运行时特性配置失败。",
+      "clearFailed": "清空运行时特性配置失败。",
+      "saved": "运行时特性配置已保存。",
+      "cleared": "运行时特性配置已清空。"
+    }
+  },
   "apiKeyPage": {
     "title": "API Key 管理",
     "addApiKey": "添加 API Key",
@@ -1810,6 +1862,10 @@
         "title": "高级",
         "description": "在这里管理额外 API Key、更多模型、request patch 和远端模型同步。"
       },
+      "advancedConfig": {
+        "title": "推理设置",
+        "description": "管理这个渠道的推理后缀和回调修复。"
+      },
       "modelsDescription": "这里可直接编辑模型名称、映射模型名称、能力和启用状态。完整配置仍然留在 ModelEdit。"
     },
     "modelCapabilities": {
@@ -1971,6 +2027,10 @@
     "capabilities": {
       "title": "模型能力",
       "description": "路由 prefilter 会读取这些显式运行时能力。启用 retry / fallback 前，请让它们与真实渠道行为保持一致。"
+    },
+    "advancedConfig": {
+      "title": "推理设置",
+      "description": "管理这个模型的推理后缀和回调修复。"
     },
     "alert": {
       "missingId": "缺少模型ID，无法编辑。",

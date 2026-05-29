@@ -63,6 +63,8 @@
         </p>
       </div>
 
+      <slot name="runtime-feature" />
+
       <div v-if="showCustomEditor" class="space-y-4 border-t border-gray-100 pt-4">
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
           <div class="space-y-1.5">

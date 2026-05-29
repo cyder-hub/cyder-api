@@ -36,7 +36,7 @@ use crate::{
         util::serialize_upstream_response_headers_for_log,
     },
     schema::enum_def::{LlmApiType, RequestStatus},
-    service::runtime::ProviderCircuitProbePermit,
+    service::runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
     service::{app_state::AppState, cache::types::CacheCostCatalogVersion},
 };
 
@@ -74,6 +74,12 @@ pub(in crate::proxy) struct ProxyRequestFailure {
     pub response_headers: Option<HeaderMap>,
 }
 
+#[derive(Clone, Debug)]
+pub(in crate::proxy) struct ReasoningContinuationCaptureContext {
+    pub scope: ReasoningContinuationScope,
+    pub feature_enabled: bool,
+}
+
 // Builds the HTTP client, sends the request to the LLM, and passes the response to be handled.
 pub(in crate::proxy) async fn send_materialized_request(
     app_state: Arc<AppState>,
@@ -88,6 +94,7 @@ pub(in crate::proxy) async fn send_materialized_request(
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     response_mode: ProxyResponseMode,
+    reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     log_mode: RuntimeLogMode,
     execution_policy: RuntimeExecutionPolicy,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
@@ -182,6 +189,11 @@ pub(in crate::proxy) async fn send_materialized_request(
         && response.headers().get(CONTENT_TYPE).map_or(false, |value| {
             value.to_str().unwrap_or("").contains("text/event-stream")
         });
+    let reasoning_capture = if execution_policy.captures_reasoning_continuations() {
+        reasoning_capture
+    } else {
+        None
+    };
 
     {
         let mut context = log_context.lock().await;
@@ -203,6 +215,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             provider_circuit_permit,
             api_type,
             target_api_type,
+            reasoning_capture.clone(),
             log_mode,
             execution_policy,
             first_byte_timeout,
@@ -235,6 +248,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             api_key_request_lease,
             provider_circuit_permit,
             response_mode,
+            reasoning_capture.as_ref(),
             log_mode,
             execution_policy,
         )
@@ -248,13 +262,19 @@ pub(in crate::proxy) async fn send_materialized_request(
 #[cfg(test)]
 mod tests {
     use super::{
+        ReasoningContinuationCaptureContext,
         client::send_with_first_byte_timeout,
+        non_stream::{
+            capture_non_stream_reasoning_continuation,
+            reasoning_capture_transform_diagnostics as non_stream_capture_transform_diagnostics,
+        },
         response::{
             build_response_builder, decode_response_body, process_success_response_body,
             should_forward_response_header,
         },
         stream::{
-            mark_stream_response_started_to_client, next_stream_chunk_timeout_duration,
+            OpenAiReasoningStreamCapture, mark_stream_response_started_to_client,
+            next_stream_chunk_timeout_duration, stream_capture_transform_diagnostics,
             sync_stream_usage_to_log_context,
         },
     };
@@ -268,16 +288,27 @@ mod tests {
                 finalize_cancelled_log_context, finalize_non_streaming_log_context,
             },
             runtime::policy::RuntimeExecutionPolicy,
+            runtime::reasoning_content_repair::{
+                ReasoningContentRepairRequest, ReasoningContentRepairResultKey,
+                canonical_tool_calls_hash, repair_openai_reasoning_content,
+            },
         },
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus},
         service::{
             app_state::AppState,
             cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider},
+            runtime::{
+                ReasoningContinuationCacheKey, ReasoningContinuationLookupResult,
+                ReasoningContinuationScope,
+            },
             transform::StreamTransformer,
         },
-        utils::{sse::SseParser, usage::UsageInfo},
+        utils::{
+            sse::{SseEvent, SseParser},
+            usage::UsageInfo,
+        },
     };
-    use axum::body::{Body, to_bytes};
+    use axum::body::{Body, Bytes, to_bytes};
     use flate2::{Compression, write::GzEncoder};
     use reqwest::{
         StatusCode,
@@ -287,7 +318,7 @@ mod tests {
         },
     };
     use serde_json::{Value, json};
-    use std::io::Write;
+    use std::{io::Write, sync::Arc};
 
     fn gzip_bytes(input: &[u8]) -> Vec<u8> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -356,6 +387,83 @@ mod tests {
             LlmApiType::Openai,
             LlmApiType::Openai,
         )
+    }
+
+    fn reasoning_capture_scope() -> ReasoningContinuationScope {
+        ReasoningContinuationScope {
+            api_key_id: 11,
+            provider_id: 22,
+            model_id: 33,
+            route_id: Some(44),
+            route_name: Some("primary".to_string()),
+            candidate_position: 1,
+        }
+    }
+
+    fn reasoning_capture_context(feature_enabled: bool) -> ReasoningContinuationCaptureContext {
+        ReasoningContinuationCaptureContext {
+            scope: reasoning_capture_scope(),
+            feature_enabled,
+        }
+    }
+
+    fn reasoning_tool_calls() -> Value {
+        json!([
+            {
+                "id": "call-weather",
+                "type": "function",
+                "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\":\"Paris\"}"
+                }
+            }
+        ])
+    }
+
+    fn reasoning_cache_key() -> ReasoningContinuationCacheKey {
+        ReasoningContinuationCacheKey::new(
+            reasoning_capture_scope(),
+            vec!["call-weather".to_string()],
+            canonical_tool_calls_hash(&reasoning_tool_calls()).expect("tool calls should hash"),
+        )
+    }
+
+    fn followup_request_without_reasoning() -> Value {
+        json!({
+            "messages": [
+                { "role": "user", "content": "weather" },
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": reasoning_tool_calls()
+                },
+                { "role": "tool", "tool_call_id": "call-weather", "content": "{}" }
+            ]
+        })
+    }
+
+    async fn repair_followup_from_capture_store(app_state: &Arc<AppState>, now_ms: i64) -> Value {
+        let mut followup = followup_request_without_reasoning();
+        let report = repair_openai_reasoning_content(ReasoningContentRepairRequest {
+            body: &mut followup,
+            scope: reasoning_capture_scope(),
+            store: app_state.reasoning_continuation_store.as_ref(),
+            feature_enabled: true,
+            target_is_openai_compatible_generation: true,
+            explicit_reasoning_disabled: false,
+            now_ms,
+        })
+        .await
+        .expect("repair should succeed");
+        assert_eq!(report.repaired_count, 1);
+        followup
+    }
+
+    fn stream_event(data: impl Into<String>) -> SseEvent {
+        SseEvent {
+            data: data.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -498,6 +606,428 @@ mod tests {
             })
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_stream_capture_reasoning_content_writes_store_for_openai_response() {
+        let app_state = Arc::new(AppState::new().await);
+        let capture_context = reasoning_capture_context(true);
+        let body = Bytes::from(
+            json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "reasoning_content": "NON_STREAM_CAPTURE_REASONING_SECRET",
+                            "tool_calls": reasoning_tool_calls()
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ]
+            })
+            .to_string(),
+        );
+        let original_body = body.clone();
+
+        let report = capture_non_stream_reasoning_continuation(
+            &app_state,
+            Some(&capture_context),
+            super::ProxyResponseMode::Generation {
+                api_type: LlmApiType::Openai,
+                target_api_type: LlmApiType::Openai,
+            },
+            &body,
+            1_000,
+        )
+        .await;
+
+        assert_eq!(body, original_body);
+        assert_eq!(report.captured_count, 1);
+        assert_eq!(
+            report.diagnostics[0].result,
+            ReasoningContentRepairResultKey::Matched
+        );
+        let diagnostics = non_stream_capture_transform_diagnostics(&report);
+        let diagnostics_json =
+            serde_json::to_string(&diagnostics).expect("diagnostics should serialize");
+        assert!(
+            diagnostics[0]
+                .reason
+                .contains("openai_reasoning_content_capture:matched")
+        );
+        assert_eq!(diagnostics[0].stage.as_deref(), Some("response_capture"));
+        assert!(!diagnostics_json.contains("NON_STREAM_CAPTURE_REASONING_SECRET"));
+        let lookup = app_state
+            .reasoning_continuation_store
+            .lookup(&reasoning_cache_key(), 1_001)
+            .await
+            .expect("lookup should succeed");
+        match lookup {
+            ReasoningContinuationLookupResult::Hit(record) => {
+                assert_eq!(
+                    record.reasoning_content,
+                    "NON_STREAM_CAPTURE_REASONING_SECRET"
+                );
+            }
+            other => panic!("unexpected lookup result: {other:?}"),
+        }
+
+        let followup = repair_followup_from_capture_store(&app_state, 1_002).await;
+        assert_eq!(
+            followup["messages"][1]["reasoning_content"],
+            "NON_STREAM_CAPTURE_REASONING_SECRET"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_stream_capture_skips_messages_without_reasoning_or_tool_calls() {
+        let app_state = Arc::new(AppState::new().await);
+        let capture_context = reasoning_capture_context(true);
+
+        for body in [
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "done",
+                        "tool_calls": reasoning_tool_calls()
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "reasoning without tools"
+                    }
+                }]
+            }),
+        ] {
+            let body = Bytes::from(body.to_string());
+            let report = capture_non_stream_reasoning_continuation(
+                &app_state,
+                Some(&capture_context),
+                super::ProxyResponseMode::Generation {
+                    api_type: LlmApiType::Openai,
+                    target_api_type: LlmApiType::Openai,
+                },
+                &body,
+                1_000,
+            )
+            .await;
+
+            assert_eq!(report.captured_count, 0);
+            assert_eq!(
+                report.diagnostics[0].result,
+                ReasoningContentRepairResultKey::NotApplicable
+            );
+        }
+        let lookup = app_state
+            .reasoning_continuation_store
+            .lookup(&reasoning_cache_key(), 1_001)
+            .await
+            .expect("lookup should succeed");
+        assert!(matches!(lookup, ReasoningContinuationLookupResult::Miss));
+    }
+
+    #[tokio::test]
+    async fn non_stream_capture_skips_feature_false_and_non_openai_generation() {
+        let app_state = Arc::new(AppState::new().await);
+        let body = Bytes::from(
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "should not capture",
+                        "tool_calls": reasoning_tool_calls()
+                    }
+                }]
+            })
+            .to_string(),
+        );
+
+        let disabled = capture_non_stream_reasoning_continuation(
+            &app_state,
+            Some(&reasoning_capture_context(false)),
+            super::ProxyResponseMode::Generation {
+                api_type: LlmApiType::Openai,
+                target_api_type: LlmApiType::Openai,
+            },
+            &body,
+            1_000,
+        )
+        .await;
+        assert_eq!(
+            disabled.diagnostics[0].result,
+            ReasoningContentRepairResultKey::Disabled
+        );
+
+        let not_applicable = capture_non_stream_reasoning_continuation(
+            &app_state,
+            Some(&reasoning_capture_context(true)),
+            super::ProxyResponseMode::Generation {
+                api_type: LlmApiType::Openai,
+                target_api_type: LlmApiType::Gemini,
+            },
+            &body,
+            1_000,
+        )
+        .await;
+        assert_eq!(
+            not_applicable.diagnostics[0].result,
+            ReasoningContentRepairResultKey::NotApplicable
+        );
+
+        let lookup = app_state
+            .reasoning_continuation_store
+            .lookup(&reasoning_cache_key(), 1_001)
+            .await
+            .expect("lookup should succeed");
+        assert!(matches!(lookup, ReasoningContinuationLookupResult::Miss));
+    }
+
+    #[tokio::test]
+    async fn non_stream_capture_parse_error_returns_diagnostic_without_failing_response() {
+        let app_state = Arc::new(AppState::new().await);
+        let body = Bytes::from_static(b"not-json");
+
+        let report = capture_non_stream_reasoning_continuation(
+            &app_state,
+            Some(&reasoning_capture_context(true)),
+            super::ProxyResponseMode::Generation {
+                api_type: LlmApiType::Openai,
+                target_api_type: LlmApiType::Openai,
+            },
+            &body,
+            1_000,
+        )
+        .await;
+
+        assert_eq!(report.captured_count, 0);
+        assert_eq!(
+            report.diagnostics[0].result,
+            ReasoningContentRepairResultKey::ParseFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_capture_reasoning_and_tool_call_deltas_writes_store() {
+        let app_state = Arc::new(AppState::new().await);
+        let mut capture = OpenAiReasoningStreamCapture::new(
+            Some(reasoning_capture_context(true)),
+            LlmApiType::Openai,
+        );
+        let events = vec![
+            stream_event(
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "reasoning_content": "STREAM_REASONING_"
+                        }
+                    }]
+                })
+                .to_string(),
+            ),
+            stream_event(
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "reasoning_content": "SECRET" }
+                    }]
+                })
+                .to_string(),
+            ),
+            stream_event(
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-weather",
+                                "type": "function",
+                                "function": { "name": "weather", "arguments": "{\"city\":\"Pa" }
+                            }]
+                        }
+                    }]
+                })
+                .to_string(),
+            ),
+            stream_event(
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "function": { "arguments": "ris\"}" }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+                .to_string(),
+            ),
+            stream_event("[DONE]"),
+        ];
+
+        capture.observe_events(&events);
+        let report = capture.finish(&app_state, 1_000).await;
+
+        assert_eq!(report.captured_count, 1);
+        assert_eq!(
+            report.diagnostics[0].result,
+            ReasoningContentRepairResultKey::Matched
+        );
+        let diagnostics = stream_capture_transform_diagnostics(&report);
+        let diagnostics_json =
+            serde_json::to_string(&diagnostics).expect("diagnostics should serialize");
+        assert!(
+            diagnostics[0]
+                .reason
+                .contains("openai_reasoning_content_capture:matched")
+        );
+        assert_eq!(diagnostics[0].stage.as_deref(), Some("response_capture"));
+        assert!(!diagnostics_json.contains("STREAM_REASONING_SECRET"));
+        let lookup = app_state
+            .reasoning_continuation_store
+            .lookup(&reasoning_cache_key(), 1_001)
+            .await
+            .expect("lookup should succeed");
+        match lookup {
+            ReasoningContinuationLookupResult::Hit(record) => {
+                assert_eq!(record.reasoning_content, "STREAM_REASONING_SECRET");
+            }
+            other => panic!("unexpected lookup result: {other:?}"),
+        }
+
+        let followup = repair_followup_from_capture_store(&app_state, 1_002).await;
+        assert_eq!(
+            followup["messages"][1]["reasoning_content"],
+            "STREAM_REASONING_SECRET"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_capture_does_not_cache_content_delta_as_reasoning() {
+        let app_state = Arc::new(AppState::new().await);
+        let mut capture = OpenAiReasoningStreamCapture::new(
+            Some(reasoning_capture_context(true)),
+            LlmApiType::Openai,
+        );
+        let events = vec![
+            stream_event(
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "visible text",
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-weather",
+                                "type": "function",
+                                "function": {
+                                    "name": "weather",
+                                    "arguments": "{\"city\":\"Paris\"}"
+                                }
+                            }]
+                        }
+                    }]
+                })
+                .to_string(),
+            ),
+            stream_event("[DONE]"),
+        ];
+
+        capture.observe_events(&events);
+        let report = capture.finish(&app_state, 1_000).await;
+
+        assert_eq!(report.captured_count, 0);
+        assert_eq!(
+            report.diagnostics[0].result,
+            ReasoningContentRepairResultKey::NotApplicable
+        );
+        let lookup = app_state
+            .reasoning_continuation_store
+            .lookup(&reasoning_cache_key(), 1_001)
+            .await
+            .expect("lookup should succeed");
+        assert!(matches!(lookup, ReasoningContinuationLookupResult::Miss));
+    }
+
+    #[tokio::test]
+    async fn stream_capture_requires_complete_tool_call_before_done() {
+        let app_state = Arc::new(AppState::new().await);
+        let mut capture = OpenAiReasoningStreamCapture::new(
+            Some(reasoning_capture_context(true)),
+            LlmApiType::Openai,
+        );
+        let events = vec![
+            stream_event(
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "reasoning_content": "complete reasoning" }
+                    }]
+                })
+                .to_string(),
+            ),
+            stream_event(
+                json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "function": { "arguments": "{\"city\":\"Paris\"}" }
+                            }]
+                        }
+                    }]
+                })
+                .to_string(),
+            ),
+            stream_event("[DONE]"),
+        ];
+
+        capture.observe_events(&events);
+        let report = capture.finish(&app_state, 1_000).await;
+
+        assert_eq!(report.captured_count, 0);
+        assert_eq!(
+            report.diagnostics[0].result,
+            ReasoningContentRepairResultKey::NotApplicable
+        );
+        let lookup = app_state
+            .reasoning_continuation_store
+            .lookup(&reasoning_cache_key(), 1_001)
+            .await
+            .expect("lookup should succeed");
+        assert!(matches!(lookup, ReasoningContinuationLookupResult::Miss));
+    }
+
+    #[tokio::test]
+    async fn stream_capture_parse_error_returns_diagnostic() {
+        let app_state = Arc::new(AppState::new().await);
+        let mut capture = OpenAiReasoningStreamCapture::new(
+            Some(reasoning_capture_context(true)),
+            LlmApiType::Openai,
+        );
+
+        capture.observe_events(&[stream_event("not-json")]);
+        let report = capture.finish(&app_state, 1_000).await;
+
+        assert_eq!(report.captured_count, 0);
+        assert_eq!(
+            report.diagnostics[0].result,
+            ReasoningContentRepairResultKey::ParseFailed
+        );
     }
 
     #[tokio::test]

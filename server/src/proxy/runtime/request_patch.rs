@@ -857,6 +857,7 @@ mod tests {
     use super::*;
     use crate::{
         database::reasoning_config::{ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset},
+        proxy::runtime::route_resolver::{CandidateRuntimeFeatures, RuntimeFeatureConfigSource},
         schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType},
         service::cache::types::{RequestPatchRuleOrigin, RuntimeResolvedRequestPatch},
     };
@@ -913,6 +914,10 @@ mod tests {
             reasoning_family: Some(ReasoningPatchFamily::OpenAiChatReasoningEffort),
             reasoning_preset: Some(ReasoningPreset::High),
             reasoning_suffix: Some("high".to_string()),
+            runtime_features: CandidateRuntimeFeatures {
+                openai_reasoning_content_repair_enabled: false,
+                openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
+            },
         }
     }
 

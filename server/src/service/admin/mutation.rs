@@ -62,6 +62,12 @@ pub enum AdminCatalogInvalidation {
     ReasoningModelConfig {
         model_id: i64,
     },
+    RuntimeFeatureProviderConfig {
+        provider_id: i64,
+    },
+    RuntimeFeatureModelConfig {
+        model_id: i64,
+    },
     Model {
         id: i64,
         name: Option<AdminModelCacheName>,
@@ -100,6 +106,8 @@ impl AdminCatalogInvalidation {
             Self::ProviderRequestPatchRules { .. } => "provider_request_patch_rules",
             Self::ReasoningProviderConfig { .. } => "reasoning_provider_config",
             Self::ReasoningModelConfig { .. } => "reasoning_model_config",
+            Self::RuntimeFeatureProviderConfig { .. } => "runtime_feature_provider_config",
+            Self::RuntimeFeatureModelConfig { .. } => "runtime_feature_model_config",
             Self::Model { .. } => "model",
             Self::ModelRoute { .. } => "model_route",
             Self::ModelRoutes(_) => "model_routes",
@@ -233,6 +241,16 @@ impl AdminMutationRunner {
             AdminCatalogInvalidation::ReasoningModelConfig { model_id } => {
                 self.catalog
                     .invalidate_reasoning_model_config(*model_id)
+                    .await
+            }
+            AdminCatalogInvalidation::RuntimeFeatureProviderConfig { provider_id } => {
+                self.catalog
+                    .invalidate_runtime_feature_provider_config(*provider_id)
+                    .await
+            }
+            AdminCatalogInvalidation::RuntimeFeatureModelConfig { model_id } => {
+                self.catalog
+                    .invalidate_runtime_feature_model_config(*model_id)
                     .await
             }
             AdminCatalogInvalidation::Model {
@@ -379,6 +397,12 @@ mod tests {
                     ),
                     AdminMutationEffect::catalog_invalidation(
                         AdminCatalogInvalidation::ReasoningModelConfig { model_id: 21 },
+                    ),
+                    AdminMutationEffect::catalog_invalidation(
+                        AdminCatalogInvalidation::RuntimeFeatureProviderConfig { provider_id: 11 },
+                    ),
+                    AdminMutationEffect::catalog_invalidation(
+                        AdminCatalogInvalidation::RuntimeFeatureModelConfig { model_id: 21 },
                     ),
                     AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Model {
                         id: 21,

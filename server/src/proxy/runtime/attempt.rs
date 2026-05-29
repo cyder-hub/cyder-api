@@ -466,7 +466,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        proxy::runtime::route_resolver::ExecutionCandidate,
+        proxy::runtime::route_resolver::{
+            CandidateRuntimeFeatures, ExecutionCandidate, RuntimeFeatureConfigSource,
+        },
         schema::enum_def::{ProviderApiKeyMode, ProviderType},
         service::cache::types::{CacheModel, CacheProvider},
     };
@@ -518,6 +520,10 @@ mod tests {
             reasoning_family: None,
             reasoning_preset: None,
             reasoning_suffix: None,
+            runtime_features: CandidateRuntimeFeatures {
+                openai_reasoning_content_repair_enabled: false,
+                openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
+            },
         }
     }
 

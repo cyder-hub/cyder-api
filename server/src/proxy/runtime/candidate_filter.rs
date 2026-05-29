@@ -302,7 +302,10 @@ mod tests {
         database::reasoning_config::ReasoningPreset,
         proxy::runtime::{
             attempt::CAPABILITY_MISMATCH_SKIPPED_ERROR,
-            route_resolver::{ExecutionCandidate, ExecutionPlan, ResolvedNameScope},
+            route_resolver::{
+                CandidateRuntimeFeatures, ExecutionCandidate, ExecutionPlan, ResolvedNameScope,
+                RuntimeFeatureConfigSource,
+            },
         },
         schema::enum_def::{ProviderApiKeyMode, ProviderType, SchedulerAction},
         service::cache::types::{CacheModel, CacheProvider},
@@ -368,6 +371,10 @@ mod tests {
             reasoning_family: None,
             reasoning_preset: None,
             reasoning_suffix: None,
+            runtime_features: CandidateRuntimeFeatures {
+                openai_reasoning_content_repair_enabled: false,
+                openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
+            },
         }
     }
 

@@ -526,6 +526,7 @@ mod tests {
             routes: vec![route],
             api_key_overrides: Vec::<CacheApiKeyModelOverride>::new(),
             reasoning_configs,
+            runtime_feature_configs: vec![],
         }
     }
 

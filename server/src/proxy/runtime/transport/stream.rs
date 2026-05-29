@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     body::{Body, Bytes},
@@ -9,12 +9,17 @@ use axum::{
 use chrono::Utc;
 use cyder_tools::log::{debug, error};
 use futures::StreamExt;
+use serde::Serialize;
+use serde_json::{Value, json};
 use tokio::{
     sync::{Mutex as TokioMutex, mpsc},
     time::timeout,
 };
 
-use super::{cancellation::ResponseStreamCancellationGuard, response::build_response_builder};
+use super::{
+    ReasoningContinuationCaptureContext, cancellation::ResponseStreamCancellationGuard,
+    response::build_response_builder,
+};
 use crate::{
     proxy::{
         ProxyError,
@@ -26,19 +31,376 @@ use crate::{
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{
-                finalize_cancelled_log_context, finalize_streaming_log_context,
-                record_streaming_completion_if_allowed,
+                append_response_transform_diagnostics, finalize_cancelled_log_context,
+                finalize_streaming_log_context, record_streaming_completion_if_allowed,
             },
             policy::{RuntimeExecutionPolicy, RuntimeLogMode},
+            reasoning_content_repair::{
+                ReasoningContentRepairResultKey, continuation_snapshot_from_parts,
+            },
         },
     },
     schema::enum_def::{LlmApiType, RequestStatus},
     service::{
-        app_state::AppState, cache::types::CacheCostCatalogVersion,
-        runtime::ProviderCircuitProbePermit, transform::StreamTransformer,
+        app_state::AppState,
+        cache::types::CacheCostCatalogVersion,
+        runtime::{
+            ProviderCircuitProbePermit, ReasoningContinuationCacheKey, ReasoningContinuationScope,
+        },
+        transform::{
+            StreamTransformer,
+            unified::{
+                UnifiedTransformDiagnostic, UnifiedTransformDiagnosticAction,
+                UnifiedTransformDiagnosticKind, UnifiedTransformDiagnosticLossLevel,
+            },
+        },
     },
-    utils::{sse::SseParser, storage::LogBodyCaptureState},
+    utils::{
+        sse::{SseEvent, SseParser},
+        storage::LogBodyCaptureState,
+    },
 };
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub(super) struct StreamReasoningContentCaptureReport {
+    pub captured_count: usize,
+    pub diagnostics: Vec<StreamReasoningContentCaptureDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct StreamReasoningContentCaptureDiagnostic {
+    pub result: ReasoningContentRepairResultKey,
+    pub captured_count: usize,
+    pub tool_call_ids: Vec<String>,
+    pub tool_calls_hash: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct OpenAiReasoningStreamCapture {
+    scope: Option<ReasoningContinuationScope>,
+    feature_enabled: bool,
+    target_is_openai_compatible_generation: bool,
+    choices: BTreeMap<u32, StreamChoiceCapture>,
+    parse_failed_count: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StreamChoiceCapture {
+    reasoning_content: String,
+    tool_calls: BTreeMap<u32, PartialToolCall>,
+    invalid: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PartialToolCall {
+    id: Option<String>,
+    type_: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+impl OpenAiReasoningStreamCapture {
+    pub(super) fn new(
+        capture_context: Option<ReasoningContinuationCaptureContext>,
+        target_api_type: LlmApiType,
+    ) -> Self {
+        let (scope, feature_enabled) = match capture_context {
+            Some(context) => (Some(context.scope), context.feature_enabled),
+            None => (None, false),
+        };
+        Self {
+            scope,
+            feature_enabled,
+            target_is_openai_compatible_generation: matches!(
+                target_api_type,
+                LlmApiType::Openai | LlmApiType::GeminiOpenai
+            ),
+            choices: BTreeMap::new(),
+            parse_failed_count: 0,
+        }
+    }
+
+    pub(super) fn observe_events(&mut self, events: &[SseEvent]) {
+        if !self.feature_enabled || !self.target_is_openai_compatible_generation {
+            return;
+        }
+
+        for event in events {
+            let data = event.data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(data) else {
+                self.parse_failed_count += 1;
+                continue;
+            };
+            self.observe_chunk_value(&value);
+        }
+    }
+
+    pub(super) async fn finish(
+        self,
+        app_state: &Arc<AppState>,
+        observed_at_ms: i64,
+    ) -> StreamReasoningContentCaptureReport {
+        if !self.feature_enabled {
+            return stream_single_capture_result(ReasoningContentRepairResultKey::Disabled, None);
+        }
+        if !self.target_is_openai_compatible_generation {
+            return stream_single_capture_result(
+                ReasoningContentRepairResultKey::NotApplicable,
+                None,
+            );
+        }
+        if self.parse_failed_count > 0 {
+            return stream_single_capture_result(
+                ReasoningContentRepairResultKey::ParseFailed,
+                Some(format!("parse_failed_count={}", self.parse_failed_count)),
+            );
+        }
+
+        let Some(scope) = self.scope.clone() else {
+            return stream_single_capture_result(ReasoningContentRepairResultKey::Disabled, None);
+        };
+        let snapshots = self.snapshots(scope, observed_at_ms);
+        if snapshots.is_empty() {
+            return stream_single_capture_result(
+                ReasoningContentRepairResultKey::NotApplicable,
+                None,
+            );
+        }
+
+        let mut report = StreamReasoningContentCaptureReport::default();
+        for snapshot in snapshots {
+            let key = snapshot.key.clone();
+            match app_state
+                .reasoning_continuation_store
+                .insert(snapshot, observed_at_ms)
+                .await
+            {
+                Ok(()) => {
+                    report.captured_count += 1;
+                    report.diagnostics.push(stream_capture_diagnostic_for_key(
+                        ReasoningContentRepairResultKey::Matched,
+                        1,
+                        &key,
+                        None,
+                    ));
+                }
+                Err(err) => report.diagnostics.push(stream_capture_diagnostic_for_key(
+                    ReasoningContentRepairResultKey::CacheMiss,
+                    0,
+                    &key,
+                    Some(format!("store_error={err}")),
+                )),
+            }
+        }
+
+        report
+    }
+
+    fn observe_chunk_value(&mut self, value: &Value) {
+        let Some(choices) = value
+            .as_object()
+            .and_then(|chunk| chunk.get("choices"))
+            .and_then(Value::as_array)
+        else {
+            self.parse_failed_count += 1;
+            return;
+        };
+
+        for choice in choices {
+            let choice_index = choice
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| u32::try_from(index).ok())
+                .unwrap_or(0);
+            let Some(delta) = choice.get("delta").and_then(Value::as_object) else {
+                continue;
+            };
+            let choice_capture = self.choices.entry(choice_index).or_default();
+
+            if let Some(reasoning_content) = delta
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                choice_capture.reasoning_content.push_str(reasoning_content);
+            }
+
+            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                for tool_call in tool_calls {
+                    if !choice_capture.observe_tool_call_delta(tool_call) {
+                        choice_capture.invalid = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn snapshots(
+        self,
+        scope: ReasoningContinuationScope,
+        observed_at_ms: i64,
+    ) -> Vec<crate::service::runtime::ReasoningContinuationSnapshot> {
+        let mut snapshots = Vec::new();
+        for choice in self.choices.into_values() {
+            if choice.reasoning_content.is_empty() || choice.invalid {
+                continue;
+            }
+            let Some(tool_calls) = choice.tool_calls_value() else {
+                continue;
+            };
+            match continuation_snapshot_from_parts(
+                scope.clone(),
+                &choice.reasoning_content,
+                &tool_calls,
+                observed_at_ms,
+            ) {
+                Ok(Some(snapshot)) => snapshots.push(snapshot),
+                Ok(None) | Err(_) => {}
+            }
+        }
+        snapshots
+    }
+}
+
+impl StreamChoiceCapture {
+    fn observe_tool_call_delta(&mut self, tool_call: &Value) -> bool {
+        let Some(index) = tool_call
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|index| u32::try_from(index).ok())
+        else {
+            return false;
+        };
+        let partial = self.tool_calls.entry(index).or_default();
+
+        if let Some(id) = tool_call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            if partial.id.as_deref().is_some_and(|existing| existing != id) {
+                return false;
+            }
+            partial.id = Some(id.to_string());
+        }
+        if let Some(type_) = tool_call
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            partial.type_ = Some(type_.to_string());
+        }
+        if let Some(function) = tool_call.get("function").and_then(Value::as_object) {
+            if let Some(name_delta) = function
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                partial
+                    .name
+                    .get_or_insert_with(String::new)
+                    .push_str(name_delta);
+            }
+            if let Some(arguments_delta) = function.get("arguments").and_then(Value::as_str) {
+                partial.arguments.push_str(arguments_delta);
+            }
+        }
+
+        true
+    }
+
+    fn tool_calls_value(&self) -> Option<Value> {
+        if self.tool_calls.is_empty() {
+            return None;
+        }
+
+        let mut tool_calls = Vec::with_capacity(self.tool_calls.len());
+        for partial in self.tool_calls.values() {
+            let id = partial.id.as_deref().filter(|value| !value.is_empty())?;
+            let name = partial.name.as_deref().filter(|value| !value.is_empty())?;
+            tool_calls.push(json!({
+                "id": id,
+                "type": partial.type_.as_deref().unwrap_or("function"),
+                "function": {
+                    "name": name,
+                    "arguments": partial.arguments,
+                }
+            }));
+        }
+
+        Some(Value::Array(tool_calls))
+    }
+}
+
+fn stream_single_capture_result(
+    result: ReasoningContentRepairResultKey,
+    detail: Option<String>,
+) -> StreamReasoningContentCaptureReport {
+    StreamReasoningContentCaptureReport {
+        captured_count: 0,
+        diagnostics: vec![StreamReasoningContentCaptureDiagnostic {
+            result,
+            captured_count: 0,
+            tool_call_ids: Vec::new(),
+            tool_calls_hash: None,
+            detail,
+        }],
+    }
+}
+
+fn stream_capture_diagnostic_for_key(
+    result: ReasoningContentRepairResultKey,
+    captured_count: usize,
+    key: &ReasoningContinuationCacheKey,
+    detail: Option<String>,
+) -> StreamReasoningContentCaptureDiagnostic {
+    StreamReasoningContentCaptureDiagnostic {
+        result,
+        captured_count,
+        tool_call_ids: key.tool_call_ids.clone(),
+        tool_calls_hash: Some(key.tool_calls_hash.clone()),
+        detail,
+    }
+}
+
+pub(super) fn stream_capture_transform_diagnostics(
+    report: &StreamReasoningContentCaptureReport,
+) -> Vec<UnifiedTransformDiagnostic> {
+    report
+        .diagnostics
+        .iter()
+        .map(stream_capture_transform_diagnostic)
+        .collect()
+}
+
+fn stream_capture_transform_diagnostic(
+    diagnostic: &StreamReasoningContentCaptureDiagnostic,
+) -> UnifiedTransformDiagnostic {
+    UnifiedTransformDiagnostic {
+        type_: "runtime_feature_diagnostic".to_string(),
+        diagnostic_kind: UnifiedTransformDiagnosticKind::CapabilityDowngrade,
+        provider: "openai_compatible".to_string(),
+        target_provider: "openai_compatible".to_string(),
+        source: "upstream_response_stream".to_string(),
+        target: "continuation_cache".to_string(),
+        stream_id: None,
+        stage: Some("response_capture".to_string()),
+        loss_level: UnifiedTransformDiagnosticLossLevel::Lossless,
+        action: UnifiedTransformDiagnosticAction::Send,
+        semantic_unit: "reasoning_content".to_string(),
+        reason: format!(
+            "openai_reasoning_content_capture:{}",
+            diagnostic.result.as_key()
+        ),
+        context: serde_json::to_string(diagnostic).ok(),
+        raw_data_summary: None,
+        recovery_hint: None,
+    }
+}
 
 pub(super) async fn sync_stream_usage_to_log_context(
     log_context: &Arc<TokioMutex<RequestLogContext>>,
@@ -175,6 +537,7 @@ pub(super) async fn handle_streaming_response(
     provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
+    reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     log_mode: RuntimeLogMode,
     execution_policy: RuntimeExecutionPolicy,
     first_byte_timeout: Option<Duration>,
@@ -247,6 +610,8 @@ pub(super) async fn handle_streaming_response(
         let mut first_chunk_received_at_proxy: i64 = 0;
         let mut llm_body_writer = Some(llm_body_writer);
         let mut user_body_writer = Some(user_body_writer);
+        let mut reasoning_stream_capture =
+            OpenAiReasoningStreamCapture::new(reasoning_capture, target_api_type);
 
         loop {
             let chunk_result = match next_stream_chunk_timeout_duration(first_chunk_received_at_proxy, first_byte_timeout) {
@@ -388,6 +753,7 @@ pub(super) async fn handle_streaming_response(
                         continue;
                     }
 
+                    reasoning_stream_capture.observe_events(&events);
                     let transformed_events = transformer.transform_events(events);
                     sync_stream_usage_to_log_context(&log_context_clone, &mut transformer).await;
                     let mut transformed_chunk_bytes: Vec<u8> = Vec::new();
@@ -537,6 +903,11 @@ pub(super) async fn handle_streaming_response(
         let llm_response_completed_at = Utc::now().timestamp_millis();
 
         if status_code.is_success() {
+            let reasoning_capture_report = reasoning_stream_capture
+                .finish(&app_state_clone, llm_response_completed_at)
+                .await;
+            let reasoning_capture_diagnostics =
+                stream_capture_transform_diagnostics(&reasoning_capture_report);
             let mut context = log_context_clone.lock().await;
             finalize_streaming_log_context(
                 &mut context,
@@ -562,6 +933,7 @@ pub(super) async fn handle_streaming_response(
                 crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream,
                 &transformer.diagnostics_snapshot(),
             );
+            append_response_transform_diagnostics(&mut context, &reasoning_capture_diagnostics);
             record_streaming_completion_if_allowed(
                 &app_state_clone,
                 &context,

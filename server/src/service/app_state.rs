@@ -26,8 +26,8 @@ use super::catalog::CatalogService;
 use super::infra::AppInfra;
 use super::runtime::{
     ApiKeyGovernanceService, ProviderCircuitService, ProviderKeySelector,
-    RuntimeStateBackendBundle, RuntimeStateBackendError, RuntimeStateBackendOperatorStatus,
-    RuntimeStateBackendStatus,
+    ReasoningContinuationStore, RuntimeStateBackendBundle, RuntimeStateBackendError,
+    RuntimeStateBackendOperatorStatus, RuntimeStateBackendStatus,
 };
 
 const RUNTIME_STATE_BACKEND_HEALTHCHECK_PROVIDER_ID: i64 = 0;
@@ -40,6 +40,7 @@ pub struct AppState {
     pub provider_key_selector: Arc<ProviderKeySelector>,
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
     pub provider_circuit: Arc<ProviderCircuitService>,
+    pub reasoning_continuation_store: Arc<dyn ReasoningContinuationStore>,
     pub diagnostics: Arc<DiagnosticsService>,
     pub metrics: Arc<MetricsService>,
     pub alerts: Arc<AlertsService>,
@@ -153,6 +154,7 @@ impl AppState {
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
+            reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             diagnostics,
             metrics,
             alerts,
@@ -447,6 +449,7 @@ mod tests {
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
+            reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             diagnostics,
             metrics,
             alerts,
@@ -466,6 +469,10 @@ mod tests {
         assert_eq!(Arc::strong_count(&app_state.provider_key_selector), 1);
         assert_eq!(Arc::strong_count(&app_state.api_key_governance), 1);
         assert_eq!(Arc::strong_count(&app_state.provider_circuit), 1);
+        assert_eq!(
+            Arc::strong_count(&app_state.reasoning_continuation_store),
+            1
+        );
         assert_eq!(Arc::strong_count(&app_state.diagnostics), 1);
         assert_eq!(Arc::strong_count(&app_state.runtime_backend_status), 1);
         assert_eq!(Arc::strong_count(&app_state.system_config), 1);

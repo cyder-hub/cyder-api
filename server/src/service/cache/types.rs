@@ -8,6 +8,9 @@ use crate::database::reasoning_config::{
     ReasoningConfigMode, ReasoningConfigScope, ReasoningConfigWithPresets, ReasoningPatchFamily,
     ReasoningPreset,
 };
+use crate::database::runtime_feature_config::{
+    RuntimeFeatureConfigScope, RuntimeFeatureConfigView, RuntimeFeatureKey,
+};
 use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::schema::enum_def::{
     Action, ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
@@ -105,6 +108,17 @@ pub struct CacheReasoningConfigPreset {
     pub is_enabled: bool,
 }
 
+/// Cached provider/model-scoped runtime feature config row.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CacheRuntimeFeatureConfig {
+    pub id: i64,
+    pub scope_kind: RuntimeFeatureConfigScope,
+    pub provider_id: Option<i64>,
+    pub model_id: Option<i64>,
+    pub feature_key: RuntimeFeatureKey,
+    pub enabled: bool,
+}
+
 /// Cached model route candidate ordered by runtime priority.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheModelRouteCandidate {
@@ -145,6 +159,7 @@ pub struct CacheModelsCatalog {
     pub routes: Vec<CacheModelRoute>,
     pub api_key_overrides: Vec<CacheApiKeyModelOverride>,
     pub reasoning_configs: Vec<CacheReasoningConfig>,
+    pub runtime_feature_configs: Vec<CacheRuntimeFeatureConfig>,
 }
 
 /// Cached provider API key
@@ -529,6 +544,19 @@ impl From<ReasoningConfigWithPresets> for CacheReasoningConfig {
                     is_enabled: preset.preset.is_enabled,
                 })
                 .collect(),
+        }
+    }
+}
+
+impl From<RuntimeFeatureConfigView> for CacheRuntimeFeatureConfig {
+    fn from(db: RuntimeFeatureConfigView) -> Self {
+        Self {
+            id: db.config.id,
+            scope_kind: db.scope,
+            provider_id: db.config.provider_id,
+            model_id: db.config.model_id,
+            feature_key: db.feature_key,
+            enabled: db.config.enabled,
         }
     }
 }

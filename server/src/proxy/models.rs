@@ -12,8 +12,9 @@ use super::{
     runtime::{
         api_key_lease::ApiKeyRequestLeaseFinalizer,
         route_resolver::{
-            ExecutionCandidate, candidate_supports_reasoning_preset,
-            resolve_effective_reasoning_config, route_supports_reasoning_preset,
+            CandidateRuntimeFeatures, ExecutionCandidate, RuntimeFeatureConfigSource,
+            candidate_supports_reasoning_preset, resolve_effective_reasoning_config,
+            route_supports_reasoning_preset,
         },
     },
     util::determine_target_api_type,
@@ -527,6 +528,10 @@ fn build_direct_reasoning_candidate(
         reasoning_family: None,
         reasoning_preset: None,
         reasoning_suffix: None,
+        runtime_features: CandidateRuntimeFeatures {
+            openai_reasoning_content_repair_enabled: false,
+            openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
+        },
     }
 }
 
@@ -805,6 +810,7 @@ mod tests {
             routes: vec![],
             api_key_overrides: vec![],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -832,6 +838,7 @@ mod tests {
             routes: vec![],
             api_key_overrides: vec![],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -847,6 +854,7 @@ mod tests {
             routes: vec![],
             api_key_overrides: vec![],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
         let api_key = api_key(
             Action::Deny,
@@ -895,6 +903,7 @@ mod tests {
                 is_enabled: true,
             }],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -930,6 +939,7 @@ mod tests {
             }],
             api_key_overrides: vec![],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -971,6 +981,7 @@ mod tests {
                 is_enabled: true,
             }],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1014,6 +1025,7 @@ mod tests {
             }],
             api_key_overrides: vec![],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
         let api_key = api_key(
             Action::Deny,
@@ -1080,6 +1092,7 @@ mod tests {
                 is_enabled: true,
             }],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
         let api_key = api_key(Action::Deny, vec![]);
 
@@ -1125,6 +1138,7 @@ mod tests {
                 is_enabled: true,
             }],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
         let api_key = api_key(
             Action::Deny,
@@ -1212,6 +1226,7 @@ mod tests {
                 },
             ],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1240,6 +1255,7 @@ mod tests {
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[(ReasoningPreset::Low, false), (ReasoningPreset::High, true)],
             )],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1277,6 +1293,7 @@ mod tests {
                 ),
                 model_disabled_reasoning_config(902, 12),
             ],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1307,6 +1324,7 @@ mod tests {
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[(ReasoningPreset::High, true)],
             )],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1331,6 +1349,7 @@ mod tests {
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[(ReasoningPreset::High, true)],
             )],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1435,6 +1454,7 @@ mod tests {
                     &[(ReasoningPreset::High, true)],
                 ),
             ],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1497,6 +1517,7 @@ mod tests {
                     &[(ReasoningPreset::High, false)],
                 ),
             ],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
@@ -1532,6 +1553,7 @@ mod tests {
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
                 &[(ReasoningPreset::High, true)],
             )],
+            runtime_feature_configs: vec![],
         };
 
         let models = collect_accessible_models(&catalog, &api_key(Action::Deny, vec![]));

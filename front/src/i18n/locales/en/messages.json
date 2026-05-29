@@ -1411,6 +1411,58 @@
       "cleared": "Reasoning config cleared."
     }
   },
+  "runtimeFeatureConfigPanel": {
+    "titles": {
+      "provider": "Provider runtime features",
+      "model": "Model runtime features"
+    },
+    "features": {
+      "openaiReasoningContentRepair": {
+        "label": "Reasoning callback",
+        "description": "Restore cached reasoning_content for compatible OpenAI tool continuations."
+      }
+    },
+    "actions": {
+      "saveProvider": "Save provider default",
+      "saveModel": "Save model override",
+      "clearProvider": "Clear provider default",
+      "clearModel": "Inherit provider"
+    },
+    "summary": {
+      "ownerConfig": "Current config",
+      "providerDefault": "Provider default",
+      "effective": "Effective value"
+    },
+    "fields": {
+      "providerDefault": "Provider default",
+      "modelOverride": "Model override"
+    },
+    "sources": {
+      "defaultFalse": "default false",
+      "providerDefault": "provider default",
+      "modelOverride": "model override",
+      "unknown": "unknown"
+    },
+    "values": {
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "missing": "missing"
+    },
+    "messages": {
+      "reasoningIndependent": "Reasoning suffix config and runtime repair are independent. Enabling reasoning_config does not automatically enable reasoning_content repair.",
+      "saveOwnerFirst": "Save the owner before configuring runtime features.",
+      "loading": "Loading runtime feature config",
+      "providerDefaultHelp": "This default applies to models that do not define their own override.",
+      "modelOverrideHelp": "Saving here creates a model override. Clear it to inherit the provider default again."
+    },
+    "alert": {
+      "loadFailed": "Failed to load runtime feature config.",
+      "saveFailed": "Failed to save runtime feature config.",
+      "clearFailed": "Failed to clear runtime feature config.",
+      "saved": "Runtime feature config saved.",
+      "cleared": "Runtime feature config cleared."
+    }
+  },
   "apiKeyPage": {
     "title": "API Key Management",
     "addApiKey": "Add API Key",
@@ -1810,6 +1862,10 @@
         "title": "Advanced",
         "description": "Manage extra API keys, more models, request patches, and remote model sync here."
       },
+      "advancedConfig": {
+        "title": "Reasoning",
+        "description": "Manage reasoning suffixes and callback repair for this provider."
+      },
       "modelsDescription": "Edit model name, mapped model name, capabilities, and enabled state inline. Full configuration still lives in ModelEdit."
     },
     "modelCapabilities": {
@@ -1971,6 +2027,10 @@
     "capabilities": {
       "title": "Model Capabilities",
       "description": "Explicit runtime capabilities used by routing prefilter. Keep these aligned with provider behavior before enabling retry and fallback."
+    },
+    "advancedConfig": {
+      "title": "Reasoning",
+      "description": "Manage reasoning suffixes and callback repair for this model."
     },
     "alert": {
       "missingId": "Model ID is missing. Cannot edit.",

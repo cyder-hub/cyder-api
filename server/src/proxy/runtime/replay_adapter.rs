@@ -658,6 +658,8 @@ async fn materialize_gateway_replay_candidate(
             Some(&input.query_params),
             &request_patch_trace.applied_rules,
             &provider_credentials,
+            input.api_key.id,
+            app_state.reasoning_continuation_store.as_ref(),
         )
         .await
         {

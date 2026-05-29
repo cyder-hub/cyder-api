@@ -33,6 +33,7 @@ import ModelBaseInfoForm from "./components/ModelBaseInfoForm.vue";
 import ModelRoutePreviewPanel from "./components/ModelRoutePreviewPanel.vue";
 import ModelRequestPatchPanel from "./components/ModelRequestPatchPanel.vue";
 import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
+import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
 import { useModelEdit } from "./composables/useModelEdit";
 
 const { t } = useI18n();
@@ -50,6 +51,7 @@ const {
   fetchData,
   handleSaveModel,
   handleReasoningConfigSaved,
+  handleRuntimeFeatureConfigSaved,
   handleNavigateToModels,
   handleNavigateToProviders,
   handleNavigateToRoutes,
@@ -132,13 +134,25 @@ const {
           :capability-items="capabilityItems"
         />
 
-      <ReasoningConfigPanel
-        owner-kind="model"
-        :owner-id="editingData.id"
-        :actions="reasoningActions"
-        :model-supports-reasoning="editingData.supports_reasoning"
-        @saved="handleReasoningConfigSaved"
-      />
+        <div class="border-t border-gray-200 pt-5">
+          <ReasoningConfigPanel
+            owner-kind="model"
+            :owner-id="editingData.id"
+            :actions="reasoningActions"
+            :title="t('modelEditPage.advancedConfig.title')"
+            :model-supports-reasoning="editingData.supports_reasoning"
+            @saved="handleReasoningConfigSaved"
+          >
+            <template #runtime-feature>
+              <RuntimeFeatureConfigPanel
+                owner-kind="model"
+                :owner-id="editingData.id"
+                embedded
+                @saved="handleRuntimeFeatureConfigSaved"
+              />
+            </template>
+          </ReasoningConfigPanel>
+        </div>
 
       <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
         <SectionHeader :title="t('modelEditPage.priceSection.title')" />

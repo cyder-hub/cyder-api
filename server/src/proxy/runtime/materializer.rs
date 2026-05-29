@@ -14,8 +14,13 @@ use crate::{
         protocol_transform_error,
         runtime::{
             credential::{ProviderCredentials, apply_provider_request_auth_header},
+            reasoning_content_repair::{
+                ReasoningContentRepairDiagnostic, ReasoningContentRepairReport,
+                ReasoningContentRepairRequest, ReasoningContentRepairResultKey,
+                repair_openai_reasoning_content,
+            },
             request_patch::{apply_request_patches, rebuild_gemini_url_query_from_snapshot},
-            route_resolver::ExecutionCandidate,
+            route_resolver::{ExecutionCandidate, ReasoningConfigSource},
             transport::ProxyResponseMode,
         },
         util::{determine_target_api_type, format_model_str},
@@ -24,9 +29,13 @@ use crate::{
     schema::enum_def::LlmApiType,
     service::{
         cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch},
+        runtime::{ReasoningContinuationScope, ReasoningContinuationStore},
         transform::{
             finalize_request_data, transform_request_data_with_diagnostics,
-            unified::UnifiedTransformDiagnostic,
+            unified::{
+                UnifiedTransformDiagnostic, UnifiedTransformDiagnosticAction,
+                UnifiedTransformDiagnosticKind, UnifiedTransformDiagnosticLossLevel,
+            },
         },
     },
     utils::storage::RequestLogBundleQueryParam,
@@ -39,6 +48,7 @@ pub(in crate::proxy) struct MaterializedAttemptRequest {
     pub final_body: Bytes,
     pub llm_request_body_for_log: Option<LoggedBody>,
     pub transform_diagnostics: Vec<UnifiedTransformDiagnostic>,
+    pub reasoning_repair_report: Option<ReasoningContentRepairReport>,
     pub model_str: String,
     pub response_mode: ProxyResponseMode,
     pub provider_api_key_id: i64,
@@ -302,6 +312,108 @@ async fn prepare_gemini_llm_request(
     Ok((url.to_string(), headers, data, provider_credentials.key_id))
 }
 
+fn is_openai_compatible_generation_target(target_api_type: LlmApiType) -> bool {
+    matches!(
+        target_api_type,
+        LlmApiType::Openai | LlmApiType::GeminiOpenai
+    )
+}
+
+fn candidate_has_explicit_reasoning_disabled(candidate: &ExecutionCandidate) -> bool {
+    matches!(
+        candidate.reasoning_config_source,
+        Some(ReasoningConfigSource::ModelDisabled)
+    ) || matches!(
+        candidate.reasoning_preset,
+        Some(crate::database::reasoning_config::ReasoningPreset::Disabled)
+    )
+}
+
+fn reasoning_continuation_scope(
+    candidate: &ExecutionCandidate,
+    downstream_api_key_id: i64,
+) -> ReasoningContinuationScope {
+    ReasoningContinuationScope {
+        api_key_id: downstream_api_key_id,
+        provider_id: candidate.provider.id,
+        model_id: candidate.model.id,
+        route_id: candidate.route_id,
+        route_name: candidate.route_name.clone(),
+        candidate_position: candidate.candidate_position,
+    }
+}
+
+async fn repair_generation_request_body(
+    candidate: &ExecutionCandidate,
+    final_body_value: &mut Value,
+    downstream_api_key_id: i64,
+    target_api_type: LlmApiType,
+    reasoning_continuation_store: &dyn ReasoningContinuationStore,
+) -> Result<Option<ReasoningContentRepairReport>, ProxyError> {
+    let report = repair_openai_reasoning_content(ReasoningContentRepairRequest {
+        body: final_body_value,
+        scope: reasoning_continuation_scope(candidate, downstream_api_key_id),
+        store: reasoning_continuation_store,
+        feature_enabled: candidate
+            .runtime_features
+            .openai_reasoning_content_repair_enabled,
+        target_is_openai_compatible_generation: is_openai_compatible_generation_target(
+            target_api_type,
+        ),
+        explicit_reasoning_disabled: candidate_has_explicit_reasoning_disabled(candidate),
+        now_ms: chrono::Utc::now().timestamp_millis(),
+    })
+    .await
+    .map_err(|err| ProxyError::InternalError(format!("reasoning content repair failed: {err}")))?;
+
+    if report.diagnostics.iter().all(|diagnostic| {
+        matches!(
+            diagnostic.result,
+            ReasoningContentRepairResultKey::Disabled
+                | ReasoningContentRepairResultKey::NotApplicable
+        )
+    }) {
+        return Ok(Some(report));
+    }
+
+    Ok(Some(report))
+}
+
+fn reasoning_repair_transform_diagnostics(
+    report: &ReasoningContentRepairReport,
+) -> Vec<UnifiedTransformDiagnostic> {
+    report
+        .diagnostics
+        .iter()
+        .map(reasoning_repair_transform_diagnostic)
+        .collect()
+}
+
+fn reasoning_repair_transform_diagnostic(
+    diagnostic: &ReasoningContentRepairDiagnostic,
+) -> UnifiedTransformDiagnostic {
+    UnifiedTransformDiagnostic {
+        type_: "runtime_feature_diagnostic".to_string(),
+        diagnostic_kind: UnifiedTransformDiagnosticKind::CapabilityDowngrade,
+        provider: "openai_compatible".to_string(),
+        target_provider: "openai_compatible".to_string(),
+        source: "cyder_runtime".to_string(),
+        target: "upstream_request".to_string(),
+        stream_id: None,
+        stage: Some("request_repair".to_string()),
+        loss_level: UnifiedTransformDiagnosticLossLevel::Lossless,
+        action: UnifiedTransformDiagnosticAction::Send,
+        semantic_unit: "reasoning_content".to_string(),
+        reason: format!(
+            "openai_reasoning_content_repair:{}",
+            diagnostic.result.as_key()
+        ),
+        context: serde_json::to_string(diagnostic).ok(),
+        raw_data_summary: None,
+        recovery_hint: None,
+    }
+}
+
 pub(in crate::proxy) async fn materialize_generation_attempt(
     candidate: &ExecutionCandidate,
     mut data: Value,
@@ -313,6 +425,8 @@ pub(in crate::proxy) async fn materialize_generation_attempt(
     replay_query_params: Option<&[RequestLogBundleQueryParam]>,
     request_patches: &[RuntimeResolvedRequestPatch],
     provider_credentials: &ProviderCredentials,
+    downstream_api_key_id: i64,
+    reasoning_continuation_store: &dyn ReasoningContinuationStore,
 ) -> Result<MaterializedAttemptRequest, ProxyError> {
     let target_api_type = candidate.llm_api_type;
     let transform_output =
@@ -347,16 +461,29 @@ pub(in crate::proxy) async fn materialize_generation_attempt(
     } else {
         prepared_request.final_url
     };
-    let final_body = Bytes::from(
-        serde_json::to_vec(&prepared_request.final_body_value).map_err(|err| {
+    let mut final_body_value = prepared_request.final_body_value;
+    let reasoning_repair_report = repair_generation_request_body(
+        candidate,
+        &mut final_body_value,
+        downstream_api_key_id,
+        target_api_type,
+        reasoning_continuation_store,
+    )
+    .await?;
+    let mut transform_diagnostics = transform_output.diagnostics;
+    if let Some(report) = reasoning_repair_report.as_ref() {
+        transform_diagnostics.extend(reasoning_repair_transform_diagnostics(report));
+    }
+    let final_body =
+        Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
             protocol_transform_error("Failed to serialize final request body", err)
-        })?,
-    );
+        })?);
     Ok(MaterializedAttemptRequest {
         final_url,
         final_headers: prepared_request.final_headers,
         llm_request_body_for_log: Some(LoggedBody::from_bytes(final_body.clone())),
-        transform_diagnostics: transform_output.diagnostics,
+        transform_diagnostics,
+        reasoning_repair_report,
         final_body,
         model_str: format_model_str(&candidate.provider, &candidate.model),
         response_mode: ProxyResponseMode::Generation {
@@ -422,6 +549,7 @@ pub(in crate::proxy) async fn materialize_utility_attempt(
         final_headers,
         llm_request_body_for_log: Some(LoggedBody::from_bytes(final_body.clone())),
         transform_diagnostics: Vec::new(),
+        reasoning_repair_report: None,
         final_body,
         model_str: format_model_str(&candidate.provider, &candidate.model),
         response_mode: ProxyResponseMode::Utility {
@@ -443,9 +571,18 @@ mod tests {
 
     use super::*;
     use crate::{
-        proxy::runtime::route_resolver::ExecutionCandidate,
-        schema::enum_def::{ProviderApiKeyMode, ProviderType},
-        service::cache::types::{CacheModel, CacheProvider},
+        proxy::logging::LoggedBody,
+        proxy::runtime::reasoning_content_repair::continuation_snapshot_from_parts,
+        proxy::runtime::route_resolver::{
+            CandidateRuntimeFeatures, ExecutionCandidate, RuntimeFeatureConfigSource,
+        },
+        schema::enum_def::{
+            ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
+        },
+        service::{
+            cache::types::{CacheModel, CacheProvider, RequestPatchRuleOrigin, RequestPatchSource},
+            runtime::{MemoryReasoningContinuationStore, ReasoningContinuationStore},
+        },
         utils::storage::RequestLogBundleQueryParam,
     };
 
@@ -500,6 +637,10 @@ mod tests {
             reasoning_family: None,
             reasoning_preset: None,
             reasoning_suffix: None,
+            runtime_features: CandidateRuntimeFeatures {
+                openai_reasoning_content_repair_enabled: false,
+                openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
+            },
         }
     }
 
@@ -508,6 +649,64 @@ mod tests {
             key_id: 42,
             request_key: "provider-secret".to_string(),
         }
+    }
+
+    fn store() -> MemoryReasoningContinuationStore {
+        MemoryReasoningContinuationStore::default()
+    }
+
+    fn request_patch(target: &str, value: serde_json::Value) -> RuntimeResolvedRequestPatch {
+        RuntimeResolvedRequestPatch {
+            placement: RequestPatchPlacement::Body,
+            target: target.to_string(),
+            operation: RequestPatchOperation::Set,
+            value_json: Some(serde_json::to_string(&value).unwrap()),
+            source: RequestPatchSource::ProviderRule { rule_id: 77 },
+            source_rule_id: Some(77),
+            source_origin: Some(RequestPatchRuleOrigin::ProviderDirect),
+            overridden_rule_ids: Vec::new(),
+            overridden_sources: Vec::new(),
+            description: None,
+        }
+    }
+
+    fn enable_reasoning_repair(candidate: &mut ExecutionCandidate) {
+        candidate
+            .runtime_features
+            .openai_reasoning_content_repair_enabled = true;
+        candidate
+            .runtime_features
+            .openai_reasoning_content_repair_source = RuntimeFeatureConfigSource::ProviderDefault;
+    }
+
+    fn repair_tool_calls() -> serde_json::Value {
+        json!([
+            {
+                "id": "call-weather",
+                "type": "function",
+                "function": { "name": "weather", "arguments": "{\"city\":\"Paris\"}" }
+            }
+        ])
+    }
+
+    async fn seed_reasoning_repair_store(
+        store: &dyn ReasoningContinuationStore,
+        candidate: &ExecutionCandidate,
+        downstream_api_key_id: i64,
+    ) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let snapshot = continuation_snapshot_from_parts(
+            reasoning_continuation_scope(candidate, downstream_api_key_id),
+            "MATERIALIZER_SECRET_REASONING",
+            &repair_tool_calls(),
+            now_ms,
+        )
+        .expect("snapshot parse should succeed")
+        .expect("snapshot should exist");
+        store
+            .insert(snapshot, now_ms)
+            .await
+            .expect("repair store insert should succeed");
     }
 
     #[test]
@@ -570,6 +769,7 @@ mod tests {
     #[tokio::test]
     async fn materialize_openai_generation_attempt_prepares_chat_request() {
         let candidate = candidate(1, true, true);
+        let store = store();
         let mut original_headers = HeaderMap::new();
         original_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         original_headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer user-key"));
@@ -585,6 +785,8 @@ mod tests {
             None,
             &[],
             &credentials(),
+            99,
+            &store,
         )
         .await
         .unwrap();
@@ -614,8 +816,177 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn materialize_openai_generation_repair_updates_final_body_and_log_body() {
+        let mut candidate = candidate(1, true, true);
+        enable_reasoning_repair(&mut candidate);
+        let store = store();
+        let downstream_api_key_id = 99;
+        seed_reasoning_repair_store(&store, &candidate, downstream_api_key_id).await;
+        let mut original_headers = HeaderMap::new();
+        original_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        let materialized = materialize_generation_attempt(
+            &candidate,
+            json!({
+                "messages": [
+                    { "role": "user", "content": "weather" },
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": repair_tool_calls()
+                    },
+                    { "role": "tool", "tool_call_id": "call-weather", "content": "{}" }
+                ]
+            }),
+            LlmApiType::Openai,
+            false,
+            &json!({}),
+            &original_headers,
+            &HashMap::new(),
+            None,
+            &[request_patch("/metadata/source", json!("patch-kept"))],
+            &credentials(),
+            downstream_api_key_id,
+            &store,
+        )
+        .await
+        .unwrap();
+
+        let body: serde_json::Value = serde_json::from_slice(&materialized.final_body).unwrap();
+        assert_eq!(
+            body["messages"][1]["reasoning_content"],
+            "MATERIALIZER_SECRET_REASONING"
+        );
+        assert_eq!(body["metadata"]["source"], "patch-kept");
+        let LoggedBody::InMemory { bytes, .. } = materialized
+            .llm_request_body_for_log
+            .as_ref()
+            .expect("llm request body should be logged")
+        else {
+            panic!("llm request body should stay in memory in this test");
+        };
+        assert_eq!(bytes, &materialized.final_body);
+        assert_eq!(
+            materialized
+                .reasoning_repair_report
+                .as_ref()
+                .expect("repair report should exist")
+                .repaired_count,
+            1
+        );
+        assert!(materialized.transform_diagnostics.iter().any(|diagnostic| {
+            diagnostic.stage.as_deref() == Some("request_repair")
+                && diagnostic
+                    .reason
+                    .contains("openai_reasoning_content_repair:matched")
+        }));
+        let diagnostics_json = serde_json::to_string(&materialized.transform_diagnostics)
+            .expect("diagnostics should serialize");
+        assert!(!diagnostics_json.contains("MATERIALIZER_SECRET_REASONING"));
+    }
+
+    #[tokio::test]
+    async fn materialize_openai_generation_skips_repair_for_disabled_reasoning_preset() {
+        let mut candidate = candidate(1, true, true);
+        enable_reasoning_repair(&mut candidate);
+        candidate.reasoning_preset =
+            Some(crate::database::reasoning_config::ReasoningPreset::Disabled);
+        let store = store();
+        seed_reasoning_repair_store(&store, &candidate, 99).await;
+        let original_headers = HeaderMap::new();
+
+        let materialized = materialize_generation_attempt(
+            &candidate,
+            json!({
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": repair_tool_calls()
+                    }
+                ]
+            }),
+            LlmApiType::Openai,
+            false,
+            &json!({}),
+            &original_headers,
+            &HashMap::new(),
+            None,
+            &[],
+            &credentials(),
+            99,
+            &store,
+        )
+        .await
+        .unwrap();
+
+        let body: serde_json::Value = serde_json::from_slice(&materialized.final_body).unwrap();
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+        assert_eq!(
+            materialized
+                .reasoning_repair_report
+                .as_ref()
+                .expect("repair report should exist")
+                .diagnostics[0]
+                .result,
+            ReasoningContentRepairResultKey::ExplicitReasoningDisabled
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_openai_generation_does_not_repair_across_candidate_scope() {
+        let mut seed_candidate = candidate(1, true, true);
+        enable_reasoning_repair(&mut seed_candidate);
+        let store = store();
+        let downstream_api_key_id = 99;
+        seed_reasoning_repair_store(&store, &seed_candidate, downstream_api_key_id).await;
+
+        let mut fallback_candidate = candidate(2, true, true);
+        enable_reasoning_repair(&mut fallback_candidate);
+        let materialized = materialize_generation_attempt(
+            &fallback_candidate,
+            json!({
+                "messages": [
+                    { "role": "user", "content": "weather" },
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": repair_tool_calls()
+                    },
+                    { "role": "tool", "tool_call_id": "call-weather", "content": "{}" }
+                ]
+            }),
+            LlmApiType::Openai,
+            false,
+            &json!({}),
+            &HeaderMap::new(),
+            &HashMap::new(),
+            None,
+            &[],
+            &credentials(),
+            downstream_api_key_id,
+            &store,
+        )
+        .await
+        .unwrap();
+
+        let body: serde_json::Value = serde_json::from_slice(&materialized.final_body).unwrap();
+        assert!(body["messages"][1].get("reasoning_content").is_none());
+        let report = materialized
+            .reasoning_repair_report
+            .as_ref()
+            .expect("repair report should exist");
+        assert_eq!(report.repaired_count, 0);
+        assert_eq!(
+            report.diagnostics[0].result,
+            ReasoningContentRepairResultKey::CacheMiss
+        );
+    }
+
+    #[tokio::test]
     async fn materialize_gemini_generation_rebuilds_replay_query_flags() {
         let mut candidate = candidate(1, true, true);
+        let store = store();
         candidate.provider = Arc::new(CacheProvider {
             endpoint: "https://example.com/v1beta/models".to_string(),
             provider_type: ProviderType::Gemini,
@@ -657,6 +1028,8 @@ mod tests {
             Some(&replay_query_params),
             &[],
             &credentials(),
+            99,
+            &store,
         )
         .await
         .unwrap();
@@ -679,6 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn materialize_ollama_generation_attempt_prepares_api_chat_request() {
         let mut candidate = candidate(1, true, true);
+        let store = store();
         candidate.provider = Arc::new(CacheProvider {
             provider_type: ProviderType::Ollama,
             ..(*candidate.provider).clone()
@@ -698,6 +1072,8 @@ mod tests {
             None,
             &[],
             &credentials(),
+            99,
+            &store,
         )
         .await
         .unwrap();

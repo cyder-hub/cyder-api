@@ -28,14 +28,25 @@
       <template v-else-if="editingData">
         <div class="space-y-5 sm:space-y-6">
           <ProviderBaseInfoForm v-model:editingData="editingData" />
-          <ReasoningConfigPanel
-            v-if="editingData.id"
-            owner-kind="provider"
-            :owner-id="editingData.id"
-            :actions="reasoningActions"
-            :provider-type="editingData.provider_type"
-            @saved="handleReasoningConfigSaved"
-          />
+          <div v-if="editingData.id" class="border-t border-gray-200 pt-5">
+            <ReasoningConfigPanel
+              owner-kind="provider"
+              :owner-id="editingData.id"
+              :actions="reasoningActions"
+              :title="$t('providerEditPage.sections.advancedConfig.title')"
+              :provider-type="editingData.provider_type"
+              @saved="handleReasoningConfigSaved"
+            >
+              <template #runtime-feature>
+                <RuntimeFeatureConfigPanel
+                  owner-kind="provider"
+                  :owner-id="editingData.id"
+                  embedded
+                  @saved="handleRuntimeFeatureConfigSaved"
+                />
+              </template>
+            </ReasoningConfigPanel>
+          </div>
           <SectionHeader
             :title="$t('providerEditPage.sections.advanced.title')"
             :help="$t('providerEditPage.sections.advanced.description')"
@@ -210,6 +221,7 @@ import ProviderModelList from "./components/ProviderModelList.vue";
 import ProviderApiKeyList from "./components/ProviderApiKeyList.vue";
 import ProviderRequestPatchPanel from "./components/ProviderRequestPatchPanel.vue";
 import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
+import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
 
 const { t: $t } = useI18n();
 const router = useRouter();
@@ -220,6 +232,7 @@ const {
   pageTitle,
   reasoningActions,
   handleReasoningConfigSaved,
+  handleRuntimeFeatureConfigSaved,
 } = useProviderEdit();
 
 const {

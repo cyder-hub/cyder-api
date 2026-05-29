@@ -19,6 +19,7 @@ use provider_runtime::create_provider_runtime_router;
 use reasoning_config::create_reasoning_config_router;
 use request_log::create_record_router;
 use request_patch::create_request_patch_router;
+use runtime_feature_config::create_runtime_feature_config_router;
 use stat::routes as create_stat_router;
 use system_config::create_system_config_router;
 
@@ -43,6 +44,7 @@ mod provider_runtime;
 mod reasoning_config;
 mod request_log;
 mod request_patch;
+mod runtime_feature_config;
 mod stat;
 mod system;
 mod system_config;
@@ -73,6 +75,7 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_model_route_router())
             .merge(create_request_patch_router())
             .merge(create_reasoning_config_router())
+            .merge(create_runtime_feature_config_router())
             .merge(create_cost_router())
             .merge(create_metrics_router())
             .merge(create_alert_router())

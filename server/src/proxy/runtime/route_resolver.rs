@@ -4,6 +4,7 @@ use crate::{
     database::reasoning_config::{
         ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
     },
+    database::runtime_feature_config::{RuntimeFeatureConfigScope, RuntimeFeatureKey},
     schema::enum_def::{LlmApiType, ProviderApiKeyMode},
     service::{
         app_state::AppState,
@@ -58,6 +59,30 @@ pub struct ExecutionCandidate {
     pub reasoning_family: Option<ReasoningPatchFamily>,
     pub reasoning_preset: Option<ReasoningPreset>,
     pub reasoning_suffix: Option<String>,
+    pub runtime_features: CandidateRuntimeFeatures,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateRuntimeFeatures {
+    pub openai_reasoning_content_repair_enabled: bool,
+    pub openai_reasoning_content_repair_source: RuntimeFeatureConfigSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeFeatureConfigSource {
+    DefaultFalse,
+    ProviderDefault,
+    ModelOverride,
+}
+
+impl RuntimeFeatureConfigSource {
+    pub(crate) fn as_key(self) -> &'static str {
+        match self {
+            Self::DefaultFalse => "default_false",
+            Self::ProviderDefault => "provider_default",
+            Self::ModelOverride => "model_override",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +188,7 @@ impl ExecutionPlan {
             .iter()
             .map(|candidate| {
                 format!(
-                    "#{} route={:?}/{} priority={:?} provider={}/{} model={}/{} llm_api={:?} key_mode={:?} reasoning_config={:?}/{}/{} reasoning_preset_row={:?} reasoning_family={:?} reasoning_preset={:?} reasoning_suffix={:?}",
+                    "#{} route={:?}/{} priority={:?} provider={}/{} model={}/{} llm_api={:?} key_mode={:?} reasoning_config={:?}/{}/{} reasoning_preset_row={:?} reasoning_family={:?} reasoning_preset={:?} reasoning_suffix={:?} runtime_feature_openai_reasoning_content_repair={}/{}",
                     candidate.candidate_position,
                     candidate.route_id,
                     candidate.route_name.as_deref().unwrap_or("direct"),
@@ -186,7 +211,14 @@ impl ExecutionPlan {
                     candidate.reasoning_config_preset_id,
                     candidate.reasoning_family,
                     candidate.reasoning_preset,
-                    candidate.reasoning_suffix
+                    candidate.reasoning_suffix,
+                    candidate
+                        .runtime_features
+                        .openai_reasoning_content_repair_enabled,
+                    candidate
+                        .runtime_features
+                        .openai_reasoning_content_repair_source
+                        .as_key()
                 )
             })
             .collect::<Vec<_>>()
@@ -255,6 +287,7 @@ fn build_candidate(
         })?;
     let llm_api_type = determine_target_api_type(&provider);
     let provider_api_key_mode = provider.provider_api_key_mode.clone();
+    let runtime_features = resolve_candidate_runtime_features(catalog, &provider, &model);
 
     Ok(ExecutionCandidate {
         candidate_position,
@@ -272,6 +305,7 @@ fn build_candidate(
         reasoning_family: None,
         reasoning_preset: None,
         reasoning_suffix: None,
+        runtime_features,
     })
 }
 
@@ -577,6 +611,56 @@ pub(crate) fn resolve_effective_reasoning_config<'a>(
     }
 }
 
+pub(crate) fn resolve_candidate_runtime_features(
+    catalog: &CacheModelsCatalog,
+    provider: &CacheProvider,
+    model: &CacheModel,
+) -> CandidateRuntimeFeatures {
+    let (openai_reasoning_content_repair_enabled, openai_reasoning_content_repair_source) =
+        resolve_effective_runtime_feature(
+            catalog,
+            provider,
+            model,
+            RuntimeFeatureKey::OpenAiReasoningContentRepair,
+        );
+
+    CandidateRuntimeFeatures {
+        openai_reasoning_content_repair_enabled,
+        openai_reasoning_content_repair_source,
+    }
+}
+
+fn resolve_effective_runtime_feature(
+    catalog: &CacheModelsCatalog,
+    provider: &CacheProvider,
+    model: &CacheModel,
+    feature_key: RuntimeFeatureKey,
+) -> (bool, RuntimeFeatureConfigSource) {
+    if let Some(model_config) = catalog.runtime_feature_configs.iter().find(|config| {
+        matches!(config.scope_kind, RuntimeFeatureConfigScope::Model)
+            && config.model_id == Some(model.id)
+            && config.feature_key == feature_key
+    }) {
+        return (
+            model_config.enabled,
+            RuntimeFeatureConfigSource::ModelOverride,
+        );
+    }
+
+    if let Some(provider_config) = catalog.runtime_feature_configs.iter().find(|config| {
+        matches!(config.scope_kind, RuntimeFeatureConfigScope::Provider)
+            && config.provider_id == Some(provider.id)
+            && config.feature_key == feature_key
+    }) {
+        return (
+            provider_config.enabled,
+            RuntimeFeatureConfigSource::ProviderDefault,
+        );
+    }
+
+    (false, RuntimeFeatureConfigSource::DefaultFalse)
+}
+
 pub(crate) fn route_supports_reasoning_preset(
     catalog: &CacheModelsCatalog,
     route: &CacheModelRoute,
@@ -739,13 +823,17 @@ pub async fn build_execution_plan(
 mod tests {
     use super::*;
     use crate::{
-        database::reasoning_config::{
-            ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
+        database::{
+            reasoning_config::{
+                ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
+            },
+            runtime_feature_config::{RuntimeFeatureConfigScope, RuntimeFeatureKey},
         },
         schema::enum_def::{ProviderApiKeyMode, ProviderType},
         service::cache::types::{
             CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelRouteCandidate,
             CacheModelsCatalog, CacheProvider, CacheReasoningConfig, CacheReasoningConfigPreset,
+            CacheRuntimeFeatureConfig,
         },
     };
 
@@ -803,6 +891,38 @@ mod tests {
             mode: ReasoningConfigMode::Disabled,
             family: None,
             presets: Vec::new(),
+        }
+    }
+
+    fn provider_runtime_feature_config(
+        id: i64,
+        provider_id: i64,
+        feature_key: RuntimeFeatureKey,
+        enabled: bool,
+    ) -> CacheRuntimeFeatureConfig {
+        CacheRuntimeFeatureConfig {
+            id,
+            scope_kind: RuntimeFeatureConfigScope::Provider,
+            provider_id: Some(provider_id),
+            model_id: None,
+            feature_key,
+            enabled,
+        }
+    }
+
+    fn model_runtime_feature_config(
+        id: i64,
+        model_id: i64,
+        feature_key: RuntimeFeatureKey,
+        enabled: bool,
+    ) -> CacheRuntimeFeatureConfig {
+        CacheRuntimeFeatureConfig {
+            id,
+            scope_kind: RuntimeFeatureConfigScope::Model,
+            provider_id: None,
+            model_id: Some(model_id),
+            feature_key,
+            enabled,
         }
     }
 
@@ -918,6 +1038,7 @@ mod tests {
                 is_enabled: true,
             }],
             reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
         }
     }
 
@@ -984,6 +1105,177 @@ mod tests {
         assert_eq!(candidate.route_id, None);
         assert_eq!(candidate.llm_api_type, LlmApiType::Openai);
         assert_eq!(candidate.provider_api_key_mode, ProviderApiKeyMode::Queue);
+        assert_eq!(
+            candidate
+                .runtime_features
+                .openai_reasoning_content_repair_source,
+            RuntimeFeatureConfigSource::DefaultFalse
+        );
+        assert!(
+            !candidate
+                .runtime_features
+                .openai_reasoning_content_repair_enabled
+        );
+    }
+
+    #[test]
+    fn runtime_feature_provider_default_true_is_inherited_by_model_candidate() {
+        let mut catalog = catalog();
+        catalog
+            .runtime_feature_configs
+            .push(provider_runtime_feature_config(
+                701,
+                1,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                true,
+            ));
+
+        let plan = build_execution_plan_from_catalog(&catalog, 42, "openai/gpt-primary")
+            .expect("direct model should resolve");
+        let candidate = plan.primary_candidate().unwrap();
+
+        assert!(
+            candidate
+                .runtime_features
+                .openai_reasoning_content_repair_enabled
+        );
+        assert_eq!(
+            candidate
+                .runtime_features
+                .openai_reasoning_content_repair_source,
+            RuntimeFeatureConfigSource::ProviderDefault
+        );
+    }
+
+    #[test]
+    fn runtime_feature_provider_default_false_is_inherited_by_model_candidate() {
+        let mut catalog = catalog();
+        catalog
+            .runtime_feature_configs
+            .push(provider_runtime_feature_config(
+                702,
+                1,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                false,
+            ));
+
+        let plan = build_execution_plan_from_catalog(&catalog, 42, "openai/gpt-primary")
+            .expect("direct model should resolve");
+        let candidate = plan.primary_candidate().unwrap();
+
+        assert!(
+            !candidate
+                .runtime_features
+                .openai_reasoning_content_repair_enabled
+        );
+        assert_eq!(
+            candidate
+                .runtime_features
+                .openai_reasoning_content_repair_source,
+            RuntimeFeatureConfigSource::ProviderDefault
+        );
+    }
+
+    #[test]
+    fn runtime_feature_model_override_true_overrides_provider_false() {
+        let mut catalog = catalog();
+        catalog
+            .runtime_feature_configs
+            .push(provider_runtime_feature_config(
+                703,
+                1,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                false,
+            ));
+        catalog
+            .runtime_feature_configs
+            .push(model_runtime_feature_config(
+                704,
+                10,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                true,
+            ));
+
+        let plan = build_execution_plan_from_catalog(&catalog, 42, "openai/gpt-primary")
+            .expect("direct model should resolve");
+        let candidate = plan.primary_candidate().unwrap();
+
+        assert!(
+            candidate
+                .runtime_features
+                .openai_reasoning_content_repair_enabled
+        );
+        assert_eq!(
+            candidate
+                .runtime_features
+                .openai_reasoning_content_repair_source,
+            RuntimeFeatureConfigSource::ModelOverride
+        );
+    }
+
+    #[test]
+    fn runtime_feature_model_override_false_overrides_provider_true() {
+        let mut catalog = catalog();
+        catalog
+            .runtime_feature_configs
+            .push(provider_runtime_feature_config(
+                705,
+                1,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                true,
+            ));
+        catalog
+            .runtime_feature_configs
+            .push(model_runtime_feature_config(
+                706,
+                10,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                false,
+            ));
+
+        let plan = build_execution_plan_from_catalog(&catalog, 42, "openai/gpt-primary")
+            .expect("direct model should resolve");
+        let candidate = plan.primary_candidate().unwrap();
+
+        assert!(
+            !candidate
+                .runtime_features
+                .openai_reasoning_content_repair_enabled
+        );
+        assert_eq!(
+            candidate
+                .runtime_features
+                .openai_reasoning_content_repair_source,
+            RuntimeFeatureConfigSource::ModelOverride
+        );
+    }
+
+    #[test]
+    fn runtime_feature_resolution_does_not_depend_on_reasoning_config() {
+        let mut catalog = catalog();
+        catalog
+            .runtime_feature_configs
+            .push(provider_runtime_feature_config(
+                707,
+                1,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                true,
+            ));
+        assert!(
+            catalog.reasoning_configs.is_empty(),
+            "fixture intentionally has no reasoning config"
+        );
+
+        let plan = build_execution_plan_from_catalog(&catalog, 42, "openai/gpt-primary")
+            .expect("direct model should resolve");
+        let candidate = plan.primary_candidate().unwrap();
+
+        assert!(
+            candidate
+                .runtime_features
+                .openai_reasoning_content_repair_enabled
+        );
+        assert!(candidate.reasoning_config_id.is_none());
     }
 
     #[test]
@@ -1081,6 +1373,10 @@ mod tests {
         );
         assert!(
             summary.contains("reasoning_suffix=Some(\"high\")"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("runtime_feature_openai_reasoning_content_repair=false/default_false"),
             "{summary}"
         );
     }

@@ -155,6 +155,15 @@ export function useModelEdit() {
     });
   };
 
+  const handleRuntimeFeatureConfigSaved = () => {
+    void Promise.all([
+      providerStore.fetchProviders(),
+      modelStore.fetchModels(),
+    ]).catch((error) => {
+      console.error("Failed to refresh stores after runtime feature config save:", error);
+    });
+  };
+
   const handleNavigateToModels = () => {
     void router.push("/model");
   };
@@ -227,6 +236,7 @@ export function useModelEdit() {
     fetchData,
     handleSaveModel,
     handleReasoningConfigSaved,
+    handleRuntimeFeatureConfigSaved,
     handleNavigateToModels,
     handleNavigateToProviders,
     handleNavigateToRoutes,

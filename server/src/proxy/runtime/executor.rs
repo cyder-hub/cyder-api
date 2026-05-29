@@ -36,14 +36,16 @@ use crate::{
             policy::{RuntimeExecutionPolicy, RuntimeLogMode},
             request_patch::load_runtime_request_patch_trace,
             route_resolver::ExecutionCandidate,
-            transport::send_materialized_request,
+            transport::{ReasoningContinuationCaptureContext, send_materialized_request},
         },
         util::{get_cost_catalog_version, serialize_downstream_request_headers_for_log},
         utility::{UtilityOperation, validate_utility_target},
     },
     schema::enum_def::LlmApiType,
     service::{
-        app_state::AppState, cache::types::CacheApiKey, runtime::ProviderCircuitProbePermit,
+        app_state::AppState,
+        cache::types::CacheApiKey,
+        runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
     },
     utils::storage::{
         RequestLogBundleCandidateManifest, RequestLogBundleQueryParam,
@@ -391,6 +393,8 @@ pub(in crate::proxy) async fn execute_attempt(
                 replay_query_params.as_deref(),
                 &request_patch_trace.applied_rules,
                 &provider_credentials,
+                api_key.id,
+                app_state.reasoning_continuation_store.as_ref(),
             )
             .await
             {
@@ -448,6 +452,10 @@ pub(in crate::proxy) async fn execute_attempt(
             }
         },
     };
+    let _reasoning_repair_count = materialized
+        .reasoning_repair_report
+        .as_ref()
+        .map(|report| report.repaired_count);
     attempt.llm_request_body_for_log = materialized.llm_request_body_for_log.clone();
     debug_assert_eq!(
         attempt.provider_api_key_id,
@@ -464,6 +472,22 @@ pub(in crate::proxy) async fn execute_attempt(
     attempt.started_at = Some(Utc::now().timestamp_millis());
     sync_attempt_timing_and_usage(&mut attempt, &log_context, cost_catalog_version.as_ref());
     log_context.set_attempts_for_logging(&skipped_attempts_for_log, Some(attempt.clone()));
+    let reasoning_capture_context =
+        execution_policy
+            .captures_reasoning_continuations()
+            .then(|| ReasoningContinuationCaptureContext {
+                scope: ReasoningContinuationScope {
+                    api_key_id: api_key.id,
+                    provider_id: candidate.provider.id,
+                    model_id: candidate.model.id,
+                    route_id: candidate.route_id,
+                    route_name: candidate.route_name.clone(),
+                    candidate_position: candidate.candidate_position,
+                },
+                feature_enabled: candidate
+                    .runtime_features
+                    .openai_reasoning_content_repair_enabled,
+            });
 
     let api_key_request_lease = if execution_policy.admits_api_key_requests() {
         match admit_api_key_request(&app_state, &api_key).await {
@@ -567,6 +591,7 @@ pub(in crate::proxy) async fn execute_attempt(
         api_key_request_lease,
         provider_circuit_permit,
         materialized.response_mode,
+        reasoning_capture_context,
         log_mode.proxy_log_mode(),
         execution_policy,
     )

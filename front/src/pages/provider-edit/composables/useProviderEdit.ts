@@ -76,6 +76,12 @@ export function useProviderEdit() {
     });
   };
 
+  const handleRuntimeFeatureConfigSaved = () => {
+    void providerStore.fetchProviders().catch((error) => {
+      console.error("Failed to refresh providers after runtime feature config save:", error);
+    });
+  };
+
   const loadProvider = async () => {
     isLoading.value = true;
     errorMsg.value = null;
@@ -137,6 +143,7 @@ export function useProviderEdit() {
     pageTitle,
     reasoningActions,
     handleReasoningConfigSaved,
+    handleRuntimeFeatureConfigSaved,
     loadProvider,
   };
 }

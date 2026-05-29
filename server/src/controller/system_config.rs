@@ -212,6 +212,7 @@ mod tests {
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
+            reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             diagnostics,
             metrics,
             alerts,

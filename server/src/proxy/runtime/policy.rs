@@ -18,6 +18,10 @@ impl RuntimeExecutionPolicy {
         matches!(self, Self::Normal)
     }
 
+    pub(crate) fn captures_reasoning_continuations(self) -> bool {
+        matches!(self, Self::Normal)
+    }
+
     pub(crate) fn admits_api_key_requests(self) -> bool {
         matches!(self, Self::Normal)
     }
@@ -66,6 +70,7 @@ mod tests {
         assert!(policy.sends_upstream_request());
         assert!(policy.records_request_log());
         assert!(policy.records_provider_runtime());
+        assert!(policy.captures_reasoning_continuations());
         assert!(policy.admits_api_key_requests());
         assert!(policy.uses_mutating_provider_governance());
         assert!(!policy.uses_read_only_provider_governance());
@@ -78,6 +83,7 @@ mod tests {
         assert!(!policy.sends_upstream_request());
         assert!(!policy.records_request_log());
         assert!(!policy.records_provider_runtime());
+        assert!(!policy.captures_reasoning_continuations());
         assert!(!policy.admits_api_key_requests());
         assert!(!policy.uses_mutating_provider_governance());
         assert!(policy.uses_read_only_provider_governance());
@@ -90,6 +96,7 @@ mod tests {
         assert!(policy.sends_upstream_request());
         assert!(!policy.records_request_log());
         assert!(!policy.records_provider_runtime());
+        assert!(!policy.captures_reasoning_continuations());
         assert!(!policy.admits_api_key_requests());
         assert!(!policy.uses_mutating_provider_governance());
         assert!(policy.uses_read_only_provider_governance());

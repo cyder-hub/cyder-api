@@ -215,6 +215,7 @@ mod tests {
                     },
                 ],
             }],
+            runtime_feature_configs: vec![],
         };
 
         assert_eq!(

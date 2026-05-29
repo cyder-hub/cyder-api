@@ -16,6 +16,7 @@ use crate::database::model_route::{ApiKeyModelOverride, ModelRoute};
 use crate::database::provider::{Provider, ProviderApiKey};
 use crate::database::reasoning_config::ReasoningConfig;
 use crate::database::request_patch::RequestPatchRule;
+use crate::database::runtime_feature_config::RuntimeFeatureConfig;
 use crate::service::app_state::AppStoreError;
 use crate::service::cache::memory::MemoryCacheBackend;
 use crate::service::cache::redis::RedisCacheBackend;
@@ -23,7 +24,7 @@ use crate::service::cache::repository::{CacheRepository, DynCacheRepo};
 use crate::service::cache::types::{
     CacheApiKey, CacheApiKeyModelOverride, CacheCostCatalogVersion, CacheEntry, CacheModel,
     CacheModelRoute, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheReasoningConfig,
-    CacheRequestPatchRule, CacheResolvedModelRequestPatches,
+    CacheRequestPatchRule, CacheResolvedModelRequestPatches, CacheRuntimeFeatureConfig,
 };
 use crate::service::redis::{self, RedisPool};
 use crate::service::request_patch::resolve_effective_request_patches;
@@ -207,12 +208,14 @@ impl CatalogService {
         let mut catalog_routes = Vec::new();
         let mut catalog_api_key_overrides = Vec::new();
         let mut catalog_reasoning_configs = Vec::new();
+        let mut catalog_runtime_feature_configs = Vec::new();
         let mut api_key_count = 0usize;
         let mut provider_count = 0usize;
         let mut model_count = 0usize;
         let mut model_route_count = 0usize;
         let mut api_key_override_count = 0usize;
         let mut reasoning_config_count = 0usize;
+        let mut runtime_feature_config_count = 0usize;
         let mut provider_api_key_count = 0usize;
         let mut provider_api_key_group_count = 0usize;
         let mut request_patch_rule_count = 0usize;
@@ -395,12 +398,24 @@ impl CatalogService {
             }
         }
 
+        match RuntimeFeatureConfig::list_active() {
+            Ok(configs) => {
+                runtime_feature_config_count = configs.len();
+                catalog_runtime_feature_configs
+                    .extend(configs.into_iter().map(CacheRuntimeFeatureConfig::from));
+            }
+            Err(_) => {
+                increment_failure_counter(&mut failure_counts, "runtime_feature_config_list");
+            }
+        }
+
         let models_catalog = CacheModelsCatalog {
             providers: catalog_providers.clone(),
             models: catalog_models.clone(),
             routes: catalog_routes.clone(),
             api_key_overrides: catalog_api_key_overrides.clone(),
             reasoning_configs: catalog_reasoning_configs.clone(),
+            runtime_feature_configs: catalog_runtime_feature_configs.clone(),
         };
         let _ = self
             .models_catalog_cache
@@ -563,6 +578,7 @@ impl CatalogService {
                 model_route_count = model_route_count,
                 api_key_override_count = api_key_override_count,
                 reasoning_config_count = reasoning_config_count,
+                runtime_feature_config_count = runtime_feature_config_count,
                 provider_api_key_count = provider_api_key_count,
                 provider_api_key_group_count = provider_api_key_group_count,
                 request_patch_rule_count = request_patch_rule_count,
@@ -583,6 +599,7 @@ impl CatalogService {
                 model_route_count = model_route_count,
                 api_key_override_count = api_key_override_count,
                 reasoning_config_count = reasoning_config_count,
+                runtime_feature_config_count = runtime_feature_config_count,
                 provider_api_key_count = provider_api_key_count,
                 provider_api_key_group_count = provider_api_key_group_count,
                 request_patch_rule_count = request_patch_rule_count,
@@ -1209,6 +1226,20 @@ impl CatalogService {
             .await?)
     }
 
+    pub async fn invalidate_runtime_feature_provider_config(
+        &self,
+        _provider_id: i64,
+    ) -> Result<(), AppStoreError> {
+        self.invalidate_models_catalog().await
+    }
+
+    pub async fn invalidate_runtime_feature_model_config(
+        &self,
+        _model_id: i64,
+    ) -> Result<(), AppStoreError> {
+        self.invalidate_models_catalog().await
+    }
+
     pub async fn get_provider_api_keys(
         &self,
         provider_id: i64,
@@ -1466,6 +1497,15 @@ impl CatalogService {
             .into_iter()
             .map(CacheReasoningConfig::from)
             .collect();
+        let runtime_feature_configs = RuntimeFeatureConfig::list_active()
+            .map_err(|e| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to list runtime feature configs: {e:?}"
+                ))
+            })?
+            .into_iter()
+            .map(CacheRuntimeFeatureConfig::from)
+            .collect();
 
         Ok(CacheModelsCatalog {
             providers,
@@ -1473,6 +1513,7 @@ impl CatalogService {
             routes,
             api_key_overrides,
             reasoning_configs,
+            runtime_feature_configs,
         })
     }
 }
@@ -1526,6 +1567,7 @@ mod tests {
         ReasoningConfig, ReasoningConfigMode, ReasoningConfigPresetInput, ReasoningConfigScope,
         ReasoningPatchFamily, ReasoningPreset,
     };
+    use crate::database::runtime_feature_config::{RuntimeFeatureConfig, RuntimeFeatureKey};
     use crate::schema::enum_def::{Action, ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::{
         CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModel, CacheModelRoute,
@@ -1795,6 +1837,18 @@ mod tests {
                 &[preset("medium", false, true)],
             )
             .expect("model config");
+            let provider_feature = RuntimeFeatureConfig::upsert_provider_config(
+                provider.id,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                true,
+            )
+            .expect("provider runtime feature config");
+            let model_feature = RuntimeFeatureConfig::upsert_model_config(
+                model.id,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair,
+                false,
+            )
+            .expect("model runtime feature config");
 
             let catalog = CatalogService::new(true).await;
             catalog.reload().await;
@@ -1836,6 +1890,25 @@ mod tests {
                 .expect("model config snapshot");
             assert_eq!(model_snapshot.scope_kind, ReasoningConfigScope::Model);
             assert_eq!(model_snapshot.model_id, Some(model.id));
+            assert_eq!(snapshot.runtime_feature_configs.len(), 2);
+            let provider_feature_snapshot = snapshot
+                .runtime_feature_configs
+                .iter()
+                .find(|config| config.id == provider_feature.config.id)
+                .expect("provider runtime feature snapshot");
+            assert_eq!(provider_feature_snapshot.provider_id, Some(provider.id));
+            assert!(provider_feature_snapshot.enabled);
+            assert_eq!(
+                provider_feature_snapshot.feature_key,
+                RuntimeFeatureKey::OpenAiReasoningContentRepair
+            );
+            let model_feature_snapshot = snapshot
+                .runtime_feature_configs
+                .iter()
+                .find(|config| config.id == model_feature.config.id)
+                .expect("model runtime feature snapshot");
+            assert_eq!(model_feature_snapshot.model_id, Some(model.id));
+            assert!(!model_feature_snapshot.enabled);
 
             let encoded = bincode::encode_to_vec(&*snapshot, bincode::config::standard())
                 .expect("catalog snapshot should bincode encode");
@@ -1843,6 +1916,7 @@ mod tests {
                 bincode::decode_from_slice(&encoded, bincode::config::standard())
                     .expect("catalog snapshot should bincode decode");
             assert_eq!(decoded.reasoning_configs.len(), 2);
+            assert_eq!(decoded.runtime_feature_configs.len(), 2);
         })
         .await;
     }
@@ -1861,6 +1935,7 @@ mod tests {
                 routes: vec![],
                 api_key_overrides: vec![],
                 reasoning_configs: vec![],
+                runtime_feature_configs: vec![],
             };
 
             catalog

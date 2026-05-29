@@ -10,6 +10,7 @@ export * from "./alerts";
 export * from "./notifications";
 export * from "./modelRoutes";
 export * from "./requestPatch";
+export * from "./runtimeFeatureConfig";
 export * from "./cost";
 export * from "./records";
 export * from "./portableConfig";

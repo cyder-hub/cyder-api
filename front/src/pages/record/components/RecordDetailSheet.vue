@@ -1,11 +1,11 @@
 <template>
-  <Dialog v-model:open="isOpen">
-    <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-[92vw] xl:max-w-6xl">
-      <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6">
-        <DialogTitle class="pr-8 text-base font-semibold text-gray-900 sm:text-lg">
+  <Drawer direction="right" v-model:open="isOpen">
+    <DrawerContent class="flex flex-col p-0 outline-none">
+      <DrawerHeader class="border-b border-gray-100 px-4 py-4 sm:px-6">
+        <DrawerTitle class="pr-8 text-base font-semibold text-gray-900 sm:text-lg">
           {{ $t("recordPage.detailDialog.title") }}
-        </DialogTitle>
-      </DialogHeader>
+        </DrawerTitle>
+      </DrawerHeader>
 
       <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
         <div v-if="loading" class="py-10 text-center text-gray-500">
@@ -150,13 +150,13 @@
         </div>
       </div>
 
-      <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:px-6">
+      <DrawerFooter class="border-t border-gray-100 px-4 py-4 sm:px-6">
         <Button variant="secondary" class="w-full sm:w-auto" @click="isOpen = false">
           {{ $t("common.close") }}
         </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+      </DrawerFooter>
+    </DrawerContent>
+  </Drawer>
 </template>
 
 <script setup lang="ts">
@@ -170,12 +170,12 @@ import RecordReplayPanel from "./RecordReplayPanel.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Drawer,
+  DrawerContent,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer";
 import type { RecordArtifactResponse, RecordAttempt, RecordRequest } from "@/services/types";
 import {
   RECORD_DETAIL_TABS,

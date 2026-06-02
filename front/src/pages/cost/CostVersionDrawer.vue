@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Drawer,
+  DrawerContent,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { VersionDraft } from "./types";
@@ -24,14 +24,14 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-2xl">
-      <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
-        <DialogTitle class="text-lg font-semibold text-gray-900">
+  <Drawer :open="open" direction="right" @update:open="(val) => emit('update:open', val)">
+    <DrawerContent class="flex h-full w-full flex-col rounded-none rounded-l-2xl border-none bg-background sm:max-w-[600px] lg:max-w-[800px] xl:max-w-[1000px] right-0 left-auto mt-0 top-0">
+      <DrawerHeader class="border-b border-gray-100 px-6 py-4 text-left">
+        <DrawerTitle class="text-lg font-semibold text-gray-900">
           {{ $t("costPage.versions.modal.titleAdd") }}
-        </DialogTitle>
-      </DialogHeader>
-      <div class="grid grid-cols-1 gap-4 overflow-y-auto px-4 py-4 sm:grid-cols-2 sm:px-6">
+        </DrawerTitle>
+      </DrawerHeader>
+      <div class="flex-1 overflow-y-auto px-6 py-6 grid grid-cols-1 gap-4">
         <div class="space-y-1.5">
           <Label for="version-name">{{ $t("costPage.versions.modal.version") }}</Label>
           <Input id="version-name" v-model="draft.version" />
@@ -53,7 +53,7 @@ const emit = defineEmits<{
           <Input id="version-effective-until" v-model="draft.effective_until" type="datetime-local" />
         </div>
         <label
-          class="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50/60 px-4 py-3 sm:col-span-2"
+          class="flex items-center justify-between py-2 sm:col-span-2"
         >
           <div>
             <div class="text-sm font-medium text-gray-900">
@@ -63,17 +63,19 @@ const emit = defineEmits<{
               {{ $t("costPage.versions.modal.enabledDescription") }}
             </div>
           </div>
-          <input v-model="draft.is_enabled" type="checkbox" class="h-4 w-4" />
+          <input v-model="draft.is_enabled" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600" />
         </label>
       </div>
-      <DialogFooter
-        class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6"
-        :show-close-button="true"
-      >
-        <Button :disabled="isSaving" @click="emit('save')">
-          {{ isSaving ? $t("common.saving") : $t("common.save") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+      <DrawerFooter class="border-t border-gray-100 px-6 py-4">
+        <div class="flex w-full justify-end gap-2">
+          <Button variant="outline" @click="emit('update:open', false)">
+            {{ $t("common.cancel") }}
+          </Button>
+          <Button :disabled="isSaving" @click="emit('save')">
+            {{ isSaving ? $t("common.saving") : $t("common.save") }}
+          </Button>
+        </div>
+      </DrawerFooter>
+    </DrawerContent>
+  </Drawer>
 </template>

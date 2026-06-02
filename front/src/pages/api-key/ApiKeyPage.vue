@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { KeyRound, Loader2, Plus, RefreshCcw } from "lucide-vue-next";
 
@@ -34,7 +34,6 @@ const {
   selectedDetail,
   selectedRuntimeView,
   selectedListKey,
-  showMobileKeyPicker,
   secretReveal,
   handleSelectKey,
   handleRevealKey,
@@ -53,7 +52,8 @@ const apiKeyGovernance = useApiKeyGovernance({
   selectedKeyId: apiKeyDetail.selectedKeyId,
   selectedDetail: apiKeyDetail.selectedDetail,
   setSecretReveal: apiKeyDetail.setSecretReveal,
-  refreshSelected,
+  refreshList: apiKeyList.fetchData,
+  refreshDetail: apiKeyDetail.loadSelectedKey,
 });
 const {
   showEditDialog,
@@ -68,6 +68,13 @@ function handleRefresh() {
   void refreshSelected(selectedKeyId.value);
 }
 
+const isDetailOpen = ref(false);
+
+function onSelectKey(id: number) {
+  handleSelectKey(id);
+  isDetailOpen.value = true;
+}
+
 onMounted(() => {
   void refreshSelected(selectedKeyId.value);
 });
@@ -80,9 +87,9 @@ onMounted(() => {
     :error="error"
     :empty="!apiKeys.length"
     header-class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"
-    page-class="flex flex-col xl:h-full xl:min-h-0 xl:overflow-hidden"
-    shell-class="flex flex-col xl:min-h-0 xl:flex-1"
-    content-class="flex flex-col gap-4 sm:gap-5 xl:min-h-0 xl:flex-1"
+    page-class="flex flex-col"
+    shell-class="flex flex-col"
+    content-class="flex flex-col gap-4 sm:gap-5"
   >
     <template #actions>
       <Button variant="outline" class="w-full sm:w-auto" @click="handleRefresh">
@@ -125,36 +132,32 @@ onMounted(() => {
 
     <StatsStrip :items="summaryCards" grid-class="grid-cols-2 sm:grid-cols-3 xl:grid-cols-5" />
 
-    <div class="grid grid-cols-1 gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-12">
-      <div class="xl:col-span-4 xl:min-h-0 2xl:col-span-3">
-        <ApiKeyTable
-          v-model:mobile-open="showMobileKeyPicker"
-          :api-keys="apiKeys"
-          :runtime-by-id="runtimeById"
-          :selected-key-id="selectedKeyId"
-          :selected-list-key="selectedListKey"
-          @select="handleSelectKey"
-        />
-      </div>
-
-      <div class="xl:col-span-8 xl:min-h-0 2xl:col-span-9">
-        <ApiKeyDetailDrawer
-          :detail="selectedDetail"
-          :runtime="selectedRuntimeView"
-          :detail-loading="detailLoading"
-          :secret-reveal="secretReveal"
-          :provider-name-by-id="providerStore.providerNameById"
-          :model-name-by-id="modelStore.modelNameById"
-          :route-name-by-id="routeNameById"
-          @reveal="handleRevealKey"
-          @rotate="handleRotateKey"
-          @edit="handleStartEditing"
-          @delete="handleDeleteKey"
-          @copy-secret="copySecret"
-          @close-secret="setSecretReveal(null)"
-        />
-      </div>
+    <div>
+      <ApiKeyTable
+        :api-keys="apiKeys"
+        :runtime-by-id="runtimeById"
+        :selected-key-id="selectedKeyId"
+        :selected-list-key="selectedListKey"
+        @select="onSelectKey"
+      />
     </div>
+
+    <ApiKeyDetailDrawer
+      v-model:open="isDetailOpen"
+      :detail="selectedDetail"
+      :runtime="selectedRuntimeView"
+      :detail-loading="detailLoading"
+      :secret-reveal="secretReveal"
+      :provider-name-by-id="providerStore.providerNameById"
+      :model-name-by-id="modelStore.modelNameById"
+      :route-name-by-id="routeNameById"
+      @reveal="handleRevealKey"
+      @rotate="handleRotateKey"
+      @edit="handleStartEditing"
+      @delete="handleDeleteKey"
+      @copy-secret="copySecret"
+      @close-secret="setSecretReveal(null)"
+    />
 
     <template #modals>
       <ApiKeyEditDialog

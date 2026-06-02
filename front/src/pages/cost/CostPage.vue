@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
-import CostCatalogDialog from "./CostCatalogDialog.vue";
+import CostCatalogDrawer from "./CostCatalogDrawer.vue";
 import CostCatalogSection from "./CostCatalogSection.vue";
-import CostComponentDialog from "./CostComponentDialog.vue";
-import CostEditorDialog from "./CostEditorDialog.vue";
-import CostTemplateDialog from "./CostTemplateDialog.vue";
-import CostVersionDialog from "./CostVersionDialog.vue";
+import CostComponentDrawer from "./CostComponentDrawer.vue";
+import CostEditorSheet from "./CostEditorSheet.vue";
+import CostTemplateDrawer from "./CostTemplateDrawer.vue";
+import CostVersionDrawer from "./CostVersionDrawer.vue";
 import { useCostPage } from "./composables/useCostPage";
 
 const {
@@ -97,7 +97,7 @@ const {
     </div>
   </CrudPageLayout>
 
-  <CostEditorDialog
+  <CostEditorSheet
     :open="isEditorDialogOpen"
     :selected-catalog="selectedCatalog"
     :selected-catalog-versions="selectedCatalogVersions"
@@ -142,7 +142,7 @@ const {
     @run-preview="runPreview"
   />
 
-  <CostTemplateDialog
+  <CostTemplateDrawer
     :open="isTemplateDialogOpen"
     :templates="templates"
     :is-loading-templates="isLoadingTemplates"
@@ -152,7 +152,7 @@ const {
     @import-template="importTemplate"
   />
 
-  <CostCatalogDialog
+  <CostCatalogDrawer
     :open="isCatalogDialogOpen"
     :draft="catalogDraft"
     :is-saving="isSavingCatalog"
@@ -160,7 +160,7 @@ const {
     @save="saveCatalog"
   />
 
-  <CostVersionDialog
+  <CostVersionDrawer
     :open="isVersionDialogOpen"
     :draft="versionDraft"
     :is-saving="isSavingVersion"
@@ -168,7 +168,7 @@ const {
     @save="saveVersion"
   />
 
-  <CostComponentDialog
+  <CostComponentDrawer
     :open="isComponentDialogOpen"
     :draft="componentDraft"
     :is-saving="isSavingComponent"

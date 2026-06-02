@@ -60,9 +60,9 @@ export interface ProviderBootstrapPayload {
   endpoint: string;
   api_key: string;
   model_name: string;
+  key: string;
   provider_type?: string;
   name?: string;
-  key?: string;
   real_model_name?: string | null;
   use_proxy?: boolean;
   save_and_test?: boolean;

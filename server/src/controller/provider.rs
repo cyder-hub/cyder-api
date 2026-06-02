@@ -425,25 +425,6 @@ fn endpoint_host(endpoint: &str) -> String {
         .to_string()
 }
 
-fn slugify(value: &str) -> String {
-    let mut slug = String::new();
-    let mut last_was_separator = false;
-
-    for ch in value.trim().chars() {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch.to_ascii_lowercase());
-            last_was_separator = false;
-        } else if !last_was_separator {
-            if !slug.is_empty() {
-                slug.push('-');
-            }
-            last_was_separator = true;
-        }
-    }
-
-    slug.trim_matches('-').to_string()
-}
-
 fn generated_provider_name(provider_type: &ProviderType, endpoint: &str) -> String {
     let host = endpoint_host(endpoint);
     if host.is_empty() {
@@ -457,25 +438,6 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
-}
-
-fn generated_provider_key(
-    provider_type: &ProviderType,
-    endpoint: &str,
-    provider_name: &str,
-) -> String {
-    let fallback = generated_provider_name(provider_type, endpoint);
-    let candidate = slugify(provider_name);
-    if !candidate.is_empty() {
-        candidate
-    } else {
-        let fallback_slug = slugify(&fallback);
-        if !fallback_slug.is_empty() {
-            fallback_slug
-        } else {
-            slugify(provider_type_label(provider_type))
-        }
-    }
 }
 
 fn base_error_message(error: &BaseError) -> String {
@@ -509,29 +471,11 @@ fn resolve_bootstrap_identity(
     let provider_name = normalize_optional_text(name)
         .unwrap_or_else(|| generated_provider_name(provider_type, endpoint));
 
-    if let Some(explicit_key) = normalize_optional_text(key) {
-        return Ok((provider_name, explicit_key));
-    }
+    let provider_key = normalize_optional_text(key).ok_or_else(|| {
+        BaseError::ParamInvalid(Some("provider_key must be provided".to_string()))
+    })?;
 
-    let base_key = generated_provider_key(provider_type, endpoint, &provider_name);
-    let mut candidate = if base_key.is_empty() {
-        slugify(&generated_provider_name(provider_type, endpoint))
-    } else {
-        base_key
-    };
-
-    if candidate.is_empty() {
-        candidate = slugify(provider_type_label(provider_type));
-    }
-
-    let base_candidate = candidate.clone();
-    let mut suffix = 2;
-    while Provider::get_by_key(&candidate)?.is_some() {
-        candidate = format!("{}-{}", base_candidate, suffix);
-        suffix += 1;
-    }
-
-    Ok((provider_name, candidate))
+    Ok((provider_name, provider_key))
 }
 
 async fn perform_provider_check(
@@ -1256,18 +1200,48 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_provider_defaults_use_provider_type_and_endpoint_host() {
+    fn bootstrap_provider_defaults_name_and_requires_explicit_key() {
         assert_eq!(
             super::generated_provider_name(&ProviderType::Openai, "https://api.example.com/v1"),
             "OpenAI api.example.com"
         );
+
+        let (provider_name, provider_key) = super::resolve_bootstrap_identity(
+            &ProviderType::Openai,
+            "https://api.example.com/v1",
+            None,
+            Some("  ds  ".to_string()),
+        )
+        .expect("explicit provider key should be accepted");
         assert_eq!(
-            super::generated_provider_key(
-                &ProviderType::Openai,
-                "https://api.example.com/v1",
-                "OpenAI api.example.com"
-            ),
-            "openai-api-example-com"
+            (provider_name.as_str(), provider_key.as_str()),
+            ("OpenAI api.example.com", "ds")
+        );
+
+        let err = super::resolve_bootstrap_identity(
+            &ProviderType::Openai,
+            "https://api.example.com/v1",
+            None,
+            Some("  ".to_string()),
+        )
+        .expect_err("blank provider key should be rejected");
+
+        assert!(super::base_error_message(&err).contains("provider_key must be provided"));
+    }
+
+    #[test]
+    fn bootstrap_provider_preserves_explicit_name_and_key() {
+        let (provider_name, provider_key) = super::resolve_bootstrap_identity(
+            &ProviderType::Openai,
+            "https://api.example.com/v1",
+            Some("  DeepSeek Main  ".to_string()),
+            Some("  ds  ".to_string()),
+        )
+        .expect("explicit provider identity should be accepted");
+
+        assert_eq!(
+            (provider_name.as_str(), provider_key.as_str()),
+            ("DeepSeek Main", "ds")
         );
     }
 

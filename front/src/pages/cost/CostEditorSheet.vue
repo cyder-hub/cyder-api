@@ -2,11 +2,11 @@
 import { Copy, Edit, Plus, RefreshCw, Sparkles } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Drawer,
+  DrawerContent,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer";
 import type {
   CostCatalogListItem,
   CostCatalogVersion,
@@ -72,16 +72,16 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent
-      class="flex max-h-[94dvh] w-[calc(100vw-1.5rem)] max-w-[96vw] flex-col overflow-hidden p-0 xl:max-w-7xl"
+  <Drawer :open="open" direction="right" @update:open="(value) => emit('update:open', value)">
+    <DrawerContent
+      class="flex max-h-[100dvh] h-full w-full max-w-[95vw] lg:max-w-[90vw] xl:max-w-[85vw] flex-col overflow-hidden p-0 rounded-none rounded-l-2xl right-0 left-auto mt-0 top-0"
     >
-      <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
+      <DrawerHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4 text-left">
         <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div class="min-w-0">
-            <DialogTitle class="text-lg font-semibold text-gray-900">
+            <DrawerTitle class="text-lg font-semibold text-gray-900">
               {{ selectedCatalog?.catalog.name || $t("costPage.editor.title") }}
-            </DialogTitle>
+            </DrawerTitle>
             <p class="mt-1 text-xs leading-5 text-gray-500">
               {{
                 selectedCatalog?.catalog.description ||
@@ -125,7 +125,7 @@ const emit = defineEmits<{
             </Button>
           </div>
         </div>
-      </DialogHeader>
+      </DrawerHeader>
 
       <div class="flex min-h-0 flex-1 flex-col px-4 py-4 sm:px-6">
         <div v-if="selectedCatalog" class="flex min-h-0 flex-1 flex-col">
@@ -181,6 +181,6 @@ const emit = defineEmits<{
           </p>
         </div>
       </div>
-    </DialogContent>
-  </Dialog>
+    </DrawerContent>
+  </Drawer>
 </template>

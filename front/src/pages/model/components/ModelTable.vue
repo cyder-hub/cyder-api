@@ -1,5 +1,5 @@
 <template>
-  <div class="hidden overflow-hidden rounded-xl border border-gray-200 bg-white md:block">
+  <div class="overflow-hidden rounded-xl border border-gray-200 bg-white">
     <Table>
       <TableHeader>
         <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">

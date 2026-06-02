@@ -1,4 +1,4 @@
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch, type Ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 
@@ -14,14 +14,14 @@ import type { CostCatalogVersion, ModelDetailResponse } from "@/services/types";
 import type { ReasoningConfigActions } from "@/components/reasoning/types";
 import type { EditingModelData } from "../types";
 
-export function useModelEdit() {
+export function useModelEdit(propsModelId?: Ref<number | null>) {
   const { t } = useI18n();
   const route = useRoute();
   const router = useRouter();
   const providerStore = useProviderStore();
   const modelStore = useModelStore();
 
-  const modelId = parseInt(route.params.id as string);
+  const modelId = computed(() => propsModelId?.value ?? parseInt(route.params.id as string));
   const isLoading = ref(true);
   const modelDetail = ref<ModelDetailResponse | null>(null);
   const editingData = ref<EditingModelData | null>(null);
@@ -62,7 +62,7 @@ export function useModelEdit() {
   );
 
   const fetchData = async () => {
-    if (isNaN(modelId)) {
+    if (isNaN(modelId.value)) {
       toastController.error(
         t("modelEditPage.alert.loadDataFailed", { modelId: route.params.id }),
       );
@@ -73,7 +73,7 @@ export function useModelEdit() {
     try {
       isLoading.value = true;
       const [detail] = await Promise.all([
-        modelService.getModelDetail(modelId),
+        modelService.getModelDetail(modelId.value),
         providerStore.fetchProviders(),
         costManager.refreshCostData(),
       ]);
@@ -100,7 +100,7 @@ export function useModelEdit() {
     } catch (error: unknown) {
       const normalizedError = normalizeError(error, t("common.unknownError"));
       toastController.error(
-        t("modelEditPage.alert.loadDataFailed", { modelId }),
+        t("modelEditPage.alert.loadDataFailed", { modelId: modelId.value }),
         normalizedError.message,
       );
     } finally {
@@ -218,8 +218,16 @@ export function useModelEdit() {
     },
   );
 
+  watch(modelId, (newVal, oldVal) => {
+    if (newVal !== oldVal && !isNaN(newVal)) {
+      void fetchData();
+    }
+  });
+
   onMounted(() => {
-    void fetchData();
+    if (!isNaN(modelId.value)) {
+      void fetchData();
+    }
   });
 
   return {

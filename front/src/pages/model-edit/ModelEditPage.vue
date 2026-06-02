@@ -24,11 +24,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Copy, Loader2, Plus, Settings2 } from "lucide-vue-next";
-import CostCatalogDialog from "@/pages/cost/CostCatalogDialog.vue";
-import CostComponentDialog from "@/pages/cost/CostComponentDialog.vue";
-import CostEditorDialog from "@/pages/cost/CostEditorDialog.vue";
-import CostTemplateDialog from "@/pages/cost/CostTemplateDialog.vue";
-import CostVersionDialog from "@/pages/cost/CostVersionDialog.vue";
+import CostCatalogDrawer from "@/pages/cost/CostCatalogDrawer.vue";
+import CostComponentDrawer from "@/pages/cost/CostComponentDrawer.vue";
+import CostEditorSheet from "@/pages/cost/CostEditorSheet.vue";
+import CostTemplateDrawer from "@/pages/cost/CostTemplateDrawer.vue";
+import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./components/ModelBaseInfoForm.vue";
 import ModelRoutePreviewPanel from "./components/ModelRoutePreviewPanel.vue";
 import ModelRequestPatchPanel from "./components/ModelRequestPatchPanel.vue";
@@ -360,7 +360,7 @@ const {
     </div>
   </div>
 
-  <CostEditorDialog
+    <CostEditorSheet
     :open="costManager.isEditorDialogOpen.value"
     :selected-catalog="costManager.selectedCatalog.value"
     :selected-catalog-versions="costManager.selectedCatalogVersions.value"
@@ -402,9 +402,9 @@ const {
     @delete-component="costManager.handleDeleteComponent"
     @apply-sample="costManager.applyPreviewSample"
     @run-preview="costManager.runPreview"
-  />
+    />
 
-  <CostTemplateDialog
+    <CostTemplateDrawer
     :open="costManager.isTemplateDialogOpen.value"
     :templates="costManager.templates.value"
     :is-loading-templates="costManager.isLoadingTemplates.value"
@@ -412,17 +412,17 @@ const {
     @update:open="(open) => (costManager.isTemplateDialogOpen.value = open)"
     @refresh="costManager.refreshTemplates"
     @import-template="costManager.importTemplate"
-  />
+    />
 
-  <CostCatalogDialog
+    <CostCatalogDrawer
     :open="costManager.isCatalogDialogOpen.value"
     :draft="costManager.catalogDraft"
     :is-saving="costManager.isSavingCatalog.value"
     @update:open="handleCostCatalogDialogOpenChange"
     @save="costManager.saveCatalog"
-  />
+    />
 
-  <CostVersionDialog
+    <CostVersionDrawer
     :open="costManager.isVersionDialogOpen.value"
     :draft="costManager.versionDraft"
     :is-saving="costManager.isSavingVersion.value"
@@ -430,7 +430,7 @@ const {
     @save="costManager.saveVersion"
   />
 
-  <CostComponentDialog
+    <CostComponentDrawer
     :open="costManager.isComponentDialogOpen.value"
     :draft="costManager.componentDraft"
     :is-saving="costManager.isSavingComponent.value"

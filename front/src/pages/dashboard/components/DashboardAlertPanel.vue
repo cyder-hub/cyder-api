@@ -63,7 +63,7 @@ const { t: $t } = useI18n();
     </p>
   </div>
 
-  <div v-else class="grid grid-cols-1 gap-4 xl:grid-cols-3">
+  <div v-else class="flex flex-col gap-4 h-full">
     <section class="rounded-lg border border-gray-200 bg-white">
       <SectionHeader
         :title="$t('dashboard.sections.alerts.title')"

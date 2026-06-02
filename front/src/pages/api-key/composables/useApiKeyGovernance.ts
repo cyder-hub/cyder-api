@@ -81,7 +81,8 @@ interface UseApiKeyGovernanceOptions {
   selectedKeyId: Ref<number | null>;
   selectedDetail: Ref<ApiKeyDetail | null>;
   setSecretReveal: (reveal: ApiKeyReveal | null) => void;
-  refreshSelected: (preferredSelectedId: number | null) => Promise<void>;
+  refreshList: (preferredSelectedId: number | null) => Promise<number | null>;
+  refreshDetail: (id: number | null) => Promise<void>;
 }
 
 const COMMON_BUDGET_CURRENCIES = ["CNY", "USD"] as const;
@@ -644,7 +645,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
     if (payload.reveal) {
       options.setSecretReveal(payload.reveal);
     }
-    await options.refreshSelected(payload.detail.id);
+    await options.refreshList(payload.detail.id);
   }
 
   async function handleRotateKey(id: number) {
@@ -662,7 +663,8 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
 
     try {
       options.setSecretReveal(await apiKeyService.rotateApiKey(id));
-      await options.refreshSelected(id);
+      await options.refreshList(id);
+      await options.refreshDetail(id);
     } catch (err: unknown) {
       toastController.error(
         options.t("apiKeyPage.rotateFailed", {
@@ -692,7 +694,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
         options.selectedDetail.value = null;
         options.setSecretReveal(null);
       }
-      await options.refreshSelected(null);
+      await options.refreshList(null);
     } catch (err: unknown) {
       toastController.error(
         options.t("apiKeyPage.deleteFailed", {

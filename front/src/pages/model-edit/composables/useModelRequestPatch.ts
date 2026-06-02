@@ -35,10 +35,10 @@ export function useModelRequestPatch(
   const conflicts = ref<RequestPatchConflict[]>([]);
   const hasConflicts = ref(false);
 
-  const explainByRuleId = computed(() => {
+  const explainByRuleId = computed<Map<number, RequestPatchExplainEntry>>(() => {
     const map = new Map<number, RequestPatchExplainEntry>();
     for (const entry of explainEntries.value) {
-      map.set(entry.rule.id, entry);
+      map.set(entry.rule.id, entry as any);
     }
     return map;
   });

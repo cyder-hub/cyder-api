@@ -88,6 +88,7 @@ const openProviderRuntime = (provider: ProviderSummaryItem) => {
     <StatsStrip :items="summaryCards" grid-class="grid-cols-2 sm:grid-cols-4" />
 
     <ProviderCards
+      class="md:hidden"
       :providers="providers"
       :runtime-levels="providerRuntimeLevelMap"
       :provider-state-label="providerStateLabel"
@@ -100,6 +101,7 @@ const openProviderRuntime = (provider: ProviderSummaryItem) => {
     />
 
     <ProviderTable
+      class="hidden md:block"
       :providers="providers"
       :runtime-levels="providerRuntimeLevelMap"
       :provider-state-label="providerStateLabel"

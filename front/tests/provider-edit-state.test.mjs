@@ -42,7 +42,7 @@ test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () 
   });
 });
 
-test("buildProviderBootstrapPreview falls back to provider type and endpoint host", () => {
+test("buildProviderBootstrapPreview requires explicit provider key", () => {
   const preview = buildProviderBootstrapPreview({
     provider_type: "openai",
     endpoint: "https://api.example.com/v1",
@@ -56,7 +56,7 @@ test("buildProviderBootstrapPreview falls back to provider type and endpoint hos
 
   assert.deepEqual(preview, {
     provider_name: "Openai",
-    provider_key: "openai-api-example-com",
+    provider_key: "",
   });
 });
 

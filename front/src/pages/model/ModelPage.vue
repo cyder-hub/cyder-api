@@ -86,11 +86,13 @@ const openModel = (id: number) => {
 
     <template v-else>
       <ModelCards
+        class="md:hidden"
         :models="modelPageState.filteredItems"
         :capability-items="capabilityItems"
         @open="openModel"
       />
       <ModelTable
+        class="hidden md:block"
         :models="modelPageState.filteredItems"
         :capability-items="capabilityItems"
         @open="openModel"

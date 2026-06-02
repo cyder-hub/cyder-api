@@ -1,5 +1,5 @@
 <template>
-  <div class="grid grid-cols-1 gap-3 md:hidden">
+  <div class="grid grid-cols-1 gap-3">
     <MobileCrudCard
       v-for="model in models"
       :key="model.id"

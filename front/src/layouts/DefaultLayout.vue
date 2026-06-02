@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import LanguageSwitcher from "@/components/LanguageSwitcher.vue";
@@ -12,6 +12,7 @@ import {
   PanelLeftOpen,
   X,
 } from "lucide-vue-next";
+import { Drawer, DrawerContent } from "@/components/ui/drawer";
 
 const { t } = useI18n();
 const route = useRoute();
@@ -104,10 +105,6 @@ watch(
   },
 );
 
-watch(isMobileNavOpen, (open) => {
-  document.body.style.overflow = open ? "hidden" : "";
-});
-
 watch(
   documentTitle,
   (title) => {
@@ -115,10 +112,6 @@ watch(
   },
   { immediate: true },
 );
-
-onBeforeUnmount(() => {
-  document.body.style.overflow = "";
-});
 </script>
 
 <template>
@@ -248,40 +241,13 @@ onBeforeUnmount(() => {
         <LanguageSwitcher compact />
       </header>
 
-      <Transition
-        enter-active-class="transition-opacity duration-200"
-        enter-from-class="opacity-0"
-        enter-to-class="opacity-100"
-        leave-active-class="transition-opacity duration-200"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div
-          v-if="isMobileNavOpen"
-          class="md:hidden fixed inset-0 z-40 bg-gray-950/35"
-          @click="closeMobileNav"
-        />
-      </Transition>
-
-      <Transition
-        enter-active-class="transition duration-300 ease-out"
-        enter-from-class="-translate-x-full"
-        enter-to-class="translate-x-0"
-        leave-active-class="transition duration-200 ease-in"
-        leave-from-class="translate-x-0"
-        leave-to-class="-translate-x-full"
-      >
-        <aside
-          v-if="isMobileNavOpen"
-          class="md:hidden fixed inset-y-0 left-0 z-50 flex w-[min(20rem,calc(100vw-2rem))] max-w-full flex-col border-r border-gray-200 bg-white shadow-xl"
+      <Drawer v-model:open="isMobileNavOpen" direction="left">
+        <DrawerContent
+          class="md:hidden flex flex-col h-full w-[min(20rem,calc(100vw-2rem))] sm:w-[min(20rem,calc(100vw-2rem))] md:w-[min(20rem,calc(100vw-2rem))] lg:w-[min(20rem,calc(100vw-2rem))] xl:w-[min(20rem,calc(100vw-2rem))] max-w-full rounded-none p-0 outline-none"
         >
           <div class="flex items-center gap-3 border-b border-gray-100 px-4 py-4">
-            <div
-              class="w-8 h-8 rounded-lg bg-gray-900 flex items-center justify-center flex-shrink-0"
-            >
-              <span class="text-white font-bold text-sm leading-none tracking-wider">
-                C
-              </span>
+            <div class="w-8 h-8 rounded-lg bg-gray-900 flex items-center justify-center flex-shrink-0">
+              <span class="text-white font-bold text-sm leading-none tracking-wider">C</span>
             </div>
             <div class="min-w-0 flex-1">
               <div class="truncate text-sm font-semibold text-gray-900">
@@ -337,8 +303,8 @@ onBeforeUnmount(() => {
             </button>
             <LanguageSwitcher class="w-full" />
           </div>
-        </aside>
-      </Transition>
+        </DrawerContent>
+      </Drawer>
 
       <main class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         <RouterView />

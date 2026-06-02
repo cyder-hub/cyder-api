@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Drawer,
+  DrawerContent,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CatalogDraft } from "./types";
@@ -24,23 +24,23 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <Dialog :open="open" @update:open="(value) => emit('update:open', value)">
-    <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-lg">
-      <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
-        <DialogTitle class="text-lg font-semibold text-gray-900">
+  <Drawer :open="open" direction="right" @update:open="(val) => emit('update:open', val)">
+    <DrawerContent class="flex h-full w-full flex-col rounded-none rounded-l-2xl border-none bg-background sm:max-w-[600px] lg:max-w-[800px] xl:max-w-[1000px] right-0 left-auto mt-0 top-0">
+      <DrawerHeader class="border-b border-gray-100 px-6 py-4 text-left">
+        <DrawerTitle class="text-lg font-semibold text-gray-900">
           {{
             draft.id === null
               ? $t("costPage.catalogs.modal.titleAdd")
               : $t("costPage.catalogs.modal.titleEdit")
           }}
-        </DialogTitle>
-      </DialogHeader>
-      <div class="space-y-4 overflow-y-auto px-4 py-4 sm:px-6">
+        </DrawerTitle>
+      </DrawerHeader>
+      <div class="flex-1 overflow-y-auto px-6 py-6">
         <div class="space-y-1.5">
           <Label for="catalog-name">{{ $t("costPage.catalogs.modal.name") }}</Label>
           <Input id="catalog-name" v-model="draft.name" />
         </div>
-        <div class="space-y-1.5">
+        <div class="space-y-1.5 pt-4">
           <Label for="catalog-description">{{ $t("costPage.catalogs.modal.description") }}</Label>
           <textarea
             id="catalog-description"
@@ -50,14 +50,16 @@ const emit = defineEmits<{
           />
         </div>
       </div>
-      <DialogFooter
-        class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6"
-        :show-close-button="true"
-      >
-        <Button :disabled="isSaving" @click="emit('save')">
-          {{ isSaving ? $t("common.saving") : $t("common.save") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+      <DrawerFooter class="border-t border-gray-100 px-6 py-4">
+        <div class="flex w-full justify-end gap-2">
+          <Button variant="outline" @click="emit('update:open', false)">
+            {{ $t("common.cancel") }}
+          </Button>
+          <Button :disabled="isSaving" @click="emit('save')">
+            {{ isSaving ? $t("common.saving") : $t("common.save") }}
+          </Button>
+        </div>
+      </DrawerFooter>
+    </DrawerContent>
+  </Drawer>
 </template>

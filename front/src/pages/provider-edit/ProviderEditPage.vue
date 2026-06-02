@@ -27,45 +27,80 @@
 
       <template v-else-if="editingData">
         <div class="space-y-5 sm:space-y-6">
-          <ProviderBaseInfoForm v-model:editingData="editingData" />
-          <div v-if="editingData.id" class="border-t border-gray-200 pt-5">
-            <ReasoningConfigPanel
-              owner-kind="provider"
-              :owner-id="editingData.id"
-              :actions="reasoningActions"
-              :title="$t('providerEditPage.sections.advancedConfig.title')"
-              :provider-type="editingData.provider_type"
-              @saved="handleReasoningConfigSaved"
-            >
-              <template #runtime-feature>
-                <RuntimeFeatureConfigPanel
-                  owner-kind="provider"
-                  :owner-id="editingData.id"
-                  embedded
-                  @saved="handleRuntimeFeatureConfigSaved"
-                />
-              </template>
-            </ReasoningConfigPanel>
+          <div class="border-b border-gray-200 app-scroll-x mb-4">
+            <div class="flex min-w-max gap-1">
+              <button
+                v-for="tab in [
+                  { id: 'base', label: $t('providerEditPage.tabs.base') },
+                  { id: 'models', label: $t('providerEditPage.tabs.models') },
+                  { id: 'credentials', label: $t('providerEditPage.tabs.credentials') },
+                  { id: 'advanced', label: $t('providerEditPage.tabs.advanced') }
+                ]"
+                :key="tab.id"
+                type="button"
+                class="border-b-2 px-4 py-2.5 text-sm font-medium transition-colors"
+                :class="
+                  activeTab === tab.id
+                    ? 'border-gray-900 text-gray-900'
+                    : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+                "
+                @click="activeTab = tab.id as any"
+              >
+                {{ tab.label }}
+              </button>
+            </div>
           </div>
-          <SectionHeader
-            :title="$t('providerEditPage.sections.advanced.title')"
-            :help="$t('providerEditPage.sections.advanced.description')"
-            :help-label="$t('providerEditPage.sections.advanced.title')"
-            class="border-t border-gray-200 pt-5"
-          />
-          <ProviderModelList 
-            v-model:editingData="editingData"
-            @check-single="(index) => handleCheck('model', index)"
-            @check-batch="() => handleBatchCheck('models')"
-          />
 
-          <ProviderApiKeyList 
-            v-model:editingData="editingData"
-            @check-single="(index) => handleCheck('apiKey', index)"
-            @check-batch="() => handleBatchCheck('api_keys')"
-          />
+          <template v-if="activeTab === 'base'">
+            <ProviderBaseInfoForm v-model:editingData="editingData" />
+          </template>
 
-          <ProviderRequestPatchPanel v-model:editingData="editingData" />
+          <template v-else-if="activeTab === 'models'">
+            <ProviderModelList
+              v-model:editingData="editingData"
+              @check-single="(index) => handleCheck('model', index)"
+              @check-batch="() => handleBatchCheck('models')"
+            />
+          </template>
+
+          <template v-else-if="activeTab === 'credentials'">
+            <ProviderApiKeyList
+              v-model:editingData="editingData"
+              @check-single="(index) => handleCheck('apiKey', index)"
+              @check-batch="() => handleBatchCheck('api_keys')"
+            />
+          </template>
+
+          <template v-else-if="activeTab === 'advanced'">
+            <div v-if="editingData.id">
+              <ReasoningConfigPanel
+                owner-kind="provider"
+                :owner-id="editingData.id"
+                :actions="reasoningActions"
+                :title="$t('providerEditPage.sections.advancedConfig.title')"
+                :provider-type="editingData.provider_type"
+                @saved="handleReasoningConfigSaved"
+              >
+                <template #runtime-feature>
+                  <RuntimeFeatureConfigPanel
+                    owner-kind="provider"
+                    :owner-id="editingData.id"
+                    embedded
+                    @saved="handleRuntimeFeatureConfigSaved"
+                  />
+                </template>
+              </ReasoningConfigPanel>
+            </div>
+
+            <SectionHeader
+              :title="$t('providerEditPage.sections.advanced.title')"
+              :help="$t('providerEditPage.sections.advanced.description')"
+              :help-label="$t('providerEditPage.sections.advanced.title')"
+              class="border-t border-gray-200 pt-5 mt-5"
+            />
+
+            <ProviderRequestPatchPanel v-model:editingData="editingData" />
+          </template>
 
           <div class="flex flex-col gap-2 border-t border-gray-100 pt-4 sm:flex-row sm:justify-end">
             <Button variant="secondary" class="w-full sm:w-auto" @click="router.push('/provider')">{{
@@ -187,7 +222,7 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from "vue";
+import { ref, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRouter } from "vue-router";
 import PageHeader from "@/components/PageHeader.vue";
@@ -234,6 +269,8 @@ const {
   handleReasoningConfigSaved,
   handleRuntimeFeatureConfigSaved,
 } = useProviderEdit();
+
+const activeTab = ref<"base" | "models" | "credentials" | "advanced">("base");
 
 const {
   isModelSelectModalOpen,

@@ -515,6 +515,19 @@ fn generate_deepseek_openai_reasoning_patch(
             )
             .map_err(|reason| ReasoningPresetUnsupported::new(family, preset, context, reason))?,
         );
+    } else if preset == ReasoningPreset::Disabled {
+        patches.push(
+            GeneratedReasoningPatch::new(
+                family,
+                preset,
+                RequestPatchPlacement::Body,
+                "/reasoning_effort",
+                RequestPatchOperation::Remove,
+                None,
+                Some("generated DeepSeek OpenAI reasoning effort removal patch".to_string()),
+            )
+            .map_err(|reason| ReasoningPresetUnsupported::new(family, preset, context, reason))?,
+        );
     }
 
     Ok(patches)
@@ -809,13 +822,19 @@ mod tests {
 
     #[test]
     fn deepseek_openai_reasoning_generates_thinking_switch_patches() {
-        let disabled = only_patch(
+        let disabled = generate_reasoning_patches(
             ReasoningPatchFamily::DeepSeekOpenAiReasoning,
             ReasoningPreset::Disabled,
-            LlmApiType::Openai,
-        );
-        assert_eq!(disabled.target, "/thinking/type");
-        assert_eq!(patch_value(&disabled), json!("disabled"));
+            ReasoningPatchContext::test(LlmApiType::Openai),
+        )
+        .expect("DeepSeek disabled patch should generate");
+        assert_eq!(disabled.len(), 2);
+        assert_eq!(disabled[0].target, "/thinking/type");
+        assert_eq!(disabled[0].operation, RequestPatchOperation::Set);
+        assert_eq!(patch_value(&disabled[0]), json!("disabled"));
+        assert_eq!(disabled[1].target, "/reasoning_effort");
+        assert_eq!(disabled[1].operation, RequestPatchOperation::Remove);
+        assert!(disabled[1].value_json.is_none());
 
         let enabled = only_patch(
             ReasoningPatchFamily::DeepSeekOpenAiReasoning,

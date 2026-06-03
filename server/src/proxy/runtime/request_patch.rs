@@ -983,6 +983,28 @@ mod tests {
         }
     }
 
+    fn reasoning_runtime_remove_patch(target: &str) -> RuntimeResolvedRequestPatch {
+        RuntimeResolvedRequestPatch {
+            placement: RequestPatchPlacement::Body,
+            target: target.to_string(),
+            operation: RequestPatchOperation::Remove,
+            value_json: None,
+            source: RequestPatchSource::ReasoningPreset {
+                config_id: 900,
+                config_scope: ReasoningConfigScope::Provider,
+                config_preset_id: 9000,
+                family: ReasoningPatchFamily::DeepSeekOpenAiReasoning,
+                preset: ReasoningPreset::Disabled,
+                suffix: "no-think".to_string(),
+            },
+            source_rule_id: None,
+            source_origin: None,
+            overridden_rule_ids: Vec::new(),
+            overridden_sources: Vec::new(),
+            description: Some("generated test reasoning removal patch".to_string()),
+        }
+    }
+
     #[test]
     fn apply_request_patches_creates_missing_body_parents_and_removes_object_fields() {
         let mut data = json!({
@@ -1400,6 +1422,41 @@ mod tests {
         apply_request_patches(&mut data, &mut url, &mut headers, &trace.applied_rules)
             .expect("merged runtime patch should apply");
         assert_eq!(data["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn generated_reasoning_remove_patch_deletes_client_reasoning_effort() {
+        let generated_rules = vec![
+            reasoning_runtime_patch("/thinking/type", json!("disabled")),
+            reasoning_runtime_remove_patch("/reasoning_effort"),
+        ];
+
+        let trace = build_runtime_request_patch_trace(
+            1,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            generated_rules,
+        )
+        .expect("runtime trace should build");
+
+        assert!(!trace.has_conflicts);
+        assert_eq!(trace.applied_rules.len(), 2);
+
+        let mut data = json!({
+            "model": "deepseek-chat",
+            "thinking": { "type": "enabled" },
+            "reasoning_effort": "high"
+        });
+        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
+        let mut headers = HeaderMap::new();
+        apply_request_patches(&mut data, &mut url, &mut headers, &trace.applied_rules)
+            .expect("generated runtime patches should apply");
+
+        assert_eq!(data["thinking"]["type"], json!("disabled"));
+        assert!(data.get("reasoning_effort").is_none());
     }
 
     #[test]

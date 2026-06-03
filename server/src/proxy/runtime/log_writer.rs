@@ -234,8 +234,12 @@ pub(in crate::proxy) async fn finalize_cancelled_log_context(
     context.completion_ts = Some(Utc::now().timestamp_millis());
     context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = RequestStatus::Cancelled;
-    context.llm_response_body = llm_response_body;
-    context.user_response_body = user_response_body;
+    if llm_response_body.is_some() {
+        context.llm_response_body = llm_response_body;
+    }
+    if user_response_body.is_some() {
+        context.user_response_body = user_response_body;
+    }
     record_completion_if_allowed(app_state, context.clone(), execution_policy).await
 }
 

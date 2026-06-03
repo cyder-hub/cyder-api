@@ -156,6 +156,10 @@ impl StreamingBodyWriter {
         }
     }
 
+    pub fn preserve_on_drop(&mut self) {
+        self.cleanup_on_drop = false;
+    }
+
     pub async fn finish(
         mut self,
         capture_state: LogBodyCaptureState,
@@ -2136,7 +2140,10 @@ impl CostOutcome {
 }
 
 fn should_persist_response_bodies(status: &RequestStatus) -> bool {
-    *status != RequestStatus::Cancelled
+    matches!(
+        status,
+        RequestStatus::Success | RequestStatus::Error | RequestStatus::Cancelled
+    )
 }
 
 fn response_capture_state_for_bundle(
@@ -2917,8 +2924,8 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_logs_skip_response_body_persistence() {
-        assert!(!should_persist_response_bodies(&RequestStatus::Cancelled));
+    fn cancelled_logs_persist_response_body_when_captured() {
+        assert!(should_persist_response_bodies(&RequestStatus::Cancelled));
         assert!(should_persist_response_bodies(&RequestStatus::Success));
         assert!(should_persist_response_bodies(&RequestStatus::Error));
     }

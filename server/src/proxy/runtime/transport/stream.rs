@@ -61,6 +61,45 @@ use crate::{
     },
 };
 
+const POST_DONE_UPSTREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const POST_DONE_UPSTREAM_DRAIN_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct PostDoneUpstreamDrainReport {
+    same_chunk_ignored_events: usize,
+    observed_chunks: usize,
+    observed_bytes: usize,
+    reached_eof: bool,
+    timed_out: bool,
+    max_bytes_reached: bool,
+    upstream_error: Option<String>,
+    write_error: Option<String>,
+}
+
+impl PostDoneUpstreamDrainReport {
+    fn capture_state(&self) -> LogBodyCaptureState {
+        if self.reached_eof
+            && !self.timed_out
+            && !self.max_bytes_reached
+            && self.upstream_error.is_none()
+            && self.write_error.is_none()
+        {
+            LogBodyCaptureState::Complete
+        } else {
+            LogBodyCaptureState::Incomplete
+        }
+    }
+
+    fn should_record_diagnostic(&self) -> bool {
+        self.same_chunk_ignored_events > 0
+            || self.observed_chunks > 0
+            || self.timed_out
+            || self.max_bytes_reached
+            || self.upstream_error.is_some()
+            || self.write_error.is_some()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub(super) struct StreamReasoningContentCaptureReport {
     pub captured_count: usize,
@@ -457,16 +496,175 @@ async fn finish_incomplete_stream_body(
     }
 }
 
-async fn abort_stream_body_writers(
-    llm_body_writer: &mut Option<StreamingBodyWriter>,
-    user_body_writer: &mut Option<StreamingBodyWriter>,
+fn is_downstream_openai_done_event(api_type: LlmApiType, event: &SseEvent) -> bool {
+    api_type == LlmApiType::Openai && event.data.trim() == "[DONE]"
+}
+
+fn append_transformed_event_bytes(
+    target_api_type: LlmApiType,
+    event: &SseEvent,
+    output: &mut Vec<u8>,
 ) {
-    if let Some(writer) = llm_body_writer.take() {
-        let _ = writer.abort().await;
+    if target_api_type == LlmApiType::Ollama {
+        output.extend_from_slice(event.data.as_bytes());
+        output.push(b'\n');
+    } else {
+        output.extend_from_slice(&event.to_bytes());
     }
-    if let Some(writer) = user_body_writer.take() {
-        let _ = writer.abort().await;
+}
+
+async fn drain_upstream_after_openai_done(
+    rx: &mut mpsc::Receiver<Result<Bytes, reqwest::Error>>,
+    writer: &mut StreamingBodyWriter,
+    same_chunk_ignored_events: usize,
+) -> PostDoneUpstreamDrainReport {
+    let mut report = PostDoneUpstreamDrainReport {
+        same_chunk_ignored_events,
+        ..Default::default()
+    };
+    let timed_out = timeout(POST_DONE_UPSTREAM_DRAIN_TIMEOUT, async {
+        loop {
+            let Some(chunk_result) = rx.recv().await else {
+                report.reached_eof = true;
+                break;
+            };
+
+            match chunk_result {
+                Ok(chunk) => {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    let next_observed_bytes = report.observed_bytes.saturating_add(chunk.len());
+                    if next_observed_bytes > POST_DONE_UPSTREAM_DRAIN_MAX_BYTES {
+                        report.max_bytes_reached = true;
+                        break;
+                    }
+                    if let Err(err) = writer.append(&chunk).await {
+                        report.write_error = Some(err.to_string());
+                        break;
+                    }
+                    report.observed_chunks += 1;
+                    report.observed_bytes = next_observed_bytes;
+                }
+                Err(err) => {
+                    report.upstream_error = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .is_err();
+    report.timed_out = timed_out;
+    report
+}
+
+fn post_done_drain_transform_diagnostic(
+    report: &PostDoneUpstreamDrainReport,
+) -> Option<UnifiedTransformDiagnostic> {
+    if !report.should_record_diagnostic() {
+        return None;
     }
+
+    Some(UnifiedTransformDiagnostic {
+        type_: "runtime_feature_diagnostic".to_string(),
+        diagnostic_kind: UnifiedTransformDiagnosticKind::CapabilityDowngrade,
+        provider: "openai_compatible".to_string(),
+        target_provider: "openai".to_string(),
+        source: "upstream_response_stream".to_string(),
+        target: "downstream_response_stream".to_string(),
+        stream_id: None,
+        stage: Some("post_done_drain".to_string()),
+        loss_level: UnifiedTransformDiagnosticLossLevel::Lossless,
+        action: UnifiedTransformDiagnosticAction::Drop,
+        semantic_unit: "post_done_upstream_frame".to_string(),
+        reason: "ignored OpenAI-compatible upstream data after data: [DONE] while completing downstream response at the DONE boundary".to_string(),
+        context: serde_json::to_string(report).ok(),
+        raw_data_summary: None,
+        recovery_hint: Some(
+            "Inspect llm_response for upstream-only post-DONE frames; user_response intentionally ends at data: [DONE].".to_string(),
+        ),
+    })
+}
+
+async fn finalize_openai_done_stream_after_drain(
+    app_state: Arc<AppState>,
+    log_context: Arc<TokioMutex<RequestLogContext>>,
+    mut rx: mpsc::Receiver<Result<Bytes, reqwest::Error>>,
+    mut llm_body_writer: Option<StreamingBodyWriter>,
+    mut user_body_writer: Option<StreamingBodyWriter>,
+    mut transformer: StreamTransformer,
+    reasoning_stream_capture: OpenAiReasoningStreamCapture,
+    url: String,
+    status_code: StatusCode,
+    cost_catalog_version: Option<CacheCostCatalogVersion>,
+    log_mode: RuntimeLogMode,
+    execution_policy: RuntimeExecutionPolicy,
+    model_str: String,
+    completed_at: i64,
+    same_chunk_ignored_events: usize,
+) {
+    let drain_report = match llm_body_writer.as_mut() {
+        Some(writer) => {
+            drain_upstream_after_openai_done(&mut rx, writer, same_chunk_ignored_events).await
+        }
+        None => PostDoneUpstreamDrainReport {
+            same_chunk_ignored_events,
+            reached_eof: true,
+            ..Default::default()
+        },
+    };
+    let llm_capture_state = drain_report.capture_state();
+    let llm_response_body = match llm_body_writer.take() {
+        Some(writer) => writer.finish(llm_capture_state).await.ok(),
+        None => None,
+    };
+    let user_response_body = match user_body_writer.take() {
+        Some(writer) => writer.finish(LogBodyCaptureState::Complete).await.ok(),
+        None => None,
+    };
+
+    let reasoning_capture_report = reasoning_stream_capture
+        .finish(&app_state, completed_at)
+        .await;
+    let reasoning_capture_diagnostics =
+        stream_capture_transform_diagnostics(&reasoning_capture_report);
+    let usage = transformer.parse_usage_info();
+    let usage_normalization = transformer.parse_usage_normalization();
+    let mut stream_diagnostics = transformer.diagnostics_snapshot();
+    if let Some(diagnostic) = post_done_drain_transform_diagnostic(&drain_report) {
+        stream_diagnostics.push(diagnostic);
+    }
+
+    let mut context = log_context.lock().await;
+    finalize_streaming_log_context(
+        &mut context,
+        &url,
+        status_code,
+        completed_at,
+        cost_catalog_version.as_ref(),
+        RequestStatus::Success,
+        None,
+    );
+    context.llm_response_body = llm_response_body;
+    context.user_response_body = user_response_body;
+    context.usage = usage;
+    context.usage_normalization = usage_normalization;
+    context.replace_transform_diagnostics_phase(
+        crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream,
+        &stream_diagnostics,
+    );
+    append_response_transform_diagnostics(&mut context, &reasoning_capture_diagnostics);
+    record_streaming_completion_if_allowed(&app_state, &context, log_mode, execution_policy).await;
+
+    crate::debug_event!(
+        "proxy.request_succeeded_debug",
+        log_id = context.id,
+        model = &model_str,
+        status_code = status_code.as_u16(),
+        is_stream = true,
+        latency_ms = completed_at.saturating_sub(context.request_received_at),
+    );
 }
 
 async fn finalize_streaming_error(
@@ -508,7 +706,8 @@ async fn abort_and_finalize_cancelled_stream(
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     execution_policy: RuntimeExecutionPolicy,
 ) {
-    abort_stream_body_writers(llm_body_writer, user_body_writer).await;
+    let llm_response_body = finish_incomplete_stream_body(llm_body_writer).await;
+    let user_response_body = finish_incomplete_stream_body(user_body_writer).await;
     if execution_policy.records_request_log() {
         finalize_cancelled_log_context(
             app_state,
@@ -516,8 +715,8 @@ async fn abort_and_finalize_cancelled_stream(
             url,
             Some(status_code),
             cost_catalog_version,
-            None,
-            None,
+            llm_response_body,
+            user_response_body,
             execution_policy,
         )
         .await;
@@ -740,6 +939,12 @@ pub(super) async fn handle_streaming_response(
 
                     {
                         let mut context = log_context_clone.lock().await;
+                        if execution_policy.records_request_log() {
+                            llm_body_writer
+                                .as_mut()
+                                .expect("llm stream writer should exist")
+                                .preserve_on_drop();
+                        }
                         context.llm_response_body =
                             Some(llm_body_writer.as_ref().expect("llm stream writer should exist").snapshot(LogBodyCaptureState::Incomplete));
                     }
@@ -753,20 +958,32 @@ pub(super) async fn handle_streaming_response(
                         continue;
                     }
 
-                    reasoning_stream_capture.observe_events(&events);
-                    let transformed_events = transformer.transform_events(events);
-                    sync_stream_usage_to_log_context(&log_context_clone, &mut transformer).await;
                     let mut transformed_chunk_bytes: Vec<u8> = Vec::new();
+                    let mut downstream_openai_done = false;
 
-                    for transformed_event in transformed_events {
-                        if target_api_type == LlmApiType::Ollama {
-                            transformed_chunk_bytes
-                                .extend_from_slice(transformed_event.data.as_bytes());
-                            transformed_chunk_bytes.push(b'\n');
-                        } else {
-                            transformed_chunk_bytes.extend_from_slice(&transformed_event.to_bytes());
+                    let parsed_event_count = events.len();
+                    let mut processed_event_count = 0usize;
+                    for event in events {
+                        processed_event_count += 1;
+                        reasoning_stream_capture.observe_events(std::slice::from_ref(&event));
+                        let transformed_events =
+                            transformer.transform_event(event).unwrap_or_default();
+                        for transformed_event in transformed_events {
+                            append_transformed_event_bytes(
+                                api_type,
+                                &transformed_event,
+                                &mut transformed_chunk_bytes,
+                            );
+                            if is_downstream_openai_done_event(api_type, &transformed_event) {
+                                downstream_openai_done = true;
+                                break;
+                            }
+                        }
+                        if downstream_openai_done {
+                            break;
                         }
                     }
+                    sync_stream_usage_to_log_context(&log_context_clone, &mut transformer).await;
 
                     let transformed_chunk = Bytes::from(transformed_chunk_bytes);
                     if let Err(e) = user_body_writer.as_mut().expect("user stream writer should exist").append(&transformed_chunk).await {
@@ -806,6 +1023,12 @@ pub(super) async fn handle_streaming_response(
 
                     {
                         let mut context = log_context_clone.lock().await;
+                        if execution_policy.records_request_log() {
+                            user_body_writer
+                                .as_mut()
+                                .expect("user stream writer should exist")
+                                .preserve_on_drop();
+                        }
                         context.user_response_body =
                             Some(user_body_writer.as_ref().expect("user stream writer should exist").snapshot(LogBodyCaptureState::Incomplete));
                     }
@@ -816,6 +1039,55 @@ pub(super) async fn handle_streaming_response(
                             &transformed_chunk,
                         )
                         .await;
+                        if downstream_openai_done {
+                            let same_chunk_ignored_events =
+                                parsed_event_count.saturating_sub(processed_event_count);
+                            let done_completed_at = Utc::now().timestamp_millis();
+                            response_drop_guard.disarm();
+                            api_key_request_lease.release().await;
+                            if execution_policy.records_provider_runtime() {
+                                record_provider_success(
+                                    &app_state_clone,
+                                    provider_id,
+                                    &model_str,
+                                    provider_circuit_permit.as_ref(),
+                                )
+                                .await;
+                            }
+
+                            let drain_app_state = Arc::clone(&app_state_clone);
+                            let drain_log_context = Arc::clone(&log_context_clone);
+                            let drain_url = url_owned.clone();
+                            let drain_cost_catalog_version = cost_catalog_version_clone.clone();
+                            let drain_model_str = model_str.clone();
+                            let drain_llm_body_writer = llm_body_writer.take();
+                            let drain_user_body_writer = user_body_writer.take();
+                            let drain_transformer = transformer;
+                            let drain_reasoning_stream_capture = reasoning_stream_capture;
+                            app_state_clone.infra.spawn_background_task(async move {
+                                finalize_openai_done_stream_after_drain(
+                                    drain_app_state,
+                                    drain_log_context,
+                                    rx,
+                                    drain_llm_body_writer,
+                                    drain_user_body_writer,
+                                    drain_transformer,
+                                    drain_reasoning_stream_capture,
+                                    drain_url,
+                                    status_code,
+                                    drain_cost_catalog_version,
+                                    log_mode,
+                                    execution_policy,
+                                    drain_model_str,
+                                    done_completed_at,
+                                    same_chunk_ignored_events,
+                                )
+                                .await;
+                            });
+
+                            yield Ok::<_, std::io::Error>(transformed_chunk);
+                            return;
+                        }
                         yield Ok::<_, std::io::Error>(transformed_chunk);
                     }
                 }
@@ -893,6 +1165,12 @@ pub(super) async fn handle_streaming_response(
             }
             {
                 let mut context = log_context_clone.lock().await;
+                if execution_policy.records_request_log() {
+                    user_body_writer
+                        .as_mut()
+                        .expect("user stream writer should exist")
+                        .preserve_on_drop();
+                }
                 context.user_response_body =
                     Some(user_body_writer.as_ref().expect("user stream writer should exist").snapshot(LogBodyCaptureState::Incomplete));
             }

@@ -96,58 +96,67 @@ onMounted(() => {
         </template>
       </PageHeader>
 
-      <div class="app-section">
-        <DashboardKpiGrid
-          :loading="kpiLoading"
-          :error="kpiError"
-          :cards="kpiCards"
-        />
-
-        <DashboardRuntimePanel
-          :loading="resourcesLoading"
-          :error="resourcesError"
-          :resource-items="resourceItems"
-          :runtime-items="runtimeItems"
-          :runtime-backend-status="runtimeBackendStatus"
-          :runtime-backend-headline="runtimeBackendHeadline"
-          :runtime-backend-detail="runtimeBackendDetail"
-          :runtime-backend-rows="runtimeBackendRows"
-          :runtime-backend-badge-label="runtimeBackendBadgeLabel"
-          :runtime-backend-badge-class="runtimeBackendBadgeClass"
-          :runtime-badge-class="runtimeBadgeClass"
-          :format-date-time="formatDateTime"
-          @view-runtime="goToRuntime"
-          @view-records="goToRecords"
-        />
-
-        <section class="rounded-lg border border-gray-200 bg-white">
-          <SectionHeader
-            :title="$t('dashboard.sections.trends.title')"
-            class="border-b border-gray-100 px-4 py-4 sm:px-6"
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:gap-6">
+        <div class="md:col-span-2 lg:col-span-3">
+          <DashboardKpiGrid
+            :loading="kpiLoading"
+            :error="kpiError"
+            :cards="kpiCards"
           />
-          <div class="px-0 pb-0">
-            <UsageChart />
-          </div>
-        </section>
+        </div>
 
-        <DashboardAlertPanel
-          :loading="alertsLoading"
-          :error="alertsError"
-          :alerts-section="alertsSection"
-          :unstable-providers="unstableProviders"
-          :show-cost-hotspots="showCostHotspots"
-          :format-count="formatCount"
-          :format-percentage="formatPercentage"
-          :format-latency="formatLatency"
-          :format-date-time="formatAlertDateTime"
-          :format-cost-entries="formatCostEntries"
-          :runtime-level-badge-class="runtimeLevelBadgeClass"
-          :runtime-level-label="runtimeLevelLabel"
-          @view-runtime="goToRuntime"
-          @view-records="goToRecords"
-          @edit-provider="goToProvider"
-          @edit-model="goToModel"
-        />
+        <div class="md:col-span-2 lg:col-span-2">
+          <section class="flex h-full flex-col rounded-lg border border-gray-200 bg-white">
+            <SectionHeader
+              :title="$t('dashboard.sections.trends.title')"
+              class="border-b border-gray-100 px-4 py-4 sm:px-6"
+            />
+            <div class="flex-1 px-0 pb-0">
+              <UsageChart class="h-full min-h-[400px]" />
+            </div>
+          </section>
+        </div>
+
+        <div class="md:col-span-2 lg:col-span-1">
+          <DashboardAlertPanel
+            class="h-full"
+            :loading="alertsLoading"
+            :error="alertsError"
+            :alerts-section="alertsSection"
+            :unstable-providers="unstableProviders"
+            :show-cost-hotspots="showCostHotspots"
+            :format-count="formatCount"
+            :format-percentage="formatPercentage"
+            :format-latency="formatLatency"
+            :format-date-time="formatAlertDateTime"
+            :format-cost-entries="formatCostEntries"
+            :runtime-level-badge-class="runtimeLevelBadgeClass"
+            :runtime-level-label="runtimeLevelLabel"
+            @view-runtime="goToRuntime"
+            @view-records="goToRecords"
+            @edit-provider="goToProvider"
+            @edit-model="goToModel"
+          />
+        </div>
+
+        <div class="md:col-span-2 lg:col-span-3">
+          <DashboardRuntimePanel
+            :loading="resourcesLoading"
+            :error="resourcesError"
+            :resource-items="resourceItems"
+            :runtime-items="runtimeItems"
+            :runtime-backend-status="runtimeBackendStatus"
+            :runtime-backend-headline="runtimeBackendHeadline"
+            :runtime-backend-detail="runtimeBackendDetail"
+            :runtime-backend-rows="runtimeBackendRows"
+            :runtime-backend-badge-label="runtimeBackendBadgeLabel"
+            :runtime-backend-badge-class="runtimeBackendBadgeClass"
+            :runtime-badge-class="runtimeBadgeClass"
+            :format-date-time="formatDateTime"
+            @view-runtime="goToRuntime"
+            @view-records="goToRecords"
+          />
+        </div>
       </div>
     </div>
   </div>

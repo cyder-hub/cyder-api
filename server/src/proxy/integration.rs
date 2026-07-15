@@ -26,7 +26,10 @@ use crate::{
         runtime::ProviderHealthStatus,
         storage::{get_storage, types::GetObjectOptions},
     },
-    utils::{ID_GENERATOR, storage::RequestLogBundleV2},
+    utils::{
+        ID_GENERATOR,
+        storage::{LogBodyCaptureState, RequestLogBundleV2},
+    },
 };
 use axum::{
     body::{Body, Bytes},
@@ -557,6 +560,16 @@ fn bundle_blob_json(bundle: &RequestLogBundleV2, blob_id: i32) -> Value {
         .expect("bundle blob should exist");
 
     serde_json::from_slice(&blob.body).expect("bundle blob should be json")
+}
+
+fn bundle_blob_bytes(bundle: &RequestLogBundleV2, blob_id: i32) -> Bytes {
+    let blob = bundle
+        .blob_pool
+        .iter()
+        .find(|blob| blob.blob_id == blob_id)
+        .expect("bundle blob should exist");
+
+    blob.body.clone()
 }
 
 fn bundle_attempt_request_json(bundle: &RequestLogBundleV2, attempt_index: i32) -> Value {
@@ -1744,6 +1757,136 @@ data: [DONE]
 }
 
 #[test]
+fn openai_stream_done_finishes_user_response_and_drains_upstream_tail_for_llm_log() {
+    run_integration_test(|test_db_context| async move {
+        let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+        assert_eq!(request.path, "/v1/chat/completions");
+        UpstreamReply::delayed_sse(vec![
+            (
+                0,
+                br#"data: {"id":"chatcmpl-tail","object":"chat.completion.chunk","created":1,"model":"upstream-stream-model","choices":[{"index":0,"delta":{"content":"stream ok"},"finish_reason":null}],"usage":null}
+
+"#,
+            ),
+            (
+                0,
+                br#"data: {"id":"chatcmpl-tail","object":"chat.completion.chunk","created":2,"model":"upstream-stream-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}
+
+"#,
+            ),
+            (0, b"data: [DONE]\n\n"),
+            (150, br#"data: {"choices":[],"cost":"0"}
+
+"#),
+        ])
+    })
+    .await
+    else {
+        return;
+    };
+        let fixture = TestFixture::new(
+            test_db_context.clone(),
+            ProviderType::Openai,
+            format!("{}/v1", upstream.base_url),
+            None,
+            Some("upstream-stream-model".to_string()),
+        )
+        .await;
+
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "stream": true,
+                "messages": [{"role": "user", "content": "tail after done"}]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_text = String::from_utf8(response_body_bytes(response).await.to_vec())
+            .expect("sse response should be utf8");
+        assert!(body_text.contains("stream ok"));
+        assert!(body_text.contains("data: [DONE]"));
+        assert!(!body_text.contains("\"cost\":\"0\""));
+
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.total_tokens, Some(5));
+        assert!(log.has_transform_diagnostics);
+        assert!(
+            log.completed_at
+                .zip(log.response_started_to_client_at)
+                .is_some_and(|(completed_at, started_at)| completed_at >= started_at)
+        );
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Success);
+        assert_eq!(
+            attempts[0].llm_response_capture_state.as_deref(),
+            Some("COMPLETE")
+        );
+
+        let bundle = bundle_for_log(&log).await;
+        let attempt_section = bundle
+            .attempt_sections
+            .iter()
+            .find(|section| section.attempt_index == 1)
+            .expect("attempt bundle section should exist");
+        assert_eq!(
+            attempt_section.llm_response_capture_state,
+            Some(LogBodyCaptureState::Complete)
+        );
+        assert_eq!(
+            bundle.request_section.user_response_capture_state,
+            Some(LogBodyCaptureState::Complete)
+        );
+
+        let llm_response_text = String::from_utf8(
+            bundle_blob_bytes(
+                &bundle,
+                attempt_section
+                    .llm_response_blob_id
+                    .expect("llm response blob should exist"),
+            )
+            .to_vec(),
+        )
+        .expect("llm response should be utf8");
+        let user_response_text = String::from_utf8(
+            bundle_blob_bytes(
+                &bundle,
+                bundle
+                    .request_section
+                    .user_response_blob_id
+                    .expect("user response blob should exist"),
+            )
+            .to_vec(),
+        )
+        .expect("user response should be utf8");
+
+        assert!(llm_response_text.contains("\"cost\":\"0\""));
+        assert!(llm_response_text.contains("data: [DONE]"));
+        assert!(user_response_text.contains("data: [DONE]"));
+        assert!(!user_response_text.contains("\"cost\":\"0\""));
+
+        let diagnostics = bundle
+            .transform_diagnostics
+            .expect("post-DONE diagnostic should be persisted");
+        let diagnostics_json =
+            serde_json::to_string(&diagnostics).expect("diagnostics should serialize");
+        assert!(diagnostics_json.contains("post_done_drain"));
+        assert!(diagnostics_json.contains("observed_chunks"));
+
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
 fn streaming_transform_diagnostics_are_persisted_in_bundle_and_summary_fields() {
     run_integration_test(|test_db_context| async move {
         let Some(upstream) = spawn_test_upstream_or_skip(|request| {
@@ -2098,6 +2241,53 @@ fn streaming_client_disconnect_marks_log_cancelled() {
         let log = fixture.latest_log().await;
         assert_eq!(log.overall_status, RequestStatus::Cancelled);
         assert!(log.bundle_storage_key.is_some());
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Cancelled);
+        assert!(attempts[0].llm_response_blob_id.is_some());
+        assert_eq!(
+            attempts[0].llm_response_capture_state.as_deref(),
+            Some("INCOMPLETE")
+        );
+
+        let bundle = bundle_for_log(&log).await;
+        let attempt_section = bundle
+            .attempt_sections
+            .iter()
+            .find(|section| section.attempt_index == 1)
+            .expect("attempt bundle section should exist");
+        assert_eq!(
+            attempt_section.llm_response_capture_state,
+            Some(LogBodyCaptureState::Incomplete)
+        );
+        assert_eq!(
+            bundle.request_section.user_response_capture_state,
+            Some(LogBodyCaptureState::Incomplete)
+        );
+        let llm_response_text = String::from_utf8(
+            bundle_blob_bytes(
+                &bundle,
+                attempt_section
+                    .llm_response_blob_id
+                    .expect("llm response blob should exist"),
+            )
+            .to_vec(),
+        )
+        .expect("llm partial response should be utf8");
+        let user_response_text = String::from_utf8(
+            bundle_blob_bytes(
+                &bundle,
+                bundle
+                    .request_section
+                    .user_response_blob_id
+                    .expect("user response blob should exist"),
+            )
+            .to_vec(),
+        )
+        .expect("user partial response should be utf8");
+        assert!(llm_response_text.contains("hel"));
+        assert!(user_response_text.contains("hel"));
 
         fixture.cleanup().await;
     });

@@ -13,8 +13,10 @@ import { Button } from "@/components/ui/button";
 import type { ApiKeyDetail, ApiKeyReveal, ApiKeyRuntimeSnapshot } from "@/services/types";
 import { maskedApiKey } from "../composables/useApiKeyDetail";
 import ApiKeyGovernancePanel from "./ApiKeyGovernancePanel.vue";
+import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerFooter } from "@/components/ui/drawer";
 
 defineProps<{
+  open: boolean;
   detail: ApiKeyDetail | null;
   runtime: ApiKeyRuntimeSnapshot;
   detailLoading: boolean;
@@ -31,27 +33,33 @@ defineEmits<{
   (event: "delete", id: number): void;
   (event: "copySecret", secret: string): void;
   (event: "closeSecret"): void;
+  (event: "update:open", value: boolean): void;
 }>();
 
 const { t } = useI18n();
 </script>
 
 <template>
-  <div class="rounded-xl border border-gray-200 bg-white xl:flex xl:h-full xl:min-h-0 xl:flex-col">
-    <div class="border-b border-gray-100 px-4 py-4 sm:px-5">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0">
-          <h2 class="text-base font-semibold text-gray-900">
-            {{ detail ? detail.name : t("apiKeyPage.sections.detailTitle") }}
-          </h2>
-          <p class="mt-1 text-xs leading-5 text-gray-500">
-            {{
-              detail
-                ? maskedApiKey(detail)
-                : t("apiKeyPage.sections.detailDescription")
-            }}
-          </p>
-        </div>
+  <Drawer direction="right" :open="open" @update:open="$emit('update:open', $event)">
+    <DrawerContent class="flex flex-col p-0 outline-none">
+      <DrawerHeader class="border-b border-gray-100 px-4 py-4 sm:px-6">
+        <DrawerTitle class="pr-8 text-base font-semibold text-gray-900 sm:text-lg">
+          {{ detail ? detail.name : t("apiKeyPage.sections.detailTitle") }}
+        </DrawerTitle>
+      </DrawerHeader>
+
+      <div class="min-h-0 flex-1 overflow-y-auto">
+        <div class="border-b border-gray-100 px-4 py-4 sm:px-5">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+              <p class="mt-1 text-xs leading-5 text-gray-500">
+                {{
+                  detail
+                    ? maskedApiKey(detail)
+                    : t("apiKeyPage.sections.detailDescription")
+                }}
+              </p>
+            </div>
 
         <div v-if="detail" class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Button variant="outline" class="w-full sm:w-auto" @click="$emit('reveal', detail.id)">
@@ -71,10 +79,10 @@ const { t } = useI18n();
             {{ t("common.delete") }}
           </Button>
         </div>
-      </div>
-    </div>
+          </div>
+        </div>
 
-    <div v-if="detailLoading" class="flex items-center justify-center px-4 py-16 xl:flex-1">
+        <div v-if="detailLoading" class="flex items-center justify-center px-4 py-16 xl:flex-1">
       <Loader2 class="mr-2 h-5 w-5 animate-spin text-gray-400" />
       <span class="text-sm text-gray-500">
         {{ t("apiKeyPage.loadingDetail") }}
@@ -127,13 +135,20 @@ const { t } = useI18n();
         />
       </div>
 
-      <ApiKeyGovernancePanel
-        :detail="detail"
-        :runtime="runtime"
-        :provider-name-by-id="providerNameById"
-        :model-name-by-id="modelNameById"
-        :route-name-by-id="routeNameById"
-      />
-    </div>
-  </div>
+        <ApiKeyGovernancePanel
+          :detail="detail"
+          :runtime="runtime"
+          :provider-name-by-id="providerNameById"
+          :model-name-by-id="modelNameById"
+          :route-name-by-id="routeNameById"
+        />
+      </div>
+      </div>
+      <DrawerFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
+        <Button variant="secondary" class="w-full sm:w-auto" @click="$emit('update:open', false)">
+          {{ t("common.close") }}
+        </Button>
+      </DrawerFooter>
+    </DrawerContent>
+  </Drawer>
 </template>

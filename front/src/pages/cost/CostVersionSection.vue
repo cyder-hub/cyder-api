@@ -5,11 +5,11 @@ import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Drawer,
+  DrawerContent,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer";
 import { formatTimestamp } from "@/utils/datetime";
 import { formatPriceFromNanos } from "@/utils/money";
 import type {
@@ -640,11 +640,11 @@ watch(isPreviewOpen, (open, previousOpen) => {
       </section>
     </div>
 
-    <Dialog v-model:open="isPreviewOpen">
-      <DialogContent class="flex max-h-[92dvh] flex-col p-0 sm:max-w-5xl">
-        <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6">
-          <DialogTitle>{{ $t("costPage.preview.title") }}</DialogTitle>
-        </DialogHeader>
+    <Drawer v-model:open="isPreviewOpen" direction="right">
+      <DrawerContent class="flex max-h-[100dvh] h-full w-full max-w-[95vw] lg:max-w-[70vw] xl:max-w-[60vw] flex-col p-0 rounded-none rounded-l-2xl right-0 left-auto mt-0 top-0">
+        <DrawerHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 text-left">
+          <DrawerTitle>{{ $t("costPage.preview.title") }}</DrawerTitle>
+        </DrawerHeader>
         <div class="min-h-0 flex-1 overflow-y-auto">
           <CostPreviewSection
             class="p-4 sm:p-6"
@@ -661,7 +661,7 @@ watch(isPreviewOpen, (open, previousOpen) => {
             @run-preview="emit('run-preview')"
           />
         </div>
-      </DialogContent>
-    </Dialog>
+      </DrawerContent>
+    </Drawer>
   </div>
 </template>

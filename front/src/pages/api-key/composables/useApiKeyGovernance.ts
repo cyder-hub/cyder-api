@@ -81,7 +81,8 @@ interface UseApiKeyGovernanceOptions {
   selectedKeyId: Ref<number | null>;
   selectedDetail: Ref<ApiKeyDetail | null>;
   setSecretReveal: (reveal: ApiKeyReveal | null) => void;
-  refreshSelected: (preferredSelectedId: number | null) => Promise<void>;
+  refreshList: (preferredSelectedId: number | null) => Promise<number | null>;
+  refreshDetail: (id: number | null) => Promise<void>;
 }
 
 const COMMON_BUDGET_CURRENCIES = ["CNY", "USD"] as const;
@@ -644,7 +645,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
     if (payload.reveal) {
       options.setSecretReveal(payload.reveal);
     }
-    await options.refreshSelected(payload.detail.id);
+    await options.refreshList(payload.detail.id);
   }
 
   async function handleRotateKey(id: number) {
@@ -662,7 +663,8 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
 
     try {
       options.setSecretReveal(await apiKeyService.rotateApiKey(id));
-      await options.refreshSelected(id);
+      await options.refreshList(id);
+      await options.refreshDetail(id);
     } catch (err: unknown) {
       toastController.error(
         options.t("apiKeyPage.rotateFailed", {
@@ -672,7 +674,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
     }
   }
 
-  async function handleDeleteKey(id: number) {
+  async function handleDeleteKey(id: number): Promise<boolean> {
     const target = options.apiKeys.value.find((item) => item.id === id);
     if (
       !(await confirm({
@@ -682,7 +684,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
         confirmText: options.t("common.delete"),
       }))
     ) {
-      return;
+      return false;
     }
 
     try {
@@ -692,13 +694,16 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
         options.selectedDetail.value = null;
         options.setSecretReveal(null);
       }
-      await options.refreshSelected(null);
+      const nextSelectedId = await options.refreshList(null);
+      await options.refreshDetail(nextSelectedId);
+      return true;
     } catch (err: unknown) {
       toastController.error(
         options.t("apiKeyPage.deleteFailed", {
           error: normalizeError(err, options.t("common.unknownError")).message,
         }),
       );
+      return false;
     }
   }
 

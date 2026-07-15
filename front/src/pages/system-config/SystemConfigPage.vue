@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   AlertCircle,
@@ -131,6 +131,14 @@ const {
   },
 });
 
+const activeTab = ref<"current" | "source" | "history">("current");
+const isFiltersExpanded = ref(false);
+const systemConfigTabs = [
+  { id: "current", labelKey: "systemConfigPage.tabs.current" },
+  { id: "source", labelKey: "systemConfigPage.tabs.source" },
+  { id: "history", labelKey: "systemConfigPage.tabs.history" },
+] as const;
+
 onMounted(() => {
   void loadConfig();
   void loadHistory(true);
@@ -214,7 +222,28 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
           grid-class="grid-cols-2 md:grid-cols-5"
         />
 
-        <SystemConfigSourcePanel
+        <div class="mt-6 border-b border-gray-200 app-scroll-x">
+          <div class="flex min-w-max gap-1">
+            <button
+              v-for="tab in systemConfigTabs"
+              :key="tab.id"
+              type="button"
+              class="border-b-2 px-4 py-2.5 text-sm font-medium transition-colors"
+              :class="
+                activeTab === tab.id
+                  ? 'border-gray-900 text-gray-900'
+                  : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
+              "
+              @click="activeTab = tab.id"
+            >
+              {{ $t(tab.labelKey) }}
+            </button>
+          </div>
+        </div>
+
+        <div class="mt-4 flex flex-col gap-4">
+          <template v-if="activeTab === 'source'">
+            <SystemConfigSourcePanel
           v-model:config-view-mode="configViewMode"
           :summary="summary"
           :is-multi-instance="isMultiInstance"
@@ -227,8 +256,10 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
           :config-document-invalid-paths="configDocumentInvalidPaths"
           :config-document-text="configDocumentText"
         />
+          </template>
 
-        <SystemConfigHistoryTable
+          <template v-else-if="activeTab === 'history'">
+            <SystemConfigHistoryTable
           :history-rows="historyRows"
           :is-history-loading="isHistoryLoading"
           :history-error="historyError"
@@ -237,188 +268,178 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
           @refresh="loadHistory(true)"
           @load-more="loadHistory(false)"
         />
+          </template>
 
-        <div class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
-          <div class="flex flex-col gap-3 border-b border-gray-100 pb-4 sm:flex-row sm:items-start sm:justify-between">
-            <div class="min-w-0">
+          <template v-else-if="activeTab === 'current'">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div class="flex items-center gap-2">
-                <SlidersHorizontal class="h-4 w-4 text-gray-400" />
-                <h2 class="text-base font-semibold text-gray-900">
+                <Button variant="outline" size="sm" @click="isFiltersExpanded = !isFiltersExpanded">
+                  <SlidersHorizontal class="mr-1.5 h-4 w-4" :class="isFiltersExpanded ? 'text-gray-900' : 'text-gray-500'" />
                   {{ $t("systemConfigPage.filters.title") }}
-                </h2>
+                  <Badge v-if="isFilterActive" variant="secondary" class="ml-1.5 h-5 px-1.5 rounded-full font-mono text-xs">!</Badge>
+                </Button>
+                <div class="text-sm text-gray-500">
+                  {{ $t("systemConfigPage.filters.activeSummary", { shown: rows.length, total: fields.length }) }}
+                </div>
               </div>
-              <p class="mt-1 text-xs leading-5 text-gray-500">
-                {{
-                  $t("systemConfigPage.filters.activeSummary", {
-                    shown: rows.length,
-                    total: fields.length,
-                  })
-                }}
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              class="w-full sm:w-auto"
-              :disabled="!isFilterActive"
-              @click="resetFilters"
-            >
-              <X class="mr-1.5 h-4 w-4" />
-              {{ $t("systemConfigPage.resetFilters") }}
-            </Button>
-          </div>
 
-          <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <div class="md:col-span-2">
-              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-                {{ $t("systemConfigPage.filters.search") }}
-              </span>
-              <div class="relative">
+              <div class="relative w-full sm:w-64">
                 <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
                 <Input
                   v-model="filters.search"
-                  class="w-full pl-9"
+                  class="h-9 w-full pl-9"
                   :placeholder="$t('systemConfigPage.filters.searchPlaceholder')"
                 />
               </div>
             </div>
 
-            <div>
-              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-                {{ $t("systemConfigPage.filters.section") }}
-              </span>
-              <Select :model-value="filters.section" @update:model-value="setSectionFilter">
-                <SelectTrigger class="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent :body-lock="false">
-                  <SelectItem :value="SYSTEM_CONFIG_ALL_FILTER">
-                    {{ $t("systemConfigPage.filters.allSections") }}
-                  </SelectItem>
-                  <SelectItem
-                    v-for="section in sectionOptions"
-                    :key="section"
-                    :value="section"
+            <div v-show="isFiltersExpanded" class="rounded-xl border border-gray-200 bg-white p-4">
+              <div class="mb-4 flex items-center justify-between border-b border-gray-100 pb-3">
+                <h3 class="text-sm font-medium text-gray-700">{{ $t("systemConfigPage.filters.title") }}</h3>
+                <Button variant="ghost" size="sm" :disabled="!isFilterActive" @click="resetFilters">
+                  <X class="mr-1.5 h-4 w-4" />
+                  {{ $t("systemConfigPage.resetFilters") }}
+                </Button>
+              </div>
+
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                <div>
+                  <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {{ $t("systemConfigPage.filters.section") }}
+                  </span>
+                  <Select :model-value="filters.section" @update:model-value="setSectionFilter">
+                    <SelectTrigger class="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent :body-lock="false">
+                      <SelectItem :value="SYSTEM_CONFIG_ALL_FILTER">
+                        {{ $t("systemConfigPage.filters.allSections") }}
+                      </SelectItem>
+                      <SelectItem
+                        v-for="section in sectionOptions"
+                        :key="section"
+                        :value="section"
+                      >
+                        {{ section }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div>
+                  <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {{ $t("systemConfigPage.filters.source") }}
+                  </span>
+                  <Select :model-value="filters.source" @update:model-value="setSourceFilter">
+                    <SelectTrigger class="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent :body-lock="false">
+                      <SelectItem :value="SYSTEM_CONFIG_ALL_FILTER">
+                        {{ $t("systemConfigPage.filters.allSources") }}
+                      </SelectItem>
+                      <SelectItem v-for="source in sourceOptions" :key="source" :value="source">
+                        {{ sourceLabel(source) }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div>
+                  <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {{ $t("systemConfigPage.filters.editable") }}
+                  </span>
+                  <Select
+                    :model-value="filters.editable"
+                    @update:model-value="(value) => setBooleanFilter('editable', value)"
                   >
-                    {{ section }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+                    <SelectTrigger class="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent :body-lock="false">
+                      <SelectItem
+                        v-for="option in booleanFilterOptions"
+                        :key="`editable-${option.value}`"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
 
-            <div>
-              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-                {{ $t("systemConfigPage.filters.source") }}
-              </span>
-              <Select :model-value="filters.source" @update:model-value="setSourceFilter">
-                <SelectTrigger class="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent :body-lock="false">
-                  <SelectItem :value="SYSTEM_CONFIG_ALL_FILTER">
-                    {{ $t("systemConfigPage.filters.allSources") }}
-                  </SelectItem>
-                  <SelectItem v-for="source in sourceOptions" :key="source" :value="source">
-                    {{ sourceLabel(source) }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div>
-              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-                {{ $t("systemConfigPage.filters.editable") }}
-              </span>
-              <Select
-                :model-value="filters.editable"
-                @update:model-value="(value) => setBooleanFilter('editable', value)"
-              >
-                <SelectTrigger class="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent :body-lock="false">
-                  <SelectItem
-                    v-for="option in booleanFilterOptions"
-                    :key="`editable-${option.value}`"
-                    :value="option.value"
+                <div>
+                  <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {{ $t("systemConfigPage.filters.hotReloadable") }}
+                  </span>
+                  <Select
+                    :model-value="filters.hotReloadable"
+                    @update:model-value="(value) => setBooleanFilter('hotReloadable', value)"
                   >
-                    {{ option.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+                    <SelectTrigger class="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent :body-lock="false">
+                      <SelectItem
+                        v-for="option in booleanFilterOptions"
+                        :key="`hot-${option.value}`"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
 
-            <div>
-              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-                {{ $t("systemConfigPage.filters.hotReloadable") }}
-              </span>
-              <Select
-                :model-value="filters.hotReloadable"
-                @update:model-value="(value) => setBooleanFilter('hotReloadable', value)"
-              >
-                <SelectTrigger class="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent :body-lock="false">
-                  <SelectItem
-                    v-for="option in booleanFilterOptions"
-                    :key="`hot-${option.value}`"
-                    :value="option.value"
+                <div>
+                  <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {{ $t("systemConfigPage.filters.restartRequired") }}
+                  </span>
+                  <Select
+                    :model-value="filters.restartRequired"
+                    @update:model-value="(value) => setBooleanFilter('restartRequired', value)"
                   >
-                    {{ option.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+                    <SelectTrigger class="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent :body-lock="false">
+                      <SelectItem
+                        v-for="option in booleanFilterOptions"
+                        :key="`restart-${option.value}`"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
 
-            <div>
-              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-                {{ $t("systemConfigPage.filters.restartRequired") }}
-              </span>
-              <Select
-                :model-value="filters.restartRequired"
-                @update:model-value="(value) => setBooleanFilter('restartRequired', value)"
-              >
-                <SelectTrigger class="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent :body-lock="false">
-                  <SelectItem
-                    v-for="option in booleanFilterOptions"
-                    :key="`restart-${option.value}`"
-                    :value="option.value"
+                <div>
+                  <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
+                    {{ $t("systemConfigPage.filters.sensitive") }}
+                  </span>
+                  <Select
+                    :model-value="filters.sensitive"
+                    @update:model-value="(value) => setBooleanFilter('sensitive', value)"
                   >
-                    {{ option.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+                    <SelectTrigger class="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent :body-lock="false">
+                      <SelectItem
+                        v-for="option in booleanFilterOptions"
+                        :key="`sensitive-${option.value}`"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </div>
 
-            <div>
-              <span class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
-                {{ $t("systemConfigPage.filters.sensitive") }}
-              </span>
-              <Select
-                :model-value="filters.sensitive"
-                @update:model-value="(value) => setBooleanFilter('sensitive', value)"
-              >
-                <SelectTrigger class="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent :body-lock="false">
-                  <SelectItem
-                    v-for="option in booleanFilterOptions"
-                    :key="`sensitive-${option.value}`"
-                    :value="option.value"
-                  >
-                    {{ option.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="rows.length === 0" class="rounded-xl border border-gray-200 bg-white py-14 text-center text-sm text-gray-500">
+            <div v-if="rows.length === 0" class="rounded-xl border border-gray-200 bg-white py-14 text-center text-sm text-gray-500">
           {{ fields.length === 0 ? $t("systemConfigPage.noFields") : $t("systemConfigPage.noMatchingFields") }}
         </div>
 
@@ -580,6 +601,8 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
               </Button>
             </div>
           </article>
+        </div>
+          </template>
         </div>
       </template>
     </div>

@@ -26,6 +26,8 @@ export interface ProviderBootstrapFormState extends ProviderBootstrapPreviewStat
   model_name: string;
   api_key_description: string;
   use_proxy: boolean;
+  provider_name: string;
+  provider_key: string;
   real_model_name?: string | null;
 }
 
@@ -74,37 +76,6 @@ function titleize(value: unknown): string {
     .replace(/\s+/g, " ")
     .toLowerCase()
     .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function slugify(value: unknown): string {
-  const text = trimText(value);
-  if (!text) return "";
-
-  return text
-    .toLowerCase()
-    .replace(/['"]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-function getEndpointHost(endpoint: unknown): string {
-  const text = trimText(endpoint);
-  if (!text) return "";
-
-  try {
-    return new URL(text).hostname;
-  } catch {
-    return "";
-  }
-}
-
-function buildPreviewSubject(form: ProviderBootstrapPreviewState): string {
-  return (
-    trimText(form.model_name) ||
-    getEndpointHost(form.endpoint) ||
-    trimText(form.provider_key ?? form.key) ||
-    "provider"
-  );
 }
 
 function mapCreatedModel(
@@ -180,6 +151,7 @@ export function buildProviderBootstrapPayload(
     endpoint: trimText(form.endpoint),
     api_key: trimText(form.api_key),
     model_name: trimText(form.model_name),
+    key: trimText(form.key ?? form.provider_key),
     save_and_test: !!saveAndTest,
     use_proxy: !!form.use_proxy,
   };
@@ -192,11 +164,6 @@ export function buildProviderBootstrapPayload(
   const providerName = trimText(form.name ?? form.provider_name);
   if (providerName) {
     payload.name = providerName;
-  }
-
-  const providerKey = trimText(form.key ?? form.provider_key);
-  if (providerKey) {
-    payload.key = providerKey;
   }
 
   const realModelName = trimText(form.real_model_name);
@@ -244,14 +211,7 @@ export function buildProviderBootstrapPreview(
   const providerKey =
     trimText(response?.provider_key) ||
     trimText(response?.provider?.provider_key) ||
-    trimText(form.provider_key ?? form.key) ||
-    (() => {
-      const providerTypeSlug = slugify(form.provider_type) || "provider";
-      const endpointHost = slugify(getEndpointHost(form.endpoint));
-      const subject = slugify(buildPreviewSubject(form));
-      const suffix = endpointHost || subject;
-      return suffix ? `${providerTypeSlug}-${suffix}` : providerTypeSlug;
-    })();
+    trimText(form.provider_key ?? form.key);
 
   return {
     provider_name: providerName,

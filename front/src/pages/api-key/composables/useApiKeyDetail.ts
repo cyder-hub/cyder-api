@@ -310,12 +310,7 @@ export function useApiKeyDetail(
   const selectedKeyId = ref<number | null>(null);
   const selectedDetail = ref<ApiKeyDetail | null>(null);
   const selectedRuntime = ref<ApiKeyRuntimeSnapshot | null>(null);
-  const showMobileKeyPicker = ref(false);
   const secretReveal = ref<ApiKeyReveal | null>(null);
-
-  const selectedListKey = computed(
-    () => apiKeys.value.find((key) => key.id === selectedKeyId.value) ?? null,
-  );
 
   const selectedRuntimeView = computed(() => {
     if (selectedRuntime.value) {
@@ -362,7 +357,6 @@ export function useApiKeyDetail(
   }
 
   function handleSelectKey(id: number) {
-    showMobileKeyPicker.value = false;
     if (selectedKeyId.value === id && selectedDetail.value) {
       return;
     }
@@ -419,8 +413,6 @@ export function useApiKeyDetail(
     selectedDetail,
     selectedRuntime,
     selectedRuntimeView,
-    selectedListKey,
-    showMobileKeyPicker,
     secretReveal,
     loadSelectedKey,
     handleSelectKey,

@@ -1,4 +1,4 @@
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch, type Ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 
@@ -14,21 +14,28 @@ import type { CostCatalogVersion, ModelDetailResponse } from "@/services/types";
 import type { ReasoningConfigActions } from "@/components/reasoning/types";
 import type { EditingModelData } from "../types";
 
-export function useModelEdit() {
+export function useModelEdit(
+  propsModelId?: Ref<number | null>,
+  autoLoad = true,
+) {
   const { t } = useI18n();
   const route = useRoute();
   const router = useRouter();
   const providerStore = useProviderStore();
   const modelStore = useModelStore();
 
-  const modelId = parseInt(route.params.id as string);
+  const modelId = computed(() =>
+    propsModelId ? propsModelId.value : parseInt(route.params.id as string),
+  );
   const isLoading = ref(true);
+  const isSaving = ref(false);
   const modelDetail = ref<ModelDetailResponse | null>(null);
   const editingData = ref<EditingModelData | null>(null);
   const shouldBindCreatedCatalog = ref(false);
   const costManager = useCostPage();
 
   const capabilityItems = MODEL_CAPABILITY_ITEMS;
+  let fetchSequence = 0;
 
   const reasoningActions: ReasoningConfigActions = {
     getCatalog: requestPatchService.getReasoningConfigCatalog,
@@ -62,7 +69,8 @@ export function useModelEdit() {
   );
 
   const fetchData = async () => {
-    if (isNaN(modelId)) {
+    const requestedModelId = modelId.value;
+    if (requestedModelId === null || Number.isNaN(requestedModelId)) {
       toastController.error(
         t("modelEditPage.alert.loadDataFailed", { modelId: route.params.id }),
       );
@@ -70,13 +78,23 @@ export function useModelEdit() {
       return;
     }
 
+    const requestSequence = ++fetchSequence;
     try {
       isLoading.value = true;
+      modelDetail.value = null;
+      editingData.value = null;
       const [detail] = await Promise.all([
-        modelService.getModelDetail(modelId),
+        modelService.getModelDetail(requestedModelId),
         providerStore.fetchProviders(),
         costManager.refreshCostData(),
       ]);
+
+      if (
+        requestSequence !== fetchSequence ||
+        requestedModelId !== modelId.value
+      ) {
+        return;
+      }
 
       modelDetail.value = detail;
 
@@ -98,22 +116,31 @@ export function useModelEdit() {
         };
       }
     } catch (error: unknown) {
+      if (
+        requestSequence !== fetchSequence ||
+        requestedModelId !== modelId.value
+      ) {
+        return;
+      }
+
       const normalizedError = normalizeError(error, t("common.unknownError"));
       toastController.error(
-        t("modelEditPage.alert.loadDataFailed", { modelId }),
+        t("modelEditPage.alert.loadDataFailed", { modelId: requestedModelId }),
         normalizedError.message,
       );
     } finally {
-      isLoading.value = false;
+      if (requestSequence === fetchSequence) {
+        isLoading.value = false;
+      }
     }
   };
 
-  const handleSaveModel = async () => {
-    if (!editingData.value) return;
+  const handleSaveModel = async (): Promise<boolean> => {
+    if (!editingData.value || isSaving.value) return false;
 
     if (!editingData.value.model_name.trim()) {
       toastController.warn(t("modelEditPage.alert.nameRequired"));
-      return;
+      return false;
     }
 
     const payload = {
@@ -129,6 +156,7 @@ export function useModelEdit() {
       cost_catalog_id: editingData.value.cost_catalog_id,
     };
 
+    isSaving.value = true;
     try {
       await modelService.updateModel(editingData.value.id, payload);
       toastController.success(t("modelEditPage.alert.updateSuccess"));
@@ -136,6 +164,7 @@ export function useModelEdit() {
         console.error("Failed to refresh providers after saving model:", error);
       });
       void fetchData();
+      return true;
     } catch (error: unknown) {
       const normalizedError = normalizeError(error, t("common.unknownError"));
       toastController.error(
@@ -143,6 +172,9 @@ export function useModelEdit() {
           error: normalizedError.message,
         }),
       );
+      return false;
+    } finally {
+      isSaving.value = false;
     }
   };
 
@@ -218,13 +250,22 @@ export function useModelEdit() {
     },
   );
 
+  watch(modelId, (newVal, oldVal) => {
+    if (autoLoad && newVal !== oldVal) {
+      void fetchData();
+    }
+  });
+
   onMounted(() => {
-    void fetchData();
+    if (autoLoad) {
+      void fetchData();
+    }
   });
 
   return {
     modelId,
     isLoading,
+    isSaving,
     modelDetail,
     editingData,
     costManager,

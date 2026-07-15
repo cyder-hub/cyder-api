@@ -152,7 +152,7 @@
               variant="outline"
               size="sm"
               class="w-full"
-              @click="router.push(`/model/edit/${model.id}`)"
+              @click="handleOpenModelEditSheet(model.id)"
             >
               <Edit2 class="mr-1.5 h-4 w-4" />
               {{ $t("common.edit") }}
@@ -265,7 +265,7 @@
             variant="ghost"
             size="sm"
             class="h-8 px-2 text-gray-600"
-            @click="router.push(`/model/edit/${model.id}`)"
+            @click="handleOpenModelEditSheet(model.id)"
           >
             <Edit2 class="h-4 w-4" />
           </Button>
@@ -298,20 +298,27 @@
       </Button>
     </div>
   </section>
+
+  <ModelEditSheet
+    v-model:open="isSheetOpen"
+    :model-id="sheetModelId"
+    @saved="handleModelSheetSaved"
+  />
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
 import * as providerService from "@/services/providers";
 import * as modelService from "@/services/models";
 import { toastController } from "@/services/uiFeedback";
 import type { EditingProviderData, LocalEditableModelItem } from "../types";
+import type { EditingModelData } from "@/pages/model-edit/types";
 import type {
   ProviderRemoteModelItem,
   ProviderRemoteModelsResponse,
 } from "@/services/types";
+import ModelEditSheet from "@/pages/model-edit/components/ModelEditSheet.vue";
 import MobileCrudCard from "@/components/MobileCrudCard.vue";
 import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
@@ -331,8 +338,32 @@ import {
 } from "lucide-vue-next";
 
 const { t: $t } = useI18n();
-const router = useRouter();
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
+
+const isSheetOpen = ref(false);
+const sheetModelId = ref<number | null>(null);
+
+const handleOpenModelEditSheet = (modelId: number) => {
+  sheetModelId.value = modelId;
+  isSheetOpen.value = true;
+};
+
+const handleModelSheetSaved = (savedModel: EditingModelData) => {
+  const model = editingData.value.models.find((item) => item.id === savedModel.id);
+  if (!model) return;
+
+  Object.assign(model, {
+    model_name: savedModel.model_name,
+    real_model_name: savedModel.real_model_name,
+    supports_streaming: savedModel.supports_streaming,
+    supports_tools: savedModel.supports_tools,
+    supports_reasoning: savedModel.supports_reasoning,
+    supports_image_input: savedModel.supports_image_input,
+    supports_embeddings: savedModel.supports_embeddings,
+    supports_rerank: savedModel.supports_rerank,
+    is_enabled: savedModel.is_enabled,
+  });
+};
 
 const capabilityItems = [
   { key: "supports_streaming", labelKey: "modelCapabilities.streaming" },

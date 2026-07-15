@@ -44,7 +44,7 @@
       </div>
     </div>
 
-    <RecordDetailDialog
+    <RecordDetailSheet
       v-model:open="isDetailModalOpen"
       v-model:active-tab="selectedTab"
       :loading="isDetailLoading"
@@ -69,7 +69,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
 import PageHeader from "@/components/PageHeader.vue";
-import RecordDetailDialog from "./components/RecordDetailDialog.vue";
+import RecordDetailSheet from "./components/RecordDetailSheet.vue";
 import RecordFilters from "./components/RecordFilters.vue";
 import RecordTable from "./components/RecordTable.vue";
 import { toastController } from "../../services/uiFeedback";

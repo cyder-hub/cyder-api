@@ -1,0 +1,402 @@
+<script setup lang="ts">
+import { computed, toRef, watch } from "vue";
+import { useI18n } from "vue-i18n";
+import {
+  Drawer,
+  DrawerContent,
+  DrawerHeader,
+  DrawerTitle,
+  DrawerFooter,
+} from "@/components/ui/drawer";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
+import MobileCrudCard from "@/components/MobileCrudCard.vue";
+import { formatTimestamp } from "@/utils/datetime";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Copy, Loader2, Plus, Settings2 } from "lucide-vue-next";
+import SectionHeader from "@/components/SectionHeader.vue";
+
+import CostCatalogDrawer from "@/pages/cost/CostCatalogDrawer.vue";
+import CostComponentDrawer from "@/pages/cost/CostComponentDrawer.vue";
+import CostEditorSheet from "@/pages/cost/CostEditorSheet.vue";
+import CostTemplateDrawer from "@/pages/cost/CostTemplateDrawer.vue";
+import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
+import ModelBaseInfoForm from "./ModelBaseInfoForm.vue";
+import ModelRoutePreviewPanel from "./ModelRoutePreviewPanel.vue";
+import ModelRequestPatchPanel from "./ModelRequestPatchPanel.vue";
+import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
+import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
+import { useModelEdit } from "../composables/useModelEdit";
+import type { EditingModelData } from "../types";
+
+const props = defineProps<{
+  open: boolean;
+  modelId: number | null;
+}>();
+
+const emit = defineEmits<{
+  "update:open": [value: boolean];
+  "saved": [model: EditingModelData];
+}>();
+
+const isOpen = computed({
+  get: () => props.open,
+  set: (val) => emit("update:open", val),
+});
+
+const modelIdRef = toRef(props, "modelId");
+
+const { t } = useI18n();
+const {
+  isLoading,
+  isSaving,
+  modelDetail,
+  editingData,
+  costManager,
+  capabilityItems,
+  currentProvider,
+  selectedCatalog,
+  selectedCatalogVersions,
+  reasoningActions,
+  fetchData,
+  handleSaveModel,
+  handleReasoningConfigSaved,
+  handleRuntimeFeatureConfigSaved,
+  handleNavigateToRoutes,
+  handleOpenSelectedCostCatalog,
+  handleCreateCostCatalog,
+  handleDuplicateSelectedCostCatalog,
+  handleCostCatalogDialogOpenChange,
+} = useModelEdit(modelIdRef, false);
+
+watch(
+  [() => props.open, () => props.modelId],
+  ([open, modelId]) => {
+    if (open && modelId !== null) {
+      void fetchData();
+    }
+  },
+  { immediate: true },
+);
+
+const onSaveAndClose = async () => {
+  const saved = await handleSaveModel();
+  if (!saved || !editingData.value) return;
+
+  emit("saved", { ...editingData.value });
+  isOpen.value = false;
+};
+</script>
+
+<template>
+  <Drawer direction="right" v-model:open="isOpen">
+    <DrawerContent class="flex flex-col p-0 outline-none">
+      <DrawerHeader class="border-b border-gray-100 px-4 py-4 sm:px-6">
+        <DrawerTitle class="pr-8 text-base font-semibold text-gray-900 sm:text-lg">
+          {{ t("modelEditPage.title") }}
+        </DrawerTitle>
+      </DrawerHeader>
+
+      <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
+        <div v-if="isLoading" class="flex items-center justify-center py-16">
+          <Loader2 class="h-5 w-5 animate-spin text-gray-400 mr-2" />
+          <span class="text-sm text-gray-500">{{ t("modelEditPage.loading") }}</span>
+        </div>
+
+        <div v-else-if="!modelDetail" class="flex flex-col items-center justify-center py-20">
+          <div class="bg-destructive/10 text-destructive border border-destructive/20 rounded-lg p-6 text-center">
+            <p class="text-sm font-medium">
+              {{ t("modelEditPage.alert.loadDataFailed", { modelId: modelId }) }}
+            </p>
+            <Button class="mt-4" @click="fetchData">{{ t("common.retry") }}</Button>
+          </div>
+        </div>
+
+        <div v-else-if="editingData" class="space-y-6">
+          <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div class="min-w-0">
+                <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+                  {{ t("modelEditPage.providerSummary.title") }}
+                </p>
+                <h2 class="mt-1 text-base font-semibold text-gray-900">
+                  {{ currentProvider?.name || t("modelEditPage.providerSummary.unknown") }}
+                </h2>
+                <p class="mt-1 font-mono text-xs text-gray-500">
+                  {{ currentProvider?.provider_key || "/" }}
+                </p>
+              </div>
+              <Badge
+                :variant="currentProvider?.is_enabled ? 'secondary' : 'outline'"
+                class="w-fit font-mono text-[11px]"
+              >
+                {{ currentProvider?.is_enabled ? t("modelEditPage.providerSummary.enabled") : t("modelEditPage.providerSummary.disabled") }}
+              </Badge>
+            </div>
+          </section>
+
+          <ModelRoutePreviewPanel
+            :route-references="modelDetail.route_references"
+            @open-routes="() => { isOpen = false; handleNavigateToRoutes(); }"
+          />
+
+          <ModelBaseInfoForm v-model:editingData="editingData" :capability-items="capabilityItems" />
+
+          <div class="border-t border-gray-200 pt-5">
+            <ReasoningConfigPanel
+              owner-kind="model"
+              :owner-id="editingData.id"
+              :actions="reasoningActions"
+              :title="t('modelEditPage.advancedConfig.title')"
+              :model-supports-reasoning="editingData.supports_reasoning"
+              @saved="handleReasoningConfigSaved"
+            >
+              <template #runtime-feature>
+                <RuntimeFeatureConfigPanel
+                  owner-kind="model"
+                  :owner-id="editingData.id"
+                  embedded
+                  @saved="handleRuntimeFeatureConfigSaved"
+                />
+              </template>
+            </ReasoningConfigPanel>
+          </div>
+
+          <section class="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+            <SectionHeader :title="t('modelEditPage.priceSection.title')" />
+            <div class="mt-4 space-y-6">
+              <div class="grid gap-1.5">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div class="grid gap-1.5">
+                    <Label class="text-gray-700">{{ t("modelEditPage.priceSection.labelCatalog") }}</Label>
+                  </div>
+                  <div class="flex flex-col gap-2 sm:w-auto sm:flex-row">
+                    <Button variant="outline" @click="handleCreateCostCatalog">
+                      <Plus class="mr-1.5 h-4 w-4" />
+                      {{ t("costPage.catalogs.add") }}
+                    </Button>
+                    <Button variant="outline" :disabled="!selectedCatalog" @click="handleDuplicateSelectedCostCatalog">
+                      <Copy class="mr-1.5 h-4 w-4" />
+                      {{ t("costPage.catalogs.duplicate") }}
+                    </Button>
+                    <Button variant="outline" :disabled="!editingData.cost_catalog_id" @click="handleOpenSelectedCostCatalog">
+                      <Settings2 class="mr-1.5 h-4 w-4" />
+                      {{ t("costPage.catalogs.openEditor") }}
+                    </Button>
+                  </div>
+                </div>
+                <Select
+                  :model-value="editingData.cost_catalog_id?.toString() || 'none'"
+                  @update:model-value="
+                    (val: any) =>
+                      (editingData!.cost_catalog_id = val === 'none' ? null : parseInt(val as string))
+                  "
+                >
+                  <SelectTrigger class="w-full">
+                    <SelectValue :placeholder="t('modelEditPage.priceSection.placeholderCatalog')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">{{ t("modelEditPage.priceSection.noCatalog") }}</SelectItem>
+                    <SelectItem
+                      v-for="catalog in costManager.catalogs.value"
+                      :key="catalog.catalog.id"
+                      :value="catalog.catalog.id.toString()"
+                    >
+                      {{ catalog.catalog.name }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div v-if="!editingData.cost_catalog_id" class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500">
+                {{ t("modelEditPage.priceSection.unboundHint") }}
+              </div>
+
+              <div v-if="editingData.cost_catalog_id" class="space-y-4">
+                <div v-if="selectedCatalogVersions.length > 0" class="space-y-3">
+                  <h4 class="text-sm font-semibold text-gray-700">
+                    {{ t("modelEditPage.priceSection.versionTitle") }}
+                  </h4>
+                  <div class="space-y-3 md:hidden">
+                    <MobileCrudCard
+                      v-for="version in selectedCatalogVersions"
+                      :key="version.id"
+                      :title="version.version"
+                      :description="version.source || version.currency"
+                    >
+                      <div class="grid grid-cols-1 gap-3 text-sm min-[360px]:grid-cols-2">
+                        <div class="space-y-1">
+                          <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">{{ t("modelEditPage.priceSection.enabled") }}</p>
+                          <div><Badge variant="secondary" class="font-mono text-xs">{{ version.is_enabled ? t("common.yes") : t("common.no") }}</Badge></div>
+                        </div>
+                        <div class="space-y-1">
+                          <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">{{ t("costPage.versions.currency") }}</p>
+                          <p class="text-sm text-gray-900">{{ version.currency }}</p>
+                        </div>
+                        <div class="space-y-1">
+                          <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">{{ t("modelEditPage.priceSection.effectiveFrom") }}</p>
+                          <p class="text-sm text-gray-900">{{ formatTimestamp(version.effective_from) }}</p>
+                        </div>
+                        <div class="space-y-1">
+                          <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">{{ t("modelEditPage.priceSection.effectiveUntil") }}</p>
+                          <p class="break-all font-mono text-sm text-gray-700">{{ version.effective_until ? formatTimestamp(version.effective_until) : "-" }}</p>
+                        </div>
+                      </div>
+                    </MobileCrudCard>
+                  </div>
+
+                  <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
+                    <Table>
+                      <TableHeader>
+                        <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
+                          <TableHead class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ t("modelEditPage.priceSection.version") }}</TableHead>
+                          <TableHead class="w-[80px] text-center text-xs font-medium text-gray-500 uppercase tracking-wider">{{ t("modelEditPage.priceSection.enabled") }}</TableHead>
+                          <TableHead class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ t("costPage.versions.currency") }}</TableHead>
+                          <TableHead class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ t("modelEditPage.priceSection.effectiveFrom") }}</TableHead>
+                          <TableHead class="text-xs font-medium text-gray-500 uppercase tracking-wider">{{ t("modelEditPage.priceSection.effectiveUntil") }}</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow v-for="version in selectedCatalogVersions" :key="version.id">
+                          <TableCell class="text-sm text-gray-900">{{ version.version }}</TableCell>
+                          <TableCell class="text-center">
+                            <Badge variant="secondary" class="font-mono text-xs">{{ version.is_enabled ? t("common.yes") : t("common.no") }}</Badge>
+                          </TableCell>
+                          <TableCell class="text-sm">{{ version.currency }}</TableCell>
+                          <TableCell class="text-sm">{{ formatTimestamp(version.effective_from) }}</TableCell>
+                          <TableCell class="text-xs text-gray-500">{{ version.effective_until ? formatTimestamp(version.effective_until) : "-" }}</TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+                <div v-else class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500">
+                  {{ t("costPage.versions.empty") }}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <ModelRequestPatchPanel
+            :model-id="editingData.id"
+            :provider-name="currentProvider?.name"
+            :provider-key="currentProvider?.provider_key"
+          />
+        </div>
+      </div>
+
+      <DrawerFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
+        <Button variant="ghost" class="w-full text-gray-600 sm:w-auto" @click="isOpen = false">
+          {{ t("common.cancel") }}
+        </Button>
+        <Button
+          variant="default"
+          class="w-full sm:w-auto"
+          :disabled="!editingData || isSaving"
+          @click="onSaveAndClose"
+        >
+          {{ isSaving ? t("common.saving") : t("common.save") }}
+        </Button>
+      </DrawerFooter>
+    </DrawerContent>
+  </Drawer>
+
+  <CostEditorSheet
+    :open="costManager.isEditorDialogOpen.value"
+    :selected-catalog="costManager.selectedCatalog.value"
+    :selected-catalog-versions="costManager.selectedCatalogVersions.value"
+    :selected-version-id="costManager.selectedVersionId.value"
+    :selected-version-summary="costManager.selectedVersionSummary.value"
+    :components="costManager.components.value"
+    :is-loading-version-detail="costManager.isLoadingVersionDetail.value"
+    :toggling-version-id="costManager.togglingVersionId.value"
+    :managing-version-id="costManager.managingVersionId.value"
+    :duplicating-version-id="costManager.duplicatingVersionId.value"
+    :duplicating-catalog-id="costManager.duplicatingCatalogId.value"
+    :show-archived-versions="costManager.showArchivedVersions.value"
+    :preview-draft="costManager.previewDraft"
+    :preview-response="costManager.previewResponse.value"
+    :can-preview="costManager.canPreview.value"
+    :is-running-preview="costManager.isRunningPreview.value"
+    :meter-label="costManager.meterLabel"
+    :charge-kind-label="costManager.chargeKindLabel"
+    :tier-basis-label="costManager.tierBasisLabel"
+    :format-rate-display="costManager.formatRateDisplay"
+    :try-format-rate-input-display="costManager.tryFormatRateInputDisplay"
+    :format-number="costManager.formatNumber"
+    :pretty-json="costManager.prettyJson"
+    @update:open="(open) => (costManager.isEditorDialogOpen.value = open)"
+    @refresh="costManager.refreshCostData"
+    @open-template="costManager.openTemplateDialog"
+    @edit-catalog="costManager.openEditCatalogDialog"
+    @duplicate-catalog="costManager.duplicateCatalog"
+    @create-version="costManager.openCreateVersionDialog"
+    @select-version="costManager.handleSelectVersion"
+    @toggle-version-enabled="costManager.handleToggleVersionEnabled"
+    @archive-version="costManager.handleArchiveVersion"
+    @unarchive-version="costManager.handleUnarchiveVersion"
+    @delete-version="costManager.handleDeleteVersion"
+    @toggle-archived-visibility="costManager.toggleArchivedVersions"
+    @duplicate-version="costManager.duplicateVersion"
+    @create-component="costManager.openCreateComponentDialog"
+    @edit-component="costManager.openEditComponentDialog"
+    @delete-component="costManager.handleDeleteComponent"
+    @apply-sample="costManager.applyPreviewSample"
+    @reset-preview="costManager.resetPreview"
+    @run-preview="costManager.runPreview"
+  />
+
+  <CostTemplateDrawer
+    :open="costManager.isTemplateDialogOpen.value"
+    :templates="costManager.templates.value"
+    :is-loading-templates="costManager.isLoadingTemplates.value"
+    :importing-template-key="costManager.importingTemplateKey.value"
+    @update:open="(open) => (costManager.isTemplateDialogOpen.value = open)"
+    @refresh="costManager.refreshTemplates"
+    @import-template="costManager.importTemplate"
+  />
+
+  <CostCatalogDrawer
+    :open="costManager.isCatalogDialogOpen.value"
+    :draft="costManager.catalogDraft"
+    :is-saving="costManager.isSavingCatalog.value"
+    @update:open="handleCostCatalogDialogOpenChange"
+    @save="costManager.saveCatalog"
+  />
+
+  <CostVersionDrawer
+    :open="costManager.isVersionDialogOpen.value"
+    :draft="costManager.versionDraft"
+    :is-saving="costManager.isSavingVersion.value"
+    @update:open="(open) => (costManager.isVersionDialogOpen.value = open)"
+    @save="costManager.saveVersion"
+  />
+
+  <CostComponentDrawer
+    :open="costManager.isComponentDialogOpen.value"
+    :draft="costManager.componentDraft"
+    :is-saving="costManager.isSavingComponent.value"
+    :selected-currency="costManager.selectedVersionSummary.value?.currency"
+    :meter-label="costManager.meterLabel"
+    :charge-kind-label="costManager.chargeKindLabel"
+    @update:open="(open) => (costManager.isComponentDialogOpen.value = open)"
+    @save="costManager.saveComponent"
+    @add-tier="costManager.addTier"
+    @remove-tier="costManager.removeTier"
+  />
+</template>

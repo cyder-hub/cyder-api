@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use super::benchmark::BenchmarkSummary;
@@ -31,4 +34,26 @@ pub fn build_transform_quality_report(
         threshold_checks,
         passed,
     }
+}
+
+pub fn load_benchmark_thresholds(path: &Path) -> Result<BenchmarkThresholds, String> {
+    let payload =
+        fs::read(path).map_err(|err| format!("read thresholds {}: {err}", path.display()))?;
+    serde_json::from_slice(&payload)
+        .map_err(|err| format!("parse thresholds {}: {err}", path.display()))
+}
+
+pub fn write_transform_quality_report(
+    path: &Path,
+    report: &TransformQualityReport,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("create report directory {}: {err}", parent.display()))?;
+    }
+    let payload = serde_json::to_vec_pretty(report)
+        .map_err(|err| format!("serialize transform quality report: {err}"))?;
+    fs::write(path, payload).map_err(|err| format!("write report {}: {err}", path.display()))
 }

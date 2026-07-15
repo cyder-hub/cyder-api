@@ -158,33 +158,26 @@ jobs:
             echo "- Docker Hub image: ${{ steps.validate.outputs.image_dockerhub }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  transform-quality-gate:
+  prepare-version-images:
     needs: validate-release
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
-      contents: read
-    steps:
-      - name: Checkout release tag
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate-release.outputs.release_tag }}
-
-      - name: Run transform quality gate
-        uses: ./.github/actions/transform-quality-gate
-
-  version-image-preflight:
-    needs: validate-release
-    runs-on: ubuntu-24.04
-    permissions:
-      packages: read
+      packages: write
     outputs:
-      build_version_image: ${{ steps.preflight.outputs.build_version_image }}
-      preflight_reason: ${{ steps.preflight.outputs.preflight_reason }}
+      ghcr_digest_ref: ${{ steps.prepare.outputs.ghcr_digest_ref }}
+      dockerhub_digest_ref: ${{ steps.prepare.outputs.dockerhub_digest_ref }}
     env:
       VERSION: ${{ needs.validate-release.outputs.version }}
+      SOURCE_SHA: ${{ needs.validate-release.outputs.source_sha }}
       IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
       IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
     steps:
+      - name: Set up crane
+        uses: imjasonh/setup-crane@v0.7
+        with:
+          version: v0.21.7
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -198,8 +191,8 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Check immutable version images
-        id: preflight
+      - name: Prepare and verify immutable version images
+        id: prepare
         shell: bash
         run: |
           set -euo pipefail
@@ -207,20 +200,32 @@ jobs:
           ghcr_exists=false
           dockerhub_exists=false
 
-          if docker manifest inspect "${IMAGE_GHCR}:${VERSION}" >/dev/null 2>&1; then
+          if crane digest "${IMAGE_GHCR}:${VERSION}" >/dev/null 2>&1; then
             ghcr_exists=true
           fi
 
-          if docker manifest inspect "${IMAGE_DOCKERHUB}:${VERSION}" >/dev/null 2>&1; then
+          if crane digest "${IMAGE_DOCKERHUB}:${VERSION}" >/dev/null 2>&1; then
             dockerhub_exists=true
           fi
 
           if [[ "$ghcr_exists" == "true" && "$dockerhub_exists" == "true" ]]; then
-            build_version_image=false
-            preflight_reason="Both immutable version images already exist; release will reuse and verify them."
+            prepare_reason="Both immutable version images already exist; reusing them."
           elif [[ "$ghcr_exists" == "false" && "$dockerhub_exists" == "false" ]]; then
-            build_version_image=true
-            preflight_reason="No immutable version images exist; release will build and push them."
+            source_ref="${IMAGE_GHCR}:${SOURCE_SHA}"
+            deadline=$((SECONDS + 1800))
+            while ! source_digest="$(crane digest "$source_ref" 2>/dev/null)"; do
+              if (( SECONDS >= deadline )); then
+                echo "Timed out waiting for Master Image artifact ${source_ref}." >&2
+                exit 1
+              fi
+              echo "Waiting for Master Image artifact ${source_ref}."
+              sleep 15
+            done
+
+            source_digest_ref="${IMAGE_GHCR}@${source_digest}"
+            crane copy "$source_digest_ref" "${IMAGE_GHCR}:${VERSION}"
+            crane copy "$source_digest_ref" "${IMAGE_DOCKERHUB}:${VERSION}"
+            prepare_reason="Promoted the CI-approved commit image to immutable version tags without rebuilding it."
           else
             echo "Immutable version image state is inconsistent." >&2
             echo "GHCR ${IMAGE_GHCR}:${VERSION} exists: ${ghcr_exists}" >&2
@@ -229,131 +234,15 @@ jobs:
             exit 1
           fi
 
-          {
-            echo "build_version_image=$build_version_image"
-            echo "preflight_reason=$preflight_reason"
-          } >> "$GITHUB_OUTPUT"
+          ghcr_digest="$(crane digest "${IMAGE_GHCR}:${VERSION}")"
+          dockerhub_digest="$(crane digest "${IMAGE_DOCKERHUB}:${VERSION}")"
+          if [[ "$ghcr_digest" != "$dockerhub_digest" ]]; then
+            echo "Registry digests differ for immutable version ${VERSION}." >&2
+            echo "GHCR: ${ghcr_digest}" >&2
+            echo "Docker Hub: ${dockerhub_digest}" >&2
+            exit 1
+          fi
 
-          {
-            echo "### Version Image Preflight"
-            echo ""
-            echo "- GHCR ${IMAGE_GHCR}:${VERSION} exists: ${ghcr_exists}"
-            echo "- Docker Hub ${IMAGE_DOCKERHUB}:${VERSION} exists: ${dockerhub_exists}"
-            echo "- Build version image: ${build_version_image}"
-            echo "- Reason: ${preflight_reason}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  build-version-image:
-    needs:
-      - validate-release
-      - transform-quality-gate
-      - version-image-preflight
-    if: needs.version-image-preflight.outputs.build_version_image == 'true'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    env:
-      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
-    steps:
-      - name: Checkout release tag
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate-release.outputs.release_tag }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push immutable release image
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: |
-            ${{ needs.validate-release.outputs.image_ghcr }}:${{ needs.validate-release.outputs.version }}
-            ${{ env.IMAGE_DOCKERHUB }}:${{ needs.validate-release.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Write image summary
-        shell: bash
-        env:
-          WORKFLOW_NAME: ${{ github.workflow }}
-          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          {
-            echo "### Release Image"
-            echo ""
-            echo "- Workflow: ${WORKFLOW_NAME}"
-            echo "- Run: ${WORKFLOW_RUN_URL}"
-            echo "- Release tag: ${{ needs.validate-release.outputs.release_tag }}"
-            echo "- Version: ${{ needs.validate-release.outputs.version }}"
-            echo "- Source SHA: ${{ needs.validate-release.outputs.source_sha }}"
-            echo "- GHCR version tag: ${{ needs.validate-release.outputs.image_ghcr }}:${{ needs.validate-release.outputs.version }}"
-            echo "- Docker Hub version tag: ${IMAGE_DOCKERHUB}:${{ needs.validate-release.outputs.version }}"
-            echo "- Build digest: ${{ steps.build.outputs.digest }}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  verify-version-images:
-    needs:
-      - validate-release
-      - transform-quality-gate
-      - version-image-preflight
-      - build-version-image
-    if: always() && needs.validate-release.result == 'success' && needs.transform-quality-gate.result == 'success' && needs.version-image-preflight.result == 'success' && (needs.build-version-image.result == 'success' || needs.build-version-image.result == 'skipped')
-    runs-on: ubuntu-24.04
-    permissions:
-      packages: read
-    outputs:
-      ghcr_digest_ref: ${{ steps.verify.outputs.ghcr_digest_ref }}
-      dockerhub_digest_ref: ${{ steps.verify.outputs.dockerhub_digest_ref }}
-    env:
-      VERSION: ${{ needs.validate-release.outputs.version }}
-      IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
-      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
-    steps:
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Verify immutable version images
-        id: verify
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          docker pull "${IMAGE_GHCR}:${VERSION}"
-          docker pull "${IMAGE_DOCKERHUB}:${VERSION}"
-
-          ghcr_digest="$(docker buildx imagetools inspect "${IMAGE_GHCR}:${VERSION}" --format '{{.Manifest.Digest}}')"
-          dockerhub_digest="$(docker buildx imagetools inspect "${IMAGE_DOCKERHUB}:${VERSION}" --format '{{.Manifest.Digest}}')"
           ghcr_digest_ref="${IMAGE_GHCR}@${ghcr_digest}"
           dockerhub_digest_ref="${IMAGE_DOCKERHUB}@${dockerhub_digest}"
 
@@ -363,18 +252,19 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           {
-            echo "### Release Image Verification"
+            echo "### Immutable Version Images"
             echo ""
-            echo "- Verified GHCR version image: ${IMAGE_GHCR}:${VERSION}"
+            echo "- GHCR ${IMAGE_GHCR}:${VERSION} exists: ${ghcr_exists}"
+            echo "- Docker Hub ${IMAGE_DOCKERHUB}:${VERSION} exists: ${dockerhub_exists}"
             echo "- GHCR digest ref: ${ghcr_digest_ref}"
-            echo "- Verified Docker Hub version image: ${IMAGE_DOCKERHUB}:${VERSION}"
             echo "- Docker Hub digest ref: ${dockerhub_digest_ref}"
+            echo "- Result: ${prepare_reason}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   create-draft-release:
     needs:
       - validate-release
-      - verify-version-images
+      - prepare-version-images
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -385,8 +275,8 @@ jobs:
       IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
       SOURCE_SHA: ${{ needs.validate-release.outputs.source_sha }}
       CI_RUN_ID: ${{ needs.validate-release.outputs.ci_run_id }}
-      GHCR_DIGEST_REF: ${{ needs.verify-version-images.outputs.ghcr_digest_ref }}
-      DOCKERHUB_DIGEST_REF: ${{ needs.verify-version-images.outputs.dockerhub_digest_ref }}
+      GHCR_DIGEST_REF: ${{ needs.prepare-version-images.outputs.ghcr_digest_ref }}
+      DOCKERHUB_DIGEST_REF: ${{ needs.prepare-version-images.outputs.dockerhub_digest_ref }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -470,6 +360,7 @@ jobs:
       - validate-release
       - create-draft-release
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     environment: release
     permissions:
       contents: write
@@ -483,6 +374,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - name: Set up crane
+        uses: imjasonh/setup-crane@v0.7
+        with:
+          version: v0.21.7
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -496,38 +392,35 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Pull immutable version images
+      - name: Promote and verify release image tags
         shell: bash
         run: |
           set -euo pipefail
 
-          docker pull "${IMAGE_GHCR}:${VERSION}"
-          docker pull "${IMAGE_DOCKERHUB}:${VERSION}"
+          ghcr_digest="$(crane digest "${IMAGE_GHCR}:${VERSION}")"
+          dockerhub_digest="$(crane digest "${IMAGE_DOCKERHUB}:${VERSION}")"
 
-      - name: Promote release image tags
-        shell: bash
-        run: |
-          set -euo pipefail
+          crane tag "${IMAGE_GHCR}:${VERSION}" "$MAJOR_MINOR"
+          crane tag "${IMAGE_GHCR}:${VERSION}" latest
+          crane tag "${IMAGE_DOCKERHUB}:${VERSION}" "$MAJOR_MINOR"
+          crane tag "${IMAGE_DOCKERHUB}:${VERSION}" latest
 
-          docker tag "${IMAGE_GHCR}:${VERSION}" "${IMAGE_GHCR}:${MAJOR_MINOR}"
-          docker tag "${IMAGE_GHCR}:${VERSION}" "${IMAGE_GHCR}:latest"
-          docker tag "${IMAGE_DOCKERHUB}:${VERSION}" "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
-          docker tag "${IMAGE_DOCKERHUB}:${VERSION}" "${IMAGE_DOCKERHUB}:latest"
+          verify_tag() {
+            local image="$1"
+            local tag="$2"
+            local expected_digest="$3"
+            local actual_digest
+            actual_digest="$(crane digest "${image}:${tag}")"
+            if [[ "$actual_digest" != "$expected_digest" ]]; then
+              echo "${image}:${tag} digest ${actual_digest} does not match ${expected_digest}." >&2
+              exit 1
+            fi
+          }
 
-          docker push "${IMAGE_GHCR}:${MAJOR_MINOR}"
-          docker push "${IMAGE_GHCR}:latest"
-          docker push "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
-          docker push "${IMAGE_DOCKERHUB}:latest"
-
-      - name: Verify promoted tags
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          docker pull "${IMAGE_GHCR}:${MAJOR_MINOR}"
-          docker pull "${IMAGE_GHCR}:latest"
-          docker pull "${IMAGE_DOCKERHUB}:${MAJOR_MINOR}"
-          docker pull "${IMAGE_DOCKERHUB}:latest"
+          verify_tag "$IMAGE_GHCR" "$MAJOR_MINOR" "$ghcr_digest"
+          verify_tag "$IMAGE_GHCR" latest "$ghcr_digest"
+          verify_tag "$IMAGE_DOCKERHUB" "$MAJOR_MINOR" "$dockerhub_digest"
+          verify_tag "$IMAGE_DOCKERHUB" latest "$dockerhub_digest"
 
           {
             echo "### Release Promotion Verification"

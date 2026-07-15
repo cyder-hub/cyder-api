@@ -1,9 +1,7 @@
 name: Master Image
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  push:
     branches: ["master"]
   workflow_dispatch:
     inputs:
@@ -13,47 +11,93 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   packages: write
 
 concurrency:
-  group: master-image-${{ github.event.workflow_run.head_branch || github.ref }}
+  group: master-image-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  # Preserve the commit-addressed image needed by a later release. A docs-only
+  # follow-up push must not cancel an in-flight runtime image build.
   cancel-in-progress: false
 
 jobs:
-  manual-transform-quality-gate:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master')
+  prepare:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      run_build: ${{ steps.detect.outputs.run_build }}
+      build_reason: ${{ steps.detect.outputs.build_reason }}
     steps:
-      - name: Record CI-backed transform gate
-        if: github.event_name == 'workflow_run'
-        shell: bash
-        run: |
-          {
-            echo "### Transform Quality Gate"
-            echo ""
-            echo "Skipped in Master Image because CI already passed for ${{ github.event.workflow_run.head_sha }}."
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Checkout repository
-        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
 
-      - name: Run transform quality gate
-        if: github.event_name == 'workflow_dispatch'
-        uses: ./.github/actions/transform-quality-gate
+      - name: Detect image changes
+        id: detect
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          run_build=false
+          build_reason="No runtime image inputs changed."
+          changed_files="$(mktemp)"
+          : > "$changed_files"
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            run_build=true
+            build_reason="Manual dispatch always builds the requested ref."
+          else
+            if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              git diff-tree --no-commit-id --name-only -r "$HEAD_SHA" > "$changed_files"
+            else
+              git diff --name-only "$BASE_SHA" "$HEAD_SHA" > "$changed_files"
+            fi
+
+            while IFS= read -r file; do
+              case "$file" in
+                Dockerfile|.dockerignore|docker-entrypoint|Cargo.toml|Cargo.lock|server/*|front/*)
+                  run_build=true
+                  build_reason="Runtime image inputs changed."
+                  break
+                  ;;
+              esac
+            done < "$changed_files"
+          fi
+
+          {
+            echo "run_build=$run_build"
+            echo "build_reason=$build_reason"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Master Image Preparation"
+            echo ""
+            echo "- Build image: ${run_build}"
+            echo "- Reason: ${build_reason}"
+            if [[ -s "$changed_files" ]]; then
+              echo ""
+              echo "Changed files:"
+              sed 's/^/- /' "$changed_files"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build-and-push:
-    needs: manual-transform-quality-gate
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master')
+    needs: prepare
+    if: needs.prepare.outputs.run_build == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.ref || github.sha }}
+          ref: ${{ inputs.ref || github.sha }}
 
       - name: Resolve source metadata
         id: source
@@ -62,7 +106,7 @@ jobs:
           set -euo pipefail
 
           source_sha="$(git rev-parse HEAD)"
-          image="ghcr.io/${GITHUB_REPOSITORY}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
 
           {
             echo "source_sha=$source_sha"
@@ -79,32 +123,85 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      - name: Build and push commit image
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: |
-            ${{ steps.source.outputs.image }}:${{ steps.source.outputs.source_sha }}
-            ${{ steps.source.outputs.image }}:edge
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.source.outputs.image }}:${{ steps.source.outputs.source_sha }}
+          cache-from: type=gha,scope=master-image,version=2
+          cache-to: type=gha,scope=master-image,mode=max,version=2
+
+      - name: Wait for successful CI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + 1800))
+          while true; do
+            ci_run_tsv="$(
+              gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+                -f head_sha="$SOURCE_SHA" \
+                --jq '.workflow_runs[0] | if . == null then "" else [.id, .status, (.conclusion // "")] | @tsv end'
+            )"
+
+            if [[ -n "$ci_run_tsv" ]]; then
+              IFS=$'\t' read -r ci_run_id ci_status ci_conclusion <<< "$ci_run_tsv"
+              if [[ "$ci_status" == "completed" && "$ci_conclusion" == "success" ]]; then
+                echo "CI run ${ci_run_id} approved image promotion."
+                break
+              fi
+              if [[ "$ci_status" == "completed" ]]; then
+                echo "CI run ${ci_run_id} completed with conclusion ${ci_conclusion}; edge will not move." >&2
+                exit 1
+              fi
+              echo "Waiting for CI run ${ci_run_id}; current status is ${ci_status}."
+            else
+              echo "Waiting for a successful CI run for ${SOURCE_SHA}."
+            fi
+
+            if (( SECONDS >= deadline )); then
+              echo "Timed out waiting for successful CI for ${SOURCE_SHA}." >&2
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Promote commit image to edge
+        shell: bash
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          docker buildx imagetools create \
+            --tag "${IMAGE}:edge" \
+            "${IMAGE}@${BUILD_DIGEST}"
+
+          source_digest="$(docker buildx imagetools inspect "${IMAGE}:${SOURCE_SHA}" --format '{{.Manifest.Digest}}')"
+          edge_digest="$(docker buildx imagetools inspect "${IMAGE}:edge" --format '{{.Manifest.Digest}}')"
+          if [[ "$source_digest" != "$edge_digest" ]]; then
+            echo "Edge digest ${edge_digest} does not match source digest ${source_digest}." >&2
+            exit 1
+          fi
 
       - name: Write image summary
         shell: bash
         env:
-          WORKFLOW_NAME: ${{ github.workflow }}
           WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           {
             echo "### Master Image"
             echo ""
-            echo "- Workflow: ${WORKFLOW_NAME}"
             echo "- Run: ${WORKFLOW_RUN_URL}"
             echo "- Source SHA: ${{ steps.source.outputs.source_sha }}"
-            echo "- GHCR image: ${{ steps.source.outputs.image }}"
             echo "- SHA tag: ${{ steps.source.outputs.image }}:${{ steps.source.outputs.source_sha }}"
             echo "- Edge tag: ${{ steps.source.outputs.image }}:edge"
             echo "- Digest: ${{ steps.build.outputs.digest }}"

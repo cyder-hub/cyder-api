@@ -199,3 +199,43 @@ fn test_benchmark_threshold_evaluation_reports_regressions() {
     assert!(!checks[0].passed);
     assert_eq!(checks[0].failures.len(), 6);
 }
+
+#[test]
+fn test_quality_report_file_helpers_round_trip_gate_artifacts() {
+    let temp_dir = tempfile::tempdir().expect("quality gate temp dir");
+    let thresholds_path = temp_dir.path().join("thresholds.json");
+    let report_path = temp_dir.path().join("artifacts/quality-report.json");
+    let thresholds = BenchmarkThresholds {
+        format_version: 1,
+        quick: true,
+        require_native_schema_conformance: true,
+        checks: Vec::new(),
+    };
+    std::fs::write(
+        &thresholds_path,
+        serde_json::to_vec_pretty(&thresholds).expect("serialize thresholds"),
+    )
+    .expect("write thresholds");
+
+    let loaded = load_benchmark_thresholds(&thresholds_path).expect("load thresholds");
+    assert_eq!(loaded, thresholds);
+
+    let report = build_transform_quality_report(
+        BenchmarkSummary {
+            format_version: 1,
+            quick: true,
+            warmup_rounds: 2,
+            sample_rounds: 8,
+            scenarios: Vec::new(),
+        },
+        &loaded,
+    );
+    assert!(report.passed);
+
+    write_transform_quality_report(&report_path, &report).expect("write quality report");
+    let persisted: TransformQualityReport = serde_json::from_slice(
+        &std::fs::read(&report_path).expect("read persisted quality report"),
+    )
+    .expect("parse persisted quality report");
+    assert_eq!(persisted, report);
+}

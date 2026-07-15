@@ -1,5 +1,5 @@
 name: Transform Quality Gate
-description: Run the quick transform quality gate and upload its JSON report.
+description: Run the quick transform benchmark and quality gate in one compilation.
 
 runs:
   using: composite
@@ -22,17 +22,28 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           target/release
-        key: ${{ runner.os }}-cargo-transform-release-v2-${{ steps.rust-cache.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-transform-bench-v3-${{ steps.rust-cache.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-transform-release-v2-${{ steps.rust-cache.outputs.version }}-
+          ${{ runner.os }}-cargo-transform-bench-v3-${{ steps.rust-cache.outputs.version }}-
 
-    - name: Build transform quality gate
-      shell: bash
-      run: cargo build --locked --release -p cyder-api --bin transform_quality_gate
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+      with:
+        version: v0.16.0
 
-    - name: Run transform quality gate
+    - name: Run transform benchmark and quality gate
       shell: bash
-      run: CYDER_DATA_DIR="${RUNNER_TEMP:-/tmp}/transform-quality-data" ./target/release/transform_quality_gate --quick --report-out /tmp/transform-quality-report.json
+      env:
+        CARGO_INCREMENTAL: "0"
+        RUSTC_WRAPPER: sccache
+        SCCACHE_GHA_ENABLED: "true"
+      run: |
+        CYDER_DATA_DIR="${RUNNER_TEMP:-/tmp}/transform-quality-data" \
+          cargo bench --locked -p cyder-api --bench transform_benchmark -- \
+            --quick \
+            --json-out /tmp/transform-benchmark-summary.json \
+            --thresholds "$GITHUB_WORKSPACE/server/src/service/transform/quality/default-thresholds.json" \
+            --quality-report-out /tmp/transform-quality-report.json
 
     - name: Upload transform quality report
       if: always()

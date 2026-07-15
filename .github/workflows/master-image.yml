@@ -88,10 +88,6 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run transform quality gate for manual build
-        if: github.event_name == 'workflow_dispatch'
-        uses: ./.github/actions/transform-quality-gate
-
   build-and-push:
     needs: prepare
     if: needs.prepare.outputs.run_build == 'true'
@@ -139,7 +135,6 @@ jobs:
           cache-to: type=gha,scope=master-image,mode=max,version=2
 
       - name: Wait for successful CI
-        if: github.event_name == 'push'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,8 +146,6 @@ jobs:
           while true; do
             ci_run_tsv="$(
               gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
-                -f branch=master \
-                -f event=push \
                 -f head_sha="$SOURCE_SHA" \
                 --jq '.workflow_runs[0] | if . == null then "" else [.id, .status, (.conclusion // "")] | @tsv end'
             )"
@@ -169,7 +162,7 @@ jobs:
               fi
               echo "Waiting for CI run ${ci_run_id}; current status is ${ci_status}."
             else
-              echo "Waiting for CI push run for ${SOURCE_SHA}."
+              echo "Waiting for a successful CI run for ${SOURCE_SHA}."
             fi
 
             if (( SECONDS >= deadline )); then

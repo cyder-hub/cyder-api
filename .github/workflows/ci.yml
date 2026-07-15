@@ -57,6 +57,11 @@ jobs:
               case "$file" in
                 Cargo.toml|Cargo.lock|server/*)
                   run_backend=true
+                  ;;
+              esac
+
+              case "$file" in
+                Cargo.toml|Cargo.lock|server/Cargo.toml|server/benches/transform_benchmark.rs|server/src/bin/transform_quality_gate.rs|server/src/service/transform/*|server/src/schema/enum_def.rs|server/src/cost/*|server/src/utils/mod.rs|server/src/utils/sse.rs|server/src/utils/usage.rs)
                   run_transform=true
                   ;;
               esac
@@ -68,9 +73,15 @@ jobs:
               esac
 
               case "$file" in
-                .github/workflows/ci.yml|.github/actions/transform-quality-gate/*)
+                .github/workflows/ci.yml)
                   run_backend=true
                   run_frontend=true
+                  run_transform=true
+                  ;;
+              esac
+
+              case "$file" in
+                .github/actions/transform-quality-gate/*)
                   run_transform=true
                   ;;
               esac
@@ -147,7 +158,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -170,9 +184,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/debug
-          key: ${{ runner.os }}-cargo-backend-v2-${{ steps.rust-cache.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-backend-v3-${{ steps.rust-cache.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-backend-v2-${{ steps.rust-cache.outputs.version }}-
+            ${{ runner.os }}-cargo-backend-v3-${{ steps.rust-cache.outputs.version }}-
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: v0.16.0
 
       - name: Check formatting
         run: cargo fmt --check

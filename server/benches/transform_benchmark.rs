@@ -1,10 +1,15 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use cyder_api::schema::enum_def::LlmApiType;
-use cyder_api::service::transform::quality::{BenchmarkScenarioMetrics, BenchmarkSummary};
+use cyder_api::service::transform::quality::{
+    BenchmarkScenarioMetrics, BenchmarkSummary, TransformQualityReport,
+    build_transform_quality_report, load_benchmark_thresholds, write_transform_quality_report,
+};
 use cyder_api::service::transform::{StreamTransformer, transform_request_data, transform_result};
 use cyder_api::utils::sse::SseEvent;
 use serde::{Deserialize, Serialize};
@@ -189,13 +194,29 @@ struct ScenarioResult {
     avg_peak_bytes: f64,
 }
 
-fn main() {
+struct BenchmarkArgs {
+    quick: bool,
+    json_out: Option<PathBuf>,
+    thresholds: Option<PathBuf>,
+    quality_report_out: Option<PathBuf>,
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(err) => {
+            eprintln!("transform benchmark failed: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run() -> Result<bool, String> {
     let scenarios = build_scenarios();
-    let args: Vec<String> = std::env::args().collect();
-    let quick = args.iter().any(|arg| arg == "--quick");
-    let json_out = arg_value(&args, "--json-out");
-    let warmup_rounds = if quick { 2 } else { 5 };
-    let sample_rounds = if quick { 8 } else { 24 };
+    let args = parse_args(std::env::args().skip(1).collect())?;
+    let warmup_rounds = if args.quick { 2 } else { 5 };
+    let sample_rounds = if args.quick { 8 } else { 24 };
     let mut summary_results = Vec::with_capacity(scenarios.len());
 
     println!(
@@ -245,25 +266,119 @@ fn main() {
         );
     }
 
-    if let Some(path) = json_out {
-        let summary = BenchmarkSummary {
-            format_version: 1,
-            quick,
-            warmup_rounds,
-            sample_rounds,
-            scenarios: summary_results,
-        };
-        let payload =
-            serde_json::to_vec_pretty(&summary).expect("serialize transform benchmark summary");
-        std::fs::write(&path, payload).expect("write transform benchmark summary");
-        eprintln!("Wrote transform benchmark summary to {}", path);
+    let summary = BenchmarkSummary {
+        format_version: 1,
+        quick: args.quick,
+        warmup_rounds,
+        sample_rounds,
+        scenarios: summary_results,
+    };
+
+    if let Some(path) = &args.json_out {
+        write_json(path, &summary, "transform benchmark summary")?;
+        eprintln!("Wrote transform benchmark summary to {}", path.display());
     }
+
+    let Some(report_out) = &args.quality_report_out else {
+        return Ok(true);
+    };
+    let thresholds_path = args
+        .thresholds
+        .as_deref()
+        .ok_or_else(|| "--quality-report-out requires --thresholds".to_string())?;
+    let thresholds = load_benchmark_thresholds(thresholds_path)?;
+    let report = build_transform_quality_report(summary, &thresholds);
+    write_transform_quality_report(report_out, &report)?;
+    eprintln!("Wrote transform quality report to {}", report_out.display());
+    print_report_summary(&report);
+
+    Ok(report.passed)
 }
 
-fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|window| window[0] == flag)
-        .map(|window| window[1].clone())
+fn parse_args(args: Vec<String>) -> Result<BenchmarkArgs, String> {
+    let mut quick = false;
+    let mut json_out = None;
+    let mut thresholds = None;
+    let mut quality_report_out = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--quick" => {
+                quick = true;
+                index += 1;
+            }
+            // Cargo appends this marker when executing a harness-free bench target.
+            "--bench" => {
+                index += 1;
+            }
+            "--json-out" => {
+                json_out = Some(parse_path_arg(&args, index, "--json-out")?);
+                index += 2;
+            }
+            "--thresholds" => {
+                thresholds = Some(parse_path_arg(&args, index, "--thresholds")?);
+                index += 2;
+            }
+            "--quality-report-out" => {
+                quality_report_out = Some(parse_path_arg(&args, index, "--quality-report-out")?);
+                index += 2;
+            }
+            other => return Err(format!("unsupported argument: {other}")),
+        }
+    }
+
+    if thresholds.is_some() != quality_report_out.is_some() {
+        return Err("--thresholds and --quality-report-out must be used together".to_string());
+    }
+
+    Ok(BenchmarkArgs {
+        quick,
+        json_out,
+        thresholds,
+        quality_report_out,
+    })
+}
+
+fn parse_path_arg(args: &[String], index: usize, flag: &str) -> Result<PathBuf, String> {
+    args.get(index + 1)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{flag} requires a path"))
+}
+
+fn write_json(path: &Path, value: &impl Serialize, label: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("create {label} directory {}: {err}", parent.display()))?;
+    }
+    let payload =
+        serde_json::to_vec_pretty(value).map_err(|err| format!("serialize {label}: {err}"))?;
+    std::fs::write(path, payload).map_err(|err| format!("write {label} {}: {err}", path.display()))
+}
+
+fn print_report_summary(report: &TransformQualityReport) {
+    let passed_checks = report
+        .threshold_checks
+        .iter()
+        .filter(|check| check.passed)
+        .count();
+    eprintln!(
+        "Transform quality gate: replay_passed={}, benchmark_checks={}/{}",
+        report.replay_summary.passed,
+        passed_checks,
+        report.threshold_checks.len()
+    );
+
+    for check in report.threshold_checks.iter().filter(|check| !check.passed) {
+        eprintln!(
+            "benchmark regression: {}/{} -> {}",
+            check.kind,
+            check.scenario,
+            check.failures.join("; ")
+        );
+    }
 }
 
 fn run_scenario(scenario: &Scenario, warmup_rounds: usize, sample_rounds: usize) -> ScenarioResult {

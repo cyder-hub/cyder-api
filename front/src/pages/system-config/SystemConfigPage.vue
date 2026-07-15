@@ -133,6 +133,11 @@ const {
 
 const activeTab = ref<"current" | "source" | "history">("current");
 const isFiltersExpanded = ref(false);
+const systemConfigTabs = [
+  { id: "current", labelKey: "systemConfigPage.tabs.current" },
+  { id: "source", labelKey: "systemConfigPage.tabs.source" },
+  { id: "history", labelKey: "systemConfigPage.tabs.history" },
+] as const;
 
 onMounted(() => {
   void loadConfig();
@@ -220,11 +225,7 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
         <div class="mt-6 border-b border-gray-200 app-scroll-x">
           <div class="flex min-w-max gap-1">
             <button
-              v-for="tab in [
-                { id: 'current', label: $t('systemConfigPage.tabs.current') },
-                { id: 'source', label: $t('systemConfigPage.tabs.source') },
-                { id: 'history', label: $t('systemConfigPage.tabs.history') }
-              ]"
+              v-for="tab in systemConfigTabs"
               :key="tab.id"
               type="button"
               class="border-b-2 px-4 py-2.5 text-sm font-medium transition-colors"
@@ -233,9 +234,9 @@ function valueText(rowValue: Parameters<typeof valuePrimary>[0]): string {
                   ? 'border-gray-900 text-gray-900'
                   : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
               "
-              @click="activeTab = tab.id as any"
+              @click="activeTab = tab.id"
             >
-              {{ tab.label }}
+              {{ $t(tab.labelKey) }}
             </button>
           </div>
         </div>

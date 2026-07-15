@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, toRef } from "vue";
+import { computed, toRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Drawer,
@@ -42,6 +42,7 @@ import ModelRequestPatchPanel from "./ModelRequestPatchPanel.vue";
 import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
 import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
 import { useModelEdit } from "../composables/useModelEdit";
+import type { EditingModelData } from "../types";
 
 const props = defineProps<{
   open: boolean;
@@ -50,7 +51,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
-  "saved": [];
+  "saved": [model: EditingModelData];
 }>();
 
 const isOpen = computed({
@@ -63,6 +64,7 @@ const modelIdRef = toRef(props, "modelId");
 const { t } = useI18n();
 const {
   isLoading,
+  isSaving,
   modelDetail,
   editingData,
   costManager,
@@ -80,11 +82,23 @@ const {
   handleCreateCostCatalog,
   handleDuplicateSelectedCostCatalog,
   handleCostCatalogDialogOpenChange,
-} = useModelEdit(modelIdRef);
+} = useModelEdit(modelIdRef, false);
+
+watch(
+  [() => props.open, () => props.modelId],
+  ([open, modelId]) => {
+    if (open && modelId !== null) {
+      void fetchData();
+    }
+  },
+  { immediate: true },
+);
 
 const onSaveAndClose = async () => {
-  await handleSaveModel();
-  emit("saved");
+  const saved = await handleSaveModel();
+  if (!saved || !editingData.value) return;
+
+  emit("saved", { ...editingData.value });
   isOpen.value = false;
 };
 </script>
@@ -290,8 +304,13 @@ const onSaveAndClose = async () => {
         <Button variant="ghost" class="w-full text-gray-600 sm:w-auto" @click="isOpen = false">
           {{ t("common.cancel") }}
         </Button>
-        <Button variant="default" class="w-full sm:w-auto" @click="onSaveAndClose" :disabled="!editingData">
-          {{ t("common.save") }}
+        <Button
+          variant="default"
+          class="w-full sm:w-auto"
+          :disabled="!editingData || isSaving"
+          @click="onSaveAndClose"
+        >
+          {{ isSaving ? t("common.saving") : t("common.save") }}
         </Button>
       </DrawerFooter>
     </DrawerContent>
@@ -338,6 +357,7 @@ const onSaveAndClose = async () => {
     @edit-component="costManager.openEditComponentDialog"
     @delete-component="costManager.handleDeleteComponent"
     @apply-sample="costManager.applyPreviewSample"
+    @reset-preview="costManager.resetPreview"
     @run-preview="costManager.runPreview"
   />
 

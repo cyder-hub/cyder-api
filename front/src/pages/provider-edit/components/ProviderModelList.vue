@@ -302,6 +302,7 @@
   <ModelEditSheet
     v-model:open="isSheetOpen"
     :model-id="sheetModelId"
+    @saved="handleModelSheetSaved"
   />
 </template>
 
@@ -312,6 +313,7 @@ import * as providerService from "@/services/providers";
 import * as modelService from "@/services/models";
 import { toastController } from "@/services/uiFeedback";
 import type { EditingProviderData, LocalEditableModelItem } from "../types";
+import type { EditingModelData } from "@/pages/model-edit/types";
 import type {
   ProviderRemoteModelItem,
   ProviderRemoteModelsResponse,
@@ -344,6 +346,23 @@ const sheetModelId = ref<number | null>(null);
 const handleOpenModelEditSheet = (modelId: number) => {
   sheetModelId.value = modelId;
   isSheetOpen.value = true;
+};
+
+const handleModelSheetSaved = (savedModel: EditingModelData) => {
+  const model = editingData.value.models.find((item) => item.id === savedModel.id);
+  if (!model) return;
+
+  Object.assign(model, {
+    model_name: savedModel.model_name,
+    real_model_name: savedModel.real_model_name,
+    supports_streaming: savedModel.supports_streaming,
+    supports_tools: savedModel.supports_tools,
+    supports_reasoning: savedModel.supports_reasoning,
+    supports_image_input: savedModel.supports_image_input,
+    supports_embeddings: savedModel.supports_embeddings,
+    supports_rerank: savedModel.supports_rerank,
+    is_enabled: savedModel.is_enabled,
+  });
 };
 
 const capabilityItems = [

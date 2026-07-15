@@ -17,7 +17,6 @@ const props = defineProps<{
   apiKeys: ApiKeyItem[];
   runtimeById: Map<number, ApiKeyRuntimeSnapshot>;
   selectedKeyId: number | null;
-  selectedListKey: ApiKeyItem | null;
 }>();
 
 const emit = defineEmits<{

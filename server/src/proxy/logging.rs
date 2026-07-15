@@ -173,16 +173,6 @@ impl StreamingBodyWriter {
             capture_state,
         })
     }
-
-    pub async fn abort(mut self) -> std::io::Result<()> {
-        self.cleanup_on_drop = false;
-        self.file.flush().await?;
-        match fs::remove_file(&self.path).await {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err),
-        }
-    }
 }
 
 impl Drop for StreamingBodyWriter {
@@ -2847,7 +2837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_body_writer_abort_removes_spooled_file() {
+    async fn streaming_body_writer_drop_removes_spooled_file() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
         let spool_dir = temp_dir.path().join("request-log-spool");
         let writer =
@@ -2859,9 +2849,29 @@ mod tests {
             panic!("streaming body should be spooled");
         };
         assert_eq!(path.parent(), Some(spool_dir.as_path()));
-        writer.abort().await.unwrap();
+        drop(writer);
 
         assert!(LogManager::read_logged_body(&snapshot, 43).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_body_writer_preserve_on_drop_keeps_snapshot_readable() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let spool_dir = temp_dir.path().join("request-log-spool");
+        let mut writer =
+            StreamingBodyWriter::new_in_spool_dir(LogBodyKind::UserResponse, 45, &spool_dir)
+                .await
+                .unwrap();
+        writer.append(b"partial response").await.unwrap();
+        let snapshot = writer.snapshot(LogBodyCaptureState::Incomplete);
+        writer.preserve_on_drop();
+        drop(writer);
+
+        assert_eq!(
+            LogManager::read_logged_body(&snapshot, 45).await,
+            Some(Bytes::from_static(b"partial response"))
+        );
+        LogManager::cleanup_logged_body(&snapshot, 45).await;
     }
 
     #[tokio::test]

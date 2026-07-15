@@ -401,6 +401,7 @@ const {
     @edit-component="costManager.openEditComponentDialog"
     @delete-component="costManager.handleDeleteComponent"
     @apply-sample="costManager.applyPreviewSample"
+    @reset-preview="costManager.resetPreview"
     @run-preview="costManager.runPreview"
     />
 

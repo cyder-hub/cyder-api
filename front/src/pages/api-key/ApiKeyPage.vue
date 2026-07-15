@@ -33,7 +33,6 @@ const {
   selectedKeyId,
   selectedDetail,
   selectedRuntimeView,
-  selectedListKey,
   secretReveal,
   handleSelectKey,
   handleRevealKey,
@@ -73,6 +72,12 @@ const isDetailOpen = ref(false);
 function onSelectKey(id: number) {
   handleSelectKey(id);
   isDetailOpen.value = true;
+}
+
+async function onDeleteKey(id: number) {
+  if (await handleDeleteKey(id)) {
+    isDetailOpen.value = false;
+  }
 }
 
 onMounted(() => {
@@ -137,7 +142,6 @@ onMounted(() => {
         :api-keys="apiKeys"
         :runtime-by-id="runtimeById"
         :selected-key-id="selectedKeyId"
-        :selected-list-key="selectedListKey"
         @select="onSelectKey"
       />
     </div>
@@ -154,7 +158,7 @@ onMounted(() => {
       @reveal="handleRevealKey"
       @rotate="handleRotateKey"
       @edit="handleStartEditing"
-      @delete="handleDeleteKey"
+      @delete="onDeleteKey"
       @copy-secret="copySecret"
       @close-secret="setSecretReveal(null)"
     />

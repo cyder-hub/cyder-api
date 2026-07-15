@@ -1,4 +1,4 @@
-import { computed, ref, watch, type Ref } from "vue";
+import { computed, ref, shallowRef, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 
 import * as requestPatchService from "@/services/requestPatch";
@@ -31,14 +31,14 @@ export function useModelRequestPatch(
   const directRules = ref<RequestPatchRule[]>([]);
   const inheritedRules = ref<InheritedRequestPatchRule[]>([]);
   const effectiveRules = ref<ResolvedRequestPatchRule[]>([]);
-  const explainEntries = ref<RequestPatchExplainEntry[]>([]);
+  const explainEntries = shallowRef<RequestPatchExplainEntry[]>([]);
   const conflicts = ref<RequestPatchConflict[]>([]);
   const hasConflicts = ref(false);
 
-  const explainByRuleId = computed<Map<number, RequestPatchExplainEntry>>(() => {
+  const explainByRuleId = computed(() => {
     const map = new Map<number, RequestPatchExplainEntry>();
     for (const entry of explainEntries.value) {
-      map.set(entry.rule.id, entry as any);
+      map.set(entry.rule.id, entry);
     }
     return map;
   });

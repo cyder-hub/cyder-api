@@ -674,7 +674,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
     }
   }
 
-  async function handleDeleteKey(id: number) {
+  async function handleDeleteKey(id: number): Promise<boolean> {
     const target = options.apiKeys.value.find((item) => item.id === id);
     if (
       !(await confirm({
@@ -684,7 +684,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
         confirmText: options.t("common.delete"),
       }))
     ) {
-      return;
+      return false;
     }
 
     try {
@@ -694,13 +694,16 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
         options.selectedDetail.value = null;
         options.setSecretReveal(null);
       }
-      await options.refreshList(null);
+      const nextSelectedId = await options.refreshList(null);
+      await options.refreshDetail(nextSelectedId);
+      return true;
     } catch (err: unknown) {
       toastController.error(
         options.t("apiKeyPage.deleteFailed", {
           error: normalizeError(err, options.t("common.unknownError")).message,
         }),
       );
+      return false;
     }
   }
 

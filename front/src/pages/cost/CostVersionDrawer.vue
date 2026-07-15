@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/drawer";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import type { VersionDraft } from "./types";
 
 defineProps<{
@@ -52,19 +53,19 @@ const emit = defineEmits<{
           <Label for="version-effective-until">{{ $t("costPage.versions.modal.effectiveUntil") }}</Label>
           <Input id="version-effective-until" v-model="draft.effective_until" type="datetime-local" />
         </div>
-        <label
-          class="flex items-center justify-between py-2 sm:col-span-2"
+        <div
+          class="flex items-center justify-between rounded-lg border border-gray-200 p-3.5 sm:col-span-2"
         >
           <div>
-            <div class="text-sm font-medium text-gray-900">
+            <Label for="version-enabled" class="text-sm font-medium text-gray-900">
               {{ $t("costPage.versions.modal.enabled") }}
-            </div>
+            </Label>
             <div class="mt-1 text-xs leading-5 text-gray-500">
               {{ $t("costPage.versions.modal.enabledDescription") }}
             </div>
           </div>
-          <input v-model="draft.is_enabled" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600" />
-        </label>
+          <Checkbox id="version-enabled" v-model="draft.is_enabled" />
+        </div>
       </div>
       <DrawerFooter class="border-t border-gray-100 px-6 py-4">
         <div class="flex w-full justify-end gap-2">

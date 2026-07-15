@@ -30,12 +30,7 @@
           <div class="border-b border-gray-200 app-scroll-x mb-4">
             <div class="flex min-w-max gap-1">
               <button
-                v-for="tab in [
-                  { id: 'base', label: $t('providerEditPage.tabs.base') },
-                  { id: 'models', label: $t('providerEditPage.tabs.models') },
-                  { id: 'credentials', label: $t('providerEditPage.tabs.credentials') },
-                  { id: 'advanced', label: $t('providerEditPage.tabs.advanced') }
-                ]"
+                v-for="tab in providerEditTabs"
                 :key="tab.id"
                 type="button"
                 class="border-b-2 px-4 py-2.5 text-sm font-medium transition-colors"
@@ -44,9 +39,9 @@
                     ? 'border-gray-900 text-gray-900'
                     : 'border-transparent text-gray-500 hover:text-gray-900 hover:border-gray-300'
                 "
-                @click="activeTab = tab.id as any"
+                @click="activeTab = tab.id"
               >
-                {{ tab.label }}
+                {{ $t(tab.labelKey) }}
               </button>
             </div>
           </div>
@@ -271,6 +266,12 @@ const {
 } = useProviderEdit();
 
 const activeTab = ref<"base" | "models" | "credentials" | "advanced">("base");
+const providerEditTabs = [
+  { id: "base", labelKey: "providerEditPage.tabs.base" },
+  { id: "models", labelKey: "providerEditPage.tabs.models" },
+  { id: "credentials", labelKey: "providerEditPage.tabs.credentials" },
+  { id: "advanced", labelKey: "providerEditPage.tabs.advanced" },
+] as const;
 
 const {
   isModelSelectModalOpen,

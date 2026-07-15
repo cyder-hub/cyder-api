@@ -158,10 +158,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -184,20 +181,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/debug
-          key: ${{ runner.os }}-cargo-backend-v3-${{ steps.rust-cache.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-backend-v4-${{ steps.rust-cache.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-backend-v3-${{ steps.rust-cache.outputs.version }}-
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-        with:
-          version: v0.16.0
+            ${{ runner.os }}-cargo-backend-v4-${{ steps.rust-cache.outputs.version }}-
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Run log lint
-        run: cargo run --locked -p cyder-api --bin log_lint
+        shell: bash
+        run: |
+          CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE/server" \
+            rustc --edition=2024 server/src/bin/log_lint.rs -o "$RUNNER_TEMP/log_lint"
+          "$RUNNER_TEMP/log_lint"
 
       - name: Run backend tests
         run: cargo test --locked -p cyder-api

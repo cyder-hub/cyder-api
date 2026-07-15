@@ -10,20 +10,29 @@ runs:
         rustup toolchain install stable --profile minimal
         rustup default stable
 
+    - name: Resolve Rust cache key
+      id: rust-cache
+      shell: bash
+      run: echo "version=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
     - name: Cache cargo artifacts
       uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-transform-${{ hashFiles('**/Cargo.lock') }}
+          target/release
+        key: ${{ runner.os }}-cargo-transform-release-v2-${{ steps.rust-cache.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-transform-
+          ${{ runner.os }}-cargo-transform-release-v2-${{ steps.rust-cache.outputs.version }}-
+
+    - name: Build transform quality gate
+      shell: bash
+      run: cargo build --locked --release -p cyder-api --bin transform_quality_gate
 
     - name: Run transform quality gate
       shell: bash
-      run: cargo run -p cyder-api --bin transform_quality_gate -- --quick --report-out /tmp/transform-quality-report.json
+      run: CYDER_DATA_DIR="${RUNNER_TEMP:-/tmp}/transform-quality-data" ./target/release/transform_quality_gate --quick --report-out /tmp/transform-quality-report.json
 
     - name: Upload transform quality report
       if: always()

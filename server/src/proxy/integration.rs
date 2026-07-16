@@ -4,6 +4,7 @@ use crate::{
     database::{
         TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload, UpdateApiKeyMetadataPayload},
+        api_key_acl_rule::ApiKeyAclRuleInput,
         model::Model,
         model_route::{CreateModelRoutePayload, ModelRoute, ModelRouteCandidateInput},
         provider::{BootstrapProviderInput, Provider, ProviderApiKey},
@@ -14,7 +15,7 @@ use crate::{
     schema::enum_def::{
         Action, LlmApiType, ProviderApiKeyMode, ProviderType, RequestAttemptStatus,
         RequestPatchOperation, RequestPatchPlacement, RequestReplayMode, RequestReplayStatus,
-        RequestStatus, SchedulerAction,
+        RequestStatus, RuleScope, SchedulerAction,
     },
     service::{
         app_state::{AppState, create_test_app_state},
@@ -323,9 +324,57 @@ impl TestFixture {
         api_key_default_action: Option<Action>,
         real_model_name: Option<String>,
     ) -> Self {
+        Self::new_with_acl_policy(
+            test_db_context,
+            provider_type,
+            endpoint,
+            api_key_default_action,
+            real_model_name,
+            false,
+        )
+        .await
+    }
+
+    async fn new_allowing_only_primary_model(
+        test_db_context: TestDbContext,
+        provider_type: ProviderType,
+        endpoint: String,
+        real_model_name: Option<String>,
+    ) -> Self {
+        Self::new_with_acl_policy(
+            test_db_context,
+            provider_type,
+            endpoint,
+            Some(Action::Deny),
+            real_model_name,
+            true,
+        )
+        .await
+    }
+
+    async fn new_with_acl_policy(
+        test_db_context: TestDbContext,
+        provider_type: ProviderType,
+        endpoint: String,
+        api_key_default_action: Option<Action>,
+        real_model_name: Option<String>,
+        allow_only_primary_model: bool,
+    ) -> Self {
         let (provider, provider_api_key, model) =
             create_provider_model(provider_type, endpoint, real_model_name);
         let api_key_nonce = ID_GENERATOR.generate_id();
+        let acl_rules = allow_only_primary_model.then(|| {
+            vec![ApiKeyAclRuleInput {
+                id: None,
+                effect: Action::Allow,
+                scope: RuleScope::Model,
+                provider_id: Some(provider.id),
+                model_id: Some(model.id),
+                priority: 100,
+                is_enabled: Some(true),
+                description: Some("allow only the primary integration model".to_string()),
+            }]
+        });
         let created_api_key = ApiKey::create(&CreateApiKeyPayload {
             name: format!("proxy-int-api-key-{api_key_nonce}"),
             description: Some("proxy integration test".to_string()),
@@ -341,7 +390,7 @@ impl TestFixture {
             budget_daily_currency: None,
             budget_monthly_nanos: None,
             budget_monthly_currency: None,
-            acl_rules: None,
+            acl_rules,
         })
         .expect("api key should be created");
         let api_key = TestApiKey {
@@ -2545,6 +2594,372 @@ fn provider_governance_open_candidate_is_skipped_and_falls_back_without_upstream
 }
 
 #[test]
+fn provider_governance_open_candidate_executes_when_next_route_candidate_is_acl_denied() {
+    run_integration_test(|test_db_context| async move {
+        if !CONFIG.provider_governance.is_enabled() {
+            eprintln!("skipping provider governance ACL fallback scenario: governance disabled");
+            return;
+        }
+
+        let Some(primary_upstream) = spawn_test_upstream_or_skip(|request| {
+            assert_eq!(request.path, "/v1/chat/completions");
+            UpstreamReply::json(
+                StatusCode::OK,
+                json!({
+                    "id": "chatcmpl-open-primary",
+                    "object": "chat.completion",
+                    "model": "open-primary-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "primary ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                        "total_tokens": 5
+                    }
+                }),
+            )
+        })
+        .await
+        else {
+            return;
+        };
+        let Some(denied_upstream) = spawn_test_upstream_or_skip(|_| {
+            panic!("ACL-denied fallback provider should not be called");
+        })
+        .await
+        else {
+            return;
+        };
+
+        let fixture = TestFixture::new_allowing_only_primary_model(
+            test_db_context.clone(),
+            ProviderType::Openai,
+            format!("{}/v1", primary_upstream.base_url),
+            Some("open-primary-model".to_string()),
+        )
+        .await;
+        let (denied_provider, denied_key, denied_model) = create_provider_model(
+            ProviderType::Openai,
+            format!("{}/v1", denied_upstream.base_url),
+            Some("denied-fallback-model".to_string()),
+        );
+        let route_name = format!(
+            "proxy-int-governance-acl-route-{}",
+            ID_GENERATOR.generate_id()
+        );
+        let route = ModelRoute::create(&CreateModelRoutePayload {
+            route_name: route_name.clone(),
+            description: Some("provider governance ACL fallback integration test".to_string()),
+            is_enabled: Some(true),
+            expose_in_models: Some(true),
+            candidates: vec![
+                ModelRouteCandidateInput {
+                    model_id: fixture.model.id,
+                    priority: 0,
+                    is_enabled: Some(true),
+                },
+                ModelRouteCandidateInput {
+                    model_id: denied_model.id,
+                    priority: 1,
+                    is_enabled: Some(true),
+                },
+            ],
+        })
+        .expect("model route should be created");
+        fixture.app_state.catalog.reload().await;
+
+        for _ in 0..CONFIG
+            .provider_governance
+            .consecutive_failure_threshold
+            .max(1)
+        {
+            fixture
+                .app_state
+                .provider_circuit
+                .record_provider_failure(
+                    fixture.provider.id,
+                    "forced test failure".to_string(),
+                    None,
+                )
+                .await
+                .expect("forced provider failure should be recorded");
+        }
+
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.api_key.api_key),
+            )],
+            json!({
+                "model": route_name,
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
+        assert_eq!(body["choices"][0]["message"]["content"], "primary ok");
+        assert_eq!(primary_upstream.captured_requests().await.len(), 1);
+        assert_eq!(denied_upstream.captured_requests().await.len(), 0);
+
+        let snapshot = fixture
+            .app_state
+            .provider_circuit
+            .get_provider_health_snapshot(fixture.provider.id)
+            .await
+            .expect("provider health snapshot should load");
+        assert_eq!(snapshot.status, ProviderHealthStatus::Healthy);
+
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(log.fallback_count, 0);
+        assert_eq!(log.final_provider_id, Some(fixture.provider.id));
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Success);
+        assert_eq!(attempts[0].scheduler_action, SchedulerAction::ReturnSuccess);
+
+        let _ = ModelRoute::delete(route.route.id);
+        let _ = Model::delete(denied_model.id);
+        let _ = ProviderApiKey::delete(denied_key.id);
+        let _ = Provider::delete(denied_provider.id);
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn provider_governance_open_direct_candidate_executes_when_no_fallback_exists() {
+    run_integration_test(|test_db_context| async move {
+        if !CONFIG.provider_governance.is_enabled() {
+            eprintln!("skipping provider governance direct scenario: governance disabled");
+            return;
+        }
+
+        let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+            assert_eq!(request.path, "/v1/chat/completions");
+            UpstreamReply::json(
+                StatusCode::OK,
+                json!({
+                    "id": "chatcmpl-direct-open",
+                    "object": "chat.completion",
+                    "model": "direct-open-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "direct ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                        "total_tokens": 5
+                    }
+                }),
+            )
+        })
+        .await
+        else {
+            return;
+        };
+
+        let fixture = TestFixture::new(
+            test_db_context.clone(),
+            ProviderType::Openai,
+            format!("{}/v1", upstream.base_url),
+            None,
+            Some("direct-open-model".to_string()),
+        )
+        .await;
+
+        for _ in 0..CONFIG
+            .provider_governance
+            .consecutive_failure_threshold
+            .max(1)
+        {
+            fixture
+                .app_state
+                .provider_circuit
+                .record_provider_failure(
+                    fixture.provider.id,
+                    "forced test failure".to_string(),
+                    None,
+                )
+                .await
+                .expect("forced provider failure should be recorded");
+        }
+        let open_snapshot = fixture
+            .app_state
+            .provider_circuit
+            .get_provider_health_snapshot(fixture.provider.id)
+            .await
+            .expect("provider health snapshot should load");
+        assert_eq!(open_snapshot.status, ProviderHealthStatus::Open);
+
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
+        assert_eq!(body["choices"][0]["message"]["content"], "direct ok");
+        assert_eq!(upstream.captured_requests().await.len(), 1);
+
+        let recovered_snapshot = fixture
+            .app_state
+            .provider_circuit
+            .get_provider_health_snapshot(fixture.provider.id)
+            .await
+            .expect("provider health snapshot should load");
+        assert_eq!(recovered_snapshot.status, ProviderHealthStatus::Healthy);
+        assert_eq!(recovered_snapshot.consecutive_failures, 0);
+
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(log.final_provider_id, Some(fixture.provider.id));
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(log.fallback_count, 0);
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Success);
+        assert_eq!(attempts[0].scheduler_action, SchedulerAction::ReturnSuccess);
+        assert_ne!(
+            attempts[0].error_code.as_deref(),
+            Some("provider_open_skipped")
+        );
+
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn provider_governance_open_single_route_candidate_executes_when_no_fallback_exists() {
+    run_integration_test(|test_db_context| async move {
+        if !CONFIG.provider_governance.is_enabled() {
+            eprintln!("skipping provider governance single-route scenario: governance disabled");
+            return;
+        }
+
+        let Some(upstream) = spawn_test_upstream_or_skip(|request| {
+            assert_eq!(request.path, "/v1/chat/completions");
+            UpstreamReply::json(
+                StatusCode::OK,
+                json!({
+                    "id": "chatcmpl-single-route-open",
+                    "object": "chat.completion",
+                    "model": "single-route-open-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "single route ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 3,
+                        "completion_tokens": 2,
+                        "total_tokens": 5
+                    }
+                }),
+            )
+        })
+        .await
+        else {
+            return;
+        };
+
+        let fixture = TestFixture::new(
+            test_db_context.clone(),
+            ProviderType::Openai,
+            format!("{}/v1", upstream.base_url),
+            None,
+            Some("single-route-open-model".to_string()),
+        )
+        .await;
+        let route_name = format!("proxy-int-single-open-route-{}", ID_GENERATOR.generate_id());
+        fixture.create_route(&route_name).await;
+
+        for _ in 0..CONFIG
+            .provider_governance
+            .consecutive_failure_threshold
+            .max(1)
+        {
+            fixture
+                .app_state
+                .provider_circuit
+                .record_provider_failure(
+                    fixture.provider.id,
+                    "forced test failure".to_string(),
+                    None,
+                )
+                .await
+                .expect("forced provider failure should be recorded");
+        }
+
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.api_key.api_key),
+            )],
+            json!({
+                "model": route_name.clone(),
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
+        assert_eq!(body["choices"][0]["message"]["content"], "single route ok");
+        assert_eq!(upstream.captured_requests().await.len(), 1);
+
+        let recovered_snapshot = fixture
+            .app_state
+            .provider_circuit
+            .get_provider_health_snapshot(fixture.provider.id)
+            .await
+            .expect("provider health snapshot should load");
+        assert_eq!(recovered_snapshot.status, ProviderHealthStatus::Healthy);
+
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Success);
+        assert_eq!(
+            log.resolved_route_name.as_deref(),
+            Some(route_name.as_str())
+        );
+        assert_eq!(log.attempt_count, 1);
+        assert_eq!(log.fallback_count, 0);
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_status, RequestAttemptStatus::Success);
+        assert_eq!(attempts[0].scheduler_action, SchedulerAction::ReturnSuccess);
+        assert_ne!(
+            attempts[0].error_code.as_deref(),
+            Some("provider_open_skipped")
+        );
+
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
 fn gateway_replay_preview_skips_open_candidate_and_materializes_fallback_without_upstream_call() {
     run_integration_test(|test_db_context| async move {
         if !CONFIG.provider_governance.is_enabled() {
@@ -3217,6 +3632,87 @@ fn upstream_errors_are_mapped_and_persisted_in_request_logs() {
         );
         assert_eq!(attempts[1].http_status, Some(429));
         assert_eq!(upstream.captured_requests().await.len(), 2);
+
+        fixture.cleanup().await;
+    });
+}
+
+#[test]
+fn upstream_connect_failures_persist_gateway_error_body_in_attempt_bundle() {
+    run_integration_test(|test_db_context| async move {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping upstream connect failure scenario: listener bind denied: {}",
+                    err
+                );
+                return;
+            }
+            Err(err) => panic!("temporary listener should bind: {err}"),
+        };
+        let unavailable_addr = listener
+            .local_addr()
+            .expect("temporary listener should have an address");
+        drop(listener);
+
+        let fixture = TestFixture::new(
+            test_db_context.clone(),
+            ProviderType::Openai,
+            format!("http://{unavailable_addr}/v1"),
+            None,
+            Some("unavailable-upstream-model".to_string()),
+        )
+        .await;
+        let request = build_json_request(
+            "/openai/v1/chat/completions",
+            &[(
+                "authorization",
+                format!("Bearer {}", fixture.api_key.api_key),
+            )],
+            json!({
+                "model": fixture.requested_model(),
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        );
+
+        let response = fixture.send(request).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body: Value =
+            serde_json::from_slice(&response_body_bytes(response).await).expect("proxy body json");
+        assert_eq!(body["code"], "upstream_error");
+
+        let log = fixture.latest_log().await;
+        assert_eq!(log.overall_status, RequestStatus::Error);
+        assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+        assert_eq!(log.attempt_count, 2);
+        assert!(log.bundle_storage_key.is_some());
+
+        let attempts = fixture.attempts_for_log(log.id).await;
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts.iter().all(|attempt| attempt.http_status.is_none()));
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt.llm_response_blob_id.is_some())
+        );
+
+        let bundle = bundle_for_log(&log).await;
+        assert_eq!(bundle.attempt_sections.len(), 2);
+        for attempt_section in &bundle.attempt_sections {
+            let error_body = String::from_utf8(
+                bundle_blob_bytes(
+                    &bundle,
+                    attempt_section
+                        .llm_response_blob_id
+                        .expect("gateway error body should be persisted"),
+                )
+                .to_vec(),
+            )
+            .expect("gateway error body should be utf8");
+            assert!(error_body.contains("[upstream_error]"));
+            assert!(error_body.contains("could not connect to upstream"));
+        }
 
         fixture.cleanup().await;
     });

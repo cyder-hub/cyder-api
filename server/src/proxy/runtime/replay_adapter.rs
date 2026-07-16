@@ -33,7 +33,10 @@ use crate::{
             policy::{RuntimeExecutionPolicy, RuntimeLogMode},
             request_patch::load_runtime_request_patch_trace,
             route_resolver::{ExecutionCandidate, ExecutionPlan, build_execution_plan},
-            scheduler::{SchedulerExecutionFailure, SchedulerExecutionInput, schedule_execution},
+            scheduler::{
+                SchedulerExecutionFailure, SchedulerExecutionInput,
+                next_accessible_candidate_available, schedule_execution,
+            },
         },
         util::serialize_downstream_request_headers_for_log,
         utility::{UtilityOperation, validate_utility_target},
@@ -462,8 +465,14 @@ async fn materialize_gateway_replay_request(
         let mut same_candidate_retry_count = 0u32;
 
         loop {
-            let next_candidate_available = candidate_index + 1 < execution_plan.candidates.len()
-                && candidate_index + 1 < candidate_budget;
+            let next_candidate_available = next_accessible_candidate_available(
+                candidate_index,
+                &execution_plan.candidates,
+                candidate_budget,
+                &input.api_key,
+                &app_state,
+            )
+            .await;
             match materialize_gateway_replay_candidate(
                 &app_state,
                 &input,
@@ -709,6 +718,7 @@ async fn materialize_gateway_replay_candidate(
 
     match preview_provider_request_allowed(app_state, candidate.provider.id).await {
         Ok(()) => {}
+        Err(ProviderGovernanceCheckError::Rejected(_)) if !next_candidate_available => {}
         Err(ProviderGovernanceCheckError::Rejected(rejection)) => {
             attempt.completed_at = Some(Utc::now().timestamp_millis());
             attempt.started_at = None;

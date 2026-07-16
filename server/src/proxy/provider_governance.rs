@@ -19,12 +19,21 @@ pub(super) async fn ensure_provider_request_allowed(
     app_state: &AppState,
     provider_id: i64,
     provider_label: &str,
+    next_candidate_available: bool,
 ) -> Result<Option<ProviderCircuitProbePermit>, ProviderGovernanceCheckError> {
-    match app_state
-        .provider_circuit
-        .allow_provider_request(provider_id)
-        .await
-    {
+    let decision = if next_candidate_available {
+        app_state
+            .provider_circuit
+            .allow_provider_request(provider_id)
+            .await
+    } else {
+        app_state
+            .provider_circuit
+            .allow_last_candidate_request(provider_id)
+            .await
+    };
+
+    match decision {
         Ok(decision) => {
             if !decision.allowed {
                 let Some(rejection) = decision.rejection else {
@@ -39,10 +48,17 @@ pub(super) async fn ensure_provider_request_allowed(
             }
 
             if decision.snapshot.status == ProviderHealthStatus::HalfOpen {
-                info!(
-                    "Provider governance entering half-open probe: provider_id={}, provider={}",
-                    provider_id, provider_label
-                );
+                if next_candidate_available {
+                    info!(
+                        "Provider governance entering half-open probe: provider_id={}, provider={}",
+                        provider_id, provider_label
+                    );
+                } else {
+                    info!(
+                        "Provider governance entering last-candidate probe: provider_id={}, provider={}",
+                        provider_id, provider_label
+                    );
+                }
             }
             Ok(decision.probe_permit)
         }

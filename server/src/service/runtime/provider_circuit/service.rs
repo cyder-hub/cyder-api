@@ -91,6 +91,23 @@ impl ProviderCircuitService {
         self.store.allow_request(provider_id, &config).await
     }
 
+    pub async fn allow_last_candidate_request(
+        &self,
+        provider_id: i64,
+    ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+        let config = self.config_manager.current().await;
+        if !config.is_enabled() {
+            return Ok(ProviderCircuitDecision::allowed(
+                ProviderHealthSnapshot::synthetic_healthy(),
+                None,
+            ));
+        }
+
+        self.store
+            .allow_last_candidate_request(provider_id, &config)
+            .await
+    }
+
     pub async fn record_provider_success(
         &self,
         provider_id: i64,

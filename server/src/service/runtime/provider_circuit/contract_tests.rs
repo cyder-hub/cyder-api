@@ -360,6 +360,143 @@ async fn assert_failure_reopen_contract(store: Arc<dyn ProviderCircuitStore>) {
     assert_eq!(snapshot.last_error.as_deref(), Some("half-open timeout"));
 }
 
+async fn assert_last_candidate_probe_success_closes_open_contract(
+    store: Arc<dyn ProviderCircuitStore>,
+) {
+    let config = config(1, 60);
+    let provider_id = 712;
+    store
+        .record_failure(provider_id, &config, "timeout".to_string(), None)
+        .await
+        .expect("failure should open circuit");
+
+    let decision = store
+        .allow_last_candidate_request(provider_id, &config)
+        .await
+        .expect("last candidate should be evaluated atomically");
+    assert!(decision.allowed);
+    assert_eq!(decision.snapshot.status, ProviderHealthStatus::HalfOpen);
+    let permit = decision
+        .probe_permit
+        .as_ref()
+        .expect("last candidate probe should include a permit");
+
+    let concurrent = store
+        .allow_last_candidate_request(provider_id, &config)
+        .await
+        .expect("concurrent last candidate should be evaluated");
+    assert!(!concurrent.allowed);
+    assert_eq!(
+        concurrent.rejection,
+        Some(ProviderCircuitRejection::HalfOpenProbeInFlight)
+    );
+
+    let snapshot = store
+        .record_success(provider_id, &config, Some(permit))
+        .await
+        .expect("last candidate probe success should close circuit");
+
+    assert_eq!(snapshot.status, ProviderHealthStatus::Healthy);
+    assert_eq!(snapshot.consecutive_failures, 0);
+    assert!(!snapshot.half_open_probe_in_flight);
+    assert!(snapshot.opened_at.is_none());
+    assert!(snapshot.last_error.is_none());
+    assert!(snapshot.last_recovered_at.is_some());
+
+    let stale_completion = store
+        .record_failure(
+            provider_id,
+            &config,
+            "stale probe failure".to_string(),
+            Some(permit),
+        )
+        .await
+        .expect("stale probe completion should be ignored");
+    assert_eq!(stale_completion.status, ProviderHealthStatus::Healthy);
+    assert_eq!(stale_completion.consecutive_failures, 0);
+    assert!(stale_completion.last_error.is_none());
+}
+
+async fn assert_last_candidate_probe_failure_reopens_contract(
+    store: Arc<dyn ProviderCircuitStore>,
+) {
+    let config = config(1, 60);
+    let provider_id = 713;
+    store
+        .record_failure(provider_id, &config, "timeout".to_string(), None)
+        .await
+        .expect("failure should open circuit");
+
+    let decision = store
+        .allow_last_candidate_request(provider_id, &config)
+        .await
+        .expect("last candidate should be evaluated atomically");
+    let permit = decision
+        .probe_permit
+        .as_ref()
+        .expect("last candidate probe should include a permit");
+    let snapshot = store
+        .record_failure(
+            provider_id,
+            &config,
+            "last candidate timeout".to_string(),
+            Some(permit),
+        )
+        .await
+        .expect("last candidate probe failure should open circuit");
+
+    assert_eq!(snapshot.status, ProviderHealthStatus::Open);
+    assert_eq!(snapshot.consecutive_failures, 2);
+    assert!(!snapshot.half_open_probe_in_flight);
+    assert!(snapshot.opened_at.is_some());
+    assert_eq!(
+        snapshot.last_error.as_deref(),
+        Some("last candidate timeout")
+    );
+}
+
+async fn assert_probe_permit_cannot_complete_another_provider_contract(
+    store: Arc<dyn ProviderCircuitStore>,
+) {
+    let config = config(1, 60);
+    let permit_provider_id = 714;
+    let other_provider_id = 715;
+    for provider_id in [permit_provider_id, other_provider_id] {
+        store
+            .record_failure(provider_id, &config, "timeout".to_string(), None)
+            .await
+            .expect("failure should open circuit");
+    }
+    let decision = store
+        .allow_last_candidate_request(permit_provider_id, &config)
+        .await
+        .expect("last candidate should be evaluated atomically");
+    let permit = decision
+        .probe_permit
+        .as_ref()
+        .expect("last candidate probe should include a permit");
+
+    let success = store
+        .record_success(other_provider_id, &config, Some(permit))
+        .await
+        .expect("mismatched success should be ignored");
+    assert_eq!(success.status, ProviderHealthStatus::Open);
+    assert_eq!(success.consecutive_failures, 1);
+
+    let failure = store
+        .record_failure(
+            other_provider_id,
+            &config,
+            "mismatched failure".to_string(),
+            Some(permit),
+        )
+        .await
+        .expect("mismatched failure should be ignored");
+    assert_eq!(failure.status, ProviderHealthStatus::Open);
+    assert_eq!(failure.consecutive_failures, 1);
+    assert_eq!(failure.last_error.as_deref(), Some("timeout"));
+}
+
 #[tokio::test]
 async fn memory_store_opens_after_threshold_failures() {
     assert_threshold_open_contract(Arc::new(MemoryProviderCircuitStore::default())).await;
@@ -394,6 +531,30 @@ async fn memory_store_matching_probe_success_closes_circuit() {
 #[tokio::test]
 async fn memory_store_matching_probe_failure_reopens_circuit() {
     assert_failure_reopen_contract(Arc::new(MemoryProviderCircuitStore::default())).await;
+}
+
+#[tokio::test]
+async fn memory_store_last_candidate_probe_is_single_flight_and_closes_on_success() {
+    assert_last_candidate_probe_success_closes_open_contract(Arc::new(
+        MemoryProviderCircuitStore::default(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn memory_store_last_candidate_probe_failure_opens_circuit() {
+    assert_last_candidate_probe_failure_reopens_contract(Arc::new(
+        MemoryProviderCircuitStore::default(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn memory_store_probe_permit_cannot_complete_another_provider() {
+    assert_probe_permit_cannot_complete_another_provider_contract(Arc::new(
+        MemoryProviderCircuitStore::default(),
+    ))
+    .await;
 }
 
 #[tokio::test]
@@ -463,6 +624,42 @@ async fn redis_store_matching_probe_failure_reopens_circuit() {
         return;
     };
     assert_failure_reopen_contract(Arc::new(redis_store(pool, Duration::from_secs(30)))).await;
+}
+
+#[tokio::test]
+async fn redis_store_last_candidate_probe_is_single_flight_and_closes_on_success() {
+    let Some(pool) = redis_pool_or_skip().await else {
+        return;
+    };
+    assert_last_candidate_probe_success_closes_open_contract(Arc::new(redis_store(
+        pool,
+        Duration::from_secs(30),
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn redis_store_last_candidate_probe_failure_opens_circuit() {
+    let Some(pool) = redis_pool_or_skip().await else {
+        return;
+    };
+    assert_last_candidate_probe_failure_reopens_contract(Arc::new(redis_store(
+        pool,
+        Duration::from_secs(30),
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn redis_store_probe_permit_cannot_complete_another_provider() {
+    let Some(pool) = redis_pool_or_skip().await else {
+        return;
+    };
+    assert_probe_permit_cannot_complete_another_provider_contract(Arc::new(redis_store(
+        pool,
+        Duration::from_secs(30),
+    )))
+    .await;
 }
 
 #[tokio::test]

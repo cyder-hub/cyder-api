@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Git ref or SHA to build. Defaults to the dispatch ref.
+        description: Git ref or SHA to build. Non-current master refs never move edge.
         required: false
         type: string
 
@@ -79,7 +79,7 @@ jobs:
           {
             echo "### Master Image Preparation"
             echo ""
-            echo "- Build image: ${run_build}"
+            echo "- Runtime rebuild requested: ${run_build}"
             echo "- Reason: ${build_reason}"
             if [[ -s "$changed_files" ]]; then
               echo ""
@@ -90,7 +90,6 @@ jobs:
 
   build-and-push:
     needs: prepare
-    if: needs.prepare.outputs.run_build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -123,8 +122,50 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve commit image plan
+        id: image_plan
+        shell: bash
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}
+          BASE_SHA: ${{ github.event.before || '' }}
+          REBUILD_REQUESTED: ${{ needs.prepare.outputs.run_build }}
+        run: |
+          set -euo pipefail
+
+          build_image=false
+          reuse_image=false
+          base_digest=""
+
+          if [[ "$REBUILD_REQUESTED" == "true" ]]; then
+            build_image=true
+            plan_reason="Runtime image inputs changed or a manual rebuild was requested."
+          elif [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
+            if base_digest="$(
+              docker buildx imagetools inspect \
+                "${IMAGE}:${BASE_SHA}" \
+                --format '{{.Manifest.Digest}}' 2>/dev/null
+            )"; then
+              reuse_image=true
+              plan_reason="No runtime inputs changed; reuse the base commit image."
+            else
+              build_image=true
+              plan_reason="No runtime inputs changed, but the base commit image is missing; rebuild as a safe fallback."
+            fi
+          else
+            build_image=true
+            plan_reason="No reusable base commit was available; rebuild as a safe fallback."
+          fi
+
+          {
+            echo "build_image=$build_image"
+            echo "reuse_image=$reuse_image"
+            echo "base_digest=$base_digest"
+            echo "plan_reason=$plan_reason"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push commit image
         id: build
+        if: steps.image_plan.outputs.build_image == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -134,7 +175,73 @@ jobs:
           cache-from: type=gha,scope=master-image,version=2
           cache-to: type=gha,scope=master-image,mode=max,version=2
 
+      - name: Reuse base commit image
+        if: steps.image_plan.outputs.reuse_image == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          BASE_DIGEST: ${{ steps.image_plan.outputs.base_digest }}
+        run: |
+          set -euo pipefail
+
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${SOURCE_SHA}" \
+            "${IMAGE}@${BASE_DIGEST}"
+
+      - name: Resolve published commit image
+        id: commit_image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          REUSED_DIGEST: ${{ steps.image_plan.outputs.base_digest }}
+        run: |
+          set -euo pipefail
+
+          digest="$(
+            docker buildx imagetools inspect \
+              "${IMAGE}:${SOURCE_SHA}" \
+              --format '{{.Manifest.Digest}}'
+          )"
+
+          if [[ -n "$REUSED_DIGEST" && "$digest" != "$REUSED_DIGEST" ]]; then
+            echo "Reused image digest ${digest} does not match base digest ${REUSED_DIGEST}." >&2
+            exit 1
+          fi
+
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve edge eligibility
+        id: edge_eligibility
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          master_sha="$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+
+          if [[ "$SOURCE_SHA" == "$master_sha" ]]; then
+            promote_edge=true
+            reason="Source SHA is the current master HEAD."
+          else
+            promote_edge=false
+            reason="Source SHA is not the current master HEAD; publish the SHA image without moving edge."
+          fi
+
+          {
+            echo "promote_edge=$promote_edge"
+            echo "master_sha=$master_sha"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Wait for successful CI
+        if: steps.edge_eligibility.outputs.promote_edge == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,6 +253,8 @@ jobs:
           while true; do
             ci_run_tsv="$(
               gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+                -f branch=master \
+                -f event=push \
                 -f head_sha="$SOURCE_SHA" \
                 --jq '.workflow_runs[0] | if . == null then "" else [.id, .status, (.conclusion // "")] | @tsv end'
             )"
@@ -173,13 +282,28 @@ jobs:
           done
 
       - name: Promote commit image to edge
+        id: edge_promotion
+        if: steps.edge_eligibility.outputs.promote_edge == 'true'
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           IMAGE: ${{ steps.source.outputs.image }}
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
-          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          BUILD_DIGEST: ${{ steps.commit_image.outputs.digest }}
         run: |
           set -euo pipefail
+
+          current_master_sha="$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/master" \
+              --jq '.object.sha'
+          )"
+          if [[ "$SOURCE_SHA" != "$current_master_sha" ]]; then
+            {
+              echo "promoted=false"
+              echo "reason=Master advanced to ${current_master_sha} before promotion; edge was left unchanged."
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           docker buildx imagetools create \
             --tag "${IMAGE}:edge" \
@@ -192,10 +316,18 @@ jobs:
             exit 1
           fi
 
+          {
+            echo "promoted=true"
+            echo "reason=Source SHA passed master push CI and remained the current master HEAD."
+          } >> "$GITHUB_OUTPUT"
+
       - name: Write image summary
         shell: bash
         env:
           WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EDGE_PROMOTED: ${{ steps.edge_promotion.outputs.promoted || 'false' }}
+          EDGE_REASON: ${{ steps.edge_promotion.outputs.reason || steps.edge_eligibility.outputs.reason }}
+          IMAGE_PLAN: ${{ steps.image_plan.outputs.plan_reason }}
         run: |
           {
             echo "### Master Image"
@@ -203,6 +335,12 @@ jobs:
             echo "- Run: ${WORKFLOW_RUN_URL}"
             echo "- Source SHA: ${{ steps.source.outputs.source_sha }}"
             echo "- SHA tag: ${{ steps.source.outputs.image }}:${{ steps.source.outputs.source_sha }}"
-            echo "- Edge tag: ${{ steps.source.outputs.image }}:edge"
-            echo "- Digest: ${{ steps.build.outputs.digest }}"
+            echo "- Image plan: ${IMAGE_PLAN}"
+            echo "- Digest: ${{ steps.commit_image.outputs.digest }}"
+            if [[ "$EDGE_PROMOTED" == "true" ]]; then
+              echo "- Edge tag: ${{ steps.source.outputs.image }}:edge"
+            else
+              echo "- Edge tag: unchanged"
+            fi
+            echo "- Edge decision: ${EDGE_REASON}"
           } >> "$GITHUB_STEP_SUMMARY"

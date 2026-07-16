@@ -23,6 +23,7 @@ local probe_lease_ttl_ms = tonumber(ARGV[4])
 local state_ttl_seconds = tonumber(ARGV[5])
 local decision_id = ARGV[6]
 local lease_id = ARGV[7]
+local allow_last_candidate_probe = ARGV[8] == '1'
 
 local function raw(field)
     return redis.call('HGET', state_key, field) or ''
@@ -107,7 +108,7 @@ if status == 'open' then
     local opened_at = tonumber(redis.call('HGET', state_key, 'opened_at')) or now_ms
     local elapsed_ms = now_ms - opened_at
     local retry_after_ms = open_cooldown_ms - elapsed_ms
-    if retry_after_ms > 0 then
+    if retry_after_ms > 0 and not allow_last_candidate_probe then
         return result(0, 'open_cooldown', retry_after_ms, -1)
     end
 
@@ -243,6 +244,8 @@ if status == 'half_open' then
     if permit_provider_id ~= provider_id or not active_lease_id or active_lease_id ~= permit_lease_id then
         return result()
     end
+elseif permit_lease_id ~= '' then
+    return result()
 end
 
 local was_unhealthy = status ~= 'healthy'
@@ -351,6 +354,8 @@ if status == 'half_open' then
     if not half_open_probe_failed then
         return result()
     end
+elseif permit_lease_id ~= '' then
+    return result()
 end
 
 local consecutive_failures = hnum('consecutive_failures') + 1
@@ -487,14 +492,12 @@ impl RedisProviderCircuitStore {
             command.arg("").arg("");
         }
     }
-}
 
-#[async_trait]
-impl ProviderCircuitStore for RedisProviderCircuitStore {
-    async fn allow_request(
+    async fn evaluate_allow_request(
         &self,
         provider_id: i64,
         config: &ProviderGovernanceConfig,
+        allow_last_candidate_probe: bool,
     ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
         let now_ms = Utc::now().timestamp_millis();
         let decision_id = Uuid::new_v4().to_string();
@@ -516,11 +519,32 @@ impl ProviderCircuitStore for RedisProviderCircuitStore {
             .arg(self.state_ttl_seconds())
             .arg(&decision_id)
             .arg(&lease_id)
+            .arg(if allow_last_candidate_probe { "1" } else { "0" })
             .query_async(&mut *conn)
             .await
             .map_err(|err| Self::redis_error("provider circuit allow script failed", err))?;
 
         allow_result_to_domain(provider_id, decision_id, lease_id, now_ms, result)
+    }
+}
+
+#[async_trait]
+impl ProviderCircuitStore for RedisProviderCircuitStore {
+    async fn allow_request(
+        &self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
+    ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+        self.evaluate_allow_request(provider_id, config, false)
+            .await
+    }
+
+    async fn allow_last_candidate_request(
+        &self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
+    ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+        self.evaluate_allow_request(provider_id, config, true).await
     }
 
     async fn record_success(

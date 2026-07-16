@@ -26,7 +26,7 @@ use crate::{
     proxy::{
         ProxyError,
         cancellation::{CancellationDropGuard, ProxyCancellationContext},
-        logging::RequestLogContext,
+        logging::{LoggedBody, RequestLogContext},
         provider_governance::record_provider_failure,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
@@ -78,6 +78,24 @@ pub(in crate::proxy) struct ProxyRequestFailure {
 pub(in crate::proxy) struct ReasoningContinuationCaptureContext {
     pub scope: ReasoningContinuationScope,
     pub feature_enabled: bool,
+}
+
+fn finalize_send_failure_log_context(
+    context: &mut RequestLogContext,
+    url: &str,
+    completed_at: i64,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    proxy_error: &ProxyError,
+) {
+    context.request_url = Some(url.to_string());
+    context.completion_ts = Some(completed_at);
+    context.cost_catalog_version = cost_catalog_version.cloned();
+    context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+        RequestStatus::Cancelled
+    } else {
+        RequestStatus::Error
+    };
+    context.llm_response_body = Some(LoggedBody::from_bytes(Bytes::from(proxy_error.to_string())));
 }
 
 // Builds the HTTP client, sends the request to the LLM, and passes the response to be handled.
@@ -154,14 +172,13 @@ pub(in crate::proxy) async fn send_materialized_request(
             let completed_at = Utc::now().timestamp_millis();
 
             let mut context = log_context.lock().await;
-            context.request_url = Some(url.clone());
-            context.completion_ts = Some(completed_at);
-            context.cost_catalog_version = cost_catalog_version.clone();
-            context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
-                RequestStatus::Cancelled
-            } else {
-                RequestStatus::Error
-            };
+            finalize_send_failure_log_context(
+                &mut context,
+                &url,
+                completed_at,
+                cost_catalog_version.as_ref(),
+                &proxy_error,
+            );
             record_immediate_completion_if_allowed(
                 &app_state,
                 &context,
@@ -264,6 +281,7 @@ mod tests {
     use super::{
         ReasoningContinuationCaptureContext,
         client::send_with_first_byte_timeout,
+        finalize_send_failure_log_context,
         non_stream::{
             capture_non_stream_reasoning_continuation,
             reasoning_capture_transform_diagnostics as non_stream_capture_transform_diagnostics,
@@ -1117,6 +1135,50 @@ mod tests {
             .unwrap();
         let returned_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(returned_body, body);
+    }
+
+    #[test]
+    fn finalize_send_failure_log_context_records_gateway_error_body_without_upstream_status() {
+        let mut context = make_log_context();
+        let cost_catalog_version = CacheCostCatalogVersion {
+            id: 8,
+            catalog_id: 4,
+            version: "v2".to_string(),
+            currency: "USD".to_string(),
+            source: None,
+            effective_from: 0,
+            effective_until: None,
+            is_enabled: true,
+            components: vec![],
+        };
+        let proxy_error = ProxyError::BadGateway(
+            "LLM request could not connect to upstream: error sending request".to_string(),
+        );
+
+        finalize_send_failure_log_context(
+            &mut context,
+            "https://api.deepseek.com//chat/completions",
+            6789,
+            Some(&cost_catalog_version),
+            &proxy_error,
+        );
+
+        assert_eq!(
+            context.request_url.as_deref(),
+            Some("https://api.deepseek.com//chat/completions")
+        );
+        assert_eq!(context.llm_status, None);
+        assert_eq!(context.completion_ts, Some(6789));
+        assert_eq!(context.overall_status, RequestStatus::Error);
+        assert_eq!(context.cost_catalog_version.as_ref().map(|v| v.id), Some(8));
+        match context.llm_response_body.as_ref() {
+            Some(LoggedBody::InMemory { bytes, .. }) => {
+                let body = std::str::from_utf8(bytes).expect("error body should be utf8");
+                assert!(body.contains("[upstream_error] LLM request could not connect"));
+            }
+            other => panic!("unexpected llm_response_body: {other:?}"),
+        }
+        assert!(context.user_response_body.is_none());
     }
 
     #[tokio::test]

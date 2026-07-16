@@ -157,14 +157,23 @@ async fn ensure_provider_governance_for_policy(
     execution_policy: RuntimeExecutionPolicy,
     provider_id: i64,
     provider_label: &str,
+    next_candidate_available: bool,
 ) -> Result<Option<ProviderCircuitProbePermit>, ProviderGovernanceCheckError> {
     if execution_policy.uses_mutating_provider_governance() {
-        ensure_provider_request_allowed(app_state, provider_id, provider_label).await
+        ensure_provider_request_allowed(
+            app_state,
+            provider_id,
+            provider_label,
+            next_candidate_available,
+        )
+        .await
     } else {
         debug_assert!(execution_policy.uses_read_only_provider_governance());
-        preview_provider_request_allowed(app_state, provider_id)
-            .await
-            .map(|_| None)
+        match preview_provider_request_allowed(app_state, provider_id).await {
+            Ok(()) => Ok(None),
+            Err(ProviderGovernanceCheckError::Rejected(_)) if !next_candidate_available => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -522,6 +531,7 @@ pub(in crate::proxy) async fn execute_attempt(
         execution_policy,
         candidate.provider.id,
         materialized.model_str.as_str(),
+        next_candidate_available,
     )
     .await
     {
@@ -718,6 +728,14 @@ mod tests {
             })
         }
 
+        async fn allow_last_candidate_request(
+            &self,
+            provider_id: i64,
+            config: &ProviderGovernanceConfig,
+        ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+            self.allow_request(provider_id, config).await
+        }
+
         async fn record_success(
             &self,
             _provider_id: i64,
@@ -755,6 +773,14 @@ mod tests {
             Err(ProviderCircuitError::Backend(
                 "redis unavailable".to_string(),
             ))
+        }
+
+        async fn allow_last_candidate_request(
+            &self,
+            provider_id: i64,
+            config: &ProviderGovernanceConfig,
+        ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+            self.allow_request(provider_id, config).await
         }
 
         async fn record_success(
@@ -823,10 +849,39 @@ mod tests {
             RuntimeExecutionPolicy::ReplayLive,
             7,
             "model",
+            true,
         )
         .await;
 
         assert!(result.is_err());
+        assert_eq!(store.allow_calls.load(Ordering::SeqCst), 0);
+        let snapshot = app_state
+            .provider_circuit
+            .get_provider_health_snapshot(7)
+            .await
+            .expect("snapshot should load");
+        assert_eq!(snapshot.status, ProviderHealthStatus::Open);
+        assert!(!snapshot.half_open_probe_in_flight);
+    }
+
+    #[tokio::test]
+    async fn replay_live_provider_governance_allows_open_last_candidate_without_mutating() {
+        let store = Arc::new(RecordingProviderCircuitStore::new(
+            RecordingProviderCircuitStore::open_snapshot(),
+        ));
+        let mut app_state = AppState::new().await;
+        app_state.provider_circuit = Arc::new(ProviderCircuitService::new(store.clone()));
+
+        let result = ensure_provider_governance_for_policy(
+            &app_state,
+            RuntimeExecutionPolicy::ReplayLive,
+            7,
+            "model",
+            false,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(None)));
         assert_eq!(store.allow_calls.load(Ordering::SeqCst), 0);
         let snapshot = app_state
             .provider_circuit
@@ -850,6 +905,7 @@ mod tests {
             RuntimeExecutionPolicy::Normal,
             7,
             "model",
+            true,
         )
         .await;
 
@@ -876,6 +932,7 @@ mod tests {
             RuntimeExecutionPolicy::Normal,
             7,
             "model",
+            true,
         )
         .await;
 

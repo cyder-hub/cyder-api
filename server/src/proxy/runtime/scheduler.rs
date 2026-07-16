@@ -10,6 +10,7 @@ use tokio::time::sleep;
 use crate::{
     proxy::{
         ProxyError,
+        auth::check_access_control,
         cancellation::ProxyCancellationContext,
         logging::RequestLogContext,
         runtime::{
@@ -29,7 +30,7 @@ use crate::{
                 record_no_candidate_failure,
             },
             policy::{RuntimeExecutionPolicy, RuntimeLogMode},
-            route_resolver::ExecutionPlan,
+            route_resolver::{ExecutionCandidate, ExecutionPlan},
         },
     },
     schema::enum_def::{LlmApiType, SchedulerAction},
@@ -90,6 +91,28 @@ fn next_candidate_available(
     candidate_budget: usize,
 ) -> bool {
     candidate_index + 1 < candidate_count && candidate_index + 1 < candidate_budget
+}
+
+pub(super) async fn next_accessible_candidate_available(
+    candidate_index: usize,
+    candidates: &[ExecutionCandidate],
+    candidate_budget: usize,
+    api_key: &CacheApiKey,
+    app_state: &Arc<AppState>,
+) -> bool {
+    if !next_candidate_available(candidate_index, candidates.len(), candidate_budget) {
+        return false;
+    }
+
+    let next_candidate = &candidates[candidate_index + 1];
+    check_access_control(
+        api_key,
+        &next_candidate.provider,
+        &next_candidate.model,
+        app_state,
+    )
+    .await
+    .is_ok()
 }
 
 fn scheduler_step_for_attempt(
@@ -245,11 +268,14 @@ pub(in crate::proxy) async fn schedule_execution(
         let mut same_candidate_retry_count = 0u32;
 
         loop {
-            let next_candidate_available = next_candidate_available(
+            let next_candidate_available = next_accessible_candidate_available(
                 candidate_index,
-                execution_plan.candidates.len(),
+                &execution_plan.candidates,
                 candidate_budget,
-            );
+                &api_key,
+                &app_state,
+            )
+            .await;
             let result = Box::pin(execute_attempt(
                 Arc::clone(&app_state),
                 AttemptExecutionInput {

@@ -52,6 +52,29 @@ impl ProviderCircuitStore for MemoryProviderCircuitStore {
         Ok(provider_state.allow_request(provider_id, config, now_ms, self.probe_lease_ttl))
     }
 
+    async fn allow_last_candidate_request(
+        &self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
+    ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+        if !config.is_enabled() {
+            return Ok(ProviderCircuitDecision::allowed(
+                ProviderHealthSnapshot::synthetic_healthy(),
+                None,
+            ));
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut state = self.inner.lock().await;
+        let provider_state = state.entry(provider_id).or_default();
+        Ok(provider_state.allow_last_candidate_request(
+            provider_id,
+            config,
+            now_ms,
+            self.probe_lease_ttl,
+        ))
+    }
+
     async fn record_success(
         &self,
         provider_id: i64,

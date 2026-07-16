@@ -247,6 +247,27 @@ impl ProviderHealthState {
         now_ms: i64,
         probe_lease_ttl: Duration,
     ) -> ProviderCircuitDecision {
+        self.allow_request_with_cooldown_policy(provider_id, config, now_ms, probe_lease_ttl, true)
+    }
+
+    pub(crate) fn allow_last_candidate_request(
+        &mut self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
+        now_ms: i64,
+        probe_lease_ttl: Duration,
+    ) -> ProviderCircuitDecision {
+        self.allow_request_with_cooldown_policy(provider_id, config, now_ms, probe_lease_ttl, false)
+    }
+
+    fn allow_request_with_cooldown_policy(
+        &mut self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
+        now_ms: i64,
+        probe_lease_ttl: Duration,
+        respect_open_cooldown: bool,
+    ) -> ProviderCircuitDecision {
         if !config.is_enabled() {
             return ProviderCircuitDecision::allowed(
                 ProviderHealthSnapshot::synthetic_healthy(),
@@ -262,7 +283,7 @@ impl ProviderHealthState {
             }
             ProviderHealthStatus::Open => {
                 let retry_after = self.retry_after_for_open(config, now_ms);
-                if !retry_after.is_zero() {
+                if respect_open_cooldown && !retry_after.is_zero() {
                     return ProviderCircuitDecision::rejected(
                         self.snapshot(),
                         ProviderCircuitRejection::OpenCooldown,
@@ -299,10 +320,16 @@ impl ProviderHealthState {
         }
 
         self.prune_expired_probe(now_ms);
-        if self.status == ProviderHealthStatus::Open {
+        let matching_probe =
+            self.status == ProviderHealthStatus::HalfOpen && self.probe_permit_matches(permit);
+        if permit.is_some() && !matching_probe {
             return;
         }
-        if self.status == ProviderHealthStatus::HalfOpen && !self.probe_permit_matches(permit) {
+        if matches!(
+            self.status,
+            ProviderHealthStatus::Open | ProviderHealthStatus::HalfOpen
+        ) && !matching_probe
+        {
             return;
         }
 
@@ -332,6 +359,9 @@ impl ProviderHealthState {
 
         let half_open_probe_failed =
             self.status == ProviderHealthStatus::HalfOpen && self.probe_permit_matches(permit);
+        if permit.is_some() && !half_open_probe_failed {
+            return;
+        }
         if self.status == ProviderHealthStatus::HalfOpen && !half_open_probe_failed {
             return;
         }
@@ -353,6 +383,12 @@ impl ProviderHealthState {
 #[async_trait]
 pub trait ProviderCircuitStore: Send + Sync {
     async fn allow_request(
+        &self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
+    ) -> Result<ProviderCircuitDecision, ProviderCircuitError>;
+
+    async fn allow_last_candidate_request(
         &self,
         provider_id: i64,
         config: &ProviderGovernanceConfig,

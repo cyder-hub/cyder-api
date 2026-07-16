@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Release tag to build and publish, for example v0.7.0.
+        description: Release tag to build and publish, for example v0.7.1.
         required: true
         type: string
 
@@ -29,7 +29,8 @@ jobs:
       version: ${{ steps.validate.outputs.version }}
       major_minor: ${{ steps.validate.outputs.major_minor }}
       image_ghcr: ${{ steps.validate.outputs.image_ghcr }}
-      image_dockerhub: ${{ steps.validate.outputs.image_dockerhub }}
+      # Recompute the Docker Hub path from vars in each job. The namespace may
+      # equal the login secret, causing GitHub to suppress it as a job output.
       source_sha: ${{ steps.validate.outputs.source_sha }}
       ci_run_id: ${{ steps.validate.outputs.ci_run_id }}
     env:
@@ -132,14 +133,12 @@ jobs:
           major_minor="$(echo "$version" | cut -d. -f1,2)"
           repository_slug="${GITHUB_REPOSITORY,,}"
           image_ghcr="ghcr.io/${repository_slug}"
-          image_dockerhub="${DOCKERHUB_NAMESPACE}/cyder-api"
 
           {
             echo "release_tag=$release_tag"
             echo "version=$version"
             echo "major_minor=$major_minor"
             echo "image_ghcr=$image_ghcr"
-            echo "image_dockerhub=$image_dockerhub"
             echo "source_sha=$source_sha"
             echo "ci_run_id=$ci_run_id"
           } >> "$GITHUB_OUTPUT"
@@ -155,7 +154,7 @@ jobs:
             echo "- Source SHA: ${{ steps.validate.outputs.source_sha }}"
             echo "- CI run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.validate.outputs.ci_run_id }}"
             echo "- GHCR image: ${{ steps.validate.outputs.image_ghcr }}"
-            echo "- Docker Hub image: ${{ steps.validate.outputs.image_dockerhub }}"
+            echo "- Docker Hub image: ${DOCKERHUB_NAMESPACE}/cyder-api"
           } >> "$GITHUB_STEP_SUMMARY"
 
   prepare-version-images:
@@ -165,13 +164,12 @@ jobs:
     permissions:
       packages: write
     outputs:
-      ghcr_digest_ref: ${{ steps.prepare.outputs.ghcr_digest_ref }}
-      dockerhub_digest_ref: ${{ steps.prepare.outputs.dockerhub_digest_ref }}
+      image_digest: ${{ steps.prepare.outputs.image_digest }}
     env:
       VERSION: ${{ needs.validate-release.outputs.version }}
       SOURCE_SHA: ${{ needs.validate-release.outputs.source_sha }}
       IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
-      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
+      IMAGE_DOCKERHUB: ${{ vars.DOCKERHUB_NAMESPACE }}/cyder-api
     steps:
       - name: Set up crane
         uses: imjasonh/setup-crane@v0.7
@@ -197,47 +195,56 @@ jobs:
         run: |
           set -euo pipefail
 
-          ghcr_exists=false
-          dockerhub_exists=false
+          source_ref="${IMAGE_GHCR}:${SOURCE_SHA}"
+          deadline=$((SECONDS + 1800))
+          while ! source_digest="$(crane digest "$source_ref" 2>/dev/null)"; do
+            if (( SECONDS >= deadline )); then
+              echo "Timed out waiting for Master Image artifact ${source_ref}." >&2
+              exit 1
+            fi
+            echo "Waiting for Master Image artifact ${source_ref}."
+            sleep 15
+          done
 
-          if crane digest "${IMAGE_GHCR}:${VERSION}" >/dev/null 2>&1; then
-            ghcr_exists=true
-          fi
+          source_digest_ref="${IMAGE_GHCR}@${source_digest}"
 
-          if crane digest "${IMAGE_DOCKERHUB}:${VERSION}" >/dev/null 2>&1; then
-            dockerhub_exists=true
-          fi
+          ensure_version_image() {
+            local result_name="$1"
+            local registry_name="$2"
+            local image="$3"
+            local version_ref="${image}:${VERSION}"
+            local existing_digest
+            local copied_digest
 
-          if [[ "$ghcr_exists" == "true" && "$dockerhub_exists" == "true" ]]; then
-            prepare_reason="Both immutable version images already exist; reusing them."
-          elif [[ "$ghcr_exists" == "false" && "$dockerhub_exists" == "false" ]]; then
-            source_ref="${IMAGE_GHCR}:${SOURCE_SHA}"
-            deadline=$((SECONDS + 1800))
-            while ! source_digest="$(crane digest "$source_ref" 2>/dev/null)"; do
-              if (( SECONDS >= deadline )); then
-                echo "Timed out waiting for Master Image artifact ${source_ref}." >&2
+            if existing_digest="$(crane digest "$version_ref" 2>/dev/null)"; then
+              if [[ "$existing_digest" != "$source_digest" ]]; then
+                echo "${registry_name} immutable version ${version_ref} has unexpected digest ${existing_digest}." >&2
+                echo "Expected CI-approved source digest ${source_digest}; refusing to overwrite it." >&2
                 exit 1
               fi
-              echo "Waiting for Master Image artifact ${source_ref}."
-              sleep 15
-            done
+              printf -v "$result_name" '%s' "Reused existing ${version_ref}."
+              return
+            fi
 
-            source_digest_ref="${IMAGE_GHCR}@${source_digest}"
-            crane copy "$source_digest_ref" "${IMAGE_GHCR}:${VERSION}"
-            crane copy "$source_digest_ref" "${IMAGE_DOCKERHUB}:${VERSION}"
-            prepare_reason="Promoted the CI-approved commit image to immutable version tags without rebuilding it."
-          else
-            echo "Immutable version image state is inconsistent." >&2
-            echo "GHCR ${IMAGE_GHCR}:${VERSION} exists: ${ghcr_exists}" >&2
-            echo "Docker Hub ${IMAGE_DOCKERHUB}:${VERSION} exists: ${dockerhub_exists}" >&2
-            echo "Refusing to overwrite ${VERSION}; fix the missing registry artifact manually, then rerun." >&2
-            exit 1
-          fi
+            crane copy "$source_digest_ref" "$version_ref"
+            copied_digest="$(crane digest "$version_ref")"
+            if [[ "$copied_digest" != "$source_digest" ]]; then
+              echo "${registry_name} copied digest ${copied_digest} does not match source digest ${source_digest}." >&2
+              exit 1
+            fi
+            printf -v "$result_name" '%s' "Created missing ${version_ref}."
+          }
+
+          ghcr_result=""
+          dockerhub_result=""
+          ensure_version_image ghcr_result "GHCR" "$IMAGE_GHCR"
+          ensure_version_image dockerhub_result "Docker Hub" "$IMAGE_DOCKERHUB"
 
           ghcr_digest="$(crane digest "${IMAGE_GHCR}:${VERSION}")"
           dockerhub_digest="$(crane digest "${IMAGE_DOCKERHUB}:${VERSION}")"
-          if [[ "$ghcr_digest" != "$dockerhub_digest" ]]; then
-            echo "Registry digests differ for immutable version ${VERSION}." >&2
+          if [[ "$ghcr_digest" != "$source_digest" || "$dockerhub_digest" != "$source_digest" ]]; then
+            echo "Immutable version image digests do not match the CI-approved source for ${VERSION}." >&2
+            echo "Source: ${source_digest}" >&2
             echo "GHCR: ${ghcr_digest}" >&2
             echo "Docker Hub: ${dockerhub_digest}" >&2
             exit 1
@@ -246,19 +253,15 @@ jobs:
           ghcr_digest_ref="${IMAGE_GHCR}@${ghcr_digest}"
           dockerhub_digest_ref="${IMAGE_DOCKERHUB}@${dockerhub_digest}"
 
-          {
-            echo "ghcr_digest_ref=$ghcr_digest_ref"
-            echo "dockerhub_digest_ref=$dockerhub_digest_ref"
-          } >> "$GITHUB_OUTPUT"
+          echo "image_digest=$source_digest" >> "$GITHUB_OUTPUT"
 
           {
             echo "### Immutable Version Images"
             echo ""
-            echo "- GHCR ${IMAGE_GHCR}:${VERSION} exists: ${ghcr_exists}"
-            echo "- Docker Hub ${IMAGE_DOCKERHUB}:${VERSION} exists: ${dockerhub_exists}"
             echo "- GHCR digest ref: ${ghcr_digest_ref}"
             echo "- Docker Hub digest ref: ${dockerhub_digest_ref}"
-            echo "- Result: ${prepare_reason}"
+            echo "- GHCR result: ${ghcr_result}"
+            echo "- Docker Hub result: ${dockerhub_result}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   create-draft-release:
@@ -272,11 +275,10 @@ jobs:
       RELEASE_TAG: ${{ needs.validate-release.outputs.release_tag }}
       VERSION: ${{ needs.validate-release.outputs.version }}
       IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
-      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
+      IMAGE_DOCKERHUB: ${{ vars.DOCKERHUB_NAMESPACE }}/cyder-api
       SOURCE_SHA: ${{ needs.validate-release.outputs.source_sha }}
       CI_RUN_ID: ${{ needs.validate-release.outputs.ci_run_id }}
-      GHCR_DIGEST_REF: ${{ needs.prepare-version-images.outputs.ghcr_digest_ref }}
-      DOCKERHUB_DIGEST_REF: ${{ needs.prepare-version-images.outputs.dockerhub_digest_ref }}
+      IMAGE_DIGEST: ${{ needs.prepare-version-images.outputs.image_digest }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -303,12 +305,12 @@ jobs:
               {
                 "registry": "ghcr",
                 "tag": "${IMAGE_GHCR}:${VERSION}",
-                "digestRef": "${GHCR_DIGEST_REF}"
+                "digestRef": "${IMAGE_GHCR}@${IMAGE_DIGEST}"
               },
               {
                 "registry": "dockerhub",
                 "tag": "${IMAGE_DOCKERHUB}:${VERSION}",
-                "digestRef": "${DOCKERHUB_DIGEST_REF}"
+                "digestRef": "${IMAGE_DOCKERHUB}@${IMAGE_DIGEST}"
               }
             ]
           }
@@ -370,7 +372,7 @@ jobs:
       VERSION: ${{ needs.validate-release.outputs.version }}
       MAJOR_MINOR: ${{ needs.validate-release.outputs.major_minor }}
       IMAGE_GHCR: ${{ needs.validate-release.outputs.image_ghcr }}
-      IMAGE_DOCKERHUB: ${{ needs.validate-release.outputs.image_dockerhub }}
+      IMAGE_DOCKERHUB: ${{ vars.DOCKERHUB_NAMESPACE }}/cyder-api
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:

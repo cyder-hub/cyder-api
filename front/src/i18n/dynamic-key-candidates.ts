@@ -89,63 +89,6 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
       "front/src/components/request-patch/RequestPatchRulesPanel.vue props.textPrefix",
   },
   {
-    id: "alerts",
-    keyTemplates: [
-      "alertsPage.severity.{severity}",
-      "alertsPage.status.{status}",
-      "alertsPage.delivery.status.{deliveryStatus}",
-    ],
-    values: [
-      "critical",
-      "warning",
-      "info",
-      "active",
-      "resolved",
-      "failed",
-      "retry_scheduled",
-      "skipped",
-      "in_progress",
-      "pending",
-      "succeeded",
-    ],
-    placeholders: {
-      severity: ["critical", "warning", "info"],
-      status: ["active", "resolved"],
-      deliveryStatus: [
-        "failed",
-        "retry_scheduled",
-        "skipped",
-        "in_progress",
-        "pending",
-        "succeeded",
-      ],
-    },
-    valueSource: "front/src/pages/alerts/** alert and delivery state values",
-  },
-  {
-    id: "notifications",
-    keyTemplates: ["notificationPage.delivery.status.{deliveryStatus}"],
-    values: [
-      "failed",
-      "retry_scheduled",
-      "skipped",
-      "in_progress",
-      "pending",
-      "succeeded",
-    ],
-    placeholders: {
-      deliveryStatus: [
-        "failed",
-        "retry_scheduled",
-        "skipped",
-        "in_progress",
-        "pending",
-        "succeeded",
-      ],
-    },
-    valueSource: "front/src/pages/notifications/** delivery state values",
-  },
-  {
     id: "api-key-governance",
     keyTemplates: [
       "apiKeyPage.status.{lifecycle}",
@@ -288,7 +231,6 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
         "provider_reasoning_config",
         "api_key_core",
         "api_key_acl",
-        "api_key_model_override",
         "cost_catalog_core",
         "cost_catalog_versions",
         "cost_components",
@@ -307,12 +249,6 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
 ] as const satisfies readonly DynamicI18nKeySource[];
 
 export const DYNAMIC_I18N_FALLBACK_EXCEPTIONS = [
-  {
-    id: "record-replay-unavailable-reason",
-    keyTemplate: "recordPage.detailDialog.replay.reasons.{reason}",
-    guard: "te(key)",
-    fallback: "raw backend reason",
-  },
   {
     id: "portable-config-unknown-module-or-subrange",
     keyTemplate:

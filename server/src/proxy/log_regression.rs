@@ -1,4 +1,4 @@
-fn hot_path_files() -> [(&'static str, &'static str); 12] {
+fn hot_path_files() -> [(&'static str, &'static str); 11] {
     [
         ("auth.rs", include_str!("auth.rs")),
         ("gemini.rs", include_str!("gemini.rs")),
@@ -7,7 +7,6 @@ fn hot_path_files() -> [(&'static str, &'static str); 12] {
         ("request.rs", include_str!("request.rs")),
         ("runtime/executor.rs", include_str!("runtime/executor.rs")),
         ("runtime/facade.rs", include_str!("runtime/facade.rs")),
-        ("runtime/scheduler.rs", include_str!("runtime/scheduler.rs")),
         (
             "runtime/transport/mod.rs",
             include_str!("runtime/transport/mod.rs"),

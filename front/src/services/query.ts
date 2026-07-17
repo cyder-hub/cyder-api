@@ -23,18 +23,5 @@ export function buildFilteredQueryString(params: QueryParams = {}): string {
   return qs.toString();
 }
 
-export const buildAlertListQuery = buildFilteredQueryString;
-export const buildNotificationDeliveryListQuery = buildFilteredQueryString;
-export const buildProviderRuntimeListQuery = buildFilteredQueryString;
+export const buildProviderRuntimeSnapshotQuery = buildFilteredQueryString;
 export const buildRecordListQuery = buildFilteredQueryString;
-
-export function buildProviderRuntimeSummaryQuery(window?: string): string {
-  return buildFilteredQueryString({ window });
-}
-
-export function buildSystemConfigHistoryQuery(params: {
-  limit?: number;
-  offset?: number;
-} = {}): string {
-  return buildFilteredQueryString(params);
-}

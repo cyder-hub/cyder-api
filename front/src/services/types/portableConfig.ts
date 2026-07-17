@@ -18,7 +18,6 @@ export type KnownPortableSubrangeId =
   | "provider_reasoning_config"
   | "api_key_core"
   | "api_key_acl"
-  | "api_key_model_override"
   | "cost_catalog_core"
   | "cost_catalog_versions"
   | "cost_components"

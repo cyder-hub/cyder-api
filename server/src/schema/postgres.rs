@@ -53,66 +53,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    use diesel::sql_types::{Int8, Bool, Text, Nullable};
-
-    api_key_model_override (id) {
-        id -> Int8,
-        api_key_id -> Int8,
-        source_name -> Text,
-        target_route_id -> Int8,
-        description -> Nullable<Text>,
-        is_enabled -> Bool,
-        deleted_at -> Nullable<Int8>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::{Int8, Text, Nullable};
-
-    alert_event (id) {
-        id -> Int8,
-        fingerprint -> Text,
-        rule_key -> Text,
-        severity -> Text,
-        status -> Text,
-        scope_type -> Text,
-        scope_id -> Text,
-        title -> Text,
-        summary -> Text,
-        details_json -> Text,
-        metrics_snapshot_json -> Nullable<Text>,
-        first_seen_at -> Int8,
-        last_seen_at -> Int8,
-        resolved_at -> Nullable<Int8>,
-        acknowledged_at -> Nullable<Int8>,
-        acknowledged_note -> Nullable<Text>,
-        suppressed_until -> Nullable<Int8>,
-        suppressed_reason -> Nullable<Text>,
-        occurrence_count -> Int8,
-        reopened_count -> Int8,
-        last_notification_at -> Nullable<Int8>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::{Int8, Text, Nullable};
-
-    alert_rule_state (rule_key, scope_type, scope_id) {
-        rule_key -> Text,
-        scope_type -> Text,
-        scope_id -> Text,
-        last_evaluated_at -> Int8,
-        last_fired_at -> Nullable<Int8>,
-        last_resolved_at -> Nullable<Int8>,
-        cooldown_until -> Nullable<Int8>,
-    }
-}
-
-diesel::table! {
     use diesel::sql_types::{Int8, Text, Nullable};
 
     api_key_rollup_daily (api_key_id, day_bucket, currency) {
@@ -216,66 +156,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    use diesel::sql_types::{Bool, Int8, Text, Nullable};
-
-    notification_channel (id) {
-        id -> Int8,
-        channel_key -> Text,
-        channel_type -> Text,
-        name -> Text,
-        endpoint_url -> Text,
-        signing_secret -> Nullable<Text>,
-        headers_json -> Nullable<Text>,
-        cooldown_seconds -> Int8,
-        is_enabled -> Bool,
-        last_test_at -> Nullable<Int8>,
-        last_test_success -> Nullable<Bool>,
-        last_test_error -> Nullable<Text>,
-        deleted_at -> Nullable<Int8>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::{Int8, Text};
-
-    notification_channel_state (id) {
-        id -> Int8,
-        alert_id -> Int8,
-        alert_fingerprint -> Text,
-        channel_id -> Int8,
-        event_type -> Text,
-        occurrence_key -> Int8,
-        last_notification_at -> Int8,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::{Int4, Int8, Text, Nullable};
-
-    notification_delivery (id) {
-        id -> Int8,
-        channel_id -> Int8,
-        alert_id -> Int8,
-        alert_fingerprint -> Text,
-        event_type -> Text,
-        status -> Text,
-        payload_json -> Text,
-        attempt_count -> Int4,
-        next_attempt_at -> Int8,
-        last_attempt_at -> Nullable<Int8>,
-        delivered_at -> Nullable<Int8>,
-        last_status_code -> Nullable<Int4>,
-        last_error -> Nullable<Text>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
     reasoning_config (id) {
         id -> Int8,
         scope_kind -> Text,
@@ -337,34 +217,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    model_route (id) {
-        id -> Int8,
-        route_name -> Text,
-        description -> Nullable<Text>,
-        is_enabled -> Bool,
-        expose_in_models -> Bool,
-        deleted_at -> Nullable<Int8>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::{Int4, Int8, Bool, Nullable};
-
-    model_route_candidate (id) {
-        id -> Int8,
-        route_id -> Int8,
-        model_id -> Int8,
-        priority -> Int4,
-        is_enabled -> Bool,
-        deleted_at -> Nullable<Int8>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
     use crate::schema::enum_def::ProviderTypeMapping;
     use crate::schema::enum_def::ProviderApiKeyModeMapping;
     use diesel::sql_types::{Int8, Text, Bool, Nullable};
@@ -399,7 +251,6 @@ diesel::table! {
 
 diesel::table! {
     use crate::schema::enum_def::RequestStatusMapping;
-    use crate::schema::enum_def::StorageTypeMapping;
     use crate::schema::enum_def::LlmApiTypeMapping;
     use diesel::sql_types::{Bool, Int4, Int8, Nullable, Text};
 
@@ -410,41 +261,27 @@ diesel::table! {
         base_requested_model_name -> Nullable<Text>,
         resolved_reasoning_suffix -> Nullable<Text>,
         resolved_reasoning_preset -> Nullable<Text>,
-        resolved_name_scope -> Nullable<Text>,
-        resolved_route_id -> Nullable<Int8>,
-        resolved_route_name -> Nullable<Text>,
         request_received_at -> Int8,
-        #[sql_name = "first_attempt_started_at"]
-        llm_request_sent_at -> Nullable<Int8>,
+        upstream_request_sent_at -> Nullable<Int8>,
         #[sql_name = "response_started_to_client_at"]
         llm_response_first_chunk_at -> Nullable<Int8>,
         #[sql_name = "completed_at"]
         llm_response_completed_at -> Nullable<Int8>,
         is_stream -> Bool,
         client_ip -> Nullable<Text>,
-        #[sql_name = "final_attempt_id"]
-        final_attempt_id -> Nullable<Int8>,
-        #[sql_name = "final_provider_id"]
         provider_id -> Nullable<Int8>,
-        #[sql_name = "final_provider_api_key_id"]
         provider_api_key_id -> Nullable<Int8>,
-        #[sql_name = "final_model_id"]
         model_id -> Nullable<Int8>,
-        final_provider_key_snapshot -> Nullable<Text>,
-        final_provider_name_snapshot -> Nullable<Text>,
-        #[sql_name = "final_model_name_snapshot"]
-        model_name -> Nullable<Text>,
-        #[sql_name = "final_real_model_name_snapshot"]
-        real_model_name -> Nullable<Text>,
-        #[sql_name = "final_llm_api_type"]
+        provider_key_snapshot -> Nullable<Text>,
+        provider_name_snapshot -> Nullable<Text>,
+        model_name_snapshot -> Nullable<Text>,
+        real_model_name_snapshot -> Nullable<Text>,
         llm_api_type -> Nullable<LlmApiTypeMapping>,
+        upstream_http_status -> Nullable<Int4>,
         #[sql_name = "overall_status"]
         status -> RequestStatusMapping,
         final_error_code -> Nullable<Text>,
         final_error_message -> Nullable<Text>,
-        attempt_count -> Int4,
-        retry_count -> Int4,
-        fallback_count -> Int4,
         estimated_cost_nanos -> Nullable<Int8>,
         estimated_cost_currency -> Nullable<Text>,
         cost_catalog_id -> Nullable<Int8>,
@@ -462,13 +299,6 @@ diesel::table! {
         cache_write_tokens -> Nullable<Int4>,
         reasoning_tokens -> Nullable<Int4>,
         total_tokens -> Nullable<Int4>,
-        has_transform_diagnostics -> Bool,
-        transform_diagnostic_count -> Int4,
-        transform_diagnostic_max_loss_level -> Nullable<Text>,
-        bundle_version -> Nullable<Int4>,
-        #[sql_name = "bundle_storage_type"]
-        storage_type -> Nullable<StorageTypeMapping>,
-        bundle_storage_key -> Nullable<Text>,
         user_api_type -> LlmApiTypeMapping,
     }
 }
@@ -496,39 +326,6 @@ diesel::table! {
         success_count -> Int8,
         error_count -> Int8,
         cancelled_count -> Int8,
-        retry_count -> Int8,
-        fallback_count -> Int8,
-        first_byte_latency_sum_ms -> Int8,
-        first_byte_latency_count -> Int8,
-        total_latency_sum_ms -> Int8,
-        total_latency_count -> Int8,
-        input_tokens -> Int8,
-        output_tokens -> Int8,
-        reasoning_tokens -> Int8,
-        total_tokens -> Int8,
-        transform_diagnostic_count -> Int8,
-        transform_diagnostic_lossy_major_count -> Int8,
-        transform_diagnostic_reject_count -> Int8,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::{Int8, Nullable, Text};
-
-    metric_attempt_rollup_minute (bucket_start_ms, scope_type, scope_id) {
-        bucket_start_ms -> Int8,
-        scope_type -> Text,
-        scope_id -> Text,
-        scope_label -> Nullable<Text>,
-        attempt_count -> Int8,
-        success_count -> Int8,
-        error_count -> Int8,
-        skipped_count -> Int8,
-        retry_same_candidate_count -> Int8,
-        fallback_next_candidate_count -> Int8,
-        fail_fast_count -> Int8,
         first_byte_latency_sum_ms -> Int8,
         first_byte_latency_count -> Int8,
         total_latency_sum_ms -> Int8,
@@ -559,114 +356,12 @@ diesel::table! {
 diesel::table! {
     use diesel::sql_types::{Int8, Text};
 
-    metric_cost_rollup_minute (bucket_start_ms, metric_kind, scope_type, scope_id, currency) {
+    metric_cost_rollup_minute (bucket_start_ms, scope_type, scope_id, currency) {
         bucket_start_ms -> Int8,
-        metric_kind -> Text,
         scope_type -> Text,
         scope_id -> Text,
         currency -> Text,
         amount_nanos -> Int8,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    use crate::schema::enum_def::LlmApiTypeMapping;
-    use crate::schema::enum_def::RequestAttemptStatusMapping;
-    use crate::schema::enum_def::SchedulerActionMapping;
-    use diesel::sql_types::{Bool, Int4, Int8, Nullable, Text};
-
-    request_attempt (id) {
-        id -> Int8,
-        request_log_id -> Int8,
-        attempt_index -> Int4,
-        candidate_position -> Int4,
-        provider_id -> Nullable<Int8>,
-        provider_api_key_id -> Nullable<Int8>,
-        model_id -> Nullable<Int8>,
-        provider_key_snapshot -> Nullable<Text>,
-        provider_name_snapshot -> Nullable<Text>,
-        model_name_snapshot -> Nullable<Text>,
-        real_model_name_snapshot -> Nullable<Text>,
-        llm_api_type -> Nullable<LlmApiTypeMapping>,
-        attempt_status -> RequestAttemptStatusMapping,
-        scheduler_action -> SchedulerActionMapping,
-        error_code -> Nullable<Text>,
-        error_message -> Nullable<Text>,
-        request_uri -> Nullable<Text>,
-        request_headers_json -> Nullable<Text>,
-        response_headers_json -> Nullable<Text>,
-        http_status -> Nullable<Int4>,
-        started_at -> Nullable<Int8>,
-        first_byte_at -> Nullable<Int8>,
-        completed_at -> Nullable<Int8>,
-        response_started_to_client -> Bool,
-        backoff_ms -> Nullable<Int4>,
-        applied_request_patch_ids_json -> Nullable<Text>,
-        request_patch_summary_json -> Nullable<Text>,
-        estimated_cost_nanos -> Nullable<Int8>,
-        estimated_cost_currency -> Nullable<Text>,
-        cost_catalog_version_id -> Nullable<Int8>,
-        total_input_tokens -> Nullable<Int4>,
-        total_output_tokens -> Nullable<Int4>,
-        input_text_tokens -> Nullable<Int4>,
-        output_text_tokens -> Nullable<Int4>,
-        input_image_tokens -> Nullable<Int4>,
-        output_image_tokens -> Nullable<Int4>,
-        cache_read_tokens -> Nullable<Int4>,
-        cache_write_tokens -> Nullable<Int4>,
-        reasoning_tokens -> Nullable<Int4>,
-        total_tokens -> Nullable<Int4>,
-        llm_request_blob_id -> Nullable<Int4>,
-        llm_request_patch_id -> Nullable<Int4>,
-        llm_response_blob_id -> Nullable<Int4>,
-        llm_response_capture_state -> Nullable<Text>,
-        created_at -> Int8,
-        updated_at -> Int8,
-    }
-}
-
-diesel::table! {
-    use crate::schema::enum_def::LlmApiTypeMapping;
-    use crate::schema::enum_def::RequestReplayKindMapping;
-    use crate::schema::enum_def::RequestReplayModeMapping;
-    use crate::schema::enum_def::RequestReplaySemanticBasisMapping;
-    use crate::schema::enum_def::RequestReplayStatusMapping;
-    use crate::schema::enum_def::StorageTypeMapping;
-    use diesel::sql_types::{Int4, Int8, Nullable, Text};
-
-    request_replay_run (id) {
-        id -> Int8,
-        source_request_log_id -> Int8,
-        source_attempt_id -> Nullable<Int8>,
-        replay_kind -> RequestReplayKindMapping,
-        replay_mode -> RequestReplayModeMapping,
-        semantic_basis -> RequestReplaySemanticBasisMapping,
-        status -> RequestReplayStatusMapping,
-        executed_route_id -> Nullable<Int8>,
-        executed_route_name -> Nullable<Text>,
-        executed_provider_id -> Nullable<Int8>,
-        executed_provider_api_key_id -> Nullable<Int8>,
-        executed_model_id -> Nullable<Int8>,
-        executed_llm_api_type -> Nullable<LlmApiTypeMapping>,
-        downstream_request_uri -> Nullable<Text>,
-        http_status -> Nullable<Int4>,
-        error_code -> Nullable<Text>,
-        error_message -> Nullable<Text>,
-        total_input_tokens -> Nullable<Int4>,
-        total_output_tokens -> Nullable<Int4>,
-        reasoning_tokens -> Nullable<Int4>,
-        total_tokens -> Nullable<Int4>,
-        estimated_cost_nanos -> Nullable<Int8>,
-        estimated_cost_currency -> Nullable<Text>,
-        diff_summary_json -> Nullable<Text>,
-        artifact_version -> Nullable<Int4>,
-        artifact_storage_type -> Nullable<StorageTypeMapping>,
-        artifact_storage_key -> Nullable<Text>,
-        started_at -> Nullable<Int8>,
-        first_byte_at -> Nullable<Int8>,
-        completed_at -> Nullable<Int8>,
         created_at -> Int8,
         updated_at -> Int8,
     }
@@ -694,8 +389,6 @@ diesel::table! {
 }
 
 diesel::joinable!(api_key_acl_rule -> api_key (api_key_id));
-diesel::joinable!(api_key_model_override -> api_key (api_key_id));
-diesel::joinable!(api_key_model_override -> model_route (target_route_id));
 diesel::joinable!(api_key_acl_rule -> model (model_id));
 diesel::joinable!(api_key_acl_rule -> provider (provider_id));
 diesel::joinable!(api_key_rollup_daily -> api_key (api_key_id));
@@ -704,62 +397,38 @@ diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
 diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
-diesel::joinable!(model_route_candidate -> model (model_id));
-diesel::joinable!(model_route_candidate -> model_route (route_id));
-diesel::joinable!(notification_channel_state -> alert_event (alert_id));
-diesel::joinable!(notification_channel_state -> notification_channel (channel_id));
-diesel::joinable!(notification_delivery -> alert_event (alert_id));
-diesel::joinable!(notification_delivery -> notification_channel (channel_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
 diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
 diesel::joinable!(runtime_feature_config -> model (model_id));
 diesel::joinable!(runtime_feature_config -> provider (provider_id));
-diesel::joinable!(request_attempt -> cost_catalog_versions (cost_catalog_version_id));
-diesel::joinable!(request_attempt -> model (model_id));
-diesel::joinable!(request_attempt -> provider (provider_id));
-diesel::joinable!(request_attempt -> provider_api_key (provider_api_key_id));
-diesel::joinable!(request_attempt -> request_log (request_log_id));
 diesel::joinable!(request_log -> api_key (api_key_id));
 diesel::joinable!(request_log -> cost_catalog_versions (cost_catalog_version_id));
 diesel::joinable!(request_log -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(request_log -> model (model_id));
 diesel::joinable!(request_log -> provider (provider_id));
 diesel::joinable!(request_log -> provider_api_key (provider_api_key_id));
-diesel::joinable!(request_replay_run -> request_attempt (source_attempt_id));
-diesel::joinable!(request_replay_run -> request_log (source_request_log_id));
 diesel::joinable!(request_patch_rule -> model (model_id));
 diesel::joinable!(request_patch_rule -> provider (provider_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     api_key,
     api_key_acl_rule,
-    api_key_model_override,
-    alert_event,
-    alert_rule_state,
     api_key_rollup_daily,
     api_key_rollup_monthly,
     cost_catalogs,
     cost_catalog_versions,
     cost_components,
     manager_auth_instance,
-    metric_attempt_rollup_minute,
     metric_cost_rollup_minute,
     metric_http_status_rollup_minute,
     metric_ingested_request_log,
     metric_request_rollup_minute,
     model,
-    model_route,
-    model_route_candidate,
-    notification_channel,
-    notification_channel_state,
-    notification_delivery,
     provider,
     provider_api_key,
     reasoning_config,
     reasoning_config_preset,
     runtime_feature_config,
-    request_attempt,
     request_log,
-    request_replay_run,
     request_patch_rule,
 );

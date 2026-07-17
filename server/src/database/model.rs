@@ -4,7 +4,6 @@ use serde::Deserialize;
 
 use super::{DbResult, get_connection};
 use crate::controller::BaseError;
-use crate::database::model_route::ModelRoute;
 use crate::database::request_patch::{RequestPatchRule, RequestPatchRuleResponse};
 use crate::service::cache::types::{
     CacheInheritedRequestPatch, CacheRequestPatchConflict, CacheRequestPatchExplainEntry,
@@ -107,7 +106,6 @@ pub struct ModelDetail {
     pub request_patch_explain: Vec<CacheRequestPatchExplainEntry>,
     pub request_patch_conflicts: Vec<CacheRequestPatchConflict>,
     pub has_request_patch_conflicts: bool,
-    pub route_references: Vec<ModelRoute>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,26 +248,6 @@ impl Model {
                     })?;
 
                 diesel::update(
-                    model_route_candidate::table.filter(
-                        model_route_candidate::dsl::model_id
-                            .eq(id_value)
-                            .and(model_route_candidate::dsl::deleted_at.is_null()),
-                    ),
-                )
-                .set((
-                    model_route_candidate::dsl::deleted_at.eq(Some(current_time)),
-                    model_route_candidate::dsl::is_enabled.eq(false),
-                    model_route_candidate::dsl::updated_at.eq(current_time),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete model route candidates for model {}: {}",
-                        id_value, e
-                    )))
-                })?;
-
-                diesel::update(
                     request_patch_rule::table.filter(
                         request_patch_rule::dsl::model_id
                             .eq(id_value)
@@ -363,7 +341,6 @@ impl Model {
             &provider_request_patches,
             &request_patches,
         );
-        let route_references = ModelRoute::list_by_model_id(model_id_val)?;
         Ok(ModelDetail {
             model,
             request_patches,
@@ -372,7 +349,6 @@ impl Model {
             request_patch_explain: resolved.explain,
             request_patch_conflicts: resolved.conflicts,
             has_request_patch_conflicts: resolved.has_conflicts,
-            route_references,
         })
     }
 
@@ -802,54 +778,6 @@ mod tests {
     }
 
     #[test]
-    fn model_detail_can_carry_direct_route_references() {
-        let detail = ModelDetail {
-            model: Model {
-                id: 22,
-                provider_id: 11,
-                model_name: "alpha-model".to_string(),
-                real_model_name: None,
-                cost_catalog_id: None,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_reasoning: true,
-                supports_image_input: true,
-                supports_embeddings: true,
-                supports_rerank: true,
-                deleted_at: None,
-                is_enabled: true,
-                created_at: 1,
-                updated_at: 1,
-            },
-            request_patches: vec![],
-            inherited_request_patches: vec![],
-            effective_request_patches: vec![],
-            request_patch_explain: vec![],
-            request_patch_conflicts: vec![],
-            has_request_patch_conflicts: false,
-            route_references: vec![ModelRoute {
-                id: 31,
-                route_name: "alpha-route".to_string(),
-                description: Some("route description".to_string()),
-                is_enabled: true,
-                expose_in_models: true,
-                deleted_at: None,
-                created_at: 1,
-                updated_at: 1,
-            }],
-        };
-
-        assert_eq!(detail.route_references.len(), 1);
-        assert_eq!(detail.route_references[0].route_name, "alpha-route");
-        assert_eq!(
-            detail.route_references[0].description.as_deref(),
-            Some("route description")
-        );
-        assert!(detail.route_references[0].is_enabled);
-        assert!(detail.route_references[0].expose_in_models);
-    }
-
-    #[test]
     fn model_detail_contract_uses_request_patch_fields() {
         let detail = ModelDetail {
             model: Model {
@@ -875,7 +803,6 @@ mod tests {
             request_patch_explain: vec![],
             request_patch_conflicts: vec![],
             has_request_patch_conflicts: false,
-            route_references: vec![],
         };
 
         let value = serde_json::to_value(detail).expect("model detail should serialize");

@@ -16,7 +16,6 @@ import type {
 export const PROVIDER_PROFILE_MODULE_ID = "provider_profile";
 export const COST_CATALOGS_MODULE_ID = "cost_catalogs";
 export const COST_BINDINGS_MODULE_ID = "cost_bindings";
-export const API_KEY_MODEL_OVERRIDE_SUBRANGE_ID = "api_key_model_override";
 export const DANGEROUS_PATCH_CONFIRMATION_CODE =
   "dangerous_request_patch_confirmation_required";
 
@@ -516,13 +515,6 @@ function isPortableApplyIssueIgnorable(
   dangerousPatchConfirmations: PortableDangerousPatchConfirmation[],
 ): boolean {
   if (issue.code === "conflict" && conflictStrategy !== "fail_on_conflict") {
-    return true;
-  }
-
-  if (
-    issue.code === "missing_dependency" &&
-    issue.subrange_id === API_KEY_MODEL_OVERRIDE_SUBRANGE_ID
-  ) {
     return true;
   }
 

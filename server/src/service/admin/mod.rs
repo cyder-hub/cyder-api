@@ -6,7 +6,6 @@ use self::api_key::ApiKeyAdminService;
 use self::auth::ManagerAuthService;
 use self::cost::CostAdminService;
 use self::model::ModelAdminService;
-use self::model_route::ModelRouteAdminService;
 use self::mutation::AdminMutationRunner;
 use self::portable_config::PortableConfigAdminService;
 use self::provider::ProviderAdminService;
@@ -19,7 +18,6 @@ pub mod audit;
 pub mod auth;
 pub mod cost;
 pub mod model;
-pub mod model_route;
 pub mod mutation;
 pub mod portable_config;
 pub mod provider;
@@ -35,7 +33,6 @@ pub struct AdminServices {
     pub provider: Arc<ProviderAdminService>,
     pub api_key: Arc<ApiKeyAdminService>,
     pub model: Arc<ModelAdminService>,
-    pub model_route: Arc<ModelRouteAdminService>,
     pub request_patch: Arc<RequestPatchAdminService>,
     pub cost: Arc<CostAdminService>,
     pub reasoning_config: Arc<ReasoningConfigAdminService>,
@@ -52,7 +49,6 @@ impl AdminServices {
             provider: Arc::new(ProviderAdminService::new(Arc::clone(&mutation_runner))),
             api_key: Arc::new(ApiKeyAdminService::new(Arc::clone(&mutation_runner))),
             model: Arc::new(ModelAdminService::new(Arc::clone(&mutation_runner))),
-            model_route: Arc::new(ModelRouteAdminService::new(Arc::clone(&mutation_runner))),
             request_patch: Arc::new(RequestPatchAdminService::new(Arc::clone(&mutation_runner))),
             cost: Arc::new(CostAdminService::new(Arc::clone(&mutation_runner))),
             reasoning_config: Arc::new(ReasoningConfigAdminService::new(Arc::clone(
@@ -88,10 +84,6 @@ mod tests {
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
             services.model.mutation_runner(),
-        ));
-        assert!(Arc::ptr_eq(
-            services.provider.mutation_runner(),
-            services.model_route.mutation_runner(),
         ));
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),

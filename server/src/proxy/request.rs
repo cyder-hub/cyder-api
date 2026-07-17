@@ -3,14 +3,11 @@ use super::{
     util::{sha256_hex, top_level_json_field_count},
 };
 use axum::{body::Body, extract::Request};
-use bytes::Bytes;
 use serde_json::Value;
 
 #[derive(Debug)]
 pub(super) struct ParsedProxyRequest {
     pub data: Value,
-    pub original_request_value: Value,
-    pub original_request_body: Bytes,
 }
 
 pub(super) async fn parse_json_request(
@@ -31,11 +28,7 @@ pub(super) async fn parse_json_request(
         stream = data.get("stream").and_then(Value::as_bool),
     );
 
-    Ok(ParsedProxyRequest {
-        original_request_value: data.clone(),
-        data,
-        original_request_body: body_bytes,
-    })
+    Ok(ParsedProxyRequest { data })
 }
 
 #[cfg(test)]
@@ -46,7 +39,7 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
-    async fn parse_json_request_keeps_original_value_and_body() {
+    async fn parse_json_request_returns_parsed_value() {
         let request = Request::builder()
             .uri("/v1/chat/completions")
             .body(Body::from(r#"{"model":"gpt-test","stream":true}"#))
@@ -55,11 +48,6 @@ mod tests {
         let parsed = parse_json_request(request, 1024 * 1024).await.unwrap();
 
         assert_eq!(parsed.data, json!({"model":"gpt-test","stream":true}));
-        assert_eq!(parsed.original_request_value, parsed.data);
-        assert_eq!(
-            parsed.original_request_body,
-            bytes::Bytes::from_static(br#"{"model":"gpt-test","stream":true}"#)
-        );
     }
 
     #[tokio::test]

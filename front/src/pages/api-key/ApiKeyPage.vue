@@ -20,8 +20,6 @@ const apiKeyDetail = useApiKeyDetail(t, apiKeyList.apiKeys, apiKeyList.runtimeBy
 const {
   apiKeys,
   runtimeById,
-  routeNameById,
-  modelRoutes,
   loading,
   error,
   summaryCards,
@@ -154,7 +152,6 @@ onMounted(() => {
       :secret-reveal="secretReveal"
       :provider-name-by-id="providerStore.providerNameById"
       :model-name-by-id="modelStore.modelNameById"
-      :route-name-by-id="routeNameById"
       @reveal="handleRevealKey"
       @rotate="handleRotateKey"
       @edit="handleStartEditing"
@@ -167,7 +164,6 @@ onMounted(() => {
       <ApiKeyEditDialog
         v-model:is-open="showEditDialog"
         :initial-data="editingDetail"
-        :model-routes="modelRoutes"
         :providers="providerStore.providers"
         :models="modelStore.models"
         @save-success="handleSaveSuccess"

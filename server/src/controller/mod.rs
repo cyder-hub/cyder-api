@@ -1,6 +1,5 @@
 use crate::service::app_state::{StateRouter, create_state_router};
 use crate::utils::auth::authorization_access_middleware;
-use alert::create_alert_router;
 use api_key::create_api_key_management_router;
 use auth::create_auth_router;
 use axum::{
@@ -10,9 +9,7 @@ use axum::{
 };
 use cost::create_cost_router;
 use metrics::create_metrics_router;
-use model::create_model_router;
-use model_route::create_model_route_router;
-use notification::create_notification_router;
+use model::create_model_controller_router;
 use portable_config::create_portable_config_router;
 use provider::create_provider_router;
 use provider_runtime::create_provider_runtime_router;
@@ -21,7 +18,6 @@ use request_log::create_record_router;
 use request_patch::create_request_patch_router;
 use runtime_feature_config::create_runtime_feature_config_router;
 use stat::routes as create_stat_router;
-use system_config::create_system_config_router;
 
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -33,11 +29,8 @@ mod cost;
 mod error;
 mod metrics;
 
-mod alert;
 mod api_key;
 mod model;
-mod model_route;
-mod notification;
 mod portable_config;
 mod provider;
 mod provider_runtime;
@@ -47,7 +40,6 @@ mod request_patch;
 mod runtime_feature_config;
 mod stat;
 mod system;
-mod system_config;
 
 pub use error::BaseError;
 pub use system::create_system_router;
@@ -71,17 +63,13 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_provider_router())
             .merge(create_provider_runtime_router())
             .merge(create_api_key_management_router())
-            .merge(create_model_router())
-            .merge(create_model_route_router())
+            .merge(create_model_controller_router())
             .merge(create_request_patch_router())
             .merge(create_reasoning_config_router())
             .merge(create_runtime_feature_config_router())
             .merge(create_cost_router())
             .merge(create_metrics_router())
-            .merge(create_alert_router())
-            .merge(create_notification_router())
             .merge(create_stat_router())
-            .merge(create_system_config_router())
             .merge(create_portable_config_router())
             .layer(middleware::from_fn(authorization_access_middleware))
             .merge(create_auth_router()),

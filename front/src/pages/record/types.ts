@@ -2,19 +2,13 @@ import type { Component } from "vue";
 import type { RecordListItem } from "../../services/types";
 import type { RecordDetailTab } from "./composables/useRecordDetail";
 
-export type BooleanFilter = "ALL" | "true" | "false";
-
 export type RecordFilters = {
   api_key_id: number;
   provider_id: number;
   model_id: number;
   status: string;
   user_api_type: string;
-  resolved_name_scope: string;
   final_error_code: string;
-  has_retry: BooleanFilter;
-  has_fallback: BooleanFilter;
-  has_transform_diagnostics: BooleanFilter;
   latency_ms_min: string;
   latency_ms_max: string;
   total_tokens_min: string;
@@ -35,8 +29,7 @@ export type EnrichedRecordListItem = RecordListItem & {
   providerName: string;
   apiKeyName: string;
   displayRequestedModelName: string;
-  attemptsDisplay: string;
-  diagnosticsDisplay: string;
+  httpStatusDisplay: string;
   firstRespTimeDisplay: string;
   totalRespTimeDisplay: string;
   tpsDisplay: string;
@@ -53,6 +46,4 @@ export type RecordStatusMeta = {
 export type RecordWorkbenchDeepLink = {
   recordId: number | null;
   tab: RecordDetailTab;
-  attemptId: number | null;
-  replayRunId: number | null;
 };

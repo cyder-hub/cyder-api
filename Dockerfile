@@ -41,7 +41,6 @@ RUN apk add --no-cache ca-certificates su-exec && \
         /opt/cyder/public \
         /data/cyder/config \
         /data/cyder/db \
-        /data/cyder/storage \
         /tmp/cyder-api && \
     chown -R cyder:cyder /data/cyder /tmp/cyder-api
 

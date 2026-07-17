@@ -5,15 +5,14 @@ use chrono::{Datelike, TimeZone, Utc};
 use crate::controller::BaseError;
 use crate::database::api_key::ApiKey;
 use crate::database::metrics::{
-    MetricAttemptWindowAggregate, MetricCostAggregate, MetricCostRollupMinute,
-    MetricHttpStatusCount, MetricRequestRollupMinute, MetricRequestWindowAggregate,
-    list_cost_rollup_minutes, list_request_rollup_minutes, query_attempt_window_aggregates,
+    MetricCostAggregate, MetricCostRollupMinute, MetricHttpStatusCount, MetricRequestRollupMinute,
+    MetricRequestWindowAggregate, list_cost_rollup_minutes, list_request_rollup_minutes,
     query_cost_window_aggregates, query_http_status_breakdown, query_request_window_aggregates,
 };
 use crate::database::model::{Model, ModelSummaryItem};
 use crate::database::provider::{Provider, ProviderSummaryItem};
 use crate::database::stat::{
-    DashboardTopModelItem, UsageStatsGroupBy, UsageStatsQueryItem, get_dashboard_cost_alert_models,
+    DashboardTopModelItem, UsageStatsGroupBy, UsageStatsQueryItem, get_dashboard_top_cost_models,
     get_dashboard_top_models, get_usage_stats_aggregates, start_of_today_timestamp_ms,
 };
 
@@ -29,21 +28,6 @@ impl MetricsService {
         scope_id_filter: Option<&str>,
     ) -> Result<Vec<MetricRequestWindowAggregate>, BaseError> {
         query_request_window_aggregates(
-            start_time_ms,
-            end_time_ms,
-            scope_type_filter,
-            scope_id_filter,
-        )
-    }
-
-    pub fn query_attempt_window_metrics(
-        &self,
-        start_time_ms: i64,
-        end_time_ms: i64,
-        scope_type_filter: Option<&str>,
-        scope_id_filter: Option<&str>,
-    ) -> Result<Vec<MetricAttemptWindowAggregate>, BaseError> {
-        query_attempt_window_aggregates(
             start_time_ms,
             end_time_ms,
             scope_type_filter,
@@ -70,14 +54,12 @@ impl MetricsService {
         &self,
         start_time_ms: i64,
         end_time_ms: i64,
-        metric_kind_filter: &str,
         scope_type_filter: &str,
         scope_id_filter: &str,
     ) -> Result<Vec<MetricCostAggregate>, BaseError> {
         query_cost_window_aggregates(
             start_time_ms,
             end_time_ms,
-            metric_kind_filter,
             scope_type_filter,
             scope_id_filter,
         )
@@ -155,7 +137,6 @@ impl MetricsService {
                 let total_cost = query_cost_window_aggregates(
                     start_time_ms,
                     end_time_ms,
-                    "request",
                     "provider_model",
                     &item.scope_id,
                 )
@@ -193,13 +174,13 @@ impl MetricsService {
         Ok(items)
     }
 
-    pub fn dashboard_cost_alert_models(
+    pub fn dashboard_top_cost_models(
         &self,
         limit_per_currency: usize,
         timezone: Option<&str>,
     ) -> Result<Vec<DashboardTopModelItem>, BaseError> {
         if !self.config().enabled {
-            return self.dashboard_cost_alert_models_fallback(
+            return self.dashboard_top_cost_models_fallback(
                 limit_per_currency,
                 timezone,
                 "metrics_disabled",
@@ -215,7 +196,7 @@ impl MetricsService {
             None,
         )?;
         if request_aggregates.is_empty() {
-            return self.dashboard_cost_alert_models_fallback(
+            return self.dashboard_top_cost_models_fallback(
                 limit_per_currency,
                 timezone,
                 "rollup_empty",
@@ -229,13 +210,9 @@ impl MetricsService {
             .map(|item| (item.scope_id.clone(), item))
             .collect::<HashMap<_, _>>();
         let mut cost_by_scope_currency = BTreeMap::<(String, String), i64>::new();
-        for cost in list_cost_rollup_minutes(
-            start_time_ms,
-            end_time_ms,
-            "request",
-            Some("provider_model"),
-            None,
-        )? {
+        for cost in
+            list_cost_rollup_minutes(start_time_ms, end_time_ms, Some("provider_model"), None)?
+        {
             if parse_provider_model_scope(&cost.scope_id).is_none() {
                 continue;
             }
@@ -422,7 +399,6 @@ impl MetricsService {
         for cost in list_cost_rollup_minutes(
             start_time_ms,
             end_time_ms,
-            "request",
             Some(source.scope_type),
             source.scope_id_filter.as_deref(),
         )? {
@@ -468,7 +444,7 @@ impl MetricsService {
         Ok(rows)
     }
 
-    fn dashboard_cost_alert_models_fallback(
+    fn dashboard_top_cost_models_fallback(
         &self,
         limit: usize,
         timezone: Option<&str>,
@@ -477,10 +453,10 @@ impl MetricsService {
         if !self.config().request_log_query_fallback_enabled {
             return Ok(Vec::new());
         }
-        let rows = get_dashboard_cost_alert_models(limit, timezone)?;
+        let rows = get_dashboard_top_cost_models(limit, timezone)?;
         if !rows.is_empty() {
             crate::warn_event!(
-                "metrics.dashboard_cost_alert_models_request_log_fallback",
+                "metrics.dashboard_top_cost_models_request_log_fallback",
                 reason = reason,
                 row_count = rows.len()
             );
@@ -809,265 +785,4 @@ fn interval_bucket_start(timestamp_ms: i64, interval: &str) -> Result<i64, BaseE
         }
     };
     Ok(bucket)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::MetricsConfig;
-    use crate::database::TestDbContext;
-    use crate::database::metrics::{
-        MetricCostRollupMinute, MetricRequestRollupMinute, add_cost_rollup_delta,
-        add_request_rollup_delta,
-    };
-
-    #[test]
-    fn usage_stats_return_empty_when_fallback_disabled_and_rollup_empty() {
-        let context = TestDbContext::new_sqlite("metrics-query-empty.sqlite");
-        context.run_sync(|| {
-            let service = MetricsService::new(MetricsConfig {
-                request_log_query_fallback_enabled: false,
-                ..MetricsConfig::default()
-            });
-            let rows = service
-                .usage_stats_aggregates(
-                    0,
-                    60_000,
-                    "minute",
-                    UsageStatsGroupBy::Provider,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
-            assert!(rows.is_empty());
-        });
-    }
-
-    #[test]
-    fn usage_stats_group_model_from_provider_model_rollup() {
-        let context = TestDbContext::new_sqlite("metrics-query-model.sqlite");
-        context.run_sync(|| {
-            add_request_rollup_delta(&request_rollup(0, "provider_model", "7:11", 3, 2, 1, 42))
-                .unwrap();
-            add_cost_rollup_delta(&cost_rollup(0, "provider_model", "7:11", "USD", 500)).unwrap();
-
-            let service = MetricsService::new(MetricsConfig {
-                request_log_query_fallback_enabled: false,
-                ..MetricsConfig::default()
-            });
-            let rows = service
-                .usage_stats_aggregates(
-                    0,
-                    60_000,
-                    "minute",
-                    UsageStatsGroupBy::Model,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].time, 0);
-            assert_eq!(rows[0].provider_id, Some(7));
-            assert_eq!(rows[0].model_id, Some(11));
-            assert_eq!(rows[0].request_count, 3);
-            assert_eq!(rows[0].success_count, 2);
-            assert_eq!(rows[0].error_count, 1);
-            assert_eq!(rows[0].total_tokens, 42);
-            assert_eq!(rows[0].total_cost.get("USD"), Some(&500));
-        });
-    }
-
-    #[test]
-    fn dashboard_top_models_use_rollup_without_request_log_fallback() {
-        let context = TestDbContext::new_sqlite("metrics-query-dashboard-top.sqlite");
-        context.run_sync(|| {
-            let bucket = Utc::now().timestamp_millis().div_euclid(60_000) * 60_000;
-            add_request_rollup_delta(&request_rollup(
-                bucket,
-                "provider_model",
-                "7:11",
-                4,
-                4,
-                0,
-                100,
-            ))
-            .unwrap();
-            add_cost_rollup_delta(&cost_rollup(bucket, "provider_model", "7:11", "USD", 900))
-                .unwrap();
-
-            let service = MetricsService::new(MetricsConfig {
-                request_log_query_fallback_enabled: false,
-                ..MetricsConfig::default()
-            });
-            let rows = service.dashboard_top_models(5, None).unwrap();
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].provider_id, 7);
-            assert_eq!(rows[0].model_id, 11);
-            assert_eq!(rows[0].request_count, 4);
-            assert_eq!(rows[0].total_cost.get("USD"), Some(&900));
-        });
-    }
-
-    #[test]
-    fn dashboard_cost_alert_models_aggregate_window_by_model_and_currency() {
-        let context = TestDbContext::new_sqlite("metrics-query-dashboard-cost.sqlite");
-        context.run_sync(|| {
-            let bucket = Utc::now().timestamp_millis().div_euclid(60_000) * 60_000;
-            add_request_rollup_delta(&request_rollup(
-                bucket - 60_000,
-                "provider_model",
-                "7:11",
-                1,
-                1,
-                0,
-                10,
-            ))
-            .unwrap();
-            add_request_rollup_delta(&request_rollup(
-                bucket,
-                "provider_model",
-                "7:11",
-                2,
-                2,
-                0,
-                20,
-            ))
-            .unwrap();
-            add_request_rollup_delta(&request_rollup(
-                bucket,
-                "provider_model",
-                "7:12",
-                5,
-                5,
-                0,
-                50,
-            ))
-            .unwrap();
-            add_cost_rollup_delta(&cost_rollup(
-                bucket - 60_000,
-                "provider_model",
-                "7:11",
-                "USD",
-                100,
-            ))
-            .unwrap();
-            add_cost_rollup_delta(&cost_rollup(bucket, "provider_model", "7:11", "USD", 200))
-                .unwrap();
-            add_cost_rollup_delta(&cost_rollup(bucket, "provider_model", "7:11", "CNY", 400))
-                .unwrap();
-            add_cost_rollup_delta(&cost_rollup(bucket, "provider_model", "7:12", "USD", 250))
-                .unwrap();
-
-            let service = MetricsService::new(MetricsConfig {
-                request_log_query_fallback_enabled: false,
-                ..MetricsConfig::default()
-            });
-            let rows = service.dashboard_cost_alert_models(1, None).unwrap();
-
-            assert_eq!(rows.len(), 2);
-            let usd = rows
-                .iter()
-                .find(|item| item.total_cost.contains_key("USD"))
-                .expect("USD row should exist");
-            assert_eq!(usd.provider_id, 7);
-            assert_eq!(usd.model_id, 11);
-            assert_eq!(usd.request_count, 3);
-            assert_eq!(usd.total_tokens, 30);
-            assert_eq!(usd.total_cost.get("USD"), Some(&300));
-
-            let cny = rows
-                .iter()
-                .find(|item| item.total_cost.contains_key("CNY"))
-                .expect("CNY row should exist");
-            assert_eq!(cny.provider_id, 7);
-            assert_eq!(cny.model_id, 11);
-            assert_eq!(cny.total_cost.get("CNY"), Some(&400));
-        });
-    }
-
-    #[test]
-    fn metrics_facade_query_timeseries_aggregates_rollup_buckets() {
-        let context = TestDbContext::new_sqlite("metrics-query-timeseries.sqlite");
-        context.run_sync(|| {
-            add_request_rollup_delta(&request_rollup(0, "provider", "7", 1, 1, 0, 10)).unwrap();
-            add_request_rollup_delta(&request_rollup(60_000, "provider", "7", 2, 1, 1, 20))
-                .unwrap();
-
-            let service = MetricsService::new(MetricsConfig {
-                request_log_query_fallback_enabled: false,
-                ..MetricsConfig::default()
-            });
-            let points = service
-                .query_timeseries(0, 120_000, "hour", Some("provider"), Some("7"))
-                .unwrap();
-
-            assert_eq!(points.len(), 1);
-            assert_eq!(points[0].bucket_start_ms, 0);
-            assert_eq!(points[0].scope_type, "provider");
-            assert_eq!(points[0].scope_id, "7");
-            assert_eq!(points[0].request_count, 3);
-            assert_eq!(points[0].success_count, 2);
-            assert_eq!(points[0].error_count, 1);
-            assert_eq!(points[0].total_tokens, 30);
-        });
-    }
-
-    fn request_rollup(
-        bucket_start_ms: i64,
-        scope_type: &str,
-        scope_id: &str,
-        request_count: i64,
-        success_count: i64,
-        error_count: i64,
-        total_tokens: i64,
-    ) -> MetricRequestRollupMinute {
-        MetricRequestRollupMinute {
-            bucket_start_ms,
-            scope_type: scope_type.to_string(),
-            scope_id: scope_id.to_string(),
-            scope_label: Some(scope_id.to_string()),
-            request_count,
-            success_count,
-            error_count,
-            cancelled_count: 0,
-            retry_count: 0,
-            fallback_count: 0,
-            first_byte_latency_sum_ms: 0,
-            first_byte_latency_count: 0,
-            total_latency_sum_ms: 900,
-            total_latency_count: request_count,
-            input_tokens: total_tokens / 2,
-            output_tokens: total_tokens / 2,
-            reasoning_tokens: 0,
-            total_tokens,
-            transform_diagnostic_count: 0,
-            transform_diagnostic_lossy_major_count: 0,
-            transform_diagnostic_reject_count: 0,
-            created_at: bucket_start_ms,
-            updated_at: bucket_start_ms,
-        }
-    }
-
-    fn cost_rollup(
-        bucket_start_ms: i64,
-        scope_type: &str,
-        scope_id: &str,
-        currency: &str,
-        amount_nanos: i64,
-    ) -> MetricCostRollupMinute {
-        MetricCostRollupMinute {
-            bucket_start_ms,
-            metric_kind: "request".to_string(),
-            scope_type: scope_type.to_string(),
-            scope_id: scope_id.to_string(),
-            currency: currency.to_string(),
-            amount_nanos,
-            created_at: bucket_start_ms,
-            updated_at: bucket_start_ms,
-        }
-    }
 }

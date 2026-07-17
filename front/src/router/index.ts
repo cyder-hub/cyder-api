@@ -40,17 +40,6 @@ const router = createRouter({
           },
         },
         {
-          path: "model_route",
-          name: "ModelRoute",
-          component: () => import("@/pages/model-route/ModelRoutePage.vue"),
-          meta: {
-            titleKey: "modelRoutePage.title",
-            navKey: "modelRoute",
-            navGroup: "traffic",
-            operatorPriority: "secondary",
-          },
-        },
-        {
           path: "cost",
           name: "Cost",
           component: () => import("@/pages/cost/CostPage.vue"),
@@ -68,17 +57,6 @@ const router = createRouter({
           meta: {
             titleKey: "portableConfigPage.title",
             navKey: "portableConfig",
-            navGroup: "governance",
-            operatorPriority: "secondary",
-          },
-        },
-        {
-          path: "system/config",
-          name: "SystemConfig",
-          component: () => import("@/pages/system-config/SystemConfigPage.vue"),
-          meta: {
-            titleKey: "systemConfigPage.title",
-            navKey: "systemConfig",
             navGroup: "governance",
             operatorPriority: "secondary",
           },
@@ -112,28 +90,6 @@ const router = createRouter({
           meta: {
             titleKey: "providerRuntimePage.title",
             navKey: "providerRuntime",
-            navGroup: "operations",
-            operatorPriority: "secondary",
-          },
-        },
-        {
-          path: "alerts",
-          name: "Alerts",
-          component: () => import("@/pages/alerts/AlertsPage.vue"),
-          meta: {
-            titleKey: "alertsPage.title",
-            navKey: "alerts",
-            navGroup: "operations",
-            operatorPriority: "secondary",
-          },
-        },
-        {
-          path: "notifications",
-          name: "Notification",
-          component: () => import("@/pages/notifications/NotificationsPage.vue"),
-          meta: {
-            titleKey: "notificationPage.title",
-            navKey: "notifications",
             navGroup: "operations",
             operatorPriority: "secondary",
           },

@@ -314,28 +314,28 @@ pub fn get_request_logs_in_range(
         DbConnection::Postgres(conn) => sql_query(
             "SELECT
                 rl.created_at,
-                rl.final_provider_id AS provider_id,
-                rl.final_model_id AS model_id,
+                rl.provider_id AS provider_id,
+                rl.model_id AS model_id,
                 rl.total_input_tokens,
                 rl.total_output_tokens,
                 rl.reasoning_tokens,
                 rl.total_tokens,
                 rl.estimated_cost_nanos,
                 rl.estimated_cost_currency,
-                COALESCE(p.provider_key, rl.final_provider_key_snapshot) AS provider_key,
-                COALESCE(m.model_name, rl.final_model_name_snapshot) AS model_name,
-                COALESCE(m.real_model_name, rl.final_real_model_name_snapshot) AS real_model_name
+                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key,
+                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name,
+                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name
              FROM request_log rl
-             LEFT JOIN provider p ON p.id = rl.final_provider_id
-             LEFT JOIN model m ON m.id = rl.final_model_id
+             LEFT JOIN provider p ON p.id = rl.provider_id
+             LEFT JOIN model m ON m.id = rl.model_id
              WHERE rl.created_at >= $1
                AND rl.created_at < $2
-               AND rl.final_provider_id IS NOT NULL
-               AND rl.final_model_id IS NOT NULL
-               AND ($3 IS NULL OR rl.final_provider_id = $3)
-               AND ($4 IS NULL OR rl.final_model_id = $4)
+               AND rl.provider_id IS NOT NULL
+               AND rl.model_id IS NOT NULL
+               AND ($3 IS NULL OR rl.provider_id = $3)
+               AND ($4 IS NULL OR rl.model_id = $4)
                AND ($5 IS NULL OR rl.api_key_id = $5)
-               AND ($6 IS NULL OR rl.final_provider_api_key_id = $6)
+               AND ($6 IS NULL OR rl.provider_api_key_id = $6)
              ORDER BY rl.created_at ASC",
         )
         .bind::<BigInt, _>(start_time_ms)
@@ -349,28 +349,28 @@ pub fn get_request_logs_in_range(
         DbConnection::Sqlite(conn) => sql_query(
             "SELECT
                 rl.created_at,
-                rl.final_provider_id AS provider_id,
-                rl.final_model_id AS model_id,
+                rl.provider_id AS provider_id,
+                rl.model_id AS model_id,
                 rl.total_input_tokens,
                 rl.total_output_tokens,
                 rl.reasoning_tokens,
                 rl.total_tokens,
                 rl.estimated_cost_nanos,
                 rl.estimated_cost_currency,
-                COALESCE(p.provider_key, rl.final_provider_key_snapshot) AS provider_key,
-                COALESCE(m.model_name, rl.final_model_name_snapshot) AS model_name,
-                COALESCE(m.real_model_name, rl.final_real_model_name_snapshot) AS real_model_name
+                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key,
+                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name,
+                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name
              FROM request_log rl
-             LEFT JOIN provider p ON p.id = rl.final_provider_id
-             LEFT JOIN model m ON m.id = rl.final_model_id
+             LEFT JOIN provider p ON p.id = rl.provider_id
+             LEFT JOIN model m ON m.id = rl.model_id
              WHERE rl.created_at >= ?
                AND rl.created_at < ?
-               AND rl.final_provider_id IS NOT NULL
-               AND rl.final_model_id IS NOT NULL
-               AND (? IS NULL OR rl.final_provider_id = ?)
-               AND (? IS NULL OR rl.final_model_id = ?)
+               AND rl.provider_id IS NOT NULL
+               AND rl.model_id IS NOT NULL
+               AND (? IS NULL OR rl.provider_id = ?)
+               AND (? IS NULL OR rl.model_id = ?)
                AND (? IS NULL OR rl.api_key_id = ?)
-               AND (? IS NULL OR rl.final_provider_api_key_id = ?)
+               AND (? IS NULL OR rl.provider_api_key_id = ?)
              ORDER BY rl.created_at ASC",
         )
         .bind::<BigInt, _>(start_time_ms)
@@ -493,7 +493,7 @@ pub fn get_dashboard_top_models(
     Ok(result)
 }
 
-pub fn get_dashboard_cost_alert_models(
+pub fn get_dashboard_top_cost_models(
     limit: usize,
     timezone: Option<&str>,
 ) -> DbResult<Vec<DashboardTopModelItem>> {
@@ -662,7 +662,7 @@ fn parse_stats_timezone(timezone: Option<&str>) -> DbResult<Tz> {
     };
     timezone.parse::<Tz>().map_err(|_| {
         BaseError::InternalServerError(Some(format!(
-            "Invalid runtime timezone '{}'; update system configuration before reading today stats",
+            "Invalid configured timezone '{}'; update config.yaml and restart before reading today stats",
             timezone
         )))
     })
@@ -679,32 +679,32 @@ fn calculate_success_rate(request_count: i64, success_count: i64) -> Option<f64>
 fn usage_group_sql(group_by: UsageStatsGroupBy) -> (&'static str, &'static str, &'static str) {
     match group_by {
         UsageStatsGroupBy::Provider => (
-            "rl.final_provider_id AS group_id,
-             rl.final_provider_id AS provider_id,
+            "rl.provider_id AS group_id,
+             rl.provider_id AS provider_id,
              CAST(NULL AS BIGINT) AS model_id,
              CAST(NULL AS BIGINT) AS api_key_id,
-             COALESCE(p.provider_key, rl.final_provider_key_snapshot) AS provider_key,
+             COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key,
              CAST(NULL AS TEXT) AS model_name,
              CAST(NULL AS TEXT) AS real_model_name,
              CAST(NULL AS TEXT) AS api_key_name,
-             COALESCE(p.provider_key, rl.final_provider_key_snapshot, '') AS group_label,
-             COALESCE(p.name, rl.final_provider_name_snapshot) AS group_detail",
-            "rl.final_provider_id, p.provider_key, rl.final_provider_key_snapshot, p.name, rl.final_provider_name_snapshot",
-            "rl.final_provider_id",
+             COALESCE(p.provider_key, rl.provider_key_snapshot, '') AS group_label,
+             COALESCE(p.name, rl.provider_name_snapshot) AS group_detail",
+            "rl.provider_id, p.provider_key, rl.provider_key_snapshot, p.name, rl.provider_name_snapshot",
+            "rl.provider_id",
         ),
         UsageStatsGroupBy::Model => (
-            "rl.final_model_id AS group_id,
-             rl.final_provider_id AS provider_id,
-             rl.final_model_id AS model_id,
+            "rl.model_id AS group_id,
+             rl.provider_id AS provider_id,
+             rl.model_id AS model_id,
              CAST(NULL AS BIGINT) AS api_key_id,
-             COALESCE(p.provider_key, rl.final_provider_key_snapshot) AS provider_key,
-             COALESCE(m.model_name, rl.final_model_name_snapshot) AS model_name,
-             COALESCE(m.real_model_name, rl.final_real_model_name_snapshot) AS real_model_name,
+             COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key,
+             COALESCE(m.model_name, rl.model_name_snapshot) AS model_name,
+             COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name,
              CAST(NULL AS TEXT) AS api_key_name,
-             COALESCE(p.provider_key, rl.final_provider_key_snapshot, '') || '/' || COALESCE(m.model_name, rl.final_model_name_snapshot, '') AS group_label,
-             COALESCE(m.real_model_name, rl.final_real_model_name_snapshot) AS group_detail",
-            "rl.final_model_id, rl.final_provider_id, p.provider_key, rl.final_provider_key_snapshot, m.model_name, rl.final_model_name_snapshot, m.real_model_name, rl.final_real_model_name_snapshot",
-            "rl.final_model_id",
+             COALESCE(p.provider_key, rl.provider_key_snapshot, '') || '/' || COALESCE(m.model_name, rl.model_name_snapshot, '') AS group_label,
+             COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS group_detail",
+            "rl.model_id, rl.provider_id, p.provider_key, rl.provider_key_snapshot, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot",
+            "rl.model_id",
         ),
         UsageStatsGroupBy::ApiKey => (
             "rl.api_key_id AS group_id,
@@ -814,25 +814,25 @@ fn load_usage_stats_base_rows(
                     CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT) AS success_count, \
                     CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END) AS BIGINT) AS error_count, \
                     CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
-                                      AND rl.first_attempt_started_at IS NOT NULL \
-                                      AND rl.completed_at >= rl.first_attempt_started_at \
-                                 THEN (rl.completed_at - rl.first_attempt_started_at)::DOUBLE PRECISION \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.completed_at >= rl.upstream_request_sent_at \
+                                 THEN (rl.completed_at - rl.upstream_request_sent_at)::DOUBLE PRECISION \
                                  ELSE 0 END) AS DOUBLE PRECISION) AS latency_sum_ms, \
                     CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
-                                      AND rl.first_attempt_started_at IS NOT NULL \
-                                      AND rl.completed_at >= rl.first_attempt_started_at \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.completed_at >= rl.upstream_request_sent_at \
                                  THEN 1 ELSE 0 END) AS BIGINT) AS latency_sample_count \
                  FROM request_log rl \
-                 LEFT JOIN provider p ON p.id = rl.final_provider_id \
-                 LEFT JOIN model m ON m.id = rl.final_model_id \
+                 LEFT JOIN provider p ON p.id = rl.provider_id \
+                 LEFT JOIN model m ON m.id = rl.model_id \
                  LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
                  WHERE rl.request_received_at >= $1 \
                    AND rl.request_received_at < $2 \
                    AND {group_id_sql} IS NOT NULL \
-                   AND ($3 IS NULL OR rl.final_provider_id = $3) \
-                   AND ($4 IS NULL OR rl.final_model_id = $4) \
+                   AND ($3 IS NULL OR rl.provider_id = $3) \
+                   AND ($4 IS NULL OR rl.model_id = $4) \
                    AND ($5 IS NULL OR rl.api_key_id = $5) \
-                   AND ($6 IS NULL OR rl.final_provider_api_key_id = $6) \
+                   AND ($6 IS NULL OR rl.provider_api_key_id = $6) \
                  GROUP BY 1, {group_by_sql} \
                  ORDER BY 1 ASC"
             );
@@ -865,25 +865,25 @@ fn load_usage_stats_base_rows(
                     CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT) AS success_count, \
                     CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END) AS BIGINT) AS error_count, \
                     CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
-                                      AND rl.first_attempt_started_at IS NOT NULL \
-                                      AND rl.completed_at >= rl.first_attempt_started_at \
-                                 THEN rl.completed_at - rl.first_attempt_started_at \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.completed_at >= rl.upstream_request_sent_at \
+                                 THEN rl.completed_at - rl.upstream_request_sent_at \
                                  ELSE 0 END) AS REAL) AS latency_sum_ms, \
                     CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
-                                      AND rl.first_attempt_started_at IS NOT NULL \
-                                      AND rl.completed_at >= rl.first_attempt_started_at \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.completed_at >= rl.upstream_request_sent_at \
                                  THEN 1 ELSE 0 END) AS BIGINT) AS latency_sample_count \
                  FROM request_log rl \
-                 LEFT JOIN provider p ON p.id = rl.final_provider_id \
-                 LEFT JOIN model m ON m.id = rl.final_model_id \
+                 LEFT JOIN provider p ON p.id = rl.provider_id \
+                 LEFT JOIN model m ON m.id = rl.model_id \
                  LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
                  WHERE rl.request_received_at >= ? \
                    AND rl.request_received_at < ? \
                    AND {group_id_sql} IS NOT NULL \
-                   AND (? IS NULL OR rl.final_provider_id = ?) \
-                   AND (? IS NULL OR rl.final_model_id = ?) \
+                   AND (? IS NULL OR rl.provider_id = ?) \
+                   AND (? IS NULL OR rl.model_id = ?) \
                    AND (? IS NULL OR rl.api_key_id = ?) \
-                   AND (? IS NULL OR rl.final_provider_api_key_id = ?) \
+                   AND (? IS NULL OR rl.provider_api_key_id = ?) \
                  GROUP BY 1, {group_by_sql} \
                  ORDER BY 1 ASC"
             );
@@ -932,16 +932,16 @@ fn load_usage_stats_cost_rows(
                     rl.estimated_cost_currency AS currency, \
                     CAST(COALESCE(SUM(rl.estimated_cost_nanos), 0) AS BIGINT) AS total_cost_nanos \
                  FROM request_log rl \
-                 LEFT JOIN provider p ON p.id = rl.final_provider_id \
-                 LEFT JOIN model m ON m.id = rl.final_model_id \
+                 LEFT JOIN provider p ON p.id = rl.provider_id \
+                 LEFT JOIN model m ON m.id = rl.model_id \
                  LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
                  WHERE rl.request_received_at >= $1 \
                    AND rl.request_received_at < $2 \
                    AND {group_id_sql} IS NOT NULL \
-                   AND ($3 IS NULL OR rl.final_provider_id = $3) \
-                   AND ($4 IS NULL OR rl.final_model_id = $4) \
+                   AND ($3 IS NULL OR rl.provider_id = $3) \
+                   AND ($4 IS NULL OR rl.model_id = $4) \
                    AND ($5 IS NULL OR rl.api_key_id = $5) \
-                   AND ($6 IS NULL OR rl.final_provider_api_key_id = $6) \
+                   AND ($6 IS NULL OR rl.provider_api_key_id = $6) \
                    AND rl.estimated_cost_nanos IS NOT NULL \
                    AND rl.estimated_cost_currency IS NOT NULL \
                  GROUP BY 1, {group_id_sql}, rl.estimated_cost_currency, {group_by_sql} \
@@ -971,16 +971,16 @@ fn load_usage_stats_cost_rows(
                     rl.estimated_cost_currency AS currency, \
                     CAST(COALESCE(SUM(rl.estimated_cost_nanos), 0) AS BIGINT) AS total_cost_nanos \
                  FROM request_log rl \
-                 LEFT JOIN provider p ON p.id = rl.final_provider_id \
-                 LEFT JOIN model m ON m.id = rl.final_model_id \
+                 LEFT JOIN provider p ON p.id = rl.provider_id \
+                 LEFT JOIN model m ON m.id = rl.model_id \
                  LEFT JOIN api_key ak ON ak.id = rl.api_key_id \
                  WHERE rl.request_received_at >= ? \
                    AND rl.request_received_at < ? \
                    AND {group_id_sql} IS NOT NULL \
-                   AND (? IS NULL OR rl.final_provider_id = ?) \
-                   AND (? IS NULL OR rl.final_model_id = ?) \
+                   AND (? IS NULL OR rl.provider_id = ?) \
+                   AND (? IS NULL OR rl.model_id = ?) \
                    AND (? IS NULL OR rl.api_key_id = ?) \
-                   AND (? IS NULL OR rl.final_provider_api_key_id = ?) \
+                   AND (? IS NULL OR rl.provider_api_key_id = ?) \
                    AND rl.estimated_cost_nanos IS NOT NULL \
                    AND rl.estimated_cost_currency IS NOT NULL \
                  GROUP BY 1, {group_id_sql}, rl.estimated_cost_currency, {group_by_sql} \
@@ -1084,21 +1084,21 @@ fn load_dashboard_today_aggregate(
                 CAST(COALESCE(SUM(reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens, \
                 CAST(COALESCE(SUM(total_tokens), 0) AS BIGINT) AS total_tokens, \
                 CAST(AVG(CASE \
-                    WHEN first_attempt_started_at IS NOT NULL \
+                    WHEN upstream_request_sent_at IS NOT NULL \
                      AND response_started_to_client_at IS NOT NULL \
-                     AND response_started_to_client_at >= first_attempt_started_at \
-                    THEN (response_started_to_client_at - first_attempt_started_at)::DOUBLE PRECISION \
+                     AND response_started_to_client_at >= upstream_request_sent_at \
+                    THEN (response_started_to_client_at - upstream_request_sent_at)::DOUBLE PRECISION \
                     ELSE NULL \
                 END) AS DOUBLE PRECISION) AS avg_first_byte_ms, \
                 CAST(AVG(CASE \
-                    WHEN first_attempt_started_at IS NOT NULL \
+                    WHEN upstream_request_sent_at IS NOT NULL \
                      AND completed_at IS NOT NULL \
-                     AND completed_at >= first_attempt_started_at \
-                    THEN (completed_at - first_attempt_started_at)::DOUBLE PRECISION \
+                     AND completed_at >= upstream_request_sent_at \
+                    THEN (completed_at - upstream_request_sent_at)::DOUBLE PRECISION \
                     ELSE NULL \
                 END) AS DOUBLE PRECISION) AS avg_total_latency_ms, \
-                CAST(COUNT(DISTINCT final_provider_id) AS BIGINT) AS active_provider_count, \
-                CAST(COUNT(DISTINCT final_model_id) AS BIGINT) AS active_model_count, \
+                CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count, \
+                CAST(COUNT(DISTINCT model_id) AS BIGINT) AS active_model_count, \
                 CAST(COUNT(DISTINCT api_key_id) AS BIGINT) AS active_api_key_count \
              FROM request_log \
              WHERE request_received_at >= $1",
@@ -1121,21 +1121,21 @@ fn load_dashboard_today_aggregate(
                 CAST(COALESCE(SUM(reasoning_tokens), 0) AS BIGINT) AS total_reasoning_tokens, \
                 CAST(COALESCE(SUM(total_tokens), 0) AS BIGINT) AS total_tokens, \
                 CAST(AVG(CASE \
-                    WHEN first_attempt_started_at IS NOT NULL \
+                    WHEN upstream_request_sent_at IS NOT NULL \
                      AND response_started_to_client_at IS NOT NULL \
-                     AND response_started_to_client_at >= first_attempt_started_at \
-                    THEN (response_started_to_client_at - first_attempt_started_at) \
+                     AND response_started_to_client_at >= upstream_request_sent_at \
+                    THEN (response_started_to_client_at - upstream_request_sent_at) \
                     ELSE NULL \
                 END) AS REAL) AS avg_first_byte_ms, \
                 CAST(AVG(CASE \
-                    WHEN first_attempt_started_at IS NOT NULL \
+                    WHEN upstream_request_sent_at IS NOT NULL \
                      AND completed_at IS NOT NULL \
-                     AND completed_at >= first_attempt_started_at \
-                    THEN (completed_at - first_attempt_started_at) \
+                     AND completed_at >= upstream_request_sent_at \
+                    THEN (completed_at - upstream_request_sent_at) \
                     ELSE NULL \
                 END) AS REAL) AS avg_total_latency_ms, \
-                CAST(COUNT(DISTINCT final_provider_id) AS BIGINT) AS active_provider_count, \
-                CAST(COUNT(DISTINCT final_model_id) AS BIGINT) AS active_model_count, \
+                CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count, \
+                CAST(COUNT(DISTINCT model_id) AS BIGINT) AS active_model_count, \
                 CAST(COUNT(DISTINCT api_key_id) AS BIGINT) AS active_api_key_count \
              FROM request_log \
              WHERE request_received_at >= ?",
@@ -1159,21 +1159,21 @@ fn load_dashboard_top_model_base_rows(
     match conn {
         DbConnection::Postgres(pg_conn) => sql_query(
             "SELECT \
-                rl.final_provider_id AS provider_id, \
-                COALESCE(p.provider_key, rl.final_provider_key_snapshot) AS provider_key, \
-                rl.final_model_id AS model_id, \
-                COALESCE(m.model_name, rl.final_model_name_snapshot) AS model_name, \
-                COALESCE(m.real_model_name, rl.final_real_model_name_snapshot) AS real_model_name, \
+                rl.provider_id AS provider_id, \
+                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key, \
+                rl.model_id AS model_id, \
+                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name, \
+                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name, \
                 COUNT(*)::BIGINT AS request_count, \
                 CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens \
              FROM request_log rl \
-             LEFT JOIN provider p ON p.id = rl.final_provider_id \
-             LEFT JOIN model m ON m.id = rl.final_model_id \
+             LEFT JOIN provider p ON p.id = rl.provider_id \
+             LEFT JOIN model m ON m.id = rl.model_id \
              WHERE rl.request_received_at >= $1 \
-               AND rl.final_provider_id IS NOT NULL \
-               AND rl.final_model_id IS NOT NULL \
-             GROUP BY rl.final_provider_id, p.provider_key, rl.final_provider_key_snapshot, rl.final_model_id, m.model_name, rl.final_model_name_snapshot, m.real_model_name, rl.final_real_model_name_snapshot \
-             ORDER BY request_count DESC, rl.final_provider_id ASC, rl.final_model_id ASC \
+               AND rl.provider_id IS NOT NULL \
+               AND rl.model_id IS NOT NULL \
+             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot, rl.model_id, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot \
+             ORDER BY request_count DESC, rl.provider_id ASC, rl.model_id ASC \
              LIMIT $2",
         )
         .bind::<BigInt, _>(start_of_today)
@@ -1187,21 +1187,21 @@ fn load_dashboard_top_model_base_rows(
         }),
         DbConnection::Sqlite(sqlite_conn) => sql_query(
             "SELECT \
-                rl.final_provider_id AS provider_id, \
-                COALESCE(p.provider_key, rl.final_provider_key_snapshot) AS provider_key, \
-                rl.final_model_id AS model_id, \
-                COALESCE(m.model_name, rl.final_model_name_snapshot) AS model_name, \
-                COALESCE(m.real_model_name, rl.final_real_model_name_snapshot) AS real_model_name, \
+                rl.provider_id AS provider_id, \
+                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key, \
+                rl.model_id AS model_id, \
+                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name, \
+                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name, \
                 CAST(COUNT(*) AS BIGINT) AS request_count, \
                 CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens \
              FROM request_log rl \
-             LEFT JOIN provider p ON p.id = rl.final_provider_id \
-             LEFT JOIN model m ON m.id = rl.final_model_id \
+             LEFT JOIN provider p ON p.id = rl.provider_id \
+             LEFT JOIN model m ON m.id = rl.model_id \
              WHERE rl.request_received_at >= ? \
-               AND rl.final_provider_id IS NOT NULL \
-               AND rl.final_model_id IS NOT NULL \
-             GROUP BY rl.final_provider_id, p.provider_key, rl.final_provider_key_snapshot, rl.final_model_id, m.model_name, rl.final_model_name_snapshot, m.real_model_name, rl.final_real_model_name_snapshot \
-             ORDER BY request_count DESC, rl.final_provider_id ASC, rl.final_model_id ASC \
+               AND rl.provider_id IS NOT NULL \
+               AND rl.model_id IS NOT NULL \
+             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot, rl.model_id, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot \
+             ORDER BY request_count DESC, rl.provider_id ASC, rl.model_id ASC \
              LIMIT ?",
         )
         .bind::<BigInt, _>(start_of_today)
@@ -1224,21 +1224,21 @@ fn load_dashboard_top_model_base_rows_for_cost(
     match conn {
         DbConnection::Postgres(pg_conn) => sql_query(
             "SELECT \
-                rl.final_provider_id AS provider_id, \
-                COALESCE(p.provider_key, rl.final_provider_key_snapshot) AS provider_key, \
-                rl.final_model_id AS model_id, \
-                COALESCE(m.model_name, rl.final_model_name_snapshot) AS model_name, \
-                COALESCE(m.real_model_name, rl.final_real_model_name_snapshot) AS real_model_name, \
+                rl.provider_id AS provider_id, \
+                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key, \
+                rl.model_id AS model_id, \
+                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name, \
+                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name, \
                 COUNT(*)::BIGINT AS request_count, \
                 CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens \
              FROM request_log rl \
-             LEFT JOIN provider p ON p.id = rl.final_provider_id \
-             LEFT JOIN model m ON m.id = rl.final_model_id \
+             LEFT JOIN provider p ON p.id = rl.provider_id \
+             LEFT JOIN model m ON m.id = rl.model_id \
              WHERE rl.request_received_at >= $1 \
-               AND rl.final_provider_id IS NOT NULL \
-               AND rl.final_model_id IS NOT NULL \
-             GROUP BY rl.final_provider_id, p.provider_key, rl.final_provider_key_snapshot, rl.final_model_id, m.model_name, rl.final_model_name_snapshot, m.real_model_name, rl.final_real_model_name_snapshot \
-             ORDER BY COALESCE(SUM(rl.estimated_cost_nanos), 0) DESC, request_count DESC, rl.final_provider_id ASC, rl.final_model_id ASC \
+               AND rl.provider_id IS NOT NULL \
+               AND rl.model_id IS NOT NULL \
+             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot, rl.model_id, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot \
+             ORDER BY COALESCE(SUM(rl.estimated_cost_nanos), 0) DESC, request_count DESC, rl.provider_id ASC, rl.model_id ASC \
              LIMIT $2",
         )
         .bind::<BigInt, _>(start_of_today)
@@ -1252,21 +1252,21 @@ fn load_dashboard_top_model_base_rows_for_cost(
         }),
         DbConnection::Sqlite(sqlite_conn) => sql_query(
             "SELECT \
-                rl.final_provider_id AS provider_id, \
-                COALESCE(p.provider_key, rl.final_provider_key_snapshot) AS provider_key, \
-                rl.final_model_id AS model_id, \
-                COALESCE(m.model_name, rl.final_model_name_snapshot) AS model_name, \
-                COALESCE(m.real_model_name, rl.final_real_model_name_snapshot) AS real_model_name, \
+                rl.provider_id AS provider_id, \
+                COALESCE(p.provider_key, rl.provider_key_snapshot) AS provider_key, \
+                rl.model_id AS model_id, \
+                COALESCE(m.model_name, rl.model_name_snapshot) AS model_name, \
+                COALESCE(m.real_model_name, rl.real_model_name_snapshot) AS real_model_name, \
                 CAST(COUNT(*) AS BIGINT) AS request_count, \
                 CAST(COALESCE(SUM(rl.total_tokens), 0) AS BIGINT) AS total_tokens \
              FROM request_log rl \
-             LEFT JOIN provider p ON p.id = rl.final_provider_id \
-             LEFT JOIN model m ON m.id = rl.final_model_id \
+             LEFT JOIN provider p ON p.id = rl.provider_id \
+             LEFT JOIN model m ON m.id = rl.model_id \
              WHERE rl.request_received_at >= ? \
-               AND rl.final_provider_id IS NOT NULL \
-               AND rl.final_model_id IS NOT NULL \
-             GROUP BY rl.final_provider_id, p.provider_key, rl.final_provider_key_snapshot, rl.final_model_id, m.model_name, rl.final_model_name_snapshot, m.real_model_name, rl.final_real_model_name_snapshot \
-             ORDER BY COALESCE(SUM(rl.estimated_cost_nanos), 0) DESC, request_count DESC, rl.final_provider_id ASC, rl.final_model_id ASC \
+               AND rl.provider_id IS NOT NULL \
+               AND rl.model_id IS NOT NULL \
+             GROUP BY rl.provider_id, p.provider_key, rl.provider_key_snapshot, rl.model_id, m.model_name, rl.model_name_snapshot, m.real_model_name, rl.real_model_name_snapshot \
+             ORDER BY COALESCE(SUM(rl.estimated_cost_nanos), 0) DESC, request_count DESC, rl.provider_id ASC, rl.model_id ASC \
              LIMIT ?",
         )
         .bind::<BigInt, _>(start_of_today)
@@ -1288,17 +1288,17 @@ fn load_dashboard_top_model_cost_rows(
     match conn {
         DbConnection::Postgres(pg_conn) => sql_query(
             "SELECT \
-                rl.final_provider_id AS provider_id, \
-                rl.final_model_id AS model_id, \
+                rl.provider_id AS provider_id, \
+                rl.model_id AS model_id, \
                 rl.estimated_cost_currency AS currency, \
                 CAST(SUM(rl.estimated_cost_nanos) AS BIGINT) AS total_cost_nanos \
              FROM request_log rl \
              WHERE rl.request_received_at >= $1 \
-               AND rl.final_provider_id IS NOT NULL \
-               AND rl.final_model_id IS NOT NULL \
+               AND rl.provider_id IS NOT NULL \
+               AND rl.model_id IS NOT NULL \
                AND rl.estimated_cost_nanos IS NOT NULL \
                AND rl.estimated_cost_currency IS NOT NULL \
-             GROUP BY rl.final_provider_id, rl.final_model_id, rl.estimated_cost_currency",
+             GROUP BY rl.provider_id, rl.model_id, rl.estimated_cost_currency",
         )
         .bind::<BigInt, _>(start_of_today)
         .load::<DashboardTopModelCostRow>(pg_conn)
@@ -1310,17 +1310,17 @@ fn load_dashboard_top_model_cost_rows(
         }),
         DbConnection::Sqlite(sqlite_conn) => sql_query(
             "SELECT \
-                rl.final_provider_id AS provider_id, \
-                rl.final_model_id AS model_id, \
+                rl.provider_id AS provider_id, \
+                rl.model_id AS model_id, \
                 rl.estimated_cost_currency AS currency, \
                 CAST(SUM(rl.estimated_cost_nanos) AS BIGINT) AS total_cost_nanos \
              FROM request_log rl \
              WHERE rl.request_received_at >= ? \
-               AND rl.final_provider_id IS NOT NULL \
-               AND rl.final_model_id IS NOT NULL \
+               AND rl.provider_id IS NOT NULL \
+               AND rl.model_id IS NOT NULL \
                AND rl.estimated_cost_nanos IS NOT NULL \
                AND rl.estimated_cost_currency IS NOT NULL \
-             GROUP BY rl.final_provider_id, rl.final_model_id, rl.estimated_cost_currency",
+             GROUP BY rl.provider_id, rl.model_id, rl.estimated_cost_currency",
         )
         .bind::<BigInt, _>(start_of_today)
         .load::<DashboardTopModelCostRow>(sqlite_conn)
@@ -1448,7 +1448,7 @@ mod tests {
         assert!(
             source.contains("CAST(COUNT(*) AS BIGINT) AS request_count")
                 && source.contains(
-                    "CAST(COUNT(DISTINCT final_provider_id) AS BIGINT) AS active_provider_count"
+                    "CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count"
                 )
                 && source.contains(
                     "CAST(COALESCE(SUM(total_input_tokens), 0) AS BIGINT) AS total_input_tokens"
@@ -1507,21 +1507,21 @@ mod tests {
             );
 
             INSERT INTO request_log (
-                id, api_key_id, requested_model_name, resolved_name_scope,
+                id, api_key_id, requested_model_name,
                 user_api_type, overall_status, final_error_code, final_error_message,
-                attempt_count, retry_count, fallback_count, request_received_at,
-                first_attempt_started_at, response_started_to_client_at, completed_at,
-                final_provider_id, final_provider_api_key_id, final_model_id,
-                final_provider_key_snapshot, final_provider_name_snapshot,
-                final_model_name_snapshot, final_real_model_name_snapshot, final_llm_api_type,
+                request_received_at,
+                upstream_request_sent_at, response_started_to_client_at, completed_at,
+                provider_id, provider_api_key_id, model_id,
+                provider_key_snapshot, provider_name_snapshot,
+                model_name_snapshot, real_model_name_snapshot, llm_api_type,
                 estimated_cost_nanos, estimated_cost_currency,
                 total_input_tokens, total_output_tokens, reasoning_tokens, total_tokens,
                 created_at, updated_at
             ) VALUES
             (
-                100, 1, 'gpt-test', 'direct',
+                100, 1, 'gpt-test',
                 'OPENAI', 'SUCCESS', NULL, NULL,
-                1, 0, 0, 1000,
+                1000,
                 1100, 1200, 1500,
                 10, 20, 30,
                 'openai-main', 'OpenAI Main',
@@ -1531,9 +1531,9 @@ mod tests {
                 1000, 1500
             ),
             (
-                101, 1, 'gpt-test', 'direct',
+                101, 1, 'gpt-test',
                 'OPENAI', 'ERROR', 'upstream_service_error', 'failed',
-                1, 0, 0, 2000,
+                2000,
                 2250, 2300, 2550,
                 10, 20, 30,
                 'openai-main', 'OpenAI Main',
@@ -1543,9 +1543,9 @@ mod tests {
                 2000, 2550
             ),
             (
-                102, 1, 'gpt-empty', 'direct',
+                102, 1, 'gpt-empty',
                 'OPENAI', 'SUCCESS', NULL, NULL,
-                1, 0, 0, 3000,
+                3000,
                 NULL, NULL, 3100,
                 NULL, NULL, NULL,
                 NULL, NULL,

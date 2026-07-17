@@ -7,7 +7,7 @@ import {
 import {
   getUnstableProviders,
   hasCostHotspots,
-} from "../src/pages/dashboard/composables/useDashboardAlerts.ts";
+} from "../src/pages/dashboard/composables/useDashboardOperations.ts";
 import { buildRuntimeStateBackendRows } from "../src/utils/runtimeBackend.ts";
 
 test("buildEmptyDashboard returns stable zero-state dashboard data", () => {
@@ -18,8 +18,8 @@ test("buildEmptyDashboard returns stable zero-state dashboard data", () => {
   assert.equal(dashboard.runtime.window, "1h");
   assert.equal(dashboard.runtime_state_backend.runtime_effective_backend, "memory");
   assert.equal(dashboard.runtime_state_backend.runtime_shared, false);
-  assert.deepEqual(dashboard.alerts.open_providers, []);
-  assert.deepEqual(dashboard.alerts.top_cost_models, []);
+  assert.deepEqual(dashboard.operational_signals.open_providers, []);
+  assert.deepEqual(dashboard.operational_signals.top_cost_models, []);
 });
 
 test("buildRuntimeStateBackendRows preserves catalog configured and effective backends", () => {
@@ -57,7 +57,7 @@ test("buildRuntimeStateBackendRows preserves catalog configured and effective ba
 });
 
 test("getUnstableProviders merges open and half-open providers in error order", () => {
-  const alerts = {
+  const signals = {
     open_providers: [
       { provider_id: 3, error_count: 8, runtime_level: "open" },
       { provider_id: 1, error_count: 8, runtime_level: "open" },
@@ -69,7 +69,7 @@ test("getUnstableProviders merges open and half-open providers in error order", 
     top_cost_models: [],
   };
 
-  const items = getUnstableProviders(alerts);
+  const items = getUnstableProviders(signals);
 
   assert.deepEqual(
     items.map((item) => [item.provider_id, item.runtime_level]),
@@ -81,7 +81,7 @@ test("getUnstableProviders merges open and half-open providers in error order", 
   );
 });
 
-test("hasCostHotspots is true when either provider or model cost alerts exist", () => {
+test("hasCostHotspots is true when either provider or model cost hotspots exist", () => {
   assert.equal(
     hasCostHotspots({
       top_cost_providers: [{ provider_id: 1 }],

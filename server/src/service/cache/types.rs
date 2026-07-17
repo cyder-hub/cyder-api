@@ -3,7 +3,6 @@ use bincode::{Decode, Encode};
 // These structures contain only the fields needed for cache operations,
 // reducing memory footprint and improving cache performance.
 
-use crate::database::model_route::{ApiKeyModelOverride, ModelRouteDetail};
 use crate::database::reasoning_config::{
     ReasoningConfigMode, ReasoningConfigScope, ReasoningConfigWithPresets, ReasoningPatchFamily,
     ReasoningPreset,
@@ -119,45 +118,11 @@ pub struct CacheRuntimeFeatureConfig {
     pub enabled: bool,
 }
 
-/// Cached model route candidate ordered by runtime priority.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheModelRouteCandidate {
-    pub route_id: i64,
-    pub model_id: i64,
-    pub provider_id: i64,
-    pub priority: i32,
-    pub is_enabled: bool,
-}
-
-/// Cached logical model route used by request resolution.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheModelRoute {
-    pub id: i64,
-    pub route_name: String,
-    pub description: Option<String>,
-    pub is_enabled: bool,
-    pub expose_in_models: bool,
-    pub candidates: Vec<CacheModelRouteCandidate>,
-}
-
-/// Cached API key scoped name override definition.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct CacheApiKeyModelOverride {
-    pub id: i64,
-    pub api_key_id: i64,
-    pub source_name: String,
-    pub target_route_id: i64,
-    pub description: Option<String>,
-    pub is_enabled: bool,
-}
-
 /// Cached aggregate catalog used by `/models` style listing endpoints
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheModelsCatalog {
     pub providers: Vec<CacheProvider>,
     pub models: Vec<CacheModel>,
-    pub routes: Vec<CacheModelRoute>,
-    pub api_key_overrides: Vec<CacheApiKeyModelOverride>,
     pub reasoning_configs: Vec<CacheReasoningConfig>,
     pub runtime_feature_configs: Vec<CacheRuntimeFeatureConfig>,
 }
@@ -455,42 +420,6 @@ impl From<crate::database::model::Model> for CacheModel {
             supports_image_input: db.supports_image_input,
             supports_embeddings: db.supports_embeddings,
             supports_rerank: db.supports_rerank,
-            is_enabled: db.is_enabled,
-        }
-    }
-}
-
-impl CacheModelRoute {
-    pub fn from_detail(detail: &ModelRouteDetail) -> Self {
-        Self {
-            id: detail.route.id,
-            route_name: detail.route.route_name.clone(),
-            description: detail.route.description.clone(),
-            is_enabled: detail.route.is_enabled,
-            expose_in_models: detail.route.expose_in_models,
-            candidates: detail
-                .candidates
-                .iter()
-                .map(|candidate| CacheModelRouteCandidate {
-                    route_id: candidate.candidate.route_id,
-                    model_id: candidate.candidate.model_id,
-                    provider_id: candidate.provider_id,
-                    priority: candidate.candidate.priority,
-                    is_enabled: candidate.candidate.is_enabled,
-                })
-                .collect(),
-        }
-    }
-}
-
-impl From<ApiKeyModelOverride> for CacheApiKeyModelOverride {
-    fn from(db: ApiKeyModelOverride) -> Self {
-        Self {
-            id: db.id,
-            api_key_id: db.api_key_id,
-            source_name: db.source_name,
-            target_route_id: db.target_route_id,
-            description: db.description,
             is_enabled: db.is_enabled,
         }
     }

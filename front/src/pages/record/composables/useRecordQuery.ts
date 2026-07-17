@@ -1,7 +1,7 @@
 import { reactive, ref } from "vue";
 import type { LocationQuery, Router, RouteLocationNormalizedLoaded } from "vue-router";
 import type { RecordListParams } from "../../../services/types";
-import type { BooleanFilter, RecordFilters } from "../types";
+import type { RecordFilters } from "../types";
 import {
   RECORD_DETAIL_TABS,
   type RecordDetailTab,
@@ -16,11 +16,7 @@ export const DEFAULT_RECORD_FILTERS: RecordFilters = {
   model_id: 0,
   status: "ALL",
   user_api_type: "ALL",
-  resolved_name_scope: "ALL",
   final_error_code: "",
-  has_retry: "ALL",
-  has_fallback: "ALL",
-  has_transform_diagnostics: "ALL",
   latency_ms_min: "",
   latency_ms_max: "",
   total_tokens_min: "",
@@ -40,15 +36,9 @@ export const VALID_RECORD_STATUSES = new Set([
   "CANCELLED",
 ]);
 
-export const VALID_BOOLEAN_FILTERS = new Set(["ALL", "true", "false"]);
-
 export const RECORD_ADVANCED_FILTER_KEYS: Array<keyof RecordFilters> = [
   "user_api_type",
-  "resolved_name_scope",
   "final_error_code",
-  "has_retry",
-  "has_fallback",
-  "has_transform_diagnostics",
   "latency_ms_min",
   "latency_ms_max",
   "total_tokens_min",
@@ -102,13 +92,6 @@ export const parseRecordStatusQuery = (value: LocationQuery[string]) => {
   return raw && VALID_RECORD_STATUSES.has(raw) ? raw : DEFAULT_RECORD_FILTERS.status;
 };
 
-export const parseRecordBooleanFilterQuery = (
-  value: LocationQuery[string],
-): BooleanFilter => {
-  const raw = getSingleRecordQueryValue(value);
-  return raw && VALID_BOOLEAN_FILTERS.has(raw) ? (raw as BooleanFilter) : "ALL";
-};
-
 export const parseRecordDetailTabQuery = (
   value: LocationQuery[string],
 ): RecordDetailTab => {
@@ -154,14 +137,7 @@ export const parseRecordQueryState = (
     model_id: acceptsEntityId(modelId, validators.hasModelId) ? modelId : 0,
     status: parseRecordStatusQuery(query.status),
     user_api_type: parseStringRecordQuery(query.user_api_type, "ALL") || "ALL",
-    resolved_name_scope:
-      parseStringRecordQuery(query.resolved_name_scope, "ALL") || "ALL",
     final_error_code: parseStringRecordQuery(query.final_error_code),
-    has_retry: parseRecordBooleanFilterQuery(query.has_retry),
-    has_fallback: parseRecordBooleanFilterQuery(query.has_fallback),
-    has_transform_diagnostics: parseRecordBooleanFilterQuery(
-      query.has_transform_diagnostics,
-    ),
     latency_ms_min: parseStringRecordQuery(query.latency_ms_min),
     latency_ms_max: parseStringRecordQuery(query.latency_ms_max),
     total_tokens_min: parseStringRecordQuery(query.total_tokens_min),
@@ -183,8 +159,6 @@ export const parseRecordQueryState = (
     filters,
     recordId: parseNullablePositiveIntRecordQuery(query.record_id),
     tab: parseRecordDetailTabQuery(query.tab),
-    attemptId: parseNullablePositiveIntRecordQuery(query.attempt_id),
-    replayRunId: parseNullablePositiveIntRecordQuery(query.replay_run_id),
     hasAdvancedFilters: RECORD_ADVANCED_FILTER_KEYS.some(
       (key) => filters[key] !== DEFAULT_RECORD_FILTERS[key],
     ),
@@ -197,8 +171,6 @@ export const buildRecordQueryFromState = (state: {
   filters: RecordFilters;
   recordId?: number | null;
   tab?: RecordDetailTab;
-  attemptId?: number | null;
-  replayRunId?: number | null;
 }) => {
   const query: Record<string, string> = {};
 
@@ -221,8 +193,6 @@ export const buildRecordQueryFromState = (state: {
     if (state.tab && state.tab !== "overview") {
       query.tab = state.tab;
     }
-    if (state.attemptId != null) query.attempt_id = String(state.attemptId);
-    if (state.replayRunId != null) query.replay_run_id = String(state.replayRunId);
   }
 
   return query;
@@ -254,11 +224,6 @@ const numberRecordParam = (value: string) => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
-const booleanRecordParam = (value: BooleanFilter) => {
-  if (value === "ALL") return undefined;
-  return value === "true";
-};
-
 const timestampRecordParam = (value: string) => {
   if (!value) return undefined;
   const parsed = Date.parse(value);
@@ -277,12 +242,7 @@ export const buildRecordListParams = (
   model_id: filters.model_id || undefined,
   status: filters.status === "ALL" ? undefined : filters.status,
   user_api_type: filters.user_api_type === "ALL" ? undefined : filters.user_api_type,
-  resolved_name_scope:
-    filters.resolved_name_scope === "ALL" ? undefined : filters.resolved_name_scope,
   final_error_code: filters.final_error_code.trim() || undefined,
-  has_retry: booleanRecordParam(filters.has_retry),
-  has_fallback: booleanRecordParam(filters.has_fallback),
-  has_transform_diagnostics: booleanRecordParam(filters.has_transform_diagnostics),
   latency_ms_min: numberRecordParam(filters.latency_ms_min),
   latency_ms_max: numberRecordParam(filters.latency_ms_max),
   total_tokens_min: numberRecordParam(filters.total_tokens_min),
@@ -307,8 +267,6 @@ export function useRecordQuery(options: {
   const isAdvancedFilterOpen = ref(false);
   const selectedRecordId = ref<number | null>(null);
   const selectedTab = ref<RecordDetailTab>("overview");
-  const selectedAttemptId = ref<number | null>(null);
-  const selectedReplayRunId = ref<number | null>(null);
 
   const applyQueryToState = (query: LocationQuery) => {
     const parsed = parseRecordQueryState(
@@ -323,8 +281,6 @@ export function useRecordQuery(options: {
     searchInput.value = filters.search;
     selectedRecordId.value = parsed.recordId;
     selectedTab.value = parsed.tab;
-    selectedAttemptId.value = parsed.attemptId;
-    selectedReplayRunId.value = parsed.replayRunId;
     if (parsed.hasAdvancedFilters) {
       isAdvancedFilterOpen.value = true;
     }
@@ -337,8 +293,6 @@ export function useRecordQuery(options: {
       filters,
       recordId: selectedRecordId.value,
       tab: selectedTab.value,
-      attemptId: selectedAttemptId.value,
-      replayRunId: selectedReplayRunId.value,
     });
 
   const syncRouteWithState = async () => {
@@ -355,8 +309,6 @@ export function useRecordQuery(options: {
   const clearDetailSelection = () => {
     selectedRecordId.value = null;
     selectedTab.value = "overview";
-    selectedAttemptId.value = null;
-    selectedReplayRunId.value = null;
   };
 
   return {
@@ -367,8 +319,6 @@ export function useRecordQuery(options: {
     isAdvancedFilterOpen,
     selectedRecordId,
     selectedTab,
-    selectedAttemptId,
-    selectedReplayRunId,
     applyQueryToState,
     buildQueryFromState,
     syncRouteWithState,

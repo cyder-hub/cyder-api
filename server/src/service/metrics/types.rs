@@ -54,7 +54,6 @@ pub struct MetricsIngestOutcome {
     pub ingested: bool,
     pub skipped_existing: bool,
     pub request_rollup_deltas: usize,
-    pub attempt_rollup_deltas: usize,
     pub http_status_deltas: usize,
     pub cost_rollup_deltas: usize,
 }
@@ -90,11 +89,10 @@ pub struct MetricsRepairParams {
 pub struct MetricsRepairSummary {
     pub requested_start_time: i64,
     pub requested_end_time: i64,
-    pub expanded_replay_start_time: i64,
-    pub expanded_replay_end_time: i64,
+    pub expanded_ingest_start_time: i64,
+    pub expanded_ingest_end_time: i64,
     pub deleted_ingest_markers: usize,
     pub deleted_request_rollups: usize,
-    pub deleted_attempt_rollups: usize,
     pub deleted_http_status_rollups: usize,
     pub deleted_cost_rollups: usize,
     pub reconciliation: MetricsReconciliationSummary,

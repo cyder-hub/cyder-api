@@ -1,8 +1,4 @@
-import type {
-  ProviderRuntimeItem,
-  ProviderRuntimeListParams,
-  ProviderRuntimeSummary,
-} from "@/services/types";
+import type { ProviderRuntimeListParams, ProviderRuntimeSnapshot } from "@/services/types";
 import type { RuntimeStateBackendScope } from "@/utils/runtimeBackend";
 
 export type ProviderRuntimeFilters = Required<ProviderRuntimeListParams>;
@@ -32,12 +28,9 @@ export interface ProviderRuntimeBackendDisplayRow {
 }
 
 export interface ProviderRuntimeDataApi {
-  getProviderRuntimeList: (
+  getProviderRuntimeSnapshot: (
     params?: ProviderRuntimeListParams,
-  ) => Promise<ProviderRuntimeItem[]>;
-  getProviderRuntimeSummary: (
-    window?: ProviderRuntimeListParams["window"],
-  ) => Promise<ProviderRuntimeSummary>;
+  ) => Promise<ProviderRuntimeSnapshot>;
 }
 
 export type ProviderRuntimeTranslator = (

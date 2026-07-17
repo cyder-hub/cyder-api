@@ -19,8 +19,6 @@ const REQUIRED_KEYS = [
   "providerEditPage.sections.quickStart.identityTitle",
   "providerPage.table.status",
   "providerRuntimePage.metrics.totalLatency",
-  "recordPage.diagnostics.retentionFailed",
-  "recordPage.diagnostics.storageInventoryFailed",
 ];
 
 const RENAMED_KEYS = [
@@ -78,8 +76,6 @@ test("dynamic i18n key candidates cover known high-risk sources", () => {
     "route-title",
     "sidebar-item",
     "request-patch-prefix",
-    "alerts",
-    "notifications",
     "api-key-governance",
     "cost-options",
     "portable-config-enums",
@@ -90,7 +86,8 @@ test("dynamic i18n key candidates cover known high-risk sources", () => {
 
   assert.equal(
     DYNAMIC_I18N_FALLBACK_EXCEPTIONS.some(
-      (exception) => exception.id === "record-replay-unavailable-reason",
+      (exception) =>
+        exception.id === "portable-config-unknown-module-or-subrange",
     ),
     true,
   );

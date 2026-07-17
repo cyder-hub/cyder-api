@@ -15,21 +15,22 @@ The codebase already has:
 
 - multi-protocol proxying for OpenAI, Responses, Anthropic, Gemini, and Ollama
 - deep protocol transformation, including streaming/tool/reasoning/multimodal paths
-- provider/model/model-route/api-key management
+- provider/model/api-key management
 - API key governance with expiry, RPM, concurrency, quota, and budget
-- provider runtime aggregation and dashboard alerts
+- provider runtime aggregation and dashboard operational signals
 - request patch rules with explain/conflict/runtime trace
-- request log persistence with object-storage bundles
+- request-level log persistence with status, timing, token, and cost summaries
 - cost catalog/version/component/template/preview flows
 
-The most important missing capabilities today are:
+Model routes, request attempts, retry/fallback, request replay/bundles,
+alert/notification delivery, and the generic System Config control plane were
+deliberately removed before 1.0. Do not restore their old DTOs, tables,
+configuration layers, or disabled skeletons. Future designs must follow the
+records under `task/refactor/` and begin from explicit domain contracts.
 
-- request-level retry / fallback
-- execution-time use of full route candidate queues
-- replay/debug tooling
-- proactive alert channels
-- fuller transform diagnostics productization
-- manager auth hardening
+The most important remaining capability work is manager auth hardening and
+careful productization of transform diagnostics without recreating the retired
+request bundle contract.
 
 When deciding what to build next, bias toward those areas.
 
@@ -43,7 +44,7 @@ When deciding what to build next, bias toward those areas.
 - Pinia
 - Vue Router
 - Tailwind CSS 4
-- `reka-ui` / `radix-vue`
+- `reka-ui`
 - `class-variance-authority` for variants
 
 ### Backend
@@ -76,7 +77,7 @@ When deciding what to build next, bias toward those areas.
 - `server/src/schema`: Diesel-generated schema
 - `server/src/controller`: management API handlers
 - `server/src/proxy`: gateway runtime path, auth, routing, execution, and logging
-- `server/src/service`: app state, transform, cache, storage, redis, request patch logic
+- `server/src/service`: app state, transform, cache, redis, runtime state, and request patch logic
 - `server/src/cost`: cost normalization, ledger, pricing engine, templates
 - `server/src/utils`: shared support utilities
 
@@ -86,12 +87,16 @@ Treat the product as a gateway first, not a generic admin app.
 
 Good investments:
 
-- route candidate execution and resilience
-- retry / fallback
+- direct provider/model execution stability
 - observability and runtime operations
-- replay and debugging
 - API key governance
 - cost visibility
+- manager authentication hardening
+- transform diagnostics with explicit evidence contracts
+
+Retry/fallback, routing candidates, replay, and proactive alerts may return only
+after their domain contracts are redesigned. Do not rebuild them by restoring
+the deleted tables, DTOs, configuration, or UI.
 
 Poor default investments:
 
@@ -118,10 +123,10 @@ use cyder_tools::log::{debug, info, warn, error};
 
 Prefer logs that help answer:
 
-- which provider/model/route was selected
+- which provider/model was selected
 - why a request failed
 - whether governance rejected the request
-- whether runtime state or storage/logging paths degraded
+- whether runtime state or request logging degraded
 
 ## Frontend Guide
 
@@ -155,11 +160,12 @@ The app loads configuration from:
 - `config.default.yaml` under the resolved data directory config path
 - base `config.yaml` under the resolved data directory config path, or `CYDER_CONFIG_PATH` when explicitly set
 - environment variables
-- `config.override.yaml` under the resolved data directory config path
 
-Repository/application-root `config.default.yaml`, `config.local.yaml`, `config.yaml`, `config.override.yaml`, and `config.override.history.jsonl` are not implicit persistence paths. Debug defaults derive from `.cyder/dev`; release defaults derive from `/data/cyder` unless `CYDER_DATA_DIR` is explicitly set.
+Repository/application-root `config.default.yaml`, `config.local.yaml`, and `config.yaml` are not implicit persistence paths. Debug defaults derive from `.cyder/dev`; release defaults derive from `/data/cyder` unless `CYDER_DATA_DIR` is explicitly set.
 
-`config.override.yaml` is the highest-priority, manager UI managed override file. It must only contain the system-config hot-reload allowlist; non-allowlisted settings belong in the base config file and require restart. `config.override.history.jsonl` is audit history only and is not loaded as configuration. Multi-instance mode is read-only for manager UI override writes.
+Configuration is startup-only. Change the base config or an allowlisted environment variable and restart the server. Retired `config.override.yaml` and `config.override.history.jsonl` files are ignored.
+
+Unknown top-level and nested fields in the base YAML and generated `config.default.yaml` are ignored during 1.0 development. Recognized fields still fail startup when their type, enum value, or validated value is invalid.
 
 Default `base_path` is `/ai`.
 
@@ -204,11 +210,7 @@ For Codex/AI agent execution, keep `rtk` as the outer command runner and do not 
 - If you touch transform logic, add or update transform tests.
 - If you touch pricing or governance, add assertions at the domain level, not just controller level.
 
-Current note:
-
-- backend tests are broadly healthy, but S3 storage integration tests may require a valid S3-compatible environment to verify object-storage paths fully
-
-Do not claim storage-related verification unless you actually ran it in a valid environment.
+Current backend tests are broadly healthy.
 
 ## Best Practices
 

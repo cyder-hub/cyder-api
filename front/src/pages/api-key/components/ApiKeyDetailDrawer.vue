@@ -23,7 +23,6 @@ defineProps<{
   secretReveal: ApiKeyReveal | null;
   providerNameById: Map<number, string>;
   modelNameById: Map<number, string>;
-  routeNameById: Map<number, string>;
 }>();
 
 defineEmits<{
@@ -140,7 +139,6 @@ const { t } = useI18n();
           :runtime="runtime"
           :provider-name-by-id="providerNameById"
           :model-name-by-id="modelNameById"
-          :route-name-by-id="routeNameById"
         />
       </div>
       </div>

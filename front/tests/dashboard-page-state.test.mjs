@@ -2,74 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  buildEmptyDashboardAlertsSection,
-  buildEmptyDashboardKpiSection,
-  buildEmptyDashboardResourcesSection,
+  buildEmptyDashboard,
+  buildEmptyDashboardOperationsSection,
   useDashboardData,
 } from "../src/pages/dashboard/composables/useDashboardData.ts";
-import { useDashboardAlerts } from "../src/pages/dashboard/composables/useDashboardAlerts.ts";
+import { useDashboardOperations } from "../src/pages/dashboard/composables/useDashboardOperations.ts";
 
 function createApiMock(overrides = {}) {
   return {
-    getSystemDashboardKpi: overrides.getSystemDashboardKpi,
-    getSystemDashboardResources: overrides.getSystemDashboardResources,
-    getSystemDashboardAlerts: overrides.getSystemDashboardAlerts,
+    getSystemDashboard: overrides.getSystemDashboard,
   };
 }
 
-function buildKpiSection(overrides = {}) {
+function buildOperationsSection(overrides = {}) {
   return {
-    ...buildEmptyDashboardKpiSection(),
-    today: {
-      ...buildEmptyDashboardKpiSection().today,
-      request_count: 42,
-      success_count: 40,
-      error_count: 2,
-      total_cost: { USD: 1230000000 },
-      ...overrides.today,
-    },
-    runtime: {
-      ...buildEmptyDashboardKpiSection().runtime,
-      open_count: 1,
-      degraded_count: 2,
-      ...overrides.runtime,
-    },
-  };
-}
-
-function buildResourcesSection(overrides = {}) {
-  return {
-    ...buildEmptyDashboardResourcesSection(),
-    overview: {
-      ...buildEmptyDashboardResourcesSection().overview,
-      provider_count: 5,
-      enabled_provider_count: 4,
-      ...overrides.overview,
-    },
-    today: {
-      ...buildEmptyDashboardResourcesSection().today,
-      active_provider_count: 3,
-      active_model_count: 7,
-      active_api_key_count: 2,
-      ...overrides.today,
-    },
-    runtime: {
-      ...buildEmptyDashboardResourcesSection().runtime,
-      healthy_count: 3,
-      ...overrides.runtime,
-    },
-    runtime_state_backend: {
-      ...buildEmptyDashboardResourcesSection().runtime_state_backend,
-      ...overrides.runtime_state_backend,
-    },
-  };
-}
-
-function buildAlertsSection(overrides = {}) {
-  return {
-    ...buildEmptyDashboardAlertsSection(),
-    alerts: {
-      ...buildEmptyDashboardAlertsSection().alerts,
+    ...buildEmptyDashboardOperationsSection(),
+    operational_signals: {
+      ...buildEmptyDashboardOperationsSection().operational_signals,
       open_providers: [
         {
           provider_id: 2,
@@ -109,7 +58,7 @@ function buildAlertsSection(overrides = {}) {
           total_cost: { USD: 4560000000 },
         },
       ],
-      ...overrides.alerts,
+      ...overrides.operational_signals,
     },
     top_providers: overrides.top_providers || [
       {
@@ -139,32 +88,69 @@ function buildAlertsSection(overrides = {}) {
   };
 }
 
-test("dashboard page state loads all sections and derives alert-focused state", async () => {
+function buildDashboardResponse(overrides = {}) {
+  const empty = buildEmptyDashboard();
+  const operationsSection = buildOperationsSection(overrides);
+  return {
+    ...empty,
+    overview: {
+      ...empty.overview,
+      provider_count: 5,
+      enabled_provider_count: 4,
+      ...overrides.overview,
+    },
+    today: {
+      ...empty.today,
+      request_count: 42,
+      success_count: 40,
+      error_count: 2,
+      total_cost: { USD: 1230000000 },
+      active_provider_count: 3,
+      active_model_count: 7,
+      active_api_key_count: 2,
+      ...overrides.today,
+    },
+    runtime: {
+      ...empty.runtime,
+      healthy_count: 3,
+      open_count: 1,
+      degraded_count: 2,
+      ...overrides.runtime,
+    },
+    runtime_state_backend: {
+      ...empty.runtime_state_backend,
+      ...overrides.runtime_state_backend,
+    },
+    operational_signals: operationsSection.operational_signals,
+    top_providers: operationsSection.top_providers,
+    top_models: operationsSection.top_models,
+  };
+}
+
+test("dashboard page state loads all sections and derives operational state", async () => {
   const state = useDashboardData({
     api: createApiMock({
-      getSystemDashboardKpi: async () => buildKpiSection(),
-      getSystemDashboardResources: async () => buildResourcesSection(),
-      getSystemDashboardAlerts: async () => buildAlertsSection(),
+      getSystemDashboard: async () => buildDashboardResponse(),
     }),
     getUnknownErrorMessage: () => "unknown",
   });
 
   await state.fetchDashboard();
-  const alerts = useDashboardAlerts(state.alertsSection);
+  const operations = useDashboardOperations(state.operationsSection);
 
   assert.equal(state.kpiError.value, null);
   assert.equal(state.resourcesError.value, null);
-  assert.equal(state.alertsError.value, null);
+  assert.equal(state.operationsError.value, null);
   assert.equal(state.kpiSection.value.today.request_count, 42);
   assert.equal(state.resourcesSection.value.overview.provider_count, 5);
   assert.equal(
     state.resourcesSection.value.runtime_state_backend.runtime_effective_backend,
     "memory",
   );
-  assert.equal(state.alertsSection.value.top_providers.length, 1);
-  assert.equal(alerts.showCostHotspots.value, true);
+  assert.equal(state.operationsSection.value.top_providers.length, 1);
+  assert.equal(operations.showCostHotspots.value, true);
   assert.deepEqual(
-    alerts.unstableProviders.value.map((item) => [item.provider_id, item.runtime_level]),
+    operations.unstableProviders.value.map((item) => [item.provider_id, item.runtime_level]),
     [
       [1, "half_open"],
       [2, "open"],
@@ -176,9 +162,8 @@ test("dashboard page state loads all sections and derives alert-focused state", 
 test("dashboard page state preserves catalog configured effective fallback status", async () => {
   const state = useDashboardData({
     api: createApiMock({
-      getSystemDashboardKpi: async () => buildKpiSection(),
-      getSystemDashboardResources: async () =>
-        buildResourcesSection({
+      getSystemDashboard: async () =>
+        buildDashboardResponse({
           runtime_state_backend: {
             catalog_cache_backend: "memory",
             catalog_cache_configured_backend: "redis",
@@ -186,7 +171,6 @@ test("dashboard page state preserves catalog configured effective fallback statu
             catalog_cache_fallback_reason: "redis_config_missing",
           },
         }),
-      getSystemDashboardAlerts: async () => buildAlertsSection(),
     }),
   });
 
@@ -202,61 +186,56 @@ test("dashboard page state preserves catalog configured effective fallback statu
 test("dashboard page state preserves stable empty sections without errors", async () => {
   const state = useDashboardData({
     api: createApiMock({
-      getSystemDashboardKpi: async () => buildEmptyDashboardKpiSection(),
-      getSystemDashboardResources: async () => buildEmptyDashboardResourcesSection(),
-      getSystemDashboardAlerts: async () => buildEmptyDashboardAlertsSection(),
+      getSystemDashboard: async () => buildEmptyDashboard(),
     }),
   });
 
   await state.fetchDashboard();
-  const alerts = useDashboardAlerts(state.alertsSection);
+  const operations = useDashboardOperations(state.operationsSection);
 
   assert.equal(state.kpiSection.value.today.request_count, 0);
   assert.equal(state.resourcesSection.value.overview.provider_count, 0);
-  assert.deepEqual(state.alertsSection.value.alerts.top_error_providers, []);
-  assert.equal(alerts.showCostHotspots.value, false);
-  assert.deepEqual(alerts.unstableProviders.value, []);
+  assert.deepEqual(
+    state.operationsSection.value.operational_signals.top_error_providers,
+    [],
+  );
+  assert.equal(operations.showCostHotspots.value, false);
+  assert.deepEqual(operations.unstableProviders.value, []);
 });
 
-test("dashboard page state degrades only the failed section", async () => {
+test("dashboard page state degrades the failed snapshot as a unit", async () => {
   const state = useDashboardData({
     api: createApiMock({
-      getSystemDashboardKpi: async () => buildKpiSection({ today: { request_count: 8 } }),
-      getSystemDashboardResources: async () => {
-        throw new Error("resources failed");
+      getSystemDashboard: async () => {
+        throw new Error("dashboard failed");
       },
-      getSystemDashboardAlerts: async () => buildAlertsSection({
-        alerts: { top_cost_providers: [], top_cost_models: [] },
-      }),
     }),
     getUnknownErrorMessage: () => "unknown",
   });
 
   await state.fetchDashboard();
-  const alerts = useDashboardAlerts(state.alertsSection);
+  const operations = useDashboardOperations(state.operationsSection);
 
-  assert.equal(state.kpiError.value, null);
-  assert.equal(state.alertsError.value, null);
-  assert.equal(state.resourcesError.value, "resources failed");
-  assert.equal(state.kpiSection.value.today.request_count, 8);
+  assert.equal(state.kpiError.value, "dashboard failed");
+  assert.equal(state.operationsError.value, "dashboard failed");
+  assert.equal(state.resourcesError.value, "dashboard failed");
+  assert.equal(state.kpiSection.value.today.request_count, 0);
   assert.equal(state.resourcesSection.value.overview.provider_count, 0);
-  assert.equal(state.alertsSection.value.top_models.length, 1);
-  assert.equal(alerts.showCostHotspots.value, false);
+  assert.equal(state.operationsSection.value.top_models.length, 0);
+  assert.equal(operations.showCostHotspots.value, false);
 });
 
-test("dashboard page state clears stale section errors after a successful refresh", async () => {
-  let alertsCallCount = 0;
+test("dashboard page state clears stale snapshot errors after a successful refresh", async () => {
+  let callCount = 0;
   const state = useDashboardData({
     api: createApiMock({
-      getSystemDashboardKpi: async () => buildKpiSection(),
-      getSystemDashboardResources: async () => buildResourcesSection(),
-      getSystemDashboardAlerts: async () => {
-        alertsCallCount += 1;
-        if (alertsCallCount === 1) {
-          throw new Error("alerts failed");
+      getSystemDashboard: async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          throw new Error("dashboard failed");
         }
-        return buildAlertsSection({
-          alerts: {
+        return buildDashboardResponse({
+          operational_signals: {
             open_providers: [],
             half_open_providers: [],
             top_cost_providers: [],
@@ -270,14 +249,14 @@ test("dashboard page state clears stale section errors after a successful refres
   });
 
   await state.fetchDashboard();
-  assert.equal(state.alertsError.value, "alerts failed");
-  assert.equal(state.alertsSection.value.top_providers.length, 0);
+  assert.equal(state.operationsError.value, "dashboard failed");
+  assert.equal(state.operationsSection.value.top_providers.length, 0);
 
   await state.fetchDashboard();
-  const alerts = useDashboardAlerts(state.alertsSection);
+  const operations = useDashboardOperations(state.operationsSection);
 
-  assert.equal(state.alertsError.value, null);
-  assert.equal(state.alertsSection.value.top_providers.length, 0);
-  assert.equal(alerts.showCostHotspots.value, false);
-  assert.deepEqual(alerts.unstableProviders.value, []);
+  assert.equal(state.operationsError.value, null);
+  assert.equal(state.operationsSection.value.top_providers.length, 0);
+  assert.equal(operations.showCostHotspots.value, false);
+  assert.deepEqual(operations.unstableProviders.value, []);
 });

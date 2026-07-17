@@ -87,7 +87,6 @@ function registry(overrides = {}) {
         subranges: [
           subrange("api_key_core", { required: true, contains_secrets: true }),
           subrange("api_key_acl"),
-          subrange("api_key_model_override"),
         ],
       }),
       module("cost_catalogs", {
@@ -197,7 +196,6 @@ test("portable export defaults select core modules and required/default subrange
   assert.deepEqual(selections[1].subranges, [
     "api_key_core",
     "api_key_acl",
-    "api_key_model_override",
   ]);
 });
 
@@ -340,50 +338,6 @@ test("portable import apply gates selected modules on non-ignorable blocking iss
       dangerousPatchConfirmations: [],
     }),
     "module_blocking",
-  );
-});
-
-test("portable import apply allows missing route override blocks to be skipped by backend", () => {
-  const routeOverridePreview = preview({
-    modules: [
-      preview().modules[0],
-      {
-        ...preview().modules[1],
-        summary: summary({ total: 2, create: 1, blocked: 1 }),
-        blocking_issues: [
-          {
-            code: "missing_dependency",
-            message: "route missing",
-            path: "$.modules[1].items[0].model_overrides[0]",
-            target: null,
-            module_id: "api_keys",
-            subrange_id: "api_key_model_override",
-          },
-        ],
-      },
-    ],
-  });
-
-  assert.equal(hasPortableBlockingState(routeOverridePreview), true);
-  assert.equal(
-    getPortableApplyDisabledReasonCode({
-      preview: routeOverridePreview,
-      selectedModules: createDefaultPortableImportSelections(routeOverridePreview),
-      conflictStrategy: "fail_on_conflict",
-      reason: "restore config",
-      dangerousPatchConfirmations: [],
-    }),
-    null,
-  );
-  assert.equal(
-    canApplyPortableImport({
-      preview: routeOverridePreview,
-      selectedModules: createDefaultPortableImportSelections(routeOverridePreview),
-      conflictStrategy: "fail_on_conflict",
-      reason: "restore config",
-      dangerousPatchConfirmations: [],
-    }),
-    true,
   );
 });
 

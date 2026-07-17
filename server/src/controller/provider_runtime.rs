@@ -4,21 +4,19 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
-use chrono::Utc;
 
 use crate::controller::BaseError;
 use crate::service::app_state::{AppState, StateRouter, create_state_router};
 use crate::service::metrics::provider_runtime::{
-    ProviderRuntimeItem, ProviderRuntimeLevel, ProviderRuntimeListParams, ProviderRuntimeSummary,
-    ProviderRuntimeSummaryParams, matches_status_filter, runtime_backend_status_for_provider_items,
-    search_matches, sort_provider_runtime_items,
+    ProviderRuntimeListParams, ProviderRuntimeSnapshot, matches_status_filter, search_matches,
+    sort_provider_runtime_items,
 };
 use crate::utils::HttpResult;
 
-async fn list_provider_runtime(
+async fn provider_runtime_snapshot(
     State(app_state): State<Arc<AppState>>,
     Query(params): Query<ProviderRuntimeListParams>,
-) -> Result<HttpResult<Vec<ProviderRuntimeItem>>, BaseError> {
+) -> Result<HttpResult<ProviderRuntimeSnapshot>, BaseError> {
     let window = params
         .window
         .unwrap_or_else(|| app_state.metrics.default_provider_runtime_window());
@@ -26,6 +24,10 @@ async fn list_provider_runtime(
         .metrics
         .build_provider_runtime_items(&app_state, window, params.only_enabled)
         .await?;
+    let summary = app_state
+        .metrics
+        .provider_runtime_summary_from_items(&app_state, window, &items)
+        .await;
 
     if let Some(search) = params.search.as_ref().map(|value| value.trim()) {
         if !search.is_empty() {
@@ -36,52 +38,13 @@ async fn list_provider_runtime(
     items.retain(|item| matches_status_filter(item.runtime_level, params.status));
     sort_provider_runtime_items(&mut items, params.sort, params.direction);
 
-    Ok(HttpResult::new(items))
-}
-
-async fn summary_provider_runtime(
-    State(app_state): State<Arc<AppState>>,
-    Query(params): Query<ProviderRuntimeSummaryParams>,
-) -> Result<HttpResult<ProviderRuntimeSummary>, BaseError> {
-    let window = params
-        .window
-        .unwrap_or_else(|| app_state.metrics.default_provider_runtime_window());
-    let items = app_state
-        .metrics
-        .build_provider_runtime_items(&app_state, window, params.only_enabled)
-        .await?;
-    let runtime_state_backend = runtime_backend_status_for_provider_items(&app_state, &items).await;
-    let mut summary = ProviderRuntimeSummary {
-        total_provider_count: items.len() as i64,
-        healthy_count: 0,
-        degraded_count: 0,
-        half_open_count: 0,
-        open_count: 0,
-        no_traffic_count: 0,
-        window,
-        generated_at: Utc::now().timestamp_millis(),
-        runtime_state_backend,
-    };
-
-    for item in items {
-        match item.runtime_level {
-            ProviderRuntimeLevel::Healthy => summary.healthy_count += 1,
-            ProviderRuntimeLevel::Degraded => summary.degraded_count += 1,
-            ProviderRuntimeLevel::HalfOpen => summary.half_open_count += 1,
-            ProviderRuntimeLevel::Open => summary.open_count += 1,
-            ProviderRuntimeLevel::NoTraffic => summary.no_traffic_count += 1,
-        }
-    }
-
-    Ok(HttpResult::new(summary))
+    Ok(HttpResult::new(ProviderRuntimeSnapshot { items, summary }))
 }
 
 pub fn create_provider_runtime_router() -> StateRouter {
     create_state_router().nest(
         "/provider/runtime",
-        create_state_router()
-            .route("/list", get(list_provider_runtime))
-            .route("/summary", get(summary_provider_runtime)),
+        create_state_router().route("/snapshot", get(provider_runtime_snapshot)),
     )
 }
 
@@ -99,6 +62,8 @@ mod tests {
     use super::create_provider_runtime_router;
     use crate::config::MetricsConfig;
     use crate::database::TestDbContext;
+    use crate::database::provider::{NewProvider, Provider};
+    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
     use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::metrics::MetricsService;
 
@@ -133,8 +98,24 @@ mod tests {
         serde_json::from_slice(&body).expect("response should be JSON")
     }
 
+    fn insert_provider(id: i64, is_enabled: bool) {
+        Provider::create(&NewProvider {
+            id,
+            provider_key: format!("provider-{id}"),
+            name: format!("Provider {id}"),
+            endpoint: "https://example.com".to_string(),
+            use_proxy: false,
+            is_enabled,
+            created_at: 1,
+            updated_at: 1,
+            provider_type: ProviderType::Openai,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        })
+        .expect("provider should insert");
+    }
+
     #[tokio::test]
-    async fn summary_uses_config_default_window_and_query_override() {
+    async fn snapshot_uses_config_default_window_and_query_override() {
         let context = TestDbContext::new_sqlite("provider-runtime-default-window.sqlite");
         context
             .run_async(async {
@@ -147,19 +128,19 @@ mod tests {
                     },
                 );
 
-                let response = send(&app_state, "/provider/runtime/summary").await;
+                let response = send(&app_state, "/provider/runtime/snapshot").await;
                 assert_eq!(response.status(), StatusCode::OK);
                 let body = response_json(response).await;
                 assert_eq!(
-                    body.pointer("/data/window").and_then(Value::as_str),
+                    body.pointer("/data/summary/window").and_then(Value::as_str),
                     Some("15m")
                 );
 
-                let response = send(&app_state, "/provider/runtime/summary?window=6h").await;
+                let response = send(&app_state, "/provider/runtime/snapshot?window=6h").await;
                 assert_eq!(response.status(), StatusCode::OK);
                 let body = response_json(response).await;
                 assert_eq!(
-                    body.pointer("/data/window").and_then(Value::as_str),
+                    body.pointer("/data/summary/window").and_then(Value::as_str),
                     Some("6h")
                 );
             })
@@ -167,7 +148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_falls_back_to_one_hour_for_invalid_config_default_window() {
+    async fn snapshot_falls_back_to_one_hour_for_invalid_config_default_window() {
         let context = TestDbContext::new_sqlite("provider-runtime-invalid-default-window.sqlite");
         context
             .run_async(async {
@@ -180,12 +161,58 @@ mod tests {
                     },
                 );
 
-                let response = send(&app_state, "/provider/runtime/summary").await;
+                let response = send(&app_state, "/provider/runtime/snapshot").await;
                 assert_eq!(response.status(), StatusCode::OK);
                 let body = response_json(response).await;
                 assert_eq!(
-                    body.pointer("/data/window").and_then(Value::as_str),
+                    body.pointer("/data/summary/window").and_then(Value::as_str),
                     Some("1h")
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_builds_summary_and_filtered_items_from_one_provider_set() {
+        let context = TestDbContext::new_sqlite("provider-runtime-snapshot-filter.sqlite");
+        context
+            .run_async(async {
+                insert_provider(1, true);
+                insert_provider(2, false);
+                let app_state = create_test_app_state(context.clone()).await;
+
+                let response = send(&app_state, "/provider/runtime/snapshot").await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response_json(response).await;
+                assert_eq!(
+                    body.pointer("/data/summary/total_provider_count")
+                        .and_then(Value::as_i64),
+                    Some(1)
+                );
+                assert_eq!(
+                    body.pointer("/data/items")
+                        .and_then(Value::as_array)
+                        .map(Vec::len),
+                    Some(1)
+                );
+
+                let response = send(
+                    &app_state,
+                    "/provider/runtime/snapshot?only_enabled=false&search=no-match",
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response_json(response).await;
+                assert_eq!(
+                    body.pointer("/data/summary/total_provider_count")
+                        .and_then(Value::as_i64),
+                    Some(2)
+                );
+                assert_eq!(
+                    body.pointer("/data/items")
+                        .and_then(Value::as_array)
+                        .map(Vec::len),
+                    Some(0)
                 );
             })
             .await;

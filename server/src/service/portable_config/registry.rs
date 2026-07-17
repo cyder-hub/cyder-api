@@ -129,8 +129,7 @@ pub fn module_registry() -> Vec<PortableModuleRegistryItem> {
         PortableModuleRegistryItem {
             module_id: PortableModuleId::ApiKeys,
             label: "API Keys".to_string(),
-            description: "Downstream API keys, ACL rules, and model override references."
-                .to_string(),
+            description: "Downstream API keys and provider/model ACL rules.".to_string(),
             module_version: PORTABLE_MODULE_VERSION_V1,
             default_selected: true,
             contains_secrets: true,
@@ -156,15 +155,6 @@ pub fn module_registry() -> Vec<PortableModuleRegistryItem> {
                 subrange(
                     PortableSubrangeId::ApiKeyAcl,
                     "ACL rules",
-                    true,
-                    false,
-                    false,
-                    false,
-                    None,
-                ),
-                subrange(
-                    PortableSubrangeId::ApiKeyModelOverride,
-                    "Model overrides",
                     true,
                     false,
                     false,

@@ -63,7 +63,7 @@ export function useProviderList() {
 
   const loadRuntimeLevels = async () => {
     try {
-      const runtimeItems = await providerRuntimeService.getProviderRuntimeList({
+      const { items: runtimeItems } = await providerRuntimeService.getProviderRuntimeSnapshot({
         window: "1h",
         only_enabled: false,
       });

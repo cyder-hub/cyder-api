@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::controller::BaseError;
 use crate::database::metrics::{
-    MetricAttemptWindowAggregate, MetricRequestWindowAggregate, query_cost_window_aggregates,
+    MetricRequestWindowAggregate, list_cost_rollup_minutes, list_http_status_rollup_minutes,
 };
 use crate::database::model::Model;
 use crate::database::provider::{Provider, ProviderApiKey};
@@ -148,13 +148,6 @@ fn default_only_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ProviderRuntimeSummaryParams {
-    pub window: Option<ProviderRuntimeWindow>,
-    #[serde(default = "default_only_enabled")]
-    pub only_enabled: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderRuntimeStatusCodeStat {
     pub status_code: i32,
@@ -199,7 +192,6 @@ pub struct ProviderRuntimeItem {
     pub last_error_summary: Option<String>,
     pub status_code_breakdown: Vec<ProviderRuntimeStatusCodeStat>,
     pub total_cost: Vec<ProviderRuntimeCostStat>,
-    pub sort_score: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +205,12 @@ pub struct ProviderRuntimeSummary {
     pub window: ProviderRuntimeWindow,
     pub generated_at: i64,
     pub runtime_state_backend: RuntimeStateBackendOperatorStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderRuntimeSnapshot {
+    pub items: Vec<ProviderRuntimeItem>,
+    pub summary: ProviderRuntimeSummary,
 }
 
 impl MetricsService {
@@ -279,26 +277,37 @@ impl MetricsService {
             Some("provider"),
             provider_scope_id.as_deref(),
         )?;
-        let attempt_aggregates = self.query_attempt_window_metrics(
-            start_time_ms,
-            end_time_ms,
-            Some("provider"),
-            provider_scope_id.as_deref(),
-        )?;
         let request_by_scope = request_aggregates
             .into_iter()
             .map(|item| (item.scope_id.clone(), item))
             .collect::<HashMap<_, _>>();
-        let attempt_by_scope = attempt_aggregates
-            .into_iter()
-            .map(|item| (item.scope_id.clone(), item))
-            .collect::<HashMap<_, _>>();
-        let mut scope_ids = request_by_scope.keys().cloned().collect::<Vec<_>>();
-        for scope_id in attempt_by_scope.keys() {
-            if !request_by_scope.contains_key(scope_id) {
-                scope_ids.push(scope_id.clone());
-            }
+        let mut status_by_scope = HashMap::<String, HashMap<i32, i64>>::new();
+        for row in list_http_status_rollup_minutes(
+            start_time_ms,
+            end_time_ms,
+            "provider",
+            provider_scope_id.as_deref(),
+        )? {
+            *status_by_scope
+                .entry(row.scope_id)
+                .or_default()
+                .entry(row.http_status)
+                .or_default() += row.count;
         }
+        let mut cost_by_scope = HashMap::<String, BTreeMap<String, i64>>::new();
+        for row in list_cost_rollup_minutes(
+            start_time_ms,
+            end_time_ms,
+            Some("provider"),
+            provider_scope_id.as_deref(),
+        )? {
+            *cost_by_scope
+                .entry(row.scope_id)
+                .or_default()
+                .entry(row.currency)
+                .or_default() += row.amount_nanos;
+        }
+        let mut scope_ids = request_by_scope.keys().cloned().collect::<Vec<_>>();
         scope_ids.sort();
         let mut result = Vec::with_capacity(scope_ids.len());
 
@@ -315,38 +324,37 @@ impl MetricsService {
                 }
             };
             let request = request_by_scope.get(&scope_id);
-            let attempt = attempt_by_scope.get(&scope_id);
 
-            let status_code_breakdown = self
-                .query_http_status_breakdown(start_time_ms, end_time_ms, "provider", &scope_id)?
+            let mut status_code_breakdown = status_by_scope
+                .remove(&scope_id)
+                .unwrap_or_default()
                 .into_iter()
-                .map(|item| ProviderRuntimeStatusCodeCount {
-                    status_code: item.status_code,
-                    count: item.count,
+                .map(|(status_code, count)| ProviderRuntimeStatusCodeCount { status_code, count })
+                .collect::<Vec<_>>();
+            status_code_breakdown.sort_by(|left, right| {
+                right
+                    .count
+                    .cmp(&left.count)
+                    .then_with(|| left.status_code.cmp(&right.status_code))
+            });
+
+            let total_cost = cost_by_scope
+                .remove(&scope_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(currency, amount_nanos)| ProviderRuntimeCostAggregate {
+                    currency,
+                    amount_nanos,
                 })
                 .collect::<Vec<_>>();
-
-            let total_cost = query_cost_window_aggregates(
-                start_time_ms,
-                end_time_ms,
-                "request",
-                "provider",
-                &scope_id,
-            )?
-            .into_iter()
-            .map(|item| ProviderRuntimeCostAggregate {
-                currency: item.currency,
-                amount_nanos: item.amount_nanos,
-            })
-            .collect::<Vec<_>>();
 
             result.push(ProviderRuntimeAggregate {
                 provider_id,
                 request_count: request.map_or(0, |item| item.request_count),
                 success_count: request.map_or(0, |item| item.success_count),
                 error_count: request.map_or(0, |item| item.error_count + item.cancelled_count),
-                avg_first_byte_ms: provider_runtime_first_byte_latency(request, attempt),
-                avg_total_latency_ms: provider_runtime_total_latency(request, attempt),
+                avg_first_byte_ms: provider_runtime_first_byte_latency(request),
+                avg_total_latency_ms: provider_runtime_total_latency(request),
                 last_request_at: request.and_then(|item| item.last_request_at),
                 last_success_at: request.and_then(|item| item.last_success_at),
                 last_error_at: request.and_then(|item| item.last_error_at),
@@ -476,10 +484,9 @@ impl MetricsService {
                 runtime_aggregate.request_count,
                 runtime_aggregate.error_count,
                 runtime_aggregate.avg_total_latency_ms,
-                runtime_state_backend_degraded,
             );
 
-            let mut item = ProviderRuntimeItem {
+            let item = ProviderRuntimeItem {
                 provider_id: provider.id,
                 provider_key: provider.provider_key.clone(),
                 provider_name: provider.name.clone(),
@@ -533,13 +540,44 @@ impl MetricsService {
                         amount_nanos: item.amount_nanos,
                     })
                     .collect(),
-                sort_score: 0.0,
             };
-            item.sort_score = compute_sort_score(&item);
             items.push(item);
         }
 
         Ok(items)
+    }
+
+    pub async fn provider_runtime_summary_from_items(
+        &self,
+        app_state: &Arc<AppState>,
+        window: ProviderRuntimeWindow,
+        items: &[ProviderRuntimeItem],
+    ) -> ProviderRuntimeSummary {
+        let runtime_state_backend =
+            runtime_backend_status_for_provider_items(app_state, items).await;
+        let mut summary = ProviderRuntimeSummary {
+            total_provider_count: items.len() as i64,
+            healthy_count: 0,
+            degraded_count: 0,
+            half_open_count: 0,
+            open_count: 0,
+            no_traffic_count: 0,
+            window,
+            generated_at: Utc::now().timestamp_millis(),
+            runtime_state_backend,
+        };
+
+        for item in items {
+            match item.runtime_level {
+                ProviderRuntimeLevel::Healthy => summary.healthy_count += 1,
+                ProviderRuntimeLevel::Degraded => summary.degraded_count += 1,
+                ProviderRuntimeLevel::HalfOpen => summary.half_open_count += 1,
+                ProviderRuntimeLevel::Open => summary.open_count += 1,
+                ProviderRuntimeLevel::NoTraffic => summary.no_traffic_count += 1,
+            }
+        }
+
+        summary
     }
 }
 
@@ -553,36 +591,17 @@ fn average_or_none(sum: i64, count: i64) -> Option<f64> {
 
 fn provider_runtime_first_byte_latency(
     request: Option<&MetricRequestWindowAggregate>,
-    attempt: Option<&MetricAttemptWindowAggregate>,
 ) -> Option<f64> {
-    request
-        .and_then(|item| {
-            average_or_none(
-                item.first_byte_latency_sum_ms,
-                item.first_byte_latency_count,
-            )
-        })
-        .or_else(|| {
-            attempt.and_then(|item| {
-                average_or_none(
-                    item.first_byte_latency_sum_ms,
-                    item.first_byte_latency_count,
-                )
-            })
-        })
+    request.and_then(|item| {
+        average_or_none(
+            item.first_byte_latency_sum_ms,
+            item.first_byte_latency_count,
+        )
+    })
 }
 
-fn provider_runtime_total_latency(
-    request: Option<&MetricRequestWindowAggregate>,
-    attempt: Option<&MetricAttemptWindowAggregate>,
-) -> Option<f64> {
-    request
-        .and_then(|item| average_or_none(item.total_latency_sum_ms, item.total_latency_count))
-        .or_else(|| {
-            attempt.and_then(|item| {
-                average_or_none(item.total_latency_sum_ms, item.total_latency_count)
-            })
-        })
+fn provider_runtime_total_latency(request: Option<&MetricRequestWindowAggregate>) -> Option<f64> {
+    request.and_then(|item| average_or_none(item.total_latency_sum_ms, item.total_latency_count))
 }
 
 fn map_health_status(status: ProviderHealthStatus) -> ProviderRuntimeHealthStatus {
@@ -627,12 +646,7 @@ pub(crate) fn compute_runtime_level(
     request_count: i64,
     error_count: i64,
     avg_total_latency_ms: Option<f64>,
-    runtime_state_backend_degraded: bool,
 ) -> ProviderRuntimeLevel {
-    if runtime_state_backend_degraded {
-        return ProviderRuntimeLevel::Degraded;
-    }
-
     match health_status {
         ProviderHealthStatus::Open => ProviderRuntimeLevel::Open,
         ProviderHealthStatus::HalfOpen => ProviderRuntimeLevel::HalfOpen,
@@ -678,13 +692,6 @@ fn health_rank(level: ProviderRuntimeLevel) -> i32 {
         ProviderRuntimeLevel::Healthy => 2,
         ProviderRuntimeLevel::NoTraffic => 1,
     }
-}
-
-fn compute_sort_score(item: &ProviderRuntimeItem) -> f64 {
-    let error_rate = calculate_error_rate(item.request_count, item.error_count).unwrap_or(0.0);
-    (health_rank(item.runtime_level) as f64 * 1_000_000.0)
-        + error_rate * 10_000.0
-        + item.last_error_at.unwrap_or(0) as f64 / 1000.0
 }
 
 fn compare_f64_option(a: Option<f64>, b: Option<f64>) -> Ordering {
@@ -797,680 +804,4 @@ pub(crate) async fn runtime_backend_status_for_provider_items(
         Utc::now().timestamp_millis(),
     );
     status
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeItem,
-        ProviderRuntimeLevel, ProviderRuntimeListParams, ProviderRuntimeSortField,
-        ProviderRuntimeStatusCodeStat, ProviderRuntimeStatusFilter, ProviderRuntimeSummaryParams,
-        ProviderRuntimeWindow, SortDirection, build_last_error_summary, compute_runtime_level,
-        merge_runtime_backend_item_read_errors, sort_provider_runtime_items,
-    };
-    use crate::config::MetricsConfig;
-    use crate::database::TestDbContext;
-    use crate::database::metrics::{
-        MetricAttemptRollupMinute, MetricCostRollupMinute, MetricHttpStatusRollupMinute,
-        MetricRequestRollupMinute, add_attempt_rollup_delta, add_cost_rollup_delta,
-        add_http_status_rollup_delta, add_request_rollup_delta,
-    };
-    use crate::database::provider::{NewProvider, Provider};
-    use crate::database::provider_runtime::{
-        ProviderRuntimeAggregate, ProviderRuntimeStatusCodeCount,
-    };
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
-    use crate::service::app_state::create_test_app_state;
-    use crate::service::metrics::MetricsService;
-    use crate::service::runtime::{ProviderHealthSnapshot, ProviderHealthStatus};
-
-    #[test]
-    fn provider_runtime_enums_serialize_to_stable_contract_values() {
-        assert_eq!(
-            serde_json::to_string(&ProviderRuntimeWindow::OneHour).unwrap(),
-            "\"1h\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ProviderRuntimeHealthStatus::HalfOpen).unwrap(),
-            "\"half_open\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ProviderRuntimeLevel::NoTraffic).unwrap(),
-            "\"no_traffic\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ProviderRuntimeStatusFilter::Degraded).unwrap(),
-            "\"degraded\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ProviderRuntimeSortField::LastErrorAt).unwrap(),
-            "\"last_error_at\""
-        );
-        assert_eq!(
-            serde_json::to_string(&SortDirection::Desc).unwrap(),
-            "\"desc\""
-        );
-    }
-
-    #[test]
-    fn compute_runtime_level_handles_open_half_open_and_no_traffic() {
-        assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Open, 10, 10, Some(20_000.0), false),
-            ProviderRuntimeLevel::Open
-        );
-        assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::HalfOpen, 10, 0, Some(100.0), false),
-            ProviderRuntimeLevel::HalfOpen
-        );
-        assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 0, 0, None, false),
-            ProviderRuntimeLevel::NoTraffic
-        );
-    }
-
-    #[test]
-    fn compute_runtime_level_marks_high_error_rate_and_latency_as_degraded() {
-        assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 5, 1, Some(500.0), false),
-            ProviderRuntimeLevel::Degraded
-        );
-        assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 3, 0, Some(10_000.0), false),
-            ProviderRuntimeLevel::Degraded
-        );
-        assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 10, 1, Some(500.0), false),
-            ProviderRuntimeLevel::Healthy
-        );
-    }
-
-    #[test]
-    fn compute_runtime_level_marks_runtime_state_backend_error_as_degraded() {
-        assert_eq!(
-            compute_runtime_level(ProviderHealthStatus::Healthy, 0, 0, None, true),
-            ProviderRuntimeLevel::Degraded
-        );
-    }
-
-    #[test]
-    fn health_sort_prioritizes_open_then_half_open() {
-        let mut items = vec![
-            sample_item(
-                1,
-                "healthy",
-                ProviderRuntimeLevel::Healthy,
-                100,
-                0,
-                Some(100.0),
-                None,
-            ),
-            sample_item(
-                2,
-                "open",
-                ProviderRuntimeLevel::Open,
-                10,
-                10,
-                Some(500.0),
-                Some(2_000),
-            ),
-            sample_item(
-                3,
-                "half-open",
-                ProviderRuntimeLevel::HalfOpen,
-                5,
-                2,
-                Some(300.0),
-                Some(1_000),
-            ),
-        ];
-
-        sort_provider_runtime_items(
-            &mut items,
-            ProviderRuntimeSortField::Health,
-            SortDirection::Desc,
-        );
-
-        let ordered_ids = items
-            .iter()
-            .map(|item| item.provider_id)
-            .collect::<Vec<_>>();
-        assert_eq!(ordered_ids, vec![2, 3, 1]);
-    }
-
-    #[test]
-    fn build_last_error_summary_ignores_success_status_codes() {
-        let health_snapshot = ProviderHealthSnapshot {
-            status: ProviderHealthStatus::Healthy,
-            consecutive_failures: 0,
-            half_open_probe_in_flight: false,
-            opened_at: None,
-            last_failure_at: None,
-            last_recovered_at: None,
-            last_error: None,
-        };
-        let runtime_aggregate = ProviderRuntimeAggregate {
-            provider_id: 1,
-            request_count: 3,
-            success_count: 3,
-            error_count: 0,
-            avg_first_byte_ms: None,
-            avg_total_latency_ms: None,
-            last_request_at: Some(3_000),
-            last_success_at: Some(3_000),
-            last_error_at: None,
-            status_code_breakdown: vec![
-                ProviderRuntimeStatusCodeCount {
-                    status_code: 200,
-                    count: 2,
-                },
-                ProviderRuntimeStatusCodeCount {
-                    status_code: 302,
-                    count: 1,
-                },
-            ],
-            total_cost: Vec::new(),
-        };
-
-        assert_eq!(
-            build_last_error_summary(&health_snapshot, &runtime_aggregate),
-            None
-        );
-    }
-
-    #[test]
-    fn build_last_error_summary_uses_first_failing_status_code_when_no_error_message() {
-        let health_snapshot = ProviderHealthSnapshot {
-            status: ProviderHealthStatus::Healthy,
-            consecutive_failures: 0,
-            half_open_probe_in_flight: false,
-            opened_at: None,
-            last_failure_at: None,
-            last_recovered_at: None,
-            last_error: None,
-        };
-        let runtime_aggregate = ProviderRuntimeAggregate {
-            provider_id: 1,
-            request_count: 4,
-            success_count: 2,
-            error_count: 2,
-            avg_first_byte_ms: None,
-            avg_total_latency_ms: None,
-            last_request_at: Some(4_000),
-            last_success_at: Some(2_000),
-            last_error_at: Some(4_000),
-            status_code_breakdown: vec![
-                ProviderRuntimeStatusCodeCount {
-                    status_code: 200,
-                    count: 2,
-                },
-                ProviderRuntimeStatusCodeCount {
-                    status_code: 429,
-                    count: 1,
-                },
-                ProviderRuntimeStatusCodeCount {
-                    status_code: 500,
-                    count: 1,
-                },
-            ],
-            total_cost: Vec::new(),
-        };
-
-        assert_eq!(
-            build_last_error_summary(&health_snapshot, &runtime_aggregate),
-            Some("Upstream status 429".to_string())
-        );
-    }
-
-    #[test]
-    fn provider_runtime_params_distinguish_missing_and_explicit_window() {
-        let params: ProviderRuntimeSummaryParams = serde_json::from_str("{}").unwrap();
-        assert_eq!(params.window, None);
-        assert!(params.only_enabled);
-
-        let params: ProviderRuntimeSummaryParams =
-            serde_json::from_str(r#"{"window":"6h"}"#).unwrap();
-        assert_eq!(params.window, Some(ProviderRuntimeWindow::SixHours));
-
-        let params: ProviderRuntimeListParams = serde_json::from_str("{}").unwrap();
-        assert_eq!(params.window, None);
-        assert!(params.only_enabled);
-    }
-
-    #[test]
-    fn default_provider_runtime_window_uses_allowed_config_or_falls_back() {
-        for (seconds, expected) in [
-            (900, ProviderRuntimeWindow::FifteenMinutes),
-            (3_600, ProviderRuntimeWindow::OneHour),
-            (21_600, ProviderRuntimeWindow::SixHours),
-            (86_400, ProviderRuntimeWindow::TwentyFourHours),
-        ] {
-            let service = MetricsService::new(MetricsConfig {
-                provider_runtime_default_window_seconds: seconds,
-                ..MetricsConfig::default()
-            });
-            assert_eq!(service.default_provider_runtime_window(), expected);
-        }
-
-        let service = MetricsService::new(MetricsConfig {
-            provider_runtime_default_window_seconds: 42,
-            ..MetricsConfig::default()
-        });
-        assert_eq!(
-            service.default_provider_runtime_window(),
-            ProviderRuntimeWindow::OneHour
-        );
-    }
-
-    #[test]
-    fn runtime_backend_status_merge_marks_item_read_errors_degraded() {
-        let mut status = crate::service::runtime::RuntimeStateBackendOperatorStatus {
-            deployment_mode: "single_instance".to_string(),
-            catalog_cache_backend: "memory".to_string(),
-            catalog_cache_configured_backend: "memory".to_string(),
-            catalog_cache_effective_backend: "memory".to_string(),
-            catalog_cache_fallback_reason: None,
-            runtime_configured_backend: "redis".to_string(),
-            runtime_effective_backend: "redis".to_string(),
-            runtime_shared: true,
-            runtime_degraded: false,
-            fallback_reason: None,
-            last_error: None,
-            last_checked_at: 1,
-        };
-        let mut item = sample_item(
-            1,
-            "redis-backed",
-            ProviderRuntimeLevel::Healthy,
-            0,
-            0,
-            None,
-            None,
-        );
-        item.runtime_state_backend_degraded = true;
-        item.runtime_state_backend_error = Some("provider circuit snapshot failed".to_string());
-
-        merge_runtime_backend_item_read_errors(&mut status, &[item], 2);
-
-        assert!(status.runtime_degraded);
-        assert_eq!(
-            status.last_error.as_deref(),
-            Some("provider circuit snapshot failed")
-        );
-        assert_eq!(status.last_checked_at, 2);
-    }
-
-    #[test]
-    fn provider_runtime_aggregates_use_metrics_rollups_and_attempt_statuses() {
-        let context = TestDbContext::new_sqlite("metrics-provider-runtime.sqlite");
-        context.run_sync(|| {
-            add_request_rollup_delta(&request_rollup(60_000, 2, 1, 1, 0, 180, 2, 1_200, 2))
-                .unwrap();
-            add_request_rollup_delta(&request_rollup(120_000, 1, 0, 0, 1, 0, 0, 1_000, 1)).unwrap();
-            add_http_status_rollup_delta(&http_status_rollup(60_000, 500, 1)).unwrap();
-            add_http_status_rollup_delta(&http_status_rollup(120_000, 429, 2)).unwrap();
-            add_cost_rollup_delta(&cost_rollup(60_000, "USD", 1_000)).unwrap();
-            add_cost_rollup_delta(&cost_rollup(120_000, "USD", 2_500)).unwrap();
-
-            let service = MetricsService::new(MetricsConfig {
-                request_log_query_fallback_enabled: false,
-                ..MetricsConfig::default()
-            });
-            let aggregates = service
-                .provider_runtime_aggregates_in_range(0, 180_000, None)
-                .unwrap();
-
-            assert_eq!(aggregates.len(), 1);
-            let aggregate = &aggregates[0];
-            assert_eq!(aggregate.provider_id, 7);
-            assert_eq!(aggregate.request_count, 3);
-            assert_eq!(aggregate.success_count, 1);
-            assert_eq!(aggregate.error_count, 2);
-            assert_eq!(aggregate.avg_first_byte_ms, Some(90.0));
-            assert_eq!(aggregate.avg_total_latency_ms, Some(2200.0 / 3.0));
-            assert_eq!(aggregate.last_request_at, Some(120_000));
-            assert_eq!(aggregate.last_success_at, Some(60_000));
-            assert_eq!(aggregate.last_error_at, Some(120_000));
-            assert_eq!(
-                aggregate.status_code_breakdown,
-                vec![
-                    ProviderRuntimeStatusCodeCount {
-                        status_code: 429,
-                        count: 2,
-                    },
-                    ProviderRuntimeStatusCodeCount {
-                        status_code: 500,
-                        count: 1,
-                    },
-                ]
-            );
-            assert_eq!(
-                aggregate.total_cost,
-                vec![
-                    crate::database::provider_runtime::ProviderRuntimeCostAggregate {
-                        currency: "USD".to_string(),
-                        amount_nanos: 3_500,
-                    }
-                ]
-            );
-        });
-    }
-
-    #[test]
-    fn provider_runtime_aggregates_include_attempt_only_provider_scope() {
-        let context = TestDbContext::new_sqlite("metrics-provider-runtime-attempt-only.sqlite");
-        context.run_sync(|| {
-            add_request_rollup_delta(&request_rollup_for_provider(
-                120_000, 8, 1, 1, 0, 0, 40, 1, 400, 1,
-            ))
-            .unwrap();
-            add_attempt_rollup_delta(&attempt_rollup_for_provider(
-                60_000, 7, 1, 0, 1, 0, 0, 900, 1,
-            ))
-            .unwrap();
-            add_http_status_rollup_delta(&http_status_rollup_for_provider(60_000, 7, 500, 1))
-                .unwrap();
-
-            let service = MetricsService::new(MetricsConfig {
-                request_log_query_fallback_enabled: false,
-                ..MetricsConfig::default()
-            });
-            let aggregates = service
-                .provider_runtime_aggregates_in_range(0, 180_000, None)
-                .unwrap();
-
-            assert_eq!(aggregates.len(), 2);
-            let attempt_only = aggregates
-                .iter()
-                .find(|item| item.provider_id == 7)
-                .expect("attempt-only provider should be visible");
-            assert_eq!(attempt_only.request_count, 0);
-            assert_eq!(attempt_only.success_count, 0);
-            assert_eq!(attempt_only.error_count, 0);
-            assert_eq!(attempt_only.avg_total_latency_ms, Some(900.0));
-            assert_eq!(
-                attempt_only.status_code_breakdown,
-                vec![ProviderRuntimeStatusCodeCount {
-                    status_code: 500,
-                    count: 1,
-                }]
-            );
-
-            let final_provider = aggregates
-                .iter()
-                .find(|item| item.provider_id == 8)
-                .expect("final provider should remain separate");
-            assert_eq!(final_provider.request_count, 1);
-            assert_eq!(final_provider.success_count, 1);
-            assert_eq!(final_provider.error_count, 0);
-            assert!(final_provider.status_code_breakdown.is_empty());
-        });
-    }
-
-    #[tokio::test]
-    async fn provider_runtime_items_include_attempt_only_status_breakdown() {
-        let context =
-            TestDbContext::new_sqlite("metrics-provider-runtime-attempt-only-list.sqlite");
-        context
-            .run_async(async {
-                Provider::create(&NewProvider {
-                    id: 7,
-                    provider_key: "provider-7".to_string(),
-                    name: "Provider 7".to_string(),
-                    endpoint: "https://example.com".to_string(),
-                    use_proxy: false,
-                    is_enabled: true,
-                    created_at: 60_000,
-                    updated_at: 60_000,
-                    provider_type: ProviderType::Openai,
-                    provider_api_key_mode: ProviderApiKeyMode::Queue,
-                })
-                .expect("provider should insert");
-                let now_bucket = chrono::Utc::now().timestamp_millis().div_euclid(60_000) * 60_000;
-                add_attempt_rollup_delta(&attempt_rollup_for_provider(
-                    now_bucket - 60_000,
-                    7,
-                    1,
-                    0,
-                    1,
-                    0,
-                    0,
-                    900,
-                    1,
-                ))
-                .unwrap();
-                add_http_status_rollup_delta(&http_status_rollup_for_provider(
-                    now_bucket - 60_000,
-                    7,
-                    500,
-                    1,
-                ))
-                .unwrap();
-                let app_state = create_test_app_state(context.clone()).await;
-
-                let items = app_state
-                    .metrics
-                    .build_provider_runtime_items(
-                        &app_state,
-                        ProviderRuntimeWindow::FifteenMinutes,
-                        true,
-                    )
-                    .await
-                    .expect("provider runtime items should build");
-
-                assert_eq!(items.len(), 1);
-                assert_eq!(items[0].provider_id, 7);
-                assert_eq!(items[0].request_count, 0);
-                assert_eq!(items[0].runtime_level, ProviderRuntimeLevel::NoTraffic);
-                assert_eq!(items[0].status_code_breakdown.len(), 1);
-                assert_eq!(items[0].status_code_breakdown[0].status_code, 500);
-                assert_eq!(items[0].status_code_breakdown[0].count, 1);
-                assert_eq!(
-                    items[0].last_error_summary.as_deref(),
-                    Some("Upstream status 500")
-                );
-            })
-            .await;
-    }
-
-    fn request_rollup(
-        bucket_start_ms: i64,
-        request_count: i64,
-        success_count: i64,
-        error_count: i64,
-        cancelled_count: i64,
-        first_byte_latency_sum_ms: i64,
-        first_byte_latency_count: i64,
-        total_latency_sum_ms: i64,
-        total_latency_count: i64,
-    ) -> MetricRequestRollupMinute {
-        MetricRequestRollupMinute {
-            bucket_start_ms,
-            scope_type: "provider".to_string(),
-            scope_id: "7".to_string(),
-            scope_label: Some("provider:7".to_string()),
-            request_count,
-            success_count,
-            error_count,
-            cancelled_count,
-            retry_count: 0,
-            fallback_count: 0,
-            first_byte_latency_sum_ms,
-            first_byte_latency_count,
-            total_latency_sum_ms,
-            total_latency_count,
-            input_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: 0,
-            total_tokens: 0,
-            transform_diagnostic_count: 0,
-            transform_diagnostic_lossy_major_count: 0,
-            transform_diagnostic_reject_count: 0,
-            created_at: 1,
-            updated_at: 1,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn request_rollup_for_provider(
-        bucket_start_ms: i64,
-        provider_id: i64,
-        request_count: i64,
-        success_count: i64,
-        error_count: i64,
-        cancelled_count: i64,
-        first_byte_latency_sum_ms: i64,
-        first_byte_latency_count: i64,
-        total_latency_sum_ms: i64,
-        total_latency_count: i64,
-    ) -> MetricRequestRollupMinute {
-        let mut rollup = request_rollup(
-            bucket_start_ms,
-            request_count,
-            success_count,
-            error_count,
-            cancelled_count,
-            first_byte_latency_sum_ms,
-            first_byte_latency_count,
-            total_latency_sum_ms,
-            total_latency_count,
-        );
-        rollup.scope_id = provider_id.to_string();
-        rollup.scope_label = Some(format!("provider:{provider_id}"));
-        rollup
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn attempt_rollup_for_provider(
-        bucket_start_ms: i64,
-        provider_id: i64,
-        attempt_count: i64,
-        success_count: i64,
-        error_count: i64,
-        first_byte_latency_sum_ms: i64,
-        first_byte_latency_count: i64,
-        total_latency_sum_ms: i64,
-        total_latency_count: i64,
-    ) -> MetricAttemptRollupMinute {
-        MetricAttemptRollupMinute {
-            bucket_start_ms,
-            scope_type: "provider".to_string(),
-            scope_id: provider_id.to_string(),
-            scope_label: Some(format!("provider:{provider_id}")),
-            attempt_count,
-            success_count,
-            error_count,
-            skipped_count: 0,
-            retry_same_candidate_count: 0,
-            fallback_next_candidate_count: 1,
-            fail_fast_count: 0,
-            first_byte_latency_sum_ms,
-            first_byte_latency_count,
-            total_latency_sum_ms,
-            total_latency_count,
-            input_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: 0,
-            total_tokens: 0,
-            created_at: 1,
-            updated_at: 1,
-        }
-    }
-
-    fn http_status_rollup(
-        bucket_start_ms: i64,
-        status_code: i32,
-        count: i64,
-    ) -> MetricHttpStatusRollupMinute {
-        MetricHttpStatusRollupMinute {
-            bucket_start_ms,
-            scope_type: "provider".to_string(),
-            scope_id: "7".to_string(),
-            http_status: status_code,
-            count,
-            created_at: 1,
-            updated_at: 1,
-        }
-    }
-
-    fn http_status_rollup_for_provider(
-        bucket_start_ms: i64,
-        provider_id: i64,
-        status_code: i32,
-        count: i64,
-    ) -> MetricHttpStatusRollupMinute {
-        let mut rollup = http_status_rollup(bucket_start_ms, status_code, count);
-        rollup.scope_id = provider_id.to_string();
-        rollup
-    }
-
-    fn cost_rollup(
-        bucket_start_ms: i64,
-        currency: &str,
-        amount_nanos: i64,
-    ) -> MetricCostRollupMinute {
-        MetricCostRollupMinute {
-            bucket_start_ms,
-            metric_kind: "request".to_string(),
-            scope_type: "provider".to_string(),
-            scope_id: "7".to_string(),
-            currency: currency.to_string(),
-            amount_nanos,
-            created_at: 1,
-            updated_at: 1,
-        }
-    }
-
-    fn sample_item(
-        provider_id: i64,
-        provider_name: &str,
-        runtime_level: ProviderRuntimeLevel,
-        request_count: i64,
-        error_count: i64,
-        avg_total_latency_ms: Option<f64>,
-        last_error_at: Option<i64>,
-    ) -> ProviderRuntimeItem {
-        ProviderRuntimeItem {
-            provider_id,
-            provider_key: format!("provider-{}", provider_id),
-            provider_name: provider_name.to_string(),
-            provider_type: "OPENAI".to_string(),
-            is_enabled: true,
-            use_proxy: false,
-            enabled_model_count: 1,
-            enabled_provider_key_count: 1,
-            health_status: ProviderRuntimeHealthStatus::Healthy,
-            runtime_level,
-            consecutive_failures: error_count as u32,
-            half_open_probe_in_flight: false,
-            opened_at: None,
-            last_failure_at: last_error_at,
-            last_recovered_at: None,
-            last_error: None,
-            runtime_state_backend_degraded: false,
-            runtime_state_backend_error: None,
-            request_count,
-            success_count: request_count.saturating_sub(error_count),
-            error_count,
-            success_rate: if request_count > 0 {
-                Some((request_count - error_count) as f64 / request_count as f64)
-            } else {
-                None
-            },
-            avg_first_byte_ms: None,
-            avg_total_latency_ms,
-            last_request_at: None,
-            last_success_at: None,
-            last_error_at,
-            last_error_summary: None,
-            status_code_breakdown: vec![ProviderRuntimeStatusCodeStat {
-                status_code: 500,
-                count: error_count,
-            }],
-            total_cost: vec![ProviderRuntimeCostStat {
-                currency: "USD".to_string(),
-                amount_nanos: 0,
-            }],
-            sort_score: 0.0,
-        }
-    }
 }

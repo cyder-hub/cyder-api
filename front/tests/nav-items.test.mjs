@@ -24,16 +24,16 @@ test("navigation starts with Dashboard and uses operator workflow groups", () =>
   const byPath = new Map(navItems.map((item) => [item.path, item]));
 
   assert.equal(byPath.get("/provider/runtime")?.section, "operations");
-  assert.equal(byPath.get("/alerts")?.section, "operations");
-  assert.equal(byPath.get("/notifications")?.section, "operations");
+  assert.equal(byPath.has("/alerts"), false);
+  assert.equal(byPath.has("/notifications"), false);
   assert.equal(byPath.get("/record")?.section, "traffic");
-  assert.equal(byPath.get("/model_route")?.section, "traffic");
+  assert.equal(byPath.has("/model_route"), false);
   assert.equal(byPath.get("/provider")?.section, "resources");
   assert.equal(byPath.get("/model")?.section, "resources");
   assert.equal(byPath.get("/api_key")?.section, "resources");
   assert.equal(byPath.get("/cost")?.section, "governance");
   assert.equal(byPath.get("/system/portable")?.section, "governance");
-  assert.equal(byPath.get("/system/config")?.section, "governance");
+  assert.equal(byPath.has("/system/config"), false);
   assert.equal(byPath.has("/custom_fields"), false);
   assert.equal(navItems.some((item) => item.section === "start"), false);
   assert.equal(navItems.some((item) => item.section === "overview"), false);

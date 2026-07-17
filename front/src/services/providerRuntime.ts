@@ -1,26 +1,15 @@
 import { request } from "./http";
-import {
-  buildProviderRuntimeListQuery,
-  buildProviderRuntimeSummaryQuery,
-} from "./query";
+import { buildProviderRuntimeSnapshotQuery } from "./query";
 import type {
-  ProviderRuntimeItem,
   ProviderRuntimeListParams,
-  ProviderRuntimeSummary,
+  ProviderRuntimeSnapshot,
 } from "./types";
 
-export function getProviderRuntimeList(
+export function getProviderRuntimeSnapshot(
   params: ProviderRuntimeListParams = {},
-): Promise<ProviderRuntimeItem[]> {
-  const qs = buildProviderRuntimeListQuery(params);
-  return request.get(`/ai/manager/api/provider/runtime/list${qs ? `?${qs}` : ""}`);
-}
-
-export function getProviderRuntimeSummary(
-  window?: ProviderRuntimeListParams["window"],
-): Promise<ProviderRuntimeSummary> {
-  const qs = buildProviderRuntimeSummaryQuery(window);
+): Promise<ProviderRuntimeSnapshot> {
+  const qs = buildProviderRuntimeSnapshotQuery(params);
   return request.get(
-    `/ai/manager/api/provider/runtime/summary${qs ? `?${qs}` : ""}`,
+    `/ai/manager/api/provider/runtime/snapshot${qs ? `?${qs}` : ""}`,
   );
 }

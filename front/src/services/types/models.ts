@@ -59,14 +59,6 @@ export interface ModelDetailModel {
   updated_at: number;
 }
 
-export interface ModelRouteReferenceItem {
-  id: number;
-  route_name: string;
-  description: string | null;
-  is_enabled: boolean;
-  expose_in_models: boolean;
-}
-
 export interface ModelDetailResponse {
   model: ModelDetailModel;
   request_patches: RequestPatchRule[];
@@ -75,7 +67,6 @@ export interface ModelDetailResponse {
   request_patch_explain: RequestPatchExplainEntry[];
   request_patch_conflicts: RequestPatchConflict[];
   has_request_patch_conflicts: boolean;
-  route_references: ModelRouteReferenceItem[];
 }
 
 

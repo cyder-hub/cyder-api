@@ -1,11 +1,12 @@
-use crate::service::alerts::read_model::{
-    DashboardAlertsReadModel, DashboardCostProviderAlertReadItem, DashboardProviderAlertReadItem,
-    DashboardTopProviderReadItem,
-};
 use crate::service::app_state::{AppState, StateRouter, create_state_router};
 use crate::service::metrics::dashboard::MetricsDashboardTodayStats;
 use crate::service::metrics::provider_runtime::{
     ProviderRuntimeItem, ProviderRuntimeLevel, ProviderRuntimeSummary, ProviderRuntimeWindow,
+};
+use crate::service::metrics::runtime_overview::{
+    DashboardCostProviderReadItem, DashboardOperationalSignalsReadModel,
+    DashboardProviderSignalReadItem, DashboardTopProviderReadItem,
+    operational_signals_from_runtime_items, top_providers_from_runtime_items,
 };
 use crate::service::runtime::RuntimeStateBackendOperatorStatus;
 use crate::{
@@ -255,28 +256,14 @@ pub struct DashboardResponse {
     today: DashboardTodayStats,
     runtime: DashboardRuntimeSummary,
     runtime_state_backend: RuntimeStateBackendOperatorStatus,
-    alerts: DashboardAlerts,
+    operational_signals: DashboardOperationalSignals,
     top_providers: Vec<DashboardTopProviderItem>,
     top_models: Vec<DashboardTopModelItem>,
 }
 
 #[derive(Serialize, Debug)]
-pub struct DashboardKpiSection {
-    today: DashboardTodayStats,
-    runtime: DashboardRuntimeSummary,
-}
-
-#[derive(Serialize, Debug)]
-pub struct DashboardResourcesSection {
-    overview: DashboardOverviewStats,
-    today: DashboardTodayStats,
-    runtime: DashboardRuntimeSummary,
-    runtime_state_backend: RuntimeStateBackendOperatorStatus,
-}
-
-#[derive(Serialize, Debug)]
-pub struct DashboardAlertsSection {
-    alerts: DashboardAlerts,
+pub struct DashboardOperationsSection {
+    operational_signals: DashboardOperationalSignals,
     top_providers: Vec<DashboardTopProviderItem>,
     top_models: Vec<DashboardTopModelItem>,
 }
@@ -305,17 +292,17 @@ impl From<ProviderRuntimeSummary> for DashboardRuntimeSummary {
 }
 
 #[derive(Serialize, Debug, Default)]
-pub struct DashboardAlerts {
-    open_providers: Vec<DashboardProviderAlertItem>,
-    half_open_providers: Vec<DashboardProviderAlertItem>,
-    degraded_providers: Vec<DashboardProviderAlertItem>,
-    top_error_providers: Vec<DashboardProviderAlertItem>,
-    top_cost_providers: Vec<DashboardCostProviderAlertItem>,
-    top_cost_models: Vec<DashboardCostModelAlertItem>,
+pub struct DashboardOperationalSignals {
+    open_providers: Vec<DashboardProviderSignalItem>,
+    half_open_providers: Vec<DashboardProviderSignalItem>,
+    degraded_providers: Vec<DashboardProviderSignalItem>,
+    top_error_providers: Vec<DashboardProviderSignalItem>,
+    top_cost_providers: Vec<DashboardCostProviderItem>,
+    top_cost_models: Vec<DashboardCostModelItem>,
 }
 
 #[derive(Serialize, Debug)]
-pub struct DashboardProviderAlertItem {
+pub struct DashboardProviderSignalItem {
     provider_id: i64,
     provider_key: String,
     provider_name: String,
@@ -329,7 +316,7 @@ pub struct DashboardProviderAlertItem {
 }
 
 #[derive(Serialize, Debug)]
-pub struct DashboardCostProviderAlertItem {
+pub struct DashboardCostProviderItem {
     provider_id: i64,
     provider_key: String,
     provider_name: String,
@@ -340,7 +327,7 @@ pub struct DashboardCostProviderAlertItem {
 }
 
 #[derive(Serialize, Debug)]
-pub struct DashboardCostModelAlertItem {
+pub struct DashboardCostModelItem {
     provider_id: i64,
     provider_key: String,
     model_id: i64,
@@ -364,8 +351,8 @@ pub struct DashboardTopProviderItem {
     avg_total_latency_ms: Option<f64>,
 }
 
-impl From<DashboardProviderAlertReadItem> for DashboardProviderAlertItem {
-    fn from(value: DashboardProviderAlertReadItem) -> Self {
+impl From<DashboardProviderSignalReadItem> for DashboardProviderSignalItem {
+    fn from(value: DashboardProviderSignalReadItem) -> Self {
         Self {
             provider_id: value.provider_id,
             provider_key: value.provider_key,
@@ -381,8 +368,8 @@ impl From<DashboardProviderAlertReadItem> for DashboardProviderAlertItem {
     }
 }
 
-impl From<DashboardCostProviderAlertReadItem> for DashboardCostProviderAlertItem {
-    fn from(value: DashboardCostProviderAlertReadItem) -> Self {
+impl From<DashboardCostProviderReadItem> for DashboardCostProviderItem {
+    fn from(value: DashboardCostProviderReadItem) -> Self {
         Self {
             provider_id: value.provider_id,
             provider_key: value.provider_key,
@@ -411,8 +398,8 @@ impl From<DashboardTopProviderReadItem> for DashboardTopProviderItem {
     }
 }
 
-impl From<DashboardAlertsReadModel> for DashboardAlerts {
-    fn from(value: DashboardAlertsReadModel) -> Self {
+impl From<DashboardOperationalSignalsReadModel> for DashboardOperationalSignals {
+    fn from(value: DashboardOperationalSignalsReadModel) -> Self {
         Self {
             open_providers: value.open_providers.into_iter().map(Into::into).collect(),
             half_open_providers: value
@@ -593,13 +580,13 @@ async fn system_overview_stats(
 async fn today_request_log_stats(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<TodayRequestLogStats>, BaseError> {
-    let timezone = current_runtime_timezone(&app_state).await;
+    let timezone = configured_timezone(&app_state);
     let stats = get_today_request_log_stats(timezone.as_deref())?;
     Ok(HttpResult::new(stats))
 }
 
-async fn current_runtime_timezone(app_state: &Arc<AppState>) -> Option<String> {
-    app_state.system_config.runtime_snapshot().await.timezone
+fn configured_timezone(app_state: &Arc<AppState>) -> Option<String> {
+    app_state.timezone.clone()
 }
 
 #[cfg(test)]
@@ -626,10 +613,8 @@ fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntime
     summary
 }
 
-fn cost_model_alert_item_from_top_model_item(
-    item: DashboardTopModelItem,
-) -> DashboardCostModelAlertItem {
-    DashboardCostModelAlertItem {
+fn cost_model_item_from_top_model_item(item: DashboardTopModelItem) -> DashboardCostModelItem {
+    DashboardCostModelItem {
         provider_id: item.provider_id,
         provider_key: item.provider_key,
         model_id: item.model_id,
@@ -641,38 +626,23 @@ fn cost_model_alert_item_from_top_model_item(
     }
 }
 
-async fn build_dashboard_runtime_items(
-    app_state: &Arc<AppState>,
-) -> Result<Vec<ProviderRuntimeItem>, BaseError> {
-    let window = app_state.metrics.default_provider_runtime_window();
-    app_state
-        .metrics
-        .build_provider_runtime_items(app_state, window, true)
-        .await
-}
-
-async fn build_dashboard_alerts_section(
+async fn build_dashboard_operations_section(
     app_state: &Arc<AppState>,
     runtime_items: &[ProviderRuntimeItem],
     timezone: Option<&str>,
-) -> Result<DashboardAlertsSection, BaseError> {
-    let mut alerts =
-        DashboardAlerts::from(app_state.alerts.build_dashboard_alerts_from_runtime_items(
-            runtime_items,
-            Utc::now().timestamp_millis(),
-        )?);
-    alerts.top_cost_models = app_state
+) -> Result<DashboardOperationsSection, BaseError> {
+    let mut operational_signals =
+        DashboardOperationalSignals::from(operational_signals_from_runtime_items(runtime_items));
+    operational_signals.top_cost_models = app_state
         .metrics
-        .dashboard_cost_alert_models(5, timezone)?
+        .dashboard_top_cost_models(5, timezone)?
         .into_iter()
-        .map(cost_model_alert_item_from_top_model_item)
+        .map(cost_model_item_from_top_model_item)
         .collect();
 
-    Ok(DashboardAlertsSection {
-        alerts,
-        top_providers: app_state
-            .alerts
-            .top_providers_from_runtime_items(runtime_items)
+    Ok(DashboardOperationsSection {
+        operational_signals,
+        top_providers: top_providers_from_runtime_items(runtime_items)
             .into_iter()
             .map(Into::into)
             .collect(),
@@ -683,15 +653,14 @@ async fn build_dashboard_alerts_section(
 async fn system_dashboard(
     State(app_state): State<Arc<AppState>>,
 ) -> Result<HttpResult<DashboardResponse>, BaseError> {
-    let timezone = current_runtime_timezone(&app_state).await;
+    let timezone = configured_timezone(&app_state);
     let timezone = timezone.as_deref();
     let resources = app_state
         .metrics
         .build_dashboard_resources(&app_state, timezone)
         .await?;
-    let runtime_items = build_dashboard_runtime_items(&app_state).await?;
-    let alerts_section =
-        build_dashboard_alerts_section(&app_state, &runtime_items, timezone).await?;
+    let operations_section =
+        build_dashboard_operations_section(&app_state, &resources.runtime_items, timezone).await?;
     let runtime_state_backend = resources.runtime.runtime_state_backend.clone();
 
     Ok(HttpResult::new(DashboardResponse {
@@ -699,53 +668,10 @@ async fn system_dashboard(
         today: DashboardTodayStats::from(resources.today),
         runtime: DashboardRuntimeSummary::from(resources.runtime),
         runtime_state_backend,
-        alerts: alerts_section.alerts,
-        top_providers: alerts_section.top_providers,
-        top_models: alerts_section.top_models,
+        operational_signals: operations_section.operational_signals,
+        top_providers: operations_section.top_providers,
+        top_models: operations_section.top_models,
     }))
-}
-
-async fn system_dashboard_kpi(
-    State(app_state): State<Arc<AppState>>,
-) -> Result<HttpResult<DashboardKpiSection>, BaseError> {
-    let timezone = current_runtime_timezone(&app_state).await;
-    let kpi = app_state
-        .metrics
-        .build_dashboard_kpi(&app_state, timezone.as_deref())
-        .await?;
-
-    Ok(HttpResult::new(DashboardKpiSection {
-        today: DashboardTodayStats::from(kpi.today),
-        runtime: DashboardRuntimeSummary::from(kpi.runtime),
-    }))
-}
-
-async fn system_dashboard_resources(
-    State(app_state): State<Arc<AppState>>,
-) -> Result<HttpResult<DashboardResourcesSection>, BaseError> {
-    let timezone = current_runtime_timezone(&app_state).await;
-    let resources = app_state
-        .metrics
-        .build_dashboard_resources(&app_state, timezone.as_deref())
-        .await?;
-    let runtime_state_backend = resources.runtime.runtime_state_backend.clone();
-
-    Ok(HttpResult::new(DashboardResourcesSection {
-        overview: DashboardOverviewStats::from(resources.overview),
-        today: DashboardTodayStats::from(resources.today),
-        runtime: DashboardRuntimeSummary::from(resources.runtime),
-        runtime_state_backend,
-    }))
-}
-
-async fn system_dashboard_alerts(
-    State(app_state): State<Arc<AppState>>,
-) -> Result<HttpResult<DashboardAlertsSection>, BaseError> {
-    let timezone = current_runtime_timezone(&app_state).await;
-    let runtime_items = build_dashboard_runtime_items(&app_state).await?;
-    Ok(HttpResult::new(
-        build_dashboard_alerts_section(&app_state, &runtime_items, timezone.as_deref()).await?,
-    ))
 }
 
 async fn system_usage_stats(
@@ -885,12 +811,6 @@ async fn system_usage_stats(
 pub fn routes() -> StateRouter {
     create_state_router()
         .route("/system/dashboard", get(system_dashboard))
-        .route("/system/dashboard/kpi", get(system_dashboard_kpi))
-        .route(
-            "/system/dashboard/resources",
-            get(system_dashboard_resources),
-        )
-        .route("/system/dashboard/alerts", get(system_dashboard_alerts))
         .route("/system/overview", get(system_overview_stats))
         .route("/system/today_log_stats", get(today_request_log_stats))
         .route("/system/usage_stats", get(system_usage_stats))
@@ -902,13 +822,13 @@ mod tests {
         DashboardOverviewStats, DashboardRuntimeSummary, DbDashboardOverviewStats, UsageGroupBy,
         UsageMetric, UsageStatItem, runtime_summary_from_items, top_group_keys,
     };
-    use crate::config::AlertsConfig;
-    use crate::database::TestDbContext;
-    use crate::service::alerts::AlertsService;
     use crate::service::metrics::provider_runtime::{
         ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeItem,
         ProviderRuntimeLevel, ProviderRuntimeStatusCodeStat, ProviderRuntimeWindow,
         first_runtime_backend_read_error,
+    };
+    use crate::service::metrics::runtime_overview::{
+        operational_signals_from_runtime_items, top_providers_from_runtime_items,
     };
     use serde_json::to_value;
     use std::collections::HashMap;
@@ -957,7 +877,6 @@ mod tests {
                 currency: "USD".to_string(),
                 amount_nanos: provider_id * 10,
             }],
-            sort_score: 0.0,
         }
     }
 
@@ -1012,15 +931,14 @@ mod tests {
             sample_runtime_item(3, ProviderRuntimeLevel::Healthy, 20, 2),
         ];
 
-        let top =
-            AlertsService::new(AlertsConfig::default()).top_providers_from_runtime_items(&items);
+        let top = top_providers_from_runtime_items(&items);
 
         let ids = top.iter().map(|item| item.provider_id).collect::<Vec<_>>();
         assert_eq!(ids, vec![2, 3, 1]);
     }
 
     #[test]
-    fn dashboard_alerts_include_half_open_and_cost_hotspots() {
+    fn dashboard_operational_signals_include_half_open_and_cost_hotspots() {
         let mut expensive = sample_runtime_item(1, ProviderRuntimeLevel::Open, 20, 5);
         expensive.total_cost[0].amount_nanos = 500;
 
@@ -1030,37 +948,32 @@ mod tests {
         let mut steady = sample_runtime_item(3, ProviderRuntimeLevel::Healthy, 30, 1);
         steady.total_cost[0].amount_nanos = 900;
 
-        let context = TestDbContext::new_sqlite("dashboard-alerts-controller.sqlite");
-        context.run_sync(|| {
-            let alerts = AlertsService::new(AlertsConfig::default())
-                .build_dashboard_alerts_from_runtime_items(&[expensive, recovering, steady], 1_000)
-                .unwrap();
+        let signals = operational_signals_from_runtime_items(&[expensive, recovering, steady]);
 
-            assert_eq!(
-                alerts
-                    .open_providers
-                    .iter()
-                    .map(|item| item.provider_id)
-                    .collect::<Vec<_>>(),
-                vec![1]
-            );
-            assert_eq!(
-                alerts
-                    .half_open_providers
-                    .iter()
-                    .map(|item| item.provider_id)
-                    .collect::<Vec<_>>(),
-                vec![2]
-            );
-            assert_eq!(
-                alerts
-                    .top_cost_providers
-                    .iter()
-                    .map(|item| item.provider_id)
-                    .collect::<Vec<_>>(),
-                vec![3, 1, 2]
-            );
-        });
+        assert_eq!(
+            signals
+                .open_providers
+                .iter()
+                .map(|item| item.provider_id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            signals
+                .half_open_providers
+                .iter()
+                .map(|item| item.provider_id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            signals
+                .top_cost_providers
+                .iter()
+                .map(|item| item.provider_id)
+                .collect::<Vec<_>>(),
+            vec![3, 1, 2]
+        );
     }
 
     #[test]

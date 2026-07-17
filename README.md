@@ -9,7 +9,7 @@ The project is already suitable for:
 - proxying multiple upstream providers behind a unified gateway
 - operating the system through a management console
 
-It is not yet a fully mature high-availability gateway. The biggest remaining gaps are request-level retry/fallback, replay/debug tooling, proactive alerting, and a few legacy naming/security cleanups.
+It is not yet a fully mature high-availability gateway. Before 1.0, the focus is a small, stable direct-routing core, manager-auth hardening, transform quality, and removal of legacy contracts. Retry/fallback, replay, and proactive alerting require new designs and are intentionally absent from the current baseline.
 
 ## Current Product Position
 
@@ -36,12 +36,12 @@ Current code already provides:
 
 - multi-protocol proxying for OpenAI, Responses, Anthropic, Gemini, and Ollama
 - deep request/response transformation, including streaming, tool calls, reasoning, and multimodal content
-- provider, model, model route, and API key override management
+- provider, model, and downstream API key management
 - API key governance: expiry, RPM, concurrency, daily/monthly quota, daily/monthly budget
 - provider circuit governance and runtime status views
 - request patch rules with inheritance, conflict detection, and runtime trace
-- request log persistence with request/response body bundles
-- dashboard, provider runtime, record, API key, route, and cost management pages
+- request-level log persistence with status, timing, token, and cost summaries
+- dashboard, provider runtime, record, API key, and cost management pages
 - cost catalog/version/component/template/preview management
 
 ## Tech Stack
@@ -63,7 +63,7 @@ Current code already provides:
 - Pinia
 - Vue Router
 - Tailwind CSS 4
-- `reka-ui` / `radix-vue`
+- `reka-ui`
 
 ## Repository Layout
 
@@ -71,7 +71,7 @@ Current code already provides:
 
 - `server/src/controller`: management API endpoints
 - `server/src/proxy`: gateway request path, routing, auth, proxy execution, logging
-- `server/src/service`: app state, cache, storage, transform, request patch resolution
+- `server/src/service`: app state, cache, transform, runtime state, and request patch resolution
 - `server/src/database`: persistence models and DB operations
 - `server/src/cost`: rating, normalization, ledger, templates
 - `server/migrations`: SQLite and PostgreSQL migrations
@@ -116,15 +116,12 @@ The directory is git-ignored and holds generated local state:
 
 - `.cyder/dev/config/config.default.yaml`
 - `.cyder/dev/config/config.yaml`, if you create one
-- `.cyder/dev/config/config.override.yaml`
-- `.cyder/dev/config/config.override.history.jsonl`
 - `.cyder/dev/db/cyder.sqlite`
-- `.cyder/dev/storage`
 - `.cyder/dev/tmp`
 
-Repository-root `config.local.yaml` and `config.yaml` are no longer read automatically for development. To migrate an older local setup, copy the old base config to `.cyder/dev/config/config.yaml`, or run with `CYDER_CONFIG_PATH=/path/to/config.yaml`.
+Repository-root `config.local.yaml` and `config.yaml` are no longer read automatically for development. To migrate an older local setup, copy it to `.cyder/dev/config/config.yaml`, or run with `CYDER_CONFIG_PATH=/path/to/config.yaml`; settings no longer recognized by the current schema are ignored.
 
-Release and packaged runs also do not use application-root `config.default.yaml`, `config.yaml`, `config.override.yaml`, or `config.override.history.jsonl` as implicit persistence paths. If `CYDER_DATA_DIR` is unset, persistent paths are still derived from `/data/cyder`; use `CYDER_CONFIG_PATH` only when the base config file must live outside that data directory.
+Release and packaged runs also do not use application-root `config.default.yaml` or `config.yaml` as implicit persistence paths. If `CYDER_DATA_DIR` is unset, persistent paths are still derived from `/data/cyder`; use `CYDER_CONFIG_PATH` only when the base config file must live outside that data directory.
 
 Runtime config is loaded in this order, from lowest to highest priority:
 
@@ -132,17 +129,12 @@ Runtime config is loaded in this order, from lowest to highest priority:
 2. bootstrapped `config.default.yaml`
 3. base config, normally `${CYDER_DATA_DIR}/config/config.yaml`
 4. allowlisted environment variables
-5. managed `config.override.yaml`
 
 `config.default.yaml` is generated on first startup to persist random secrets and path-aware defaults. It is runtime state, not a tracked sample that should be hand-maintained.
 
-`config.override.yaml` is a managed override file written by the System Config page in the management console. It is only for the hot-reload allowlist exposed by that page, such as log level, timezone, proxy request timeout settings, routing resilience, provider governance, and diagnostics retention/capture settings.
+Configuration is startup-only. Change the base YAML or an allowlisted environment variable, then restart the server. The retired `config.override.yaml` and `config.override.history.jsonl` files are ignored; move any settings that must remain active into `config.yaml`.
 
-Do not use `config.override.yaml` as a general replacement for `config.yaml`. Bind settings, manager secrets, database, Redis/cache, storage, deployment mode, runtime state backend, and other non-allowlisted settings must be changed in the base config file and applied with a server restart. If a non-allowlisted path is present in `config.override.yaml`, startup/reload/apply validation rejects it instead of treating it as a restart-only override.
-
-The management console can reload `config.override.yaml` after a manual edit, but routine edits should be made through the UI so preview, validation, and audit history stay consistent. `config.override.history.jsonl` records apply/reset/reload history for audit display only; it is not part of configuration loading.
-
-In the first version of this feature, multi-instance deployments are read-only for System Config writes. This prevents multiple instances from diverging through separate local override files.
+Unknown top-level and nested fields in `config.yaml` and the generated `config.default.yaml` are ignored during 1.0 development. This lets older experimental settings remain temporarily while the schema changes. Recognized fields still fail startup when their type, enum value, or validated value is invalid.
 
 Important config areas include:
 
@@ -153,7 +145,6 @@ Important config areas include:
 - proxy request behavior: `proxy_request`
 - provider governance: `provider_governance`
 - cache: `cache`, optional `redis`
-- storage: local filesystem or S3-compatible object storage
 
 Current built-in database backends are SQLite and PostgreSQL; other database URL schemes are not supported.
 
@@ -170,9 +161,9 @@ The only environment variables that can override final config fields are:
 Startup path environment variables are separate:
 
 - `CYDER_DATA_DIR`: data directory root. Docker images set this to `/data/cyder`.
-- `CYDER_CONFIG_PATH`: optional migration hook for an external base config file. It changes only the base config path; default config, System Config override/history, SQLite defaults, and local storage still belong to the data directory.
+- `CYDER_CONFIG_PATH`: optional migration hook for an external base config file. It changes only the base config path; generated defaults and SQLite data still belong to the data directory.
 
-Database URLs, secrets, Redis/cache, S3, local storage roots, deployment mode, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
+Database URLs, secrets, Redis/cache, deployment mode, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
 
 ## Common Commands
 
@@ -214,24 +205,23 @@ Manager API endpoints:
 Supported modules:
 
 - `provider_profile`: providers, provider API keys, provider models, request patch rules, and reasoning config.
-- `api_keys`: downstream API keys, ACL rules, and model override references to routes that already exist in the target environment.
+- `api_keys`: downstream API keys and provider/model ACL rules.
 - `cost_catalogs`: cost catalogs, versions, and components.
 - `cost_bindings`: model-to-cost-catalog bindings through `model.cost_catalog_id`.
 
 Export files can be plaintext JSON or password-encrypted armored `.cyd` files. Use password encryption when the bundle contains provider keys or downstream API keys. The encrypted format hides the whole JSON bundle; plaintext export intentionally contains raw secrets so the target environment can preserve existing downstream keys.
 
-Import always starts with preview. Preview validates the schema, password and integrity status, module versions, dependencies, conflicts, missing provider/model/route/cost references, and dangerous request patch targets. Apply must submit the same bundle digest returned by preview.
+Import always starts with preview. Preview validates the schema, password and integrity status, module versions, dependencies, conflicts, missing provider/model/cost references, and dangerous request patch targets. Apply must submit the same bundle digest returned by preview.
 
-For existing downstream API keys, `overwrite_existing` updates API key metadata and governance limits only. Bundle ACL rules and model overrides for an already-existing raw API key are counted as skipped and are not appended, upserted, replaced, or used to delete target-environment child rows. ACL rules and model overrides are imported only when the API key itself is newly created.
+For existing downstream API keys, `overwrite_existing` updates API key metadata and governance limits only. Bundle ACL rules for an already-existing raw API key are counted as skipped and are not appended, upserted, replaced, or used to delete target-environment child rows. ACL rules are imported only when the API key itself is newly created.
 
 Portable Config intentionally does not migrate these runtime, history, audit, or deployment records:
 
-- `request_log`, `request_attempt`, `request_replay_run`, replay artifacts, object-storage bundles, and object-storage artifacts.
-- `metric_ingested_request_log`, `metric_request_rollup_minute`, `metric_attempt_rollup_minute`, `metric_http_status_rollup_minute`, and `metric_cost_rollup_minute`.
-- `alert_event`, `alert_rule_state`, `notification_channel`, `notification_channel_state`, `notification_delivery`, and notification test results.
+- `request_log`.
+- `metric_ingested_request_log`, `metric_request_rollup_minute`, `metric_http_status_rollup_minute`, and `metric_cost_rollup_minute`.
 - `api_key_rollup_daily`, `api_key_rollup_monthly`, `manager_auth_instance`, refresh sessions, and manager login rate-limit runtime.
 - Provider circuit runtime state, provider key cursors, API key concurrency windows, API key RPM windows, and Redis-backed runtime state.
-- `config.default.yaml`, `config.yaml`, `config.override.yaml`, and `config.override.history.jsonl`.
+- `config.default.yaml` and `config.yaml`.
 
 Those are runtime facts or deployment configuration, not portable gateway configuration.
 
@@ -276,18 +266,17 @@ Frontend verification:
 - `just test-front`
 - `just build-front`
 
-Current test coverage is strong across transform, proxy, cost, governance, and runtime logic. However, storage integration around S3 may require a working S3-compatible environment when configured. Do not assume object-storage paths are verified unless you have run the relevant tests in a valid environment.
+Current test coverage is strong across transform, proxy, cost, governance, and runtime logic.
 
 ## Current Priorities
 
 Based on the current codebase, the most valuable next steps are:
 
-1. make `model_route` candidates participate in real execution
-2. add request-level retry/fallback and attempt trace
-3. add replay/debug tooling for request logs
-4. productize transform diagnostics for operations/debugging
-5. add proactive alert channels
-6. tighten manager auth and finish the remaining `api_key` convergence/docs/test cleanup
+1. stabilize and verify the direct `provider/model` execution path
+2. tighten manager authentication and secret ownership
+3. productize transform diagnostics without recreating the retired request-bundle contract
+4. finish the remaining `api_key` naming, documentation, and test convergence
+5. redesign retry/fallback, replay, and proactive alerts as separate domains before implementation
 
 ## Docker
 
@@ -317,11 +306,10 @@ The runtime image keeps application artifacts under `/opt/cyder`:
 
 Mutable local state is under `/data/cyder`:
 
-- config files and System Config override/history: `/data/cyder/config`
+- generated defaults and base configuration: `/data/cyder/config`
 - SQLite database files: `/data/cyder/db`
-- local request log and replay object storage: `/data/cyder/storage`
 
-The image sets `CYDER_DATA_DIR=/data/cyder`, declares `/data/cyder` as the only volume, and runs the service process as the non-root `cyder` user. Temporary request-log spool files use `/tmp/cyder-api` and are not persisted.
+The image sets `CYDER_DATA_DIR=/data/cyder`, declares `/data/cyder` as the only volume, and runs the service process as the non-root `cyder` user. Temporary process files use `/tmp/cyder-api` and are not persisted.
 
 Advanced deployments can override `CYDER_DATA_DIR`, but the default and recommended path remains `/data/cyder`. When overriding it, mount the replacement directory explicitly:
 
@@ -332,9 +320,7 @@ docker run --rm -p 8000:8000 \
   cyder-api:latest
 ```
 
-Maintainer verification on 2026-05-06 built `cyder-api:task10` from this Dockerfile and confirmed zero-config startup, empty `/data/cyder` volume startup, container recreation with persisted `config.default.yaml`/SQLite/override/history, request-log bundle writes under `/data/cyder/storage`, read-only `/opt/cyder` behavior for the service user, and management UI asset loading from `/opt/cyder/public`. S3 persistence was not verified in this smoke test.
-
-PostgreSQL, S3-compatible object storage, and Redis are external state. Configure those services in `/data/cyder/config/config.yaml` and restart the container; do not pass database, secret, Redis, or S3 settings through environment variables.
+PostgreSQL and Redis are external state. Configure those services in `/data/cyder/config/config.yaml` and restart the container; do not pass database, secret, or Redis settings through environment variables.
 
 For an existing deployment, mount the old config file into the container and point `CYDER_CONFIG_PATH` at it while keeping `/data/cyder` as the persistent data root:
 
@@ -346,7 +332,7 @@ docker run --rm -p 8000:8000 \
   cyder-api:latest
 ```
 
-This migration hook only changes the base config file path. Managed override/history files and default local SQLite/storage paths remain under `/data/cyder`.
+This migration hook only changes the base config file path. Generated defaults and the default SQLite path remain under `/data/cyder`.
 
 ## Release Workflow
 
@@ -362,4 +348,4 @@ Do not publish releases directly from the GitHub Release UI. Use the same tag wi
 
 ## Summary
 
-Cyder API is already beyond the "CRUD plus proxy" stage. It now has the core shape of a serious single-admin LLM gateway, with strong transformation logic and a growing operations console. The next stage is not more platform surface area; it is resilience, replay, alerting, and tighter operational feedback loops.
+Cyder API is already beyond the "CRUD plus proxy" stage. It has the core shape of a single-admin LLM gateway with strong transformation logic and an operations console. The next stage is to make that core smaller, safer, and easier to reason about before selectively rebuilding advanced resilience and debugging capabilities.

@@ -9,7 +9,6 @@ use axum::{
 use chrono::Utc;
 use cyder_tools::log::{debug, error};
 use futures::StreamExt;
-use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{
     sync::{Mutex as TokioMutex, mpsc},
@@ -25,95 +24,27 @@ use crate::{
         ProxyError,
         cancellation::ProxyCancellationContext,
         classify_upstream_status,
-        logging::{LogBodyKind, LoggedBody, RequestLogContext, StreamingBodyWriter},
+        logging::RequestLogContext,
         protocol_transform_error,
         provider_governance::{record_provider_failure, record_provider_success},
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{
-                append_response_transform_diagnostics, finalize_cancelled_log_context,
-                finalize_streaming_log_context, record_streaming_completion_if_allowed,
+                finalize_cancelled_log_context, finalize_streaming_log_context,
+                record_streaming_completion,
             },
-            policy::{RuntimeExecutionPolicy, RuntimeLogMode},
-            reasoning_content_repair::{
-                ReasoningContentRepairResultKey, continuation_snapshot_from_parts,
-            },
+            reasoning_content_repair::continuation_snapshot_from_parts,
         },
     },
     schema::enum_def::{LlmApiType, RequestStatus},
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
-        runtime::{
-            ProviderCircuitProbePermit, ReasoningContinuationCacheKey, ReasoningContinuationScope,
-        },
-        transform::{
-            StreamTransformer,
-            unified::{
-                UnifiedTransformDiagnostic, UnifiedTransformDiagnosticAction,
-                UnifiedTransformDiagnosticKind, UnifiedTransformDiagnosticLossLevel,
-            },
-        },
+        runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
+        transform::StreamTransformer,
     },
-    utils::{
-        sse::{SseEvent, SseParser},
-        storage::LogBodyCaptureState,
-    },
+    utils::sse::{SseEvent, SseParser},
 };
-
-const POST_DONE_UPSTREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-const POST_DONE_UPSTREAM_DRAIN_MAX_BYTES: usize = 256 * 1024;
-
-#[derive(Clone, Debug, Default, Serialize)]
-struct PostDoneUpstreamDrainReport {
-    same_chunk_ignored_events: usize,
-    observed_chunks: usize,
-    observed_bytes: usize,
-    reached_eof: bool,
-    timed_out: bool,
-    max_bytes_reached: bool,
-    upstream_error: Option<String>,
-    write_error: Option<String>,
-}
-
-impl PostDoneUpstreamDrainReport {
-    fn capture_state(&self) -> LogBodyCaptureState {
-        if self.reached_eof
-            && !self.timed_out
-            && !self.max_bytes_reached
-            && self.upstream_error.is_none()
-            && self.write_error.is_none()
-        {
-            LogBodyCaptureState::Complete
-        } else {
-            LogBodyCaptureState::Incomplete
-        }
-    }
-
-    fn should_record_diagnostic(&self) -> bool {
-        self.same_chunk_ignored_events > 0
-            || self.observed_chunks > 0
-            || self.timed_out
-            || self.max_bytes_reached
-            || self.upstream_error.is_some()
-            || self.write_error.is_some()
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub(super) struct StreamReasoningContentCaptureReport {
-    pub captured_count: usize,
-    pub diagnostics: Vec<StreamReasoningContentCaptureDiagnostic>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(super) struct StreamReasoningContentCaptureDiagnostic {
-    pub result: ReasoningContentRepairResultKey,
-    pub captured_count: usize,
-    pub tool_call_ids: Vec<String>,
-    pub tool_calls_hash: Option<String>,
-    pub detail: Option<String>,
-}
 
 #[derive(Clone, Debug)]
 pub(super) struct OpenAiReasoningStreamCapture {
@@ -178,65 +109,27 @@ impl OpenAiReasoningStreamCapture {
         }
     }
 
-    pub(super) async fn finish(
-        self,
-        app_state: &Arc<AppState>,
-        observed_at_ms: i64,
-    ) -> StreamReasoningContentCaptureReport {
-        if !self.feature_enabled {
-            return stream_single_capture_result(ReasoningContentRepairResultKey::Disabled, None);
-        }
-        if !self.target_is_openai_compatible_generation {
-            return stream_single_capture_result(
-                ReasoningContentRepairResultKey::NotApplicable,
-                None,
-            );
-        }
-        if self.parse_failed_count > 0 {
-            return stream_single_capture_result(
-                ReasoningContentRepairResultKey::ParseFailed,
-                Some(format!("parse_failed_count={}", self.parse_failed_count)),
-            );
+    pub(super) async fn finish(self, app_state: &Arc<AppState>, observed_at_ms: i64) {
+        if !self.feature_enabled
+            || !self.target_is_openai_compatible_generation
+            || self.parse_failed_count > 0
+        {
+            return;
         }
 
         let Some(scope) = self.scope.clone() else {
-            return stream_single_capture_result(ReasoningContentRepairResultKey::Disabled, None);
+            return;
         };
         let snapshots = self.snapshots(scope, observed_at_ms);
-        if snapshots.is_empty() {
-            return stream_single_capture_result(
-                ReasoningContentRepairResultKey::NotApplicable,
-                None,
-            );
-        }
-
-        let mut report = StreamReasoningContentCaptureReport::default();
         for snapshot in snapshots {
-            let key = snapshot.key.clone();
-            match app_state
+            if let Err(err) = app_state
                 .reasoning_continuation_store
                 .insert(snapshot, observed_at_ms)
                 .await
             {
-                Ok(()) => {
-                    report.captured_count += 1;
-                    report.diagnostics.push(stream_capture_diagnostic_for_key(
-                        ReasoningContentRepairResultKey::Matched,
-                        1,
-                        &key,
-                        None,
-                    ));
-                }
-                Err(err) => report.diagnostics.push(stream_capture_diagnostic_for_key(
-                    ReasoningContentRepairResultKey::CacheMiss,
-                    0,
-                    &key,
-                    Some(format!("store_error={err}")),
-                )),
+                debug!("Failed to cache reasoning continuation: {err}");
             }
         }
-
-        report
     }
 
     fn observe_chunk_value(&mut self, value: &Value) {
@@ -375,91 +268,19 @@ impl StreamChoiceCapture {
     }
 }
 
-fn stream_single_capture_result(
-    result: ReasoningContentRepairResultKey,
-    detail: Option<String>,
-) -> StreamReasoningContentCaptureReport {
-    StreamReasoningContentCaptureReport {
-        captured_count: 0,
-        diagnostics: vec![StreamReasoningContentCaptureDiagnostic {
-            result,
-            captured_count: 0,
-            tool_call_ids: Vec::new(),
-            tool_calls_hash: None,
-            detail,
-        }],
-    }
-}
-
-fn stream_capture_diagnostic_for_key(
-    result: ReasoningContentRepairResultKey,
-    captured_count: usize,
-    key: &ReasoningContinuationCacheKey,
-    detail: Option<String>,
-) -> StreamReasoningContentCaptureDiagnostic {
-    StreamReasoningContentCaptureDiagnostic {
-        result,
-        captured_count,
-        tool_call_ids: key.tool_call_ids.clone(),
-        tool_calls_hash: Some(key.tool_calls_hash.clone()),
-        detail,
-    }
-}
-
-pub(super) fn stream_capture_transform_diagnostics(
-    report: &StreamReasoningContentCaptureReport,
-) -> Vec<UnifiedTransformDiagnostic> {
-    report
-        .diagnostics
-        .iter()
-        .map(stream_capture_transform_diagnostic)
-        .collect()
-}
-
-fn stream_capture_transform_diagnostic(
-    diagnostic: &StreamReasoningContentCaptureDiagnostic,
-) -> UnifiedTransformDiagnostic {
-    UnifiedTransformDiagnostic {
-        type_: "runtime_feature_diagnostic".to_string(),
-        diagnostic_kind: UnifiedTransformDiagnosticKind::CapabilityDowngrade,
-        provider: "openai_compatible".to_string(),
-        target_provider: "openai_compatible".to_string(),
-        source: "upstream_response_stream".to_string(),
-        target: "continuation_cache".to_string(),
-        stream_id: None,
-        stage: Some("response_capture".to_string()),
-        loss_level: UnifiedTransformDiagnosticLossLevel::Lossless,
-        action: UnifiedTransformDiagnosticAction::Send,
-        semantic_unit: "reasoning_content".to_string(),
-        reason: format!(
-            "openai_reasoning_content_capture:{}",
-            diagnostic.result.as_key()
-        ),
-        context: serde_json::to_string(diagnostic).ok(),
-        raw_data_summary: None,
-        recovery_hint: None,
-    }
-}
-
 pub(super) async fn sync_stream_usage_to_log_context(
     log_context: &Arc<TokioMutex<RequestLogContext>>,
     transformer: &mut StreamTransformer,
 ) {
     let usage = transformer.cached_usage_info();
     let usage_normalization = transformer.cached_usage_normalization();
-    let diagnostics = transformer.diagnostics_snapshot();
-
-    if usage.is_none() && usage_normalization.is_none() && diagnostics.is_empty() {
+    if usage.is_none() && usage_normalization.is_none() {
         return;
     }
 
     let mut context = log_context.lock().await;
     context.usage = usage;
     context.usage_normalization = usage_normalization;
-    context.replace_transform_diagnostics_phase(
-        crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream,
-        &diagnostics,
-    );
 }
 
 pub(super) async fn mark_stream_response_started_to_client(
@@ -487,15 +308,6 @@ pub(super) fn next_stream_chunk_timeout_duration(
     }
 }
 
-async fn finish_incomplete_stream_body(
-    writer: &mut Option<StreamingBodyWriter>,
-) -> Option<LoggedBody> {
-    match writer.take() {
-        Some(writer) => writer.finish(LogBodyCaptureState::Incomplete).await.ok(),
-        None => None,
-    }
-}
-
 fn is_downstream_openai_done_event(api_type: LlmApiType, event: &SseEvent) -> bool {
     api_type == LlmApiType::Openai && event.data.trim() == "[DONE]"
 }
@@ -513,128 +325,22 @@ fn append_transformed_event_bytes(
     }
 }
 
-async fn drain_upstream_after_openai_done(
-    rx: &mut mpsc::Receiver<Result<Bytes, reqwest::Error>>,
-    writer: &mut StreamingBodyWriter,
-    same_chunk_ignored_events: usize,
-) -> PostDoneUpstreamDrainReport {
-    let mut report = PostDoneUpstreamDrainReport {
-        same_chunk_ignored_events,
-        ..Default::default()
-    };
-    let timed_out = timeout(POST_DONE_UPSTREAM_DRAIN_TIMEOUT, async {
-        loop {
-            let Some(chunk_result) = rx.recv().await else {
-                report.reached_eof = true;
-                break;
-            };
-
-            match chunk_result {
-                Ok(chunk) => {
-                    if chunk.is_empty() {
-                        continue;
-                    }
-                    let next_observed_bytes = report.observed_bytes.saturating_add(chunk.len());
-                    if next_observed_bytes > POST_DONE_UPSTREAM_DRAIN_MAX_BYTES {
-                        report.max_bytes_reached = true;
-                        break;
-                    }
-                    if let Err(err) = writer.append(&chunk).await {
-                        report.write_error = Some(err.to_string());
-                        break;
-                    }
-                    report.observed_chunks += 1;
-                    report.observed_bytes = next_observed_bytes;
-                }
-                Err(err) => {
-                    report.upstream_error = Some(err.to_string());
-                    break;
-                }
-            }
-        }
-    })
-    .await
-    .is_err();
-    report.timed_out = timed_out;
-    report
-}
-
-fn post_done_drain_transform_diagnostic(
-    report: &PostDoneUpstreamDrainReport,
-) -> Option<UnifiedTransformDiagnostic> {
-    if !report.should_record_diagnostic() {
-        return None;
-    }
-
-    Some(UnifiedTransformDiagnostic {
-        type_: "runtime_feature_diagnostic".to_string(),
-        diagnostic_kind: UnifiedTransformDiagnosticKind::CapabilityDowngrade,
-        provider: "openai_compatible".to_string(),
-        target_provider: "openai".to_string(),
-        source: "upstream_response_stream".to_string(),
-        target: "downstream_response_stream".to_string(),
-        stream_id: None,
-        stage: Some("post_done_drain".to_string()),
-        loss_level: UnifiedTransformDiagnosticLossLevel::Lossless,
-        action: UnifiedTransformDiagnosticAction::Drop,
-        semantic_unit: "post_done_upstream_frame".to_string(),
-        reason: "ignored OpenAI-compatible upstream data after data: [DONE] while completing downstream response at the DONE boundary".to_string(),
-        context: serde_json::to_string(report).ok(),
-        raw_data_summary: None,
-        recovery_hint: Some(
-            "Inspect llm_response for upstream-only post-DONE frames; user_response intentionally ends at data: [DONE].".to_string(),
-        ),
-    })
-}
-
-async fn finalize_openai_done_stream_after_drain(
-    app_state: Arc<AppState>,
-    log_context: Arc<TokioMutex<RequestLogContext>>,
-    mut rx: mpsc::Receiver<Result<Bytes, reqwest::Error>>,
-    mut llm_body_writer: Option<StreamingBodyWriter>,
-    mut user_body_writer: Option<StreamingBodyWriter>,
+async fn finalize_openai_done_stream(
+    app_state: &Arc<AppState>,
+    log_context: &Arc<TokioMutex<RequestLogContext>>,
     mut transformer: StreamTransformer,
     reasoning_stream_capture: OpenAiReasoningStreamCapture,
-    url: String,
+    url: &str,
     status_code: StatusCode,
-    cost_catalog_version: Option<CacheCostCatalogVersion>,
-    log_mode: RuntimeLogMode,
-    execution_policy: RuntimeExecutionPolicy,
-    model_str: String,
+    cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    model_str: &str,
     completed_at: i64,
-    same_chunk_ignored_events: usize,
 ) {
-    let drain_report = match llm_body_writer.as_mut() {
-        Some(writer) => {
-            drain_upstream_after_openai_done(&mut rx, writer, same_chunk_ignored_events).await
-        }
-        None => PostDoneUpstreamDrainReport {
-            same_chunk_ignored_events,
-            reached_eof: true,
-            ..Default::default()
-        },
-    };
-    let llm_capture_state = drain_report.capture_state();
-    let llm_response_body = match llm_body_writer.take() {
-        Some(writer) => writer.finish(llm_capture_state).await.ok(),
-        None => None,
-    };
-    let user_response_body = match user_body_writer.take() {
-        Some(writer) => writer.finish(LogBodyCaptureState::Complete).await.ok(),
-        None => None,
-    };
-
-    let reasoning_capture_report = reasoning_stream_capture
-        .finish(&app_state, completed_at)
+    reasoning_stream_capture
+        .finish(app_state, completed_at)
         .await;
-    let reasoning_capture_diagnostics =
-        stream_capture_transform_diagnostics(&reasoning_capture_report);
     let usage = transformer.parse_usage_info();
     let usage_normalization = transformer.parse_usage_normalization();
-    let mut stream_diagnostics = transformer.diagnostics_snapshot();
-    if let Some(diagnostic) = post_done_drain_transform_diagnostic(&drain_report) {
-        stream_diagnostics.push(diagnostic);
-    }
 
     let mut context = log_context.lock().await;
     finalize_streaming_log_context(
@@ -642,25 +348,18 @@ async fn finalize_openai_done_stream_after_drain(
         &url,
         status_code,
         completed_at,
-        cost_catalog_version.as_ref(),
+        cost_catalog_version,
         RequestStatus::Success,
         None,
     );
-    context.llm_response_body = llm_response_body;
-    context.user_response_body = user_response_body;
     context.usage = usage;
     context.usage_normalization = usage_normalization;
-    context.replace_transform_diagnostics_phase(
-        crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream,
-        &stream_diagnostics,
-    );
-    append_response_transform_diagnostics(&mut context, &reasoning_capture_diagnostics);
-    record_streaming_completion_if_allowed(&app_state, &context, log_mode, execution_policy).await;
+    record_streaming_completion(app_state, &context).await;
 
     crate::debug_event!(
         "proxy.request_succeeded_debug",
         log_id = context.id,
-        model = &model_str,
+        model = model_str,
         status_code = status_code.as_u16(),
         is_stream = true,
         latency_ms = completed_at.saturating_sub(context.request_received_at),
@@ -670,17 +369,11 @@ async fn finalize_openai_done_stream_after_drain(
 async fn finalize_streaming_error(
     app_state: &Arc<AppState>,
     log_context: &Arc<TokioMutex<RequestLogContext>>,
-    llm_body_writer: &mut Option<StreamingBodyWriter>,
-    user_body_writer: &mut Option<StreamingBodyWriter>,
     url: &str,
     status_code: StatusCode,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     proxy_error: &ProxyError,
-    log_mode: RuntimeLogMode,
-    execution_policy: RuntimeExecutionPolicy,
 ) {
-    let llm_response_body = finish_incomplete_stream_body(llm_body_writer).await;
-    let user_response_body = finish_incomplete_stream_body(user_body_writer).await;
     let mut context = log_context.lock().await;
     finalize_streaming_log_context(
         &mut context,
@@ -691,36 +384,24 @@ async fn finalize_streaming_error(
         RequestStatus::Error,
         Some(proxy_error),
     );
-    context.llm_response_body = llm_response_body;
-    context.user_response_body = user_response_body;
-    record_streaming_completion_if_allowed(app_state, &context, log_mode, execution_policy).await;
+    record_streaming_completion(app_state, &context).await;
 }
 
 async fn abort_and_finalize_cancelled_stream(
     app_state: &Arc<AppState>,
     log_context: &Arc<TokioMutex<RequestLogContext>>,
-    llm_body_writer: &mut Option<StreamingBodyWriter>,
-    user_body_writer: &mut Option<StreamingBodyWriter>,
     url: &str,
     status_code: StatusCode,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
-    execution_policy: RuntimeExecutionPolicy,
 ) {
-    let llm_response_body = finish_incomplete_stream_body(llm_body_writer).await;
-    let user_response_body = finish_incomplete_stream_body(user_body_writer).await;
-    if execution_policy.records_request_log() {
-        finalize_cancelled_log_context(
-            app_state,
-            log_context,
-            url,
-            Some(status_code),
-            cost_catalog_version,
-            llm_response_body,
-            user_response_body,
-            execution_policy,
-        )
-        .await;
-    }
+    finalize_cancelled_log_context(
+        app_state,
+        log_context,
+        url,
+        Some(status_code),
+        cost_catalog_version,
+    )
+    .await;
 }
 
 pub(super) async fn handle_streaming_response(
@@ -732,13 +413,11 @@ pub(super) async fn handle_streaming_response(
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
-    mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
+    api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     api_type: LlmApiType,
     target_api_type: LlmApiType,
     reasoning_capture: Option<ReasoningContinuationCaptureContext>,
-    log_mode: RuntimeLogMode,
-    execution_policy: RuntimeExecutionPolicy,
     first_byte_timeout: Option<Duration>,
 ) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
@@ -773,25 +452,6 @@ pub(super) async fn handle_streaming_response(
     let mut transformer = StreamTransformer::new(target_api_type, api_type);
     let mut parser = SseParser::new();
     let log_context_clone = log_context.clone();
-    let llm_body_writer = match StreamingBodyWriter::new(LogBodyKind::LlmResponse, log_id).await {
-        Ok(writer) => writer,
-        Err(e) => {
-            let proxy_error =
-                ProxyError::InternalError(format!("Failed to create LLM stream spool writer: {e}"));
-            api_key_request_lease.release().await;
-            return Err(proxy_error);
-        }
-    };
-    let user_body_writer = match StreamingBodyWriter::new(LogBodyKind::UserResponse, log_id).await {
-        Ok(writer) => writer,
-        Err(e) => {
-            let proxy_error = ProxyError::InternalError(format!(
-                "Failed to create user stream spool writer: {e}"
-            ));
-            api_key_request_lease.release().await;
-            return Err(proxy_error);
-        }
-    };
 
     let monitored_stream = async_stream::stream! {
         let mut api_key_request_lease = api_key_request_lease;
@@ -803,12 +463,9 @@ pub(super) async fn handle_streaming_response(
             url_owned.clone(),
             status_code,
             cost_catalog_version_clone.clone(),
-            execution_policy,
             format!("Client disconnected while receiving streaming response for log_id {}.", log_id),
         );
         let mut first_chunk_received_at_proxy: i64 = 0;
-        let mut llm_body_writer = Some(llm_body_writer);
-        let mut user_body_writer = Some(user_body_writer);
         let mut reasoning_stream_capture =
             OpenAiReasoningStreamCapture::new(reasoning_capture, target_api_type);
 
@@ -823,12 +480,9 @@ pub(super) async fn handle_streaming_response(
                         abort_and_finalize_cancelled_stream(
                             &app_state_clone,
                             &log_context_clone,
-                            &mut llm_body_writer,
-                            &mut user_body_writer,
                             &url_owned,
                             status_code,
                             cost_catalog_version_clone.as_ref(),
-                            execution_policy,
                         ).await;
                         api_key_request_lease.release().await;
                         yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, proxy_error.to_string()));
@@ -847,26 +501,20 @@ pub(super) async fn handle_streaming_response(
                             finalize_streaming_error(
                                 &app_state_clone,
                                 &log_context_clone,
-                                &mut llm_body_writer,
-                                &mut user_body_writer,
                                 &url_owned,
                                 status_code,
                                 cost_catalog_version_clone.as_ref(),
                                 &proxy_error,
-                                log_mode,
-                                execution_policy,
                             )
                             .await;
-                            if execution_policy.records_provider_runtime() {
-                                record_provider_failure(
-                                    &app_state_clone,
-                                    provider_id,
-                                    &model_str,
-                                    &proxy_error,
-                                    provider_circuit_permit.as_ref(),
-                                )
-                                .await;
-                            }
+                            record_provider_failure(
+                                &app_state_clone,
+                                provider_id,
+                                &model_str,
+                                &proxy_error,
+                                provider_circuit_permit.as_ref(),
+                            )
+                            .await;
 
                             api_key_request_lease.release().await;
                             yield Err(std::io::Error::new(std::io::ErrorKind::TimedOut, stream_error_message));
@@ -881,12 +529,9 @@ pub(super) async fn handle_streaming_response(
                             abort_and_finalize_cancelled_stream(
                                 &app_state_clone,
                                 &log_context_clone,
-                                &mut llm_body_writer,
-                                &mut user_body_writer,
                                 &url_owned,
                                 status_code,
                                 cost_catalog_version_clone.as_ref(),
-                                execution_policy,
                             ).await;
                             api_key_request_lease.release().await;
                             yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, cancellation.cancellation_error().await.to_string()));
@@ -903,52 +548,6 @@ pub(super) async fn handle_streaming_response(
 
             match chunk_result {
                 Ok(chunk) => {
-                    if let Err(e) = llm_body_writer.as_mut().expect("llm stream writer should exist").append(&chunk).await {
-                        response_drop_guard.disarm();
-                        let stream_error_message = format!("Failed to persist LLM stream chunk: {}", e);
-                        error!("{}", stream_error_message);
-                        let proxy_error = ProxyError::InternalError(stream_error_message.clone());
-                        finalize_streaming_error(
-                            &app_state_clone,
-                            &log_context_clone,
-                            &mut llm_body_writer,
-                            &mut user_body_writer,
-                            &url_owned,
-                            status_code,
-                            cost_catalog_version_clone.as_ref(),
-                            &proxy_error,
-                            log_mode,
-                            execution_policy,
-                        )
-                        .await;
-                        if execution_policy.records_provider_runtime() {
-                            record_provider_failure(
-                                &app_state_clone,
-                                provider_id,
-                                &model_str,
-                                &proxy_error,
-                                provider_circuit_permit.as_ref(),
-                            )
-                            .await;
-                        }
-
-                        api_key_request_lease.release().await;
-                        yield Err(std::io::Error::other(stream_error_message));
-                        return;
-                    }
-
-                    {
-                        let mut context = log_context_clone.lock().await;
-                        if execution_policy.records_request_log() {
-                            llm_body_writer
-                                .as_mut()
-                                .expect("llm stream writer should exist")
-                                .preserve_on_drop();
-                        }
-                        context.llm_response_body =
-                            Some(llm_body_writer.as_ref().expect("llm stream writer should exist").snapshot(LogBodyCaptureState::Incomplete));
-                    }
-
                     if first_chunk_received_at_proxy == 0 {
                         first_chunk_received_at_proxy = Utc::now().timestamp_millis();
                     }
@@ -961,10 +560,7 @@ pub(super) async fn handle_streaming_response(
                     let mut transformed_chunk_bytes: Vec<u8> = Vec::new();
                     let mut downstream_openai_done = false;
 
-                    let parsed_event_count = events.len();
-                    let mut processed_event_count = 0usize;
                     for event in events {
-                        processed_event_count += 1;
                         reasoning_stream_capture.observe_events(std::slice::from_ref(&event));
                         let transformed_events =
                             transformer.transform_event(event).unwrap_or_default();
@@ -986,53 +582,6 @@ pub(super) async fn handle_streaming_response(
                     sync_stream_usage_to_log_context(&log_context_clone, &mut transformer).await;
 
                     let transformed_chunk = Bytes::from(transformed_chunk_bytes);
-                    if let Err(e) = user_body_writer.as_mut().expect("user stream writer should exist").append(&transformed_chunk).await {
-                        response_drop_guard.disarm();
-                        let stream_error_message =
-                            format!("Failed to persist transformed stream chunk: {}", e);
-                        error!("{}", stream_error_message);
-                        let proxy_error = ProxyError::InternalError(stream_error_message.clone());
-                        finalize_streaming_error(
-                            &app_state_clone,
-                            &log_context_clone,
-                            &mut llm_body_writer,
-                            &mut user_body_writer,
-                            &url_owned,
-                            status_code,
-                            cost_catalog_version_clone.as_ref(),
-                            &proxy_error,
-                            log_mode,
-                            execution_policy,
-                        )
-                        .await;
-                        if execution_policy.records_provider_runtime() {
-                            record_provider_failure(
-                                &app_state_clone,
-                                provider_id,
-                                &model_str,
-                                &proxy_error,
-                                provider_circuit_permit.as_ref(),
-                            )
-                            .await;
-                        }
-
-                        api_key_request_lease.release().await;
-                        yield Err(std::io::Error::other(stream_error_message));
-                        return;
-                    }
-
-                    {
-                        let mut context = log_context_clone.lock().await;
-                        if execution_policy.records_request_log() {
-                            user_body_writer
-                                .as_mut()
-                                .expect("user stream writer should exist")
-                                .preserve_on_drop();
-                        }
-                        context.user_response_body =
-                            Some(user_body_writer.as_ref().expect("user stream writer should exist").snapshot(LogBodyCaptureState::Incomplete));
-                    }
-
                     if !transformed_chunk.is_empty() {
                         mark_stream_response_started_to_client(
                             &log_context_clone,
@@ -1040,47 +589,35 @@ pub(super) async fn handle_streaming_response(
                         )
                         .await;
                         if downstream_openai_done {
-                            let same_chunk_ignored_events =
-                                parsed_event_count.saturating_sub(processed_event_count);
                             let done_completed_at = Utc::now().timestamp_millis();
                             response_drop_guard.disarm();
                             api_key_request_lease.release().await;
-                            if execution_policy.records_provider_runtime() {
-                                record_provider_success(
-                                    &app_state_clone,
-                                    provider_id,
-                                    &model_str,
-                                    provider_circuit_permit.as_ref(),
-                                )
-                                .await;
-                            }
+                            record_provider_success(
+                                &app_state_clone,
+                                provider_id,
+                                &model_str,
+                                provider_circuit_permit.as_ref(),
+                            )
+                            .await;
 
                             let drain_app_state = Arc::clone(&app_state_clone);
                             let drain_log_context = Arc::clone(&log_context_clone);
                             let drain_url = url_owned.clone();
                             let drain_cost_catalog_version = cost_catalog_version_clone.clone();
                             let drain_model_str = model_str.clone();
-                            let drain_llm_body_writer = llm_body_writer.take();
-                            let drain_user_body_writer = user_body_writer.take();
                             let drain_transformer = transformer;
                             let drain_reasoning_stream_capture = reasoning_stream_capture;
                             app_state_clone.infra.spawn_background_task(async move {
-                                finalize_openai_done_stream_after_drain(
-                                    drain_app_state,
-                                    drain_log_context,
-                                    rx,
-                                    drain_llm_body_writer,
-                                    drain_user_body_writer,
+                                finalize_openai_done_stream(
+                                    &drain_app_state,
+                                    &drain_log_context,
                                     drain_transformer,
                                     drain_reasoning_stream_capture,
-                                    drain_url,
+                                    &drain_url,
                                     status_code,
-                                    drain_cost_catalog_version,
-                                    log_mode,
-                                    execution_policy,
-                                    drain_model_str,
+                                    drain_cost_catalog_version.as_ref(),
+                                    &drain_model_str,
                                     done_completed_at,
-                                    same_chunk_ignored_events,
                                 )
                                 .await;
                             });
@@ -1099,26 +636,20 @@ pub(super) async fn handle_streaming_response(
                     finalize_streaming_error(
                         &app_state_clone,
                         &log_context_clone,
-                        &mut llm_body_writer,
-                        &mut user_body_writer,
                         &url_owned,
                         status_code,
                         cost_catalog_version_clone.as_ref(),
                         &proxy_error,
-                        log_mode,
-                        execution_policy,
                     )
                     .await;
-                    if execution_policy.records_provider_runtime() {
-                        record_provider_failure(
-                            &app_state_clone,
-                            provider_id,
-                            &model_str,
-                            &proxy_error,
-                            provider_circuit_permit.as_ref(),
-                        )
-                        .await;
-                    }
+                    record_provider_failure(
+                        &app_state_clone,
+                        provider_id,
+                        &model_str,
+                        &proxy_error,
+                        provider_circuit_permit.as_ref(),
+                    )
+                    .await;
 
                     api_key_request_lease.release().await;
                     yield Err(std::io::Error::other(stream_error_message));
@@ -1130,50 +661,6 @@ pub(super) async fn handle_streaming_response(
         if status_code.is_success() && api_type == LlmApiType::Openai && target_api_type == LlmApiType::Gemini {
             debug!("[handle_streaming_response] Appending [DONE] chunk for OpenAI client.");
             let done_chunk = Bytes::from("data: [DONE]\n\n");
-            if let Err(e) = user_body_writer.as_mut().expect("user stream writer should exist").append(&done_chunk).await {
-                response_drop_guard.disarm();
-                let stream_error_message = format!("Failed to persist terminal DONE chunk: {}", e);
-                error!("{}", stream_error_message);
-                let proxy_error = ProxyError::InternalError(stream_error_message.clone());
-                finalize_streaming_error(
-                    &app_state_clone,
-                    &log_context_clone,
-                    &mut llm_body_writer,
-                    &mut user_body_writer,
-                    &url_owned,
-                    status_code,
-                    cost_catalog_version_clone.as_ref(),
-                    &proxy_error,
-                    log_mode,
-                    execution_policy,
-                )
-                .await;
-                if execution_policy.records_provider_runtime() {
-                    record_provider_failure(
-                        &app_state_clone,
-                        provider_id,
-                        &model_str,
-                        &proxy_error,
-                        provider_circuit_permit.as_ref(),
-                    )
-                    .await;
-                }
-
-                api_key_request_lease.release().await;
-                yield Err(std::io::Error::other(stream_error_message));
-                return;
-            }
-            {
-                let mut context = log_context_clone.lock().await;
-                if execution_policy.records_request_log() {
-                    user_body_writer
-                        .as_mut()
-                        .expect("user stream writer should exist")
-                        .preserve_on_drop();
-                }
-                context.user_response_body =
-                    Some(user_body_writer.as_ref().expect("user stream writer should exist").snapshot(LogBodyCaptureState::Incomplete));
-            }
             mark_stream_response_started_to_client(&log_context_clone, &done_chunk).await;
             yield Ok::<_, std::io::Error>(done_chunk);
         }
@@ -1181,11 +668,9 @@ pub(super) async fn handle_streaming_response(
         let llm_response_completed_at = Utc::now().timestamp_millis();
 
         if status_code.is_success() {
-            let reasoning_capture_report = reasoning_stream_capture
+            reasoning_stream_capture
                 .finish(&app_state_clone, llm_response_completed_at)
                 .await;
-            let reasoning_capture_diagnostics =
-                stream_capture_transform_diagnostics(&reasoning_capture_report);
             let mut context = log_context_clone.lock().await;
             finalize_streaming_log_context(
                 &mut context,
@@ -1196,38 +681,16 @@ pub(super) async fn handle_streaming_response(
                 RequestStatus::Success,
                 None,
             );
-            context.llm_response_body = match llm_body_writer.take() {
-                Some(writer) => writer.finish(LogBodyCaptureState::Complete).await.ok(),
-                None => None,
-            };
-            context.user_response_body = match user_body_writer.take() {
-                Some(writer) => writer.finish(LogBodyCaptureState::Complete).await.ok(),
-                None => None,
-            };
-
             context.usage = transformer.parse_usage_info();
             context.usage_normalization = transformer.parse_usage_normalization();
-            context.replace_transform_diagnostics_phase(
-                crate::utils::storage::RequestLogBundleTransformDiagnosticPhase::Stream,
-                &transformer.diagnostics_snapshot(),
-            );
-            append_response_transform_diagnostics(&mut context, &reasoning_capture_diagnostics);
-            record_streaming_completion_if_allowed(
+            record_streaming_completion(&app_state_clone, &context).await;
+            record_provider_success(
                 &app_state_clone,
-                &context,
-                log_mode,
-                execution_policy,
+                provider_id,
+                &model_str,
+                provider_circuit_permit.as_ref(),
             )
             .await;
-            if execution_policy.records_provider_runtime() {
-                record_provider_success(
-                    &app_state_clone,
-                    provider_id,
-                    &model_str,
-                    provider_circuit_permit.as_ref(),
-                )
-                .await;
-            }
             if context.usage.is_none() {
                 crate::debug_event!(
                     "proxy.stream_usage_missing_debug",
@@ -1251,26 +714,20 @@ pub(super) async fn handle_streaming_response(
             finalize_streaming_error(
                 &app_state_clone,
                 &log_context_clone,
-                &mut llm_body_writer,
-                &mut user_body_writer,
                 &url_owned,
                 status_code,
                 cost_catalog_version_clone.as_ref(),
                 &proxy_error,
-                log_mode,
-                execution_policy,
             )
             .await;
-            if execution_policy.records_provider_runtime() {
-                record_provider_failure(
-                    &app_state_clone,
-                    provider_id,
-                    &model_str,
-                    &proxy_error,
-                    provider_circuit_permit.as_ref(),
-                )
-                .await;
-            }
+            record_provider_failure(
+                &app_state_clone,
+                provider_id,
+                &model_str,
+                &proxy_error,
+                provider_circuit_permit.as_ref(),
+            )
+            .await;
             api_key_request_lease.release().await;
             response_drop_guard.disarm();
         }

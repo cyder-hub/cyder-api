@@ -37,14 +37,13 @@
               {{ record.overall_status || "/" }}
             </Badge>
           </div>
-          <MobileField :label="$t('recordPage.table.attempts')" :value="record.attemptsDisplay" mono />
+          <MobileField label="HTTP" :value="record.httpStatusDisplay" mono />
         </div>
 
         <div class="grid grid-cols-1 gap-3 rounded-lg bg-gray-50 p-3 min-[360px]:grid-cols-2">
           <MobileField :label="$t('recordPage.table.tokens')" :value="record.total_tokens ?? '/'" />
           <MobileField :label="$t('recordPage.table.cost')" :value="record.costDisplay" mono />
           <MobileField :label="$t('recordPage.table.firstByte')" :value="record.firstRespTimeDisplay" />
-          <MobileField :label="$t('recordPage.table.diagnostics')" :value="record.diagnosticsDisplay" mono />
         </div>
 
         <template #actions>
@@ -75,10 +74,7 @@
               {{ $t("recordPage.table.tokens") }}
             </TableHead>
             <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
-              {{ $t("recordPage.table.attempts") }}
-            </TableHead>
-            <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
-              {{ $t("recordPage.table.diagnostics") }}
+              HTTP
             </TableHead>
             <TableHead class="min-w-[200px] text-xs font-medium uppercase tracking-wider text-gray-500">
               {{ $t("recordPage.table.performance") }}
@@ -128,15 +124,7 @@
               }}
             </TableCell>
             <TableCell class="font-mono text-xs text-gray-700">
-              {{ record.attemptsDisplay }}
-            </TableCell>
-            <TableCell class="font-mono text-xs text-gray-700">
-              <Badge
-                :variant="record.has_transform_diagnostics ? 'outline' : 'secondary'"
-                class="font-mono text-[11px]"
-              >
-                {{ record.diagnosticsDisplay }}
-              </Badge>
+              {{ record.httpStatusDisplay }}
             </TableCell>
             <TableCell class="font-mono text-xs text-gray-700">
               {{

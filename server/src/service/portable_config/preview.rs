@@ -10,22 +10,10 @@ use super::{
 pub fn excluded_data_types() -> Vec<String> {
     [
         "request_log",
-        "request_attempt",
-        "request_replay_run",
-        "request_replay_artifact",
-        "object_storage_bundle",
-        "object_storage_artifact",
         "metric_ingested_request_log",
         "metric_request_rollup_minute",
-        "metric_attempt_rollup_minute",
         "metric_http_status_rollup_minute",
         "metric_cost_rollup_minute",
-        "alert_event",
-        "alert_rule_state",
-        "notification_channel",
-        "notification_channel_state",
-        "notification_delivery",
-        "notification_test_result",
         "api_key_rollup_daily",
         "api_key_rollup_monthly",
         "manager_auth_instance",
@@ -37,8 +25,6 @@ pub fn excluded_data_types() -> Vec<String> {
         "api_key_rpm_window",
         "config.default.yaml",
         "config.yaml",
-        "config.override.yaml",
-        "config.override.history.jsonl",
     ]
     .into_iter()
     .map(str::to_string)
@@ -135,22 +121,10 @@ mod tests {
 
         for expected in [
             "request_log",
-            "request_attempt",
-            "request_replay_run",
-            "request_replay_artifact",
-            "object_storage_bundle",
-            "object_storage_artifact",
             "metric_ingested_request_log",
             "metric_request_rollup_minute",
-            "metric_attempt_rollup_minute",
             "metric_http_status_rollup_minute",
             "metric_cost_rollup_minute",
-            "alert_event",
-            "alert_rule_state",
-            "notification_channel",
-            "notification_channel_state",
-            "notification_delivery",
-            "notification_test_result",
             "api_key_rollup_daily",
             "api_key_rollup_monthly",
             "manager_auth_instance",
@@ -162,8 +136,6 @@ mod tests {
             "api_key_rpm_window",
             "config.default.yaml",
             "config.yaml",
-            "config.override.yaml",
-            "config.override.history.jsonl",
         ] {
             assert!(
                 excluded_set.contains(expected),
@@ -171,15 +143,7 @@ mod tests {
             );
         }
 
-        for too_broad in [
-            "metrics",
-            "alert_state",
-            "notification_state",
-            "manager_auth_sessions",
-            "runtime_redis_state",
-            "system_config_files",
-            "config_override_history",
-        ] {
+        for too_broad in ["metrics", "manager_auth_sessions", "runtime_redis_state"] {
             assert!(
                 !excluded_set.contains(too_broad),
                 "excluded_data_types should not use broad category `{too_broad}`"

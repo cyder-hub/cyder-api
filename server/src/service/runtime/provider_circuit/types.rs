@@ -247,27 +247,6 @@ impl ProviderHealthState {
         now_ms: i64,
         probe_lease_ttl: Duration,
     ) -> ProviderCircuitDecision {
-        self.allow_request_with_cooldown_policy(provider_id, config, now_ms, probe_lease_ttl, true)
-    }
-
-    pub(crate) fn allow_last_candidate_request(
-        &mut self,
-        provider_id: i64,
-        config: &ProviderGovernanceConfig,
-        now_ms: i64,
-        probe_lease_ttl: Duration,
-    ) -> ProviderCircuitDecision {
-        self.allow_request_with_cooldown_policy(provider_id, config, now_ms, probe_lease_ttl, false)
-    }
-
-    fn allow_request_with_cooldown_policy(
-        &mut self,
-        provider_id: i64,
-        config: &ProviderGovernanceConfig,
-        now_ms: i64,
-        probe_lease_ttl: Duration,
-        respect_open_cooldown: bool,
-    ) -> ProviderCircuitDecision {
         if !config.is_enabled() {
             return ProviderCircuitDecision::allowed(
                 ProviderHealthSnapshot::synthetic_healthy(),
@@ -283,7 +262,7 @@ impl ProviderHealthState {
             }
             ProviderHealthStatus::Open => {
                 let retry_after = self.retry_after_for_open(config, now_ms);
-                if respect_open_cooldown && !retry_after.is_zero() {
+                if !retry_after.is_zero() {
                     return ProviderCircuitDecision::rejected(
                         self.snapshot(),
                         ProviderCircuitRejection::OpenCooldown,
@@ -383,12 +362,6 @@ impl ProviderHealthState {
 #[async_trait]
 pub trait ProviderCircuitStore: Send + Sync {
     async fn allow_request(
-        &self,
-        provider_id: i64,
-        config: &ProviderGovernanceConfig,
-    ) -> Result<ProviderCircuitDecision, ProviderCircuitError>;
-
-    async fn allow_last_candidate_request(
         &self,
         provider_id: i64,
         config: &ProviderGovernanceConfig,

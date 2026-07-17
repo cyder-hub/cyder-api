@@ -85,7 +85,6 @@ pub enum PortableSubrangeId {
     ProviderReasoningConfig,
     ApiKeyCore,
     ApiKeyAcl,
-    ApiKeyModelOverride,
     CostCatalogCore,
     CostCatalogVersions,
     CostComponents,
@@ -103,7 +102,6 @@ impl PortableSubrangeId {
             "provider_reasoning_config" => Self::ProviderReasoningConfig,
             "api_key_core" => Self::ApiKeyCore,
             "api_key_acl" => Self::ApiKeyAcl,
-            "api_key_model_override" => Self::ApiKeyModelOverride,
             "cost_catalog_core" => Self::CostCatalogCore,
             "cost_catalog_versions" => Self::CostCatalogVersions,
             "cost_components" => Self::CostComponents,
@@ -121,7 +119,6 @@ impl PortableSubrangeId {
             Self::ProviderReasoningConfig => "provider_reasoning_config",
             Self::ApiKeyCore => "api_key_core",
             Self::ApiKeyAcl => "api_key_acl",
-            Self::ApiKeyModelOverride => "api_key_model_override",
             Self::CostCatalogCore => "cost_catalog_core",
             Self::CostCatalogVersions => "cost_catalog_versions",
             Self::CostComponents => "cost_components",
@@ -328,8 +325,6 @@ pub struct PortableApiKeyItem {
     pub api_key: String,
     #[serde(default)]
     pub acl_rules: Vec<PortableApiKeyAclRuleItem>,
-    #[serde(default)]
-    pub model_overrides: Vec<PortableApiKeyModelOverrideItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -341,14 +336,6 @@ pub struct PortableApiKeyAclRuleItem {
     pub priority: i32,
     pub is_enabled: bool,
     pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PortableApiKeyModelOverrideItem {
-    pub source_name: String,
-    pub target_route_ref: String,
-    pub description: Option<String>,
-    pub is_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

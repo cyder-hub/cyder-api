@@ -11,8 +11,6 @@ pub struct ConfigPaths {
     pub default_config_path: PathBuf,
     pub user_config_path: PathBuf,
     pub user_config_path_required: bool,
-    pub override_config_path: PathBuf,
-    pub override_history_path: PathBuf,
     pub persistence: PersistencePaths,
     pub ignored_empty_environment_variables: Vec<String>,
 }
@@ -21,15 +19,11 @@ impl ConfigPaths {
     pub fn new(
         default_config_path: impl Into<PathBuf>,
         user_config_path: impl Into<PathBuf>,
-        override_config_path: impl Into<PathBuf>,
-        override_history_path: impl Into<PathBuf>,
     ) -> Self {
         Self {
             default_config_path: default_config_path.into(),
             user_config_path: user_config_path.into(),
             user_config_path_required: false,
-            override_config_path: override_config_path.into(),
-            override_history_path: override_history_path.into(),
             persistence: default_release_persistence_paths(),
             ignored_empty_environment_variables: Vec::new(),
         }
@@ -48,8 +42,6 @@ impl ConfigPaths {
             default_config_path: resolved.default_config_path,
             user_config_path: resolved.user_config_path,
             user_config_path_required: resolved.user_config_path_required,
-            override_config_path: resolved.override_config_path,
-            override_history_path: resolved.override_history_path,
             persistence: resolved.persistence,
             ignored_empty_environment_variables: resolved.ignored_empty_environment_variables,
         }

@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use axum::{body::Body, response::Response};
 use serde::Serialize;
@@ -12,40 +9,35 @@ use super::{
     runtime::{
         api_key_lease::ApiKeyRequestLeaseFinalizer,
         route_resolver::{
-            CandidateRuntimeFeatures, ExecutionCandidate, RuntimeFeatureConfigSource,
-            candidate_supports_reasoning_preset, resolve_effective_reasoning_config,
-            route_supports_reasoning_preset,
+            ExecutionTarget, RuntimeFeatureConfigSource, TargetRuntimeFeatures,
+            resolve_effective_reasoning_config, target_supports_reasoning_preset,
         },
     },
     util::determine_target_api_type,
 };
 use crate::{
     database::reasoning_config::{ReasoningConfigMode, ReasoningPreset},
-    schema::enum_def::{LlmApiType, ProviderType},
+    schema::enum_def::LlmApiType,
     service::{
         app_state::AppState,
         cache::types::{
-            CacheApiKey, CacheApiKeyModelOverride, CacheModel, CacheModelRoute, CacheModelsCatalog,
-            CacheProvider, CacheReasoningConfig,
+            CacheApiKey, CacheModel, CacheModelsCatalog, CacheProvider, CacheReasoningConfig,
         },
     },
     utils::acl::ACL_EVALUATOR,
 };
-use cyder_tools::log::{debug, error, warn};
+use cyder_tools::log::{debug, error};
 
 #[derive(Debug)]
 pub(super) struct AccessibleModel {
     pub id: String,
     pub owned_by: String,
-    pub provider_type: ProviderType,
 }
 
 pub(super) async fn get_accessible_models(
     app_state: &Arc<AppState>,
     api_key: &CacheApiKey,
 ) -> Result<Vec<AccessibleModel>, ProxyError> {
-    debug!("Fetching accessible models for API key ID: {}", api_key.id);
-
     let catalog = app_state
         .catalog
         .get_models_catalog()
@@ -54,15 +46,7 @@ pub(super) async fn get_accessible_models(
             error!("Failed to fetch models catalog from cache: {:?}", store_err);
             ProxyError::InternalError("Failed to retrieve models catalog".to_string())
         })?;
-
-    let available_models = collect_accessible_models(catalog.as_ref(), api_key);
-
-    debug!(
-        "Total accessible models (including routes and overrides): {}",
-        available_models.len()
-    );
-
-    Ok(available_models)
+    Ok(collect_accessible_models(catalog.as_ref(), api_key))
 }
 
 pub(super) async fn execute_models_listing(
@@ -70,31 +54,22 @@ pub(super) async fn execute_models_listing(
     api_key: Arc<CacheApiKey>,
     api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
-    let request_lease = admit_api_key_request(&app_state, &api_key)
-        .await
-        .map_err(|e| {
-            error!("API key request admission failed for /models: {:?}", e);
-            e
-        })?;
+    let request_lease = admit_api_key_request(&app_state, &api_key).await?;
     let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
-
     let result = async {
-        let accessible_models = get_accessible_models(&app_state, &api_key).await?;
-        let response_body = render_models_response(api_type, &accessible_models)?;
-
+        let models = get_accessible_models(&app_state, &api_key).await?;
+        let response_body = render_models_response(api_type, &models)?;
         Ok(Response::builder()
             .status(200)
             .header("content-type", "application/json")
             .body(Body::from(response_body))
-            .unwrap())
+            .expect("models response is valid"))
     }
     .await;
-
     request_lease.release().await;
     result
 }
 
-// --- Structs for /models endpoint response ---
 #[derive(Serialize, Debug)]
 pub(super) struct ModelListResponse {
     pub object: String,
@@ -103,12 +78,11 @@ pub(super) struct ModelListResponse {
 
 #[derive(Serialize, Debug)]
 pub(super) struct ModelInfo {
-    pub id: String, // model.model_name
+    pub id: String,
     pub object: String,
-    pub owned_by: String, // provider.provider_key
+    pub owned_by: String,
 }
 
-// --- Structs for Gemini /models endpoint response ---
 #[derive(Serialize, Debug)]
 pub(super) struct GeminiModelListResponse {
     pub models: Vec<GeminiModelInfo>,
@@ -124,79 +98,50 @@ fn render_models_response(
     accessible_models: &[AccessibleModel],
 ) -> Result<String, ProxyError> {
     match api_type {
-        LlmApiType::Gemini => {
-            let models = accessible_models
+        LlmApiType::Gemini => serde_json::to_string(&GeminiModelListResponse {
+            models: accessible_models
                 .iter()
-                .map(|m| GeminiModelInfo {
-                    name: format!("models/{}", m.id),
+                .map(|model| GeminiModelInfo {
+                    name: format!("models/{}", model.id),
                 })
-                .collect();
-            serde_json::to_string(&GeminiModelListResponse { models }).map_err(|e| {
-                ProxyError::InternalError(format!("Failed to serialize Gemini models list: {}", e))
-            })
-        }
-        LlmApiType::Ollama => {
-            let models = accessible_models
+                .collect(),
+        }),
+        LlmApiType::Ollama => serde_json::to_string(&serde_json::json!({
+            "models": accessible_models.iter().map(|model| serde_json::json!({
+                "name": model.id,
+                "model": model.id,
+                "modified_at": "",
+                "size": 0,
+                "digest": "",
+                "details": {
+                    "format": "",
+                    "family": "",
+                    "families": null,
+                    "parameter_size": "",
+                    "quantization_level": ""
+                }
+            })).collect::<Vec<_>>()
+        })),
+        _ => serde_json::to_string(&ModelListResponse {
+            object: "list".to_string(),
+            data: accessible_models
                 .iter()
-                .map(|m| {
-                    serde_json::json!({
-                        "name": m.id,
-                        "model": m.id,
-                        "modified_at": "",
-                        "size": 0,
-                        "digest": "",
-                        "details": {
-                            "format": "",
-                            "family": "",
-                            "families": null,
-                            "parameter_size": "",
-                            "quantization_level": ""
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-            serde_json::to_string(&serde_json::json!({ "models": models })).map_err(|e| {
-                ProxyError::InternalError(format!("Failed to serialize Ollama models list: {}", e))
-            })
-        }
-        _ => {
-            let data = accessible_models
-                .iter()
-                .map(|m| ModelInfo {
-                    id: m.id.clone(),
+                .map(|model| ModelInfo {
+                    id: model.id.clone(),
                     object: "model".to_string(),
-                    owned_by: m.owned_by.clone(),
+                    owned_by: model.owned_by.clone(),
                 })
-                .collect();
-            serde_json::to_string(&ModelListResponse {
-                object: "list".to_string(),
-                data,
-            })
-            .map_err(|e| {
-                ProxyError::InternalError(format!("Failed to serialize models list: {}", e))
-            })
-        }
+                .collect(),
+        }),
     }
+    .map_err(|err| ProxyError::InternalError(format!("Failed to serialize models list: {err}")))
 }
 
 fn collect_accessible_models(
     catalog: &CacheModelsCatalog,
     api_key: &CacheApiKey,
 ) -> Vec<AccessibleModel> {
-    let providers_by_id = catalog
-        .providers
-        .iter()
-        .filter(|provider| provider.is_enabled)
-        .map(|provider| (provider.id, provider))
-        .collect::<HashMap<_, _>>();
-    let models_by_id = catalog
-        .models
-        .iter()
-        .filter(|model| model.is_enabled)
-        .map(|model| (model.id, model))
-        .collect::<HashMap<_, _>>();
-
-    let mut available_models = Vec::new();
+    let mut result = Vec::new();
     let mut seen_ids = HashSet::new();
 
     for provider in catalog
@@ -204,279 +149,43 @@ fn collect_accessible_models(
         .iter()
         .filter(|provider| provider.is_enabled)
     {
-        let mut provider_models = catalog
+        let mut models = catalog
             .models
             .iter()
             .filter(|model| model.is_enabled && model.provider_id == provider.id)
             .collect::<Vec<_>>();
-        provider_models.sort_by(|left, right| left.model_name.cmp(&right.model_name));
+        models.sort_by(|left, right| left.model_name.cmp(&right.model_name));
 
-        for model in provider_models {
-            if is_model_allowed(api_key, provider, model) {
-                push_unique_accessible_model(
-                    &mut available_models,
-                    &mut seen_ids,
-                    AccessibleModel {
-                        id: format!("{}/{}", provider.provider_key, model.model_name),
-                        owned_by: provider.provider_key.clone(),
-                        provider_type: provider.provider_type.clone(),
-                    },
-                    "direct",
-                );
-            }
-        }
-    }
-
-    debug!(
-        "Found {} accessible models from providers",
-        available_models.len()
-    );
-
-    let mut routes = catalog
-        .routes
-        .iter()
-        .filter(|route| route.is_enabled && route.expose_in_models)
-        .collect::<Vec<_>>();
-    routes.sort_by(|left, right| left.route_name.cmp(&right.route_name));
-
-    for route in routes {
-        let Some(accessible_model) =
-            build_route_accessible_model(route, &providers_by_id, &models_by_id, api_key)
-        else {
-            continue;
-        };
-        push_unique_accessible_model(
-            &mut available_models,
-            &mut seen_ids,
-            accessible_model,
-            "route",
-        );
-    }
-
-    let mut overrides = catalog
-        .api_key_overrides
-        .iter()
-        .filter(|override_row| override_row.is_enabled && override_row.api_key_id == api_key.id)
-        .collect::<Vec<_>>();
-    overrides.sort_by(|left, right| left.source_name.cmp(&right.source_name));
-
-    for override_row in overrides {
-        let Some(route) = catalog
-            .routes
-            .iter()
-            .find(|route| route.id == override_row.target_route_id)
-        else {
-            continue;
-        };
-        let Some(accessible_model) = build_override_accessible_model(
-            override_row,
-            route,
-            &providers_by_id,
-            &models_by_id,
-            api_key,
-        ) else {
-            continue;
-        };
-        push_unique_accessible_model(
-            &mut available_models,
-            &mut seen_ids,
-            accessible_model,
-            "override",
-        );
-    }
-
-    collect_direct_reasoning_aliases(catalog, api_key, &mut available_models, &mut seen_ids);
-    collect_route_reasoning_aliases(
-        catalog,
-        &providers_by_id,
-        &models_by_id,
-        api_key,
-        &mut available_models,
-        &mut seen_ids,
-    );
-    collect_override_reasoning_aliases(
-        catalog,
-        &providers_by_id,
-        &models_by_id,
-        api_key,
-        &mut available_models,
-        &mut seen_ids,
-    );
-
-    available_models
-}
-
-fn collect_direct_reasoning_aliases(
-    catalog: &CacheModelsCatalog,
-    api_key: &CacheApiKey,
-    available_models: &mut Vec<AccessibleModel>,
-    seen_ids: &mut HashSet<String>,
-) {
-    for provider in catalog
-        .providers
-        .iter()
-        .filter(|provider| provider.is_enabled)
-    {
-        let mut provider_models = catalog
-            .models
-            .iter()
-            .filter(|model| model.is_enabled && model.provider_id == provider.id)
-            .collect::<Vec<_>>();
-        provider_models.sort_by(|left, right| left.model_name.cmp(&right.model_name));
-
-        for model in provider_models {
+        for model in models {
             if !is_model_allowed(api_key, provider, model) {
                 continue;
             }
+            push_model(
+                &mut result,
+                &mut seen_ids,
+                format!("{}/{}", provider.provider_key, model.model_name),
+                provider,
+            );
 
             for preset in exposed_presets_for_model(catalog, provider, model) {
-                let candidate = build_direct_reasoning_candidate(provider, model);
-                if candidate_supports_reasoning_preset(catalog, &candidate, preset).is_err() {
-                    continue;
-                }
-                push_unique_accessible_model(
-                    available_models,
-                    seen_ids,
-                    AccessibleModel {
-                        id: format!(
+                let target = build_direct_reasoning_target(provider, model);
+                if target_supports_reasoning_preset(catalog, &target, preset).is_ok() {
+                    push_model(
+                        &mut result,
+                        &mut seen_ids,
+                        format!(
                             "{}/{}-{}",
                             provider.provider_key,
                             model.model_name,
                             preset.canonical_suffix()
                         ),
-                        owned_by: provider.provider_key.clone(),
-                        provider_type: provider.provider_type.clone(),
-                    },
-                    "direct reasoning alias",
-                );
+                        provider,
+                    );
+                }
             }
         }
     }
-}
-
-fn collect_route_reasoning_aliases(
-    catalog: &CacheModelsCatalog,
-    providers_by_id: &HashMap<i64, &CacheProvider>,
-    models_by_id: &HashMap<i64, &CacheModel>,
-    api_key: &CacheApiKey,
-    available_models: &mut Vec<AccessibleModel>,
-    seen_ids: &mut HashSet<String>,
-) {
-    let mut routes = catalog
-        .routes
-        .iter()
-        .filter(|route| route.is_enabled && route.expose_in_models)
-        .collect::<Vec<_>>();
-    routes.sort_by(|left, right| left.route_name.cmp(&right.route_name));
-
-    for route in routes {
-        let Some(accessible_model) =
-            build_route_accessible_model(route, providers_by_id, models_by_id, api_key)
-        else {
-            continue;
-        };
-        push_route_reasoning_aliases(
-            catalog,
-            route,
-            &accessible_model,
-            &route.route_name,
-            available_models,
-            seen_ids,
-            "route reasoning alias",
-        );
-    }
-}
-
-fn collect_override_reasoning_aliases(
-    catalog: &CacheModelsCatalog,
-    providers_by_id: &HashMap<i64, &CacheProvider>,
-    models_by_id: &HashMap<i64, &CacheModel>,
-    api_key: &CacheApiKey,
-    available_models: &mut Vec<AccessibleModel>,
-    seen_ids: &mut HashSet<String>,
-) {
-    let mut overrides = catalog
-        .api_key_overrides
-        .iter()
-        .filter(|override_row| override_row.is_enabled && override_row.api_key_id == api_key.id)
-        .collect::<Vec<_>>();
-    overrides.sort_by(|left, right| left.source_name.cmp(&right.source_name));
-
-    for override_row in overrides {
-        let Some(route) = catalog
-            .routes
-            .iter()
-            .find(|route| route.id == override_row.target_route_id)
-        else {
-            continue;
-        };
-        let Some(accessible_model) = build_override_accessible_model(
-            override_row,
-            route,
-            providers_by_id,
-            models_by_id,
-            api_key,
-        ) else {
-            continue;
-        };
-        push_route_reasoning_aliases(
-            catalog,
-            route,
-            &accessible_model,
-            &override_row.source_name,
-            available_models,
-            seen_ids,
-            "override reasoning alias",
-        );
-    }
-}
-
-fn push_route_reasoning_aliases(
-    catalog: &CacheModelsCatalog,
-    route: &CacheModelRoute,
-    accessible_model: &AccessibleModel,
-    alias_base_name: &str,
-    available_models: &mut Vec<AccessibleModel>,
-    seen_ids: &mut HashSet<String>,
-    source_kind: &str,
-) {
-    for preset in ReasoningPreset::ALL {
-        if !route_exposes_reasoning_preset(catalog, route, preset) {
-            continue;
-        }
-        push_unique_accessible_model(
-            available_models,
-            seen_ids,
-            AccessibleModel {
-                id: format!("{}-{}", alias_base_name, preset.canonical_suffix()),
-                owned_by: accessible_model.owned_by.clone(),
-                provider_type: accessible_model.provider_type.clone(),
-            },
-            source_kind,
-        );
-    }
-}
-
-fn route_exposes_reasoning_preset(
-    catalog: &CacheModelsCatalog,
-    route: &CacheModelRoute,
-    preset: ReasoningPreset,
-) -> bool {
-    let Ok(bindings) = route_supports_reasoning_preset(catalog, route, preset) else {
-        return false;
-    };
-
-    bindings.iter().all(|binding| {
-        catalog.reasoning_configs.iter().any(|config| {
-            config.id == binding.config_id
-                && matches!(config.mode, ReasoningConfigMode::Custom)
-                && config.presets.iter().any(|config_preset| {
-                    config_preset.id == binding.config_preset_id
-                        && config_preset.is_enabled
-                        && config_preset.expose_in_models
-                })
-        })
-    })
+    result
 }
 
 fn exposed_presets_for_model(
@@ -484,14 +193,12 @@ fn exposed_presets_for_model(
     provider: &CacheProvider,
     model: &CacheModel,
 ) -> Vec<ReasoningPreset> {
-    let effective = resolve_effective_reasoning_config(catalog, provider, model);
-    let Some(config) = effective.config else {
+    let Some(config) = resolve_effective_reasoning_config(catalog, provider, model).config else {
         return Vec::new();
     };
     if !matches!(config.mode, ReasoningConfigMode::Custom) {
         return Vec::new();
     }
-
     exposed_presets_for_config(config)
 }
 
@@ -499,28 +206,19 @@ fn exposed_presets_for_config(config: &CacheReasoningConfig) -> Vec<ReasoningPre
     ReasoningPreset::ALL
         .into_iter()
         .filter(|preset| {
-            config.presets.iter().any(|config_preset| {
-                config_preset.preset == *preset
-                    && config_preset.is_enabled
-                    && config_preset.expose_in_models
-            })
+            config
+                .presets
+                .iter()
+                .any(|row| row.preset == *preset && row.is_enabled && row.expose_in_models)
         })
         .collect()
 }
 
-fn build_direct_reasoning_candidate(
-    provider: &CacheProvider,
-    model: &CacheModel,
-) -> ExecutionCandidate {
-    ExecutionCandidate {
-        candidate_position: 1,
-        route_id: None,
-        route_name: None,
-        route_candidate_priority: None,
+fn build_direct_reasoning_target(provider: &CacheProvider, model: &CacheModel) -> ExecutionTarget {
+    ExecutionTarget {
         provider: Arc::new(provider.clone()),
         model: Arc::new(model.clone()),
         llm_api_type: determine_target_api_type(provider),
-        provider_api_key_mode: provider.provider_api_key_mode.clone(),
         reasoning_config_id: None,
         reasoning_config_scope: None,
         reasoning_config_source: None,
@@ -528,80 +226,25 @@ fn build_direct_reasoning_candidate(
         reasoning_family: None,
         reasoning_preset: None,
         reasoning_suffix: None,
-        runtime_features: CandidateRuntimeFeatures {
+        runtime_features: TargetRuntimeFeatures {
             openai_reasoning_content_repair_enabled: false,
             openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
         },
     }
 }
 
-fn push_unique_accessible_model(
-    available_models: &mut Vec<AccessibleModel>,
+fn push_model(
+    result: &mut Vec<AccessibleModel>,
     seen_ids: &mut HashSet<String>,
-    accessible_model: AccessibleModel,
-    source_kind: &str,
+    id: String,
+    provider: &CacheProvider,
 ) {
-    if !seen_ids.insert(accessible_model.id.clone()) {
-        warn!(
-            "Skipping duplicate /models id '{}' from {} entry; preserving earlier entry",
-            accessible_model.id, source_kind
-        );
-        return;
+    if seen_ids.insert(id.clone()) {
+        result.push(AccessibleModel {
+            id,
+            owned_by: provider.provider_key.clone(),
+        });
     }
-
-    available_models.push(accessible_model);
-}
-
-fn select_first_accessible_route_candidate<'a>(
-    route: &'a CacheModelRoute,
-    models_by_id: &'a HashMap<i64, &'a CacheModel>,
-    providers_by_id: &'a HashMap<i64, &'a CacheProvider>,
-    api_key: &CacheApiKey,
-) -> Option<&'a CacheModel> {
-    route
-        .candidates
-        .iter()
-        .filter(|candidate| candidate.is_enabled)
-        .find_map(|candidate| {
-            let model = models_by_id.get(&candidate.model_id).copied()?;
-            let provider = providers_by_id.get(&model.provider_id).copied()?;
-            is_model_allowed(api_key, provider, model).then_some(model)
-        })
-}
-
-fn build_route_accessible_model(
-    route: &CacheModelRoute,
-    providers_by_id: &HashMap<i64, &CacheProvider>,
-    models_by_id: &HashMap<i64, &CacheModel>,
-    api_key: &CacheApiKey,
-) -> Option<AccessibleModel> {
-    let model =
-        select_first_accessible_route_candidate(route, models_by_id, providers_by_id, api_key)?;
-    let provider = providers_by_id.get(&model.provider_id)?;
-
-    Some(AccessibleModel {
-        id: route.route_name.clone(),
-        owned_by: "cyder-api".to_string(),
-        provider_type: provider.provider_type.clone(),
-    })
-}
-
-fn build_override_accessible_model(
-    override_row: &CacheApiKeyModelOverride,
-    route: &CacheModelRoute,
-    providers_by_id: &HashMap<i64, &CacheProvider>,
-    models_by_id: &HashMap<i64, &CacheModel>,
-    api_key: &CacheApiKey,
-) -> Option<AccessibleModel> {
-    let model =
-        select_first_accessible_route_candidate(route, models_by_id, providers_by_id, api_key)?;
-    let provider = providers_by_id.get(&model.provider_id)?;
-
-    Some(AccessibleModel {
-        id: override_row.source_name.clone(),
-        owned_by: "cyder-api".to_string(),
-        provider_type: provider.provider_type.clone(),
-    })
 }
 
 fn is_model_allowed(api_key: &CacheApiKey, provider: &CacheProvider, model: &CacheModel) -> bool {
@@ -620,978 +263,5 @@ fn is_model_allowed(api_key: &CacheApiKey, provider: &CacheProvider, model: &Cac
             );
             false
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{collect_accessible_models, render_models_response};
-    use crate::database::reasoning_config::{
-        ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
-    };
-    use crate::schema::enum_def::{Action, LlmApiType, ProviderApiKeyMode, ProviderType};
-    use crate::service::cache::types::{
-        CacheApiKey, CacheApiKeyAclRule, CacheApiKeyModelOverride, CacheModel, CacheModelRoute,
-        CacheModelRouteCandidate, CacheModelsCatalog, CacheProvider, CacheReasoningConfig,
-        CacheReasoningConfigPreset,
-    };
-
-    fn provider(id: i64, provider_key: &str, is_enabled: bool) -> CacheProvider {
-        CacheProvider {
-            id,
-            provider_key: provider_key.to_string(),
-            name: provider_key.to_string(),
-            endpoint: "https://example.com".to_string(),
-            use_proxy: false,
-            provider_type: ProviderType::Openai,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-            is_enabled,
-        }
-    }
-
-    fn provider_with_type(
-        id: i64,
-        provider_key: &str,
-        provider_type: ProviderType,
-    ) -> CacheProvider {
-        CacheProvider {
-            provider_type,
-            ..provider(id, provider_key, true)
-        }
-    }
-
-    fn model(id: i64, provider_id: i64, model_name: &str, is_enabled: bool) -> CacheModel {
-        CacheModel {
-            id,
-            provider_id,
-            model_name: model_name.to_string(),
-            real_model_name: None,
-            cost_catalog_id: None,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_reasoning: true,
-            supports_image_input: true,
-            supports_embeddings: true,
-            supports_rerank: true,
-            is_enabled,
-        }
-    }
-
-    fn model_with_reasoning_support(
-        id: i64,
-        provider_id: i64,
-        model_name: &str,
-        supports_reasoning: bool,
-    ) -> CacheModel {
-        CacheModel {
-            supports_reasoning,
-            ..model(id, provider_id, model_name, true)
-        }
-    }
-
-    fn provider_reasoning_config(
-        id: i64,
-        provider_id: i64,
-        family: ReasoningPatchFamily,
-        presets: &[(ReasoningPreset, bool)],
-    ) -> CacheReasoningConfig {
-        reasoning_config(
-            id,
-            ReasoningConfigScope::Provider,
-            Some(provider_id),
-            None,
-            family,
-            presets,
-        )
-    }
-
-    fn model_reasoning_config(
-        id: i64,
-        model_id: i64,
-        family: ReasoningPatchFamily,
-        presets: &[(ReasoningPreset, bool)],
-    ) -> CacheReasoningConfig {
-        reasoning_config(
-            id,
-            ReasoningConfigScope::Model,
-            None,
-            Some(model_id),
-            family,
-            presets,
-        )
-    }
-
-    fn model_disabled_reasoning_config(id: i64, model_id: i64) -> CacheReasoningConfig {
-        CacheReasoningConfig {
-            id,
-            scope_kind: ReasoningConfigScope::Model,
-            provider_id: None,
-            model_id: Some(model_id),
-            mode: ReasoningConfigMode::Disabled,
-            family: None,
-            presets: Vec::new(),
-        }
-    }
-
-    fn reasoning_config(
-        id: i64,
-        scope_kind: ReasoningConfigScope,
-        provider_id: Option<i64>,
-        model_id: Option<i64>,
-        family: ReasoningPatchFamily,
-        presets: &[(ReasoningPreset, bool)],
-    ) -> CacheReasoningConfig {
-        CacheReasoningConfig {
-            id,
-            scope_kind,
-            provider_id,
-            model_id,
-            mode: ReasoningConfigMode::Custom,
-            family: Some(family),
-            presets: presets
-                .iter()
-                .enumerate()
-                .map(
-                    |(index, (preset, expose_in_models))| CacheReasoningConfigPreset {
-                        id: id * 10 + index as i64,
-                        config_id: id,
-                        preset: *preset,
-                        suffix: preset.canonical_suffix().to_string(),
-                        requires_reasoning: preset.requires_reasoning(),
-                        allowed_operation_kinds: preset
-                            .allowed_operation_kinds()
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect(),
-                        expose_in_models: *expose_in_models,
-                        is_enabled: true,
-                    },
-                )
-                .collect(),
-        }
-    }
-
-    fn api_key(default_action: Action, acl_rules: Vec<CacheApiKeyAclRule>) -> CacheApiKey {
-        CacheApiKey {
-            id: 1,
-            api_key_hash: "hash".to_string(),
-            key_prefix: "cyder-prefix".to_string(),
-            key_last4: "1234".to_string(),
-            name: "test-key".to_string(),
-            description: None,
-            default_action,
-            is_enabled: true,
-            expires_at: None,
-            rate_limit_rpm: None,
-            max_concurrent_requests: None,
-            quota_daily_requests: None,
-            quota_daily_tokens: None,
-            quota_monthly_tokens: None,
-            budget_daily_nanos: None,
-            budget_daily_currency: None,
-            budget_monthly_nanos: None,
-            budget_monthly_currency: None,
-            acl_rules,
-        }
-    }
-
-    #[test]
-    fn collects_direct_models_from_cached_catalog_and_preserves_ordering() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![
-                provider(1, "provider-b", true),
-                provider(2, "provider-a", true),
-            ],
-            models: vec![
-                model(11, 1, "z-model", true),
-                model(12, 1, "a-model", true),
-                model(21, 2, "middle", true),
-            ],
-            routes: vec![],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![
-                "provider-b/a-model".to_string(),
-                "provider-b/z-model".to_string(),
-                "provider-a/middle".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn skips_inactive_provider_and_model_direct_entries() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider(1, "active", true), provider(2, "inactive", false)],
-            models: vec![
-                model(11, 1, "active-model", true),
-                model(12, 1, "disabled-model", false),
-                model(21, 2, "hidden-by-provider", true),
-            ],
-            routes: vec![],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(ids, vec!["active/active-model".to_string()]);
-    }
-
-    #[test]
-    fn filters_direct_models_with_access_control() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider(1, "provider", true)],
-            models: vec![model(11, 1, "allowed", true), model(12, 1, "denied", true)],
-            routes: vec![],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-        let api_key = api_key(
-            Action::Deny,
-            vec![CacheApiKeyAclRule {
-                id: 1,
-                effect: Action::Allow,
-                priority: 1,
-                scope: crate::schema::enum_def::RuleScope::Model,
-                provider_id: Some(1),
-                model_id: Some(11),
-                is_enabled: true,
-                description: None,
-            }],
-        );
-
-        let models = collect_accessible_models(&catalog, &api_key);
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(ids, vec!["provider/allowed".to_string()]);
-    }
-
-    #[test]
-    fn exposes_route_and_override_names_when_primary_candidate_is_allowed() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider(1, "provider", true)],
-            models: vec![model(11, 1, "allowed", true)],
-            routes: vec![CacheModelRoute {
-                id: 200,
-                route_name: "manual-smoke-route".to_string(),
-                description: None,
-                is_enabled: true,
-                expose_in_models: true,
-                candidates: vec![CacheModelRouteCandidate {
-                    route_id: 200,
-                    model_id: 11,
-                    provider_id: 1,
-                    priority: 0,
-                    is_enabled: true,
-                }],
-            }],
-            api_key_overrides: vec![CacheApiKeyModelOverride {
-                id: 1,
-                api_key_id: 1,
-                source_name: "manual-cli-model".to_string(),
-                target_route_id: 200,
-                description: None,
-                is_enabled: true,
-            }],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![
-                "provider/allowed".to_string(),
-                "manual-smoke-route".to_string(),
-                "manual-cli-model".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn exposes_route_name_without_override_when_route_is_visible() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider(1, "provider", true)],
-            models: vec![model(11, 1, "allowed", true)],
-            routes: vec![CacheModelRoute {
-                id: 200,
-                route_name: "manual-smoke-route".to_string(),
-                description: None,
-                is_enabled: true,
-                expose_in_models: true,
-                candidates: vec![CacheModelRouteCandidate {
-                    route_id: 200,
-                    model_id: 11,
-                    provider_id: 1,
-                    priority: 0,
-                    is_enabled: true,
-                }],
-            }],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![
-                "provider/allowed".to_string(),
-                "manual-smoke-route".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn exposes_override_name_even_when_route_is_hidden_from_models() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider(1, "provider", true)],
-            models: vec![model(11, 1, "allowed", true)],
-            routes: vec![CacheModelRoute {
-                id: 200,
-                route_name: "hidden-route".to_string(),
-                description: None,
-                is_enabled: true,
-                expose_in_models: false,
-                candidates: vec![CacheModelRouteCandidate {
-                    route_id: 200,
-                    model_id: 11,
-                    provider_id: 1,
-                    priority: 0,
-                    is_enabled: true,
-                }],
-            }],
-            api_key_overrides: vec![CacheApiKeyModelOverride {
-                id: 1,
-                api_key_id: 1,
-                source_name: "manual-cli-model".to_string(),
-                target_route_id: 200,
-                description: None,
-                is_enabled: true,
-            }],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![
-                "provider/allowed".to_string(),
-                "manual-cli-model".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn keeps_route_visible_when_primary_candidate_is_denied_but_secondary_is_allowed() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider(1, "provider", true)],
-            models: vec![model(11, 1, "allowed", true), model(12, 1, "denied", true)],
-            routes: vec![CacheModelRoute {
-                id: 200,
-                route_name: "manual-smoke-route".to_string(),
-                description: None,
-                is_enabled: true,
-                expose_in_models: true,
-                candidates: vec![
-                    CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 12,
-                        provider_id: 1,
-                        priority: 0,
-                        is_enabled: true,
-                    },
-                    CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 11,
-                        provider_id: 1,
-                        priority: 10,
-                        is_enabled: true,
-                    },
-                ],
-            }],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-        let api_key = api_key(
-            Action::Deny,
-            vec![CacheApiKeyAclRule {
-                id: 1,
-                effect: Action::Allow,
-                priority: 1,
-                scope: crate::schema::enum_def::RuleScope::Model,
-                provider_id: Some(1),
-                model_id: Some(11),
-                is_enabled: true,
-                description: None,
-            }],
-        );
-
-        let models = collect_accessible_models(&catalog, &api_key);
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![
-                "provider/allowed".to_string(),
-                "manual-smoke-route".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn hides_route_and_override_when_all_candidates_are_denied() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider(1, "provider", true)],
-            models: vec![
-                model(11, 1, "denied-a", true),
-                model(12, 1, "denied-b", true),
-            ],
-            routes: vec![CacheModelRoute {
-                id: 200,
-                route_name: "manual-smoke-route".to_string(),
-                description: None,
-                is_enabled: true,
-                expose_in_models: true,
-                candidates: vec![
-                    CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 11,
-                        provider_id: 1,
-                        priority: 0,
-                        is_enabled: true,
-                    },
-                    CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 12,
-                        provider_id: 1,
-                        priority: 10,
-                        is_enabled: true,
-                    },
-                ],
-            }],
-            api_key_overrides: vec![CacheApiKeyModelOverride {
-                id: 1,
-                api_key_id: 1,
-                source_name: "manual-cli-model".to_string(),
-                target_route_id: 200,
-                description: None,
-                is_enabled: true,
-            }],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-        let api_key = api_key(Action::Deny, vec![]);
-
-        let models = collect_accessible_models(&catalog, &api_key);
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert!(ids.is_empty());
-    }
-
-    #[test]
-    fn keeps_override_visible_when_primary_candidate_is_denied_but_secondary_is_allowed() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider(1, "provider", true)],
-            models: vec![model(11, 1, "allowed", true), model(12, 1, "denied", true)],
-            routes: vec![CacheModelRoute {
-                id: 200,
-                route_name: "manual-smoke-route".to_string(),
-                description: None,
-                is_enabled: true,
-                expose_in_models: false,
-                candidates: vec![
-                    CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 12,
-                        provider_id: 1,
-                        priority: 0,
-                        is_enabled: true,
-                    },
-                    CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 11,
-                        provider_id: 1,
-                        priority: 10,
-                        is_enabled: true,
-                    },
-                ],
-            }],
-            api_key_overrides: vec![CacheApiKeyModelOverride {
-                id: 1,
-                api_key_id: 1,
-                source_name: "manual-cli-model".to_string(),
-                target_route_id: 200,
-                description: None,
-                is_enabled: true,
-            }],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-        let api_key = api_key(
-            Action::Deny,
-            vec![CacheApiKeyAclRule {
-                id: 1,
-                effect: Action::Allow,
-                priority: 1,
-                scope: crate::schema::enum_def::RuleScope::Model,
-                provider_id: Some(1),
-                model_id: Some(11),
-                is_enabled: true,
-                description: None,
-            }],
-        );
-
-        let models = collect_accessible_models(&catalog, &api_key);
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![
-                "provider/allowed".to_string(),
-                "manual-cli-model".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn deduplicates_route_and_override_effective_names_and_preserves_order() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![
-                provider(1, "provider-b", true),
-                provider(2, "provider-a", true),
-            ],
-            models: vec![
-                model(11, 1, "z-model", true),
-                model(12, 1, "a-model", true),
-                model(21, 2, "middle", true),
-            ],
-            routes: vec![
-                CacheModelRoute {
-                    id: 200,
-                    route_name: "manual-smoke-route".to_string(),
-                    description: None,
-                    is_enabled: true,
-                    expose_in_models: true,
-                    candidates: vec![CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 11,
-                        provider_id: 1,
-                        priority: 0,
-                        is_enabled: true,
-                    }],
-                },
-                CacheModelRoute {
-                    id: 201,
-                    route_name: "provider-a/middle".to_string(),
-                    description: None,
-                    is_enabled: true,
-                    expose_in_models: true,
-                    candidates: vec![CacheModelRouteCandidate {
-                        route_id: 201,
-                        model_id: 21,
-                        provider_id: 2,
-                        priority: 0,
-                        is_enabled: true,
-                    }],
-                },
-            ],
-            api_key_overrides: vec![
-                CacheApiKeyModelOverride {
-                    id: 1,
-                    api_key_id: 1,
-                    source_name: "manual-smoke-route".to_string(),
-                    target_route_id: 200,
-                    description: None,
-                    is_enabled: true,
-                },
-                CacheApiKeyModelOverride {
-                    id: 2,
-                    api_key_id: 1,
-                    source_name: "provider-b/a-model".to_string(),
-                    target_route_id: 200,
-                    description: None,
-                    is_enabled: true,
-                },
-            ],
-            reasoning_configs: vec![],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(
-            ids,
-            vec![
-                "provider-b/a-model".to_string(),
-                "provider-b/z-model".to_string(),
-                "provider-a/middle".to_string(),
-                "manual-smoke-route".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn exposes_direct_reasoning_aliases_for_enabled_exposed_presets() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
-            models: vec![model_with_reasoning_support(11, 1, "gpt", true)],
-            routes: vec![],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![provider_reasoning_config(
-                900,
-                1,
-                ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                &[(ReasoningPreset::Low, false), (ReasoningPreset::High, true)],
-            )],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-
-        assert_eq!(
-            ids,
-            vec!["openai/gpt".to_string(), "openai/gpt-high".to_string()]
-        );
-    }
-
-    #[test]
-    fn direct_reasoning_aliases_respect_provider_default_model_custom_and_model_disabled() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
-            models: vec![
-                model_with_reasoning_support(11, 1, "custom", true),
-                model_with_reasoning_support(12, 1, "disabled", true),
-                model_with_reasoning_support(13, 1, "inherited", true),
-            ],
-            routes: vec![],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![
-                provider_reasoning_config(
-                    900,
-                    1,
-                    ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                    &[(ReasoningPreset::High, true)],
-                ),
-                model_reasoning_config(
-                    901,
-                    11,
-                    ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                    &[(ReasoningPreset::Low, true)],
-                ),
-                model_disabled_reasoning_config(902, 12),
-            ],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-
-        assert_eq!(
-            ids,
-            vec![
-                "openai/custom".to_string(),
-                "openai/disabled".to_string(),
-                "openai/inherited".to_string(),
-                "openai/custom-low".to_string(),
-                "openai/inherited-high".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn hides_direct_reasoning_alias_when_model_lacks_reasoning_capability() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
-            models: vec![model_with_reasoning_support(11, 1, "gpt", false)],
-            routes: vec![],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![provider_reasoning_config(
-                900,
-                1,
-                ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                &[(ReasoningPreset::High, true)],
-            )],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-
-        assert_eq!(ids, vec!["openai/gpt".to_string()]);
-    }
-
-    #[test]
-    fn deduplicates_reasoning_alias_when_exact_direct_model_exists() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
-            models: vec![
-                model_with_reasoning_support(11, 1, "gpt", true),
-                model_with_reasoning_support(12, 1, "gpt-high", true),
-            ],
-            routes: vec![],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![provider_reasoning_config(
-                900,
-                1,
-                ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                &[(ReasoningPreset::High, true)],
-            )],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-
-        assert_eq!(
-            ids,
-            vec![
-                "openai/gpt".to_string(),
-                "openai/gpt-high".to_string(),
-                "openai/gpt-high-high".to_string(),
-            ]
-        );
-        assert_eq!(
-            ids.iter()
-                .filter(|id| id.as_str() == "openai/gpt-high")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn exposes_route_and_override_reasoning_aliases_only_when_route_is_stable() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![
-                provider_with_type(1, "openai", ProviderType::Openai),
-                provider_with_type(2, "gemini", ProviderType::Gemini),
-                provider(3, "plain", true),
-            ],
-            models: vec![
-                model_with_reasoning_support(11, 1, "gpt", true),
-                model_with_reasoning_support(21, 2, "gemini", true),
-                model_with_reasoning_support(31, 3, "plain", true),
-            ],
-            routes: vec![
-                CacheModelRoute {
-                    id: 200,
-                    route_name: "stable-route".to_string(),
-                    description: None,
-                    is_enabled: true,
-                    expose_in_models: true,
-                    candidates: vec![
-                        CacheModelRouteCandidate {
-                            route_id: 200,
-                            model_id: 11,
-                            provider_id: 1,
-                            priority: 0,
-                            is_enabled: true,
-                        },
-                        CacheModelRouteCandidate {
-                            route_id: 200,
-                            model_id: 21,
-                            provider_id: 2,
-                            priority: 10,
-                            is_enabled: true,
-                        },
-                    ],
-                },
-                CacheModelRoute {
-                    id: 201,
-                    route_name: "partial-route".to_string(),
-                    description: None,
-                    is_enabled: true,
-                    expose_in_models: true,
-                    candidates: vec![
-                        CacheModelRouteCandidate {
-                            route_id: 201,
-                            model_id: 11,
-                            provider_id: 1,
-                            priority: 0,
-                            is_enabled: true,
-                        },
-                        CacheModelRouteCandidate {
-                            route_id: 201,
-                            model_id: 31,
-                            provider_id: 3,
-                            priority: 10,
-                            is_enabled: true,
-                        },
-                    ],
-                },
-            ],
-            api_key_overrides: vec![CacheApiKeyModelOverride {
-                id: 1,
-                api_key_id: 1,
-                source_name: "stable-alias".to_string(),
-                target_route_id: 200,
-                description: None,
-                is_enabled: true,
-            }],
-            reasoning_configs: vec![
-                provider_reasoning_config(
-                    900,
-                    1,
-                    ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                    &[(ReasoningPreset::High, true)],
-                ),
-                provider_reasoning_config(
-                    901,
-                    2,
-                    ReasoningPatchFamily::Gemini25ThinkingBudget,
-                    &[(ReasoningPreset::High, true)],
-                ),
-            ],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-
-        assert!(ids.contains(&"stable-route".to_string()));
-        assert!(ids.contains(&"stable-route-high".to_string()));
-        assert!(ids.contains(&"stable-alias".to_string()));
-        assert!(ids.contains(&"stable-alias-high".to_string()));
-        assert!(ids.contains(&"partial-route".to_string()));
-        assert!(!ids.contains(&"partial-route-high".to_string()));
-    }
-
-    #[test]
-    fn hides_route_reasoning_alias_when_any_candidate_config_hides_preset() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![
-                provider_with_type(1, "openai-a", ProviderType::Openai),
-                provider_with_type(2, "openai-b", ProviderType::Openai),
-            ],
-            models: vec![
-                model_with_reasoning_support(11, 1, "gpt-a", true),
-                model_with_reasoning_support(21, 2, "gpt-b", true),
-            ],
-            routes: vec![CacheModelRoute {
-                id: 200,
-                route_name: "mixed-exposure-route".to_string(),
-                description: None,
-                is_enabled: true,
-                expose_in_models: true,
-                candidates: vec![
-                    CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 11,
-                        provider_id: 1,
-                        priority: 0,
-                        is_enabled: true,
-                    },
-                    CacheModelRouteCandidate {
-                        route_id: 200,
-                        model_id: 21,
-                        provider_id: 2,
-                        priority: 10,
-                        is_enabled: true,
-                    },
-                ],
-            }],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![
-                provider_reasoning_config(
-                    900,
-                    1,
-                    ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                    &[(ReasoningPreset::High, true)],
-                ),
-                provider_reasoning_config(
-                    901,
-                    2,
-                    ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                    &[(ReasoningPreset::High, false)],
-                ),
-            ],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Allow, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-
-        assert!(ids.contains(&"mixed-exposure-route".to_string()));
-        assert!(!ids.contains(&"mixed-exposure-route-high".to_string()));
-    }
-
-    #[test]
-    fn hides_route_reasoning_alias_when_api_key_cannot_access_any_candidate() {
-        let catalog = CacheModelsCatalog {
-            providers: vec![provider_with_type(1, "openai", ProviderType::Openai)],
-            models: vec![model_with_reasoning_support(11, 1, "gpt", true)],
-            routes: vec![CacheModelRoute {
-                id: 200,
-                route_name: "stable-route".to_string(),
-                description: None,
-                is_enabled: true,
-                expose_in_models: true,
-                candidates: vec![CacheModelRouteCandidate {
-                    route_id: 200,
-                    model_id: 11,
-                    provider_id: 1,
-                    priority: 0,
-                    is_enabled: true,
-                }],
-            }],
-            api_key_overrides: vec![],
-            reasoning_configs: vec![provider_reasoning_config(
-                900,
-                1,
-                ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                &[(ReasoningPreset::High, true)],
-            )],
-            runtime_feature_configs: vec![],
-        };
-
-        let models = collect_accessible_models(&catalog, &api_key(Action::Deny, vec![]));
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-
-        assert!(ids.is_empty());
-    }
-
-    #[test]
-    fn renders_openai_style_models_response() {
-        let response_body = render_models_response(
-            LlmApiType::Openai,
-            &[super::AccessibleModel {
-                id: "provider/model".to_string(),
-                owned_by: "provider".to_string(),
-                provider_type: ProviderType::Openai,
-            }],
-        )
-        .unwrap();
-
-        let value: serde_json::Value = serde_json::from_str(&response_body).unwrap();
-        assert_eq!(value["object"], "list");
-        assert_eq!(value["data"][0]["id"], "provider/model");
-    }
-
-    #[test]
-    fn renders_gemini_style_models_response() {
-        let response_body = render_models_response(
-            LlmApiType::Gemini,
-            &[super::AccessibleModel {
-                id: "provider/model".to_string(),
-                owned_by: "provider".to_string(),
-                provider_type: ProviderType::Gemini,
-            }],
-        )
-        .unwrap();
-
-        let value: serde_json::Value = serde_json::from_str(&response_body).unwrap();
-        assert_eq!(value["models"][0]["name"], "models/provider/model");
     }
 }

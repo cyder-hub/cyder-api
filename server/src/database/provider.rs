@@ -361,39 +361,6 @@ impl Provider {
                         )))
                     })?;
 
-                let model_ids = model::table
-                    .filter(model::dsl::provider_id.eq(target_id_value))
-                    .select(model::dsl::id)
-                    .load::<i64>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to list models for provider {} while deleting dependents: {}",
-                            target_id_value, e
-                        )))
-                    })?;
-
-                if !model_ids.is_empty() {
-                    diesel::update(
-                        model_route_candidate::table.filter(
-                            model_route_candidate::dsl::model_id
-                                .eq_any(model_ids)
-                                .and(model_route_candidate::dsl::deleted_at.is_null()),
-                        ),
-                    )
-                    .set((
-                        model_route_candidate::dsl::deleted_at.eq(Some(current_time)),
-                        model_route_candidate::dsl::is_enabled.eq(false),
-                        model_route_candidate::dsl::updated_at.eq(current_time),
-                    ))
-                    .execute(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to delete model route candidates for provider {}: {}",
-                            target_id_value, e
-                        )))
-                    })?;
-                }
-
                 diesel::update(
                     provider_api_key::table.filter(
                         provider_api_key::dsl::provider_id

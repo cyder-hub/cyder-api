@@ -210,7 +210,7 @@ pub fn get_provider_runtime_aggregates_in_range(
                 .select((
                     request_log::dsl::provider_id,
                     request_log::dsl::request_received_at,
-                    request_log::dsl::llm_request_sent_at,
+                    request_log::dsl::upstream_request_sent_at,
                     request_log::dsl::llm_response_first_chunk_at,
                     request_log::dsl::llm_response_completed_at,
                     request_log::dsl::status,
@@ -271,7 +271,7 @@ pub fn get_provider_runtime_aggregates_in_range(
                 .select((
                     request_log::dsl::provider_id,
                     request_log::dsl::request_received_at,
-                    request_log::dsl::llm_request_sent_at,
+                    request_log::dsl::upstream_request_sent_at,
                     request_log::dsl::llm_response_first_chunk_at,
                     request_log::dsl::llm_response_completed_at,
                     request_log::dsl::status,

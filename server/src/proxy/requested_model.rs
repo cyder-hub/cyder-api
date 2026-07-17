@@ -183,8 +183,6 @@ mod tests {
         let catalog = CacheModelsCatalog {
             providers: vec![],
             models: vec![],
-            routes: vec![],
-            api_key_overrides: vec![],
             reasoning_configs: vec![CacheReasoningConfig {
                 id: 1,
                 scope_kind: crate::database::reasoning_config::ReasoningConfigScope::Provider,

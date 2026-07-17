@@ -167,13 +167,8 @@ fn ignored_environment_variable(name: &str) -> Option<IgnoredEnvironmentVariable
                 reason: "unprefixed configuration variables are ignored; use the CYDER_* allowlist",
             })
         }
-        "DB_URL"
-        | "SECRET_KEY"
-        | "PASSWORD_SALT"
-        | "JWT_SECRET"
-        | "API_KEY_JWT_SECRET"
-        | "REDIS_URL"
-        | "STORAGE__LOCAL__ROOT" => Some(IgnoredEnvironmentVariable {
+        "DB_URL" | "SECRET_KEY" | "PASSWORD_SALT" | "JWT_SECRET" | "API_KEY_JWT_SECRET"
+        | "REDIS_URL" => Some(IgnoredEnvironmentVariable {
             name: name.to_string(),
             reason: "this configuration field must come from YAML and cannot be overridden by environment",
         }),

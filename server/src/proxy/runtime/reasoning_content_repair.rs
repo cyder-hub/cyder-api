@@ -24,22 +24,6 @@ pub(crate) enum ReasoningContentRepairResultKey {
     ExplicitReasoningDisabled,
 }
 
-impl ReasoningContentRepairResultKey {
-    pub(crate) fn as_key(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::NotApplicable => "not_applicable",
-            Self::CacheMiss => "cache_miss",
-            Self::Ambiguous => "ambiguous",
-            Self::Matched => "matched",
-            Self::AlreadyPresent => "already_present",
-            Self::Expired => "expired",
-            Self::ParseFailed => "parse_failed",
-            Self::ExplicitReasoningDisabled => "explicit_reasoning_disabled",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReasoningContentRepairDiagnostic {
     pub result: ReasoningContentRepairResultKey,
@@ -459,9 +443,6 @@ mod tests {
             api_key_id: 11,
             provider_id: 22,
             model_id: 33,
-            route_id: Some(44),
-            route_name: Some("primary".to_string()),
-            candidate_position: 0,
         }
     }
 

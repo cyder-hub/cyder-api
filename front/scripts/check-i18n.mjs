@@ -222,8 +222,6 @@ async function checkDynamicKeyCandidates(messageKeys) {
     "sidebar-section",
     "dashboard-usage-metric",
     "request-patch-prefix",
-    "alerts",
-    "notifications",
     "api-key-governance",
     "api-key-edit-modal",
     "model-capabilities",
@@ -261,10 +259,7 @@ async function checkDynamicKeyCandidates(messageKeys) {
   const exceptionIds = new Set(
     DYNAMIC_I18N_FALLBACK_EXCEPTIONS.map((exception) => exception.id),
   );
-  for (const id of [
-    "record-replay-unavailable-reason",
-    "portable-config-unknown-module-or-subrange",
-  ]) {
+  for (const id of ["portable-config-unknown-module-or-subrange"]) {
     if (!exceptionIds.has(id)) {
       addError(`dynamic keys: missing fallback exception ${id}`);
     }

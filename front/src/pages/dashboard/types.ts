@@ -1,7 +1,5 @@
 import type {
-  DashboardAlertsSection,
-  DashboardKpiSection,
-  DashboardResourcesSection,
+  DashboardResponse,
   ProviderRuntimeLevel,
   RuntimeStateBackendName,
   RuntimeStateBackendStatus,
@@ -9,9 +7,7 @@ import type {
 import type { RuntimeStateBackendScope } from "@/utils/runtimeBackend";
 
 export interface DashboardApiClient {
-  getSystemDashboardKpi: () => Promise<DashboardKpiSection>;
-  getSystemDashboardResources: () => Promise<DashboardResourcesSection>;
-  getSystemDashboardAlerts: () => Promise<DashboardAlertsSection>;
+  getSystemDashboard: () => Promise<DashboardResponse>;
 }
 
 export type DashboardTranslator = (

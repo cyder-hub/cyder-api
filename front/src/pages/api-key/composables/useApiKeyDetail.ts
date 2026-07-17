@@ -12,7 +12,6 @@ import type {
   ApiKeyAclRuleScope,
   ApiKeyDetail,
   ApiKeyItem,
-  ApiKeyModelOverrideItem,
   ApiKeyReveal,
   ApiKeyRuntimeBilledAmount,
   ApiKeyRuntimeSnapshot,
@@ -287,18 +286,6 @@ export function aclRuleTarget(
     return providerNameById.get(rule.provider_id ?? -1) ?? t("common.notAvailable");
   }
   return modelNameById.get(rule.model_id ?? -1) ?? t("common.notAvailable");
-}
-
-export function modelOverrideTargetLabel(
-  item: ApiKeyModelOverrideItem,
-  routeNameById: Map<number, string>,
-  t: TranslateFn,
-) {
-  return (
-    item.target_route_name ??
-    routeNameById.get(item.target_route_id) ??
-    t("common.notAvailable")
-  );
 }
 
 export function useApiKeyDetail(

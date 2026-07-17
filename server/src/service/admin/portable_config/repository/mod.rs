@@ -4,7 +4,6 @@ use crate::{controller::BaseError, database::DbConnection};
 
 pub(crate) mod api_key;
 pub(crate) mod cost;
-pub(crate) mod model_route;
 pub(crate) mod provider;
 pub(crate) mod reasoning_config;
 pub(crate) mod request_patch;

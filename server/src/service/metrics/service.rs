@@ -9,7 +9,6 @@ use crate::{
             delete_metrics_data_in_range, ingest_metric_rollups,
             list_request_log_ids_in_range_after, list_uningested_request_log_ids,
         },
-        request_attempt::RequestAttempt,
         request_log::RequestLog,
     },
     proxy::logging::RequestLogPersistedSink,
@@ -103,7 +102,6 @@ impl MetricsService {
     pub fn record_request_log(
         &self,
         request_log: &RequestLog,
-        attempts: &[RequestAttempt],
     ) -> Result<MetricsIngestOutcome, BaseError> {
         if !self.config.enabled {
             return Ok(MetricsIngestOutcome {
@@ -121,16 +119,10 @@ impl MetricsService {
             completed_at: request_log.completed_at,
             ingested_at: now_ms,
         };
-        let deltas = build_rollup_deltas(
-            request_log,
-            attempts,
-            self.config.rollup_bucket_seconds,
-            now_ms,
-        );
+        let deltas = build_rollup_deltas(request_log, self.config.rollup_bucket_seconds, now_ms);
         if !ingest_metric_rollups(
             &marker,
             &deltas.request_rollups,
-            &deltas.attempt_rollups,
             &deltas.http_status_rollups,
             &deltas.cost_rollups,
         )? {
@@ -147,7 +139,6 @@ impl MetricsService {
             ingested: true,
             skipped_existing: false,
             request_rollup_deltas: deltas.request_rollups.len(),
-            attempt_rollup_deltas: deltas.attempt_rollups.len(),
             http_status_deltas: deltas.http_status_rollups.len(),
             cost_rollup_deltas: deltas.cost_rollups.len(),
         })
@@ -158,8 +149,7 @@ impl MetricsService {
         request_log_id: i64,
     ) -> Result<MetricsIngestOutcome, BaseError> {
         let request_log = RequestLog::get_by_id(request_log_id)?;
-        let attempts = RequestAttempt::list_by_request_log_id(request_log_id)?;
-        self.record_request_log(&request_log, &attempts)
+        self.record_request_log(&request_log)
     }
 
     pub fn reconcile_request_logs(
@@ -230,12 +220,12 @@ impl MetricsService {
 
         if params.dry_run {
             let reconciliation =
-                self.replay_request_logs_in_range(bucket_start, bucket_end, params.limit, true)?;
+                self.reingest_request_logs_in_range(bucket_start, bucket_end, params.limit, true)?;
             return Ok(MetricsRepairSummary {
                 requested_start_time: params.start_time,
                 requested_end_time: params.end_time,
-                expanded_replay_start_time: bucket_start,
-                expanded_replay_end_time: bucket_end,
+                expanded_ingest_start_time: bucket_start,
+                expanded_ingest_end_time: bucket_end,
                 reconciliation,
                 ..Default::default()
             });
@@ -244,16 +234,15 @@ impl MetricsService {
         let deleted =
             delete_metrics_data_in_range(bucket_start, bucket_end, bucket_start, bucket_end)?;
         let reconciliation =
-            self.replay_request_logs_in_range(bucket_start, bucket_end, params.limit, false)?;
+            self.reingest_request_logs_in_range(bucket_start, bucket_end, params.limit, false)?;
 
         Ok(MetricsRepairSummary {
             requested_start_time: params.start_time,
             requested_end_time: params.end_time,
-            expanded_replay_start_time: bucket_start,
-            expanded_replay_end_time: bucket_end,
+            expanded_ingest_start_time: bucket_start,
+            expanded_ingest_end_time: bucket_end,
             deleted_ingest_markers: deleted.deleted_ingest_markers,
             deleted_request_rollups: deleted.deleted_request_rollups,
-            deleted_attempt_rollups: deleted.deleted_attempt_rollups,
             deleted_http_status_rollups: deleted.deleted_http_status_rollups,
             deleted_cost_rollups: deleted.deleted_cost_rollups,
             reconciliation,
@@ -268,7 +257,7 @@ impl MetricsService {
         count_uningested_request_logs_in_range(start_time, end_time)
     }
 
-    fn replay_request_logs_in_range(
+    fn reingest_request_logs_in_range(
         &self,
         start_time: i64,
         end_time: i64,
@@ -350,7 +339,6 @@ impl RequestLogPersistedSink for MetricsService {
                     ingested = outcome.ingested,
                     skipped_existing = outcome.skipped_existing,
                     request_rollup_deltas = outcome.request_rollup_deltas,
-                    attempt_rollup_deltas = outcome.attempt_rollup_deltas,
                     http_status_deltas = outcome.http_status_deltas,
                     cost_rollup_deltas = outcome.cost_rollup_deltas,
                 );

@@ -6,7 +6,6 @@ use crate::{
         DbResult,
         api_key::{ApiKey, NewApiKey, UpdateApiKeyData, hash_api_key, key_last4, key_prefix},
         api_key_acl_rule::{ApiKeyAclRule, NewApiKeyAclRule},
-        model_route::{ApiKeyModelOverride, NewApiKeyModelOverride},
     },
     schema::enum_def::Action,
     service::portable_config::schema::PortableModelRef,
@@ -64,12 +63,6 @@ pub(crate) struct ExportApiKeyAclRule {
     pub rule: ApiKeyAclRule,
     pub provider_ref: Option<String>,
     pub model_ref: Option<PortableModelRef>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ExportApiKeyModelOverride {
-    pub row: ApiKeyModelOverride,
-    pub target_route_ref: String,
 }
 
 pub(crate) fn list_api_keys_for_export(
@@ -214,81 +207,6 @@ pub(crate) fn list_api_key_acl_rules_for_export(
     Ok(exported)
 }
 
-pub(crate) fn list_api_key_model_overrides_for_export(
-    conn: &mut PortableRepositoryConnection<'_>,
-    api_key_id: i64,
-) -> DbResult<Vec<ExportApiKeyModelOverride>> {
-    let rows: Vec<ApiKeyModelOverride> = match conn {
-        PortableRepositoryConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::api_key_model_override;
-            use crate::database::model_route::_postgres_model::ApiKeyModelOverrideDb;
-
-            api_key_model_override::table
-                .filter(
-                    api_key_model_override::dsl::api_key_id
-                        .eq(api_key_id)
-                        .and(api_key_model_override::dsl::deleted_at.is_null()),
-                )
-                .order((
-                    api_key_model_override::dsl::created_at.asc(),
-                    api_key_model_override::dsl::id.asc(),
-                ))
-                .select(ApiKeyModelOverrideDb::as_select())
-                .load::<ApiKeyModelOverrideDb>(*conn)
-                .map(|rows| {
-                    rows.into_iter()
-                        .map(ApiKeyModelOverrideDb::from_db)
-                        .collect()
-                })
-                .map_err(|err| {
-                    map_write_error(
-                        "Failed to list api key model overrides for portable export",
-                        err,
-                    )
-                })?
-        }
-        PortableRepositoryConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::api_key_model_override;
-            use crate::database::model_route::_sqlite_model::ApiKeyModelOverrideDb;
-
-            api_key_model_override::table
-                .filter(
-                    api_key_model_override::dsl::api_key_id
-                        .eq(api_key_id)
-                        .and(api_key_model_override::dsl::deleted_at.is_null()),
-                )
-                .order((
-                    api_key_model_override::dsl::created_at.asc(),
-                    api_key_model_override::dsl::id.asc(),
-                ))
-                .select(ApiKeyModelOverrideDb::as_select())
-                .load::<ApiKeyModelOverrideDb>(*conn)
-                .map(|rows| {
-                    rows.into_iter()
-                        .map(ApiKeyModelOverrideDb::from_db)
-                        .collect()
-                })
-                .map_err(|err| {
-                    map_write_error(
-                        "Failed to list api key model overrides for portable export",
-                        err,
-                    )
-                })?
-        }
-    };
-
-    let mut exported = Vec::with_capacity(rows.len());
-    for row in rows {
-        if let Some(target_route_ref) = find_route_name_by_id(conn, row.target_route_id)? {
-            exported.push(ExportApiKeyModelOverride {
-                row,
-                target_route_ref,
-            });
-        }
-    }
-    Ok(exported)
-}
-
 pub(crate) fn insert_raw_api_key(
     conn: &mut PortableRepositoryConnection<'_>,
     input: &RawApiKeyImportInput,
@@ -417,75 +335,6 @@ pub(crate) fn insert_api_key_acl_rule(
     }
 }
 
-pub(crate) fn insert_api_key_model_override(
-    conn: &mut PortableRepositoryConnection<'_>,
-    row: &NewApiKeyModelOverride,
-) -> DbResult<ApiKeyModelOverride> {
-    validate_model_override_source_name(conn, &row.source_name)?;
-    match conn {
-        PortableRepositoryConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::{api_key_model_override, model_route};
-            use crate::database::model_route::_postgres_model::{
-                ApiKeyModelOverrideDb, NewApiKeyModelOverrideDb,
-            };
-
-            model_route::table
-                .filter(
-                    model_route::dsl::id
-                        .eq(row.target_route_id)
-                        .and(model_route::dsl::deleted_at.is_null()),
-                )
-                .select(model_route::dsl::id)
-                .first::<i64>(*conn)
-                .optional()
-                .map_err(|err| map_write_error("Failed to lookup model route for override", err))?
-                .ok_or_else(|| {
-                    BaseError::NotFound(Some(format!(
-                        "Model route {} not found",
-                        row.target_route_id
-                    )))
-                })?;
-
-            diesel::insert_into(api_key_model_override::table)
-                .values(NewApiKeyModelOverrideDb::to_db(row))
-                .returning(ApiKeyModelOverrideDb::as_returning())
-                .get_result::<ApiKeyModelOverrideDb>(*conn)
-                .map(ApiKeyModelOverrideDb::from_db)
-                .map_err(|err| map_write_error("Failed to import api key model override", err))
-        }
-        PortableRepositoryConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::{api_key_model_override, model_route};
-            use crate::database::model_route::_sqlite_model::{
-                ApiKeyModelOverrideDb, NewApiKeyModelOverrideDb,
-            };
-
-            model_route::table
-                .filter(
-                    model_route::dsl::id
-                        .eq(row.target_route_id)
-                        .and(model_route::dsl::deleted_at.is_null()),
-                )
-                .select(model_route::dsl::id)
-                .first::<i64>(*conn)
-                .optional()
-                .map_err(|err| map_write_error("Failed to lookup model route for override", err))?
-                .ok_or_else(|| {
-                    BaseError::NotFound(Some(format!(
-                        "Model route {} not found",
-                        row.target_route_id
-                    )))
-                })?;
-
-            diesel::insert_into(api_key_model_override::table)
-                .values(NewApiKeyModelOverrideDb::to_db(row))
-                .returning(ApiKeyModelOverrideDb::as_returning())
-                .get_result::<ApiKeyModelOverrideDb>(*conn)
-                .map(ApiKeyModelOverrideDb::from_db)
-                .map_err(|err| map_write_error("Failed to import api key model override", err))
-        }
-    }
-}
-
 fn validate_raw_api_key_input(input: &RawApiKeyImportInput) -> DbResult<()> {
     if input.raw_api_key.trim().is_empty() {
         return Err(BaseError::ParamInvalid(Some(
@@ -497,64 +346,6 @@ fn validate_raw_api_key_input(input: &RawApiKeyImportInput) -> DbResult<()> {
             "api key name must not be empty".to_string(),
         )));
     }
-    Ok(())
-}
-
-fn validate_model_override_source_name(
-    conn: &mut PortableRepositoryConnection<'_>,
-    source_name: &str,
-) -> DbResult<()> {
-    if source_name.trim().is_empty() {
-        return Err(BaseError::ParamInvalid(Some(
-            "model override source_name must not be empty".to_string(),
-        )));
-    }
-
-    let direct_model_names = match conn {
-        PortableRepositoryConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::{model, provider};
-
-            provider::table
-                .inner_join(model::table.on(model::dsl::provider_id.eq(provider::dsl::id)))
-                .filter(
-                    provider::dsl::deleted_at
-                        .is_null()
-                        .and(provider::dsl::is_enabled.eq(true))
-                        .and(model::dsl::deleted_at.is_null())
-                        .and(model::dsl::is_enabled.eq(true)),
-                )
-                .select((provider::dsl::provider_key, model::dsl::model_name))
-                .load::<(String, String)>(*conn)
-                .map_err(|err| map_write_error("Failed to load direct provider/model names", err))?
-        }
-        PortableRepositoryConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::{model, provider};
-
-            provider::table
-                .inner_join(model::table.on(model::dsl::provider_id.eq(provider::dsl::id)))
-                .filter(
-                    provider::dsl::deleted_at
-                        .is_null()
-                        .and(provider::dsl::is_enabled.eq(true))
-                        .and(model::dsl::deleted_at.is_null())
-                        .and(model::dsl::is_enabled.eq(true)),
-                )
-                .select((provider::dsl::provider_key, model::dsl::model_name))
-                .load::<(String, String)>(*conn)
-                .map_err(|err| map_write_error("Failed to load direct provider/model names", err))?
-        }
-    };
-
-    if direct_model_names
-        .iter()
-        .any(|(provider_key, model_name)| format!("{provider_key}/{model_name}") == source_name)
-    {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "name '{}' conflicts with an active direct provider/model address",
-            source_name
-        ))));
-    }
-
     Ok(())
 }
 
@@ -645,46 +436,6 @@ fn find_model_ref_by_id(
         provider_key,
         model_name,
     }))
-}
-
-fn find_route_name_by_id(
-    conn: &mut PortableRepositoryConnection<'_>,
-    route_id: i64,
-) -> DbResult<Option<String>> {
-    match conn {
-        PortableRepositoryConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::model_route;
-
-            model_route::table
-                .filter(
-                    model_route::dsl::id
-                        .eq(route_id)
-                        .and(model_route::dsl::deleted_at.is_null()),
-                )
-                .select(model_route::dsl::route_name)
-                .first::<String>(*conn)
-                .optional()
-                .map_err(|err| {
-                    map_write_error("Failed to lookup route ref for portable export", err)
-                })
-        }
-        PortableRepositoryConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::model_route;
-
-            model_route::table
-                .filter(
-                    model_route::dsl::id
-                        .eq(route_id)
-                        .and(model_route::dsl::deleted_at.is_null()),
-                )
-                .select(model_route::dsl::route_name)
-                .first::<String>(*conn)
-                .optional()
-                .map_err(|err| {
-                    map_write_error("Failed to lookup route ref for portable export", err)
-                })
-        }
-    }
 }
 
 #[cfg(test)]

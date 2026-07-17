@@ -113,14 +113,14 @@ fn provider_request_auth_header(
     let header_value = if header_name == AUTHORIZATION {
         ReqwestHeaderValue::try_from(format!("Bearer {}", request_key)).map_err(|err| {
             ProxyError::BadRequest(format!(
-                "Invalid provider credential for replay/auth header '{}': {}",
+                "Invalid provider credential for upstream auth header '{}': {}",
                 header_name, err
             ))
         })?
     } else {
         ReqwestHeaderValue::try_from(request_key).map_err(|err| {
             ProxyError::BadRequest(format!(
-                "Invalid provider credential for replay/auth header '{}': {}",
+                "Invalid provider credential for upstream auth header '{}': {}",
                 header_name, err
             ))
         })?

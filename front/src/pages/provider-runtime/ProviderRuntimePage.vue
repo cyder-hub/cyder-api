@@ -323,10 +323,6 @@ function buildPrimaryMetrics(item: ProviderRuntimeItem) {
       value: formatCount(item.consecutive_failures),
     },
     {
-      label: $t("providerRuntimePage.metrics.sortScore"),
-      value: item.sort_score.toFixed(2),
-    },
-    {
       label: $t("providerRuntimePage.metrics.proxy"),
       value: item.use_proxy ? $t("common.yes") : $t("common.no"),
     },

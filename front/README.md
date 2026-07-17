@@ -3,7 +3,7 @@
 This frontend is the single-administrator management console for the Cyder LLM
 gateway. It is an operator console, not a multi-tenant SaaS application. New
 work should prioritize gateway health, request troubleshooting, provider
-runtime visibility, API key governance, cost visibility, alerting, and manager
+runtime visibility, API key governance, cost visibility, diagnostics, and manager
 session safety.
 
 ## Stack
@@ -14,7 +14,7 @@ session safety.
 - Pinia
 - Vue Router
 - Tailwind CSS 4
-- reka-ui / radix-vue primitives
+- reka-ui primitives
 - lucide-vue-next icons
 - vue-i18n
 
@@ -40,7 +40,7 @@ Rules:
 - The routed SFC is the composition root for layout, component wiring, event
   binding, and connecting composables to the template.
 - Page logic is organized by user workflow or business capability in `useXxx`
-  composables, for example `useRecordReplay`, `useApiKeyGovernance`, or
+  composables, for example `useDashboardOperations`, `useApiKeyGovernance`, or
   `useProviderRuntimeFilters`.
 - Do not create mechanical horizontal layers such as `state.ts`, `query.ts`,
   `viewModel.ts`, or `format.ts` as the default page structure.
@@ -88,14 +88,10 @@ front/src/services/
   dashboard.ts
   providers.ts
   models.ts
-  modelRoutes.ts
   apiKeys.ts
   records.ts
   providerRuntime.ts
-  alerts.ts
-  notifications.ts
   cost.ts
-  systemConfig.ts
   requestPatch.ts
   types/
 ```

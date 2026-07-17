@@ -204,10 +204,6 @@ export function useModelEdit(
     void router.push("/provider");
   };
 
-  const handleNavigateToRoutes = () => {
-    void router.push("/model_route");
-  };
-
   const handleOpenSelectedCostCatalog = () => {
     if (!editingData.value?.cost_catalog_id) {
       toastController.warn(t("costPage.alert.selectCatalogFirst"));
@@ -280,7 +276,6 @@ export function useModelEdit(
     handleRuntimeFeatureConfigSaved,
     handleNavigateToModels,
     handleNavigateToProviders,
-    handleNavigateToRoutes,
     handleOpenSelectedCostCatalog,
     handleCreateCostCatalog,
     handleDuplicateSelectedCostCatalog,

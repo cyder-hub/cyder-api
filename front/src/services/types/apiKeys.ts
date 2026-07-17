@@ -39,7 +39,6 @@ export interface ApiKeyItem {
 
 export interface ApiKeyDetail extends ApiKeyItem {
   acl_rules: ApiKeyAclRule[];
-  model_overrides: ApiKeyModelOverrideItem[];
 }
 
 export interface ApiKeyReveal {
@@ -86,22 +85,6 @@ export interface ApiKeyAclRulePayload {
   description?: string | null;
 }
 
-export interface ApiKeyModelOverrideItem {
-  id: number;
-  source_name: string;
-  target_route_id: number;
-  target_route_name: string | null;
-  description: string | null;
-  is_enabled: boolean;
-}
-
-export interface ApiKeyModelOverridePayload {
-  source_name: string;
-  target_route_id: number;
-  description?: string | null;
-  is_enabled?: boolean;
-}
-
 export interface ApiKeyCreatePayload {
   name: string;
   description?: string | null;
@@ -118,7 +101,6 @@ export interface ApiKeyCreatePayload {
   budget_monthly_nanos?: number | null;
   budget_monthly_currency?: string | null;
   acl_rules?: ApiKeyAclRulePayload[];
-  model_overrides?: ApiKeyModelOverridePayload[];
 }
 
 export interface ApiKeyUpdatePayload {
@@ -137,5 +119,4 @@ export interface ApiKeyUpdatePayload {
   budget_monthly_nanos?: number | null;
   budget_monthly_currency?: string | null;
   acl_rules?: ApiKeyAclRulePayload[];
-  model_overrides?: ApiKeyModelOverridePayload[];
 }

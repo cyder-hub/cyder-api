@@ -23,7 +23,6 @@ local probe_lease_ttl_ms = tonumber(ARGV[4])
 local state_ttl_seconds = tonumber(ARGV[5])
 local decision_id = ARGV[6]
 local lease_id = ARGV[7]
-local allow_last_candidate_probe = ARGV[8] == '1'
 
 local function raw(field)
     return redis.call('HGET', state_key, field) or ''
@@ -108,7 +107,7 @@ if status == 'open' then
     local opened_at = tonumber(redis.call('HGET', state_key, 'opened_at')) or now_ms
     local elapsed_ms = now_ms - opened_at
     local retry_after_ms = open_cooldown_ms - elapsed_ms
-    if retry_after_ms > 0 and not allow_last_candidate_probe then
+    if retry_after_ms > 0 then
         return result(0, 'open_cooldown', retry_after_ms, -1)
     end
 
@@ -497,7 +496,6 @@ impl RedisProviderCircuitStore {
         &self,
         provider_id: i64,
         config: &ProviderGovernanceConfig,
-        allow_last_candidate_probe: bool,
     ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
         let now_ms = Utc::now().timestamp_millis();
         let decision_id = Uuid::new_v4().to_string();
@@ -519,7 +517,6 @@ impl RedisProviderCircuitStore {
             .arg(self.state_ttl_seconds())
             .arg(&decision_id)
             .arg(&lease_id)
-            .arg(if allow_last_candidate_probe { "1" } else { "0" })
             .query_async(&mut *conn)
             .await
             .map_err(|err| Self::redis_error("provider circuit allow script failed", err))?;
@@ -535,16 +532,7 @@ impl ProviderCircuitStore for RedisProviderCircuitStore {
         provider_id: i64,
         config: &ProviderGovernanceConfig,
     ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-        self.evaluate_allow_request(provider_id, config, false)
-            .await
-    }
-
-    async fn allow_last_candidate_request(
-        &self,
-        provider_id: i64,
-        config: &ProviderGovernanceConfig,
-    ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-        self.evaluate_allow_request(provider_id, config, true).await
+        self.evaluate_allow_request(provider_id, config).await
     }
 
     async fn record_success(

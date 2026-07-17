@@ -31,38 +31,6 @@ db_object! {
         pub success_count: i64,
         pub error_count: i64,
         pub cancelled_count: i64,
-        pub retry_count: i64,
-        pub fallback_count: i64,
-        pub first_byte_latency_sum_ms: i64,
-        pub first_byte_latency_count: i64,
-        pub total_latency_sum_ms: i64,
-        pub total_latency_count: i64,
-        pub input_tokens: i64,
-        pub output_tokens: i64,
-        pub reasoning_tokens: i64,
-        pub total_tokens: i64,
-        pub transform_diagnostic_count: i64,
-        pub transform_diagnostic_lossy_major_count: i64,
-        pub transform_diagnostic_reject_count: i64,
-        pub created_at: i64,
-        pub updated_at: i64,
-    }
-
-    #[derive(Insertable, Queryable, Selectable, Debug, Clone, Serialize, Deserialize)]
-    #[diesel(table_name = metric_attempt_rollup_minute)]
-    #[diesel(primary_key(bucket_start_ms, scope_type, scope_id))]
-    pub struct MetricAttemptRollupMinute {
-        pub bucket_start_ms: i64,
-        pub scope_type: String,
-        pub scope_id: String,
-        pub scope_label: Option<String>,
-        pub attempt_count: i64,
-        pub success_count: i64,
-        pub error_count: i64,
-        pub skipped_count: i64,
-        pub retry_same_candidate_count: i64,
-        pub fallback_next_candidate_count: i64,
-        pub fail_fast_count: i64,
         pub first_byte_latency_sum_ms: i64,
         pub first_byte_latency_count: i64,
         pub total_latency_sum_ms: i64,
@@ -90,10 +58,9 @@ db_object! {
 
     #[derive(Insertable, Queryable, Selectable, Debug, Clone, Serialize, Deserialize)]
     #[diesel(table_name = metric_cost_rollup_minute)]
-    #[diesel(primary_key(bucket_start_ms, metric_kind, scope_type, scope_id, currency))]
+    #[diesel(primary_key(bucket_start_ms, scope_type, scope_id, currency))]
     pub struct MetricCostRollupMinute {
         pub bucket_start_ms: i64,
-        pub metric_kind: String,
         pub scope_type: String,
         pub scope_id: String,
         pub currency: String,
@@ -112,8 +79,6 @@ pub struct MetricRequestWindowAggregate {
     pub success_count: i64,
     pub error_count: i64,
     pub cancelled_count: i64,
-    pub retry_count: i64,
-    pub fallback_count: i64,
     pub first_byte_latency_sum_ms: i64,
     pub first_byte_latency_count: i64,
     pub total_latency_sum_ms: i64,
@@ -122,34 +87,9 @@ pub struct MetricRequestWindowAggregate {
     pub output_tokens: i64,
     pub reasoning_tokens: i64,
     pub total_tokens: i64,
-    pub transform_diagnostic_count: i64,
-    pub transform_diagnostic_lossy_major_count: i64,
-    pub transform_diagnostic_reject_count: i64,
     pub last_request_at: Option<i64>,
     pub last_success_at: Option<i64>,
     pub last_error_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MetricAttemptWindowAggregate {
-    pub scope_type: String,
-    pub scope_id: String,
-    pub scope_label: Option<String>,
-    pub attempt_count: i64,
-    pub success_count: i64,
-    pub error_count: i64,
-    pub skipped_count: i64,
-    pub retry_same_candidate_count: i64,
-    pub fallback_next_candidate_count: i64,
-    pub fail_fast_count: i64,
-    pub first_byte_latency_sum_ms: i64,
-    pub first_byte_latency_count: i64,
-    pub total_latency_sum_ms: i64,
-    pub total_latency_count: i64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub reasoning_tokens: i64,
-    pub total_tokens: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +108,6 @@ pub struct MetricCostAggregate {
 pub struct MetricsRepairDeleteSummary {
     pub deleted_ingest_markers: usize,
     pub deleted_request_rollups: usize,
-    pub deleted_attempt_rollups: usize,
     pub deleted_http_status_rollups: usize,
     pub deleted_cost_rollups: usize,
 }
@@ -212,28 +151,18 @@ macro_rules! upsert_request_rollup_delta_in_tx {
                 metric_request_rollup_minute::dsl::cancelled_count
                     .eq(metric_request_rollup_minute::dsl::cancelled_count
                         + excluded(metric_request_rollup_minute::dsl::cancelled_count)),
-                metric_request_rollup_minute::dsl::retry_count
-                    .eq(metric_request_rollup_minute::dsl::retry_count
-                        + excluded(metric_request_rollup_minute::dsl::retry_count)),
-                metric_request_rollup_minute::dsl::fallback_count
-                    .eq(metric_request_rollup_minute::dsl::fallback_count
-                        + excluded(metric_request_rollup_minute::dsl::fallback_count)),
-                metric_request_rollup_minute::dsl::first_byte_latency_sum_ms.eq(
-                    metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
-                        + excluded(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms),
-                ),
-                metric_request_rollup_minute::dsl::first_byte_latency_count.eq(
-                    metric_request_rollup_minute::dsl::first_byte_latency_count
-                        + excluded(metric_request_rollup_minute::dsl::first_byte_latency_count),
-                ),
-                metric_request_rollup_minute::dsl::total_latency_sum_ms.eq(
-                    metric_request_rollup_minute::dsl::total_latency_sum_ms
-                        + excluded(metric_request_rollup_minute::dsl::total_latency_sum_ms),
-                ),
-                metric_request_rollup_minute::dsl::total_latency_count.eq(
-                    metric_request_rollup_minute::dsl::total_latency_count
-                        + excluded(metric_request_rollup_minute::dsl::total_latency_count),
-                ),
+                metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
+                    .eq(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
+                        + excluded(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms)),
+                metric_request_rollup_minute::dsl::first_byte_latency_count
+                    .eq(metric_request_rollup_minute::dsl::first_byte_latency_count
+                        + excluded(metric_request_rollup_minute::dsl::first_byte_latency_count)),
+                metric_request_rollup_minute::dsl::total_latency_sum_ms
+                    .eq(metric_request_rollup_minute::dsl::total_latency_sum_ms
+                        + excluded(metric_request_rollup_minute::dsl::total_latency_sum_ms)),
+                metric_request_rollup_minute::dsl::total_latency_count
+                    .eq(metric_request_rollup_minute::dsl::total_latency_count
+                        + excluded(metric_request_rollup_minute::dsl::total_latency_count)),
                 metric_request_rollup_minute::dsl::input_tokens
                     .eq(metric_request_rollup_minute::dsl::input_tokens
                         + excluded(metric_request_rollup_minute::dsl::input_tokens)),
@@ -246,22 +175,6 @@ macro_rules! upsert_request_rollup_delta_in_tx {
                 metric_request_rollup_minute::dsl::total_tokens
                     .eq(metric_request_rollup_minute::dsl::total_tokens
                         + excluded(metric_request_rollup_minute::dsl::total_tokens)),
-                metric_request_rollup_minute::dsl::transform_diagnostic_count.eq(
-                    metric_request_rollup_minute::dsl::transform_diagnostic_count
-                        + excluded(metric_request_rollup_minute::dsl::transform_diagnostic_count),
-                ),
-                metric_request_rollup_minute::dsl::transform_diagnostic_lossy_major_count.eq(
-                    metric_request_rollup_minute::dsl::transform_diagnostic_lossy_major_count
-                        + excluded(
-                            metric_request_rollup_minute::dsl::transform_diagnostic_lossy_major_count,
-                        ),
-                ),
-                metric_request_rollup_minute::dsl::transform_diagnostic_reject_count.eq(
-                    metric_request_rollup_minute::dsl::transform_diagnostic_reject_count
-                        + excluded(
-                            metric_request_rollup_minute::dsl::transform_diagnostic_reject_count,
-                        ),
-                ),
                 metric_request_rollup_minute::dsl::updated_at
                     .eq(excluded(metric_request_rollup_minute::dsl::updated_at)),
             ))
@@ -270,82 +183,6 @@ macro_rules! upsert_request_rollup_delta_in_tx {
             .map_err(|err| {
                 BaseError::DatabaseFatal(Some(format!(
                     "Failed to add request metrics delta for {}:{} bucket {}: {}",
-                    $delta.scope_type, $delta.scope_id, $delta.bucket_start_ms, err
-                )))
-            })
-    }};
-}
-
-macro_rules! upsert_attempt_rollup_delta_in_tx {
-    ($conn:expr, $delta:expr) => {{
-        diesel::insert_into(metric_attempt_rollup_minute::table)
-            .values(MetricAttemptRollupMinuteDb::to_db($delta))
-            .on_conflict((
-                metric_attempt_rollup_minute::dsl::bucket_start_ms,
-                metric_attempt_rollup_minute::dsl::scope_type,
-                metric_attempt_rollup_minute::dsl::scope_id,
-            ))
-            .do_update()
-            .set((
-                metric_attempt_rollup_minute::dsl::scope_label
-                    .eq(excluded(metric_attempt_rollup_minute::dsl::scope_label)),
-                metric_attempt_rollup_minute::dsl::attempt_count
-                    .eq(metric_attempt_rollup_minute::dsl::attempt_count
-                        + excluded(metric_attempt_rollup_minute::dsl::attempt_count)),
-                metric_attempt_rollup_minute::dsl::success_count
-                    .eq(metric_attempt_rollup_minute::dsl::success_count
-                        + excluded(metric_attempt_rollup_minute::dsl::success_count)),
-                metric_attempt_rollup_minute::dsl::error_count
-                    .eq(metric_attempt_rollup_minute::dsl::error_count
-                        + excluded(metric_attempt_rollup_minute::dsl::error_count)),
-                metric_attempt_rollup_minute::dsl::skipped_count
-                    .eq(metric_attempt_rollup_minute::dsl::skipped_count
-                        + excluded(metric_attempt_rollup_minute::dsl::skipped_count)),
-                metric_attempt_rollup_minute::dsl::retry_same_candidate_count.eq(
-                    metric_attempt_rollup_minute::dsl::retry_same_candidate_count
-                        + excluded(metric_attempt_rollup_minute::dsl::retry_same_candidate_count),
-                ),
-                metric_attempt_rollup_minute::dsl::fallback_next_candidate_count.eq(
-                    metric_attempt_rollup_minute::dsl::fallback_next_candidate_count
-                        + excluded(
-                            metric_attempt_rollup_minute::dsl::fallback_next_candidate_count,
-                        ),
-                ),
-                metric_attempt_rollup_minute::dsl::fail_fast_count
-                    .eq(metric_attempt_rollup_minute::dsl::fail_fast_count
-                        + excluded(metric_attempt_rollup_minute::dsl::fail_fast_count)),
-                metric_attempt_rollup_minute::dsl::first_byte_latency_sum_ms
-                    .eq(metric_attempt_rollup_minute::dsl::first_byte_latency_sum_ms
-                        + excluded(metric_attempt_rollup_minute::dsl::first_byte_latency_sum_ms)),
-                metric_attempt_rollup_minute::dsl::first_byte_latency_count
-                    .eq(metric_attempt_rollup_minute::dsl::first_byte_latency_count
-                        + excluded(metric_attempt_rollup_minute::dsl::first_byte_latency_count)),
-                metric_attempt_rollup_minute::dsl::total_latency_sum_ms
-                    .eq(metric_attempt_rollup_minute::dsl::total_latency_sum_ms
-                        + excluded(metric_attempt_rollup_minute::dsl::total_latency_sum_ms)),
-                metric_attempt_rollup_minute::dsl::total_latency_count
-                    .eq(metric_attempt_rollup_minute::dsl::total_latency_count
-                        + excluded(metric_attempt_rollup_minute::dsl::total_latency_count)),
-                metric_attempt_rollup_minute::dsl::input_tokens
-                    .eq(metric_attempt_rollup_minute::dsl::input_tokens
-                        + excluded(metric_attempt_rollup_minute::dsl::input_tokens)),
-                metric_attempt_rollup_minute::dsl::output_tokens
-                    .eq(metric_attempt_rollup_minute::dsl::output_tokens
-                        + excluded(metric_attempt_rollup_minute::dsl::output_tokens)),
-                metric_attempt_rollup_minute::dsl::reasoning_tokens
-                    .eq(metric_attempt_rollup_minute::dsl::reasoning_tokens
-                        + excluded(metric_attempt_rollup_minute::dsl::reasoning_tokens)),
-                metric_attempt_rollup_minute::dsl::total_tokens
-                    .eq(metric_attempt_rollup_minute::dsl::total_tokens
-                        + excluded(metric_attempt_rollup_minute::dsl::total_tokens)),
-                metric_attempt_rollup_minute::dsl::updated_at
-                    .eq(excluded(metric_attempt_rollup_minute::dsl::updated_at)),
-            ))
-            .execute($conn)
-            .map(|_| ())
-            .map_err(|err| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to add attempt metrics delta for {}:{} bucket {}: {}",
                     $delta.scope_type, $delta.scope_id, $delta.bucket_start_ms, err
                 )))
             })
@@ -391,7 +228,6 @@ macro_rules! upsert_cost_rollup_delta_in_tx {
             .values(MetricCostRollupMinuteDb::to_db($delta))
             .on_conflict((
                 metric_cost_rollup_minute::dsl::bucket_start_ms,
-                metric_cost_rollup_minute::dsl::metric_kind,
                 metric_cost_rollup_minute::dsl::scope_type,
                 metric_cost_rollup_minute::dsl::scope_id,
                 metric_cost_rollup_minute::dsl::currency,
@@ -408,8 +244,7 @@ macro_rules! upsert_cost_rollup_delta_in_tx {
             .map(|_| ())
             .map_err(|err| {
                 BaseError::DatabaseFatal(Some(format!(
-                    "Failed to add cost metrics delta for {} {}:{} {} bucket {}: {}",
-                    $delta.metric_kind,
+                    "Failed to add cost metrics delta for {}:{} {} bucket {}: {}",
                     $delta.scope_type,
                     $delta.scope_id,
                     $delta.currency,
@@ -459,7 +294,6 @@ pub fn ingested_request_log_marker_exists(request_log_id: i64) -> DbResult<bool>
 pub fn ingest_metric_rollups(
     marker: &MetricIngestedRequestLog,
     request_rollups: &[MetricRequestRollupMinute],
-    attempt_rollups: &[MetricAttemptRollupMinute],
     http_status_rollups: &[MetricHttpStatusRollupMinute],
     cost_rollups: &[MetricCostRollupMinute],
 ) -> DbResult<bool> {
@@ -484,9 +318,6 @@ pub fn ingest_metric_rollups(
 
             for delta in request_rollups {
                 upsert_request_rollup_delta_in_tx!(conn, delta)?;
-            }
-            for delta in attempt_rollups {
-                upsert_attempt_rollup_delta_in_tx!(conn, delta)?;
             }
             for delta in http_status_rollups {
                 upsert_http_status_rollup_delta_in_tx!(conn, delta)?;
@@ -543,23 +374,6 @@ pub fn delete_metrics_data_in_range(
                 )))
             })?;
 
-            let deleted_attempt_rollups = diesel::delete(
-                metric_attempt_rollup_minute::table
-                    .filter(
-                        metric_attempt_rollup_minute::dsl::bucket_start_ms.ge(rollup_start_time_ms),
-                    )
-                    .filter(
-                        metric_attempt_rollup_minute::dsl::bucket_start_ms.lt(rollup_end_time_ms),
-                    ),
-            )
-            .execute(conn)
-            .map_err(|err| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to delete attempt metrics rollups {}..{}: {}",
-                    rollup_start_time_ms, rollup_end_time_ms, err
-                )))
-            })?;
-
             let deleted_request_rollups = diesel::delete(
                 metric_request_rollup_minute::table
                     .filter(
@@ -599,7 +413,6 @@ pub fn delete_metrics_data_in_range(
             Ok(MetricsRepairDeleteSummary {
                 deleted_ingest_markers,
                 deleted_request_rollups,
-                deleted_attempt_rollups,
                 deleted_http_status_rollups,
                 deleted_cost_rollups,
             })
@@ -807,12 +620,6 @@ pub fn add_request_rollup_delta(
                 metric_request_rollup_minute::dsl::cancelled_count
                     .eq(metric_request_rollup_minute::dsl::cancelled_count
                         + excluded(metric_request_rollup_minute::dsl::cancelled_count)),
-                metric_request_rollup_minute::dsl::retry_count
-                    .eq(metric_request_rollup_minute::dsl::retry_count
-                        + excluded(metric_request_rollup_minute::dsl::retry_count)),
-                metric_request_rollup_minute::dsl::fallback_count
-                    .eq(metric_request_rollup_minute::dsl::fallback_count
-                        + excluded(metric_request_rollup_minute::dsl::fallback_count)),
                 metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
                     .eq(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
                         + excluded(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms)),
@@ -837,24 +644,6 @@ pub fn add_request_rollup_delta(
                 metric_request_rollup_minute::dsl::total_tokens
                     .eq(metric_request_rollup_minute::dsl::total_tokens
                         + excluded(metric_request_rollup_minute::dsl::total_tokens)),
-                metric_request_rollup_minute::dsl::transform_diagnostic_count.eq(
-                    metric_request_rollup_minute::dsl::transform_diagnostic_count
-                        + excluded(
-                            metric_request_rollup_minute::dsl::transform_diagnostic_count,
-                        ),
-                ),
-                metric_request_rollup_minute::dsl::transform_diagnostic_lossy_major_count.eq(
-                    metric_request_rollup_minute::dsl::transform_diagnostic_lossy_major_count
-                        + excluded(
-                            metric_request_rollup_minute::dsl::transform_diagnostic_lossy_major_count,
-                        ),
-                ),
-                metric_request_rollup_minute::dsl::transform_diagnostic_reject_count.eq(
-                    metric_request_rollup_minute::dsl::transform_diagnostic_reject_count
-                        + excluded(
-                            metric_request_rollup_minute::dsl::transform_diagnostic_reject_count,
-                        ),
-                ),
                 metric_request_rollup_minute::dsl::updated_at
                     .eq(excluded(metric_request_rollup_minute::dsl::updated_at)),
             ))
@@ -864,86 +653,6 @@ pub fn add_request_rollup_delta(
             .map_err(|err| {
                 BaseError::DatabaseFatal(Some(format!(
                     "Failed to add request metrics delta for {}:{} bucket {}: {}",
-                    delta.scope_type, delta.scope_id, delta.bucket_start_ms, err
-                )))
-            })
-    })
-}
-
-pub fn add_attempt_rollup_delta(
-    delta: &MetricAttemptRollupMinute,
-) -> DbResult<MetricAttemptRollupMinute> {
-    let conn = &mut get_connection()?;
-    db_execute!(conn, {
-        diesel::insert_into(metric_attempt_rollup_minute::table)
-            .values(MetricAttemptRollupMinuteDb::to_db(delta))
-            .on_conflict((
-                metric_attempt_rollup_minute::dsl::bucket_start_ms,
-                metric_attempt_rollup_minute::dsl::scope_type,
-                metric_attempt_rollup_minute::dsl::scope_id,
-            ))
-            .do_update()
-            .set((
-                metric_attempt_rollup_minute::dsl::scope_label
-                    .eq(excluded(metric_attempt_rollup_minute::dsl::scope_label)),
-                metric_attempt_rollup_minute::dsl::attempt_count
-                    .eq(metric_attempt_rollup_minute::dsl::attempt_count
-                        + excluded(metric_attempt_rollup_minute::dsl::attempt_count)),
-                metric_attempt_rollup_minute::dsl::success_count
-                    .eq(metric_attempt_rollup_minute::dsl::success_count
-                        + excluded(metric_attempt_rollup_minute::dsl::success_count)),
-                metric_attempt_rollup_minute::dsl::error_count
-                    .eq(metric_attempt_rollup_minute::dsl::error_count
-                        + excluded(metric_attempt_rollup_minute::dsl::error_count)),
-                metric_attempt_rollup_minute::dsl::skipped_count
-                    .eq(metric_attempt_rollup_minute::dsl::skipped_count
-                        + excluded(metric_attempt_rollup_minute::dsl::skipped_count)),
-                metric_attempt_rollup_minute::dsl::retry_same_candidate_count.eq(
-                    metric_attempt_rollup_minute::dsl::retry_same_candidate_count
-                        + excluded(metric_attempt_rollup_minute::dsl::retry_same_candidate_count),
-                ),
-                metric_attempt_rollup_minute::dsl::fallback_next_candidate_count.eq(
-                    metric_attempt_rollup_minute::dsl::fallback_next_candidate_count
-                        + excluded(
-                            metric_attempt_rollup_minute::dsl::fallback_next_candidate_count,
-                        ),
-                ),
-                metric_attempt_rollup_minute::dsl::fail_fast_count
-                    .eq(metric_attempt_rollup_minute::dsl::fail_fast_count
-                        + excluded(metric_attempt_rollup_minute::dsl::fail_fast_count)),
-                metric_attempt_rollup_minute::dsl::first_byte_latency_sum_ms
-                    .eq(metric_attempt_rollup_minute::dsl::first_byte_latency_sum_ms
-                        + excluded(metric_attempt_rollup_minute::dsl::first_byte_latency_sum_ms)),
-                metric_attempt_rollup_minute::dsl::first_byte_latency_count
-                    .eq(metric_attempt_rollup_minute::dsl::first_byte_latency_count
-                        + excluded(metric_attempt_rollup_minute::dsl::first_byte_latency_count)),
-                metric_attempt_rollup_minute::dsl::total_latency_sum_ms
-                    .eq(metric_attempt_rollup_minute::dsl::total_latency_sum_ms
-                        + excluded(metric_attempt_rollup_minute::dsl::total_latency_sum_ms)),
-                metric_attempt_rollup_minute::dsl::total_latency_count
-                    .eq(metric_attempt_rollup_minute::dsl::total_latency_count
-                        + excluded(metric_attempt_rollup_minute::dsl::total_latency_count)),
-                metric_attempt_rollup_minute::dsl::input_tokens
-                    .eq(metric_attempt_rollup_minute::dsl::input_tokens
-                        + excluded(metric_attempt_rollup_minute::dsl::input_tokens)),
-                metric_attempt_rollup_minute::dsl::output_tokens
-                    .eq(metric_attempt_rollup_minute::dsl::output_tokens
-                        + excluded(metric_attempt_rollup_minute::dsl::output_tokens)),
-                metric_attempt_rollup_minute::dsl::reasoning_tokens
-                    .eq(metric_attempt_rollup_minute::dsl::reasoning_tokens
-                        + excluded(metric_attempt_rollup_minute::dsl::reasoning_tokens)),
-                metric_attempt_rollup_minute::dsl::total_tokens
-                    .eq(metric_attempt_rollup_minute::dsl::total_tokens
-                        + excluded(metric_attempt_rollup_minute::dsl::total_tokens)),
-                metric_attempt_rollup_minute::dsl::updated_at
-                    .eq(excluded(metric_attempt_rollup_minute::dsl::updated_at)),
-            ))
-            .returning(MetricAttemptRollupMinuteDb::as_returning())
-            .get_result::<MetricAttemptRollupMinuteDb>(conn)
-            .map(MetricAttemptRollupMinuteDb::from_db)
-            .map_err(|err| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to add attempt metrics delta for {}:{} bucket {}: {}",
                     delta.scope_type, delta.scope_id, delta.bucket_start_ms, err
                 )))
             })
@@ -990,7 +699,6 @@ pub fn add_cost_rollup_delta(delta: &MetricCostRollupMinute) -> DbResult<MetricC
             .values(MetricCostRollupMinuteDb::to_db(delta))
             .on_conflict((
                 metric_cost_rollup_minute::dsl::bucket_start_ms,
-                metric_cost_rollup_minute::dsl::metric_kind,
                 metric_cost_rollup_minute::dsl::scope_type,
                 metric_cost_rollup_minute::dsl::scope_id,
                 metric_cost_rollup_minute::dsl::currency,
@@ -1008,13 +716,8 @@ pub fn add_cost_rollup_delta(delta: &MetricCostRollupMinute) -> DbResult<MetricC
             .map(MetricCostRollupMinuteDb::from_db)
             .map_err(|err| {
                 BaseError::DatabaseFatal(Some(format!(
-                    "Failed to add cost metrics delta for {} {}:{} {} bucket {}: {}",
-                    delta.metric_kind,
-                    delta.scope_type,
-                    delta.scope_id,
-                    delta.currency,
-                    delta.bucket_start_ms,
-                    err
+                    "Failed to add cost metrics delta for {}:{} {} bucket {}: {}",
+                    delta.scope_type, delta.scope_id, delta.currency, delta.bucket_start_ms, err
                 )))
             })
     })
@@ -1098,45 +801,6 @@ pub fn list_request_rollup_minutes(
     })
 }
 
-pub fn query_attempt_window_aggregates(
-    start_time_ms: i64,
-    end_time_ms: i64,
-    scope_type_filter: Option<&str>,
-    scope_id_filter: Option<&str>,
-) -> DbResult<Vec<MetricAttemptWindowAggregate>> {
-    let conn = &mut get_connection()?;
-    let rows = db_execute!(conn, {
-        let mut query = metric_attempt_rollup_minute::table
-            .filter(metric_attempt_rollup_minute::dsl::bucket_start_ms.ge(start_time_ms))
-            .filter(metric_attempt_rollup_minute::dsl::bucket_start_ms.lt(end_time_ms))
-            .into_boxed();
-
-        if let Some(scope_type_filter) = scope_type_filter {
-            query =
-                query.filter(metric_attempt_rollup_minute::dsl::scope_type.eq(scope_type_filter));
-        }
-        if let Some(scope_id_filter) = scope_id_filter {
-            query = query.filter(metric_attempt_rollup_minute::dsl::scope_id.eq(scope_id_filter));
-        }
-
-        query
-            .select(MetricAttemptRollupMinuteDb::as_select())
-            .load::<MetricAttemptRollupMinuteDb>(conn)
-            .map(|rows| {
-                rows.into_iter()
-                    .map(MetricAttemptRollupMinuteDb::from_db)
-                    .collect::<Vec<_>>()
-            })
-            .map_err(|err| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to query attempt metrics window {}..{}: {}",
-                    start_time_ms, end_time_ms, err
-                )))
-            })
-    })?;
-    Ok(aggregate_attempt_rows(rows))
-}
-
 pub fn query_http_status_breakdown(
     start_time_ms: i64,
     end_time_ms: i64,
@@ -1182,10 +846,45 @@ pub fn query_http_status_breakdown(
     Ok(result)
 }
 
+pub fn list_http_status_rollup_minutes(
+    start_time_ms: i64,
+    end_time_ms: i64,
+    scope_type_filter: &str,
+    scope_id_filter: Option<&str>,
+) -> DbResult<Vec<MetricHttpStatusRollupMinute>> {
+    let conn = &mut get_connection()?;
+    db_execute!(conn, {
+        let mut query = metric_http_status_rollup_minute::table
+            .filter(metric_http_status_rollup_minute::dsl::bucket_start_ms.ge(start_time_ms))
+            .filter(metric_http_status_rollup_minute::dsl::bucket_start_ms.lt(end_time_ms))
+            .filter(metric_http_status_rollup_minute::dsl::scope_type.eq(scope_type_filter))
+            .into_boxed();
+
+        if let Some(scope_id_filter) = scope_id_filter {
+            query =
+                query.filter(metric_http_status_rollup_minute::dsl::scope_id.eq(scope_id_filter));
+        }
+
+        query
+            .select(MetricHttpStatusRollupMinuteDb::as_select())
+            .load::<MetricHttpStatusRollupMinuteDb>(conn)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(MetricHttpStatusRollupMinuteDb::from_db)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|err| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to list HTTP status metrics window {}..{} for {}: {}",
+                    start_time_ms, end_time_ms, scope_type_filter, err
+                )))
+            })
+    })
+}
+
 pub fn query_cost_window_aggregates(
     start_time_ms: i64,
     end_time_ms: i64,
-    metric_kind_filter: &str,
     scope_type_filter: &str,
     scope_id_filter: &str,
 ) -> DbResult<Vec<MetricCostAggregate>> {
@@ -1194,7 +893,6 @@ pub fn query_cost_window_aggregates(
         metric_cost_rollup_minute::table
             .filter(metric_cost_rollup_minute::dsl::bucket_start_ms.ge(start_time_ms))
             .filter(metric_cost_rollup_minute::dsl::bucket_start_ms.lt(end_time_ms))
-            .filter(metric_cost_rollup_minute::dsl::metric_kind.eq(metric_kind_filter))
             .filter(metric_cost_rollup_minute::dsl::scope_type.eq(scope_type_filter))
             .filter(metric_cost_rollup_minute::dsl::scope_id.eq(scope_id_filter))
             .select(MetricCostRollupMinuteDb::as_select())
@@ -1206,13 +904,8 @@ pub fn query_cost_window_aggregates(
             })
             .map_err(|err| {
                 BaseError::DatabaseFatal(Some(format!(
-                    "Failed to query cost metrics window {}..{} for {} {}:{}: {}",
-                    start_time_ms,
-                    end_time_ms,
-                    metric_kind_filter,
-                    scope_type_filter,
-                    scope_id_filter,
-                    err
+                    "Failed to query cost metrics window {}..{} for {}:{}: {}",
+                    start_time_ms, end_time_ms, scope_type_filter, scope_id_filter, err
                 )))
             })
     })?;
@@ -1233,7 +926,6 @@ pub fn query_cost_window_aggregates(
 pub fn list_cost_rollup_minutes(
     start_time_ms: i64,
     end_time_ms: i64,
-    metric_kind_filter: &str,
     scope_type_filter: Option<&str>,
     scope_id_filter: Option<&str>,
 ) -> DbResult<Vec<MetricCostRollupMinute>> {
@@ -1242,7 +934,6 @@ pub fn list_cost_rollup_minutes(
         let mut query = metric_cost_rollup_minute::table
             .filter(metric_cost_rollup_minute::dsl::bucket_start_ms.ge(start_time_ms))
             .filter(metric_cost_rollup_minute::dsl::bucket_start_ms.lt(end_time_ms))
-            .filter(metric_cost_rollup_minute::dsl::metric_kind.eq(metric_kind_filter))
             .into_boxed();
 
         if let Some(scope_type_filter) = scope_type_filter {
@@ -1263,8 +954,8 @@ pub fn list_cost_rollup_minutes(
             })
             .map_err(|err| {
                 BaseError::DatabaseFatal(Some(format!(
-                    "Failed to list cost metrics rollup minutes {}..{} for {}: {}",
-                    start_time_ms, end_time_ms, metric_kind_filter, err
+                    "Failed to list cost metrics rollup minutes {}..{}: {}",
+                    start_time_ms, end_time_ms, err
                 )))
             })
     })
@@ -1290,8 +981,6 @@ fn aggregate_request_rows(
         entry.success_count += row.success_count;
         entry.error_count += row.error_count;
         entry.cancelled_count += row.cancelled_count;
-        entry.retry_count += row.retry_count;
-        entry.fallback_count += row.fallback_count;
         entry.first_byte_latency_sum_ms += row.first_byte_latency_sum_ms;
         entry.first_byte_latency_count += row.first_byte_latency_count;
         entry.total_latency_sum_ms += row.total_latency_sum_ms;
@@ -1300,9 +989,6 @@ fn aggregate_request_rows(
         entry.output_tokens += row.output_tokens;
         entry.reasoning_tokens += row.reasoning_tokens;
         entry.total_tokens += row.total_tokens;
-        entry.transform_diagnostic_count += row.transform_diagnostic_count;
-        entry.transform_diagnostic_lossy_major_count += row.transform_diagnostic_lossy_major_count;
-        entry.transform_diagnostic_reject_count += row.transform_diagnostic_reject_count;
         if row.request_count > 0 {
             update_latest_ms(&mut entry.last_request_at, row.bucket_start_ms);
         }
@@ -1319,42 +1005,6 @@ fn aggregate_request_rows(
 
 fn update_latest_ms(target: &mut Option<i64>, candidate: i64) {
     *target = Some(target.map_or(candidate, |current| current.max(candidate)));
-}
-
-fn aggregate_attempt_rows(
-    rows: Vec<MetricAttemptRollupMinute>,
-) -> Vec<MetricAttemptWindowAggregate> {
-    let mut by_scope = BTreeMap::<(String, String), MetricAttemptWindowAggregate>::new();
-    for row in rows {
-        let entry = by_scope
-            .entry((row.scope_type.clone(), row.scope_id.clone()))
-            .or_insert_with(|| MetricAttemptWindowAggregate {
-                scope_type: row.scope_type.clone(),
-                scope_id: row.scope_id.clone(),
-                scope_label: row.scope_label.clone(),
-                ..Default::default()
-            });
-        if row.scope_label.is_some() {
-            entry.scope_label = row.scope_label;
-        }
-        entry.attempt_count += row.attempt_count;
-        entry.success_count += row.success_count;
-        entry.error_count += row.error_count;
-        entry.skipped_count += row.skipped_count;
-        entry.retry_same_candidate_count += row.retry_same_candidate_count;
-        entry.fallback_next_candidate_count += row.fallback_next_candidate_count;
-        entry.fail_fast_count += row.fail_fast_count;
-        entry.first_byte_latency_sum_ms += row.first_byte_latency_sum_ms;
-        entry.first_byte_latency_count += row.first_byte_latency_count;
-        entry.total_latency_sum_ms += row.total_latency_sum_ms;
-        entry.total_latency_count += row.total_latency_count;
-        entry.input_tokens += row.input_tokens;
-        entry.output_tokens += row.output_tokens;
-        entry.reasoning_tokens += row.reasoning_tokens;
-        entry.total_tokens += row.total_tokens;
-    }
-
-    by_scope.into_values().collect()
 }
 
 #[cfg(test)]
@@ -1376,8 +1026,6 @@ mod tests {
             success_count: 1,
             error_count: 0,
             cancelled_count: 0,
-            retry_count: 1,
-            fallback_count: 2,
             first_byte_latency_sum_ms: 100,
             first_byte_latency_count: 1,
             total_latency_sum_ms: 250,
@@ -1386,39 +1034,6 @@ mod tests {
             output_tokens: 20,
             reasoning_tokens: 3,
             total_tokens: 33,
-            transform_diagnostic_count: 1,
-            transform_diagnostic_lossy_major_count: 1,
-            transform_diagnostic_reject_count: 0,
-            created_at: 1,
-            updated_at: 1,
-        }
-    }
-
-    fn attempt_delta(
-        bucket_start_ms: i64,
-        scope_type: &str,
-        scope_id: &str,
-    ) -> MetricAttemptRollupMinute {
-        MetricAttemptRollupMinute {
-            bucket_start_ms,
-            scope_type: scope_type.to_string(),
-            scope_id: scope_id.to_string(),
-            scope_label: Some(format!("{scope_type}:{scope_id}")),
-            attempt_count: 1,
-            success_count: 0,
-            error_count: 1,
-            skipped_count: 0,
-            retry_same_candidate_count: 1,
-            fallback_next_candidate_count: 1,
-            fail_fast_count: 0,
-            first_byte_latency_sum_ms: 0,
-            first_byte_latency_count: 0,
-            total_latency_sum_ms: 400,
-            total_latency_count: 1,
-            input_tokens: 4,
-            output_tokens: 5,
-            reasoning_tokens: 6,
-            total_tokens: 15,
             created_at: 1,
             updated_at: 1,
         }
@@ -1443,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn request_and_attempt_rollup_deltas_accumulate_by_scope() {
+    fn request_rollup_deltas_accumulate_by_scope() {
         let context = TestDbContext::new_sqlite("metrics-rollup.sqlite");
         context.run_sync(|| {
             let mut second = request_delta(60_000, "provider", "7");
@@ -1459,8 +1074,6 @@ mod tests {
             assert_eq!(updated.success_count, 1);
             assert_eq!(updated.error_count, 1);
             assert_eq!(updated.cancelled_count, 1);
-            assert_eq!(updated.retry_count, 2);
-            assert_eq!(updated.fallback_count, 4);
             assert_eq!(updated.updated_at, 2);
 
             let aggregates =
@@ -1470,18 +1083,6 @@ mod tests {
             assert_eq!(aggregates[0].first_byte_latency_sum_ms, 200);
             assert_eq!(aggregates[0].total_latency_count, 2);
             assert_eq!(aggregates[0].total_tokens, 66);
-            assert_eq!(aggregates[0].transform_diagnostic_lossy_major_count, 2);
-
-            add_attempt_rollup_delta(&attempt_delta(60_000, "provider", "7")).unwrap();
-            add_attempt_rollup_delta(&attempt_delta(120_000, "provider", "7")).unwrap();
-            let attempts =
-                query_attempt_window_aggregates(0, 180_000, Some("provider"), Some("7")).unwrap();
-            assert_eq!(attempts.len(), 1);
-            assert_eq!(attempts[0].attempt_count, 2);
-            assert_eq!(attempts[0].error_count, 2);
-            assert_eq!(attempts[0].retry_same_candidate_count, 2);
-            assert_eq!(attempts[0].fallback_next_candidate_count, 2);
-            assert_eq!(attempts[0].total_latency_sum_ms, 800);
         });
     }
 
@@ -1537,7 +1138,6 @@ mod tests {
 
             add_cost_rollup_delta(&MetricCostRollupMinute {
                 bucket_start_ms: 60_000,
-                metric_kind: "request".to_string(),
                 scope_type: "provider".to_string(),
                 scope_id: "7".to_string(),
                 currency: "USD".to_string(),
@@ -1548,7 +1148,6 @@ mod tests {
             .unwrap();
             add_cost_rollup_delta(&MetricCostRollupMinute {
                 bucket_start_ms: 120_000,
-                metric_kind: "request".to_string(),
                 scope_type: "provider".to_string(),
                 scope_id: "7".to_string(),
                 currency: "USD".to_string(),
@@ -1557,20 +1156,7 @@ mod tests {
                 updated_at: 1,
             })
             .unwrap();
-            add_cost_rollup_delta(&MetricCostRollupMinute {
-                bucket_start_ms: 120_000,
-                metric_kind: "attempt".to_string(),
-                scope_type: "provider".to_string(),
-                scope_id: "7".to_string(),
-                currency: "USD".to_string(),
-                amount_nanos: 999,
-                created_at: 1,
-                updated_at: 1,
-            })
-            .unwrap();
-
-            let costs =
-                query_cost_window_aggregates(0, 180_000, "request", "provider", "7").unwrap();
+            let costs = query_cost_window_aggregates(0, 180_000, "provider", "7").unwrap();
             assert_eq!(
                 costs,
                 vec![MetricCostAggregate {

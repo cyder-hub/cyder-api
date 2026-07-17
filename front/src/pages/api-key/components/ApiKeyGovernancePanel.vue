@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { Activity, Gauge, KeyRound, Shield } from "lucide-vue-next";
+import { Activity, Gauge, Shield } from "lucide-vue-next";
 
 import { Badge } from "@/components/ui/badge";
 import { formatTimestamp } from "@/utils/datetime";
@@ -13,7 +13,6 @@ import {
   buildApiKeyGovernanceItems,
   buildRuntimeRejectionView,
   lifecycleLabel,
-  modelOverrideTargetLabel,
   runtimeRejectionBadgeClass,
   scopeLabel,
 } from "../composables/useApiKeyDetail";
@@ -23,7 +22,6 @@ const props = defineProps<{
   runtime: ApiKeyRuntimeSnapshot;
   providerNameById: Map<number, string>;
   modelNameById: Map<number, string>;
-  routeNameById: Map<number, string>;
 }>();
 
 const { t } = useI18n();
@@ -161,66 +159,6 @@ const runtimeRejection = computed(() =>
           </p>
           <p v-if="rule.description" class="mt-2 text-sm text-gray-500">
             {{ rule.description }}
-          </p>
-        </div>
-      </div>
-    </section>
-
-    <section class="space-y-3 border-t border-gray-100 pt-6">
-      <div class="flex items-center gap-2">
-        <KeyRound class="h-4 w-4 text-gray-400" />
-        <h3 class="text-base font-semibold text-gray-900">
-          {{ t("apiKeyPage.sections.overrideTitle") }}
-        </h3>
-      </div>
-      <p class="text-sm text-gray-500">
-        {{ t("apiKeyPage.sections.overrideDescription") }}
-      </p>
-
-      <div
-        v-if="!detail.model_overrides.length"
-        class="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-sm text-gray-500"
-      >
-        {{ t("apiKeyPage.noOverrides") }}
-      </div>
-
-      <div v-else class="space-y-3">
-        <div
-          v-for="item in detail.model_overrides"
-          :key="item.id"
-          class="rounded-lg bg-gray-50/70 px-4 py-3"
-        >
-          <div class="flex flex-wrap items-center gap-2">
-            <Badge variant="outline" class="text-[11px]">
-              {{ item.source_name }}
-            </Badge>
-            <Badge variant="secondary" class="text-[11px]">
-              {{ modelOverrideTargetLabel(item, routeNameById, t) }}
-            </Badge>
-            <Badge
-              :class="
-                item.is_enabled
-                  ? 'border border-gray-200 bg-white text-gray-600'
-                  : 'border border-gray-200 bg-gray-100 text-gray-400'
-              "
-              class="text-[11px]"
-            >
-              {{
-                item.is_enabled
-                  ? t("apiKeyPage.rule.enabled")
-                  : t("apiKeyPage.rule.disabled")
-              }}
-            </Badge>
-          </div>
-          <p class="mt-2 text-sm text-gray-900">
-            {{
-              t("apiKeyPage.override.targetRoute", {
-                value: modelOverrideTargetLabel(item, routeNameById, t),
-              })
-            }}
-          </p>
-          <p v-if="item.description" class="mt-2 text-sm text-gray-500">
-            {{ item.description }}
           </p>
         </div>
       </div>

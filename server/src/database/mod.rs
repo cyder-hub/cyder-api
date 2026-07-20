@@ -45,6 +45,9 @@ pub mod runtime_feature_config;
 pub mod stat;
 //pub mod record; // Assuming this will be replaced or removed if request_log supersedes it
 
+#[cfg(test)]
+mod migration_smoke_tests;
+
 pub enum DbType {
     Postgres,
     Sqlite,

@@ -22,8 +22,6 @@
 host: 0.0.0.0
 port: 8000
 base_path: /ai
-secret_key: your_secret_key
-password_salt: jKnDj%pNoJerZGPA&AG7Rwuwo&8tC6QW
 jwt_secret: uCK6g1EBERjj2U7FT8sGlMFFzL2M3ufW
 # api_key_jwt_secret: another_secret_key
 db_url: /data/cyder/db/cyder.sqlite

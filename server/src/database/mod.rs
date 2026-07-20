@@ -34,6 +34,7 @@ pub mod api_key_acl_rule;
 pub mod api_key_rollup;
 pub mod cost;
 pub mod manager_auth_instance;
+pub mod manager_credential;
 pub mod metrics;
 pub mod model;
 pub mod provider;

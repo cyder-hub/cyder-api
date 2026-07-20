@@ -1,4 +1,4 @@
-use crate::service::app_state::{StateRouter, create_state_router};
+use crate::service::app_state::{AppState, StateRouter, create_state_router};
 use crate::utils::auth::authorization_access_middleware;
 use api_key::create_api_key_management_router;
 use auth::create_auth_router;
@@ -18,6 +18,7 @@ use request_log::create_record_router;
 use request_patch::create_request_patch_router;
 use runtime_feature_config::create_runtime_feature_config_router;
 use stat::routes as create_stat_router;
+use std::sync::Arc;
 
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -44,7 +45,7 @@ mod system;
 pub use error::BaseError;
 pub use system::create_system_router;
 
-pub fn create_manager_router() -> StateRouter {
+pub fn create_manager_router(app_state: Arc<AppState>) -> StateRouter {
     let serve_dir = ServeDir::new("public").fallback(ServeFile::new("public/index.html"));
     let serve_vendor_dir = ServeDir::new("public/assets");
 
@@ -71,7 +72,10 @@ pub fn create_manager_router() -> StateRouter {
             .merge(create_metrics_router())
             .merge(create_stat_router())
             .merge(create_portable_config_router())
-            .layer(middleware::from_fn(authorization_access_middleware))
+            .layer(middleware::from_fn_with_state(
+                app_state,
+                authorization_access_middleware,
+            ))
             .merge(create_auth_router()),
     );
 

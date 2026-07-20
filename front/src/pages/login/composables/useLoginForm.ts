@@ -1,4 +1,5 @@
 import { ref } from "vue";
+import { authErrorCode } from "../../../services/authErrors.ts";
 import type { UseLoginFormOptions, UseLoginFormReturn } from "../types";
 
 export function useLoginForm(
@@ -17,14 +18,15 @@ export function useLoginForm(
     error.value = null;
 
     try {
-      const success = await options.login(password.value);
-      if (success) {
-        await options.onSuccess();
-      } else {
-        error.value = options.translate("loginPage.loginFailed");
+      await options.login(password.value);
+      await options.onSuccess();
+    } catch (caught) {
+      const code = authErrorCode(caught);
+      if (code === 1411) {
+        await options.onUninitialized();
+        return;
       }
-    } catch {
-      error.value = options.translate("loginPage.loginFailed");
+      error.value = options.errorForCode(code);
     } finally {
       isLoading.value = false;
     }

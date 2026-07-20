@@ -2,8 +2,9 @@ import { createRouter, createWebHistory } from "vue-router";
 import DefaultLayout from "@/layouts/DefaultLayout.vue";
 import LoginLayout from "@/layouts/LoginLayout.vue";
 import { useAuthStore } from "@/store/authStore";
-import { tryRefreshToken } from "@/services/auth";
+import { getBootstrapStatus, tryRefreshToken } from "@/services/auth";
 import { readStoredRefreshToken } from "@/services/authTokens";
+import { decideAuthRoute, type AuthRouteKind } from "./auth-state";
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -144,11 +145,6 @@ const router = createRouter({
       ],
     },
     {
-      path: "/:pathMatch(.*)*",
-      name: "NotFound",
-      component: () => import("@/pages/NotFound.vue"),
-    },
-    {
       path: "/login",
       component: LoginLayout,
       children: [
@@ -162,36 +158,74 @@ const router = createRouter({
         },
       ],
     },
+    {
+      path: "/bootstrap",
+      component: LoginLayout,
+      children: [
+        {
+          path: "",
+          name: "Bootstrap",
+          component: () => import("@/pages/bootstrap/BootstrapPage.vue"),
+          meta: {
+            titleKey: "bootstrapPage.title",
+          },
+        },
+      ],
+    },
+    {
+      path: "/:pathMatch(.*)*",
+      name: "NotFound",
+      component: () => import("@/pages/NotFound.vue"),
+    },
   ],
 });
 
 router.beforeEach(async (to, _from, next) => {
+  const authStore = useAuthStore();
+  const bootstrapState = await authStore.resolveBootstrapState(getBootstrapStatus);
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
   const refreshToken = readStoredRefreshToken();
-  const isAuthenticated = !!refreshToken;
+  const routeKind: AuthRouteKind =
+    to.name === "Bootstrap"
+      ? "bootstrap"
+      : to.name === "Login"
+        ? "login"
+        : requiresAuth
+          ? "protected"
+          : "public";
+  const decision = decideAuthRoute({
+    bootstrapState,
+    routeKind,
+    hasRefreshToken: !!refreshToken,
+    hasAccessToken: !!authStore.accessToken,
+  });
 
-  if (requiresAuth) {
-    if (!isAuthenticated) {
-      next({ name: "Login" });
-    } else {
-      const authStore = useAuthStore();
-      // Proactively refresh access_token if missing (e.g., after reload)
-      if (!authStore.accessToken) {
-        const refreshed = await tryRefreshToken();
-        if (refreshed) {
-          next();
-        } else {
-          next({ name: "Login" });
-        }
-      } else {
-        next();
-      }
-    }
-  } else if (to.name === "Login" && isAuthenticated) {
-    next({ name: "Dashboard" });
-  } else {
-    next();
+  if (decision === "bootstrap") {
+    next({ name: "Bootstrap" });
+    return;
   }
+  if (decision === "login") {
+    next({ name: "Login" });
+    return;
+  }
+  if (decision === "dashboard") {
+    next({ name: "Dashboard" });
+    return;
+  }
+  if (decision === "restore") {
+    const refreshed = await tryRefreshToken();
+    if (!refreshed) {
+      next({ name: "Login" });
+      return;
+    }
+    if (routeKind === "protected") {
+      next();
+    } else {
+      next({ name: "Dashboard" });
+    }
+    return;
+  }
+  next();
 });
 
 export default router;

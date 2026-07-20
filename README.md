@@ -139,7 +139,7 @@ Unknown top-level and nested fields in `config.yaml` and the generated `config.d
 Important config areas include:
 
 - server bind settings: `host`, `port`, `base_path`
-- manager auth: `secret_key`, `jwt_secret`
+- manager auth: initialize the manager password in the Web Bootstrap page; `jwt_secret` signs manager tokens
 - downstream API key JWT: `api_key_jwt_secret`
 - database: `db_url`
 - proxy request behavior: `proxy_request`

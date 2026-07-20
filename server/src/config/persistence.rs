@@ -734,7 +734,7 @@ mod tests {
     fn bootstrap_does_not_overwrite_existing_default_config() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
         let paths = ConfigPaths::for_test(temp_dir.path());
-        let existing = "secret_key: existing-secret\n";
+        let existing = "port: 9123\n";
         write_test_config(&paths.default_config_path, existing);
 
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
@@ -777,7 +777,7 @@ mod tests {
         let error = create_file_if_missing_inner(
             &path,
             "create default configuration file",
-            b"secret_key: temporary\n",
+            b"port: 9124\n",
             true,
         )
         .expect_err("simulated install failure should fail");
@@ -823,8 +823,8 @@ mod tests {
 
         assert_eq!(before, after_first);
         assert_eq!(before, after_second);
-        assert_eq!(first.secret_key, second.secret_key);
         assert_eq!(first.jwt_secret, second.jwt_secret);
+        assert_eq!(first.db_url, second.db_url);
     }
 
     #[test]

@@ -3,6 +3,7 @@ import type { AuthTokenPair } from "./types";
 export interface RetriableHttpRequest {
   _retry?: boolean;
   headers?: Record<string, string>;
+  url?: string;
   [key: string]: unknown;
 }
 
@@ -45,6 +46,15 @@ function setAuthorizationHeader(
   request.headers.Authorization = `Bearer ${token}`;
 }
 
+export function isPublicManagerAuthRequest(request: RetriableHttpRequest): boolean {
+  const url = request.url ?? "";
+  return [
+    "/ai/manager/api/auth/bootstrap/status",
+    "/ai/manager/api/auth/bootstrap",
+    "/ai/manager/api/auth/login",
+  ].some((path) => url === path || url.startsWith(`${path}?`));
+}
+
 export function createHttpAuthRefreshHandler(
   deps: HttpAuthRefreshDependencies,
 ) {
@@ -70,7 +80,8 @@ export function createHttpAuthRefreshHandler(
     if (
       error.response?.status !== 401 ||
       !originalRequest ||
-      originalRequest._retry
+      originalRequest._retry ||
+      isPublicManagerAuthRequest(originalRequest)
     ) {
       throw error;
     }

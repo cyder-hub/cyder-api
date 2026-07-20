@@ -1,0 +1,231 @@
+openapi: 3.1.0
+info:
+  title: Cyder Manager Auth Living Contract
+  version: 1.0.0-pre.1
+  description: Single-manager authentication contract for the Cyder management control plane.
+servers:
+  - url: /
+x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434]
+paths:
+  /ai/manager/api/auth/bootstrap/status:
+    get:
+      operationId: getManagerBootstrapStatus
+      security: []
+      x-cyder-error-codes: [1404]
+      responses:
+        "200":
+          description: Current manager credential initialization state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapStatusEnvelope"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/bootstrap:
+    post:
+      operationId: bootstrapManagerCredential
+      security: []
+      x-cyder-error-codes: [1401, 1402, 1403, 1404, 1405]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TokenPair"
+        "409":
+          $ref: "#/components/responses/AuthError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/BusyError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/login:
+    post:
+      operationId: loginManager
+      security: []
+      x-cyder-error-codes: [1411, 1412, 1413, 1414, 1415, 1416]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TokenPair"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/AuthError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/BusyError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/password/rotate:
+    post:
+      operationId: rotateManagerPassword
+      security:
+        - managerAccessToken: []
+      x-cyder-error-codes: [1421, 1422, 1423, 1424, 1425, 1426]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotatePasswordRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TokenPair"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/AuthError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/BusyError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/refresh_token:
+    post:
+      operationId: refreshManagerTokens
+      security:
+        - managerRefreshToken: []
+      x-cyder-error-codes: [1441, 1442, 1443]
+      responses:
+        "200":
+          $ref: "#/components/responses/TokenPair"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/logout:
+    post:
+      operationId: logoutManager
+      security:
+        - managerAccessToken: []
+      x-cyder-error-codes: [1431, 1432, 1433, 1451]
+      responses:
+        "200":
+          description: Current manager refresh session was revoked when present.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmptyEnvelope"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+components:
+  securitySchemes:
+    managerAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT access token
+    managerRefreshToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT refresh token
+  schemas:
+    PasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          type: string
+          minLength: 15
+          maxLength: 128
+          description: NFC-normalized Unicode password. Whitespace is preserved.
+    RotatePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 15
+          maxLength: 128
+    AuthTokenPair:
+      type: object
+      required: [refresh_token, access_token]
+      properties:
+        refresh_token:
+          type: string
+        access_token:
+          type: string
+    TokenPairEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/AuthTokenPair"
+    BootstrapStatus:
+      type: object
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [uninitialized, ready]
+    BootstrapStatusEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/BootstrapStatus"
+    EmptyEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          type: "null"
+    AuthError:
+      type: object
+      required: [code, msg]
+      properties:
+        code:
+          type: integer
+        msg:
+          type: string
+  responses:
+    TokenPair:
+      description: New manager access and refresh token pair.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TokenPairEnvelope"
+    AuthError:
+      description: Stable scenario-specific manager authentication error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
+    BusyError:
+      description: Password operation is already in progress.
+      headers:
+        Retry-After:
+          required: true
+          schema:
+            type: integer
+            const: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"

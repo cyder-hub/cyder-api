@@ -1,9 +1,9 @@
 import type { Ref } from "vue";
-import type { AppTranslate } from "@/i18n";
 
 export interface UseLoginFormOptions {
-  login: (password: string) => Promise<boolean>;
-  translate: AppTranslate;
+  login: (password: string) => Promise<void>;
+  errorForCode: (code: number | null) => string;
+  onUninitialized: () => unknown | Promise<unknown>;
   onSuccess: () => unknown | Promise<unknown>;
 }
 

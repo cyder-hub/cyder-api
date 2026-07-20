@@ -3,10 +3,12 @@ import { computed, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import LanguageSwitcher from "@/components/LanguageSwitcher.vue";
+import RotatePasswordDialog from "@/components/manager/RotatePasswordDialog.vue";
 import { navItems, navSectionOrder, type NavSection } from "@/router/nav-items";
 import { logout as logoutSession } from "@/services/auth";
 import {
   LogOut,
+  KeyRound,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -20,6 +22,7 @@ const router = useRouter();
 
 const isCollapsed = ref(false);
 const isMobileNavOpen = ref(false);
+const isPasswordDialogOpen = ref(false);
 
 type ManagerRouteMeta = {
   titleKey?: string;
@@ -46,6 +49,11 @@ const handleLogout = async () => {
   await logoutSession();
   closeMobileNav();
   router.replace({ name: "Login" });
+};
+
+const openPasswordDialog = () => {
+  closeMobileNav();
+  isPasswordDialogOpen.value = true;
 };
 
 const translateNavItem = (item: { text?: string; i18nKey?: string }) => {
@@ -204,6 +212,19 @@ watch(
           type="button"
           class="group flex w-full items-center rounded-md px-3 py-2 text-sm font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
           :class="{ 'justify-center px-0': isCollapsed }"
+          :title="isCollapsed ? t('app.rotatePassword') : undefined"
+          :aria-label="t('app.rotatePassword')"
+          @click="openPasswordDialog"
+        >
+          <KeyRound class="h-4 w-4 flex-shrink-0 text-gray-400 group-hover:text-gray-600" />
+          <span v-if="!isCollapsed" class="ml-2.5 overflow-hidden whitespace-nowrap">
+            {{ t("app.rotatePassword") }}
+          </span>
+        </button>
+        <button
+          type="button"
+          class="group flex w-full items-center rounded-md px-3 py-2 text-sm font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
+          :class="{ 'justify-center px-0': isCollapsed }"
           :title="isCollapsed ? t('app.logout') : undefined"
           :aria-label="t('app.logout')"
           @click="handleLogout"
@@ -295,6 +316,15 @@ watch(
             <button
               type="button"
               class="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
+              :aria-label="t('app.rotatePassword')"
+              @click="openPasswordDialog"
+            >
+              <KeyRound class="h-4 w-4 flex-shrink-0 text-gray-400" />
+              <span class="truncate">{{ t("app.rotatePassword") }}</span>
+            </button>
+            <button
+              type="button"
+              class="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
               :aria-label="t('app.logout')"
               @click="handleLogout"
             >
@@ -310,6 +340,8 @@ watch(
         <RouterView />
       </main>
     </div>
+
+    <RotatePasswordDialog v-model:open="isPasswordDialogOpen" />
   </div>
 </template>
 

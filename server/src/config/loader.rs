@@ -198,6 +198,18 @@ mod tests {
     }
 
     #[test]
+    fn effective_config_ignores_retired_manager_credential_fields_without_reserializing_them() {
+        let config =
+            load_user_yaml("port: 9123\nsecret_key: retired-secret\npassword_salt: retired-salt\n")
+                .expect("retired manager credential fields should be ignored");
+
+        assert_eq!(config.port, 9123);
+        let serialized = serde_yaml::to_string(&config).expect("effective config should serialize");
+        assert!(!serialized.contains("secret_key"));
+        assert!(!serialized.contains("password_salt"));
+    }
+
+    #[test]
     fn effective_config_ignores_unknown_nested_fields() {
         let config = load_user_yaml(
             "provider_governance:\n  open_cooldown_seconds: 17\n  unknown_policy: true\n",

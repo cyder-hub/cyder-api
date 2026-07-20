@@ -14,15 +14,26 @@
         <label class="block text-sm font-medium text-gray-700">
           {{ $t("loginPage.passwordLabel") }}
         </label>
-        <Input
-          v-model="passwordModel"
-          :disabled="isLoading"
-          type="password"
-          required
-          autocomplete="current-password"
-          :placeholder="$t('loginPage.passwordPlaceholder')"
-          class="w-full"
-        />
+        <div class="relative">
+          <Input
+            v-model="passwordModel"
+            :disabled="isLoading"
+            :type="showPassword ? 'text' : 'password'"
+            required
+            autocomplete="current-password"
+            :placeholder="$t('loginPage.passwordPlaceholder')"
+            class="w-full pr-11"
+          />
+          <button
+            type="button"
+            class="absolute inset-y-0 right-0 inline-flex w-11 items-center justify-center text-gray-400 transition-colors hover:text-gray-700"
+            :aria-label="$t(showPassword ? 'authPassword.hide' : 'authPassword.show')"
+            @click="showPassword = !showPassword"
+          >
+            <EyeOff v-if="showPassword" class="h-4 w-4" />
+            <Eye v-else class="h-4 w-4" />
+          </button>
+        </div>
       </div>
 
       <div
@@ -44,9 +55,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Eye, EyeOff } from "lucide-vue-next";
+
+const showPassword = ref(false);
 
 const props = defineProps<{
   password: string;

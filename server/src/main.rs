@@ -71,7 +71,7 @@ async fn main() {
                 &CONFIG.base_path,
                 create_state_router()
                     .merge(create_system_router())
-                    .merge(create_manager_router())
+                    .merge(create_manager_router(std::sync::Arc::clone(&app_state)))
                     .merge(create_proxy_router())
                     .fallback(handle_404),
             )

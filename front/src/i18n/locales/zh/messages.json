@@ -440,6 +440,7 @@
     "header": "AI网关管理器",
     "footer": "© 2025 AI网关管理器. 版权所有.",
     "toggleSidebar": "切换侧边栏",
+    "rotatePassword": "修改密码",
     "logout": "退出登录"
   },
   "language": {
@@ -578,7 +579,55 @@
     "passwordPlaceholder": "请输入密码",
     "submit": "确认",
     "submitting": "登录中...",
-    "loginFailed": "登录失败，请检查密码是否正确。"
+    "loginFailed": "登录失败，请检查密码是否正确。",
+    "errors": {
+      "busy": "登录暂时受限，请稍后重试。",
+      "unavailable": "管理员登录当前不可用。",
+      "invalidRequest": "请输入有效的密码。"
+    }
+  },
+  "authPassword": {
+    "show": "显示密码",
+    "hide": "隐藏密码",
+    "policy": "请输入 15–128 个 Unicode 字符，空格会被保留。"
+  },
+  "bootstrapPage": {
+    "title": "初始化管理员",
+    "description": "为此网关的唯一管理员设置密码。",
+    "firstComeWarning": "初始化采用先到先得方式。请在将管理界面暴露给不可信网络前完成设置。",
+    "passwordLabel": "管理员密码",
+    "confirmLabel": "确认密码",
+    "submit": "初始化并登录",
+    "submitting": "正在初始化...",
+    "statusErrorTitle": "无法获取初始化状态",
+    "statusErrorDescription": "服务器无法确定管理员凭据是否已初始化。请检查服务后重试。",
+    "errors": {
+      "confirmation": "两次输入的密码不一致。",
+      "policy": "密码必须包含 15–128 个 Unicode 字符。",
+      "alreadyInitialized": "其他请求已完成初始化，请继续登录。",
+      "busy": "已有密码操作正在执行，请稍后重试。",
+      "unavailable": "管理员初始化当前不可用。",
+      "failed": "管理员初始化失败。"
+    }
+  },
+  "rotatePassword": {
+    "title": "修改管理员密码",
+    "description": "请验证当前密码。修改后已有管理员会话将失效。",
+    "currentPassword": "当前密码",
+    "newPassword": "新密码",
+    "confirmPassword": "确认新密码",
+    "submit": "修改密码",
+    "success": "管理员密码已修改",
+    "errors": {
+      "currentPassword": "当前密码不正确。",
+      "policy": "新密码必须包含 15–128 个 Unicode 字符。",
+      "samePassword": "新密码不能与当前密码相同。",
+      "confirmation": "两次输入的新密码不一致。",
+      "busy": "已有密码操作正在执行，请稍后重试。",
+      "conflict": "管理员凭据已变化，请刷新后重试。",
+      "unavailable": "修改密码当前不可用。",
+      "failed": "修改密码失败。"
+    }
   },
   "modelPage": {
     "title": "模型库",

@@ -156,6 +156,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    manager_credential (manager_id) {
+        manager_id -> BigInt,
+        manager_subject -> Text,
+        password_verifier -> Text,
+        credential_epoch -> Text,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
     reasoning_config (id) {
         id -> BigInt,
         scope_kind -> Text,
@@ -419,6 +430,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     cost_catalog_versions,
     cost_components,
     manager_auth_instance,
+    manager_credential,
     metric_cost_rollup_minute,
     metric_http_status_rollup_minute,
     metric_ingested_request_log,

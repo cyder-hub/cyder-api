@@ -12,6 +12,11 @@ export interface AuthSessionDependencies {
   clearStoredRefreshTokenIfCurrent: (refreshToken: string) => boolean;
   refreshToken: (refreshToken: string) => Promise<AuthTokenPair>;
   loginWithPassword: (password: string) => Promise<AuthTokenPair>;
+  bootstrapWithPassword: (password: string) => Promise<AuthTokenPair>;
+  rotateManagerPassword: (
+    currentPassword: string,
+    newPassword: string,
+  ) => Promise<AuthTokenPair>;
   logoutRequest: () => Promise<void>;
 }
 
@@ -35,14 +40,23 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
     }
   };
 
-  const login = async (password: string): Promise<boolean> => {
-    try {
-      const tokenPair = await deps.loginWithPassword(password);
-      deps.getAuthStore().setAccessToken(deps.persistAuthTokenPair(tokenPair));
-      return true;
-    } catch {
-      return false;
-    }
+  const persistSession = (tokenPair: AuthTokenPair): void => {
+    deps.getAuthStore().setAccessToken(deps.persistAuthTokenPair(tokenPair));
+  };
+
+  const login = async (password: string): Promise<void> => {
+    persistSession(await deps.loginWithPassword(password));
+  };
+
+  const bootstrap = async (password: string): Promise<void> => {
+    persistSession(await deps.bootstrapWithPassword(password));
+  };
+
+  const rotatePassword = async (
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> => {
+    persistSession(await deps.rotateManagerPassword(currentPassword, newPassword));
   };
 
   const logout = async (): Promise<void> => {
@@ -59,6 +73,8 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
   return {
     tryRefreshToken,
     login,
+    bootstrap,
+    rotatePassword,
     logout,
   };
 }

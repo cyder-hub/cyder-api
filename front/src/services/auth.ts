@@ -1,6 +1,6 @@
 import { useAuthStore } from "@/store/authStore";
 import { request } from "./http";
-import type { AuthTokenPair } from "./types";
+import type { AuthTokenPair, ManagerBootstrapStatus } from "./types";
 import { createAuthSessionActions } from "./authSession";
 import {
   clearStoredRefreshTokenIfCurrent,
@@ -20,7 +20,25 @@ export function refreshToken(refreshToken: string): Promise<AuthTokenPair> {
 }
 
 export function loginWithPassword(password: string): Promise<AuthTokenPair> {
-  return request.post("/ai/manager/api/auth/login", { key: password });
+  return request.post("/ai/manager/api/auth/login", { password });
+}
+
+export function getBootstrapStatus(): Promise<ManagerBootstrapStatus> {
+  return request.get("/ai/manager/api/auth/bootstrap/status");
+}
+
+export function bootstrapWithPassword(password: string): Promise<AuthTokenPair> {
+  return request.post("/ai/manager/api/auth/bootstrap", { password });
+}
+
+export function rotateManagerPassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<AuthTokenPair> {
+  return request.post("/ai/manager/api/auth/password/rotate", {
+    current_password: currentPassword,
+    new_password: newPassword,
+  });
 }
 
 export function logoutRequest(): Promise<void> {
@@ -35,7 +53,9 @@ const authSession = createAuthSessionActions({
   clearStoredRefreshTokenIfCurrent,
   refreshToken,
   loginWithPassword,
+  bootstrapWithPassword,
+  rotateManagerPassword,
   logoutRequest,
 });
 
-export const { tryRefreshToken, login, logout } = authSession;
+export const { tryRefreshToken, login, bootstrap, rotatePassword, logout } = authSession;

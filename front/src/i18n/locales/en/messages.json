@@ -440,6 +440,7 @@
     "header": "AI Gateway Manager",
     "footer": "© 2025 AI Gateway Manager. All rights reserved.",
     "toggleSidebar": "Toggle Sidebar",
+    "rotatePassword": "Change password",
     "logout": "Log out"
   },
   "language": {
@@ -578,7 +579,55 @@
     "passwordPlaceholder": "Enter your password",
     "submit": "Confirm",
     "submitting": "Logging in...",
-    "loginFailed": "Login failed. Please check your password."
+    "loginFailed": "Login failed. Please check your password.",
+    "errors": {
+      "busy": "Login is temporarily limited. Please retry shortly.",
+      "unavailable": "Manager login is currently unavailable.",
+      "invalidRequest": "Enter a valid password request."
+    }
+  },
+  "authPassword": {
+    "show": "Show password",
+    "hide": "Hide password",
+    "policy": "Use 15–128 Unicode characters. Spaces are preserved."
+  },
+  "bootstrapPage": {
+    "title": "Initialize administrator",
+    "description": "Set the password for this gateway's single administrator.",
+    "firstComeWarning": "Initialization is first come, first served. Complete it before exposing the management interface to untrusted networks.",
+    "passwordLabel": "Administrator password",
+    "confirmLabel": "Confirm password",
+    "submit": "Initialize and sign in",
+    "submitting": "Initializing...",
+    "statusErrorTitle": "Initialization status unavailable",
+    "statusErrorDescription": "The server could not determine whether administrator credentials are initialized. Retry after checking the service.",
+    "errors": {
+      "confirmation": "The password confirmation does not match.",
+      "policy": "The password must contain 15–128 Unicode characters.",
+      "alreadyInitialized": "Another request completed initialization. Continue to sign in.",
+      "busy": "A password operation is already running. Retry shortly.",
+      "unavailable": "Administrator initialization is currently unavailable.",
+      "failed": "Administrator initialization failed."
+    }
+  },
+  "rotatePassword": {
+    "title": "Change administrator password",
+    "description": "Confirm the current password. Existing manager sessions will be invalidated.",
+    "currentPassword": "Current password",
+    "newPassword": "New password",
+    "confirmPassword": "Confirm new password",
+    "submit": "Change password",
+    "success": "Administrator password changed",
+    "errors": {
+      "currentPassword": "The current password is incorrect.",
+      "policy": "The new password must contain 15–128 Unicode characters.",
+      "samePassword": "The new password must differ from the current password.",
+      "confirmation": "The new password confirmation does not match.",
+      "busy": "A password operation is already running. Retry shortly.",
+      "conflict": "The administrator credential changed. Reload and try again.",
+      "unavailable": "Password change is currently unavailable.",
+      "failed": "Password change failed."
+    }
   },
   "modelPage": {
     "title": "Model Library",

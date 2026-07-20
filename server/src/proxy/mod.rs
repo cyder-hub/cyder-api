@@ -18,6 +18,8 @@ mod util;
 mod utility;
 
 #[cfg(test)]
+mod direct_execution_regression;
+#[cfg(test)]
 mod log_regression;
 
 use error::classify_request_body_error;

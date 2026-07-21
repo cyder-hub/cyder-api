@@ -696,10 +696,7 @@ impl CatalogService {
 
     pub async fn invalidate_api_key_id(&self, id: i64) -> Result<(), AppStoreError> {
         if let Ok(row) = ApiKey::get_by_id(id) {
-            let api_key_hash = row
-                .api_key_hash
-                .unwrap_or_else(|| crate::database::api_key::hash_api_key(&row.api_key));
-            self.invalidate_api_key_hash(&api_key_hash).await?;
+            self.invalidate_api_key_hash(&row.api_key_hash).await?;
         }
 
         Ok(())

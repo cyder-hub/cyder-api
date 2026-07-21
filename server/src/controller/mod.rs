@@ -58,6 +58,8 @@ pub fn create_manager_router(app_state: Arc<AppState>) -> StateRouter {
         .nest_service("/ui/assets", serve_vendor_dir);
 
     let auth_router = create_auth_router(Arc::clone(&app_state));
+    let no_store =
+        SetResponseHeaderLayer::overriding(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     let api_router = create_state_router().nest(
         "/api",
         create_state_router()
@@ -77,7 +79,8 @@ pub fn create_manager_router(app_state: Arc<AppState>) -> StateRouter {
                 app_state,
                 authorization_access_middleware,
             ))
-            .merge(auth_router),
+            .merge(auth_router)
+            .layer(no_store),
     );
 
     create_state_router().nest(
@@ -88,4 +91,131 @@ pub fn create_manager_router(app_state: Arc<AppState>) -> StateRouter {
 
 pub async fn handle_404() -> impl IntoResponse {
     (http::StatusCode::NOT_FOUND, "not found")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, sync::Arc};
+
+    use axum::{
+        body::Body,
+        extract::ConnectInfo,
+        http::{Method, Request, StatusCode, header},
+    };
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    use crate::database::TestDbContext;
+    use crate::service::app_state::create_test_app_state;
+
+    use super::create_manager_router;
+
+    async fn send(
+        app_state: &Arc<crate::service::app_state::AppState>,
+        mut request: Request<Body>,
+    ) -> axum::response::Response {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 31_200))));
+        create_manager_router(Arc::clone(app_state))
+            .with_state(Arc::clone(app_state))
+            .oneshot(request)
+            .await
+            .expect("manager router should respond")
+    }
+
+    fn request(method: Method, uri: &str, token: Option<&str>, body: Body) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        builder.body(body).expect("manager request should build")
+    }
+
+    fn assert_no_store(response: &axum::response::Response) {
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
+
+    #[tokio::test]
+    async fn manager_api_overrides_cache_control_for_get_secret_post_and_errors() {
+        let database = TestDbContext::new_sqlite("manager-api-no-store.sqlite");
+        database
+            .run_async(async {
+                let app_state = create_test_app_state(database.clone()).await;
+                let tokens = app_state
+                    .admin
+                    .auth
+                    .bootstrap("manager no-store contract password")
+                    .await
+                    .expect("manager bootstrap should succeed");
+
+                let response = send(
+                    &app_state,
+                    request(
+                        Method::GET,
+                        "/manager/api/api_key/list",
+                        Some(&tokens.access_token),
+                        Body::empty(),
+                    ),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_no_store(&response);
+
+                let response = send(
+                    &app_state,
+                    request(
+                        Method::POST,
+                        "/manager/api/api_key",
+                        Some(&tokens.access_token),
+                        Body::from(
+                            serde_json::to_vec(&json!({
+                                "name": "manager-no-store-secret",
+                                "default_action": "ALLOW"
+                            }))
+                            .expect("create payload should serialize"),
+                        ),
+                    ),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_no_store(&response);
+
+                let response = send(
+                    &app_state,
+                    request(
+                        Method::GET,
+                        "/manager/api/api_key/list",
+                        None,
+                        Body::empty(),
+                    ),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                assert_no_store(&response);
+
+                let response = send(
+                    &app_state,
+                    request(Method::GET, "/manager/ui/missing", None, Body::empty()),
+                )
+                .await;
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(header::CACHE_CONTROL)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("no-cache, no-store, must-revalidate")
+                );
+            })
+            .await;
+    }
 }

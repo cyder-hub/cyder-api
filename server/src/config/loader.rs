@@ -118,6 +118,14 @@ fn load_effective_config_inner(
     let mut builder =
         Config::builder().add_source(File::from_str(&default.merged_yaml, FileFormat::Yaml));
 
+    // Secret values are intentionally redacted when FinalConfig is serialized. Re-add the
+    // managed default source so a deployment that explicitly placed secret_encryption there
+    // still loads it without ever copying the value into the generated merged YAML snapshot.
+    if paths.default_config_path.exists() {
+        builder =
+            builder.add_source(File::from(paths.default_config_path.as_path()).required(false));
+    }
+
     if paths.user_config_path_required {
         validate_required_user_config_file(paths)?;
         builder = builder.add_source(File::from(paths.user_config_path.as_path()).required(true));
@@ -239,6 +247,97 @@ mod tests {
             error.to_string().contains("port"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn secret_encryption_defaults_to_one_time_without_generating_a_key() {
+        let config = load_user_yaml("port: 9123\n").expect("default config should load");
+
+        assert_eq!(
+            config.secret_encryption.downstream_mode,
+            crate::config::DownstreamSecretMode::OneTime
+        );
+        assert!(config.secret_encryption.encryption_key().is_none());
+        assert!(!config.secret_encryption.has_previous_encryption_key());
+    }
+
+    #[test]
+    fn secret_encryption_accepts_recoverable_current_and_distinct_previous_keys() {
+        let current = "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
+        let previous = "FFEEDDCCBBAA99887766554433221100FFEEDDCCBBAA99887766554433221100";
+        let config = load_user_yaml(&format!(
+            "secret_encryption:\n  downstream_mode: recoverable\n  encryption_key: '{current}'\n  previous_encryption_key: '{previous}'\n"
+        ))
+        .expect("valid secret encryption config should load");
+
+        assert_eq!(
+            config.secret_encryption.downstream_mode,
+            crate::config::DownstreamSecretMode::Recoverable
+        );
+        assert!(config.secret_encryption.encryption_key().is_some());
+        assert!(config.secret_encryption.has_previous_encryption_key());
+
+        let debug = format!("{:?}", config.secret_encryption);
+        let serialized =
+            serde_yaml::to_string(&config).expect("effective config should serialize safely");
+        for output in [debug, serialized] {
+            assert!(!output.contains(current));
+            assert!(!output.contains(previous));
+        }
+    }
+
+    #[test]
+    fn secret_encryption_rejects_invalid_key_relationships_without_echoing_values() {
+        let valid = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        let cases = [
+            "secret_encryption:\n  downstream_mode: recoverable\n",
+            "secret_encryption:\n  downstream_mode: recoverable\n  encryption_key: 'not-a-key'\n",
+            "secret_encryption:\n  downstream_mode: recoverable\n  encryption_key: 'hex:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
+            "secret_encryption:\n  previous_encryption_key: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
+        ];
+        for yaml in cases {
+            let error = load_user_yaml(yaml).expect_err("invalid secret config should fail");
+            assert!(!error.to_string().contains(valid));
+        }
+
+        let error = load_user_yaml(&format!(
+            "secret_encryption:\n  encryption_key: '{valid}'\n  previous_encryption_key: '{valid}'\n"
+        ))
+        .expect_err("equal current and previous keys should fail");
+        assert!(error.to_string().contains("must differ"));
+        assert!(!error.to_string().contains(valid));
+    }
+
+    #[test]
+    fn managed_default_secret_value_is_reapplied_after_redacted_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("config test directory should be created");
+        let paths = ConfigPaths::new(
+            temp_dir.path().join("config.default.yaml"),
+            temp_dir.path().join("config.yaml"),
+        );
+        let key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        fs::write(
+            &paths.default_config_path,
+            format!(
+                "secret_encryption:\n  downstream_mode: recoverable\n  encryption_key: '{key}'\n"
+            ),
+        )
+        .expect("managed default should be written");
+
+        let loaded_default = load_default_config(&paths).expect("default snapshot should load");
+        assert!(!loaded_default.merged_yaml.contains(key));
+        let config = load_effective_config(
+            &paths,
+            ConfigLoadOptions {
+                include_environment: false,
+            },
+        )
+        .expect("managed default secret should be reapplied");
+        assert_eq!(
+            config.secret_encryption.downstream_mode,
+            crate::config::DownstreamSecretMode::Recoverable
+        );
+        assert!(config.secret_encryption.encryption_key().is_some());
     }
 
     #[test]

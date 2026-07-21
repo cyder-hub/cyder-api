@@ -23,10 +23,17 @@ host: 0.0.0.0
 port: 8000
 base_path: /ai
 jwt_secret: uCK6g1EBERjj2U7FT8sGlMFFzL2M3ufW
-# api_key_jwt_secret: another_secret_key
 db_url: /data/cyder/db/cyder.sqlite
 # db_url: postgres://user:pass@host:port/schema_name
 # Supported database URL forms are SQLite paths and PostgreSQL URLs.
+secret_encryption:
+  # one_time stores only the downstream API key authentication hash.
+  # recoverable additionally requires encryption_key and permits explicit reveal.
+  downstream_mode: one_time
+  # Keys use exactly 64 hexadecimal characters (32 bytes), without a prefix.
+  encryption_key: null
+  # Set only during a controlled startup rotation, then remove after success.
+  previous_encryption_key: null
 redis:
   url: "redis://127.0.0.1:6379/"
   pool_size: 10

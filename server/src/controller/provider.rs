@@ -452,6 +452,7 @@ fn base_error_message(error: &BaseError) -> String {
             .clone()
             .unwrap_or_else(|| "some unique keys have conflicted".to_string()),
         BaseError::NotFound(msg) => msg.clone().unwrap_or_else(|| "data not found".to_string()),
+        BaseError::ApiKeySecretUnavailable => "api key secret is unavailable".to_string(),
         BaseError::Unauthorized(msg) => msg.clone().unwrap_or_else(|| "Unauthorized".to_string()),
         BaseError::StoreError(msg) => msg
             .clone()

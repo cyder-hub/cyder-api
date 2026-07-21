@@ -189,6 +189,15 @@ export interface PortablePreviewModule {
   summary: PortableModuleSummary;
   warnings: string[];
   blocking_issues: PortableBlockedItem[];
+  api_key_items?: PortableApiKeyPreviewItem[];
+}
+
+export interface PortableApiKeyPreviewItem {
+  name: string;
+  key_prefix: string;
+  key_last4: string;
+  acl_rule_count: number;
+  outcome: "create" | "skip" | "conflict" | "blocked" | (string & {});
 }
 
 export interface PortablePreviewResponse {

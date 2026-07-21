@@ -213,8 +213,32 @@ mod tests {
                 assert_eq!(modules_body["code"], 0);
                 assert_eq!(
                     modules_body["data"]["default_selected_modules"],
-                    json!(["provider_profile", "api_keys"])
+                    json!(["provider_profile"])
                 );
+                assert!(
+                    modules_body["data"]["modules"]
+                        .as_array()
+                        .expect("module registry should be an array")
+                        .iter()
+                        .all(|module| module["module_id"] != "api_keys")
+                );
+
+                let rejected_api_key_export = send(
+                    &app_state,
+                    request(
+                        Method::POST,
+                        "/system/portable/export",
+                        Some(json!({
+                            "selected_modules": [{
+                                "module_id": "api_keys",
+                                "subranges": ["api_key_core", "api_key_acl"]
+                            }],
+                            "file_protection": "plaintext"
+                        })),
+                    ),
+                )
+                .await;
+                assert_eq!(rejected_api_key_export.status(), StatusCode::BAD_REQUEST);
 
                 let export_response = send(
                     &app_state,
@@ -262,7 +286,7 @@ mod tests {
                 assert_eq!(preview_body["code"], 0);
                 assert_eq!(
                     preview_body["data"]["default_selected_modules"],
-                    json!(["provider_profile", "api_keys"])
+                    json!(["provider_profile"])
                 );
                 assert_eq!(preview_body["data"]["modules"][0]["summary"]["total"], 0);
 

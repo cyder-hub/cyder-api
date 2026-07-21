@@ -2,13 +2,11 @@
 
 diesel::table! {
     use crate::schema::enum_def::ActionMapping;
-    use diesel::sql_types::{Integer, BigInt, Bool, Text, Nullable};
+    use diesel::sql_types::{Integer, BigInt, Binary, Bool, Text, Nullable};
 
     api_key (id) {
         id -> BigInt,
-        #[sql_name = "api_key"]
-        api_key_value -> Text,
-        api_key_hash -> Nullable<Text>,
+        api_key_hash -> Text,
         key_prefix -> Text,
         key_last4 -> Text,
         name -> Text,
@@ -25,6 +23,10 @@ diesel::table! {
         budget_daily_currency -> Nullable<Text>,
         budget_monthly_nanos -> Nullable<BigInt>,
         budget_monthly_currency -> Nullable<Text>,
+        secret_ciphertext -> Nullable<Binary>,
+        secret_nonce -> Nullable<Binary>,
+        secret_format_version -> Nullable<Integer>,
+        secret_key_fingerprint -> Nullable<Text>,
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
         updated_at -> BigInt,

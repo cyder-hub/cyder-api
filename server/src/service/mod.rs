@@ -8,5 +8,6 @@ pub mod portable_config;
 pub mod redis;
 pub mod request_patch;
 pub mod runtime;
+pub mod secret_encryption;
 pub mod transform;
 pub mod vertex;

@@ -880,8 +880,18 @@
     },
     "secret": {
       "title": "Current Secret",
-      "description": "The full secret is only shown here. Copy it now if you need to distribute it.",
+      "revealedDescription": "The plaintext is held only in this open detail view. Closing it, selecting another key, leaving this page, or logging out clears it from memory.",
+      "unavailable": "This API key cannot be revealed. Rotate it if you need a new plaintext secret.",
       "copied": "API key secret copied."
+    },
+    "issuedSecret": {
+      "title": "Save this API key now",
+      "description": "This plaintext is shown only in this Create or Rotate response. You may close without copying, but it cannot be recovered afterward.",
+      "responseLoss": "Closing this dialog, refreshing, or leaving the page permanently loses this response. If the response is lost or the key was not saved, rotate the API key again.",
+      "acknowledge": "I saved it, close",
+      "recoverableTitle": "API key ready",
+      "recoverableDescription": "This secret is stored encrypted. You can copy it now or reveal it later from the API key details.",
+      "close": "Close"
     },
     "noRules": "No ACL rules configured. The key follows its default action.",
     "loadDetailFailed": "Failed to load API key detail: {error}",
@@ -891,7 +901,7 @@
     "deleteFailed": "Failed to delete API key: {error}",
     "confirmDelete": "Are you sure you want to delete API Key '{name}'?",
     "confirmReveal": "Reveal API Key '{name}'?",
-    "confirmRevealDescription": "The full secret can be copied from the next panel. Only reveal it when you are ready to handle it securely.",
+    "confirmRevealDescription": "The plaintext will remain only in the open detail view until you close it, select another key, leave this page, or log out.",
     "confirmRotate": "Are you sure you want to rotate API Key '{name}'? The old secret will stop working immediately.",
     "copyFailed": "Failed to copy API key."
   },

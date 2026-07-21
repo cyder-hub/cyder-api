@@ -5,6 +5,7 @@ use cyder_api::controller::{create_manager_router, create_system_router, handle_
 use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
 use cyder_api::proxy::create_proxy_router;
 use cyder_api::service::app_state::{create_app_state, create_state_router};
+use cyder_api::service::secret_encryption::rotate_downstream_secrets_before_startup;
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -49,6 +50,25 @@ async fn main() {
             log_level = &CONFIG.log_level,
         );
     }
+    let secret_rotation = rotate_downstream_secrets_before_startup(&CONFIG.secret_encryption)
+        .unwrap_or_else(|error| {
+            panic!("failed to prepare encrypted secrets before startup: {error:?}")
+        });
+    if secret_rotation.unavailable_preserved > 0 {
+        cyder_api::warn_event!(
+            "startup.downstream_secret_rotation_degraded",
+            current_records = secret_rotation.current,
+            rotated_records = secret_rotation.rotated,
+            unavailable_records = secret_rotation.unavailable_preserved,
+        );
+    } else if secret_rotation.total() > 0 {
+        cyder_api::info_event!(
+            "startup.downstream_secret_rotation_completed",
+            current_records = secret_rotation.current,
+            rotated_records = secret_rotation.rotated,
+        );
+    }
+    let app_state = create_app_state().await;
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("failed to bind server listener");
@@ -56,7 +76,6 @@ async fn main() {
         .local_addr()
         .map(|addr| addr.to_string())
         .unwrap_or(addr.clone());
-    let app_state = create_app_state().await;
     let shutdown_app_state = std::sync::Arc::clone(&app_state);
     cyder_api::info_event!(
         "startup.server_started",

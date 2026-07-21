@@ -397,13 +397,20 @@ fn classify_inactive_api_key_row(row: &ApiKey) -> Result<(), ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeyPosition, ProxyError, classify_inactive_api_key_row,
+        ApiKeyPosition, ProxyError, check_system_api_key, classify_inactive_api_key_row,
         parse_anthropic_api_key_from_headers,
     };
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
     use chrono::Utc;
+    use std::sync::Arc;
 
-    use crate::database::api_key::ApiKey;
+    use crate::config::SecretEncryptionConfig;
+    use crate::database::TestDbContext;
+    use crate::database::api_key::{ApiKey, CreateApiKeyPayload};
+    use crate::schema::enum_def::Action;
+    use crate::service::admin::AdminServices;
+    use crate::service::app_state::create_test_app_state;
+    use crate::service::secret_encryption::SecretEncryptionService;
 
     #[test]
     fn anthropic_auth_prefers_x_api_key_over_authorization() {
@@ -481,5 +488,86 @@ mod tests {
         let err = classify_inactive_api_key_row(&row).expect_err("expired key should fail");
 
         assert!(matches!(err, ProxyError::KeyExpired(_)));
+    }
+
+    #[tokio::test]
+    async fn api_key_rotation_immediately_replaces_proxy_hash_authentication() {
+        let database = TestDbContext::new_sqlite("proxy-api-key-rotation.sqlite");
+        database
+            .run_async(async {
+                let base = create_test_app_state(database.clone()).await;
+                let config: SecretEncryptionConfig = serde_yaml::from_str(
+                    "downstream_mode: one_time\nencryption_key: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
+                )
+                .expect("one-time config should parse");
+                let encryption = Arc::new(SecretEncryptionService::from_config(&config));
+                let admin = Arc::new(AdminServices::new(
+                    Arc::clone(&base.catalog),
+                    Arc::clone(&encryption),
+                ));
+                let mut configured = (*base).clone();
+                configured.admin = admin;
+                configured.secret_encryption = encryption;
+                let app_state = Arc::new(configured);
+
+                let created = app_state
+                    .admin
+                    .api_key
+                    .create_api_key(CreateApiKeyPayload {
+                        name: "proxy-rotation".to_string(),
+                        description: None,
+                        default_action: Some(Action::Allow),
+                        is_enabled: Some(true),
+                        expires_at: None,
+                        rate_limit_rpm: None,
+                        max_concurrent_requests: None,
+                        quota_daily_requests: None,
+                        quota_daily_tokens: None,
+                        quota_monthly_tokens: None,
+                        budget_daily_nanos: None,
+                        budget_daily_currency: None,
+                        budget_monthly_nanos: None,
+                        budget_monthly_currency: None,
+                        acl_rules: None,
+                    })
+                    .await
+                    .expect("proxy key should create");
+                let old_secret = created.reveal.api_key;
+                assert!(
+                    check_system_api_key(
+                        &app_state,
+                        &old_secret,
+                        ApiKeyPosition::AuthorizationHeader,
+                    )
+                    .await
+                    .is_ok()
+                );
+
+                let rotated = app_state
+                    .admin
+                    .api_key
+                    .rotate_api_key(created.detail.id)
+                    .await
+                    .expect("proxy key should rotate");
+                assert!(matches!(
+                    check_system_api_key(
+                        &app_state,
+                        &old_secret,
+                        ApiKeyPosition::AuthorizationHeader,
+                    )
+                    .await,
+                    Err(ProxyError::Unauthorized(_))
+                ));
+                assert!(
+                    check_system_api_key(
+                        &app_state,
+                        &rotated.api_key,
+                        ApiKeyPosition::AuthorizationHeader,
+                    )
+                    .await
+                    .is_ok()
+                );
+            })
+            .await;
     }
 }

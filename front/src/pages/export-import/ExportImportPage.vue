@@ -31,6 +31,7 @@ import type {
   ConflictStrategy,
   FileProtectionMode,
   PortableApplyModuleStatus,
+  PortableApiKeyPreviewItem,
   PortableModuleId,
   PortableModuleSummary,
   PortableSubrangeId,
@@ -193,6 +194,10 @@ function applyStatusClass(status: PortableApplyModuleStatus): string {
     case "failed":
       return "border-red-200 bg-red-50 text-red-700";
   }
+}
+
+function portableApiKeyDisplay(item: PortableApiKeyPreviewItem): string {
+  return `${item.key_prefix}••••${item.key_last4}`;
 }
 </script>
 
@@ -553,6 +558,29 @@ function applyStatusClass(status: PortableApplyModuleStatus): string {
                   </p>
                   <p class="font-mono text-sm font-semibold text-gray-900">
                     {{ value }}
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div
+              v-if="row.module.api_key_items?.length"
+              class="mt-3 grid gap-2 border-t border-gray-100 pt-3 sm:grid-cols-2"
+            >
+              <div
+                v-for="item in row.module.api_key_items"
+                :key="`${item.name}:${item.key_prefix}:${item.key_last4}`"
+                class="flex items-center justify-between gap-3 rounded-md bg-gray-50 px-3 py-2"
+              >
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-medium text-gray-800">{{ item.name }}</p>
+                  <p class="font-mono text-xs text-gray-500">{{ portableApiKeyDisplay(item) }}</p>
+                </div>
+                <div class="shrink-0 text-right">
+                  <Badge variant="outline" class="text-xs">
+                    {{ t(`portableConfigPage.summary.${item.outcome}`) }}
+                  </Badge>
+                  <p class="mt-1 text-xs text-gray-500">
+                    {{ subrangeLabel("api_key_acl", "ACL") }}: {{ item.acl_rule_count }}
                   </p>
                 </div>
               </div>

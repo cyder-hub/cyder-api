@@ -378,9 +378,7 @@ impl CacheApiKey {
     pub fn from_db(row: ApiKey, acl_rules: Vec<ApiKeyAclRule>) -> Self {
         Self {
             id: row.id,
-            api_key_hash: row
-                .api_key_hash
-                .unwrap_or_else(|| crate::database::api_key::hash_api_key(&row.api_key)),
+            api_key_hash: row.api_key_hash,
             key_prefix: row.key_prefix,
             key_last4: row.key_last4,
             name: row.name,

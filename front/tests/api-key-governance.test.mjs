@@ -16,6 +16,7 @@ const t = (key) => key;
 function apiKey(overrides = {}) {
   return {
     id: 1,
+    can_reveal: false,
     key_prefix: "ck_live",
     key_last4: "1234",
     name: "ops",

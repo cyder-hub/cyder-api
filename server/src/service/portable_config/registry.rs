@@ -59,11 +59,21 @@ pub fn registry_response() -> PortableModuleRegistryResponse {
         schema_version: PORTABLE_SCHEMA_VERSION.to_string(),
         modules,
         default_selected_modules,
-        apply_order: apply_order(),
+        apply_order: apply_order()
+            .into_iter()
+            .filter(|module_id| module_id != &PortableModuleId::ApiKeys)
+            .collect(),
     }
 }
 
 pub fn module_registry() -> Vec<PortableModuleRegistryItem> {
+    import_module_registry()
+        .into_iter()
+        .filter(|module| module.module_id != PortableModuleId::ApiKeys)
+        .collect()
+}
+
+pub(crate) fn import_module_registry() -> Vec<PortableModuleRegistryItem> {
     vec![
         PortableModuleRegistryItem {
             module_id: PortableModuleId::ProviderProfile,
@@ -294,13 +304,9 @@ mod tests {
 
         assert_eq!(
             module_ids,
-            vec![
-                "provider_profile",
-                "api_keys",
-                "cost_catalogs",
-                "cost_bindings"
-            ]
+            vec!["provider_profile", "cost_catalogs", "cost_bindings"]
         );
+        assert!(!module_ids.contains(&"api_keys"));
         assert!(!module_ids.contains(&"request_logs"));
         assert!(!module_ids.contains(&"metrics"));
         assert!(!module_ids.contains(&"alerts"));
@@ -308,12 +314,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_marks_core_secret_modules_as_default_selected() {
+    fn export_registry_omits_downstream_api_keys() {
         let registry = registry_response();
 
         assert_eq!(
             registry.default_selected_modules,
-            vec![PortableModuleId::ProviderProfile, PortableModuleId::ApiKeys]
+            vec![PortableModuleId::ProviderProfile]
         );
         assert_eq!(
             registry
@@ -330,7 +336,8 @@ mod tests {
                 .filter(|module| module.contains_secrets)
                 .map(|module| module.module_id.clone())
                 .collect::<Vec<_>>(),
-            vec![PortableModuleId::ProviderProfile, PortableModuleId::ApiKeys]
+            vec![PortableModuleId::ProviderProfile]
         );
+        assert!(!registry.apply_order.contains(&PortableModuleId::ApiKeys));
     }
 }

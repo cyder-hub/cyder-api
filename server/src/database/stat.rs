@@ -1469,13 +1469,13 @@ mod tests {
     fn seed_stat_rows(conn: &mut SqliteConnection) {
         conn.batch_execute(
             "INSERT INTO api_key (
-                id, api_key, api_key_hash, key_prefix, key_last4, name, description,
+                id, api_key_hash, key_prefix, key_last4, name, description,
                 default_action, is_enabled, expires_at, rate_limit_rpm, max_concurrent_requests,
                 quota_daily_requests, quota_daily_tokens, quota_monthly_tokens,
                 budget_daily_nanos, budget_daily_currency, budget_monthly_nanos,
                 budget_monthly_currency, deleted_at, created_at, updated_at
             ) VALUES (
-                1, 'ck-test', 'hash', 'ck-test', 'test', 'Ops key', NULL,
+                1, 'hash', 'ck-test', 'test', 'Ops key', NULL,
                 'ALLOW', 1, NULL, NULL, NULL,
                 NULL, NULL, NULL,
                 NULL, NULL, NULL,

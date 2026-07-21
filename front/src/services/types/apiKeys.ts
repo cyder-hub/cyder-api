@@ -15,6 +15,7 @@ export interface ApiKeyAclRule {
 
 export interface ApiKeyItem {
   id: number;
+  can_reveal: boolean;
   key_prefix: string;
   key_last4: string;
   name: string;
@@ -48,6 +49,7 @@ export interface ApiKeyReveal {
   key_last4: string;
   api_key: string;
   updated_at: number;
+  can_reveal: boolean;
 }
 
 export interface ApiKeyCreateResponse {

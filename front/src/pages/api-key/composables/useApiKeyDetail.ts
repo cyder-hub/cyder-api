@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef } from "vue";
+import { computed, ref, type ComputedRef, type Ref } from "vue";
 
 import * as apiKeyService from "@/services/apiKeys";
 import { confirm, toastController } from "@/services/uiFeedback";
@@ -292,12 +292,14 @@ export function useApiKeyDetail(
   t: TranslateFn,
   apiKeys: ComputedRef<ApiKeyItem[]>,
   runtimeById: ComputedRef<ApiKeyRuntimeById>,
+  revealedSecret: Ref<ApiKeyReveal | null>,
+  setRevealedSecret: (reveal: ApiKeyReveal | null) => void,
+  selectSecretKey: (id: number | null) => void,
 ) {
   const detailLoading = ref(false);
   const selectedKeyId = ref<number | null>(null);
   const selectedDetail = ref<ApiKeyDetail | null>(null);
   const selectedRuntime = ref<ApiKeyRuntimeSnapshot | null>(null);
-  const secretReveal = ref<ApiKeyReveal | null>(null);
 
   const selectedRuntimeView = computed(() => {
     if (selectedRuntime.value) {
@@ -313,11 +315,11 @@ export function useApiKeyDetail(
   });
 
   async function loadSelectedKey(id: number | null) {
+    selectSecretKey(id);
     selectedKeyId.value = id;
     if (id == null) {
       selectedDetail.value = null;
       selectedRuntime.value = null;
-      secretReveal.value = null;
       return;
     }
 
@@ -329,9 +331,6 @@ export function useApiKeyDetail(
       ]);
       selectedDetail.value = detail;
       selectedRuntime.value = runtime;
-      if (secretReveal.value && secretReveal.value.id !== id) {
-        secretReveal.value = null;
-      }
     } catch (err: unknown) {
       toastController.error(
         t("apiKeyPage.loadDetailFailed", {
@@ -347,16 +346,13 @@ export function useApiKeyDetail(
     if (selectedKeyId.value === id && selectedDetail.value) {
       return;
     }
+    selectSecretKey(id);
     void loadSelectedKey(id);
   }
 
   function setSelectedDetail(detail: ApiKeyDetail | null) {
     selectedDetail.value = detail;
     selectedKeyId.value = detail?.id ?? null;
-  }
-
-  function setSecretReveal(reveal: ApiKeyReveal | null) {
-    secretReveal.value = reveal;
   }
 
   async function handleRevealKey(id: number) {
@@ -372,7 +368,7 @@ export function useApiKeyDetail(
     }
 
     try {
-      secretReveal.value = await apiKeyService.revealApiKey(id);
+      setRevealedSecret(await apiKeyService.revealApiKey(id));
       if (selectedKeyId.value !== id) {
         await loadSelectedKey(id);
       }
@@ -400,12 +396,12 @@ export function useApiKeyDetail(
     selectedDetail,
     selectedRuntime,
     selectedRuntimeView,
-    secretReveal,
+    secretReveal: revealedSecret,
     loadSelectedKey,
     handleSelectKey,
     handleRevealKey,
     copySecret,
     setSelectedDetail,
-    setSecretReveal,
+    setSecretReveal: setRevealedSecret,
   };
 }

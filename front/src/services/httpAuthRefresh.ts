@@ -13,6 +13,7 @@ export type AuthLifecycle =
 
 export interface RetriableHttpRequest {
   _retry?: boolean;
+  _skipAuthRetry?: boolean;
   _authRevision?: number;
   _authRefreshToken?: string;
   headers?: Record<string, string>;
@@ -198,6 +199,7 @@ export function createHttpAuthRefreshHandler(
       error.response?.status !== 401 ||
       !originalRequest ||
       originalRequest._retry ||
+      originalRequest._skipAuthRetry ||
       isPublicManagerAuthRequest(originalRequest)
     ) {
       throw error;

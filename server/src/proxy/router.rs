@@ -3,9 +3,11 @@ use std::{collections::HashMap, sync::Arc};
 use axum::{
     body::Body,
     extract::{ConnectInfo, Path, Query, Request, State},
+    http::{HeaderValue, header::CACHE_CONTROL},
     routing::{MethodRouter, any, get},
 };
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::{
     schema::enum_def::LlmApiType,
@@ -163,4 +165,108 @@ pub fn create_proxy_router() -> StateRouter {
         .nest("/responses", create_responses_router())
         .nest("/gemini", create_gemini_router())
         .layer(cors)
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+
+    use crate::database::TestDbContext;
+    use crate::database::api_key::{ApiKey, CreateApiKeyPayload};
+    use crate::schema::enum_def::Action;
+    use crate::service::app_state::create_test_app_state;
+
+    use super::create_proxy_router;
+
+    fn payload() -> CreateApiKeyPayload {
+        CreateApiKeyPayload {
+            name: "proxy-no-store".to_string(),
+            description: None,
+            default_action: Some(Action::Allow),
+            is_enabled: Some(true),
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: None,
+        }
+    }
+
+    fn request(path: &str, header_name: &str, api_key: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().method(Method::GET).uri(path);
+        if let Some(api_key) = api_key {
+            let value = if header_name == header::AUTHORIZATION.as_str() {
+                format!("Bearer {api_key}")
+            } else {
+                api_key.to_string()
+            };
+            builder = builder.header(header_name, value);
+        }
+        builder
+            .body(Body::empty())
+            .expect("proxy request should build")
+    }
+
+    fn assert_no_store(response: &axum::response::Response) {
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
+
+    #[tokio::test]
+    async fn all_proxy_protocols_override_cache_control_on_success_and_auth_error() {
+        let database = TestDbContext::new_sqlite("proxy-api-no-store.sqlite");
+        database
+            .run_async(async {
+                let created = ApiKey::create(&payload()).expect("proxy key should create");
+                let api_key = created.reveal.api_key;
+                let app_state = create_test_app_state(database.clone()).await;
+                let cases = [
+                    ("/openai/v1/models", header::AUTHORIZATION.as_str()),
+                    ("/responses/v1/models", header::AUTHORIZATION.as_str()),
+                    ("/anthropic/v1/models", "x-api-key"),
+                    ("/gemini/v1/models", "x-goog-api-key"),
+                    ("/ollama/api/tags", header::AUTHORIZATION.as_str()),
+                ];
+
+                for (path, header_name) in cases {
+                    let success = create_proxy_router()
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(request(path, header_name, Some(&api_key)))
+                        .await
+                        .expect("proxy success should respond");
+                    assert_eq!(success.status(), StatusCode::OK, "{path}");
+                    assert_no_store(&success);
+
+                    let error = create_proxy_router()
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(request(path, header_name, None))
+                        .await
+                        .expect("proxy auth error should respond");
+                    assert_eq!(error.status(), StatusCode::UNAUTHORIZED, "{path}");
+                    assert_no_store(&error);
+                }
+            })
+            .await;
+    }
 }

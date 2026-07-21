@@ -184,7 +184,7 @@ pub enum PortableReferenceStatus {
     Blocked,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortableBundle {
     pub schema_version: String,
     pub exported_at: i64,
@@ -192,7 +192,13 @@ pub struct PortableBundle {
     pub modules: Vec<PortableBundleModule>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl fmt::Debug for PortableBundle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableBundle(<redacted>)")
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortableBundleModule {
     pub module_id: PortableModuleId,
     pub module_version: u32,
@@ -202,6 +208,12 @@ pub struct PortableBundleModule {
     pub summary: PortableModuleSummary,
     #[serde(default)]
     pub items: Value,
+}
+
+impl fmt::Debug for PortableBundleModule {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableBundleModule(<redacted>)")
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,7 +318,7 @@ pub struct PortableProviderReasoningConfigItem {
     pub presets: Vec<PortableReasoningConfigPresetItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortableApiKeyItem {
     pub name: String,
     pub description: Option<String>,
@@ -325,6 +337,12 @@ pub struct PortableApiKeyItem {
     pub api_key: String,
     #[serde(default)]
     pub acl_rules: Vec<PortableApiKeyAclRuleItem>,
+}
+
+impl fmt::Debug for PortableApiKeyItem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableApiKeyItem(<redacted>)")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -428,6 +446,17 @@ pub struct PortablePreviewModule {
     pub summary: PortableModuleSummary,
     pub warnings: Vec<String>,
     pub blocking_issues: Vec<PortableBlockedItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_key_items: Vec<PortableApiKeyPreviewItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortableApiKeyPreviewItem {
+    pub name: String,
+    pub key_prefix: String,
+    pub key_last4: String,
+    pub acl_rule_count: u64,
+    pub outcome: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -452,7 +481,7 @@ pub struct PortableModuleSelection {
     pub subranges: Vec<PortableSubrangeId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortableExportRequest {
     #[serde(default)]
     pub selected_modules: Vec<PortableModuleSelection>,
@@ -462,7 +491,13 @@ pub struct PortableExportRequest {
     pub auto_generate_password: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Debug for PortableExportRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableExportRequest(<redacted>)")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortableExportResponse {
     pub filename: String,
     pub content: String,
@@ -471,10 +506,22 @@ pub struct PortableExportResponse {
     pub bundle_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl fmt::Debug for PortableExportResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableExportResponse(<redacted>)")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortableImportPreviewRequest {
     pub content: String,
     pub password: Option<String>,
+}
+
+impl fmt::Debug for PortableImportPreviewRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableImportPreviewRequest(<redacted>)")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,7 +531,7 @@ pub struct PortableDangerousPatchConfirmation {
     pub confirmed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortableApplyRequest {
     pub content: String,
     pub password: Option<String>,
@@ -496,6 +543,12 @@ pub struct PortableApplyRequest {
     pub reason: String,
     #[serde(default)]
     pub dangerous_patch_confirmations: Vec<PortableDangerousPatchConfirmation>,
+}
+
+impl fmt::Debug for PortableApplyRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableApplyRequest(<redacted>)")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

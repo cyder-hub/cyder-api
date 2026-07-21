@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use crate::{
     database::api_key::{
-        ApiKey, ApiKeyDetail, ApiKeyDetailWithSecret, ApiKeyReveal, ApiKeySummary,
-        CreateApiKeyPayload, UpdateApiKeyMetadataPayload,
+        ApiKeyDetail, ApiKeyDetailWithSecret, ApiKeyReveal, ApiKeySummary, CreateApiKeyPayload,
+        UpdateApiKeyMetadataPayload,
     },
     service::app_state::{AppState, StateRouter, create_state_router},
     service::runtime::{ApiKeyBilledAmountSnapshot, ApiKeyGovernanceSnapshot},
@@ -83,12 +83,19 @@ async fn create_api_key(
     Ok(HttpResult::new(created))
 }
 
-async fn list_api_keys() -> Result<HttpResult<Vec<ApiKeySummary>>, BaseError> {
-    Ok(HttpResult::new(ApiKey::list_summary()?))
+async fn list_api_keys(
+    State(app_state): State<Arc<AppState>>,
+) -> Result<HttpResult<Vec<ApiKeySummary>>, BaseError> {
+    Ok(HttpResult::new(app_state.admin.api_key.list_api_keys()?))
 }
 
-async fn get_api_key_detail(Path(id): Path<i64>) -> Result<HttpResult<ApiKeyDetail>, BaseError> {
-    Ok(HttpResult::new(ApiKey::get_detail(id)?))
+async fn get_api_key_detail(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<HttpResult<ApiKeyDetail>, BaseError> {
+    Ok(HttpResult::new(
+        app_state.admin.api_key.get_api_key_detail(id)?,
+    ))
 }
 
 async fn update_api_key(
@@ -110,17 +117,11 @@ async fn rotate_api_key(
     ))
 }
 
-async fn reveal_api_key(Path(id): Path<i64>) -> Result<HttpResult<ApiKeyReveal>, BaseError> {
-    let existing = ApiKey::get_by_id(id)?;
-    let revealed = ApiKey::reveal_key(id)?;
-    crate::info_event!(
-        "manager.api_key_revealed",
-        action = "reveal",
-        api_key_id = revealed.id,
-        api_key_name = &revealed.name,
-        is_enabled = existing.is_enabled,
-    );
-    Ok(HttpResult::new(revealed))
+async fn reveal_api_key(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<HttpResult<ApiKeyReveal>, BaseError> {
+    Ok(HttpResult::new(app_state.admin.api_key.reveal_api_key(id)?))
 }
 
 async fn delete_api_key(
@@ -135,7 +136,7 @@ async fn get_api_key_runtime_snapshot(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<ApiKeyRuntimeSnapshotResponse>, BaseError> {
-    ApiKey::get_by_id(id)?;
+    app_state.admin.api_key.ensure_api_key_exists(id)?;
     let snapshot = app_state
         .api_key_governance
         .get_api_key_governance_snapshot(id)
@@ -170,7 +171,220 @@ pub fn create_api_key_management_router() -> StateRouter {
                     .delete(delete_api_key),
             )
             .route("/{id}/rotate", post(rotate_api_key))
-            .route("/{id}/reveal", get(reveal_api_key))
+            .route("/{id}/reveal", post(reveal_api_key))
             .route("/{id}/runtime", get(get_api_key_runtime_snapshot)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode},
+        response::IntoResponse,
+    };
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use crate::config::SecretEncryptionConfig;
+    use crate::database::TestDbContext;
+    use crate::database::api_key::CreateApiKeyPayload;
+    use crate::schema::enum_def::Action;
+    use crate::service::admin::AdminServices;
+    use crate::service::app_state::create_test_app_state;
+    use crate::service::secret_encryption::SecretEncryptionService;
+
+    use super::{BaseError, create_api_key_management_router};
+
+    const CURRENT_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    fn payload() -> CreateApiKeyPayload {
+        CreateApiKeyPayload {
+            name: "controller-reveal-contract".to_string(),
+            description: None,
+            default_action: Some(Action::Allow),
+            is_enabled: Some(true),
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: None,
+        }
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&bytes).expect("response should be JSON")
+    }
+
+    #[tokio::test]
+    async fn api_key_reveal_contract_is_post_only_and_returns_recoverable_secret() {
+        let database = TestDbContext::new_sqlite("controller-api-key-reveal.sqlite");
+        database
+            .run_async(async {
+                let base = create_test_app_state(database.clone()).await;
+                let config: SecretEncryptionConfig = serde_yaml::from_str(&format!(
+                    "downstream_mode: recoverable\nencryption_key: '{CURRENT_KEY}'\n"
+                ))
+                .expect("recoverable config should parse");
+                let encryption = Arc::new(SecretEncryptionService::from_config(&config));
+                let admin = Arc::new(AdminServices::new(
+                    Arc::clone(&base.catalog),
+                    Arc::clone(&encryption),
+                ));
+                let mut configured = (*base).clone();
+                configured.admin = admin;
+                configured.secret_encryption = encryption;
+                let app_state = Arc::new(configured);
+
+                let created = app_state
+                    .admin
+                    .api_key
+                    .create_api_key(payload())
+                    .await
+                    .expect("recoverable API key should create");
+                let route = format!("/api_key/{}/reveal", created.detail.id);
+
+                let response = create_api_key_management_router()
+                    .with_state(Arc::clone(&app_state))
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri(&route)
+                            .body(Body::empty())
+                            .expect("POST request should build"),
+                    )
+                    .await
+                    .expect("POST reveal should respond");
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response_json(response).await;
+                assert_eq!(body["data"]["api_key"], created.reveal.api_key);
+                assert_eq!(body["data"]["can_reveal"], true);
+
+                let response = create_api_key_management_router()
+                    .with_state(app_state)
+                    .oneshot(
+                        Request::builder()
+                            .method(Method::GET)
+                            .uri(&route)
+                            .body(Body::empty())
+                            .expect("GET request should build"),
+                    )
+                    .await
+                    .expect("GET reveal should respond");
+                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manager_api_key_openapi_matches_routes_safe_dtos_and_errors() {
+        let document: serde_yaml::Value = serde_yaml::from_str(include_str!(
+            "../../../docs/openapi/manager-api-key.openapi.yaml"
+        ))
+        .expect("manager API key OpenAPI should parse");
+        assert_eq!(document["openapi"].as_str(), Some("3.1.0"));
+        assert_eq!(
+            document["x-cyder-default-cache-control"].as_str(),
+            Some("no-store")
+        );
+
+        let expected_operations = [
+            ("/ai/manager/api/api_key/list", "get"),
+            ("/ai/manager/api/api_key", "post"),
+            ("/ai/manager/api/api_key/{id}", "get"),
+            ("/ai/manager/api/api_key/{id}", "put"),
+            ("/ai/manager/api/api_key/{id}", "delete"),
+            ("/ai/manager/api/api_key/{id}/rotate", "post"),
+            ("/ai/manager/api/api_key/{id}/reveal", "post"),
+        ];
+        for (path, method) in expected_operations {
+            let operation = &document["paths"][path][method];
+            assert!(
+                operation.is_mapping(),
+                "operation should exist for {method} {path}"
+            );
+            assert!(
+                operation["x-cyder-error-codes"].is_sequence(),
+                "error contract should exist for {method} {path}"
+            );
+        }
+        assert!(
+            document["paths"]["/ai/manager/api/api_key/{id}/reveal"]["get"].is_null(),
+            "GET Reveal must not be documented"
+        );
+        assert!(
+            document["paths"]["/ai/manager/api/api_key/{id}/rotate"]["post"]["requestBody"]
+                .is_null(),
+            "Rotate must have no request body"
+        );
+        assert!(
+            document["paths"]["/ai/manager/api/api_key/{id}/reveal"]["post"]["requestBody"]
+                .is_null(),
+            "Reveal must have no request body"
+        );
+
+        let summary_required = document["components"]["schemas"]["ApiKeySummary"]["required"]
+            .as_sequence()
+            .expect("API key summary required fields")
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(summary_required.contains(&"can_reveal"));
+        for forbidden in [
+            "api_key",
+            "api_key_hash",
+            "secret_ciphertext",
+            "secret_nonce",
+            "secret_key_fingerprint",
+        ] {
+            assert!(!summary_required.contains(&forbidden));
+        }
+
+        let reveal_required = document["components"]["schemas"]["ApiKeyReveal"]["required"]
+            .as_sequence()
+            .expect("API key reveal required fields")
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(reveal_required.contains(&"api_key"));
+        assert!(reveal_required.contains(&"can_reveal"));
+        assert_eq!(
+            document["components"]["schemas"]["ApiKeySecretUnavailableError"]["properties"]["code"]
+                ["const"]
+                .as_u64(),
+            Some(1004)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ApiKeySecretUnavailableError"]["properties"]["msg"]
+                ["const"]
+                .as_str(),
+            Some("api key secret is unavailable")
+        );
+
+        for (path, method) in expected_operations {
+            let success = &document["paths"][path][method]["responses"]["200"];
+            assert_eq!(
+                success["headers"]["Cache-Control"]["$ref"].as_str(),
+                Some("#/components/headers/NoStore"),
+                "successful {method} {path} must document no-store"
+            );
+        }
+
+        let response = BaseError::ApiKeySecretUnavailable.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await;
+        assert_eq!(body["code"].as_u64(), Some(1004));
+        assert_eq!(body["msg"].as_str(), Some("api key secret is unavailable"));
+    }
 }

@@ -1,4 +1,5 @@
 import { request } from "./http";
+import type { AxiosRequestConfig } from "axios";
 import type {
   ApiKeyCreatePayload,
   ApiKeyCreateResponse,
@@ -35,17 +36,21 @@ export function updateApiKey(
 export function createApiKey(
   payload: ApiKeyCreatePayload,
 ): Promise<ApiKeyCreateResponse> {
-  return request.post("/ai/manager/api/api_key/", payload);
+  return request.post("/ai/manager/api/api_key", payload, noAuthRetry);
 }
 
 export function rotateApiKey(id: number): Promise<ApiKeyReveal> {
-  return request.post(`/ai/manager/api/api_key/${id}/rotate`, {});
+  return request.post(`/ai/manager/api/api_key/${id}/rotate`, undefined, noAuthRetry);
 }
 
 export function revealApiKey(id: number): Promise<ApiKeyReveal> {
-  return request.get(`/ai/manager/api/api_key/${id}/reveal`);
+  return request.post(`/ai/manager/api/api_key/${id}/reveal`);
 }
 
 export function deleteApiKey(id: number): Promise<void> {
   return request.delete(`/ai/manager/api/api_key/${id}`);
 }
+
+const noAuthRetry = {
+  _skipAuthRetry: true,
+} as AxiosRequestConfig;

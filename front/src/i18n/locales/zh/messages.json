@@ -880,8 +880,18 @@
     },
     "secret": {
       "title": "当前密钥",
-      "description": "完整密钥只会在这里展示一次，请在需要分发时立即复制。",
+      "revealedDescription": "明文仅保留在当前打开的详情内存中；关闭详情、切换 Key、离开页面或退出登录时会立即清除。",
+      "unavailable": "此 API Key 不可查看。如需新的明文密钥，请执行轮换。",
       "copied": "已复制 API Key 密钥。"
+    },
+    "issuedSecret": {
+      "title": "请立即保存此 API Key",
+      "description": "此明文只在本次创建或轮换响应中展示。可以不复制直接关闭，但关闭后无法恢复。",
+      "responseLoss": "关闭弹窗、刷新或离开页面都会永久丢失本次响应。如响应丢失或未保存，请再次轮换该 API Key。",
+      "acknowledge": "我已保存，关闭",
+      "recoverableTitle": "API Key 已就绪",
+      "recoverableDescription": "此密钥已加密保存。你可以现在复制，也可以稍后在 API Key 详情中查看。",
+      "close": "关闭"
     },
     "noRules": "当前没有配置 ACL 规则，将按默认动作执行。",
     "loadDetailFailed": "加载 API Key 详情失败: {error}",
@@ -891,7 +901,7 @@
     "deleteFailed": "删除 API Key 失败: {error}",
     "confirmDelete": "确定要删除 API Key \"{name}\" 吗？",
     "confirmReveal": "显示 API Key \"{name}\" 的完整密钥？",
-    "confirmRevealDescription": "完整密钥会显示在下一个面板中。请只在准备安全处理密钥时执行该操作。",
+    "confirmRevealDescription": "明文只保留在当前详情内存中，直到关闭详情、切换 Key、离开页面或退出登录。",
     "confirmRotate": "确定要轮换 API Key \"{name}\" 吗？旧密钥会立即失效。",
     "copyFailed": "复制 API Key 失败。"
   },

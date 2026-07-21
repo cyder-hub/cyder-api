@@ -67,7 +67,8 @@ interface UseApiKeyGovernanceOptions {
   apiKeys: ComputedRef<ApiKeyItem[]>;
   selectedKeyId: Ref<number | null>;
   selectedDetail: Ref<ApiKeyDetail | null>;
-  setSecretReveal: (reveal: ApiKeyReveal | null) => void;
+  setIssuedSecret: (reveal: ApiKeyReveal | null) => void;
+  clearRevealedSecret: () => void;
   refreshList: (preferredSelectedId: number | null) => Promise<number | null>;
   refreshDetail: (id: number | null) => Promise<void>;
 }
@@ -539,7 +540,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
     editingDetail.value = null;
     showEditDialog.value = false;
     if (payload.reveal) {
-      options.setSecretReveal(payload.reveal);
+      options.setIssuedSecret(payload.reveal);
     }
     await options.refreshList(payload.detail.id);
   }
@@ -558,7 +559,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
     }
 
     try {
-      options.setSecretReveal(await apiKeyService.rotateApiKey(id));
+      options.setIssuedSecret(await apiKeyService.rotateApiKey(id));
       await options.refreshList(id);
       await options.refreshDetail(id);
     } catch (err: unknown) {
@@ -588,7 +589,7 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
       if (options.selectedKeyId.value === id) {
         options.selectedKeyId.value = null;
         options.selectedDetail.value = null;
-        options.setSecretReveal(null);
+        options.clearRevealedSecret();
       }
       const nextSelectedId = await options.refreshList(null);
       await options.refreshDetail(nextSelectedId);

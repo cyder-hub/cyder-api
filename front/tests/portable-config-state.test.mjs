@@ -73,22 +73,6 @@ function registry(overrides = {}) {
           subrange("provider_request_patches", { default_selected: false }),
         ],
       }),
-      module("api_keys", {
-        default_selected: true,
-        contains_secrets: true,
-        dependencies: [
-          {
-            module_id: "provider_profile",
-            required_for_export: false,
-            required_for_fresh_import: true,
-            reason: "needs provider refs",
-          },
-        ],
-        subranges: [
-          subrange("api_key_core", { required: true, contains_secrets: true }),
-          subrange("api_key_acl"),
-        ],
-      }),
       module("cost_catalogs", {
         default_selected: false,
         deferred: overrides.costDeferred ?? false,
@@ -116,13 +100,8 @@ function registry(overrides = {}) {
         subranges: [subrange("cost_model_bindings", { required: true })],
       }),
     ],
-    default_selected_modules: ["provider_profile", "api_keys"],
-    apply_order: [
-      "cost_catalogs",
-      "provider_profile",
-      "cost_bindings",
-      "api_keys",
-    ],
+    default_selected_modules: ["provider_profile"],
+    apply_order: ["cost_catalogs", "provider_profile", "cost_bindings"],
   };
 }
 
@@ -179,24 +158,24 @@ function preview(overrides = {}) {
   };
 }
 
-test("portable export defaults select core modules and required/default subranges", () => {
+test("portable export defaults omit downstream API keys", () => {
   const selections = createDefaultPortableExportSelections(
     registry({ costDeferred: true, bindingDeferred: true }),
   );
 
   assert.deepEqual(
     selections.map((selection) => selection.module_id),
-    ["provider_profile", "api_keys"],
+    ["provider_profile"],
   );
   assert.deepEqual(selections[0].subranges, [
     "provider_core",
     "provider_keys",
     "provider_models",
   ]);
-  assert.deepEqual(selections[1].subranges, [
-    "api_key_core",
-    "api_key_acl",
-  ]);
+  assert.equal(
+    registry().modules.some((item) => item.module_id === "api_keys"),
+    false,
+  );
 });
 
 test("cost bindings stay disabled until provider profile and cost catalogs are selected", () => {

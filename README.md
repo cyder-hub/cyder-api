@@ -140,8 +140,8 @@ Important config areas include:
 
 - server bind settings: `host`, `port`, `base_path`
 - manager auth: initialize the manager password in the Web Bootstrap page; `jwt_secret` signs manager tokens
-- downstream API key JWT: `api_key_jwt_secret`
 - database: `db_url`
+- downstream secret handling: `secret_encryption`
 - proxy request behavior: `proxy_request`
 - provider governance: `provider_governance`
 - cache: `cache`, optional `redis`
@@ -164,6 +164,23 @@ Startup path environment variables are separate:
 - `CYDER_CONFIG_PATH`: optional migration hook for an external base config file. It changes only the base config path; generated defaults and SQLite data still belong to the data directory.
 
 Database URLs, secrets, Redis/cache, deployment mode, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
+
+### Downstream API Key Secrets
+
+Downstream API keys always authenticate through a stored SHA-256 hash. Secret recovery is a separate startup-only YAML choice:
+
+```yaml
+secret_encryption:
+  downstream_mode: one_time
+  encryption_key: null
+  previous_encryption_key: null
+```
+
+`one_time` is the default. Create and Rotate return the new plaintext once, while the database stores no recoverable copy. Save that response immediately; if it is lost, rotate the API key again. `recoverable` additionally stores an XChaCha20-Poly1305 ciphertext and enables an explicit manager Reveal action. It requires `encryption_key` to contain exactly 64 hexadecimal characters, representing 32 bytes, without an encoding prefix. The keys are read only from normal YAML configuration; there is no environment-variable, generated fallback, key-file, or KMS source.
+
+To replace a configured master key, set the new value as `encryption_key` and the existing value as `previous_encryption_key`, then restart. Before Axum begins serving requests, Cyder decrypts matching downstream ciphertext with the previous key and re-encrypts it with the current key in one database transaction. Remove `previous_encryption_key` after a successful startup. Unknown or damaged downstream ciphertext is preserved unchanged and becomes unavailable to Reveal; hash authentication continues to work.
+
+Losing the master key does not invalidate downstream callers because authentication remains hash-based, but existing encrypted plaintext cannot be revealed without the matching key. Restore the correct configuration or rotate the affected downstream API keys. Back up the database before upgrading: the R2.6 migration permanently removes the legacy plaintext column and has no executable downgrade; restoring the pre-upgrade database backup is the only rollback path.
 
 ## Common Commands
 
@@ -205,15 +222,16 @@ Manager API endpoints:
 Supported modules:
 
 - `provider_profile`: providers, provider API keys, provider models, request patch rules, and reasoning config.
-- `api_keys`: downstream API keys and provider/model ACL rules.
 - `cost_catalogs`: cost catalogs, versions, and components.
 - `cost_bindings`: model-to-cost-catalog bindings through `model.cost_catalog_id`.
 
-Export files can be plaintext JSON or password-encrypted armored `.cyd` files. Use password encryption when the bundle contains provider keys or downstream API keys. The encrypted format hides the whole JSON bundle; plaintext export intentionally contains raw secrets so the target environment can preserve existing downstream keys.
+Downstream `api_keys` export is temporarily unavailable while the encrypted secret export contract is redesigned. It is absent from the export module registry and management UI. Existing v1 `.cyd` files that contain an `api_keys` module remain supported for Preview and Import.
+
+Export files can be plaintext JSON or password-encrypted armored `.cyd` files. Use password encryption when a bundle contains provider keys. The encrypted format hides the whole JSON bundle; plaintext provider exports contain raw provider credentials.
 
 Import always starts with preview. Preview validates the schema, password and integrity status, module versions, dependencies, conflicts, missing provider/model/cost references, and dangerous request patch targets. Apply must submit the same bundle digest returned by preview.
 
-For existing downstream API keys, `overwrite_existing` updates API key metadata and governance limits only. Bundle ACL rules for an already-existing raw API key are counted as skipped and are not appended, upserted, replaced, or used to delete target-environment child rows. ACL rules are imported only when the API key itself is newly created.
+Historical v1 API key imports follow the target server's current `downstream_mode`. In `one_time`, the raw imported key is reduced to its authentication hash and no new ciphertext is stored. In `recoverable`, the raw key is encrypted with the current master key. Preview shows only safe name, prefix/last4, ACL count, and outcome summaries; it never returns raw keys. Import remains part of the enclosing Portable Config transaction.
 
 Portable Config intentionally does not migrate these runtime, history, audit, or deployment records:
 
@@ -228,8 +246,9 @@ Those are runtime facts or deployment configuration, not portable gateway config
 Release verification for this feature must include:
 
 - plaintext core bundle export/import into fresh SQLite
-- password-encrypted full bundle export/import into fresh SQLite
-- provider/provider key/model/API key/cost catalog/model cost binding lookups after import
+- password-encrypted provider bundle export/import into fresh SQLite
+- historical v1 API key Preview/Import in both downstream modes
+- provider/provider key/model/cost catalog/model cost binding lookups after import
 - frontend export/import state tests
 
 ## Main Routes

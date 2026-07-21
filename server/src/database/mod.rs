@@ -5,7 +5,6 @@ use diesel::{
     sql_types::Text,
 };
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-use sha2::{Digest, Sha256};
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs::File;
@@ -184,7 +183,7 @@ pub(crate) struct TestDbContext {
 
 #[cfg(test)]
 struct TestDbContextInner {
-    _temp_dir: TempDir,
+    _temp_dir: Option<TempDir>,
     pool: DbPool,
 }
 
@@ -214,8 +213,17 @@ impl TestDbContext {
 
         Self {
             inner: Arc::new(TestDbContextInner {
-                _temp_dir: temp_dir,
+                _temp_dir: Some(temp_dir),
                 pool,
+            }),
+        }
+    }
+
+    pub(crate) fn new_postgres(database_url: &str) -> Self {
+        Self {
+            inner: Arc::new(TestDbContextInner {
+                _temp_dir: None,
+                pool: DbPool::establish_for_url(database_url),
             }),
         }
     }
@@ -322,10 +330,6 @@ pub enum DatabaseInitError {
         backend: &'static str,
         source: String,
     },
-    Backfill {
-        backend: &'static str,
-        source: diesel::result::Error,
-    },
     Pool {
         backend: &'static str,
         source: String,
@@ -358,12 +362,6 @@ impl fmt::Display for DatabaseInitError {
             ),
             Self::Migration { backend, source } => {
                 write!(f, "failed to run {backend} migrations: {source}")
-            }
-            Self::Backfill { backend, source } => {
-                write!(
-                    f,
-                    "failed to backfill {backend} api_key shadow table: {source}"
-                )
             }
             Self::Pool { backend, source } => {
                 write!(f, "failed to create {backend} database pool: {source}")
@@ -542,14 +540,6 @@ struct SqliteTableInfoRow {
 }
 
 #[derive(QueryableByName)]
-struct ApiKeyBackfillRow {
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    id: i64,
-    #[diesel(sql_type = Text)]
-    api_key: String,
-}
-
-#[derive(QueryableByName)]
 struct DbCountRow {
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     count: i64,
@@ -578,81 +568,6 @@ fn repair_legacy_sqlite_schema(
             connection.batch_execute("ALTER TABLE model ADD COLUMN cost_catalog_id BIGINT;")
         }
     }
-}
-
-fn compute_api_key_hash(api_key: &str) -> String {
-    format!("{:x}", Sha256::digest(api_key.as_bytes()))
-}
-
-fn compute_key_prefix(api_key: &str) -> String {
-    api_key.chars().take(12).collect()
-}
-
-fn compute_key_last4(api_key: &str) -> String {
-    let last4: String = api_key.chars().rev().take(4).collect();
-    last4.chars().rev().collect()
-}
-
-fn backfill_api_key_shadow_sqlite(
-    connection: &mut SqliteConnection,
-) -> Result<(), diesel::result::Error> {
-    let rows = diesel::sql_query(
-        "SELECT id, api_key
-         FROM api_key
-         WHERE api_key_hash IS NULL
-            OR api_key_hash = ''
-            OR key_prefix = ''
-            OR key_last4 = ''",
-    )
-    .load::<ApiKeyBackfillRow>(connection)?;
-
-    for row in rows {
-        diesel::sql_query(
-            "UPDATE api_key
-             SET api_key_hash = ?,
-                 key_prefix = ?,
-                 key_last4 = ?
-             WHERE id = ?",
-        )
-        .bind::<diesel::sql_types::Text, _>(compute_api_key_hash(&row.api_key))
-        .bind::<diesel::sql_types::Text, _>(compute_key_prefix(&row.api_key))
-        .bind::<diesel::sql_types::Text, _>(compute_key_last4(&row.api_key))
-        .bind::<diesel::sql_types::BigInt, _>(row.id)
-        .execute(connection)?;
-    }
-
-    Ok(())
-}
-
-fn backfill_api_key_shadow_postgres(
-    connection: &mut PgConnection,
-) -> Result<(), diesel::result::Error> {
-    let rows = diesel::sql_query(
-        "SELECT id, api_key
-         FROM api_key
-         WHERE api_key_hash IS NULL
-            OR api_key_hash = ''
-            OR key_prefix = ''
-            OR key_last4 = ''",
-    )
-    .load::<ApiKeyBackfillRow>(connection)?;
-
-    for row in rows {
-        diesel::sql_query(
-            "UPDATE api_key
-             SET api_key_hash = $1,
-                 key_prefix = $2,
-                 key_last4 = $3
-             WHERE id = $4",
-        )
-        .bind::<diesel::sql_types::Text, _>(compute_api_key_hash(&row.api_key))
-        .bind::<diesel::sql_types::Text, _>(compute_key_prefix(&row.api_key))
-        .bind::<diesel::sql_types::Text, _>(compute_key_last4(&row.api_key))
-        .bind::<diesel::sql_types::BigInt, _>(row.id)
-        .execute(connection)?;
-    }
-
-    Ok(())
 }
 
 fn sqlite_user_table_count(
@@ -844,13 +759,6 @@ fn init_sqlite_pool(
         backend: "sqlite",
         source: source.to_string(),
     })?;
-    backfill_api_key_shadow_sqlite(&mut connection).map_err(|source| {
-        DatabaseInitError::Backfill {
-            backend: "sqlite",
-            source,
-        }
-    })?;
-
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);
     Pool::builder()
         .test_on_check_out(true)
@@ -880,13 +788,6 @@ fn init_pg_pool(db_url: &str) -> Result<Pool<ConnectionManager<PgConnection>>, D
         backend: "postgres",
         source: source.to_string(),
     })?;
-    backfill_api_key_shadow_postgres(&mut connection).map_err(|source| {
-        DatabaseInitError::Backfill {
-            backend: "postgres",
-            source,
-        }
-    })?;
-
     let manager = ConnectionManager::<PgConnection>::new(db_url);
     Pool::builder()
         .max_size(CONFIG.db_pool_size)

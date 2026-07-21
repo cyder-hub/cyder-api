@@ -6,6 +6,7 @@ use chacha20poly1305::{
 };
 use rand::{Rng, distr::Alphanumeric, rng};
 use serde_json::Value;
+use std::fmt;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -24,24 +25,42 @@ const NONCE_LEN: usize = 24;
 const KEY_LEN: usize = 32;
 const GENERATED_PASSWORD_LEN: usize = 32;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PortableFileEncodeOptions {
     pub mode: FileProtectionMode,
     pub password: Option<String>,
     pub auto_generate_password: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for PortableFileEncodeOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PortableFileEncodeOptions(<redacted>)")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncodedPortableFile {
     pub content: String,
     pub file_protection: FileProtectionMode,
     pub generated_password: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for EncodedPortableFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EncodedPortableFile(<redacted>)")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct DecodedPortableFile {
     pub plaintext: String,
     pub file_protection: PortableFileProtectionStatus,
+}
+
+impl fmt::Debug for DecodedPortableFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DecodedPortableFile(<redacted>)")
+    }
 }
 
 #[derive(Debug, Error)]

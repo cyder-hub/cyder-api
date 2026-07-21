@@ -1,6 +1,11 @@
 use rand::{Rng, distr::Alphanumeric, rng};
-use serde::{Deserialize, Deserializer, Serialize};
-use std::{fmt, sync::LazyLock, time::Duration};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
+use std::{
+    fmt,
+    sync::{Arc, LazyLock, Mutex},
+    time::Duration,
+};
+use zeroize::Zeroizing;
 
 use crate::utils::ID_MAX_WORKER_ID;
 
@@ -8,6 +13,174 @@ pub mod env;
 pub mod loader;
 pub mod paths;
 pub mod persistence;
+
+// --- START SECRET ENCRYPTION CONFIG ---
+
+const SECRET_ENCRYPTION_KEY_BYTES: usize = 32;
+const SECRET_ENCRYPTION_KEY_HEX_LEN: usize = SECRET_ENCRYPTION_KEY_BYTES * 2;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownstreamSecretMode {
+    OneTime,
+    Recoverable,
+}
+
+impl Default for DownstreamSecretMode {
+    fn default() -> Self {
+        Self::OneTime
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SecretEncryptionKey(Arc<Zeroizing<[u8; SECRET_ENCRYPTION_KEY_BYTES]>>);
+
+impl SecretEncryptionKey {
+    fn parse(field: &'static str, value: &str) -> Result<Self, String> {
+        if value.len() != SECRET_ENCRYPTION_KEY_HEX_LEN
+            || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!(
+                "secret_encryption.{field} must contain exactly 64 hexadecimal characters"
+            ));
+        }
+
+        let mut bytes = [0_u8; SECRET_ENCRYPTION_KEY_BYTES];
+        for (index, slot) in bytes.iter_mut().enumerate() {
+            let offset = index * 2;
+            *slot = u8::from_str_radix(&value[offset..offset + 2], 16).map_err(|_| {
+                format!("secret_encryption.{field} must contain exactly 64 hexadecimal characters")
+            })?;
+        }
+        Ok(Self(Arc::new(Zeroizing::new(bytes))))
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; SECRET_ENCRYPTION_KEY_BYTES] {
+        self.0.as_ref()
+    }
+}
+
+#[derive(Clone)]
+pub struct SecretEncryptionConfig {
+    pub downstream_mode: DownstreamSecretMode,
+    encryption_key: Option<SecretEncryptionKey>,
+    previous_encryption_key: Arc<Mutex<Option<SecretEncryptionKey>>>,
+}
+
+impl Default for SecretEncryptionConfig {
+    fn default() -> Self {
+        Self {
+            downstream_mode: DownstreamSecretMode::OneTime,
+            encryption_key: None,
+            previous_encryption_key: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl fmt::Debug for SecretEncryptionConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SecretEncryptionConfig")
+            .field("downstream_mode", &self.downstream_mode)
+            .field(
+                "encryption_key",
+                &self.encryption_key.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "previous_encryption_key",
+                &self.has_previous_encryption_key().then_some("<configured>"),
+            )
+            .finish()
+    }
+}
+
+impl Serialize for SecretEncryptionConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("SecretEncryptionConfig", 3)?;
+        state.serialize_field("downstream_mode", &self.downstream_mode)?;
+        state.serialize_field("encryption_key", &Option::<String>::None)?;
+        state.serialize_field("previous_encryption_key", &Option::<String>::None)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretEncryptionConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawSecretEncryptionConfig {
+            #[serde(default)]
+            downstream_mode: DownstreamSecretMode,
+            #[serde(default)]
+            encryption_key: Option<String>,
+            #[serde(default)]
+            previous_encryption_key: Option<String>,
+        }
+
+        let raw = RawSecretEncryptionConfig::deserialize(deserializer)?;
+        let encryption_key = raw
+            .encryption_key
+            .as_deref()
+            .map(|value| SecretEncryptionKey::parse("encryption_key", value))
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let previous_encryption_key = raw
+            .previous_encryption_key
+            .as_deref()
+            .map(|value| SecretEncryptionKey::parse("previous_encryption_key", value))
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+
+        if previous_encryption_key.is_some() && encryption_key.is_none() {
+            return Err(serde::de::Error::custom(
+                "secret_encryption.previous_encryption_key requires encryption_key",
+            ));
+        }
+        if encryption_key.is_some() && encryption_key == previous_encryption_key {
+            return Err(serde::de::Error::custom(
+                "secret_encryption.previous_encryption_key must differ from encryption_key",
+            ));
+        }
+        if raw.downstream_mode == DownstreamSecretMode::Recoverable && encryption_key.is_none() {
+            return Err(serde::de::Error::custom(
+                "secret_encryption.encryption_key is required when downstream_mode=recoverable",
+            ));
+        }
+
+        Ok(Self {
+            downstream_mode: raw.downstream_mode,
+            encryption_key,
+            previous_encryption_key: Arc::new(Mutex::new(previous_encryption_key)),
+        })
+    }
+}
+
+impl SecretEncryptionConfig {
+    pub(crate) fn encryption_key(&self) -> Option<&SecretEncryptionKey> {
+        self.encryption_key.as_ref()
+    }
+
+    pub(crate) fn has_previous_encryption_key(&self) -> bool {
+        self.previous_encryption_key
+            .lock()
+            .map(|key| key.is_some())
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn take_previous_encryption_key(&self) -> Option<SecretEncryptionKey> {
+        self.previous_encryption_key
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
+// --- END SECRET ENCRYPTION CONFIG ---
 
 // --- START DEPLOYMENT CONFIG ---
 
@@ -566,7 +739,6 @@ pub struct FinalConfig {
     pub port: u16,
     pub base_path: String,
     pub jwt_secret: String,
-    pub api_key_jwt_secret: String,
     pub db_url: String,
     pub proxy: Option<String>,
     pub log_level: String,
@@ -588,6 +760,8 @@ pub struct FinalConfig {
     pub cache: CacheConfig,
     #[serde(default)]
     pub runtime_state: RuntimeStateConfig,
+    #[serde(default)]
+    pub secret_encryption: SecretEncryptionConfig,
 }
 
 impl FinalConfig {
@@ -690,7 +864,6 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         port: 8000,
         base_path: "/ai".to_string(),
         jwt_secret: generate_random_string(48),
-        api_key_jwt_secret: generate_random_string(48),
         db_url: "/data/cyder/db/cyder.sqlite".to_string(),
         proxy: None,
         log_level: "info".to_string(),
@@ -705,6 +878,7 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         provider_governance: ProviderGovernanceConfig::default(),
         cache: CacheConfig::default(),
         runtime_state: RuntimeStateConfig::default(),
+        secret_encryption: SecretEncryptionConfig::default(),
     }
 }
 

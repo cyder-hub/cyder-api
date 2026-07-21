@@ -12,7 +12,7 @@ use crate::{
     controller::BaseError,
     cost::validate_component_config,
     database::{
-        api_key::{ApiKey, UpdateApiKeyData, hash_api_key},
+        api_key::{ApiKey, UpdateApiKeyData, key_last4, key_prefix},
         api_key_acl_rule::NewApiKeyAclRule,
         cost::{
             CostCatalog, CostCatalogVersion, CostComponent, NewCostCatalog, NewCostCatalogVersion,
@@ -40,24 +40,29 @@ use crate::{
         },
         registry::{
             PortableModuleRegistryItem, PortableModuleRegistryResponse,
-            PortableSubrangeRegistryItem, module_registry, registry_response,
+            PortableSubrangeRegistryItem, import_module_registry, module_registry,
+            registry_response,
         },
         schema::{
             ConflictStrategy, FileProtectionMode, PORTABLE_MODULE_VERSION_V1,
             PORTABLE_SCHEMA_VERSION, ParsedPortableBundle, PortableApiKeyAclRuleItem,
-            PortableApiKeyItem, PortableApplyModuleResult, PortableApplyModuleStatus,
-            PortableApplyRequest, PortableApplyResult, PortableBlockedItem, PortableBundle,
-            PortableBundleModule, PortableCostBindingItem, PortableCostCatalogItem,
-            PortableCostCatalogItems, PortableCostCatalogVersionItem, PortableCostComponentItem,
-            PortableDangerousPatchConfirmation, PortableDependencyStatus, PortableExportRequest,
-            PortableExportResponse, PortableFileProtectionStatus, PortableImportPreviewRequest,
-            PortableModelRef, PortableModuleId, PortableModuleSelection, PortableModuleSummary,
+            PortableApiKeyItem, PortableApiKeyPreviewItem, PortableApplyModuleResult,
+            PortableApplyModuleStatus, PortableApplyRequest, PortableApplyResult,
+            PortableBlockedItem, PortableBundle, PortableBundleModule, PortableCostBindingItem,
+            PortableCostCatalogItem, PortableCostCatalogItems, PortableCostCatalogVersionItem,
+            PortableCostComponentItem, PortableDangerousPatchConfirmation,
+            PortableDependencyStatus, PortableExportRequest, PortableExportResponse,
+            PortableFileProtectionStatus, PortableImportPreviewRequest, PortableModelRef,
+            PortableModuleId, PortableModuleSelection, PortableModuleSummary,
             PortablePreviewModule, PortablePreviewResponse, PortableProviderApiKeyItem,
             PortableProviderItem, PortableProviderModelItem, PortableProviderOwnerRef,
             PortableProviderProfileItems, PortableProviderReasoningConfigItem,
             PortableProviderRequestPatchItem, PortableReasoningConfigPresetItem,
             PortableReferenceStatus, PortableSubrangeId, parse_portable_bundle_str,
         },
+    },
+    service::secret_encryption::{
+        EncryptedSecret, SecretDomain, SecretEncryptionService, SensitiveSecret,
     },
     utils::ID_GENERATOR,
 };
@@ -74,11 +79,18 @@ pub(crate) mod repository;
 
 pub struct PortableConfigAdminService {
     mutation_runner: Arc<AdminMutationRunner>,
+    secret_encryption: Arc<SecretEncryptionService>,
 }
 
 impl PortableConfigAdminService {
-    pub(crate) fn new(mutation_runner: Arc<AdminMutationRunner>) -> Self {
-        Self { mutation_runner }
+    pub(crate) fn new(
+        mutation_runner: Arc<AdminMutationRunner>,
+        secret_encryption: Arc<SecretEncryptionService>,
+    ) -> Self {
+        Self {
+            mutation_runner,
+            secret_encryption,
+        }
     }
 
     pub fn module_registry(&self) -> PortableModuleRegistryResponse {
@@ -202,6 +214,7 @@ impl PortableConfigAdminService {
                 request.reason.trim(),
                 &request.dangerous_patch_confirmations,
                 now,
+                &self.secret_encryption,
             )
         })?;
 
@@ -218,6 +231,11 @@ impl PortableConfigAdminService {
     #[cfg(test)]
     pub(crate) fn mutation_runner(&self) -> &Arc<AdminMutationRunner> {
         &self.mutation_runner
+    }
+
+    #[cfg(test)]
+    pub(crate) fn secret_encryption(&self) -> &Arc<SecretEncryptionService> {
+        &self.secret_encryption
     }
 
     async fn run_post_commit_effects(&self, effects: Vec<AdminMutationEffect>) {
@@ -237,7 +255,7 @@ impl NormalizedExportSelection {
         } else {
             request.selected_modules.clone()
         };
-        let registry = registry_by_module_id();
+        let registry = export_registry_by_module_id();
         let mut modules = BTreeMap::new();
         let mut seen = BTreeSet::new();
 
@@ -264,13 +282,12 @@ impl NormalizedExportSelection {
 
             match selection.module_id {
                 PortableModuleId::ProviderProfile
-                | PortableModuleId::ApiKeys
                 | PortableModuleId::CostCatalogs
                 | PortableModuleId::CostBindings => {
                     let subranges = normalize_subranges(registry_item, &selection)?;
                     modules.insert(selection.module_id, subranges);
                 }
-                PortableModuleId::Unknown(_) => {
+                PortableModuleId::ApiKeys | PortableModuleId::Unknown(_) => {
                     return Err(BaseError::ParamInvalid(Some(format!(
                         "portable export module `{}` is not supported",
                         selection.module_id
@@ -312,7 +329,7 @@ impl NormalizedApplySelection {
             .iter()
             .map(|module| (module.module_id.clone(), module))
             .collect::<BTreeMap<_, _>>();
-        let registry = registry_by_module_id();
+        let registry = import_registry_by_module_id();
         let selections = if request.selected_modules.is_empty() {
             bundle
                 .modules
@@ -415,10 +432,6 @@ fn build_export_bundle(
     if let Some(subranges) = selection.subranges(&PortableModuleId::CostBindings) {
         modules.push(export_cost_bindings(conn, selection, subranges, &modules)?);
     }
-    if let Some(subranges) = selection.subranges(&PortableModuleId::ApiKeys) {
-        modules.push(export_api_keys(conn, subranges)?);
-    }
-
     Ok(PortableBundle {
         schema_version: PORTABLE_SCHEMA_VERSION.to_string(),
         exported_at,
@@ -433,7 +446,7 @@ fn build_import_preview(
     file_protection: PortableFileProtectionStatus,
     bundle_digest: String,
 ) -> Result<PortablePreviewResponse, BaseError> {
-    let registry = registry_by_module_id();
+    let registry = import_registry_by_module_id();
     let bundle_refs = collect_bundle_refs(&parsed.bundle);
     let mut preview_modules = Vec::with_capacity(parsed.bundle.modules.len());
 
@@ -1460,6 +1473,7 @@ fn preview_api_keys_module(
     let mut blocking_issues = Vec::new();
     let mut warnings = Vec::new();
     let mut seen_raw_keys = BTreeSet::new();
+    let mut safe_items = Vec::with_capacity(items.len());
     let mut provider_dependency_missing_count = 0_u64;
     let mut has_provider_dependency = false;
     let include_acl = module.subranges.contains(&PortableSubrangeId::ApiKeyAcl);
@@ -1468,6 +1482,7 @@ fn preview_api_keys_module(
         summary.total += 1;
         let api_key_path = format!("$.modules[{module_index}].items[{api_key_index}]");
         if api_key.api_key.trim().is_empty() {
+            safe_items.push(api_key_preview_item(api_key, "blocked"));
             add_blocked_issue(
                 &mut summary,
                 &mut blocking_issues,
@@ -1480,6 +1495,7 @@ fn preview_api_keys_module(
             continue;
         }
         if !seen_raw_keys.insert(api_key.api_key.clone()) {
+            safe_items.push(api_key_preview_item(api_key, "blocked"));
             add_blocked_issue(
                 &mut summary,
                 &mut blocking_issues,
@@ -1494,6 +1510,7 @@ fn preview_api_keys_module(
 
         match api_key_repository::find_active_api_key_by_raw_key(conn, &api_key.api_key)? {
             Some(existing) if api_key_core_matches(&existing, api_key) => {
+                safe_items.push(api_key_preview_item(api_key, "skip"));
                 summary.skip += 1;
                 preview_skip_existing_api_key_children(
                     api_key,
@@ -1504,6 +1521,7 @@ fn preview_api_keys_module(
                 continue;
             }
             Some(_) => {
+                safe_items.push(api_key_preview_item(api_key, "conflict"));
                 summary.conflict += 1;
                 blocking_issues.push(blocked_item(
                     "conflict",
@@ -1520,7 +1538,10 @@ fn preview_api_keys_module(
                 );
                 continue;
             }
-            None => summary.create += 1,
+            None => {
+                safe_items.push(api_key_preview_item(api_key, "create"));
+                summary.create += 1;
+            }
         }
 
         if include_acl {
@@ -1570,14 +1591,31 @@ fn preview_api_keys_module(
         Vec::new()
     };
 
-    Ok(preview_module(
+    let mut preview = preview_module(
         module,
         registry_item,
         dependencies,
         summary,
         warnings,
         blocking_issues,
-    ))
+    );
+    preview.api_key_items = safe_items;
+    Ok(preview)
+}
+
+fn api_key_preview_item(api_key: &PortableApiKeyItem, outcome: &str) -> PortableApiKeyPreviewItem {
+    let (key_prefix, key_last4) = if api_key.api_key.chars().count() >= 20 {
+        (key_prefix(&api_key.api_key), key_last4(&api_key.api_key))
+    } else {
+        ("<masked>".to_string(), String::new())
+    };
+    PortableApiKeyPreviewItem {
+        name: api_key.name.clone(),
+        key_prefix,
+        key_last4,
+        acl_rule_count: api_key.acl_rules.len() as u64,
+        outcome: outcome.to_string(),
+    }
 }
 
 fn preview_skip_existing_api_key_children(
@@ -2214,6 +2252,7 @@ fn preview_unsupported_module(module: &PortableBundleModule) -> PortablePreviewM
             module.module_id
         )],
         blocking_issues: Vec::new(),
+        api_key_items: Vec::new(),
     }
 }
 
@@ -2239,6 +2278,7 @@ fn preview_module(
         summary,
         warnings,
         blocking_issues,
+        api_key_items: Vec::new(),
     }
 }
 
@@ -2423,7 +2463,6 @@ struct ApplyImportContext {
     model_ids: BTreeMap<(String, String), i64>,
     created_provider_refs: BTreeSet<String>,
     created_model_refs: BTreeSet<(String, String)>,
-    api_key_ids: BTreeMap<String, i64>,
     cost_catalog_ids: BTreeMap<String, i64>,
     effects: Vec<AdminMutationEffect>,
 }
@@ -2460,10 +2499,6 @@ impl ApplyImportContext {
         self.created_model_refs.insert(key);
     }
 
-    fn remember_api_key(&mut self, raw_api_key: impl Into<String>, api_key_id: i64) {
-        self.api_key_ids.insert(raw_api_key.into(), api_key_id);
-    }
-
     fn remember_cost_catalog(&mut self, name: impl Into<String>, cost_catalog_id: i64) {
         self.cost_catalog_ids.insert(name.into(), cost_catalog_id);
     }
@@ -2478,6 +2513,7 @@ fn apply_import_bundle(
     reason: &str,
     dangerous_patch_confirmations: &[PortableDangerousPatchConfirmation],
     now: i64,
+    secret_encryption: &SecretEncryptionService,
 ) -> Result<AppliedImport, BaseError> {
     // Keep DB preflight and mutations in one transaction so conflict reads and writes
     // observe the same target state during apply.
@@ -2543,6 +2579,7 @@ fn apply_import_bundle(
             conflict_strategy,
             now,
             &mut context,
+            secret_encryption,
         )?);
     }
 
@@ -2570,7 +2607,7 @@ fn build_apply_previews(
     selection: &NormalizedApplySelection,
     dangerous_patch_confirmations: &[PortableDangerousPatchConfirmation],
 ) -> Result<Vec<PortablePreviewModule>, BaseError> {
-    let registry = registry_by_module_id();
+    let registry = import_registry_by_module_id();
     let bundle_refs = collect_selected_bundle_refs(bundle, selection);
     let mut previews = Vec::new();
 
@@ -3861,6 +3898,7 @@ fn apply_api_keys_module(
     conflict_strategy: ConflictStrategy,
     now: i64,
     context: &mut ApplyImportContext,
+    secret_encryption: &SecretEncryptionService,
 ) -> Result<PortableApplyModuleResult, BaseError> {
     let items =
         serde_json::from_value::<Vec<PortableApiKeyItem>>(module.items.clone()).map_err(|err| {
@@ -3883,8 +3921,13 @@ fn apply_api_keys_module(
         let existing = api_key_repository::find_active_api_key_by_raw_key(conn, &api_key.api_key)?;
         let api_key_id = match existing {
             Some(existing) if api_key_core_matches(&existing, api_key) => {
+                store_recoverable_import_secret(
+                    conn,
+                    secret_encryption,
+                    existing.id,
+                    &api_key.api_key,
+                )?;
                 summary.skip += 1;
-                context.remember_api_key(api_key.api_key.clone(), existing.id);
                 if include_acl {
                     let skipped = skip_api_key_children(api_key, include_acl, &mut summary);
                     if skipped > 0 {
@@ -3903,8 +3946,13 @@ fn apply_api_keys_module(
                     )));
                 }
                 ConflictStrategy::SkipExisting => {
+                    store_recoverable_import_secret(
+                        conn,
+                        secret_encryption,
+                        existing.id,
+                        &api_key.api_key,
+                    )?;
                     summary.skip += 1;
-                    context.remember_api_key(api_key.api_key.clone(), existing.id);
                     let skipped_children = if include_acl {
                         skip_api_key_children(api_key, include_acl, &mut summary)
                     } else {
@@ -3930,6 +3978,12 @@ fn apply_api_keys_module(
                         &api_key_update_data(api_key),
                         now,
                     )?;
+                    store_recoverable_import_secret(
+                        conn,
+                        secret_encryption,
+                        updated.id,
+                        &api_key.api_key,
+                    )?;
                     summary.update += 1;
                     context
                         .effects
@@ -3940,10 +3994,9 @@ fn apply_api_keys_module(
                         .effects
                         .push(AdminMutationEffect::catalog_invalidation(
                             AdminCatalogInvalidation::ApiKeyHash {
-                                api_key_hash: hash_api_key(&updated.api_key),
+                                api_key_hash: updated.api_key_hash.clone(),
                             },
                         ));
-                    context.remember_api_key(api_key.api_key.clone(), updated.id);
                     let skipped_children = if include_acl {
                         skip_api_key_children(api_key, include_acl, &mut summary)
                     } else {
@@ -3961,10 +4014,15 @@ fn apply_api_keys_module(
                 }
             },
             None => {
+                let id = ID_GENERATOR.generate_id();
+                let encrypted_secret =
+                    imported_secret_for_mode(secret_encryption, id, &api_key.api_key)?;
                 let created = api_key_repository::insert_raw_api_key(
                     conn,
                     &api_key_repository::RawApiKeyImportInput {
+                        id,
                         raw_api_key: api_key.api_key.clone(),
+                        encrypted_secret,
                         name: api_key.name.clone(),
                         description: api_key.description.clone(),
                         default_action: api_key.default_action.clone(),
@@ -3992,10 +4050,9 @@ fn apply_api_keys_module(
                     .effects
                     .push(AdminMutationEffect::catalog_invalidation(
                         AdminCatalogInvalidation::ApiKeyHash {
-                            api_key_hash: hash_api_key(&created.api_key),
+                            api_key_hash: created.api_key_hash.clone(),
                         },
                     ));
-                context.remember_api_key(api_key.api_key.clone(), created.id);
                 created.id
             }
         };
@@ -4012,6 +4069,39 @@ fn apply_api_keys_module(
         messages,
         blocking_issues: Vec::new(),
     })
+}
+
+fn imported_secret_for_mode(
+    secret_encryption: &SecretEncryptionService,
+    api_key_id: i64,
+    raw_api_key: &str,
+) -> Result<Option<EncryptedSecret>, BaseError> {
+    if secret_encryption.downstream_mode() == crate::config::DownstreamSecretMode::OneTime {
+        return Ok(None);
+    }
+    secret_encryption
+        .encrypt_current(
+            SecretDomain::DownstreamApiKey(api_key_id),
+            &SensitiveSecret::new(raw_api_key.to_string()),
+        )
+        .map(Some)
+        .map_err(|_| {
+            BaseError::InternalServerError(Some(
+                "failed to protect imported api key secret".to_string(),
+            ))
+        })
+}
+
+fn store_recoverable_import_secret(
+    conn: &mut repository::PortableRepositoryConnection<'_>,
+    secret_encryption: &SecretEncryptionService,
+    api_key_id: i64,
+    raw_api_key: &str,
+) -> Result<(), BaseError> {
+    if let Some(encrypted) = imported_secret_for_mode(secret_encryption, api_key_id, raw_api_key)? {
+        api_key_repository::update_api_key_secret(conn, api_key_id, &encrypted)?;
+    }
+    Ok(())
 }
 
 fn skip_api_key_children(
@@ -4538,96 +4628,6 @@ fn portable_model_owner(provider_key: &str, model_name: &str) -> PortableProvide
     }
 }
 
-fn export_api_keys(
-    conn: &mut repository::PortableRepositoryConnection<'_>,
-    subranges: &[PortableSubrangeId],
-) -> Result<PortableBundleModule, BaseError> {
-    let include_acl = subranges.contains(&PortableSubrangeId::ApiKeyAcl);
-    let api_keys = api_key_repository::list_api_keys_for_export(conn)?
-        .into_iter()
-        .map(|api_key| {
-            let acl_rules = if include_acl {
-                export_acl_rules(conn, api_key.id)?
-            } else {
-                Vec::new()
-            };
-            Ok::<PortableApiKeyItem, BaseError>(PortableApiKeyItem {
-                name: api_key.name,
-                description: api_key.description,
-                default_action: api_key.default_action,
-                is_enabled: api_key.is_enabled,
-                expires_at: api_key.expires_at,
-                rate_limit_rpm: api_key.rate_limit_rpm,
-                max_concurrent_requests: api_key.max_concurrent_requests,
-                quota_daily_requests: api_key.quota_daily_requests,
-                quota_daily_tokens: api_key.quota_daily_tokens,
-                quota_monthly_tokens: api_key.quota_monthly_tokens,
-                budget_daily_nanos: api_key.budget_daily_nanos,
-                budget_daily_currency: api_key.budget_daily_currency,
-                budget_monthly_nanos: api_key.budget_monthly_nanos,
-                budget_monthly_currency: api_key.budget_monthly_currency,
-                api_key: api_key.api_key,
-                acl_rules,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let total = api_keys
-        .iter()
-        .map(|api_key| 1 + api_key.acl_rules.len() as u64)
-        .sum();
-
-    Ok(PortableBundleModule {
-        module_id: PortableModuleId::ApiKeys,
-        module_version: PORTABLE_MODULE_VERSION_V1,
-        subranges: subranges.to_vec(),
-        summary: PortableModuleSummary {
-            total,
-            ..PortableModuleSummary::default()
-        },
-        items: serde_json::to_value(api_keys).map_err(|err| {
-            BaseError::InternalServerError(Some(format!(
-                "failed to serialize api key portable export items: {err}"
-            )))
-        })?,
-    })
-}
-
-fn export_acl_rules(
-    conn: &mut repository::PortableRepositoryConnection<'_>,
-    api_key_id: i64,
-) -> Result<Vec<PortableApiKeyAclRuleItem>, BaseError> {
-    Ok(
-        api_key_repository::list_api_key_acl_rules_for_export(conn, api_key_id)?
-            .into_iter()
-            .filter_map(|exported| match exported.rule.scope {
-                RuleScope::Provider if exported.provider_ref.is_some() => {
-                    Some(PortableApiKeyAclRuleItem {
-                        effect: exported.rule.effect,
-                        scope: exported.rule.scope,
-                        provider_ref: exported.provider_ref,
-                        model_ref: None,
-                        priority: exported.rule.priority,
-                        is_enabled: exported.rule.is_enabled,
-                        description: exported.rule.description,
-                    })
-                }
-                RuleScope::Model if exported.model_ref.is_some() => {
-                    Some(PortableApiKeyAclRuleItem {
-                        effect: exported.rule.effect,
-                        scope: exported.rule.scope,
-                        provider_ref: exported.provider_ref,
-                        model_ref: exported.model_ref,
-                        priority: exported.rule.priority,
-                        is_enabled: exported.rule.is_enabled,
-                        description: exported.rule.description,
-                    })
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-
 fn export_cost_catalogs(
     conn: &mut repository::PortableRepositoryConnection<'_>,
     subranges: &[PortableSubrangeId],
@@ -4842,8 +4842,15 @@ fn default_export_selections() -> Vec<PortableModuleSelection> {
         .collect()
 }
 
-fn registry_by_module_id() -> BTreeMap<PortableModuleId, PortableModuleRegistryItem> {
+fn export_registry_by_module_id() -> BTreeMap<PortableModuleId, PortableModuleRegistryItem> {
     module_registry()
+        .into_iter()
+        .map(|module| (module.module_id.clone(), module))
+        .collect()
+}
+
+fn import_registry_by_module_id() -> BTreeMap<PortableModuleId, PortableModuleRegistryItem> {
+    import_module_registry()
         .into_iter()
         .map(|module| (module.module_id.clone(), module))
         .collect()
@@ -4953,4 +4960,321 @@ fn ordered_subranges(
         .filter(|subrange| selected.contains(&subrange.subrange_id))
         .map(|subrange| subrange.subrange_id.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use diesel::{RunQueryDsl, connection::SimpleConnection, prelude::*};
+
+    use crate::config::SecretEncryptionConfig;
+    use crate::database::api_key::{ApiKey, hash_api_key};
+    use crate::database::{DbConnection, TestDbContext, get_connection};
+    use crate::service::admin::AdminServices;
+    use crate::service::catalog::CatalogService;
+    use crate::service::portable_config::schema::{
+        ConflictStrategy, PORTABLE_MODULE_VERSION_V1, PORTABLE_SCHEMA_VERSION,
+        PortableApplyRequest, PortableBundle, PortableBundleModule, PortableImportPreviewRequest,
+        PortableModuleId, PortableModuleSelection, PortableModuleSummary, PortableSubrangeId,
+    };
+    use crate::service::secret_encryption::{SecretEncryptionService, SensitiveSecret};
+
+    const CURRENT_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    type SecretTuple = (
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<i32>,
+        Option<String>,
+    );
+
+    fn config(mode: &str) -> SecretEncryptionConfig {
+        serde_yaml::from_str(&format!(
+            "downstream_mode: {mode}\nencryption_key: '{CURRENT_KEY}'\n"
+        ))
+        .expect("portable secret config should parse")
+    }
+
+    async fn services(mode: &str) -> Arc<AdminServices> {
+        let catalog = Arc::new(CatalogService::new(true).await);
+        let encryption = Arc::new(SecretEncryptionService::from_config(&config(mode)));
+        Arc::new(AdminServices::new(catalog, encryption))
+    }
+
+    fn api_key_item(raw: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "description": "portable R2.6 fixture",
+            "default_action": "ALLOW",
+            "is_enabled": true,
+            "expires_at": null,
+            "rate_limit_rpm": null,
+            "max_concurrent_requests": null,
+            "quota_daily_requests": null,
+            "quota_daily_tokens": null,
+            "quota_monthly_tokens": null,
+            "budget_daily_nanos": null,
+            "budget_daily_currency": null,
+            "budget_monthly_nanos": null,
+            "budget_monthly_currency": null,
+            "api_key": raw,
+            "acl_rules": []
+        })
+    }
+
+    fn bundle(items: Vec<serde_json::Value>) -> String {
+        serde_json::to_string(&PortableBundle {
+            schema_version: PORTABLE_SCHEMA_VERSION.to_string(),
+            exported_at: 1_778_236_800_000,
+            cyder_version: "0.7.1".to_string(),
+            modules: vec![PortableBundleModule {
+                module_id: PortableModuleId::ApiKeys,
+                module_version: PORTABLE_MODULE_VERSION_V1,
+                subranges: vec![PortableSubrangeId::ApiKeyCore],
+                summary: PortableModuleSummary {
+                    total: items.len() as u64,
+                    ..Default::default()
+                },
+                items: serde_json::Value::Array(items),
+            }],
+        })
+        .expect("portable bundle should serialize")
+    }
+
+    async fn apply(
+        services: &AdminServices,
+        content: &str,
+        strategy: ConflictStrategy,
+    ) -> Result<(), crate::controller::BaseError> {
+        let preview = services
+            .portable_config
+            .preview_import(PortableImportPreviewRequest {
+                content: content.to_string(),
+                password: None,
+            })
+            .await?;
+        services
+            .portable_config
+            .apply_import(PortableApplyRequest {
+                content: content.to_string(),
+                password: None,
+                bundle_digest: preview.bundle_digest,
+                selected_modules: vec![PortableModuleSelection {
+                    module_id: PortableModuleId::ApiKeys,
+                    subranges: vec![PortableSubrangeId::ApiKeyCore],
+                }],
+                conflict_strategy: strategy,
+                reason: "R2.6 portable import test".to_string(),
+                dangerous_patch_confirmations: Vec::new(),
+            })
+            .await
+            .map(|_| ())
+    }
+
+    fn load_secret_tuple(id_value: i64) -> SecretTuple {
+        let mut connection = get_connection().expect("test connection should load");
+        let DbConnection::Sqlite(connection) = &mut connection else {
+            panic!("portable unit test requires sqlite")
+        };
+        use crate::database::_sqlite_schema::api_key::dsl as key;
+        key::api_key
+            .filter(key::id.eq(id_value))
+            .select((
+                key::secret_ciphertext,
+                key::secret_nonce,
+                key::secret_format_version,
+                key::secret_key_fingerprint,
+            ))
+            .first(connection)
+            .expect("secret tuple should load")
+    }
+
+    fn replace_fingerprint(id_value: i64, fingerprint: &str) {
+        let mut connection = get_connection().expect("test connection should load");
+        let DbConnection::Sqlite(connection) = &mut connection else {
+            panic!("portable unit test requires sqlite")
+        };
+        use crate::database::_sqlite_schema::api_key::dsl as key;
+        diesel::update(key::api_key.filter(key::id.eq(id_value)))
+            .set(key::secret_key_fingerprint.eq(Some(fingerprint.to_string())))
+            .execute(connection)
+            .expect("fingerprint fixture should update");
+    }
+
+    fn execute_sql(sql: &str) {
+        let mut connection = get_connection().expect("test connection should load");
+        let DbConnection::Sqlite(connection) = &mut connection else {
+            panic!("portable unit test requires sqlite")
+        };
+        connection
+            .batch_execute(sql)
+            .expect("portable test SQL should execute");
+    }
+
+    #[tokio::test]
+    async fn portable_api_key_import_obeys_mode_and_duplicate_secret_rules() {
+        let database = TestDbContext::new_sqlite("portable-api-key-mode.sqlite");
+        database
+            .run_async(async {
+                let raw = "cyder-portable-mode-secret-1234";
+                let content = bundle(vec![api_key_item(raw, "portable-mode")]);
+                let one_time = services("one_time").await;
+                apply(&one_time, &content, ConflictStrategy::FailOnConflict)
+                    .await
+                    .expect("one-time import should apply");
+                let imported = ApiKey::get_by_hash(&hash_api_key(raw))
+                    .expect("one-time imported key should authenticate");
+                assert_eq!(load_secret_tuple(imported.id), (None, None, None, None));
+                assert!(
+                    !one_time
+                        .api_key
+                        .get_api_key_detail(imported.id)
+                        .expect("one-time detail should load")
+                        .can_reveal
+                );
+
+                let recoverable = services("recoverable").await;
+                apply(&recoverable, &content, ConflictStrategy::SkipExisting)
+                    .await
+                    .expect("recoverable duplicate should supplement secret");
+                let recoverable_tuple = load_secret_tuple(imported.id);
+                assert!(recoverable_tuple.0.is_some());
+                assert_eq!(
+                    recoverable
+                        .api_key
+                        .reveal_api_key(imported.id)
+                        .expect("supplemented key should reveal")
+                        .api_key,
+                    raw
+                );
+
+                apply(&one_time, &content, ConflictStrategy::SkipExisting)
+                    .await
+                    .expect("one-time duplicate should apply without secret changes");
+                assert_eq!(load_secret_tuple(imported.id), recoverable_tuple);
+                assert!(
+                    !one_time
+                        .api_key
+                        .get_api_key_detail(imported.id)
+                        .expect("one-time detail should load")
+                        .can_reveal
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn portable_api_key_import_preserves_unknown_in_one_time_and_repairs_in_recoverable() {
+        let database = TestDbContext::new_sqlite("portable-api-key-repair.sqlite");
+        database
+            .run_async(async {
+                let raw = "cyder-portable-repair-secret-5678";
+                let content = bundle(vec![api_key_item(raw, "portable-repair")]);
+                let recoverable = services("recoverable").await;
+                apply(&recoverable, &content, ConflictStrategy::FailOnConflict)
+                    .await
+                    .expect("recoverable import should apply");
+                let imported = ApiKey::get_by_hash(&hash_api_key(raw))
+                    .expect("imported key should authenticate");
+                replace_fingerprint(imported.id, &"f".repeat(64));
+                let unknown = load_secret_tuple(imported.id);
+
+                let one_time = services("one_time").await;
+                apply(&one_time, &content, ConflictStrategy::SkipExisting)
+                    .await
+                    .expect("one-time duplicate should preserve unknown tuple");
+                assert_eq!(load_secret_tuple(imported.id), unknown);
+
+                apply(&recoverable, &content, ConflictStrategy::SkipExisting)
+                    .await
+                    .expect("recoverable duplicate should replace unknown tuple");
+                assert_ne!(load_secret_tuple(imported.id), unknown);
+                assert_eq!(
+                    recoverable
+                        .api_key
+                        .reveal_api_key(imported.id)
+                        .expect("repaired secret should reveal")
+                        .api_key,
+                    raw
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn portable_api_key_preview_is_safe_and_total_transaction_rolls_back() {
+        let database = TestDbContext::new_sqlite("portable-api-key-safe-preview.sqlite");
+        database
+            .run_async(async {
+                let raw = "cyder-portable-never-preview-9012";
+                let duplicate_content = bundle(vec![
+                    api_key_item(raw, "portable-safe-a"),
+                    api_key_item(raw, "portable-safe-b"),
+                ]);
+                let recoverable = services("recoverable").await;
+                let preview = recoverable
+                    .portable_config
+                    .preview_import(PortableImportPreviewRequest {
+                        content: duplicate_content.clone(),
+                        password: None,
+                    })
+                    .await
+                    .expect("duplicate preview should return safely");
+                let serialized = serde_json::to_string(&preview)
+                    .expect("preview response should serialize");
+                assert!(!serialized.contains(raw));
+                assert!(!format!("{preview:?}").contains(raw));
+                let module = preview.modules.first().expect("API key module should preview");
+                assert_eq!(module.api_key_items.len(), 2);
+                assert_eq!(module.api_key_items[0].name, "portable-safe-a");
+                assert_eq!(module.api_key_items[0].key_last4, "9012");
+                assert_eq!(module.api_key_items[1].outcome, "blocked");
+
+                let single_content = bundle(vec![api_key_item(raw, "portable-safe-a")]);
+                execute_sql(
+                    "CREATE TRIGGER fail_portable_secret BEFORE UPDATE OF secret_ciphertext ON api_key WHEN NEW.secret_ciphertext IS NOT NULL BEGIN SELECT RAISE(ABORT, 'blocked portable secret'); END;",
+                );
+                assert!(
+                    apply(
+                        &recoverable,
+                        &single_content,
+                        ConflictStrategy::FailOnConflict,
+                    )
+                    .await
+                    .is_err()
+                );
+                execute_sql("DROP TRIGGER fail_portable_secret;");
+                assert!(matches!(
+                    ApiKey::get_by_hash(&hash_api_key(raw)),
+                    Err(crate::controller::BaseError::NotFound(_))
+                ));
+
+                let sensitive = SensitiveSecret::new(raw.to_string());
+                assert!(!format!("{sensitive:?}").contains(raw));
+            })
+            .await;
+    }
+
+    #[test]
+    fn portable_api_key_debug_contract_redacts_raw_material() {
+        let raw = "cyder-portable-debug-secret-3456";
+        let content = bundle(vec![api_key_item(raw, "portable-debug")]);
+        let parsed: PortableBundle =
+            serde_json::from_str(&content).expect("debug bundle should parse");
+        let request = PortableApplyRequest {
+            content: content.clone(),
+            password: Some("portable-password".to_string()),
+            bundle_digest: "sha256:test".to_string(),
+            selected_modules: Vec::new(),
+            conflict_strategy: ConflictStrategy::FailOnConflict,
+            reason: "debug contract".to_string(),
+            dangerous_patch_confirmations: Vec::new(),
+        };
+
+        for output in [format!("{parsed:?}"), format!("{request:?}")] {
+            assert!(!output.contains(raw));
+            assert!(!output.contains("portable-password"));
+        }
+    }
 }

@@ -8,6 +8,7 @@ use crate::config::{CONFIG, RuntimeStateBackendType};
 use crate::proxy::logging::RequestLogPersistedSink;
 use crate::service::cache::CacheError;
 use crate::service::metrics::MetricsService;
+use crate::service::secret_encryption::SecretEncryptionService;
 
 #[cfg(test)]
 use crate::database::TestDbContext;
@@ -34,6 +35,7 @@ pub struct AppState {
     pub reasoning_continuation_store: Arc<dyn ReasoningContinuationStore>,
     pub metrics: Arc<MetricsService>,
     pub runtime_backend_status: Arc<RuntimeStateBackendStatus>,
+    pub secret_encryption: Arc<SecretEncryptionService>,
     pub max_body_size: usize,
     pub timezone: Option<String>,
 }
@@ -93,7 +95,13 @@ impl AppState {
         let runtime_backend =
             RuntimeStateBackendBundle::from_config(&config, force_memory_runtime_state).await?;
         let catalog = Arc::new(CatalogService::new(force_memory_cache).await);
-        let admin = Arc::new(AdminServices::new(Arc::clone(&catalog)));
+        let secret_encryption = Arc::new(SecretEncryptionService::from_config(
+            &config.secret_encryption,
+        ));
+        let admin = Arc::new(AdminServices::new(
+            Arc::clone(&catalog),
+            Arc::clone(&secret_encryption),
+        ));
         let provider_key_selector = ProviderKeySelector::new(
             Arc::clone(&catalog),
             Arc::clone(&runtime_backend.provider_key_cursor_store),
@@ -110,6 +118,7 @@ impl AppState {
             reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
+            secret_encryption,
             max_body_size: config.max_body_size,
             timezone: config.timezone.clone(),
         })
@@ -292,13 +301,20 @@ mod tests {
     use crate::service::infra::AppInfra;
     use crate::service::metrics::MetricsService;
     use crate::service::runtime::{ProviderKeySelector, RuntimeStateBackendBundle};
+    use crate::service::secret_encryption::SecretEncryptionService;
     use diesel::RunQueryDsl;
     use std::sync::Arc;
 
     async fn test_app_state() -> AppState {
         let catalog = Arc::new(CatalogService::new(true).await);
-        let admin = Arc::new(AdminServices::new(Arc::clone(&catalog)));
         let config = CONFIG.clone();
+        let secret_encryption = Arc::new(SecretEncryptionService::from_config(
+            &config.secret_encryption,
+        ));
+        let admin = Arc::new(AdminServices::new(
+            Arc::clone(&catalog),
+            Arc::clone(&secret_encryption),
+        ));
         let infra = Arc::new(
             AppInfra::new_with_config(config.proxy_request.clone(), config.proxy.clone(), None)
                 .await,
@@ -323,6 +339,7 @@ mod tests {
             reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
+            secret_encryption,
             max_body_size: config.max_body_size,
             timezone: config.timezone,
         }
@@ -343,6 +360,10 @@ mod tests {
             1
         );
         assert_eq!(Arc::strong_count(&app_state.runtime_backend_status), 1);
+        assert!(Arc::ptr_eq(
+            &app_state.secret_encryption,
+            &app_state.admin.secret_encryption,
+        ));
     }
 
     #[tokio::test]

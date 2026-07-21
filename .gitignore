@@ -20,4 +20,4 @@ diesel.toml
 .aider*
 .antigravitycli/
 
-/task/**
+/task/

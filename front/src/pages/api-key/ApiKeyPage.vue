@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { onBeforeRouteLeave } from "vue-router";
 import { KeyRound, Loader2, Plus, RefreshCcw } from "lucide-vue-next";
 
 import CrudPageLayout from "@/components/CrudPageLayout.vue";
@@ -8,15 +9,27 @@ import StatsStrip from "@/components/StatsStrip.vue";
 import { Button } from "@/components/ui/button";
 import ApiKeyDetailDrawer from "./components/ApiKeyDetailDrawer.vue";
 import ApiKeyEditDialog from "./components/ApiKeyEditDialog.vue";
+import ApiKeySecretDialog from "./components/ApiKeySecretDialog.vue";
 import ApiKeyTable from "./components/ApiKeyTable.vue";
 import { useApiKeyDetail } from "./composables/useApiKeyDetail";
 import { useApiKeyGovernance } from "./composables/useApiKeyGovernance";
 import { useApiKeyList } from "./composables/useApiKeyList";
+import { useApiKeySecretState } from "./composables/useApiKeySecretState";
+import { useAuthStore } from "@/store/authStore";
 
 const { t } = useI18n();
+const authStore = useAuthStore();
 
 const apiKeyList = useApiKeyList(t);
-const apiKeyDetail = useApiKeyDetail(t, apiKeyList.apiKeys, apiKeyList.runtimeById);
+const secretState = useApiKeySecretState();
+const apiKeyDetail = useApiKeyDetail(
+  t,
+  apiKeyList.apiKeys,
+  apiKeyList.runtimeById,
+  secretState.revealedSecret,
+  secretState.setRevealedSecret,
+  secretState.selectKey,
+);
 const {
   apiKeys,
   runtimeById,
@@ -35,7 +48,6 @@ const {
   handleSelectKey,
   handleRevealKey,
   copySecret,
-  setSecretReveal,
 } = apiKeyDetail;
 
 async function refreshSelected(preferredSelectedId: number | null) {
@@ -48,7 +60,8 @@ const apiKeyGovernance = useApiKeyGovernance({
   apiKeys: apiKeyList.apiKeys,
   selectedKeyId: apiKeyDetail.selectedKeyId,
   selectedDetail: apiKeyDetail.selectedDetail,
-  setSecretReveal: apiKeyDetail.setSecretReveal,
+  setIssuedSecret: secretState.setIssuedSecret,
+  clearRevealedSecret: secretState.closeDrawer,
   refreshList: apiKeyList.fetchData,
   refreshDetail: apiKeyDetail.loadSelectedKey,
 });
@@ -72,6 +85,13 @@ function onSelectKey(id: number) {
   isDetailOpen.value = true;
 }
 
+function onDetailOpenChange(open: boolean) {
+  isDetailOpen.value = open;
+  if (!open) {
+    secretState.closeDrawer();
+  }
+}
+
 async function onDeleteKey(id: number) {
   if (await handleDeleteKey(id)) {
     isDetailOpen.value = false;
@@ -81,6 +101,19 @@ async function onDeleteKey(id: number) {
 onMounted(() => {
   void refreshSelected(selectedKeyId.value);
 });
+
+onBeforeRouteLeave(() => {
+  secretState.leaveRoute();
+});
+
+watch(
+  () => authStore.lifecycle,
+  (lifecycle) => {
+    if (lifecycle === "anonymous") {
+      secretState.logout();
+    }
+  },
+);
 </script>
 
 <template>
@@ -145,7 +178,7 @@ onMounted(() => {
     </div>
 
     <ApiKeyDetailDrawer
-      v-model:open="isDetailOpen"
+      :open="isDetailOpen"
       :detail="selectedDetail"
       :runtime="selectedRuntimeView"
       :detail-loading="detailLoading"
@@ -157,7 +190,8 @@ onMounted(() => {
       @edit="handleStartEditing"
       @delete="onDeleteKey"
       @copy-secret="copySecret"
-      @close-secret="setSecretReveal(null)"
+      @close-secret="secretState.setRevealedSecret(null)"
+      @update:open="onDetailOpenChange"
     />
 
     <template #modals>
@@ -167,6 +201,11 @@ onMounted(() => {
         :providers="providerStore.providers"
         :models="modelStore.models"
         @save-success="handleSaveSuccess"
+      />
+      <ApiKeySecretDialog
+        :secret="secretState.issuedSecret.value"
+        @copy="copySecret"
+        @acknowledge="secretState.setIssuedSecret(null)"
       />
     </template>
   </CrudPageLayout>

@@ -8,15 +8,16 @@ use crate::{
         api_key_acl_rule::{ApiKeyAclRule, NewApiKeyAclRule},
     },
     schema::enum_def::Action,
-    service::portable_config::schema::PortableModelRef,
-    utils::ID_GENERATOR,
+    service::secret_encryption::EncryptedSecret,
 };
 
 use super::{PortableRepositoryConnection, map_write_error};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct RawApiKeyImportInput {
+    pub id: i64,
     pub raw_api_key: String,
+    pub encrypted_secret: Option<EncryptedSecret>,
     pub name: String,
     pub description: Option<String>,
     pub default_action: Action,
@@ -34,11 +35,19 @@ pub(crate) struct RawApiKeyImportInput {
     pub now: i64,
 }
 
+impl std::fmt::Debug for RawApiKeyImportInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RawApiKeyImportInput(<redacted>)")
+    }
+}
+
 impl RawApiKeyImportInput {
     #[cfg(test)]
     fn test(raw_api_key: &str, name: &str, now: i64) -> Self {
         Self {
+            id: crate::utils::ID_GENERATOR.generate_id(),
             raw_api_key: raw_api_key.to_string(),
+            encrypted_secret: None,
             name: name.to_string(),
             description: None,
             default_action: Action::Allow,
@@ -58,44 +67,6 @@ impl RawApiKeyImportInput {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ExportApiKeyAclRule {
-    pub rule: ApiKeyAclRule,
-    pub provider_ref: Option<String>,
-    pub model_ref: Option<PortableModelRef>,
-}
-
-pub(crate) fn list_api_keys_for_export(
-    conn: &mut PortableRepositoryConnection<'_>,
-) -> DbResult<Vec<ApiKey>> {
-    match conn {
-        PortableRepositoryConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::api_key;
-            use crate::database::api_key::_postgres_model::ApiKeyDb;
-
-            api_key::table
-                .filter(api_key::dsl::deleted_at.is_null())
-                .order((api_key::dsl::created_at.asc(), api_key::dsl::id.asc()))
-                .select(ApiKeyDb::as_select())
-                .load::<ApiKeyDb>(*conn)
-                .map(|rows| rows.into_iter().map(ApiKeyDb::from_db).collect())
-                .map_err(|err| map_write_error("Failed to list api keys for portable export", err))
-        }
-        PortableRepositoryConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::api_key;
-            use crate::database::api_key::_sqlite_model::ApiKeyDb;
-
-            api_key::table
-                .filter(api_key::dsl::deleted_at.is_null())
-                .order((api_key::dsl::created_at.asc(), api_key::dsl::id.asc()))
-                .select(ApiKeyDb::as_select())
-                .load::<ApiKeyDb>(*conn)
-                .map(|rows| rows.into_iter().map(ApiKeyDb::from_db).collect())
-                .map_err(|err| map_write_error("Failed to list api keys for portable export", err))
-        }
-    }
-}
-
 pub(crate) fn find_active_api_key_by_raw_key(
     conn: &mut PortableRepositoryConnection<'_>,
     raw_api_key: &str,
@@ -109,7 +80,7 @@ pub(crate) fn find_active_api_key_by_raw_key(
             api_key::table
                 .filter(
                     api_key::dsl::api_key_hash
-                        .eq(Some(api_key_hash))
+                        .eq(api_key_hash)
                         .and(api_key::dsl::deleted_at.is_null()),
                 )
                 .select(ApiKeyDb::as_select())
@@ -125,7 +96,7 @@ pub(crate) fn find_active_api_key_by_raw_key(
             api_key::table
                 .filter(
                     api_key::dsl::api_key_hash
-                        .eq(Some(api_key_hash))
+                        .eq(api_key_hash)
                         .and(api_key::dsl::deleted_at.is_null()),
                 )
                 .select(ApiKeyDb::as_select())
@@ -137,85 +108,14 @@ pub(crate) fn find_active_api_key_by_raw_key(
     }
 }
 
-pub(crate) fn list_api_key_acl_rules_for_export(
-    conn: &mut PortableRepositoryConnection<'_>,
-    api_key_id: i64,
-) -> DbResult<Vec<ExportApiKeyAclRule>> {
-    let rules: Vec<ApiKeyAclRule> = match conn {
-        PortableRepositoryConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::api_key_acl_rule;
-            use crate::database::api_key_acl_rule::_postgres_model::ApiKeyAclRuleDb;
-
-            api_key_acl_rule::table
-                .filter(
-                    api_key_acl_rule::dsl::api_key_id
-                        .eq(api_key_id)
-                        .and(api_key_acl_rule::dsl::deleted_at.is_null()),
-                )
-                .order((
-                    api_key_acl_rule::dsl::priority.asc(),
-                    api_key_acl_rule::dsl::created_at.asc(),
-                    api_key_acl_rule::dsl::id.asc(),
-                ))
-                .select(ApiKeyAclRuleDb::as_select())
-                .load::<ApiKeyAclRuleDb>(*conn)
-                .map(|rows| rows.into_iter().map(ApiKeyAclRuleDb::from_db).collect())
-                .map_err(|err| {
-                    map_write_error("Failed to list api key ACL rules for portable export", err)
-                })?
-        }
-        PortableRepositoryConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::api_key_acl_rule;
-            use crate::database::api_key_acl_rule::_sqlite_model::ApiKeyAclRuleDb;
-
-            api_key_acl_rule::table
-                .filter(
-                    api_key_acl_rule::dsl::api_key_id
-                        .eq(api_key_id)
-                        .and(api_key_acl_rule::dsl::deleted_at.is_null()),
-                )
-                .order((
-                    api_key_acl_rule::dsl::priority.asc(),
-                    api_key_acl_rule::dsl::created_at.asc(),
-                    api_key_acl_rule::dsl::id.asc(),
-                ))
-                .select(ApiKeyAclRuleDb::as_select())
-                .load::<ApiKeyAclRuleDb>(*conn)
-                .map(|rows| rows.into_iter().map(ApiKeyAclRuleDb::from_db).collect())
-                .map_err(|err| {
-                    map_write_error("Failed to list api key ACL rules for portable export", err)
-                })?
-        }
-    };
-
-    let mut exported = Vec::with_capacity(rules.len());
-    for rule in rules {
-        let provider_ref = match rule.provider_id {
-            Some(provider_id) => find_provider_key_by_id(conn, provider_id)?,
-            None => None,
-        };
-        let model_ref = match rule.model_id {
-            Some(model_id) => find_model_ref_by_id(conn, model_id)?,
-            None => None,
-        };
-        exported.push(ExportApiKeyAclRule {
-            rule,
-            provider_ref,
-            model_ref,
-        });
-    }
-    Ok(exported)
-}
-
 pub(crate) fn insert_raw_api_key(
     conn: &mut PortableRepositoryConnection<'_>,
     input: &RawApiKeyImportInput,
 ) -> DbResult<ApiKey> {
     validate_raw_api_key_input(input)?;
     let new_key = NewApiKey {
-        id: ID_GENERATOR.generate_id(),
-        api_key: input.raw_api_key.clone(),
-        api_key_hash: Some(hash_api_key(&input.raw_api_key)),
+        id: input.id,
+        api_key_hash: hash_api_key(&input.raw_api_key),
         key_prefix: key_prefix(&input.raw_api_key),
         key_last4: key_last4(&input.raw_api_key),
         name: input.name.trim().to_string(),
@@ -237,7 +137,7 @@ pub(crate) fn insert_raw_api_key(
         updated_at: input.now,
     };
 
-    match conn {
+    let inserted = match conn {
         PortableRepositoryConnection::Postgres(conn) => {
             use crate::database::_postgres_schema::api_key;
             use crate::database::api_key::_postgres_model::{ApiKeyDb, NewApiKeyDb};
@@ -260,7 +160,65 @@ pub(crate) fn insert_raw_api_key(
                 .map(ApiKeyDb::from_db)
                 .map_err(|err| map_write_error("Failed to import raw api key", err))
         }
+    }?;
+    if let Some(encrypted) = input.encrypted_secret.as_ref() {
+        update_api_key_secret(conn, inserted.id, encrypted)?;
     }
+    Ok(inserted)
+}
+
+pub(crate) fn update_api_key_secret(
+    conn: &mut PortableRepositoryConnection<'_>,
+    api_key_id: i64,
+    encrypted: &EncryptedSecret,
+) -> DbResult<()> {
+    let ciphertext = Some(encrypted.ciphertext().to_vec());
+    let nonce = Some(encrypted.nonce().to_vec());
+    let format_version = Some(encrypted.format_version());
+    let fingerprint = Some(encrypted.key_fingerprint().as_str().to_string());
+    let updated = match conn {
+        PortableRepositoryConnection::Postgres(conn) => {
+            use crate::database::_postgres_schema::api_key;
+            diesel::update(
+                api_key::table.filter(
+                    api_key::dsl::id
+                        .eq(api_key_id)
+                        .and(api_key::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                api_key::dsl::secret_ciphertext.eq(ciphertext),
+                api_key::dsl::secret_nonce.eq(nonce),
+                api_key::dsl::secret_format_version.eq(format_version),
+                api_key::dsl::secret_key_fingerprint.eq(fingerprint),
+            ))
+            .execute(*conn)
+        }
+        PortableRepositoryConnection::Sqlite(conn) => {
+            use crate::database::_sqlite_schema::api_key;
+            diesel::update(
+                api_key::table.filter(
+                    api_key::dsl::id
+                        .eq(api_key_id)
+                        .and(api_key::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                api_key::dsl::secret_ciphertext.eq(ciphertext),
+                api_key::dsl::secret_nonce.eq(nonce),
+                api_key::dsl::secret_format_version.eq(format_version),
+                api_key::dsl::secret_key_fingerprint.eq(fingerprint),
+            ))
+            .execute(*conn)
+        }
+    }
+    .map_err(|err| map_write_error("Failed to store imported api key secret", err))?;
+    if updated != 1 {
+        return Err(BaseError::NotFound(Some(format!(
+            "Api key {api_key_id} not found"
+        ))));
+    }
+    Ok(())
 }
 
 pub(crate) fn update_api_key_metadata(
@@ -349,95 +307,6 @@ fn validate_raw_api_key_input(input: &RawApiKeyImportInput) -> DbResult<()> {
     Ok(())
 }
 
-fn find_provider_key_by_id(
-    conn: &mut PortableRepositoryConnection<'_>,
-    provider_id: i64,
-) -> DbResult<Option<String>> {
-    match conn {
-        PortableRepositoryConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::provider;
-
-            provider::table
-                .filter(
-                    provider::dsl::id
-                        .eq(provider_id)
-                        .and(provider::dsl::deleted_at.is_null()),
-                )
-                .select(provider::dsl::provider_key)
-                .first::<String>(*conn)
-                .optional()
-                .map_err(|err| {
-                    map_write_error("Failed to lookup provider ref for portable export", err)
-                })
-        }
-        PortableRepositoryConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::provider;
-
-            provider::table
-                .filter(
-                    provider::dsl::id
-                        .eq(provider_id)
-                        .and(provider::dsl::deleted_at.is_null()),
-                )
-                .select(provider::dsl::provider_key)
-                .first::<String>(*conn)
-                .optional()
-                .map_err(|err| {
-                    map_write_error("Failed to lookup provider ref for portable export", err)
-                })
-        }
-    }
-}
-
-fn find_model_ref_by_id(
-    conn: &mut PortableRepositoryConnection<'_>,
-    model_id: i64,
-) -> DbResult<Option<PortableModelRef>> {
-    let row = match conn {
-        PortableRepositoryConnection::Postgres(conn) => {
-            use crate::database::_postgres_schema::{model, provider};
-
-            model::table
-                .inner_join(provider::table.on(model::dsl::provider_id.eq(provider::dsl::id)))
-                .filter(
-                    model::dsl::id
-                        .eq(model_id)
-                        .and(model::dsl::deleted_at.is_null())
-                        .and(provider::dsl::deleted_at.is_null()),
-                )
-                .select((provider::dsl::provider_key, model::dsl::model_name))
-                .first::<(String, String)>(*conn)
-                .optional()
-                .map_err(|err| {
-                    map_write_error("Failed to lookup model ref for portable export", err)
-                })?
-        }
-        PortableRepositoryConnection::Sqlite(conn) => {
-            use crate::database::_sqlite_schema::{model, provider};
-
-            model::table
-                .inner_join(provider::table.on(model::dsl::provider_id.eq(provider::dsl::id)))
-                .filter(
-                    model::dsl::id
-                        .eq(model_id)
-                        .and(model::dsl::deleted_at.is_null())
-                        .and(provider::dsl::deleted_at.is_null()),
-                )
-                .select((provider::dsl::provider_key, model::dsl::model_name))
-                .first::<(String, String)>(*conn)
-                .optional()
-                .map_err(|err| {
-                    map_write_error("Failed to lookup model ref for portable export", err)
-                })?
-        }
-    };
-
-    Ok(row.map(|(provider_key, model_name)| PortableModelRef {
-        provider_key,
-        model_name,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -453,7 +322,7 @@ mod tests {
     use super::{RawApiKeyImportInput, insert_raw_api_key};
 
     #[test]
-    fn raw_api_key_import_writes_secret_and_shadow_fields_in_transaction() {
+    fn raw_api_key_import_writes_hash_and_display_fields_in_transaction() {
         let test_db_context = TestDbContext::new_sqlite("portable-raw-api-key-import.sqlite");
 
         test_db_context.run_sync(|| {
@@ -464,18 +333,14 @@ mod tests {
             })
             .expect("raw api key import should commit");
 
-            assert_eq!(inserted.api_key, raw_key);
             let expected_hash = hash_api_key(raw_key);
-            assert_eq!(
-                inserted.api_key_hash.as_deref(),
-                Some(expected_hash.as_str())
-            );
+            assert_eq!(inserted.api_key_hash, expected_hash);
             assert_eq!(inserted.key_prefix, "cyder-import");
             assert_eq!(inserted.key_last4, "7890");
 
             let loaded = ApiKey::get_by_hash(&expected_hash).expect("imported key should load");
             assert_eq!(loaded.id, inserted.id);
-            assert_eq!(loaded.api_key, raw_key);
+            assert_eq!(loaded.api_key_hash, expected_hash);
         });
     }
 

@@ -8,15 +8,17 @@ use super::{DbResult, get_connection};
 
 pub const MANAGER_ID: i64 = 0;
 pub const MANAGER_SUBJECT: &str = "admin";
+pub const INITIAL_SESSION_VERSION: i64 = 1;
 
 db_object! {
-    #[derive(Queryable, Selectable, Identifiable, Debug, Clone, PartialEq, Eq)]
+    #[derive(Queryable, Selectable, Identifiable, Clone, PartialEq, Eq)]
     #[diesel(table_name = manager_auth_instance)]
     pub struct ManagerAuthInstance {
         pub id: i64,
         pub manager_id: i64,
         pub manager_subject: String,
         pub current_refresh_jti: String,
+        pub session_version: i64,
         pub created_at: i64,
         pub last_rotated_at: i64,
         pub expires_at: i64,
@@ -24,13 +26,14 @@ db_object! {
         pub revoked_reason: Option<String>,
     }
 
-    #[derive(Insertable, Debug, Clone)]
+    #[derive(Insertable, Clone)]
     #[diesel(table_name = manager_auth_instance)]
     pub struct NewManagerAuthInstance {
         pub id: i64,
         pub manager_id: i64,
         pub manager_subject: String,
         pub current_refresh_jti: String,
+        pub session_version: i64,
         pub created_at: i64,
         pub last_rotated_at: i64,
         pub expires_at: i64,
@@ -60,6 +63,7 @@ impl ManagerAuthInstance {
             manager_id: MANAGER_ID,
             manager_subject: MANAGER_SUBJECT.to_string(),
             current_refresh_jti: current_refresh_jti_value,
+            session_version: INITIAL_SESSION_VERSION,
             created_at: now,
             last_rotated_at: now,
             expires_at: expires_at_value,
@@ -96,13 +100,36 @@ impl ManagerAuthInstance {
         })
     }
 
+    pub fn list_active_instances(now: i64) -> DbResult<Vec<ManagerAuthInstance>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let instances = manager_auth_instance::table
+                .filter(manager_auth_instance::dsl::revoked_at.is_null())
+                .filter(manager_auth_instance::dsl::expires_at.gt(now))
+                .select(ManagerAuthInstanceDb::as_select())
+                .load::<ManagerAuthInstanceDb>(conn)
+                .map_err(|error| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list active manager auth instances: {error}"
+                    )))
+                })?;
+            Ok(instances.into_iter().map(|row| row.from_db()).collect())
+        })
+    }
+
     pub fn rotate_refresh_jti(
         id_value: i64,
         expected_current_refresh_jti: &str,
+        expected_session_version: i64,
         new_refresh_jti: String,
         now: i64,
         expires_at_value: i64,
     ) -> DbResult<Option<ManagerAuthInstance>> {
+        let new_session_version = expected_session_version.checked_add(1).ok_or_else(|| {
+            BaseError::InternalServerError(Some(
+                "Manager auth session version overflow".to_string(),
+            ))
+        })?;
         let conn = &mut get_connection()?;
         db_execute!(conn, {
             let updated = diesel::update(
@@ -113,11 +140,17 @@ impl ManagerAuthInstance {
                             manager_auth_instance::dsl::current_refresh_jti
                                 .eq(expected_current_refresh_jti),
                         )
-                        .and(manager_auth_instance::dsl::revoked_at.is_null()),
+                        .and(
+                            manager_auth_instance::dsl::session_version
+                                .eq(expected_session_version),
+                        )
+                        .and(manager_auth_instance::dsl::revoked_at.is_null())
+                        .and(manager_auth_instance::dsl::expires_at.gt(now)),
                 ),
             )
             .set((
                 manager_auth_instance::dsl::current_refresh_jti.eq(new_refresh_jti),
+                manager_auth_instance::dsl::session_version.eq(new_session_version),
                 manager_auth_instance::dsl::last_rotated_at.eq(now),
                 manager_auth_instance::dsl::expires_at.eq(expires_at_value),
             ))
@@ -146,7 +179,8 @@ impl ManagerAuthInstance {
                 manager_auth_instance::table.filter(
                     manager_auth_instance::dsl::id
                         .eq(id_value)
-                        .and(manager_auth_instance::dsl::revoked_at.is_null()),
+                        .and(manager_auth_instance::dsl::revoked_at.is_null())
+                        .and(manager_auth_instance::dsl::expires_at.gt(now)),
                 ),
             )
             .set((
@@ -164,6 +198,28 @@ impl ManagerAuthInstance {
             })?;
 
             Ok(revoked.map(|row| row.from_db()))
+        })
+    }
+
+    pub fn revoke_all_active(now: i64, reason: &str) -> DbResult<usize> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            diesel::update(
+                manager_auth_instance::table
+                    .filter(manager_auth_instance::dsl::manager_id.eq(MANAGER_ID))
+                    .filter(manager_auth_instance::dsl::revoked_at.is_null())
+                    .filter(manager_auth_instance::dsl::expires_at.gt(now)),
+            )
+            .set((
+                manager_auth_instance::dsl::revoked_at.eq(Some(now)),
+                manager_auth_instance::dsl::revoked_reason.eq(Some(reason.to_string())),
+            ))
+            .execute(conn)
+            .map_err(|error| {
+                BaseError::DatabaseFatal(Some(format!(
+                    "Failed to revoke all manager auth instances: {error}"
+                )))
+            })
         })
     }
 
@@ -186,7 +242,7 @@ impl ManagerAuthInstance {
 
 #[cfg(test)]
 mod tests {
-    use super::ManagerAuthInstance;
+    use super::{INITIAL_SESSION_VERSION, ManagerAuthInstance};
     use crate::database::TestDbContext;
 
     #[test]
@@ -202,11 +258,13 @@ mod tests {
 
             assert_ne!(first.id, second.id);
             assert_eq!(first.current_refresh_jti, "jti-first");
+            assert_eq!(first.session_version, INITIAL_SESSION_VERSION);
             assert_eq!(second.current_refresh_jti, "jti-second");
 
             let rotated = ManagerAuthInstance::rotate_refresh_jti(
                 first.id,
                 "jti-first",
+                INITIAL_SESSION_VERSION,
                 "jti-first-rotated".to_string(),
                 1_020,
                 2_020,
@@ -214,18 +272,35 @@ mod tests {
             .expect("rotation should query")
             .expect("matching current jti should rotate");
             assert_eq!(rotated.current_refresh_jti, "jti-first-rotated");
+            assert_eq!(rotated.session_version, 2);
             assert_eq!(rotated.last_rotated_at, 1_020);
             assert_eq!(rotated.expires_at, 2_020);
 
             let stale_rotation = ManagerAuthInstance::rotate_refresh_jti(
                 first.id,
                 "jti-first",
+                INITIAL_SESSION_VERSION,
                 "stale-rotation".to_string(),
                 1_030,
                 2_030,
             )
             .expect("stale rotation should query");
             assert!(stale_rotation.is_none());
+
+            let stale_version_rotation = ManagerAuthInstance::rotate_refresh_jti(
+                first.id,
+                "jti-first-rotated",
+                INITIAL_SESSION_VERSION,
+                "stale-version".to_string(),
+                1_030,
+                2_030,
+            )
+            .expect("stale version rotation should query");
+            assert!(stale_version_rotation.is_none());
+
+            let active = ManagerAuthInstance::list_active_instances(1_035)
+                .expect("active instances should load");
+            assert_eq!(active.len(), 2);
 
             let revoked = ManagerAuthInstance::revoke_instance(first.id, 1_040, "logout")
                 .expect("revoke should query")
@@ -238,6 +313,15 @@ mod tests {
                 .expect("second instance should still exist");
             assert_eq!(second_after_revoke.current_refresh_jti, "jti-second");
             assert_eq!(second_after_revoke.revoked_at, None);
+
+            let revoked_all = ManagerAuthInstance::revoke_all_active(1_050, "logout_all")
+                .expect("all active instances should revoke");
+            assert_eq!(revoked_all, 1);
+            assert!(
+                ManagerAuthInstance::list_active_instances(1_051)
+                    .expect("active instances should load after revoke all")
+                    .is_empty()
+            );
 
             let cleanup_count = ManagerAuthInstance::cleanup_expired_instances(2_025)
                 .expect("cleanup should succeed");

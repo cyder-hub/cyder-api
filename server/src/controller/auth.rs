@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json,
-    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
+    extract::{ConnectInfo, DefaultBodyLimit, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     middleware,
     response::{IntoResponse, Response},
@@ -10,6 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::net::SocketAddr;
 
 use crate::service::admin::auth::{
     AuthTokenPair, BootstrapError, BootstrapStatus, BootstrapStatusError, LoginError, LogoutError,
@@ -19,7 +20,7 @@ use crate::service::app_state::{AppState, StateRouter, create_state_router};
 use crate::utils::{
     HttpResult,
     auth::{
-        BearerTokenError, ManagerAuthContext, authorization_access_token_middleware,
+        BearerTokenError, ManagerAuthContext, authorization_access_middleware,
         extract_bearer_token_from_headers,
     },
 };
@@ -78,6 +79,8 @@ enum LoginHttpError {
     Uninitialized,
     InvalidPassword,
     Busy,
+    SourceRateLimited(u64),
+    GlobalRateLimited(u64),
     Unavailable,
     Storage,
     InvalidRequest,
@@ -97,6 +100,7 @@ enum RotatePasswordHttpError {
 enum RefreshHttpError {
     Invalid,
     EpochMismatch,
+    Replay,
     Unavailable,
 }
 
@@ -157,45 +161,57 @@ impl IntoResponse for BootstrapHttpError {
 
 impl IntoResponse for LoginHttpError {
     fn into_response(self) -> Response {
-        let (status, code, message, retry) = match self {
+        let (status, code, message, retry_after) = match self {
             Self::Uninitialized => (
                 StatusCode::CONFLICT,
                 1411,
                 "manager credential is not initialized",
-                false,
+                None,
             ),
             Self::InvalidPassword => (
                 StatusCode::UNAUTHORIZED,
                 1412,
                 "invalid manager password",
-                false,
+                None,
             ),
             Self::Busy => (
                 StatusCode::TOO_MANY_REQUESTS,
                 1413,
                 "manager login is temporarily limited",
-                true,
+                Some(1),
+            ),
+            Self::SourceRateLimited(retry_after) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                1417,
+                "manager login source is temporarily locked",
+                Some(retry_after),
+            ),
+            Self::GlobalRateLimited(retry_after) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                1418,
+                "manager login anomaly protection is active",
+                Some(retry_after),
             ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 1414,
                 "manager credential unavailable",
-                false,
+                None,
             ),
             Self::Storage => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 1415,
                 "manager login session unavailable",
-                false,
+                None,
             ),
             Self::InvalidRequest => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 1416,
                 "login request is invalid",
-                false,
+                None,
             ),
         };
-        auth_error_response(status, code, message, retry)
+        auth_error_response_with_retry_after(status, code, message, retry_after)
     }
 }
 
@@ -249,6 +265,7 @@ impl IntoResponse for RefreshHttpError {
             Self::Invalid => (1441, "invalid refresh token"),
             Self::EpochMismatch => (1442, "manager credential no longer valid"),
             Self::Unavailable => (1443, "manager refresh unavailable"),
+            Self::Replay => (1444, "refresh token replay detected"),
         };
         let status = if matches!(self, Self::Unavailable) {
             StatusCode::SERVICE_UNAVAILABLE
@@ -283,11 +300,20 @@ fn auth_error_response(
     message: &'static str,
     retry_after: bool,
 ) -> Response {
+    auth_error_response_with_retry_after(status, code, message, retry_after.then_some(1))
+}
+
+fn auth_error_response_with_retry_after(
+    status: StatusCode,
+    code: u16,
+    message: &'static str,
+    retry_after: Option<u64>,
+) -> Response {
     let mut response = (status, Json(json!({ "code": code, "msg": message }))).into_response();
-    if retry_after {
-        response
-            .headers_mut()
-            .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+    if let Some(retry_after) = retry_after {
+        if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+            response.headers_mut().insert(RETRY_AFTER, value);
+        }
     }
     response
 }
@@ -324,13 +350,14 @@ async fn bootstrap(
 
 async fn login(
     State(app_state): State<Arc<AppState>>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     request: Result<Json<PasswordRequest>, JsonRejection>,
 ) -> Result<HttpResult<AuthTokenPairResponse>, LoginHttpError> {
     let Json(request) = request.map_err(|_| LoginHttpError::InvalidRequest)?;
     app_state
         .admin
         .auth
-        .login(&request.password)
+        .login(peer_addr.ip(), &request.password)
         .await
         .map_err(LoginHttpError::from)
         .map(AuthTokenPairResponse::from)
@@ -386,6 +413,19 @@ async fn logout(
     Ok(HttpResult::new(()))
 }
 
+async fn logout_all(
+    State(app_state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<ManagerAuthContext>,
+) -> Result<HttpResult<()>, LogoutHttpError> {
+    app_state
+        .admin
+        .auth
+        .logout_all(&auth_context)
+        .await
+        .map_err(LogoutHttpError::from)?;
+    Ok(HttpResult::new(()))
+}
+
 impl From<BootstrapError> for BootstrapHttpError {
     fn from(error: BootstrapError) -> Self {
         match error {
@@ -403,7 +443,9 @@ impl From<LoginError> for LoginHttpError {
         match error {
             LoginError::Uninitialized => Self::Uninitialized,
             LoginError::InvalidPassword => Self::InvalidPassword,
-            LoginError::RateLimited | LoginError::Busy => Self::Busy,
+            LoginError::SourceRateLimited { retry_after } => Self::SourceRateLimited(retry_after),
+            LoginError::GlobalRateLimited { retry_after } => Self::GlobalRateLimited(retry_after),
+            LoginError::Busy => Self::Busy,
             LoginError::Unavailable => Self::Unavailable,
             LoginError::Storage => Self::Storage,
         }
@@ -428,6 +470,7 @@ impl From<RefreshError> for RefreshHttpError {
         match error {
             RefreshError::Invalid => Self::Invalid,
             RefreshError::EpochMismatch => Self::EpochMismatch,
+            RefreshError::Replay => Self::Replay,
             RefreshError::Unavailable | RefreshError::Storage => Self::Unavailable,
         }
     }
@@ -442,11 +485,15 @@ impl From<LogoutError> for LogoutHttpError {
     }
 }
 
-pub fn create_auth_router() -> StateRouter {
+pub fn create_auth_router(app_state: Arc<AppState>) -> StateRouter {
     let protected_router = create_state_router()
         .route("/password/rotate", post(rotate_password))
         .route("/logout", post(logout))
-        .layer(middleware::from_fn(authorization_access_token_middleware));
+        .route("/logout_all", post(logout_all))
+        .layer(middleware::from_fn_with_state(
+            app_state,
+            authorization_access_middleware,
+        ));
 
     create_state_router().nest(
         "/auth",
@@ -462,10 +509,12 @@ pub fn create_auth_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::sync::Arc;
 
     use axum::{
         body::{Body, to_bytes},
+        extract::ConnectInfo,
         http::{Method, Request, StatusCode, header},
         response::IntoResponse,
     };
@@ -475,7 +524,7 @@ mod tests {
     use crate::{
         controller::create_manager_router,
         database::{
-            TestDbContext,
+            DbConnection, TestDbContext, get_connection,
             manager_credential::{ManagerCredential, NewManagerCredential},
         },
         service::app_state::{AppState, create_test_app_state},
@@ -489,12 +538,27 @@ mod tests {
         BootstrapHttpError, LoginHttpError, LogoutHttpError, RefreshHttpError,
         RotatePasswordHttpError, create_auth_router,
     };
+    use diesel::RunQueryDsl;
 
     const INITIAL_PASSWORD: &str = "correct horse battery staple";
     const ROTATED_PASSWORD: &str = "correct horse battery staple rotated";
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
-        create_auth_router()
+        send_from(
+            app_state,
+            request,
+            SocketAddr::from(([127, 0, 0, 1], 31_000)),
+        )
+        .await
+    }
+
+    async fn send_from(
+        app_state: &Arc<AppState>,
+        mut request: Request<Body>,
+        peer_addr: SocketAddr,
+    ) -> axum::response::Response {
+        request.extensions_mut().insert(ConnectInfo(peer_addr));
+        create_auth_router(Arc::clone(app_state))
             .with_state(Arc::clone(app_state))
             .oneshot(request)
             .await
@@ -503,8 +567,11 @@ mod tests {
 
     async fn send_manager(
         app_state: &Arc<AppState>,
-        request: Request<Body>,
+        mut request: Request<Body>,
     ) -> axum::response::Response {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 31_000))));
         create_manager_router(Arc::clone(app_state))
             .with_state(Arc::clone(app_state))
             .oneshot(request)
@@ -673,13 +740,82 @@ mod tests {
                 )
                 .await;
                 assert_eq!(refresh_response.status(), StatusCode::OK);
+                let (_, refreshed_access) = token_pair(&response_json(refresh_response).await);
 
-                let logout_response = send(
+                let replay = send(
+                    &app_state,
+                    auth_request(
+                        Method::POST,
+                        "/auth/refresh_token",
+                        &rotated_refresh,
+                        json!({}),
+                    ),
+                )
+                .await;
+                assert_error(replay, StatusCode::UNAUTHORIZED, 1444).await;
+
+                let stale_access_logout = send(
                     &app_state,
                     auth_request(Method::POST, "/auth/logout", &rotated_access, json!({})),
                 )
                 .await;
+                assert_error(stale_access_logout, StatusCode::UNAUTHORIZED, 1435).await;
+
+                let logout_response = send(
+                    &app_state,
+                    auth_request(Method::POST, "/auth/logout", &refreshed_access, json!({})),
+                )
+                .await;
                 assert_eq!(logout_response.status(), StatusCode::OK);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn auth_http_logout_all_revokes_current_and_other_sessions() {
+        let test_db_context = TestDbContext::new_sqlite("controller-auth-logout-all.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+                let first = app_state
+                    .admin
+                    .auth
+                    .bootstrap(INITIAL_PASSWORD)
+                    .await
+                    .expect("bootstrap should succeed");
+                let second_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/login",
+                        json!({ "password": INITIAL_PASSWORD }),
+                    ),
+                )
+                .await;
+                assert_eq!(second_response.status(), StatusCode::OK);
+                let (_, second_access) = token_pair(&response_json(second_response).await);
+
+                let logout_all_response = send(
+                    &app_state,
+                    auth_request(Method::POST, "/auth/logout_all", &second_access, json!({})),
+                )
+                .await;
+                assert_eq!(logout_all_response.status(), StatusCode::OK);
+
+                for access_token in [first.access_token, second_access] {
+                    let response = send_manager(
+                        &app_state,
+                        Request::builder()
+                            .method(Method::GET)
+                            .uri("/manager/api/system/overview")
+                            .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                            .body(Body::empty())
+                            .expect("request should build"),
+                    )
+                    .await;
+                    assert_error(response, StatusCode::UNAUTHORIZED, 1435).await;
+                }
             })
             .await;
     }
@@ -715,6 +851,82 @@ mod tests {
                 )
                 .await;
                 assert_error(oversized, StatusCode::UNPROCESSABLE_ENTITY, 1402).await;
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn auth_http_login_rate_limit_uses_peer_ip_and_ignores_forwarded_headers() {
+        let test_db_context = TestDbContext::new_sqlite("controller-auth-peer-rate-limit.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+                app_state
+                    .admin
+                    .auth
+                    .bootstrap(INITIAL_PASSWORD)
+                    .await
+                    .expect("bootstrap should succeed");
+                let first_peer = SocketAddr::from(([192, 0, 2, 10], 31_001));
+                let second_peer = SocketAddr::from(([192, 0, 2, 11], 31_002));
+
+                for index in 0..5 {
+                    let mut request = json_request(
+                        Method::POST,
+                        "/auth/login",
+                        json!({ "password": "wrong horse battery staple" }),
+                    );
+                    request.headers_mut().insert(
+                        "x-forwarded-for",
+                        format!("198.51.100.{}", index + 1)
+                            .parse()
+                            .expect("forwarded header should parse"),
+                    );
+                    request.headers_mut().insert(
+                        "x-real-ip",
+                        format!("203.0.113.{}", index + 1)
+                            .parse()
+                            .expect("real ip header should parse"),
+                    );
+                    let response = send_from(&app_state, request, first_peer).await;
+                    assert_error(response, StatusCode::UNAUTHORIZED, 1412).await;
+                }
+
+                let mut locked_request = json_request(
+                    Method::POST,
+                    "/auth/login",
+                    json!({ "password": INITIAL_PASSWORD }),
+                );
+                locked_request.headers_mut().insert(
+                    "forwarded",
+                    "for=203.0.113.200"
+                        .parse()
+                        .expect("forwarded header should parse"),
+                );
+                let locked = send_from(&app_state, locked_request, first_peer).await;
+                let retry_after = locked
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .expect("source lock should expose Retry-After")
+                    .to_str()
+                    .expect("Retry-After should be text")
+                    .parse::<u64>()
+                    .expect("Retry-After should be numeric");
+                assert!((1..=60).contains(&retry_after));
+                assert_error(locked, StatusCode::TOO_MANY_REQUESTS, 1417).await;
+
+                let independent = send_from(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/login",
+                        json!({ "password": INITIAL_PASSWORD }),
+                    ),
+                    second_peer,
+                )
+                .await;
+                assert_eq!(independent.status(), StatusCode::OK);
             })
             .await;
     }
@@ -810,6 +1022,79 @@ mod tests {
                 )
                 .await;
                 assert_eq!(accepted_after_rotation.status(), StatusCode::OK);
+
+                let rotated_context = decode_access_token(&rotated.access_token)
+                    .expect("rotated access should decode");
+                app_state
+                    .admin
+                    .auth
+                    .logout(&rotated_context)
+                    .await
+                    .expect("logout should revoke the rotated session");
+                let revoked = send_manager(
+                    &app_state,
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/manager/api/system/overview")
+                        .header(
+                            header::AUTHORIZATION,
+                            format!("Bearer {}", rotated.access_token),
+                        )
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await;
+                assert_error(revoked, StatusCode::UNAUTHORIZED, 1435).await;
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manager_router_access_guard_reports_unavailable_session_registry() {
+        let test_db_context =
+            TestDbContext::new_sqlite("manager-access-session-unavailable.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let initial_state = create_test_app_state(test_db_context.clone()).await;
+                let tokens = initial_state
+                    .admin
+                    .auth
+                    .bootstrap(INITIAL_PASSWORD)
+                    .await
+                    .expect("bootstrap should succeed");
+
+                let mut conn = get_connection().expect("connection should load");
+                match &mut conn {
+                    DbConnection::Postgres(conn) => {
+                        diesel::sql_query("DROP TABLE manager_auth_instance")
+                            .execute(conn)
+                            .expect("session table should drop");
+                    }
+                    DbConnection::Sqlite(conn) => {
+                        diesel::sql_query("DROP TABLE manager_auth_instance")
+                            .execute(conn)
+                            .expect("session table should drop");
+                    }
+                }
+                drop(conn);
+
+                let unavailable_state = create_test_app_state(test_db_context.clone()).await;
+                let response = send_manager(
+                    &unavailable_state,
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/manager/api/system/overview")
+                        .header(
+                            header::AUTHORIZATION,
+                            format!("Bearer {}", tokens.access_token),
+                        )
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await;
+                assert_error(response, StatusCode::SERVICE_UNAVAILABLE, 1436).await;
+                assert!(unavailable_state.max_body_size > 0);
             })
             .await;
     }
@@ -832,6 +1117,7 @@ mod tests {
                     crate::database::manager_credential::MANAGER_ID,
                     1,
                     &generate_token_jti(),
+                    crate::database::manager_auth_instance::INITIAL_SESSION_VERSION,
                     &uuid::Uuid::new_v4(),
                     now,
                 );
@@ -852,6 +1138,19 @@ mod tests {
 
     #[tokio::test]
     async fn auth_http_error_enums_have_stable_codes_statuses_and_retry_headers() {
+        for (response, expected_retry_after) in [
+            (LoginHttpError::SourceRateLimited(37).into_response(), "37"),
+            (LoginHttpError::GlobalRateLimited(23).into_response(), "23"),
+        ] {
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected_retry_after)
+            );
+        }
+
         let cases = [
             (
                 BootstrapHttpError::AlreadyInitialized.into_response(),
@@ -891,6 +1190,18 @@ mod tests {
                 false,
             ),
             (LoginHttpError::Busy.into_response(), 429, 1413, true),
+            (
+                LoginHttpError::SourceRateLimited(37).into_response(),
+                429,
+                1417,
+                true,
+            ),
+            (
+                LoginHttpError::GlobalRateLimited(23).into_response(),
+                429,
+                1418,
+                true,
+            ),
             (
                 LoginHttpError::Unavailable.into_response(),
                 503,
@@ -953,6 +1264,7 @@ mod tests {
                 1443,
                 false,
             ),
+            (RefreshHttpError::Replay.into_response(), 401, 1444, false),
             (
                 LogoutHttpError::InvalidCredential.into_response(),
                 401,
@@ -989,6 +1301,18 @@ mod tests {
                 1434,
                 false,
             ),
+            (
+                AccessGuardError::SessionInvalid.into_response(),
+                401,
+                1435,
+                false,
+            ),
+            (
+                AccessGuardError::SessionUnavailable.into_response(),
+                503,
+                1436,
+                false,
+            ),
         ];
 
         for (response, expected_status, expected_code, retry) in cases {
@@ -1013,7 +1337,7 @@ mod tests {
                 .iter()
                 .map(|value| value.as_u64().expect("access guard code should be numeric"))
                 .collect::<Vec<_>>(),
-            vec![1431, 1432, 1433, 1434]
+            vec![1431, 1432, 1433, 1434, 1435, 1436]
         );
 
         let expected = [
@@ -1026,22 +1350,29 @@ mod tests {
             (
                 "/ai/manager/api/auth/login",
                 "post",
-                vec![1411, 1412, 1413, 1414, 1415, 1416],
+                vec![1411, 1412, 1413, 1414, 1415, 1416, 1417, 1418],
             ),
             (
                 "/ai/manager/api/auth/password/rotate",
                 "post",
-                vec![1421, 1422, 1423, 1424, 1425, 1426],
+                vec![
+                    1421, 1422, 1423, 1424, 1425, 1426, 1431, 1432, 1433, 1434, 1435, 1436,
+                ],
             ),
             (
                 "/ai/manager/api/auth/refresh_token",
                 "post",
-                vec![1441, 1442, 1443],
+                vec![1441, 1442, 1443, 1444],
             ),
             (
                 "/ai/manager/api/auth/logout",
                 "post",
-                vec![1431, 1432, 1433, 1451],
+                vec![1431, 1432, 1433, 1434, 1435, 1436, 1451],
+            ),
+            (
+                "/ai/manager/api/auth/logout_all",
+                "post",
+                vec![1431, 1432, 1433, 1434, 1435, 1436, 1451],
             ),
         ];
         for (path, method, error_codes) in expected {

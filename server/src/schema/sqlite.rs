@@ -147,6 +147,7 @@ diesel::table! {
         manager_id -> BigInt,
         manager_subject -> Text,
         current_refresh_jti -> Text,
+        session_version -> BigInt,
         created_at -> BigInt,
         last_rotated_at -> BigInt,
         expires_at -> BigInt,

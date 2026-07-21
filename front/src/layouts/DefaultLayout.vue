@@ -5,9 +5,11 @@ import { useI18n } from "vue-i18n";
 import LanguageSwitcher from "@/components/LanguageSwitcher.vue";
 import RotatePasswordDialog from "@/components/manager/RotatePasswordDialog.vue";
 import { navItems, navSectionOrder, type NavSection } from "@/router/nav-items";
-import { logout as logoutSession } from "@/services/auth";
+import { logout as logoutSession, logoutAll } from "@/services/auth";
+import { confirm, toastController } from "@/services/uiFeedback";
 import {
   LogOut,
+  ShieldX,
   KeyRound,
   Menu,
   PanelLeftClose,
@@ -23,6 +25,8 @@ const router = useRouter();
 const isCollapsed = ref(false);
 const isMobileNavOpen = ref(false);
 const isPasswordDialogOpen = ref(false);
+const isLoggingOut = ref(false);
+const isLoggingOutAll = ref(false);
 
 type ManagerRouteMeta = {
   titleKey?: string;
@@ -46,9 +50,47 @@ const closeMobileNav = () => {
 };
 
 const handleLogout = async () => {
-  await logoutSession();
+  if (isLoggingOut.value || isLoggingOutAll.value) return;
+  isLoggingOut.value = true;
+  try {
+    const outcome = await logoutSession();
+    closeMobileNav();
+    await router.replace({ name: "Login" });
+    if (!outcome.serverRevocationConfirmed) {
+      toastController.warn(
+        t("app.logoutLocalOnlyTitle"),
+        t("app.logoutLocalOnlyDescription"),
+      );
+    }
+  } finally {
+    isLoggingOut.value = false;
+  }
+};
+
+const handleLogoutAll = async () => {
+  if (isLoggingOut.value || isLoggingOutAll.value) return;
   closeMobileNav();
-  router.replace({ name: "Login" });
+  const confirmed = await confirm({
+    title: t("app.logoutAllConfirmTitle"),
+    description: t("app.logoutAllConfirmDescription"),
+    confirmText: t("app.logoutAllConfirmAction"),
+    cancelText: t("common.cancel"),
+  });
+  if (!confirmed) return;
+
+  isLoggingOutAll.value = true;
+  try {
+    await logoutAll();
+    toastController.success(t("app.logoutAllSuccess"));
+    await router.replace({ name: "Login" });
+  } catch {
+    toastController.error(
+      t("app.logoutAllFailedTitle"),
+      t("app.logoutAllFailedDescription"),
+    );
+  } finally {
+    isLoggingOutAll.value = false;
+  }
 };
 
 const openPasswordDialog = () => {
@@ -228,6 +270,7 @@ watch(
           :title="isCollapsed ? t('app.logout') : undefined"
           :aria-label="t('app.logout')"
           @click="handleLogout"
+          :disabled="isLoggingOut || isLoggingOutAll"
         >
           <LogOut class="h-4 w-4 flex-shrink-0 text-gray-400 group-hover:text-gray-600" />
           <span
@@ -235,6 +278,20 @@ watch(
             class="ml-2.5 overflow-hidden whitespace-nowrap"
           >
             {{ t("app.logout") }}
+          </span>
+        </button>
+        <button
+          type="button"
+          class="group flex w-full items-center rounded-md px-3 py-2 text-sm font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+          :class="{ 'justify-center px-0': isCollapsed }"
+          :title="isCollapsed ? t('app.logoutAll') : undefined"
+          :aria-label="t('app.logoutAll')"
+          :disabled="isLoggingOut || isLoggingOutAll"
+          @click="handleLogoutAll"
+        >
+          <ShieldX class="h-4 w-4 flex-shrink-0 text-gray-400 group-hover:text-gray-600" />
+          <span v-if="!isCollapsed" class="ml-2.5 overflow-hidden whitespace-nowrap">
+            {{ t("app.logoutAll") }}
           </span>
         </button>
       </div>
@@ -327,9 +384,20 @@ watch(
               class="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
               :aria-label="t('app.logout')"
               @click="handleLogout"
+              :disabled="isLoggingOut || isLoggingOutAll"
             >
               <LogOut class="h-4 w-4 flex-shrink-0 text-gray-400" />
               <span class="truncate">{{ t("app.logout") }}</span>
+            </button>
+            <button
+              type="button"
+              class="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+              :aria-label="t('app.logoutAll')"
+              :disabled="isLoggingOut || isLoggingOutAll"
+              @click="handleLogoutAll"
+            >
+              <ShieldX class="h-4 w-4 flex-shrink-0 text-gray-400" />
+              <span class="truncate">{{ t("app.logoutAll") }}</span>
             </button>
             <LanguageSwitcher class="w-full" />
           </div>

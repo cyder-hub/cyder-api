@@ -57,6 +57,7 @@ pub fn create_manager_router(app_state: Arc<AppState>) -> StateRouter {
         ))
         .nest_service("/ui/assets", serve_vendor_dir);
 
+    let auth_router = create_auth_router(Arc::clone(&app_state));
     let api_router = create_state_router().nest(
         "/api",
         create_state_router()
@@ -76,7 +77,7 @@ pub fn create_manager_router(app_state: Arc<AppState>) -> StateRouter {
                 app_state,
                 authorization_access_middleware,
             ))
-            .merge(create_auth_router()),
+            .merge(auth_router),
     );
 
     create_state_router().nest(

@@ -5,8 +5,9 @@ use super::{
     run_sqlite_migrations, sqlite_user_table_count,
 };
 use diesel::{
-    Connection, PgConnection, QueryableByName, RunQueryDsl, connection::SimpleConnection,
-    sql_types::Text,
+    Connection, PgConnection, QueryableByName, RunQueryDsl,
+    connection::SimpleConnection,
+    sql_types::{BigInt, Text},
 };
 use diesel_migrations::MigrationHarness;
 use std::{
@@ -22,6 +23,12 @@ const POSTGRES_CLEAN_BASELINE_VERSION: &str = "20260423180000";
 struct DatabaseNameRow {
     #[diesel(sql_type = Text)]
     name: String,
+}
+
+#[derive(QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = BigInt)]
+    count: i64,
 }
 
 fn assert_bootstrap_versions_recorded(
@@ -98,6 +105,68 @@ fn sqlite_clean_upgrade_chain_from_empty() {
             .has_pending_migration(SQLITE_UPGRADE_MIGRATIONS)
             .expect("sqlite pending migrations should remain queryable"),
         "sqlite second migration run should remain fully applied"
+    );
+}
+
+#[test]
+fn sqlite_manager_auth_session_version_upgrade_clears_sessions_only() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("manager-auth-session-version-upgrade.sqlite");
+    connection
+        .batch_execute(
+            "CREATE TABLE manager_credential (
+                manager_id BIGINT PRIMARY KEY NOT NULL,
+                manager_subject TEXT NOT NULL,
+                password_verifier TEXT NOT NULL,
+                credential_epoch TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            );
+            CREATE TABLE manager_auth_instance (
+                id BIGINT PRIMARY KEY NOT NULL,
+                manager_id BIGINT NOT NULL,
+                manager_subject TEXT NOT NULL,
+                current_refresh_jti TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                last_rotated_at BIGINT NOT NULL,
+                expires_at BIGINT NOT NULL,
+                revoked_at BIGINT NULL,
+                revoked_reason TEXT NULL
+            );
+            INSERT INTO manager_credential VALUES
+                (0, 'admin', 'verifier', 'epoch', 1, 1);
+            INSERT INTO manager_auth_instance VALUES
+                (1, 0, 'admin', 'refresh-jti', 1, 1, 999999, NULL, NULL);",
+        )
+        .expect("pre-version manager auth schema should create");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-21-090000_manager_auth_session_version/up.sql"
+        ))
+        .expect("session version migration should run");
+
+    let credential_count = diesel::sql_query("SELECT COUNT(*) AS count FROM manager_credential")
+        .get_result::<CountRow>(&mut connection)
+        .expect("credential count should query")
+        .count;
+    let session_count = diesel::sql_query("SELECT COUNT(*) AS count FROM manager_auth_instance")
+        .get_result::<CountRow>(&mut connection)
+        .expect("session count should query")
+        .count;
+    let version_default = diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM pragma_table_info('manager_auth_instance')
+         WHERE name = 'session_version' AND \"notnull\" = 1 AND \"dflt_value\" = '1'",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("session version column should query")
+    .count;
+
+    assert_eq!(credential_count, 1, "manager credential must be preserved");
+    assert_eq!(session_count, 0, "pre-version sessions must be cleared");
+    assert_eq!(
+        version_default, 1,
+        "session version column must be required"
     );
 }
 

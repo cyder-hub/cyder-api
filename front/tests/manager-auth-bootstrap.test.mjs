@@ -9,8 +9,12 @@ import { validateManagerPassword } from "../src/services/managerPassword.ts";
 const ROOT = new URL("../", import.meta.url);
 
 test("manager auth route matrix prioritizes bootstrap state before session restoration", () => {
-  const decide = (bootstrapState, routeKind, hasRefreshToken = false, hasAccessToken = false) =>
-    decideAuthRoute({ bootstrapState, routeKind, hasRefreshToken, hasAccessToken });
+  const decide = (
+    bootstrapState,
+    routeKind,
+    hasStoredSession = false,
+    lifecycle = "unknown",
+  ) => decideAuthRoute({ bootstrapState, routeKind, hasStoredSession, lifecycle });
 
   assert.equal(decide("uninitialized", "protected"), "bootstrap");
   assert.equal(decide("uninitialized", "login"), "bootstrap");
@@ -19,9 +23,9 @@ test("manager auth route matrix prioritizes bootstrap state before session resto
   assert.equal(decide("error", "bootstrap"), "allow");
   assert.equal(decide("ready", "protected"), "login");
   assert.equal(decide("ready", "protected", true), "restore");
-  assert.equal(decide("ready", "protected", true, true), "allow");
+  assert.equal(decide("ready", "protected", true, "authenticated"), "allow");
   assert.equal(decide("ready", "login", true), "restore");
-  assert.equal(decide("ready", "login", true, true), "dashboard");
+  assert.equal(decide("ready", "login", true, "authenticated"), "dashboard");
   assert.equal(decide("ready", "bootstrap"), "login");
   assert.equal(decide("ready", "bootstrap", true), "restore");
 });

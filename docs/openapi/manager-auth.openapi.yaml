@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: Cyder Manager Auth Living Contract
-  version: 1.0.0-pre.1
+  version: 1.0.0-pre.2
   description: Single-manager authentication contract for the Cyder management control plane.
 servers:
   - url: /
-x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434]
+x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434, 1435, 1436]
 paths:
   /ai/manager/api/auth/bootstrap/status:
     get:
@@ -47,7 +47,7 @@ paths:
     post:
       operationId: loginManager
       security: []
-      x-cyder-error-codes: [1411, 1412, 1413, 1414, 1415, 1416]
+      x-cyder-error-codes: [1411, 1412, 1413, 1414, 1415, 1416, 1417, 1418]
       requestBody:
         required: true
         content:
@@ -64,7 +64,7 @@ paths:
         "422":
           $ref: "#/components/responses/AuthError"
         "429":
-          $ref: "#/components/responses/BusyError"
+          $ref: "#/components/responses/LoginRateLimitError"
         "503":
           $ref: "#/components/responses/AuthError"
   /ai/manager/api/auth/password/rotate:
@@ -72,7 +72,7 @@ paths:
       operationId: rotateManagerPassword
       security:
         - managerAccessToken: []
-      x-cyder-error-codes: [1421, 1422, 1423, 1424, 1425, 1426]
+      x-cyder-error-codes: [1421, 1422, 1423, 1424, 1425, 1426, 1431, 1432, 1433, 1434, 1435, 1436]
       requestBody:
         required: true
         content:
@@ -97,7 +97,7 @@ paths:
       operationId: refreshManagerTokens
       security:
         - managerRefreshToken: []
-      x-cyder-error-codes: [1441, 1442, 1443]
+      x-cyder-error-codes: [1441, 1442, 1443, 1444]
       responses:
         "200":
           $ref: "#/components/responses/TokenPair"
@@ -110,10 +110,28 @@ paths:
       operationId: logoutManager
       security:
         - managerAccessToken: []
-      x-cyder-error-codes: [1431, 1432, 1433, 1451]
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1451]
       responses:
         "200":
           description: Current manager refresh session was revoked when present.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmptyEnvelope"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/logout_all:
+    post:
+      operationId: logoutAllManagerSessions
+      description: Revokes every active manager session, including the caller.
+      security:
+        - managerAccessToken: []
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1451]
+      responses:
+        "200":
+          description: Every active manager session was revoked.
           content:
             application/json:
               schema:
@@ -127,11 +145,11 @@ components:
     managerAccessToken:
       type: http
       scheme: bearer
-      bearerFormat: JWT access token
+      bearerFormat: JWT access token with required session_version
     managerRefreshToken:
       type: http
       scheme: bearer
-      bearerFormat: JWT refresh token
+      bearerFormat: JWT refresh token with required session_version
   schemas:
     PasswordRequest:
       type: object
@@ -225,6 +243,18 @@ components:
           schema:
             type: integer
             const: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
+    LoginRateLimitError:
+      description: Password verification is busy or login protection is active.
+      headers:
+        Retry-After:
+          required: true
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:

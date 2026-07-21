@@ -1,4 +1,4 @@
-import type { BootstrapLoadState } from "@/store/authStore";
+import type { AuthLifecycle, BootstrapLoadState } from "@/store/authStore";
 
 export type AuthRouteKind = "bootstrap" | "login" | "protected" | "public";
 export type AuthRouteDecision = "allow" | "bootstrap" | "login" | "dashboard" | "restore";
@@ -6,8 +6,8 @@ export type AuthRouteDecision = "allow" | "bootstrap" | "login" | "dashboard" | 
 export interface AuthRouteDecisionInput {
   bootstrapState: BootstrapLoadState;
   routeKind: AuthRouteKind;
-  hasRefreshToken: boolean;
-  hasAccessToken: boolean;
+  hasStoredSession: boolean;
+  lifecycle: AuthLifecycle;
 }
 
 export function decideAuthRoute(input: AuthRouteDecisionInput): AuthRouteDecision {
@@ -22,16 +22,16 @@ export function decideAuthRoute(input: AuthRouteDecisionInput): AuthRouteDecisio
   }
 
   if (input.routeKind === "bootstrap") {
-    if (input.hasAccessToken) return "dashboard";
-    return input.hasRefreshToken ? "restore" : "login";
+    if (input.lifecycle === "authenticated") return "dashboard";
+    return input.hasStoredSession ? "restore" : "login";
   }
   if (input.routeKind === "protected") {
-    if (input.hasAccessToken) return "allow";
-    return input.hasRefreshToken ? "restore" : "login";
+    if (input.lifecycle === "authenticated") return "allow";
+    return input.hasStoredSession ? "restore" : "login";
   }
   if (input.routeKind === "login") {
-    if (input.hasAccessToken) return "dashboard";
-    return input.hasRefreshToken ? "restore" : "allow";
+    if (input.lifecycle === "authenticated") return "dashboard";
+    return input.hasStoredSession ? "restore" : "allow";
   }
   return "allow";
 }

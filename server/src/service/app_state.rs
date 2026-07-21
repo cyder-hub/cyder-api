@@ -157,6 +157,7 @@ impl AppState {
     #[cfg(not(test))]
     pub fn start_background_workers(self: &Arc<Self>) {
         self.spawn_metrics_reconciliation_worker();
+        self.spawn_manager_session_cleanup_worker();
     }
 
     #[cfg(not(test))]
@@ -192,6 +193,38 @@ impl AppState {
                 }
             }
         });
+    }
+
+    #[cfg(not(test))]
+    fn spawn_manager_session_cleanup_worker(self: &Arc<Self>) {
+        let app_state = Arc::clone(self);
+        self.infra.spawn_background_task(async move {
+            let period = std::time::Duration::from_secs(60 * 60);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            loop {
+                interval.tick().await;
+                app_state.tick_manager_session_cleanup();
+            }
+        });
+    }
+
+    fn tick_manager_session_cleanup(&self) -> Option<usize> {
+        match self.admin.auth.cleanup_expired_instances() {
+            Ok(removed) => {
+                if removed > 0 {
+                    crate::debug_event!(
+                        "manager.auth.session_cleanup_completed",
+                        removed_sessions = removed
+                    );
+                }
+                Some(removed)
+            }
+            Err(_) => {
+                crate::warn_event!("manager.auth.session_cleanup_failed", reason = "storage");
+                None
+            }
+        }
     }
 }
 
@@ -253,11 +286,13 @@ mod tests {
     use super::super::admin::AdminServices;
     use super::AppState;
     use crate::config::{CONFIG, RuntimeStateBackendType};
-    use crate::database::TestDbContext;
+    use crate::database::manager_auth_instance::ManagerAuthInstance;
+    use crate::database::{DbConnection, TestDbContext, get_connection};
     use crate::service::catalog::CatalogService;
     use crate::service::infra::AppInfra;
     use crate::service::metrics::MetricsService;
     use crate::service::runtime::{ProviderKeySelector, RuntimeStateBackendBundle};
+    use diesel::RunQueryDsl;
     use std::sync::Arc;
 
     async fn test_app_state() -> AppState {
@@ -349,5 +384,51 @@ mod tests {
 
         assert_eq!(app_state.max_body_size, CONFIG.max_body_size);
         assert_eq!(app_state.timezone, CONFIG.timezone);
+    }
+
+    #[tokio::test]
+    async fn manager_session_cleanup_tick_removes_expired_rows_and_survives_storage_failure() {
+        let test_db_context = TestDbContext::new_sqlite("app-state-session-cleanup.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let app_state = super::create_test_app_state(test_db_context.clone()).await;
+                let now = crate::utils::auth::get_current_timestamp();
+                let expired = ManagerAuthInstance::create_instance(
+                    "expired-cleanup".to_string(),
+                    now - 2,
+                    now - 1,
+                )
+                .expect("expired fixture should create");
+
+                assert_eq!(app_state.tick_manager_session_cleanup(), Some(1));
+                assert!(
+                    ManagerAuthInstance::get_instance(expired.id)
+                        .expect("expired lookup should query")
+                        .is_none()
+                );
+
+                let mut conn = get_connection().expect("connection should load");
+                match &mut conn {
+                    DbConnection::Postgres(conn) => {
+                        diesel::sql_query("DROP TABLE manager_auth_instance")
+                            .execute(conn)
+                            .expect("session table should drop");
+                    }
+                    DbConnection::Sqlite(conn) => {
+                        diesel::sql_query("DROP TABLE manager_auth_instance")
+                            .execute(conn)
+                            .expect("session table should drop");
+                    }
+                }
+                drop(conn);
+
+                assert_eq!(app_state.tick_manager_session_cleanup(), None);
+                assert!(
+                    app_state.max_body_size > 0,
+                    "proxy state must remain usable"
+                );
+            })
+            .await;
     }
 }

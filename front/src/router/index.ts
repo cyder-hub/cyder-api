@@ -2,8 +2,9 @@ import { createRouter, createWebHistory } from "vue-router";
 import DefaultLayout from "@/layouts/DefaultLayout.vue";
 import LoginLayout from "@/layouts/LoginLayout.vue";
 import { useAuthStore } from "@/store/authStore";
-import { getBootstrapStatus, tryRefreshToken } from "@/services/auth";
-import { readStoredRefreshToken } from "@/services/authTokens";
+import { getBootstrapStatus, restoreStoredSession } from "@/services/auth";
+import { readStoredAuthSession } from "@/services/authTokens";
+import { registerLoginNavigation } from "@/services/authRuntime";
 import { decideAuthRoute, type AuthRouteKind } from "./auth-state";
 
 const router = createRouter({
@@ -180,11 +181,17 @@ const router = createRouter({
   ],
 });
 
+registerLoginNavigation(() => {
+  if (router.currentRoute.value.name !== "Login") {
+    void router.push({ name: "Login" });
+  }
+});
+
 router.beforeEach(async (to, _from, next) => {
   const authStore = useAuthStore();
   const bootstrapState = await authStore.resolveBootstrapState(getBootstrapStatus);
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
-  const refreshToken = readStoredRefreshToken();
+  const storedSession = readStoredAuthSession();
   const routeKind: AuthRouteKind =
     to.name === "Bootstrap"
       ? "bootstrap"
@@ -196,8 +203,8 @@ router.beforeEach(async (to, _from, next) => {
   const decision = decideAuthRoute({
     bootstrapState,
     routeKind,
-    hasRefreshToken: !!refreshToken,
-    hasAccessToken: !!authStore.accessToken,
+    hasStoredSession: !!storedSession,
+    lifecycle: authStore.lifecycle,
   });
 
   if (decision === "bootstrap") {
@@ -213,9 +220,13 @@ router.beforeEach(async (to, _from, next) => {
     return;
   }
   if (decision === "restore") {
-    const refreshed = await tryRefreshToken();
+    const refreshed = await restoreStoredSession();
     if (!refreshed) {
-      next({ name: "Login" });
+      if (routeKind === "login") {
+        next();
+      } else {
+        next({ name: "Login" });
+      }
       return;
     }
     if (routeKind === "protected") {

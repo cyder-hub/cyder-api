@@ -441,7 +441,16 @@
     "footer": "© 2025 AI网关管理器. 版权所有.",
     "toggleSidebar": "切换侧边栏",
     "rotatePassword": "修改密码",
-    "logout": "退出登录"
+    "logout": "退出当前会话",
+    "logoutLocalOnlyTitle": "已在本地退出",
+    "logoutLocalOnlyDescription": "服务端未能确认会话撤销；当前浏览器已删除本地会话。",
+    "logoutAll": "退出全部会话",
+    "logoutAllConfirmTitle": "确定退出全部管理员会话？",
+    "logoutAllConfirmDescription": "这会让管理员在所有浏览器中退出，之后需要重新登录。",
+    "logoutAllConfirmAction": "退出全部会话",
+    "logoutAllSuccess": "已退出全部管理员会话。",
+    "logoutAllFailedTitle": "无法退出全部会话",
+    "logoutAllFailedDescription": "当前会话已保留，请检查连接后重试。"
   },
   "language": {
     "change": "切换语言",

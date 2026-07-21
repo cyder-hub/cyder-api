@@ -510,6 +510,7 @@ mod tests {
             manager_id: MANAGER_ID,
             manager_subject: MANAGER_SUBJECT.to_string(),
             current_refresh_jti: jti.to_string(),
+            session_version: super::super::manager_auth_instance::INITIAL_SESSION_VERSION,
             created_at: now,
             last_rotated_at: now,
             expires_at: now + 3_600,

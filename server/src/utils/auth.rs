@@ -48,6 +48,7 @@ pub struct ManagerRefreshClaims {
     sub: String,
     iid: i64,
     jti: String,
+    session_version: i64,
     credential_epoch: String,
 }
 
@@ -60,6 +61,7 @@ pub struct ManagerAccessClaims {
     sub: String,
     iid: i64,
     jti: String,
+    session_version: i64,
     credential_epoch: String,
 }
 
@@ -68,6 +70,7 @@ pub struct RefreshJwtResult {
     pub manager_id: i64,
     pub login_instance_id: i64,
     pub jwt_id: String,
+    pub session_version: i64,
     pub issued_at: i64,
     pub expires_at: i64,
     pub credential_epoch: Uuid,
@@ -80,6 +83,7 @@ pub struct ManagerAuthContext {
     pub manager_subject: String,
     pub login_instance_id: i64,
     pub access_jti: String,
+    pub session_version: i64,
     pub issued_at: i64,
     pub expires_at: i64,
     pub credential_epoch: Uuid,
@@ -102,6 +106,7 @@ impl ManagerRefreshClaims {
         manager_id: i64,
         login_instance_id: i64,
         refresh_jti: &str,
+        session_version: i64,
         credential_epoch: &Uuid,
         issued_at: i64,
         expires_at: i64,
@@ -114,6 +119,7 @@ impl ManagerRefreshClaims {
             sub: REFRESH_TOKEN_SUBJECT.to_string(),
             iid: login_instance_id,
             jti: refresh_jti.to_string(),
+            session_version,
             credential_epoch: credential_epoch.to_string(),
         }
     }
@@ -123,6 +129,7 @@ pub fn issue_refresh_token(
     manager_id: i64,
     login_instance_id: i64,
     refresh_jti: &str,
+    session_version: i64,
     credential_epoch: &Uuid,
     issued_at: i64,
     expires_at: i64,
@@ -131,6 +138,7 @@ pub fn issue_refresh_token(
         manager_id,
         login_instance_id,
         refresh_jti,
+        session_version,
         credential_epoch,
         issued_at,
         expires_at,
@@ -150,6 +158,7 @@ pub fn decode_refresh_token(token: &str) -> Result<RefreshJwtResult, JwtError> {
             "exp",
             "iss",
             "iid",
+            "session_version",
             "credential_epoch",
         ],
     };
@@ -161,6 +170,9 @@ pub fn decode_refresh_token(token: &str) -> Result<RefreshJwtResult, JwtError> {
     if manager_id != MANAGER_ID {
         return Err(JwtError::Invalid);
     }
+    if result.session_version < 1 {
+        return Err(JwtError::Invalid);
+    }
     let credential_epoch =
         Uuid::parse_str(&result.credential_epoch).map_err(|_| JwtError::Parse)?;
     Ok(RefreshJwtResult {
@@ -168,6 +180,7 @@ pub fn decode_refresh_token(token: &str) -> Result<RefreshJwtResult, JwtError> {
         login_instance_id: result.iid,
         token: token.to_string(),
         jwt_id: result.jti,
+        session_version: result.session_version,
         issued_at: result.iat as i64,
         expires_at: result.exp as i64,
         credential_epoch,
@@ -179,6 +192,7 @@ impl ManagerAccessClaims {
         manager_id: i64,
         login_instance_id: i64,
         access_jti: &str,
+        session_version: i64,
         credential_epoch: &Uuid,
         issued_at: i64,
         expires_at: i64,
@@ -191,6 +205,7 @@ impl ManagerAccessClaims {
             sub: MANAGER_SUBJECT.to_string(),
             iid: login_instance_id,
             jti: access_jti.to_string(),
+            session_version,
             credential_epoch: credential_epoch.to_string(),
         }
     }
@@ -200,6 +215,7 @@ pub fn issue_access_token(
     manager_id: i64,
     login_instance_id: i64,
     access_jti: &str,
+    session_version: i64,
     credential_epoch: &Uuid,
     issued_at: i64,
 ) -> String {
@@ -207,6 +223,7 @@ pub fn issue_access_token(
         manager_id,
         login_instance_id,
         access_jti,
+        session_version,
         credential_epoch,
         issued_at,
         issued_at + ACCESS_TOKEN_ISSUE_SEC,
@@ -217,6 +234,7 @@ fn issue_access_token_with_expiration(
     manager_id: i64,
     login_instance_id: i64,
     access_jti: &str,
+    session_version: i64,
     credential_epoch: &Uuid,
     issued_at: i64,
     expires_at: i64,
@@ -225,6 +243,7 @@ fn issue_access_token_with_expiration(
         manager_id,
         login_instance_id,
         access_jti,
+        session_version,
         credential_epoch,
         issued_at,
         expires_at,
@@ -237,6 +256,7 @@ pub(crate) fn issue_access_token_with_expiration_for_test(
     manager_id: i64,
     login_instance_id: i64,
     access_jti: &str,
+    session_version: i64,
     credential_epoch: &Uuid,
     issued_at: i64,
     expires_at: i64,
@@ -245,6 +265,7 @@ pub(crate) fn issue_access_token_with_expiration_for_test(
         manager_id,
         login_instance_id,
         access_jti,
+        session_version,
         credential_epoch,
         issued_at,
         expires_at,
@@ -263,6 +284,7 @@ pub fn decode_access_token(token: &str) -> Result<ManagerAuthContext, JwtError> 
             "exp",
             "iss",
             "iid",
+            "session_version",
             "credential_epoch",
         ],
     };
@@ -274,6 +296,9 @@ pub fn decode_access_token(token: &str) -> Result<ManagerAuthContext, JwtError> 
     if manager_id != MANAGER_ID {
         return Err(JwtError::Invalid);
     }
+    if result.session_version < 1 {
+        return Err(JwtError::Invalid);
+    }
     let credential_epoch =
         Uuid::parse_str(&result.credential_epoch).map_err(|_| JwtError::Parse)?;
     Ok(ManagerAuthContext {
@@ -282,6 +307,7 @@ pub fn decode_access_token(token: &str) -> Result<ManagerAuthContext, JwtError> 
         login_instance_id: result.iid,
         token: token.to_string(),
         access_jti: result.jti,
+        session_version: result.session_version,
         issued_at: result.iat as i64,
         expires_at: result.exp as i64,
         credential_epoch,
@@ -300,6 +326,8 @@ pub enum AccessGuardError {
     InvalidToken,
     CredentialMismatch,
     CredentialUnavailable,
+    SessionInvalid,
+    SessionUnavailable,
 }
 
 impl IntoResponse for AccessGuardError {
@@ -322,6 +350,16 @@ impl IntoResponse for AccessGuardError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 1434,
                 "manager credential unavailable",
+            ),
+            AccessGuardError::SessionInvalid => (
+                StatusCode::UNAUTHORIZED,
+                1435,
+                "manager session no longer valid",
+            ),
+            AccessGuardError::SessionUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                1436,
+                "manager session state unavailable",
             ),
         };
         let body = Json(json!({
@@ -426,6 +464,14 @@ pub async fn authorization_access_middleware(
                 log_access_rejected("credential_unavailable");
                 AccessGuardError::CredentialUnavailable
             }
+            AccessCredentialError::SessionInvalid => {
+                log_access_rejected("session_invalid");
+                AccessGuardError::SessionInvalid
+            }
+            AccessCredentialError::SessionUnavailable => {
+                log_access_rejected("session_unavailable");
+                AccessGuardError::SessionUnavailable
+            }
         })?;
     req.extensions_mut().insert(token_data);
     Ok(next.run(req).await)
@@ -469,16 +515,19 @@ mod tests {
             MANAGER_ID,
             42,
             "refresh-jti",
+            7,
             &credential_epoch,
             now,
             now + REFRESH_TOKEN_ISSUE_SEC,
         );
-        let access_token = issue_access_token(MANAGER_ID, 42, "access-jti", &credential_epoch, now);
+        let access_token =
+            issue_access_token(MANAGER_ID, 42, "access-jti", 7, &credential_epoch, now);
 
         let refresh = decode_refresh_token(&refresh_token).expect("refresh should decode");
         assert_eq!(refresh.manager_id, MANAGER_ID);
         assert_eq!(refresh.login_instance_id, 42);
         assert_eq!(refresh.jwt_id, "refresh-jti");
+        assert_eq!(refresh.session_version, 7);
         assert_eq!(refresh.issued_at, now);
         assert_eq!(refresh.expires_at, now + REFRESH_TOKEN_ISSUE_SEC);
         assert_eq!(refresh.credential_epoch, credential_epoch);
@@ -488,6 +537,7 @@ mod tests {
         assert_eq!(access.manager_subject, MANAGER_SUBJECT);
         assert_eq!(access.login_instance_id, 42);
         assert_eq!(access.access_jti, "access-jti");
+        assert_eq!(access.session_version, 7);
         assert_eq!(access.issued_at, now);
         assert_eq!(access.expires_at, now + ACCESS_TOKEN_ISSUE_SEC);
         assert_eq!(access.credential_epoch, credential_epoch);
@@ -534,6 +584,72 @@ mod tests {
 
         assert!(decode_access_token(&access_token).is_err());
         assert!(decode_refresh_token(&refresh_token).is_err());
+    }
+
+    #[test]
+    fn pre_session_version_and_non_positive_version_tokens_are_rejected() {
+        #[derive(Debug, Serialize)]
+        struct PreSessionVersionClaims {
+            aud: String,
+            exp: u64,
+            iat: u64,
+            iss: String,
+            sub: String,
+            iid: i64,
+            jti: String,
+            credential_epoch: String,
+        }
+
+        let now = get_current_timestamp();
+        let credential_epoch = Uuid::new_v4();
+        let pre_version_access = issue_jwt(
+            &KEYS.encoding,
+            &PreSessionVersionClaims {
+                aud: MANAGER_ID.to_string(),
+                exp: (now + ACCESS_TOKEN_ISSUE_SEC) as u64,
+                iat: now as u64,
+                iss: ISSUER.to_string(),
+                sub: MANAGER_SUBJECT.to_string(),
+                iid: 42,
+                jti: "pre-version-access".to_string(),
+                credential_epoch: credential_epoch.to_string(),
+            },
+        );
+        let pre_version_refresh = issue_jwt(
+            &KEYS.encoding,
+            &PreSessionVersionClaims {
+                aud: MANAGER_ID.to_string(),
+                exp: (now + REFRESH_TOKEN_ISSUE_SEC) as u64,
+                iat: now as u64,
+                iss: ISSUER.to_string(),
+                sub: super::REFRESH_TOKEN_SUBJECT.to_string(),
+                iid: 42,
+                jti: "pre-version-refresh".to_string(),
+                credential_epoch: credential_epoch.to_string(),
+            },
+        );
+        let zero_version_access = issue_access_token(
+            MANAGER_ID,
+            42,
+            "zero-version-access",
+            0,
+            &credential_epoch,
+            now,
+        );
+        let zero_version_refresh = issue_refresh_token(
+            MANAGER_ID,
+            42,
+            "zero-version-refresh",
+            0,
+            &credential_epoch,
+            now,
+            now + REFRESH_TOKEN_ISSUE_SEC,
+        );
+
+        assert!(decode_access_token(&pre_version_access).is_err());
+        assert!(decode_refresh_token(&pre_version_refresh).is_err());
+        assert!(decode_access_token(&zero_version_access).is_err());
+        assert!(decode_refresh_token(&zero_version_refresh).is_err());
     }
 
     #[test]

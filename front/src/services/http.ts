@@ -1,16 +1,19 @@
 import axios from "axios";
 import { useAuthStore } from "@/store/authStore";
-import router from "@/router";
 import type { AuthTokenPair } from "./types";
+import { navigateToManagerLogin, restoreManagerSession } from "./authRuntime";
 import {
   createHttpAuthRefreshHandler,
+  createProtectedManagerRequestGate,
+  type HttpAuthRefreshDependencies,
   type HttpAuthRefreshError,
   type RetriableHttpRequest,
 } from "./httpAuthRefresh";
 import {
-  clearStoredRefreshTokenIfCurrent,
+  clearStoredAuthSessionIfCurrent,
   persistAuthTokenPair,
-  readStoredRefreshToken,
+  readStoredAuthSession,
+  subscribeToAuthSessionChanges,
 } from "./authTokens";
 
 const apiClient = axios.create({
@@ -19,26 +22,15 @@ const apiClient = axios.create({
   },
 });
 
-apiClient.interceptors.request.use(
-  (config) => {
-    const authStore = useAuthStore();
-    const token = authStore.accessToken;
-    if (token && !config.headers.Authorization) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
-  },
-);
-
-const handleAuthRefresh = createHttpAuthRefreshHandler({
-  readStoredRefreshToken,
+const authHttpDependencies = {
+  readStoredAuthSession,
   persistAuthTokenPair,
-  clearStoredRefreshTokenIfCurrent,
-  setAccessToken: (token) => useAuthStore().setAccessToken(token),
-  refreshAccessToken: async (refreshToken) => {
+  clearStoredAuthSessionIfCurrent,
+  getLifecycle: () => useAuthStore().lifecycle,
+  restoreStoredSession: restoreManagerSession,
+  setAuthenticated: (token: string) => useAuthStore().setAuthenticated(token),
+  setAnonymous: () => useAuthStore().setAnonymous(),
+  refreshAccessToken: async (refreshToken: string) => {
     const response = await axios.post(
       "/ai/manager/api/auth/refresh_token",
       {},
@@ -50,10 +42,22 @@ const handleAuthRefresh = createHttpAuthRefreshHandler({
   },
   retryRequest: (originalRequest: RetriableHttpRequest) =>
     apiClient(originalRequest),
-  redirectToLogin: () => {
-    void router.push({ name: "Login" });
+  redirectToLogin: navigateToManagerLogin,
+  subscribeToSessionChanges: subscribeToAuthSessionChanges,
+} satisfies HttpAuthRefreshDependencies;
+
+const gateProtectedManagerRequest = createProtectedManagerRequestGate(
+  authHttpDependencies,
+);
+const handleAuthRefresh = createHttpAuthRefreshHandler(authHttpDependencies);
+
+apiClient.interceptors.request.use(
+  async (config) => {
+    await gateProtectedManagerRequest(config as unknown as RetriableHttpRequest);
+    return config;
   },
-});
+  (error) => Promise.reject(error),
+);
 
 apiClient.interceptors.response.use(
   (response) => {

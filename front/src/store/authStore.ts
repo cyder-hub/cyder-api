@@ -8,13 +8,36 @@ export type BootstrapLoadState =
   | ManagerBootstrapState
   | "error";
 
+export type AuthLifecycle =
+  | "unknown"
+  | "restoring"
+  | "authenticated"
+  | "anonymous";
+
 export const useAuthStore = defineStore("auth", () => {
   const accessToken = ref<string | null>(null);
+  const lifecycle = ref<AuthLifecycle>("unknown");
   const bootstrapState = ref<BootstrapLoadState>("unknown");
   let bootstrapRequest: Promise<BootstrapLoadState> | null = null;
 
-  function setAccessToken(token: string | null) {
+  function setRestoring() {
+    lifecycle.value = "restoring";
+    accessToken.value = null;
+  }
+
+  function setUnknown() {
+    lifecycle.value = "unknown";
+    accessToken.value = null;
+  }
+
+  function setAuthenticated(token: string) {
     accessToken.value = token;
+    lifecycle.value = "authenticated";
+  }
+
+  function setAnonymous() {
+    accessToken.value = null;
+    lifecycle.value = "anonymous";
   }
 
   async function resolveBootstrapState(
@@ -50,8 +73,12 @@ export const useAuthStore = defineStore("auth", () => {
 
   return {
     accessToken,
+    lifecycle,
     bootstrapState,
-    setAccessToken,
+    setRestoring,
+    setUnknown,
+    setAuthenticated,
+    setAnonymous,
     resolveBootstrapState,
     markBootstrapReady,
   };

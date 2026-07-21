@@ -441,7 +441,16 @@
     "footer": "© 2025 AI Gateway Manager. All rights reserved.",
     "toggleSidebar": "Toggle Sidebar",
     "rotatePassword": "Change password",
-    "logout": "Log out"
+    "logout": "Log out this session",
+    "logoutLocalOnlyTitle": "Logged out locally",
+    "logoutLocalOnlyDescription": "The server could not confirm session revocation. This browser has removed its session.",
+    "logoutAll": "Log out all sessions",
+    "logoutAllConfirmTitle": "Log out every manager session?",
+    "logoutAllConfirmDescription": "This signs the administrator out in every browser. You will need to sign in again.",
+    "logoutAllConfirmAction": "Log out all sessions",
+    "logoutAllSuccess": "All manager sessions have been logged out.",
+    "logoutAllFailedTitle": "Could not log out all sessions",
+    "logoutAllFailedDescription": "Your current session was kept. Check the connection and try again."
   },
   "language": {
     "change": "Change language",

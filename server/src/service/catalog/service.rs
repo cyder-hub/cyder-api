@@ -12,7 +12,7 @@ use crate::controller::BaseError;
 use crate::database::api_key::ApiKey;
 use crate::database::cost::{CostCatalogVersion, CostComponent};
 use crate::database::model::Model;
-use crate::database::provider::{Provider, ProviderApiKey};
+use crate::database::provider::{Provider, ProviderApiKeyRepository};
 use crate::database::reasoning_config::ReasoningConfig;
 use crate::database::request_patch::RequestPatchRule;
 use crate::database::runtime_feature_config::RuntimeFeatureConfig;
@@ -34,8 +34,17 @@ use super::reload::{
 };
 
 type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
-type ProviderApiKeysInvalidationHook =
-    Arc<dyn Fn(i64) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
+type ProviderApiKeysInvalidationHook = Arc<
+    dyn Fn(i64) -> Pin<Box<dyn Future<Output = Result<(), AppStoreError>> + Send + 'static>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
+enum ProviderApiKeyRuntimeSnapshot {
+    Trusted(Arc<Vec<CacheProviderKey>>),
+    FailClosed,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CatalogCacheBackendStatus {
@@ -58,6 +67,9 @@ pub struct CatalogService {
     negative_cache_ttl: Duration,
     provider_api_keys_invalidation_hook:
         tokio::sync::RwLock<Option<ProviderApiKeysInvalidationHook>>,
+    provider_api_key_runtime_snapshots:
+        tokio::sync::RwLock<HashMap<i64, ProviderApiKeyRuntimeSnapshot>>,
+    provider_api_key_refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl CatalogService {
@@ -100,6 +112,8 @@ impl CatalogService {
             backend_status,
             negative_cache_ttl,
             provider_api_keys_invalidation_hook: tokio::sync::RwLock::new(None),
+            provider_api_key_runtime_snapshots: tokio::sync::RwLock::new(HashMap::new()),
+            provider_api_key_refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -336,7 +350,7 @@ impl CatalogService {
             )
             .await;
 
-        match ProviderApiKey::list_all() {
+        match ProviderApiKeyRepository::list_all_selections() {
             Ok(keys) => {
                 provider_api_key_count = keys.len();
                 let mut by_provider: HashMap<i64, Vec<CacheProviderKey>> = HashMap::new();
@@ -347,7 +361,20 @@ impl CatalogService {
                         .push(CacheProviderKey::from(key));
                 }
                 provider_api_key_group_count = by_provider.len();
+                let mut snapshots = provider_id_to_key
+                    .keys()
+                    .map(|provider_id| {
+                        (
+                            *provider_id,
+                            ProviderApiKeyRuntimeSnapshot::Trusted(Arc::new(Vec::new())),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
                 for (provider_id, provider_keys) in by_provider {
+                    snapshots.insert(
+                        provider_id,
+                        ProviderApiKeyRuntimeSnapshot::Trusted(Arc::new(provider_keys.clone())),
+                    );
                     let _ = self
                         .provider_api_keys_cache
                         .set_positive(
@@ -356,9 +383,14 @@ impl CatalogService {
                         )
                         .await;
                 }
+                *self.provider_api_key_runtime_snapshots.write().await = snapshots;
             }
             Err(_) => {
                 increment_failure_counter(&mut failure_counts, "provider_api_key_list");
+                *self.provider_api_key_runtime_snapshots.write().await = provider_id_to_key
+                    .keys()
+                    .map(|provider_id| (*provider_id, ProviderApiKeyRuntimeSnapshot::FailClosed))
+                    .collect();
             }
         }
 
@@ -523,6 +555,11 @@ impl CatalogService {
 
     pub async fn clear_cache(&self) {
         crate::info_event!("cache.clear_started");
+
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .clear();
 
         let mut failed_repos = Vec::new();
 
@@ -955,41 +992,132 @@ impl CatalogService {
         &self,
         provider_id: i64,
     ) -> Result<Arc<Vec<CacheProviderKey>>, AppStoreError> {
-        let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
+        if let Some(snapshot) = self
+            .provider_api_key_runtime_snapshots
+            .read()
+            .await
+            .get(&provider_id)
+            .cloned()
+        {
+            return Self::resolve_provider_key_snapshot(provider_id, snapshot);
+        }
 
-        let arc_list = self
-            .get_or_load(&self.provider_api_keys_cache, &cache_key, || async {
-                if let Ok(db_keys) = ProviderApiKey::list_by_provider_id(provider_id) {
-                    Ok(Some(
-                        db_keys.into_iter().map(CacheProviderKey::from).collect(),
-                    ))
-                } else {
-                    Ok(None)
-                }
-            })
-            .await?;
-
-        Ok(arc_list.unwrap_or_else(|| Arc::new(Vec::new())))
+        let _refresh_guard = self.provider_api_key_refresh_lock.lock().await;
+        if let Some(snapshot) = self
+            .provider_api_key_runtime_snapshots
+            .read()
+            .await
+            .get(&provider_id)
+            .cloned()
+        {
+            return Self::resolve_provider_key_snapshot(provider_id, snapshot);
+        }
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .insert(provider_id, ProviderApiKeyRuntimeSnapshot::FailClosed);
+        let snapshot = Arc::new(Self::load_provider_api_key_snapshot(provider_id)?);
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .insert(
+                provider_id,
+                ProviderApiKeyRuntimeSnapshot::Trusted(Arc::clone(&snapshot)),
+            );
+        self.publish_provider_api_key_snapshot_best_effort(provider_id, snapshot.as_ref())
+            .await;
+        Ok(snapshot)
     }
 
-    async fn run_provider_api_keys_invalidation_hook(&self, provider_id: i64) {
+    fn resolve_provider_key_snapshot(
+        provider_id: i64,
+        snapshot: ProviderApiKeyRuntimeSnapshot,
+    ) -> Result<Arc<Vec<CacheProviderKey>>, AppStoreError> {
+        match snapshot {
+            ProviderApiKeyRuntimeSnapshot::Trusted(keys) => Ok(keys),
+            ProviderApiKeyRuntimeSnapshot::FailClosed => Err(AppStoreError::CacheError(format!(
+                "provider credential snapshot is fail-closed for provider {provider_id}"
+            ))),
+        }
+    }
+
+    fn load_provider_api_key_snapshot(
+        provider_id: i64,
+    ) -> Result<Vec<CacheProviderKey>, AppStoreError> {
+        ProviderApiKeyRepository::list_selections_by_provider_id(provider_id)
+            .map(|rows| rows.into_iter().map(CacheProviderKey::from).collect())
+            .map_err(|_| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to load provider credential snapshot for provider {provider_id}"
+                ))
+            })
+    }
+
+    async fn publish_provider_api_key_snapshot_best_effort(
+        &self,
+        provider_id: i64,
+        snapshot: &Vec<CacheProviderKey>,
+    ) {
+        let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
+        if let Err(error) = self.provider_api_keys_cache.delete(&cache_key).await {
+            crate::warn_event!(
+                "provider_credential.remote_cache_delete_failed",
+                provider_id = provider_id,
+                error = &error.to_string(),
+            );
+        }
+        if let Err(error) = self
+            .provider_api_keys_cache
+            .set_positive(&cache_key, snapshot)
+            .await
+        {
+            crate::warn_event!(
+                "provider_credential.remote_cache_write_failed",
+                provider_id = provider_id,
+                error = &error.to_string(),
+            );
+        }
+    }
+
+    async fn run_provider_api_keys_invalidation_hook(
+        &self,
+        provider_id: i64,
+    ) -> Result<(), AppStoreError> {
         let hook = self
             .provider_api_keys_invalidation_hook
             .read()
             .await
             .clone();
         if let Some(hook) = hook {
-            (hook)(provider_id).await;
+            (hook)(provider_id).await?;
         }
+        Ok(())
     }
 
     pub async fn invalidate_provider_api_keys(
         &self,
         provider_id: i64,
     ) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
-        self.provider_api_keys_cache.delete(&cache_key).await?;
-        self.run_provider_api_keys_invalidation_hook(provider_id)
+        let _refresh_guard = self.provider_api_key_refresh_lock.lock().await;
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .insert(provider_id, ProviderApiKeyRuntimeSnapshot::FailClosed);
+        let snapshot = Arc::new(Self::load_provider_api_key_snapshot(provider_id)?);
+        if let Err(error) = self
+            .run_provider_api_keys_invalidation_hook(provider_id)
+            .await
+        {
+            return Err(error);
+        }
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .insert(
+                provider_id,
+                ProviderApiKeyRuntimeSnapshot::Trusted(Arc::clone(&snapshot)),
+            );
+        self.publish_provider_api_key_snapshot_best_effort(provider_id, snapshot.as_ref())
             .await;
         Ok(())
     }

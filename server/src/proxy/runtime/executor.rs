@@ -13,7 +13,6 @@ use crate::{
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             capability::{validate_generation_capabilities, validate_utility_capabilities},
-            credential::resolve_provider_credentials,
             log_writer::{
                 RequestLogContextInput, finalize_request_failure_context, new_request_log_context,
                 record_completion,
@@ -30,6 +29,7 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::CacheApiKey,
+        provider_credential::resolve_selected_provider_credential,
         runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
     },
 };
@@ -140,13 +140,6 @@ pub(in crate::proxy) async fn execute_request(
         return fail_before_send(&app_state, log_context, error).await;
     }
 
-    let provider_credentials =
-        match resolve_provider_credentials(&target.provider, &app_state).await {
-            Ok(credentials) => credentials,
-            Err(error) => return fail_before_send(&app_state, log_context, error).await,
-        };
-    log_context.provider_api_key_id = Some(provider_credentials.key_id);
-
     if let Err(error) =
         check_access_control(&api_key, &target.provider, &target.model, &app_state).await
     {
@@ -169,6 +162,27 @@ pub(in crate::proxy) async fn execute_request(
     }
 
     let cost_catalog_version = get_cost_catalog_version(&target.model, &app_state).await;
+    let request_lease = match admit_api_key_request(&app_state, &api_key).await {
+        Ok(lease) => lease,
+        Err(error) => return fail_before_send(&app_state, log_context, error).await,
+    };
+    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
+
+    let provider_credential =
+        match resolve_selected_provider_credential(&target.provider, &app_state).await {
+            Ok(credential) => credential,
+            Err(error) => {
+                request_lease.release().await;
+                return fail_before_send(
+                    &app_state,
+                    log_context,
+                    ProxyError::InternalError(error.to_string()),
+                )
+                .await;
+            }
+        };
+    log_context.provider_api_key_id = Some(provider_credential.key_id());
+
     let materialized = match kind {
         RequestExecutionKind::Generation {
             user_api_type,
@@ -183,14 +197,17 @@ pub(in crate::proxy) async fn execute_request(
                 &original_headers,
                 &query_params,
                 &request_patch_trace.applied_rules,
-                &provider_credentials,
+                &provider_credential,
                 api_key.id,
                 app_state.reasoning_continuation_store.as_ref(),
             )
             .await
             {
                 Ok(request) => request,
-                Err(error) => return fail_before_send(&app_state, log_context, error).await,
+                Err(error) => {
+                    request_lease.release().await;
+                    return fail_before_send(&app_state, log_context, error).await;
+                }
             }
         }
         RequestExecutionKind::Utility { operation, data } => match materialize_utility_request(
@@ -200,23 +217,21 @@ pub(in crate::proxy) async fn execute_request(
             &original_headers,
             &query_params,
             &request_patch_trace.applied_rules,
-            &provider_credentials,
+            &provider_credential,
         )
         .await
         {
             Ok(request) => request,
-            Err(error) => return fail_before_send(&app_state, log_context, error).await,
+            Err(error) => {
+                request_lease.release().await;
+                return fail_before_send(&app_state, log_context, error).await;
+            }
         },
     };
 
     log_context.request_url = Some(materialized.final_url.clone());
     log_context.llm_request_sent_at = Some(Utc::now().timestamp_millis());
 
-    let request_lease = match admit_api_key_request(&app_state, &api_key).await {
-        Ok(lease) => lease,
-        Err(error) => return fail_before_send(&app_state, log_context, error).await,
-    };
-    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
     let provider_permit = match allow_provider(&app_state, &target, &materialized.model_str).await {
         Ok(permit) => permit,
         Err(error) => {

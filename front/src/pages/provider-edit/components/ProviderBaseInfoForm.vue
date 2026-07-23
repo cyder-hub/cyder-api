@@ -75,11 +75,20 @@
           {{ $t("providerEditPage.quickStart.labelApiKey") }}
           <span class="ml-0.5 text-red-500">*</span>
         </Label>
-        <Input
+        <textarea
+          v-if="['VERTEX', 'VERTEX_OPENAI'].includes(quickStart.provider_type)"
           v-model="quickStart.api_key"
-          :type="quickStart.provider_type === 'VERTEX' ? 'text' : 'password'"
-          class="font-mono text-sm"
+          rows="8"
+          class="flex w-full resize-y rounded-md border border-gray-200 bg-white px-3 py-2 font-mono text-sm text-gray-900 outline-none focus:border-gray-400"
+          :placeholder="$t('providerEditPage.credentials.vertexPlaceholder')"
         />
+        <Input v-else v-model="quickStart.api_key" type="password" class="font-mono text-sm" />
+        <p
+          v-if="['VERTEX', 'VERTEX_OPENAI'].includes(quickStart.provider_type)"
+          class="text-xs leading-5 text-gray-500"
+        >
+          {{ $t("providerEditPage.credentials.vertexHelp") }}
+        </p>
       </div>
 
       <div v-if="!editingData.id" class="space-y-1.5">
@@ -179,10 +188,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import * as providerService from "@/services/providers";
 import { useProviderStore } from "@/store/providerStore";
+import { useAuthStore } from "@/store/authStore";
 import { toastController } from "@/services/uiFeedback";
 import SectionHeader from "@/components/SectionHeader.vue";
 import type { EditingProviderData } from "../types";
@@ -224,6 +234,7 @@ const providerTypes = [
 
 const { t: $t } = useI18n();
 const providerStore = useProviderStore();
+const authStore = useAuthStore();
 const editingData = defineModel<EditingProviderData>("editingData", {
   required: true,
 });
@@ -297,9 +308,7 @@ const handleBootstrap = async (saveAndTest: boolean) => {
     syncHydratedIdentity(response);
 
     const checkResult = normalizeBootstrapCheckResult(response.check_result);
-    void providerStore.fetchProviders().catch((error) => {
-      console.error("Failed to refresh providers after bootstrap:", error);
-    });
+    void providerStore.fetchProviders().catch(() => undefined);
 
     if (saveAndTest && checkResult && !checkResult.ok) {
       toastController.error(
@@ -316,13 +325,14 @@ const handleBootstrap = async (saveAndTest: boolean) => {
       toastController.success($t("providerEditPage.alert.bootstrapSaveSuccess"));
     }
   } catch (error) {
-    console.error("Failed to bootstrap provider:", error);
     toastController.error(
       $t("providerEditPage.alert.bootstrapFailed", {
         error: (error as Error).message || $t("common.unknownError"),
       }),
     );
   } finally {
+    payload.api_key = "";
+    quickStart.api_key = "";
     isSubmitting.value = false;
     pendingAction.value = null;
   }
@@ -357,12 +367,9 @@ const handleUpdateProvider = async () => {
     data.use_proxy = !!quickStart.use_proxy;
     syncProviderBootstrapFormState(quickStart, data);
 
-    void providerStore.fetchProviders().catch((error) => {
-      console.error("Failed to refresh providers after update:", error);
-    });
+    void providerStore.fetchProviders().catch(() => undefined);
     toastController.success($t("providerEditPage.alert.baseInfoUpdateSuccess"));
   } catch (error) {
-    console.error("Failed to update provider:", error);
     toastController.error(
       $t("providerEditPage.alert.baseInfoSaveFailed", {
         error: (error as Error).message || $t("common.unknownError"),
@@ -373,5 +380,21 @@ const handleUpdateProvider = async () => {
     pendingAction.value = null;
   }
 };
+
+const clearBootstrapSecret = () => {
+  quickStart.api_key = "";
+};
+
+watch(
+  () => editingData.value.id,
+  () => clearBootstrapSecret(),
+);
+watch(
+  () => authStore.lifecycle,
+  (lifecycle) => {
+    if (lifecycle === "anonymous") clearBootstrapSecret();
+  },
+);
+onBeforeUnmount(clearBootstrapSecret);
 
 </script>

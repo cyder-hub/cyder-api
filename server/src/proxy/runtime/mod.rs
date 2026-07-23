@@ -1,6 +1,5 @@
 pub(crate) mod api_key_lease;
 pub(crate) mod capability;
-pub(crate) mod credential;
 pub(crate) mod executor;
 pub(crate) mod facade;
 pub(crate) mod log_writer;

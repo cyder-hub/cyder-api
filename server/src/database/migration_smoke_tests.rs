@@ -43,7 +43,8 @@ CREATE TABLE api_key (
     budget_monthly_currency TEXT,
     deleted_at BIGINT,
     created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL
+    updated_at BIGINT NOT NULL,
+    CONSTRAINT chk_provider_api_key_timestamps CHECK (updated_at >= created_at)
 );
 CREATE UNIQUE INDEX idx_api_key_key_uq_active
     ON api_key (api_key) WHERE deleted_at IS NULL AND is_enabled = true;
@@ -96,6 +97,83 @@ CREATE TABLE api_key_child (
     id BIGINT PRIMARY KEY,
     api_key_id BIGINT NOT NULL REFERENCES api_key(id) ON DELETE CASCADE ON UPDATE CASCADE
 );
+"#;
+
+const LEGACY_SQLITE_PROVIDER_SECRET_SCHEMA: &str = r#"
+PRAGMA foreign_keys = ON;
+CREATE TABLE provider (
+    id BIGINT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL
+);
+CREATE TABLE model (
+    id BIGINT PRIMARY KEY NOT NULL,
+    provider_id BIGINT NOT NULL REFERENCES provider(id),
+    name TEXT NOT NULL
+);
+CREATE TABLE provider_api_key (
+    id BIGINT PRIMARY KEY NOT NULL,
+    provider_id BIGINT NOT NULL REFERENCES provider(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    api_key TEXT NOT NULL,
+    description TEXT,
+    deleted_at BIGINT,
+    is_enabled BOOLEAN NOT NULL DEFAULT true,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX idx_provider_api_key_pid_apikey_uq_active
+    ON provider_api_key (provider_id, api_key)
+    WHERE deleted_at IS NULL AND is_enabled = true;
+CREATE TABLE request_log (
+    id BIGINT PRIMARY KEY NOT NULL,
+    provider_api_key_id BIGINT REFERENCES provider_api_key(id) ON DELETE SET NULL,
+    status TEXT NOT NULL
+);
+INSERT INTO provider VALUES (1, 'preserved provider');
+INSERT INTO model VALUES (11, 1, 'preserved model');
+INSERT INTO provider_api_key VALUES
+    (21, 1, 'secret-one', 'first', NULL, true, 1, 1),
+    (22, 1, 'secret-two', 'second', NULL, false, 2, 2);
+INSERT INTO request_log VALUES
+    (31, 21, 'SUCCESS'),
+    (32, 22, 'FAILED');
+"#;
+
+const LEGACY_POSTGRES_PROVIDER_SECRET_SCHEMA: &str = r#"
+CREATE TABLE provider (
+    id BIGINT PRIMARY KEY,
+    name TEXT NOT NULL
+);
+CREATE TABLE model (
+    id BIGINT PRIMARY KEY,
+    provider_id BIGINT NOT NULL REFERENCES provider(id),
+    name TEXT NOT NULL
+);
+CREATE TABLE provider_api_key (
+    id BIGINT PRIMARY KEY,
+    provider_id BIGINT NOT NULL REFERENCES provider(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    api_key TEXT NOT NULL,
+    description TEXT NULL,
+    deleted_at BIGINT NULL,
+    is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX idx_provider_api_key_pid_apikey_uq_active
+    ON provider_api_key (provider_id, api_key)
+    WHERE deleted_at IS NULL AND is_enabled = TRUE;
+CREATE TABLE request_log (
+    id BIGINT PRIMARY KEY,
+    provider_api_key_id BIGINT NULL REFERENCES provider_api_key(id) ON DELETE SET NULL,
+    status TEXT NOT NULL
+);
+INSERT INTO provider VALUES (1, 'preserved provider');
+INSERT INTO model VALUES (11, 1, 'preserved model');
+INSERT INTO provider_api_key VALUES
+    (21, 1, 'secret-one', 'first', NULL, TRUE, 1, 1),
+    (22, 1, 'secret-two', 'second', NULL, FALSE, 2, 2);
+INSERT INTO request_log VALUES
+    (31, 21, 'SUCCESS'),
+    (32, 22, 'FAILED');
 "#;
 
 #[derive(QueryableByName)]
@@ -171,6 +249,19 @@ fn assert_sqlite_column_count(
         .expect("sqlite api key column should be queryable")
         .count;
     assert_eq!(count, expected, "unexpected api_key column state: {column}");
+}
+
+fn sqlite_table_column_count(
+    connection: &mut diesel::SqliteConnection,
+    table: &str,
+    column: &str,
+) -> i64 {
+    diesel::sql_query(format!(
+        "SELECT COUNT(*) AS count FROM pragma_table_info('{table}') WHERE name = '{column}'"
+    ))
+    .get_result::<CountRow>(connection)
+    .expect("sqlite table column should be queryable")
+    .count
 }
 
 #[test]
@@ -325,6 +416,150 @@ fn sqlite_r26_api_key_secret_upgrade_rolls_back_when_hash_is_null() {
 }
 
 #[test]
+fn sqlite_r27_provider_secret_upgrade_discards_keys_and_enforces_contract() {
+    let (_temp_dir, mut connection) = open_test_sqlite_connection("r27-provider-secret.sqlite");
+    connection
+        .batch_execute(LEGACY_SQLITE_PROVIDER_SECRET_SCHEMA)
+        .expect("legacy sqlite provider secret schema should create");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-23-090000_provider_api_key_secret/up.sql"
+        ))
+        .expect("R2.7 sqlite migration should run");
+
+    let key_count = diesel::sql_query("SELECT COUNT(*) AS count FROM provider_api_key")
+        .get_result::<CountRow>(&mut connection)
+        .expect("provider key count should query")
+        .count;
+    let preserved = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM provider p
+         JOIN model m ON m.provider_id = p.id
+         JOIN request_log r ON r.status IN ('SUCCESS', 'FAILED')
+         WHERE p.name = 'preserved provider' AND m.name = 'preserved model'
+           AND r.provider_api_key_id IS NULL",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("preserved R2.7 rows should query")
+    .count;
+    assert_eq!(
+        key_count, 0,
+        "all historical provider keys must be discarded"
+    );
+    assert_eq!(
+        preserved, 2,
+        "provider/model/log data and log statuses must survive"
+    );
+    assert_eq!(
+        sqlite_table_column_count(&mut connection, "provider_api_key", "api_key"),
+        0
+    );
+    for column in [
+        "key_prefix",
+        "key_last4",
+        "secret_ciphertext",
+        "secret_nonce",
+        "secret_format_version",
+        "secret_key_fingerprint",
+        "secret_hmac",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(&mut connection, "provider_api_key", column),
+            1,
+            "missing provider secret column {column}"
+        );
+    }
+
+    let fingerprint = "a".repeat(64);
+    let hmac = "b".repeat(64);
+    connection
+        .batch_execute(&format!(
+            "INSERT INTO provider_api_key (
+                id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                secret_format_version, secret_key_fingerprint, secret_hmac,
+                is_enabled, created_at, updated_at
+             ) VALUES (41, 1, 'sk-a', 'last', X'01', zeroblob(24), 1,
+                '{fingerprint}', '{hmac}', false, 10, 10);"
+        ))
+        .expect("complete disabled provider key should insert");
+    let duplicate_disabled = connection.batch_execute(&format!(
+        "INSERT INTO provider_api_key (
+            id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+            secret_format_version, secret_key_fingerprint, secret_hmac,
+            is_enabled, created_at, updated_at
+         ) VALUES (42, 1, 'sk-b', 'last', X'02', zeroblob(24), 1,
+            '{fingerprint}', '{hmac}', false, 10, 10);"
+    ));
+    assert!(
+        duplicate_disabled.is_err(),
+        "disabled live key must remain unique"
+    );
+    connection
+        .batch_execute(
+            "UPDATE provider_api_key SET
+                deleted_at = 11, is_enabled = false,
+                secret_ciphertext = NULL, secret_nonce = NULL,
+                secret_format_version = NULL, secret_key_fingerprint = NULL,
+                secret_hmac = NULL, updated_at = 11
+             WHERE id = 41;",
+        )
+        .expect("soft delete must clear provider secret material");
+    connection
+        .batch_execute(&format!(
+            "INSERT INTO provider_api_key (
+                id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                secret_format_version, secret_key_fingerprint, secret_hmac,
+                is_enabled, created_at, updated_at
+             ) VALUES (42, 1, 'sk-b', 'last', X'02', zeroblob(24), 1,
+                '{fingerprint}', '{hmac}', true, 12, 12);"
+        ))
+        .expect("soft deletion should release provider secret fingerprint");
+    connection
+        .batch_execute(&format!(
+            "INSERT INTO provider_api_key (
+                id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                secret_format_version, secret_key_fingerprint, secret_hmac,
+                is_enabled, created_at, updated_at
+             ) VALUES (45, 1, '', '', X'03', zeroblob(24), 1,
+                '{}', '{}', true, 12, 12);",
+            "d".repeat(64),
+            "e".repeat(64)
+        ))
+        .expect("empty mask fragments must support single-character provider secrets");
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO provider_api_key (
+                    id, provider_id, key_prefix, key_last4, is_enabled, created_at, updated_at
+                 ) VALUES (43, 1, 'bad', 'last', true, 1, 1);"
+            )
+            .is_err(),
+        "live rows without a complete secret tuple must be rejected"
+    );
+    assert!(
+        connection
+            .batch_execute(&format!(
+                "INSERT INTO provider_api_key (
+                    id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                    secret_format_version, secret_key_fingerprint, secret_hmac,
+                    is_enabled, created_at, updated_at
+                 ) VALUES (44, 1, 'bad', 'last', X'01', zeroblob(23), 1,
+                    '{fingerprint}', '{}', true, 2, 1);",
+                "c".repeat(64)
+            ))
+            .is_err(),
+        "nonce length and timestamp constraints must be enforced"
+    );
+    let foreign_key_violations =
+        diesel::sql_query("SELECT COUNT(*) AS count FROM pragma_foreign_key_check")
+            .get_result::<CountRow>(&mut connection)
+            .expect("sqlite foreign key check should run")
+            .count;
+    assert_eq!(foreign_key_violations, 0);
+}
+
+#[test]
 fn sqlite_manager_auth_session_version_upgrade_clears_sessions_only() {
     let (_temp_dir, mut connection) =
         open_test_sqlite_connection("manager-auth-session-version-upgrade.sqlite");
@@ -444,6 +679,161 @@ fn postgres_clean_upgrade_chain_from_empty() {
                 .has_pending_migration(POSTGRES_UPGRADE_MIGRATIONS)
                 .expect("postgres pending migrations should remain queryable"),
             "postgres second migration run should remain fully applied"
+        );
+    }));
+
+    rebuild_postgres_public_schema(&mut connection);
+    if let Err(panic_payload) = test_result {
+        resume_unwind(panic_payload);
+    }
+}
+
+#[test]
+#[ignore = "requires a dedicated PostgreSQL 17 database"]
+fn postgres_r27_provider_secret_upgrade_discards_keys_and_enforces_contract() {
+    let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
+        panic!("{POSTGRES_SMOKE_URL_ENV} must point to the dedicated PostgreSQL smoke database")
+    });
+    let mut connection = PgConnection::establish(&database_url)
+        .expect("dedicated postgres smoke database should be reachable");
+    assert_eq!(
+        postgres_database_name(&mut connection),
+        POSTGRES_SMOKE_DATABASE,
+        "refusing to rebuild a non-dedicated PostgreSQL database"
+    );
+
+    rebuild_postgres_public_schema(&mut connection);
+    let test_result = catch_unwind(AssertUnwindSafe(|| {
+        connection
+            .batch_execute(LEGACY_POSTGRES_PROVIDER_SECRET_SCHEMA)
+            .expect("legacy postgres provider secret schema should create");
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-23-090000_provider_api_key_secret/up.sql"
+            ))
+            .expect("R2.7 postgres migration should run");
+
+        let key_count = diesel::sql_query("SELECT COUNT(*) AS count FROM provider_api_key")
+            .get_result::<CountRow>(&mut connection)
+            .expect("postgres provider key count should query")
+            .count;
+        let preserved = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM provider p
+             JOIN model m ON m.provider_id = p.id
+             JOIN request_log r ON r.status IN ('SUCCESS', 'FAILED')
+             WHERE p.name = 'preserved provider' AND m.name = 'preserved model'
+               AND r.provider_api_key_id IS NULL",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("postgres preserved R2.7 rows should query")
+        .count;
+        let raw_column = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'provider_api_key'
+               AND column_name = 'api_key'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("postgres plaintext provider key column should query")
+        .count;
+        assert_eq!(
+            key_count, 0,
+            "all historical provider keys must be discarded"
+        );
+        assert_eq!(
+            preserved, 2,
+            "provider/model/log data and log statuses must survive"
+        );
+        assert_eq!(
+            raw_column, 0,
+            "plaintext provider key column must be removed"
+        );
+
+        let fingerprint = "a".repeat(64);
+        let hmac = "b".repeat(64);
+        connection
+            .batch_execute(&format!(
+                "INSERT INTO provider_api_key (
+                    id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                    secret_format_version, secret_key_fingerprint, secret_hmac,
+                    is_enabled, created_at, updated_at
+                 ) VALUES (41, 1, 'sk-a', 'last', decode('01', 'hex'), decode('{}', 'hex'), 1,
+                    '{fingerprint}', '{hmac}', FALSE, 10, 10);",
+                "00".repeat(24)
+            ))
+            .expect("complete disabled postgres provider key should insert");
+        let duplicate_disabled = connection.batch_execute(&format!(
+            "INSERT INTO provider_api_key (
+                id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                secret_format_version, secret_key_fingerprint, secret_hmac,
+                is_enabled, created_at, updated_at
+             ) VALUES (42, 1, 'sk-b', 'last', decode('02', 'hex'), decode('{}', 'hex'), 1,
+                '{fingerprint}', '{hmac}', FALSE, 10, 10);",
+            "00".repeat(24)
+        ));
+        assert!(
+            duplicate_disabled.is_err(),
+            "disabled live key must remain unique"
+        );
+        connection
+            .batch_execute(
+                "UPDATE provider_api_key SET
+                    deleted_at = 11, is_enabled = FALSE,
+                    secret_ciphertext = NULL, secret_nonce = NULL,
+                    secret_format_version = NULL, secret_key_fingerprint = NULL,
+                    secret_hmac = NULL, updated_at = 11
+                 WHERE id = 41;",
+            )
+            .expect("postgres soft delete must clear provider secret material");
+        connection
+            .batch_execute(&format!(
+                "INSERT INTO provider_api_key (
+                    id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                    secret_format_version, secret_key_fingerprint, secret_hmac,
+                    is_enabled, created_at, updated_at
+                 ) VALUES (42, 1, 'sk-b', 'last', decode('02', 'hex'), decode('{}', 'hex'), 1,
+                    '{fingerprint}', '{hmac}', TRUE, 12, 12);",
+                "00".repeat(24)
+            ))
+            .expect("postgres soft deletion should release provider fingerprint");
+        connection
+            .batch_execute(&format!(
+                "INSERT INTO provider_api_key (
+                    id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                    secret_format_version, secret_key_fingerprint, secret_hmac,
+                    is_enabled, created_at, updated_at
+                 ) VALUES (45, 1, '', '', decode('03', 'hex'), decode('{}', 'hex'), 1,
+                    '{}', '{}', TRUE, 12, 12);",
+                "00".repeat(24),
+                "d".repeat(64),
+                "e".repeat(64)
+            ))
+            .expect("empty mask fragments must support single-character provider secrets");
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO provider_api_key (
+                        id, provider_id, key_prefix, key_last4, is_enabled, created_at, updated_at
+                     ) VALUES (43, 1, 'bad', 'last', TRUE, 1, 1);"
+                )
+                .is_err(),
+            "postgres live rows without a complete secret tuple must be rejected"
+        );
+        assert!(
+            connection
+                .batch_execute(&format!(
+                    "INSERT INTO provider_api_key (
+                        id, provider_id, key_prefix, key_last4, secret_ciphertext, secret_nonce,
+                        secret_format_version, secret_key_fingerprint, secret_hmac,
+                        is_enabled, created_at, updated_at
+                     ) VALUES (44, 1, 'bad', 'last', decode('01', 'hex'), decode('{}', 'hex'), 1,
+                        '{fingerprint}', '{}', TRUE, 2, 1);",
+                    "00".repeat(23),
+                    "c".repeat(64)
+                ))
+                .is_err(),
+            "postgres nonce length and timestamp constraints must be enforced"
         );
     }));
 

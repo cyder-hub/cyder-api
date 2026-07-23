@@ -33,7 +33,6 @@
   "multimodal": "多模态",
   "ollama": "Ollama",
   "openai": "OpenAI",
-  "portable_config": "配置导入导出",
   "provider": "渠道",
   "provider_api_key": "渠道 API Key",
   "provider_key": "渠道 Key",

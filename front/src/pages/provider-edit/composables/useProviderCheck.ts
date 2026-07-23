@@ -40,7 +40,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
       return (
         key.description ||
         $t("providerEditPage.alert.apiKeyNameFallback", {
-          lastKeyChars: key.api_key.slice(-4),
+          lastKeyChars: key.key_last4,
         }) ||
         `${$t("common.selected")} #${index + 1}`
       );
@@ -67,7 +67,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     return (
       key.description ||
       $t("providerEditPage.alert.apiKeyNameFallback", {
-        lastKeyChars: key.api_key.slice(-4),
+        lastKeyChars: key.key_last4,
       })
     );
   });
@@ -93,9 +93,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
       ...(modelItem.id
         ? { model_id: modelItem.id }
         : { model_name: modelItem.real_model_name || modelItem.model_name }),
-      ...(keyItem.id
-        ? { provider_api_key_id: keyItem.id }
-        : { provider_api_key: keyItem.api_key }),
+      provider_api_key_id: keyItem.id,
     };
 
     try {
@@ -132,9 +130,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         ...(model.id
           ? { model_id: model.id }
           : { model_name: model.real_model_name || model.model_name }),
-        ...(key.id
-          ? { provider_api_key_id: key.id }
-          : { provider_api_key: key.api_key }),
+        provider_api_key_id: key.id,
       };
       try {
         await providerService.checkProviderConnection(data.id!, payload);
@@ -176,9 +172,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         ...(model.id
           ? { model_id: model.id }
           : { model_name: model.real_model_name || model.model_name }),
-        ...(key.id
-          ? { provider_api_key_id: key.id }
-          : { provider_api_key: key.api_key }),
+        provider_api_key_id: key.id,
       };
       try {
         await providerService.checkProviderConnection(data.id!, payload);

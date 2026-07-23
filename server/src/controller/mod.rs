@@ -10,7 +10,6 @@ use axum::{
 use cost::create_cost_router;
 use metrics::create_metrics_router;
 use model::create_model_controller_router;
-use portable_config::create_portable_config_router;
 use provider::create_provider_router;
 use provider_runtime::create_provider_runtime_router;
 use reasoning_config::create_reasoning_config_router;
@@ -32,7 +31,6 @@ mod metrics;
 
 mod api_key;
 mod model;
-mod portable_config;
 mod provider;
 mod provider_runtime;
 mod reasoning_config;
@@ -74,7 +72,6 @@ pub fn create_manager_router(app_state: Arc<AppState>) -> StateRouter {
             .merge(create_cost_router())
             .merge(create_metrics_router())
             .merge(create_stat_router())
-            .merge(create_portable_config_router())
             .layer(middleware::from_fn_with_state(
                 app_state,
                 authorization_access_middleware,
@@ -215,6 +212,36 @@ mod tests {
                         .and_then(|value| value.to_str().ok()),
                     Some("no-cache, no-store, must-revalidate")
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manager_router_does_not_register_portable_config_routes() {
+        let database = TestDbContext::new_sqlite("manager-portable-routes-removed.sqlite");
+        database
+            .run_async(async {
+                let app_state = create_test_app_state(database.clone()).await;
+                let tokens = app_state
+                    .admin
+                    .auth
+                    .bootstrap("manager removed portable route password")
+                    .await
+                    .expect("manager bootstrap should succeed");
+
+                for (method, uri) in [
+                    (Method::GET, "/manager/api/system/portable/modules"),
+                    (Method::POST, "/manager/api/system/portable/export"),
+                    (Method::POST, "/manager/api/system/portable/import/preview"),
+                    (Method::POST, "/manager/api/system/portable/import/apply"),
+                ] {
+                    let response = send(
+                        &app_state,
+                        request(method, uri, Some(&tokens.access_token), Body::empty()),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+                }
             })
             .await;
     }

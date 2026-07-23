@@ -28,11 +28,18 @@ db_url: /data/cyder/db/cyder.sqlite
 # Supported database URL forms are SQLite paths and PostgreSQL URLs.
 secret_encryption:
   # one_time stores only the downstream API key authentication hash.
-  # recoverable additionally requires encryption_key and permits explicit reveal.
+  # recoverable additionally stores downstream ciphertext and permits explicit reveal.
+  # Provider credentials are always encrypted and revealable in both modes.
   downstream_mode: one_time
+  # Required in every mode. Generate an independent value, for example with
+  # `openssl rand -hex 32`, and replace null in config.yaml before startup.
+  # The server deliberately refuses to start while this remains null.
   # Keys use exactly 64 hexadecimal characters (32 bytes), without a prefix.
   encryption_key: null
-  # Set only during a controlled startup rotation, then remove after success.
+  # During rotation, set this to the old key and encryption_key to the new key.
+  # Startup rotates downstream and Provider ciphertext in one transaction;
+  # any invalid Provider credential rolls everything back and refuses startup.
+  # Remove this field after one successful startup.
   previous_encryption_key: null
 redis:
   url: "redis://127.0.0.1:6379/"

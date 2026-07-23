@@ -12,6 +12,8 @@ pub enum BaseError {
     DatabaseDup(Option<String>),
     NotFound(Option<String>),
     ApiKeySecretUnavailable,
+    ProviderApiKeySecretUnavailable,
+    ProviderRuntimeRefreshFailed,
     Unauthorized(Option<String>),
     StoreError(Option<String>), // For AppStoreError
     InternalServerError(Option<String>),
@@ -56,6 +58,17 @@ impl IntoResponse for BaseError {
                 StatusCode::CONFLICT,
                 1004,
                 "api key secret is unavailable".to_string(),
+            ),
+            BaseError::ProviderApiKeySecretUnavailable => (
+                StatusCode::CONFLICT,
+                1005,
+                "provider API key secret is unavailable; replace the credential".to_string(),
+            ),
+            BaseError::ProviderRuntimeRefreshFailed => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                1201,
+                "provider credential change was committed, but runtime refresh failed; the provider is fail-closed"
+                    .to_string(),
             ),
             BaseError::Unauthorized(msg) => (
                 StatusCode::UNAUTHORIZED,

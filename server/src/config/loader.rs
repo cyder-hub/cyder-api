@@ -152,6 +152,10 @@ fn load_effective_config_inner(
         .map_err(|err| ConfigLoadError::BuildEffective(err.to_string()))?
         .try_deserialize()
         .map_err(|err| ConfigLoadError::DeserializeEffective(err.to_string()))?;
+    final_config
+        .secret_encryption
+        .validate_for_runtime()
+        .map_err(ConfigLoadError::DeserializeEffective)?;
     let final_config = finalize_loaded_config(final_config);
 
     Ok(final_config)
@@ -181,12 +185,29 @@ fn validate_required_user_config_file(paths: &ConfigPaths) -> Result<(), ConfigL
 mod tests {
     use super::*;
 
+    const TEST_ENCRYPTION_KEY: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
     fn load_user_yaml(yaml: &str) -> Result<FinalConfig, ConfigLoadError> {
+        load_user_yaml_with_managed_key(yaml, true)
+    }
+
+    fn load_user_yaml_with_managed_key(
+        yaml: &str,
+        include_managed_key: bool,
+    ) -> Result<FinalConfig, ConfigLoadError> {
         let temp_dir = tempfile::tempdir().expect("config test directory should be created");
         let paths = ConfigPaths::new(
             temp_dir.path().join("config.default.yaml"),
             temp_dir.path().join("config.yaml"),
         );
+        if include_managed_key {
+            fs::write(
+                &paths.default_config_path,
+                format!("secret_encryption:\n  encryption_key: '{TEST_ENCRYPTION_KEY}'\n"),
+            )
+            .expect("managed test config should be written");
+        }
         fs::write(&paths.user_config_path, yaml).expect("user config should be written");
 
         load_effective_config(
@@ -250,15 +271,60 @@ mod tests {
     }
 
     #[test]
-    fn secret_encryption_defaults_to_one_time_without_generating_a_key() {
-        let config = load_user_yaml("port: 9123\n").expect("default config should load");
+    fn secret_encryption_requires_current_key_in_every_downstream_mode() {
+        for yaml in [
+            "port: 9123\n",
+            "secret_encryption:\n  downstream_mode: one_time\n",
+            "secret_encryption:\n  downstream_mode: recoverable\n",
+        ] {
+            let error = load_user_yaml_with_managed_key(yaml, false)
+                .expect_err("effective config without current key should fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("encryption_key is required for all downstream modes")
+            );
+            assert!(!error.to_string().contains(TEST_ENCRYPTION_KEY));
+        }
+    }
 
-        assert_eq!(
-            config.secret_encryption.downstream_mode,
-            crate::config::DownstreamSecretMode::OneTime
+    #[test]
+    fn generated_default_redacts_required_key_as_null_without_bypassing_runtime_validation() {
+        let temp_dir = tempfile::tempdir().expect("config test directory should be created");
+        let paths = ConfigPaths::new(
+            temp_dir.path().join("config.default.yaml"),
+            temp_dir.path().join("config.yaml"),
         );
-        assert!(config.secret_encryption.encryption_key().is_none());
-        assert!(!config.secret_encryption.has_previous_encryption_key());
+
+        let generated = load_default_config(&paths).expect("default snapshot should serialize");
+        assert!(generated.merged_yaml.contains("encryption_key: null"));
+        assert!(!generated.merged_yaml.contains(TEST_ENCRYPTION_KEY));
+
+        let error = load_effective_config(
+            &paths,
+            ConfigLoadOptions {
+                include_environment: false,
+            },
+        )
+        .expect_err("redacted generated default must not satisfy required current key");
+        assert!(
+            error
+                .to_string()
+                .contains("encryption_key is required for all downstream modes")
+        );
+    }
+
+    #[test]
+    fn tracked_config_sample_marks_current_key_as_required_redacted_input() {
+        let sample = include_str!("../../../config.sample.yaml");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(sample).expect("tracked config sample should parse");
+        assert!(
+            document["secret_encryption"]["encryption_key"].is_null(),
+            "tracked sample must not contain a usable master key"
+        );
+        assert!(sample.contains("Required in every mode"));
+        assert!(sample.contains("Provider credentials are always encrypted"));
     }
 
     #[test]
@@ -290,15 +356,21 @@ mod tests {
     fn secret_encryption_rejects_invalid_key_relationships_without_echoing_values() {
         let valid = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         let cases = [
-            "secret_encryption:\n  downstream_mode: recoverable\n",
             "secret_encryption:\n  downstream_mode: recoverable\n  encryption_key: 'not-a-key'\n",
             "secret_encryption:\n  downstream_mode: recoverable\n  encryption_key: 'hex:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
-            "secret_encryption:\n  previous_encryption_key: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
         ];
         for yaml in cases {
             let error = load_user_yaml(yaml).expect_err("invalid secret config should fail");
             assert!(!error.to_string().contains(valid));
         }
+
+        let error = load_user_yaml_with_managed_key(
+            "secret_encryption:\n  previous_encryption_key: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
+            false,
+        )
+        .expect_err("previous key without current key should fail");
+        assert!(error.to_string().contains("requires encryption_key"));
+        assert!(!error.to_string().contains(valid));
 
         let error = load_user_yaml(&format!(
             "secret_encryption:\n  encryption_key: '{valid}'\n  previous_encryption_key: '{valid}'\n"

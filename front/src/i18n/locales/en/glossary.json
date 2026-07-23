@@ -33,7 +33,6 @@
   "multimodal": "Multimodal",
   "ollama": "Ollama",
   "openai": "OpenAI",
-  "portable_config": "Portable Config",
   "provider": "Provider",
   "provider_api_key": "Provider API Key",
   "provider_key": "Provider Key",

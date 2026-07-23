@@ -1,5 +1,5 @@
 import type {
-  ProviderApiKeyItem,
+  ProviderApiKeySummary,
   ProviderBootstrapPayload,
   ProviderBootstrapResponse,
   ModelItem,
@@ -114,17 +114,19 @@ function mapCreatedModel(
   };
 }
 
-function mapCreatedApiKey(
-  key:
-    | Partial<Pick<ProviderApiKeyItem, "id" | "api_key" | "description">>
-    | null
-    | undefined,
-): LocalProviderApiKeyItem {
+export function mapProviderApiKeySummary(
+  key: ProviderApiKeySummary | null | undefined,
+): LocalProviderApiKeyItem | null {
+  if (!key) return null;
   return {
-    id: key?.id ?? null,
-    api_key: key?.api_key ?? "",
-    description: key?.description ?? null,
-    isEditing: false,
+    id: key.id,
+    provider_id: key.provider_id,
+    description: key.description ?? null,
+    key_prefix: key.key_prefix,
+    key_last4: key.key_last4,
+    is_enabled: key.is_enabled,
+    created_at: key.created_at,
+    updated_at: key.updated_at,
     checkStatus: "unchecked",
   };
 }
@@ -189,8 +191,6 @@ export function buildProviderUpdatePayload(
     endpoint: trimText(form.endpoint),
     use_proxy: !!form.use_proxy,
     provider_type: trimText(form.provider_type) || trimText(editingData.provider_type),
-    omit_config: null,
-    api_keys: [],
   };
 }
 
@@ -249,13 +249,11 @@ export function hydrateEditingProviderDataFromBootstrap(
   }
 
   if (response.created_key) {
-    const normalizedKey = mapCreatedApiKey(response.created_key);
-    const existingIndex =
-      normalizedKey.id === null
-        ? -1
-        : editingData.provider_keys.findIndex(
-            (item) => item.id === normalizedKey.id,
-          );
+    const normalizedKey = mapProviderApiKeySummary(response.created_key);
+    if (!normalizedKey) return editingData;
+    const existingIndex = editingData.provider_keys.findIndex(
+      (item) => item.id === normalizedKey.id,
+    );
 
     if (existingIndex >= 0) {
       editingData.provider_keys.splice(existingIndex, 1, normalizedKey);

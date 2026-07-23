@@ -146,12 +146,6 @@ impl<'de> Deserialize<'de> for SecretEncryptionConfig {
                 "secret_encryption.previous_encryption_key must differ from encryption_key",
             ));
         }
-        if raw.downstream_mode == DownstreamSecretMode::Recoverable && encryption_key.is_none() {
-            return Err(serde::de::Error::custom(
-                "secret_encryption.encryption_key is required when downstream_mode=recoverable",
-            ));
-        }
-
         Ok(Self {
             downstream_mode: raw.downstream_mode,
             encryption_key,
@@ -161,6 +155,15 @@ impl<'de> Deserialize<'de> for SecretEncryptionConfig {
 }
 
 impl SecretEncryptionConfig {
+    pub(crate) fn validate_for_runtime(&self) -> Result<(), String> {
+        if self.encryption_key.is_none() {
+            return Err(
+                "secret_encryption.encryption_key is required for all downstream modes".to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn encryption_key(&self) -> Option<&SecretEncryptionKey> {
         self.encryption_key.as_ref()
     }
@@ -172,11 +175,18 @@ impl SecretEncryptionConfig {
             .unwrap_or(true)
     }
 
-    pub(crate) fn take_previous_encryption_key(&self) -> Option<SecretEncryptionKey> {
+    pub(crate) fn previous_encryption_key(&self) -> Option<SecretEncryptionKey> {
         self.previous_encryption_key
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
+            .clone()
+    }
+
+    pub(crate) fn consume_previous_encryption_key(&self) {
+        self.previous_encryption_key
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
     }
 }
 

@@ -127,12 +127,41 @@ pub struct CacheModelsCatalog {
     pub runtime_feature_configs: Vec<CacheRuntimeFeatureConfig>,
 }
 
-/// Cached provider API key
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+/// Cached provider API key selection. Secret material remains encrypted at rest and in cache.
+#[derive(Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheProviderKey {
     pub id: i64,
     pub provider_id: i64,
-    pub api_key: String,
+    pub secret_ciphertext: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    pub secret_format_version: i32,
+    pub secret_key_fingerprint: String,
+}
+
+impl std::fmt::Debug for CacheProviderKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "CacheProviderKey {{ id: {}, provider_id: {}, secret_material: <redacted> }}",
+            self.id, self.provider_id
+        )
+    }
+}
+
+impl CacheProviderKey {
+    pub fn encrypted_secret(
+        &self,
+    ) -> Result<
+        crate::service::secret_encryption::EncryptedSecret,
+        crate::service::secret_encryption::SecretEncryptionError,
+    > {
+        crate::service::secret_encryption::EncryptedSecret::from_parts(
+            self.secret_ciphertext.clone(),
+            self.secret_nonce.clone(),
+            self.secret_format_version,
+            self.secret_key_fingerprint.clone(),
+        )
+    }
 }
 
 /// Embedded ACL rule carried by `CacheApiKey`.
@@ -423,12 +452,15 @@ impl From<crate::database::model::Model> for CacheModel {
     }
 }
 
-impl From<crate::database::provider::ProviderApiKey> for CacheProviderKey {
-    fn from(db: crate::database::provider::ProviderApiKey) -> Self {
+impl From<crate::database::provider::ProviderApiKeySelection> for CacheProviderKey {
+    fn from(db: crate::database::provider::ProviderApiKeySelection) -> Self {
         Self {
             id: db.id,
             provider_id: db.provider_id,
-            api_key: db.api_key,
+            secret_ciphertext: db.secret_ciphertext,
+            secret_nonce: db.secret_nonce,
+            secret_format_version: db.secret_format_version,
+            secret_key_fingerprint: db.secret_key_fingerprint,
         }
     }
 }

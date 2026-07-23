@@ -33,11 +33,18 @@ use crate::{
     database::{
         TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
-        provider::{BootstrapProviderInput, Provider},
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
+        request_patch::CreateRequestPatchPayload,
     },
-    schema::enum_def::{Action, LlmApiType, ProviderApiKeyMode, ProviderType, RequestStatus},
-    service::app_state::{AppState, create_test_app_state},
+    schema::enum_def::{
+        Action, LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation,
+        RequestPatchPlacement, RequestStatus,
+    },
+    service::{
+        admin::model::UpdateModelInput,
+        admin::provider::BootstrapProviderCommand,
+        app_state::{AppState, create_test_app_state},
+    },
     utils::{ID_GENERATOR, sse::SseParser},
 };
 
@@ -413,6 +420,15 @@ struct RouterFixture {
 
 impl RouterFixture {
     async fn new(context: TestDbContext, fixture: &DirectExecutionFixture, base_url: &str) -> Self {
+        Self::new_with_default_action(context, fixture, base_url, Action::Allow).await
+    }
+
+    async fn new_with_default_action(
+        context: TestDbContext,
+        fixture: &DirectExecutionFixture,
+        base_url: &str,
+        default_action: Action,
+    ) -> Self {
         let nonce = ID_GENERATOR.generate_id();
         let endpoint = match fixture.provider_type {
             ProviderType::Gemini => format!("{base_url}/v1beta/models"),
@@ -420,24 +436,29 @@ impl RouterFixture {
         };
         let provider_key = format!("baseline-provider-{nonce}");
         let provider_name = format!("Baseline Provider {nonce}");
-        let bootstrapped = Provider::bootstrap(&BootstrapProviderInput {
-            provider_id: nonce,
-            provider_key: provider_key.clone(),
-            name: provider_name.clone(),
-            endpoint,
-            use_proxy: false,
-            provider_type: fixture.provider_type.clone(),
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-            api_key: PROVIDER_SECRET.to_string(),
-            api_key_description: Some("direct execution regression".to_string()),
-            model_name: "baseline-model".to_string(),
-            real_model_name: Some(UPSTREAM_MODEL.to_string()),
-        })
-        .expect("provider fixture should bootstrap");
+        let app_state = create_test_app_state(context).await;
+        let bootstrapped = app_state
+            .admin
+            .provider
+            .bootstrap_provider_persist(BootstrapProviderCommand {
+                provider_id: nonce,
+                provider_key: provider_key.clone(),
+                name: provider_name.clone(),
+                endpoint,
+                use_proxy: false,
+                provider_type: fixture.provider_type.clone(),
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+                api_key: PROVIDER_SECRET.to_string(),
+                api_key_description: Some("direct execution regression".to_string()),
+                model_name: "baseline-model".to_string(),
+                real_model_name: Some(UPSTREAM_MODEL.to_string()),
+            })
+            .await
+            .expect("provider fixture should bootstrap");
         let created_key = ApiKey::create(&CreateApiKeyPayload {
             name: format!("direct-execution-key-{nonce}"),
             description: Some("direct execution regression".to_string()),
-            default_action: Some(Action::Allow),
+            default_action: Some(default_action),
             is_enabled: Some(true),
             expires_at: None,
             rate_limit_rpm: None,
@@ -452,7 +473,6 @@ impl RouterFixture {
             acl_rules: None,
         })
         .expect("downstream key fixture should create");
-        let app_state = create_test_app_state(context).await;
         Self {
             app_state,
             downstream_key: created_key.reveal.api_key,
@@ -765,6 +785,147 @@ fn direct_execution_regression_fixtures_define_five_complete_protocols() {
     for (name, fixture) in fixtures {
         validate_fixture(name, &fixture);
     }
+}
+
+#[test]
+fn capability_rejection_does_not_decrypt_provider_credential() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let model = crate::database::model::Model::get_by_id(router.model_id).unwrap();
+        router
+            .app_state
+            .admin
+            .model
+            .update_model(
+                model.id,
+                UpdateModelInput {
+                    model_name: model.model_name,
+                    real_model_name: model.real_model_name,
+                    is_enabled: true,
+                    cost_catalog_id: model.cost_catalog_id,
+                    supports_streaming: Some(model.supports_streaming),
+                    supports_tools: Some(false),
+                    supports_reasoning: Some(model.supports_reasoning),
+                    supports_image_input: Some(model.supports_image_input),
+                    supports_embeddings: Some(model.supports_embeddings),
+                    supports_rerank: Some(model.supports_rerank),
+                },
+            )
+            .await
+            .expect("model capability should update");
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+        let mut body = fixture.request.downstream.clone();
+        body.as_object_mut().unwrap().insert(
+            "tools".to_string(),
+            json!([{"type":"function","function":{"name":"probe"}}]),
+        );
+
+        let response = router.send(&fixture, false, &body).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn acl_rejection_does_not_decrypt_provider_credential() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new_with_default_action(
+            context,
+            &fixture,
+            &upstream.base_url,
+            Action::Deny,
+        )
+        .await;
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn request_patch_conflict_rejection_does_not_decrypt_provider_credential() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let patch = |target: &str| CreateRequestPatchPayload {
+            placement: RequestPatchPlacement::Body,
+            target: target.to_string(),
+            operation: RequestPatchOperation::Set,
+            value_json: Some(Some(json!({"temperature": 0.2}))),
+            description: Some("decrypt ordering regression".to_string()),
+            is_enabled: Some(true),
+            confirm_dangerous_target: None,
+        };
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_provider_request_patch(router.provider_id, patch("/generation_config"))
+            .await
+            .expect("provider patch should create");
+        router
+            .app_state
+            .admin
+            .request_patch
+            .create_model_request_patch(router.model_id, patch("/generation_config/temperature"))
+            .await
+            .expect("model patch should create");
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
 }
 
 #[test]

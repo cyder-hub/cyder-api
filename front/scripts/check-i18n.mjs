@@ -228,8 +228,6 @@ async function checkDynamicKeyCandidates(messageKeys) {
     "cost-options",
     "cost-version-state",
     "cost-validation-alert",
-    "portable-config-enums",
-    "portable-config-known-ids",
     "record-detail-tabs",
   ];
   const sourceIds = new Set(DYNAMIC_I18N_KEY_SOURCES.map((source) => source.id));
@@ -256,12 +254,11 @@ async function checkDynamicKeyCandidates(messageKeys) {
     }
   }
 
-  const exceptionIds = new Set(
-    DYNAMIC_I18N_FALLBACK_EXCEPTIONS.map((exception) => exception.id),
-  );
-  for (const id of ["portable-config-unknown-module-or-subrange"]) {
-    if (!exceptionIds.has(id)) {
-      addError(`dynamic keys: missing fallback exception ${id}`);
+  if (DYNAMIC_I18N_FALLBACK_EXCEPTIONS.length > 0) {
+    for (const exception of DYNAMIC_I18N_FALLBACK_EXCEPTIONS) {
+      if (!exception.id || !exception.keyTemplate || !exception.guard || !exception.fallback) {
+        addError("dynamic keys: fallback exception is incomplete");
+      }
     }
   }
 }

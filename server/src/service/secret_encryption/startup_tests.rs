@@ -1,9 +1,12 @@
 use super::*;
 
 use crate::database::api_key::{_postgres_model, _sqlite_model, ApiKey, CreateApiKeyPayload};
+use crate::database::provider::{
+    NewProvider, NewProviderApiKey, Provider, ProviderApiKeyRepository, StoredProviderApiKey,
+};
 use crate::database::{DbConnection, TestDbContext, get_connection};
 use crate::db_execute;
-use crate::schema::enum_def::Action;
+use crate::schema::enum_def::{Action, ProviderApiKeyMode, ProviderType};
 use diesel::connection::SimpleConnection;
 use diesel::{Connection, PgConnection, QueryableByName, RunQueryDsl, sql_types::Text};
 use std::env;
@@ -117,6 +120,60 @@ fn encrypt_for(id: i64, service: &SecretEncryptionService, value: &str) -> Encry
         .expect("test secret should encrypt")
 }
 
+fn create_test_provider(id: i64) -> Provider {
+    Provider::create(&NewProvider {
+        id,
+        provider_key: format!("secret-startup-provider-{id}"),
+        name: format!("Secret Startup Provider {id}"),
+        endpoint: "https://api.example.com/v1".to_string(),
+        use_proxy: false,
+        is_enabled: true,
+        created_at: 1,
+        updated_at: 1,
+        provider_type: ProviderType::Openai,
+        provider_api_key_mode: ProviderApiKeyMode::Queue,
+    })
+    .expect("test provider should create")
+}
+
+fn create_test_provider_secret(
+    id: i64,
+    provider_id: i64,
+    service: &SecretEncryptionService,
+    value: &str,
+) {
+    let plaintext = SensitiveSecret::new(value.to_string());
+    ProviderApiKeyRepository::insert(&NewProviderApiKey {
+        id,
+        provider_id,
+        description: Some("startup rotation".to_string()),
+        key_prefix: value.chars().take(4).collect(),
+        key_last4: value
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect(),
+        encrypted_secret: service
+            .encrypt_current(SecretDomain::ProviderApiKey(id), &plaintext)
+            .expect("provider secret should encrypt"),
+        secret_hmac: service
+            .provider_secret_fingerprint(provider_id, &plaintext)
+            .expect("provider secret should fingerprint"),
+        is_enabled: true,
+        created_at: id,
+        updated_at: id,
+    })
+    .expect("provider secret should insert");
+}
+
+fn load_provider_secret(provider_id: i64, id: i64) -> StoredProviderApiKey {
+    ProviderApiKeyRepository::get_stored_by_id(provider_id, id)
+        .expect("stored provider secret should load")
+}
+
 #[test]
 fn startup_rotation_rotates_previous_and_preserves_unknown_or_corrupt_downstream_secrets() {
     let context = TestDbContext::new_sqlite("secret-startup-rotation.sqlite");
@@ -144,17 +201,18 @@ fn startup_rotation_rotates_previous_and_preserves_unknown_or_corrupt_downstream
 
         let config = rotation_config(DownstreamSecretMode::Recoverable);
         let startup_config = config.clone();
-        let summary = rotate_downstream_secrets_before_startup(&startup_config)
+        let summary = prepare_secrets_before_startup(&startup_config)
             .expect("downstream startup rotation should continue past unavailable rows");
         assert_eq!(
-            summary,
+            summary.downstream,
             SecretRotationSummary {
                 current: 1,
                 rotated: 1,
                 unavailable_preserved: 2,
             }
         );
-        assert_eq!(summary.total(), 4);
+        assert_eq!(summary.downstream.total(), 4);
+        assert_eq!(summary.provider.total(), 0);
         assert!(!config.has_previous_encryption_key());
 
         let rotated = load_encrypted_secret(previous_id);
@@ -165,11 +223,11 @@ fn startup_rotation_rotates_previous_and_preserves_unknown_or_corrupt_downstream
         assert_eq!(load_encrypted_secret(unknown_id), unknown_before);
         assert_eq!(load_encrypted_secret(corrupt_id), corrupt);
 
-        let second = rotate_downstream_secrets_before_startup(&config)
+        let second = prepare_secrets_before_startup(&config)
             .expect("rotation should be idempotent after previous key is consumed");
-        assert_eq!(second.current, 2);
-        assert_eq!(second.rotated, 0);
-        assert_eq!(second.unavailable_preserved, 2);
+        assert_eq!(second.downstream.current, 2);
+        assert_eq!(second.downstream.rotated, 0);
+        assert_eq!(second.downstream.unavailable_preserved, 2);
     });
 }
 
@@ -186,9 +244,9 @@ fn startup_rotation_runs_in_one_time_mode() {
         );
 
         let config = rotation_config(DownstreamSecretMode::OneTime);
-        let summary = rotate_downstream_secrets_before_startup(&config)
+        let summary = prepare_secrets_before_startup(&config)
             .expect("one-time mode should still rotate historical ciphertext");
-        assert_eq!(summary.rotated, 1);
+        assert_eq!(summary.downstream.rotated, 1);
         let plaintext = current_service
             .decrypt_current(
                 SecretDomain::DownstreamApiKey(id),
@@ -197,6 +255,190 @@ fn startup_rotation_runs_in_one_time_mode() {
             .expect("historical secret should use current key");
         assert_eq!(plaintext.expose(), "preserved-for-future");
     });
+}
+
+#[test]
+fn startup_preparation_authenticates_current_and_rotates_previous_provider_secrets() {
+    let context = TestDbContext::new_sqlite("provider-secret-startup-success.sqlite");
+    context.run_sync(|| {
+        let provider = create_test_provider(1_001);
+        let current_service = service_for_key(KEY_A);
+        let previous_service = service_for_key(KEY_B);
+        create_test_provider_secret(
+            1_101,
+            provider.id,
+            &current_service,
+            "current-provider-secret",
+        );
+        create_test_provider_secret(
+            1_102,
+            provider.id,
+            &previous_service,
+            "previous-provider-secret",
+        );
+        let previous_before = load_provider_secret(provider.id, 1_102)
+            .secret_nonce
+            .expect("previous nonce should exist");
+
+        let config = rotation_config(DownstreamSecretMode::OneTime);
+        let summary =
+            prepare_secrets_before_startup(&config).expect("valid provider secrets should prepare");
+        assert_eq!(summary.provider.current, 1);
+        assert_eq!(summary.provider.rotated, 1);
+        assert_eq!(summary.provider.unavailable_preserved, 0);
+        assert!(!config.has_previous_encryption_key());
+
+        let rotated = load_provider_secret(provider.id, 1_102);
+        assert_ne!(
+            rotated.secret_nonce.as_deref(),
+            Some(previous_before.as_slice())
+        );
+        let plaintext = current_service
+            .decrypt_current(
+                SecretDomain::ProviderApiKey(1_102),
+                &rotated
+                    .encrypted_secret()
+                    .expect("rotated provider tuple should be valid"),
+            )
+            .expect("rotated provider secret should use current key");
+        assert_eq!(plaintext.expose(), "previous-provider-secret");
+        assert_eq!(
+            rotated.secret_hmac.as_deref(),
+            Some(
+                current_service
+                    .provider_secret_fingerprint(provider.id, &plaintext)
+                    .expect("rotated HMAC should compute")
+                    .as_str()
+            )
+        );
+    });
+}
+
+#[test]
+fn provider_failure_rolls_back_downstream_rotation_and_preserves_previous_key_for_retry() {
+    let context = TestDbContext::new_sqlite("provider-secret-startup-rollback.sqlite");
+    context.run_sync(|| {
+        let previous_service = service_for_key(KEY_B);
+        let current_service = service_for_key(KEY_A);
+        let downstream_id = create_test_api_key("rollback-with-provider");
+        let downstream_before = encrypt_for(downstream_id, &previous_service, "downstream-value");
+        store_encrypted_secret(downstream_id, &downstream_before);
+        let provider = create_test_provider(2_001);
+        create_test_provider_secret(2_101, provider.id, &current_service, "provider-value");
+        {
+            let conn = &mut get_connection().expect("test connection should load");
+            db_execute!(conn, {
+                diesel::update(provider_api_key::table.find(2_101_i64))
+                    .set(provider_api_key::dsl::secret_hmac.eq(Some("f".repeat(64))))
+                    .execute(conn)
+                    .expect("provider HMAC should tamper")
+            });
+        }
+
+        let config = rotation_config(DownstreamSecretMode::Recoverable);
+        let error = prepare_secrets_before_startup(&config)
+            .expect_err("provider HMAC mismatch must reject startup");
+        assert!(format!("{error:?}").contains("reason=hmac_mismatch"));
+        assert_eq!(load_encrypted_secret(downstream_id), downstream_before);
+        assert!(config.has_previous_encryption_key());
+
+        let provider_plaintext = SensitiveSecret::new("provider-value".to_string());
+        let correct_hmac = current_service
+            .provider_secret_fingerprint(provider.id, &provider_plaintext)
+            .expect("correct HMAC should compute");
+        {
+            let conn = &mut get_connection().expect("test connection should load");
+            db_execute!(conn, {
+                diesel::update(provider_api_key::table.find(2_101_i64))
+                    .set(
+                        provider_api_key::dsl::secret_hmac
+                            .eq(Some(correct_hmac.as_str().to_string())),
+                    )
+                    .execute(conn)
+                    .expect("provider HMAC should repair")
+            });
+        }
+
+        let retry = prepare_secrets_before_startup(&config)
+            .expect("same config should retry after provider repair");
+        assert_eq!(retry.downstream.rotated, 1);
+        assert_eq!(retry.provider.current, 1);
+        assert!(!config.has_previous_encryption_key());
+    });
+}
+
+fn assert_sqlite_provider_secret_failure(
+    file_name: &str,
+    stored_key: &str,
+    mutation_sql: &str,
+    expected_reason: &str,
+) {
+    let context = TestDbContext::new_sqlite(file_name);
+    context.run_sync(|| {
+        let provider = create_test_provider(3_001);
+        let stored_service = service_for_key(stored_key);
+        create_test_provider_secret(
+            3_101,
+            provider.id,
+            &stored_service,
+            "strict-provider-secret",
+        );
+        if !mutation_sql.is_empty() {
+            let mut connection = get_connection().expect("test connection should load");
+            match &mut connection {
+                DbConnection::Sqlite(connection) => connection
+                    .batch_execute(mutation_sql)
+                    .expect("provider corruption fixture should apply"),
+                DbConnection::Postgres(_) => unreachable!("test uses sqlite"),
+            }
+        }
+        let config: SecretEncryptionConfig = serde_yaml::from_str(&format!(
+            "downstream_mode: one_time\nencryption_key: '{KEY_A}'\n"
+        ))
+        .expect("current-only config should parse");
+        let error = prepare_secrets_before_startup(&config)
+            .expect_err("invalid provider secret must reject startup");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains(expected_reason),
+            "unexpected error: {message}"
+        );
+        assert!(!message.contains("strict-provider-secret"));
+        assert!(!message.contains(&"f".repeat(64)));
+    });
+}
+
+#[test]
+fn startup_preparation_rejects_provider_corruption_with_safe_reason_codes() {
+    assert_sqlite_provider_secret_failure(
+        "provider-secret-corrupt-ciphertext.sqlite",
+        KEY_A,
+        "UPDATE provider_api_key SET secret_ciphertext = X'00' WHERE id = 3101;",
+        "reason=decrypt_failed",
+    );
+    assert_sqlite_provider_secret_failure(
+        "provider-secret-wrong-hmac.sqlite",
+        KEY_A,
+        &format!(
+            "UPDATE provider_api_key SET secret_hmac = '{}' WHERE id = 3101;",
+            "f".repeat(64)
+        ),
+        "reason=hmac_mismatch",
+    );
+    assert_sqlite_provider_secret_failure(
+        "provider-secret-incomplete.sqlite",
+        KEY_A,
+        "PRAGMA ignore_check_constraints = ON;
+         UPDATE provider_api_key SET secret_nonce = NULL WHERE id = 3101;
+         PRAGMA ignore_check_constraints = OFF;",
+        "reason=incomplete_fields",
+    );
+    assert_sqlite_provider_secret_failure(
+        "provider-secret-unknown-key.sqlite",
+        KEY_C,
+        "",
+        "reason=unknown_key",
+    );
 }
 
 #[test]
@@ -229,7 +471,7 @@ fn startup_rotation_database_error_rolls_back_all_prior_updates() {
 
         let config = rotation_config(DownstreamSecretMode::Recoverable);
         assert!(
-            rotate_downstream_secrets_before_startup(&config).is_err(),
+            prepare_secrets_before_startup(&config).is_err(),
             "database failure should fail startup rotation"
         );
         assert_eq!(load_encrypted_secret(first_id), first_before);
@@ -245,9 +487,9 @@ fn startup_rotation_database_error_rolls_back_all_prior_updates() {
         drop(connection);
 
         let retry_config = rotation_config(DownstreamSecretMode::Recoverable);
-        let retry_summary = rotate_downstream_secrets_before_startup(&retry_config)
+        let retry_summary = prepare_secrets_before_startup(&retry_config)
             .expect("a fresh startup should retry the rolled-back rotation");
-        assert_eq!(retry_summary.rotated, 2);
+        assert_eq!(retry_summary.downstream.rotated, 2);
         let current_service = service_for_key(KEY_A);
         assert_eq!(
             current_service
@@ -276,7 +518,7 @@ fn startup_rotation_database_error_rolls_back_all_prior_updates() {
 fn main_prepares_state_and_rotates_secrets_before_binding_or_serving() {
     let main_source = include_str!("../../main.rs");
     let rotation = main_source
-        .find("let secret_rotation = rotate_downstream_secrets_before_startup")
+        .find("let secret_preparation = prepare_secrets_before_startup")
         .expect("main must run startup secret rotation");
     let app_state = main_source
         .find("create_app_state().await")
@@ -323,12 +565,20 @@ fn postgres_startup_rotation_reencrypts_previous_and_preserves_unknown() {
             let unknown = encrypt_for(unknown_id, &unknown_service, "postgres-unknown");
             store_encrypted_secret(previous_id, &previous);
             store_encrypted_secret(unknown_id, &unknown);
+            let provider = create_test_provider(4_001);
+            create_test_provider_secret(
+                4_101,
+                provider.id,
+                &previous_service,
+                "postgres-provider-secret",
+            );
 
             let config = rotation_config(DownstreamSecretMode::Recoverable);
-            let summary = rotate_downstream_secrets_before_startup(&config)
+            let summary = prepare_secrets_before_startup(&config)
                 .expect("postgres startup rotation should succeed");
-            assert_eq!(summary.rotated, 1);
-            assert_eq!(summary.unavailable_preserved, 1);
+            assert_eq!(summary.downstream.rotated, 1);
+            assert_eq!(summary.downstream.unavailable_preserved, 1);
+            assert_eq!(summary.provider.rotated, 1);
             let plaintext = current_service
                 .decrypt_current(
                     SecretDomain::DownstreamApiKey(previous_id),
@@ -337,6 +587,15 @@ fn postgres_startup_rotation_reencrypts_previous_and_preserves_unknown() {
                 .expect("postgres rotated secret should use current key");
             assert_eq!(plaintext.expose(), "postgres-secret");
             assert_eq!(load_encrypted_secret(unknown_id), unknown);
+            let provider_plaintext = current_service
+                .decrypt_current(
+                    SecretDomain::ProviderApiKey(4_101),
+                    &load_provider_secret(provider.id, 4_101)
+                        .encrypted_secret()
+                        .expect("postgres provider tuple should load"),
+                )
+                .expect("postgres provider secret should rotate");
+            assert_eq!(provider_plaintext.expose(), "postgres-provider-secret");
         });
     }));
     drop(context);

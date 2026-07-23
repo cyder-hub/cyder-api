@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use cyder_tools::log::warn;
 use rand::{Rng, rng};
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -118,12 +117,9 @@ impl ProviderKeySelector {
                 let selector = selector.upgrade();
                 Box::pin(async move {
                     if let Some(selector) = selector {
-                        if let Err(err) = selector.reset_provider_cursor(provider_id).await {
-                            warn!(
-                                "failed to reset provider key cursor after provider api key invalidation: provider_id={}, error={}",
-                                provider_id, err
-                            );
-                        }
+                        selector.reset_provider_cursor(provider_id).await
+                    } else {
+                        Ok(())
                     }
                 })
             }))

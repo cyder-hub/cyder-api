@@ -32,7 +32,7 @@ test("navigation starts with Dashboard and uses operator workflow groups", () =>
   assert.equal(byPath.get("/model")?.section, "resources");
   assert.equal(byPath.get("/api_key")?.section, "resources");
   assert.equal(byPath.get("/cost")?.section, "governance");
-  assert.equal(byPath.get("/system/portable")?.section, "governance");
+  assert.equal(byPath.has("/system/portable"), false);
   assert.equal(byPath.has("/system/config"), false);
   assert.equal(byPath.has("/custom_fields"), false);
   assert.equal(navItems.some((item) => item.section === "start"), false);

@@ -453,6 +453,9 @@ mod tests {
         paths::ConfigPaths,
     };
 
+    const TEST_ENCRYPTION_KEY: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
     fn write_test_config(path: &Path, yaml: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("config parent should be created");
@@ -576,6 +579,10 @@ mod tests {
         };
 
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        write_test_config(
+            &paths.user_config_path,
+            &format!("secret_encryption:\n  encryption_key: '{TEST_ENCRYPTION_KEY}'\n"),
+        );
         let loaded = load_effective_config(
             &paths,
             ConfigLoadOptions {
@@ -801,6 +808,10 @@ mod tests {
         let paths = ConfigPaths::for_test(temp_dir.path());
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
         let before = fs::read_to_string(&paths.default_config_path).expect("default should read");
+        write_test_config(
+            &paths.user_config_path,
+            &format!("secret_encryption:\n  encryption_key: '{TEST_ENCRYPTION_KEY}'\n"),
+        );
 
         let first = load_effective_config(
             &paths,

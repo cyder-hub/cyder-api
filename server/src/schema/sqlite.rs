@@ -251,11 +251,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::{BigInt, Binary, Bool, Integer, Nullable, Text};
+
     provider_api_key (id) {
         id -> BigInt,
         provider_id -> BigInt,
-        api_key -> Text,
         description -> Nullable<Text>,
+        key_prefix -> Text,
+        key_last4 -> Text,
+        secret_ciphertext -> Nullable<Binary>,
+        secret_nonce -> Nullable<Binary>,
+        secret_format_version -> Nullable<Integer>,
+        secret_key_fingerprint -> Nullable<Text>,
+        secret_hmac -> Nullable<Text>,
         deleted_at -> Nullable<BigInt>,
         is_enabled -> Bool,
         created_at -> BigInt,

@@ -4,7 +4,7 @@ pub mod cache;
 pub mod catalog;
 pub mod infra;
 pub mod metrics;
-pub mod portable_config;
+pub mod provider_credential;
 pub mod redis;
 pub mod request_patch;
 pub mod runtime;

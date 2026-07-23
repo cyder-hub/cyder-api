@@ -1,11 +1,14 @@
 import { request } from "./http";
 import type {
-  ProviderApiKeyItem,
+  ProviderApiKeyReveal,
+  ProviderApiKeySummary,
   ProviderBase,
   ProviderBootstrapPayload,
   ProviderBootstrapResponse,
   ProviderCheckPayload,
   ProviderKeyPayload,
+  ProviderKeyReplacePayload,
+  ProviderKeyUpdatePayload,
   ProviderListItem,
   ProviderPayload,
   ProviderRemoteModelsResponse,
@@ -56,8 +59,35 @@ export function getProviderRemoteModels(
 export function createProviderKey(
   id: number | string,
   payload: ProviderKeyPayload,
-): Promise<ProviderApiKeyItem> {
-  return request.post(`/ai/manager/api/provider/${id}/provider_key`, payload);
+): Promise<ProviderApiKeySummary> {
+  return request.post(`/ai/manager/api/provider/${id}/provider_keys`, payload);
+}
+
+export function getProviderKeys(id: number | string): Promise<ProviderApiKeySummary[]> {
+  return request.get(`/ai/manager/api/provider/${id}/provider_keys`);
+}
+
+export function updateProviderKey(
+  id: number | string,
+  keyId: number | string,
+  payload: ProviderKeyUpdatePayload,
+): Promise<ProviderApiKeySummary> {
+  return request.put(`/ai/manager/api/provider/${id}/provider_keys/${keyId}`, payload);
+}
+
+export function replaceProviderKey(
+  id: number | string,
+  keyId: number | string,
+  payload: ProviderKeyReplacePayload,
+): Promise<ProviderApiKeySummary> {
+  return request.post(`/ai/manager/api/provider/${id}/provider_keys/${keyId}/replace`, payload);
+}
+
+export function revealProviderKey(
+  id: number | string,
+  keyId: number | string,
+): Promise<ProviderApiKeyReveal> {
+  return request.post(`/ai/manager/api/provider/${id}/provider_keys/${keyId}/reveal`);
 }
 
 export function deleteProviderKey(
@@ -65,7 +95,7 @@ export function deleteProviderKey(
   keyId: number | string,
 ): Promise<void> {
   return request.delete(
-    `/ai/manager/api/provider/${id}/provider_key/${keyId}`,
+    `/ai/manager/api/provider/${id}/provider_keys/${keyId}`,
   );
 }
 

@@ -11,7 +11,6 @@ use crate::{
     proxy::{
         ProxyError, protocol_transform_error,
         runtime::{
-            credential::{ProviderCredentials, apply_provider_request_auth_header},
             reasoning_content_repair::{
                 ReasoningContentRepairRequest, repair_openai_reasoning_content,
             },
@@ -25,6 +24,7 @@ use crate::{
     schema::enum_def::LlmApiType,
     service::{
         cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch},
+        provider_credential::{ProviderCredential, apply_provider_request_auth_header},
         runtime::{ReasoningContinuationScope, ReasoningContinuationStore},
         transform::{finalize_request_data, transform_request_data},
     },
@@ -72,7 +72,7 @@ fn select_generation_prepare_kind(
 fn build_gemini_headers(
     original_headers: &HeaderMap,
     provider: &CacheProvider,
-    api_key: &str,
+    credential: &ProviderCredential,
 ) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in original_headers.iter() {
@@ -87,7 +87,8 @@ fn build_gemini_headers(
         }
     }
 
-    apply_provider_request_auth_header(&mut headers, provider, LlmApiType::Gemini, api_key)?;
+    apply_provider_request_auth_header(&mut headers, provider, LlmApiType::Gemini, credential)
+        .map_err(|error| ProxyError::BadRequest(error.to_string()))?;
 
     Ok(headers)
 }
@@ -120,7 +121,7 @@ fn build_new_headers(
     pre_headers: &HeaderMap,
     provider: &CacheProvider,
     target_api_type: LlmApiType,
-    api_key: &str,
+    credential: &ProviderCredential,
 ) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in pre_headers.iter() {
@@ -129,7 +130,8 @@ fn build_new_headers(
             headers.insert(name.clone(), value.clone());
         }
     }
-    apply_provider_request_auth_header(&mut headers, provider, target_api_type, api_key)?;
+    apply_provider_request_auth_header(&mut headers, provider, target_api_type, credential)
+        .map_err(|error| ProxyError::BadRequest(error.to_string()))?;
     Ok(headers)
 }
 
@@ -153,7 +155,7 @@ async fn prepare_llm_request(
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credentials: &ProviderCredentials,
+    provider_credential: &ProviderCredential,
     path: &str,
 ) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
     debug!(
@@ -169,7 +171,7 @@ async fn prepare_llm_request(
         original_headers,
         provider,
         target_api_type,
-        &provider_credentials.request_key,
+        provider_credential,
     )?;
 
     ensure_request_body_object(&mut data);
@@ -180,7 +182,7 @@ async fn prepare_llm_request(
     data = finalize_request_data(data, LlmApiType::Openai, &provider.provider_type, path);
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
 
-    Ok((url.to_string(), headers, data, provider_credentials.key_id))
+    Ok((url.to_string(), headers, data, provider_credential.key_id()))
 }
 
 async fn prepare_generation_request(
@@ -189,7 +191,7 @@ async fn prepare_generation_request(
     data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credentials: &ProviderCredentials,
+    provider_credential: &ProviderCredential,
     target_api_type: LlmApiType,
     is_stream: bool,
     params: &HashMap<String, String>,
@@ -203,7 +205,7 @@ async fn prepare_generation_request(
                     data,
                     original_headers,
                     request_patches,
-                    provider_credentials,
+                    provider_credential,
                     path,
                 )
                 .await?;
@@ -222,7 +224,7 @@ async fn prepare_generation_request(
                     data,
                     original_headers,
                     request_patches,
-                    provider_credentials,
+                    provider_credential,
                     is_stream,
                     params,
                 )
@@ -243,7 +245,7 @@ async fn prepare_simple_gemini_request(
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credentials: &ProviderCredentials,
+    provider_credential: &ProviderCredential,
     action: &str,
     params: &HashMap<String, String>,
 ) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
@@ -254,14 +256,10 @@ async fn prepare_simple_gemini_request(
 
     let real_model_name = resolve_real_model_name(model);
     let mut url = build_gemini_url(provider, real_model_name, action, params, false)?;
-    let mut headers = build_gemini_headers(
-        original_headers,
-        provider,
-        &provider_credentials.request_key,
-    )?;
+    let mut headers = build_gemini_headers(original_headers, provider, provider_credential)?;
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
 
-    Ok((url.to_string(), headers, data, provider_credentials.key_id))
+    Ok((url.to_string(), headers, data, provider_credential.key_id()))
 }
 
 async fn prepare_gemini_llm_request(
@@ -270,7 +268,7 @@ async fn prepare_gemini_llm_request(
     mut data: Value,
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credentials: &ProviderCredentials,
+    provider_credential: &ProviderCredential,
     is_stream: bool,
     params: &HashMap<String, String>,
 ) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
@@ -286,15 +284,11 @@ async fn prepare_gemini_llm_request(
         "generateContent"
     };
     let mut url = build_gemini_url(provider, real_model_name, action, params, is_stream)?;
-    let mut headers = build_gemini_headers(
-        original_headers,
-        provider,
-        &provider_credentials.request_key,
-    )?;
+    let mut headers = build_gemini_headers(original_headers, provider, provider_credential)?;
 
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
 
-    Ok((url.to_string(), headers, data, provider_credentials.key_id))
+    Ok((url.to_string(), headers, data, provider_credential.key_id()))
 }
 
 fn is_openai_compatible_generation_target(target_api_type: LlmApiType) -> bool {
@@ -358,7 +352,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credentials: &ProviderCredentials,
+    provider_credential: &ProviderCredential,
     downstream_api_key_id: i64,
     reasoning_continuation_store: &dyn ReasoningContinuationStore,
 ) -> Result<MaterializedRequest, ProxyError> {
@@ -370,7 +364,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
         data,
         original_headers,
         request_patches,
-        provider_credentials,
+        provider_credential,
         target_api_type,
         is_stream,
         query_params,
@@ -378,7 +372,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
     .await?;
     debug_assert_eq!(
         prepared_request.provider_api_key_id,
-        provider_credentials.key_id
+        provider_credential.key_id()
     );
     let final_url = prepared_request.final_url;
     let mut final_body_value = prepared_request.final_body_value;
@@ -413,7 +407,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
     request_patches: &[RuntimeResolvedRequestPatch],
-    provider_credentials: &ProviderCredentials,
+    provider_credential: &ProviderCredential,
 ) -> Result<MaterializedRequest, ProxyError> {
     let (final_url, final_headers, final_body_value, provider_api_key_id) = match operation.protocol
     {
@@ -424,7 +418,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
                 data,
                 original_headers,
                 request_patches,
-                provider_credentials,
+                provider_credential,
                 &operation.downstream_path,
             )
             .await?
@@ -436,14 +430,14 @@ pub(in crate::proxy) async fn materialize_utility_request(
                 data,
                 original_headers,
                 request_patches,
-                provider_credentials,
+                provider_credential,
                 &operation.downstream_path,
                 query_params,
             )
             .await?
         }
     };
-    debug_assert_eq!(provider_api_key_id, provider_credentials.key_id);
+    debug_assert_eq!(provider_api_key_id, provider_credential.key_id());
     let final_body =
         Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
             protocol_transform_error("Failed to serialize final request body", err)

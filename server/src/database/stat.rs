@@ -1,6 +1,6 @@
 use crate::controller::BaseError;
 use crate::database::model::Model;
-use crate::database::provider::{Provider, ProviderApiKey};
+use crate::database::provider::{Provider, ProviderApiKeyRepository};
 use crate::database::{DbConnection, DbResult, get_connection};
 use crate::{db_execute, db_object};
 use chrono::{DateTime, TimeZone, Utc};
@@ -406,7 +406,7 @@ pub fn get_today_request_log_stats(timezone: Option<&str>) -> DbResult<TodayRequ
 pub fn get_dashboard_overview_stats() -> DbResult<DashboardOverviewStats> {
     let providers = Provider::list_all()?;
     let models = Model::list_all()?;
-    let provider_keys = ProviderApiKey::list_all()?;
+    let provider_keys = ProviderApiKeyRepository::list_all_summaries()?;
     let conn = &mut get_connection()?;
     let (api_key_count, enabled_api_key_count) = load_dashboard_api_key_counts(conn)?;
 
@@ -1491,9 +1491,16 @@ mod tests {
             );
 
             INSERT INTO provider_api_key (
-                id, provider_id, api_key, description, deleted_at, is_enabled, created_at, updated_at
+                id, provider_id, description, key_prefix, key_last4,
+                secret_ciphertext, secret_nonce, secret_format_version,
+                secret_key_fingerprint, secret_hmac,
+                deleted_at, is_enabled, created_at, updated_at
             ) VALUES (
-                20, 10, 'sk-provider', NULL, NULL, 1, 1, 1
+                20, 10, NULL, 'sk-prov', 'ider',
+                X'00', X'000000000000000000000000000000000000000000000000', 1,
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                '1111111111111111111111111111111111111111111111111111111111111111',
+                NULL, 1, 1, 1
             );
 
             INSERT INTO model (

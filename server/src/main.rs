@@ -5,7 +5,7 @@ use cyder_api::controller::{create_manager_router, create_system_router, handle_
 use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
 use cyder_api::proxy::create_proxy_router;
 use cyder_api::service::app_state::{create_app_state, create_state_router};
-use cyder_api::service::secret_encryption::rotate_downstream_secrets_before_startup;
+use cyder_api::service::secret_encryption::prepare_secrets_before_startup;
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -50,22 +50,29 @@ async fn main() {
             log_level = &CONFIG.log_level,
         );
     }
-    let secret_rotation = rotate_downstream_secrets_before_startup(&CONFIG.secret_encryption)
+    let secret_preparation = prepare_secrets_before_startup(&CONFIG.secret_encryption)
         .unwrap_or_else(|error| {
             panic!("failed to prepare encrypted secrets before startup: {error:?}")
         });
-    if secret_rotation.unavailable_preserved > 0 {
+    if secret_preparation.downstream.unavailable_preserved > 0 {
         cyder_api::warn_event!(
             "startup.downstream_secret_rotation_degraded",
-            current_records = secret_rotation.current,
-            rotated_records = secret_rotation.rotated,
-            unavailable_records = secret_rotation.unavailable_preserved,
+            current_records = secret_preparation.downstream.current,
+            rotated_records = secret_preparation.downstream.rotated,
+            unavailable_records = secret_preparation.downstream.unavailable_preserved,
         );
-    } else if secret_rotation.total() > 0 {
+    } else if secret_preparation.downstream.total() > 0 {
         cyder_api::info_event!(
             "startup.downstream_secret_rotation_completed",
-            current_records = secret_rotation.current,
-            rotated_records = secret_rotation.rotated,
+            current_records = secret_preparation.downstream.current,
+            rotated_records = secret_preparation.downstream.rotated,
+        );
+    }
+    if secret_preparation.provider.total() > 0 {
+        cyder_api::info_event!(
+            "startup.provider_secret_preparation_completed",
+            current_records = secret_preparation.provider.current,
+            rotated_records = secret_preparation.provider.rotated,
         );
     }
     let app_state = create_app_state().await;

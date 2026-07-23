@@ -9,4 +9,3 @@ export * from "./requestPatch";
 export * from "./runtimeFeatureConfig";
 export * from "./cost";
 export * from "./records";
-export * from "./portableConfig";

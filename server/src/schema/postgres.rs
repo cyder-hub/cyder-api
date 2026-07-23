@@ -251,11 +251,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::{Binary, Bool, Int4, Int8, Nullable, Text};
+
     provider_api_key (id) {
         id -> Int8,
         provider_id -> Int8,
-        api_key -> Text,
         description -> Nullable<Text>,
+        key_prefix -> Text,
+        key_last4 -> Text,
+        secret_ciphertext -> Nullable<Binary>,
+        secret_nonce -> Nullable<Binary>,
+        secret_format_version -> Nullable<Int4>,
+        secret_key_fingerprint -> Nullable<Text>,
+        secret_hmac -> Nullable<Text>,
         deleted_at -> Nullable<Int8>,
         is_enabled -> Bool,
         created_at -> Int8,

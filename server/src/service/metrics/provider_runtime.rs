@@ -10,7 +10,7 @@ use crate::database::metrics::{
     MetricRequestWindowAggregate, list_cost_rollup_minutes, list_http_status_rollup_minutes,
 };
 use crate::database::model::Model;
-use crate::database::provider::{Provider, ProviderApiKey};
+use crate::database::provider::{Provider, ProviderApiKeyRepository};
 use crate::database::provider_runtime::{
     ProviderRuntimeAggregate, ProviderRuntimeCostAggregate, ProviderRuntimeStatusCodeCount,
     get_provider_runtime_aggregates_in_range,
@@ -411,7 +411,7 @@ impl MetricsService {
             Provider::list_all()?
         };
         let models = Model::list_all()?;
-        let provider_api_keys = ProviderApiKey::list_all()?;
+        let provider_api_keys = ProviderApiKeyRepository::list_all_summaries()?;
 
         let now = Utc::now().timestamp_millis();
         let start_time_ms = now - window.duration_ms();

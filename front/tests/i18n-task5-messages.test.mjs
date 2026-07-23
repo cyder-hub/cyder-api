@@ -78,17 +78,10 @@ test("dynamic i18n key candidates cover known high-risk sources", () => {
     "request-patch-prefix",
     "api-key-governance",
     "cost-options",
-    "portable-config-enums",
     "record-detail-tabs",
   ]) {
     assert.equal(sourceIds.has(id), true, `${id} dynamic key source exists`);
   }
 
-  assert.equal(
-    DYNAMIC_I18N_FALLBACK_EXCEPTIONS.some(
-      (exception) =>
-        exception.id === "portable-config-unknown-module-or-subrange",
-    ),
-    true,
-  );
+  assert.equal(DYNAMIC_I18N_FALLBACK_EXCEPTIONS.length, 0);
 });

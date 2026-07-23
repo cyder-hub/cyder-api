@@ -185,62 +185,6 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
     valueSource: "front/src/pages/cost/** validation message path mapping",
   },
   {
-    id: "portable-config-enums",
-    keyTemplates: [
-      "portableConfigPage.fileProtection.{mode}",
-      "portableConfigPage.conflictStrategy.{strategy}",
-      "portableConfigPage.applyStatus.{status}",
-      "portableConfigPage.import.applyDisabledReason.{code}",
-    ],
-    values: [],
-    placeholders: {
-      mode: ["plaintext", "password_encrypted"],
-      strategy: ["fail_on_conflict", "skip_existing", "overwrite_existing"],
-      status: ["applied", "skipped", "blocked", "failed"],
-      code: [
-        "no_preview",
-        "top_level_blocking",
-        "no_selected_modules",
-        "missing_reason",
-        "module_blocking",
-        "dangerous_patch_confirmation",
-      ],
-    },
-    valueSource:
-      "front/src/services/types/portableConfig.ts and PortableApplyDisabledReasonCode",
-  },
-  {
-    id: "portable-config-known-ids",
-    keyTemplates: [
-      "portableConfigPage.modules.{moduleId}",
-      "portableConfigPage.subranges.{subrangeId}",
-    ],
-    values: [],
-    placeholders: {
-      moduleId: [
-        "provider_profile",
-        "api_keys",
-        "cost_catalogs",
-        "cost_bindings",
-      ],
-      subrangeId: [
-        "provider_core",
-        "provider_keys",
-        "provider_models",
-        "provider_request_patches",
-        "provider_reasoning_config",
-        "api_key_core",
-        "api_key_acl",
-        "cost_catalog_core",
-        "cost_catalog_versions",
-        "cost_components",
-        "cost_model_bindings",
-      ],
-    },
-    valueSource:
-      "KnownPortableModuleId and KnownPortableSubrangeId; unknown backend IDs use backend labels",
-  },
-  {
     id: "record-detail-tabs",
     keyTemplates: ["{tab.labelKey}"],
     values: [],
@@ -248,12 +192,5 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
   },
 ] as const satisfies readonly DynamicI18nKeySource[];
 
-export const DYNAMIC_I18N_FALLBACK_EXCEPTIONS = [
-  {
-    id: "portable-config-unknown-module-or-subrange",
-    keyTemplate:
-      "portableConfigPage.modules.{moduleId} / portableConfigPage.subranges.{subrangeId}",
-    guard: "known ID check",
-    fallback: "backend-provided label",
-  },
-] as const satisfies readonly DynamicI18nFallbackException[];
+export const DYNAMIC_I18N_FALLBACK_EXCEPTIONS =
+  [] as const satisfies readonly DynamicI18nFallbackException[];

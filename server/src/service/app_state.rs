@@ -416,8 +416,11 @@ mod tests {
                 let now = crate::utils::auth::get_current_timestamp();
                 let expired = ManagerAuthInstance::create_instance(
                     "expired-cleanup".to_string(),
+                    crate::utils::auth::manager_jwt_key_id().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
                     now - 2,
                     now - 1,
+                    now + 100,
                 )
                 .expect("expired fixture should create");
 

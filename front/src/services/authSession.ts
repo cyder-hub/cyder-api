@@ -1,5 +1,4 @@
-import type { AuthTokenPair } from "./types";
-import type { AuthSessionRecord, StoredAuthSession } from "./authTokens";
+import type { LogoutAllResult, ManagerAuthAccess } from "./types";
 import { authErrorCode } from "./authErrors.ts";
 
 export interface AuthSessionStore {
@@ -10,106 +9,152 @@ export interface AuthSessionStore {
   setAnonymous: () => void;
 }
 
-export function applyStoredAuthSession(
-  store: AuthSessionStore,
-  session: StoredAuthSession | null,
-): void {
-  if (session?.kind === "record") {
-    store.setAuthenticated(session.record.access_token);
-  } else {
-    store.setAnonymous();
-  }
-}
-
 export interface AuthSessionDependencies {
   getAuthStore: () => AuthSessionStore;
-  readStoredAuthSession: () => StoredAuthSession | null;
-  persistAuthTokenPair: (tokenPair: AuthTokenPair) => AuthSessionRecord;
-  clearStoredAuthSession: () => void;
-  clearStoredAuthSessionIfCurrent: (refreshToken: string) => boolean;
-  refreshToken: (refreshToken: string) => Promise<AuthTokenPair>;
-  loginWithPassword: (password: string) => Promise<AuthTokenPair>;
-  bootstrapWithPassword: (password: string) => Promise<AuthTokenPair>;
+  getAccessToken: () => string | null;
+  setAccessToken: (token: string) => void;
+  clearAccessToken: () => void;
+  clearLegacyAuthStorage: () => void;
+  requestAccess: () => Promise<ManagerAuthAccess>;
+  loginWithPassword: (password: string) => Promise<ManagerAuthAccess>;
+  bootstrapWithPassword: (password: string) => Promise<ManagerAuthAccess>;
   rotateManagerPassword: (
     currentPassword: string,
     newPassword: string,
-  ) => Promise<AuthTokenPair>;
+  ) => Promise<ManagerAuthAccess>;
   logoutRequest: () => Promise<void>;
-  logoutAllRequest: () => Promise<void>;
+  logoutAllRequest: () => Promise<LogoutAllResult>;
+  announceSessionChanged: () => void;
+  announceSessionRevoked: () => void;
+  onSessionRevoked: () => void;
 }
 
 export interface LogoutOutcome {
   serverRevocationConfirmed: boolean;
 }
 
+class AuthLifecycleSupersededError extends Error {
+  constructor() {
+    super("manager authentication lifecycle changed during access recovery");
+    this.name = "AuthLifecycleSupersededError";
+  }
+}
+
+function isDefinitiveSessionFailure(error: unknown): boolean {
+  return [1441, 1444].includes(authErrorCode(error) ?? -1);
+}
+
 export function createAuthSessionActions(deps: AuthSessionDependencies) {
-  let restorePromise: Promise<boolean> | null = null;
+  let accessPromise: Promise<string> | null = null;
+  let lifecycleGeneration = 0;
+  deps.clearLegacyAuthStorage();
 
-  const restoreStoredSession = async (): Promise<boolean> => {
+  const installAccess = (access: ManagerAuthAccess): string => {
+    deps.setAccessToken(access.access_token);
+    deps.getAuthStore().setAuthenticated(access.access_token);
+    return access.access_token;
+  };
+
+  const invalidateAccessRecovery = (): void => {
+    lifecycleGeneration += 1;
+    accessPromise = null;
+  };
+
+  const replaceAccess = (access: ManagerAuthAccess): string => {
+    invalidateAccessRecovery();
+    return installAccess(access);
+  };
+
+  const clearSession = (): void => {
+    deps.clearAccessToken();
+    deps.getAuthStore().setAnonymous();
+  };
+
+  const revokeLocalSession = (announce = false): void => {
+    invalidateAccessRecovery();
+    clearSession();
+    if (announce) deps.announceSessionRevoked();
+    deps.onSessionRevoked();
+  };
+
+  const recoverAccess = async (): Promise<string> => {
+    if (accessPromise) return accessPromise;
+
     const store = deps.getAuthStore();
-    if (store.lifecycle === "authenticated") return true;
-    if (restorePromise) return restorePromise;
-
-    const storedSession = deps.readStoredAuthSession();
-    const storedRefreshToken =
-      storedSession?.kind === "record"
-        ? storedSession.record.refresh_token
-        : storedSession?.refresh_token;
-
-    if (!storedRefreshToken) {
-      store.setAnonymous();
-      return false;
+    const previousLifecycle = store.lifecycle;
+    const previousAccess = deps.getAccessToken();
+    if (previousLifecycle !== "authenticated") {
+      store.setRestoring();
     }
 
-    store.setRestoring();
-    restorePromise = (async () => {
-      try {
-        const tokenPair = await deps.refreshToken(storedRefreshToken);
-        store.setAuthenticated(deps.persistAuthTokenPair(tokenPair).access_token);
-        return true;
-      } catch (error) {
-        const winner = deps.readStoredAuthSession();
-        if (
-          winner?.kind === "record" &&
-          winner.record.refresh_token !== storedRefreshToken
-        ) {
-          store.setAuthenticated(winner.record.access_token);
-          return true;
+    const recoveryGeneration = lifecycleGeneration;
+    const currentPromise = deps
+      .requestAccess()
+      .then((access) => {
+        if (recoveryGeneration !== lifecycleGeneration) {
+          throw new AuthLifecycleSupersededError();
         }
-        if ([1441, 1442, 1444].includes(authErrorCode(error) ?? -1)) {
-          if (deps.clearStoredAuthSessionIfCurrent(storedRefreshToken)) {
-            store.setAnonymous();
-          }
+        return installAccess(access);
+      })
+      .catch((error: unknown) => {
+        if (recoveryGeneration !== lifecycleGeneration) {
+          throw error;
+        }
+        if (isDefinitiveSessionFailure(error)) {
+          revokeLocalSession(true);
+        } else if (
+          previousLifecycle === "authenticated" &&
+          previousAccess !== null
+        ) {
+          store.setAuthenticated(previousAccess);
         } else {
           store.setUnknown();
         }
-        return false;
-      } finally {
-        restorePromise = null;
-      }
-    })();
-    return restorePromise;
+        throw error;
+      })
+      .finally(() => {
+        if (accessPromise === currentPromise) {
+          accessPromise = null;
+        }
+      });
+    accessPromise = currentPromise;
+    return currentPromise;
   };
 
-  const persistSession = (tokenPair: AuthTokenPair): void => {
-    deps.getAuthStore().setAuthenticated(
-      deps.persistAuthTokenPair(tokenPair).access_token,
-    );
+  const restoreSession = async (): Promise<boolean> => {
+    const store = deps.getAuthStore();
+    if (
+      store.lifecycle === "authenticated" &&
+      deps.getAccessToken() !== null
+    ) {
+      return true;
+    }
+    try {
+      await recoverAccess();
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   const login = async (password: string): Promise<void> => {
-    persistSession(await deps.loginWithPassword(password));
+    replaceAccess(await deps.loginWithPassword(password));
+    deps.announceSessionChanged();
   };
 
   const bootstrap = async (password: string): Promise<void> => {
-    persistSession(await deps.bootstrapWithPassword(password));
+    replaceAccess(await deps.bootstrapWithPassword(password));
+    deps.announceSessionChanged();
   };
 
   const rotatePassword = async (
     currentPassword: string,
     newPassword: string,
   ): Promise<void> => {
-    persistSession(await deps.rotateManagerPassword(currentPassword, newPassword));
+    replaceAccess(
+      await deps.rotateManagerPassword(currentPassword, newPassword),
+    );
+    deps.announceSessionChanged();
   };
 
   const logout = async (): Promise<LogoutOutcome> => {
@@ -117,31 +162,34 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
     try {
       await deps.logoutRequest();
       serverRevocationConfirmed = true;
-    } catch (error) {
-      serverRevocationConfirmed = [1433, 1435].includes(
-        authErrorCode(error) ?? -1,
-      );
-      // Local logout must still finish if the backend session is already invalid.
+    } catch {
+      serverRevocationConfirmed = false;
     } finally {
-      deps.clearStoredAuthSession();
-      deps.getAuthStore().setAnonymous();
+      revokeLocalSession(true);
     }
     return { serverRevocationConfirmed };
   };
 
-  const logoutAll = async (): Promise<void> => {
+  const logoutAll = async (): Promise<LogoutAllResult> => {
     try {
-      await deps.logoutAllRequest();
+      const result = await deps.logoutAllRequest();
+      revokeLocalSession(true);
+      return result;
     } catch (error) {
-      if (![1433, 1435].includes(authErrorCode(error) ?? -1)) throw error;
+      if ([1433, 1435, 1441].includes(authErrorCode(error) ?? -1)) {
+        revokeLocalSession(true);
+        return { revoked_sessions: 0 };
+      }
+      throw error;
     }
-    deps.clearStoredAuthSession();
-    deps.getAuthStore().setAnonymous();
   };
 
   return {
-    restoreStoredSession,
-    tryRefreshToken: restoreStoredSession,
+    restoreSession,
+    recoverAccess,
+    invalidateAccessRecovery,
+    revokeLocalSession: () => revokeLocalSession(false),
+    revokeAndAnnounce: () => revokeLocalSession(true),
     login,
     bootstrap,
     rotatePassword,

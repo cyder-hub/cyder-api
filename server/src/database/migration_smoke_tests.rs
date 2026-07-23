@@ -622,6 +622,103 @@ fn sqlite_manager_auth_session_version_upgrade_clears_sessions_only() {
 }
 
 #[test]
+fn sqlite_r211_manager_token_mediator_upgrade_clears_sessions_and_enforces_family_contract() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("r211-manager-token-mediator-upgrade.sqlite");
+    connection
+        .batch_execute(
+            "CREATE TABLE manager_credential (
+                manager_id BIGINT PRIMARY KEY NOT NULL,
+                manager_subject TEXT NOT NULL,
+                password_verifier TEXT NOT NULL,
+                credential_epoch TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            );
+            CREATE TABLE manager_auth_instance (
+                id BIGINT PRIMARY KEY NOT NULL,
+                manager_id BIGINT NOT NULL,
+                manager_subject TEXT NOT NULL,
+                current_refresh_jti TEXT NOT NULL UNIQUE,
+                session_version BIGINT NOT NULL DEFAULT 1,
+                created_at BIGINT NOT NULL,
+                last_rotated_at BIGINT NOT NULL,
+                expires_at BIGINT NOT NULL,
+                revoked_at BIGINT NULL,
+                revoked_reason TEXT NULL
+            );
+            INSERT INTO manager_credential VALUES
+                (0, 'admin', 'verifier', '018fa7d8-6a00-7c9a-8f7e-111111111111', 1, 1);
+            INSERT INTO manager_auth_instance VALUES
+                (1, 0, 'admin', 'legacy-jti', 1, 1, 1, 999999, NULL, NULL);",
+        )
+        .expect("legacy R2.11 sqlite schema should create");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-23-120000_manager_token_mediator/up.sql"
+        ))
+        .expect("R2.11 sqlite migration should run");
+
+    let credential_count = diesel::sql_query("SELECT COUNT(*) AS count FROM manager_credential")
+        .get_result::<CountRow>(&mut connection)
+        .expect("credential count should query")
+        .count;
+    let session_count = diesel::sql_query("SELECT COUNT(*) AS count FROM manager_auth_instance")
+        .get_result::<CountRow>(&mut connection)
+        .expect("session count should query")
+        .count;
+    let required_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pragma_table_info('manager_auth_instance')
+         WHERE name IN (
+            'refresh_generation', 'session_version', 'signing_key_id', 'credential_epoch',
+            'idle_expires_at', 'absolute_expires_at'
+         ) AND \"notnull\" = 1",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("R2.11 sqlite columns should query")
+    .count;
+
+    assert_eq!(credential_count, 1, "manager credential must be preserved");
+    assert_eq!(session_count, 0, "legacy sessions must be cleared");
+    assert_eq!(required_columns, 6, "R2.11 columns must be required");
+
+    let key_id = "a".repeat(64);
+    connection
+        .batch_execute(&format!(
+            "INSERT INTO manager_auth_instance (
+                id, manager_id, manager_subject, current_refresh_jti,
+                refresh_generation, session_version, signing_key_id, credential_epoch,
+                created_at, last_rotated_at, idle_expires_at, absolute_expires_at,
+                revoked_at, revoked_reason
+             ) VALUES (
+                2, 0, 'admin', 'current-jti', 1, 1, '{key_id}',
+                '018fa7d8-6a00-7c9a-8f7e-111111111111',
+                10, 10, 20, 30, NULL, NULL
+             );"
+        ))
+        .expect("valid R2.11 sqlite family should insert");
+    assert!(
+        connection
+            .batch_execute(&format!(
+                "INSERT INTO manager_auth_instance (
+                    id, manager_id, manager_subject, current_refresh_jti,
+                    refresh_generation, session_version, signing_key_id, credential_epoch,
+                    created_at, last_rotated_at, idle_expires_at, absolute_expires_at,
+                    revoked_at, revoked_reason
+                 ) VALUES (
+                    3, 0, 'admin', 'invalid-generation', 0, 1, '{key_id}',
+                    '018fa7d8-6a00-7c9a-8f7e-111111111111',
+                    10, 10, 20, 30, NULL, NULL
+                 );"
+            ))
+            .is_err(),
+        "zero refresh generation must be rejected"
+    );
+}
+
+#[test]
 #[ignore = "requires a dedicated PostgreSQL 17 database"]
 fn postgres_clean_upgrade_chain_from_empty() {
     let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
@@ -680,6 +777,92 @@ fn postgres_clean_upgrade_chain_from_empty() {
                 .expect("postgres pending migrations should remain queryable"),
             "postgres second migration run should remain fully applied"
         );
+    }));
+
+    rebuild_postgres_public_schema(&mut connection);
+    if let Err(panic_payload) = test_result {
+        resume_unwind(panic_payload);
+    }
+}
+
+#[test]
+#[ignore = "requires a dedicated PostgreSQL 17 database"]
+fn postgres_r211_manager_token_mediator_upgrade() {
+    let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
+        panic!("{POSTGRES_SMOKE_URL_ENV} must point to the dedicated PostgreSQL smoke database")
+    });
+    let mut connection = PgConnection::establish(&database_url)
+        .expect("dedicated postgres smoke database should be reachable");
+    assert_eq!(
+        postgres_database_name(&mut connection),
+        POSTGRES_SMOKE_DATABASE,
+        "refusing to rebuild a non-dedicated PostgreSQL database"
+    );
+
+    rebuild_postgres_public_schema(&mut connection);
+    let test_result = catch_unwind(AssertUnwindSafe(|| {
+        connection
+            .batch_execute(
+                "CREATE TABLE manager_credential (
+                    manager_id BIGINT PRIMARY KEY NOT NULL,
+                    manager_subject TEXT NOT NULL,
+                    password_verifier TEXT NOT NULL,
+                    credential_epoch TEXT NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL
+                );
+                CREATE TABLE manager_auth_instance (
+                    id BIGINT PRIMARY KEY,
+                    manager_id BIGINT NOT NULL,
+                    manager_subject TEXT NOT NULL,
+                    current_refresh_jti TEXT NOT NULL UNIQUE,
+                    session_version BIGINT NOT NULL DEFAULT 1,
+                    created_at BIGINT NOT NULL,
+                    last_rotated_at BIGINT NOT NULL,
+                    expires_at BIGINT NOT NULL,
+                    revoked_at BIGINT NULL,
+                    revoked_reason TEXT NULL
+                );
+                INSERT INTO manager_credential VALUES
+                    (0, 'admin', 'verifier', '018fa7d8-6a00-7c9a-8f7e-111111111111', 1, 1);
+                INSERT INTO manager_auth_instance VALUES
+                    (1, 0, 'admin', 'legacy-jti', 1, 1, 1, 999999, NULL, NULL);",
+            )
+            .expect("legacy R2.11 postgres schema should create");
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-23-120000_manager_token_mediator/up.sql"
+            ))
+            .expect("R2.11 postgres migration should run");
+
+        let credential_count =
+            diesel::sql_query("SELECT COUNT(*) AS count FROM manager_credential")
+                .get_result::<CountRow>(&mut connection)
+                .expect("postgres credential count should query")
+                .count;
+        let session_count =
+            diesel::sql_query("SELECT COUNT(*) AS count FROM manager_auth_instance")
+                .get_result::<CountRow>(&mut connection)
+                .expect("postgres session count should query")
+                .count;
+        let required_columns = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'manager_auth_instance'
+               AND column_name IN (
+                  'refresh_generation', 'session_version', 'signing_key_id', 'credential_epoch',
+                  'idle_expires_at', 'absolute_expires_at'
+               )
+               AND is_nullable = 'NO'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("R2.11 postgres columns should query")
+        .count;
+
+        assert_eq!(credential_count, 1, "manager credential must be preserved");
+        assert_eq!(session_count, 0, "legacy sessions must be cleared");
+        assert_eq!(required_columns, 6, "R2.11 columns must be required");
     }));
 
     rebuild_postgres_public_schema(&mut connection);

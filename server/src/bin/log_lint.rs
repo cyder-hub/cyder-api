@@ -169,6 +169,27 @@ fn scan_log_invocations(path: &Path, contents: &str) -> Vec<LintViolation> {
                 excerpt: compact_excerpt(&invocation.snippet),
             });
         }
+
+        if contains_any(
+            &invocation.snippet,
+            &[
+                "access_token",
+                "refresh_token",
+                "mediator_token",
+                "access_jti",
+                "current_refresh_jti",
+                "refresh.jwt_id",
+                "Cookie",
+                "COOKIE",
+            ],
+        ) {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "manager token/cookie logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
     }
 
     violations
@@ -493,6 +514,24 @@ mod tests {
                 .iter()
                 .any(|violation| violation.reason == "auth header/value logging is forbidden")
         );
+    }
+
+    #[test]
+    fn scan_log_invocations_rejects_manager_token_cookie_and_jti_values() {
+        let path = PathBuf::from("sample.rs");
+        for contents in [
+            concat!("debug", r#"!("access {:?}", access_token);"#),
+            concat!("warn", r#"!("refresh jti {}", refresh.jwt_id);"#),
+            concat!("info", r#"!("cookie {:?}", headers.get(COOKIE));"#),
+        ] {
+            let violations = scan_log_invocations(&path, contents);
+            assert!(
+                violations.iter().any(
+                    |violation| violation.reason == "manager token/cookie logging is forbidden"
+                ),
+                "expected manager credential logging violation for {contents}"
+            );
+        }
     }
 
     #[test]

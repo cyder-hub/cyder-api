@@ -1,26 +1,29 @@
 import { useAuthStore } from "@/store/authStore";
 import { request } from "./http";
-import type { AuthTokenPair, ManagerBootstrapStatus } from "./types";
+import type {
+  LogoutAllResult,
+  ManagerAuthAccess,
+  ManagerBootstrapStatus,
+} from "./types";
 import { createAuthSessionActions } from "./authSession";
-import { registerAuthRestoration } from "./authRuntime";
+import { createAuthCoordination } from "./authCoordination";
+import { navigateToManagerLogin, registerAuthRecovery } from "./authRuntime";
 import {
-  clearStoredAuthSessionIfCurrent,
-  clearStoredAuthSession,
-  persistAuthTokenPair,
-  readStoredAuthSession,
+  clearAccessToken,
+  clearLegacyAuthStorage,
+  getAccessToken,
+  setAccessToken,
 } from "./authTokens";
 
-export function refreshToken(refreshToken: string): Promise<AuthTokenPair> {
-  return request.post(
-    "/ai/manager/api/auth/refresh_token",
-    {},
-    {
-      headers: { Authorization: `Bearer ${refreshToken}` },
-    },
-  );
+let coordination: ReturnType<typeof createAuthCoordination> | null = null;
+
+export function requestAccess(): Promise<ManagerAuthAccess> {
+  return request.post("/ai/manager/api/auth/access", {});
 }
 
-export function loginWithPassword(password: string): Promise<AuthTokenPair> {
+export function loginWithPassword(
+  password: string,
+): Promise<ManagerAuthAccess> {
   return request.post("/ai/manager/api/auth/login", { password });
 }
 
@@ -28,14 +31,16 @@ export function getBootstrapStatus(): Promise<ManagerBootstrapStatus> {
   return request.get("/ai/manager/api/auth/bootstrap/status");
 }
 
-export function bootstrapWithPassword(password: string): Promise<AuthTokenPair> {
+export function bootstrapWithPassword(
+  password: string,
+): Promise<ManagerAuthAccess> {
   return request.post("/ai/manager/api/auth/bootstrap", { password });
 }
 
 export function rotateManagerPassword(
   currentPassword: string,
   newPassword: string,
-): Promise<AuthTokenPair> {
+): Promise<ManagerAuthAccess> {
   return request.post("/ai/manager/api/auth/password/rotate", {
     current_password: currentPassword,
     new_password: newPassword,
@@ -46,27 +51,33 @@ export function logoutRequest(): Promise<void> {
   return request.post("/ai/manager/api/auth/logout", {});
 }
 
-export function logoutAllRequest(): Promise<void> {
+export function logoutAllRequest(): Promise<LogoutAllResult> {
   return request.post("/ai/manager/api/auth/logout_all", {});
 }
 
 const authSession = createAuthSessionActions({
   getAuthStore: useAuthStore,
-  readStoredAuthSession,
-  persistAuthTokenPair,
-  clearStoredAuthSession,
-  clearStoredAuthSessionIfCurrent,
-  refreshToken,
+  getAccessToken,
+  setAccessToken,
+  clearAccessToken,
+  clearLegacyAuthStorage,
+  requestAccess,
   loginWithPassword,
   bootstrapWithPassword,
   rotateManagerPassword,
   logoutRequest,
   logoutAllRequest,
+  announceSessionChanged: () => coordination?.announceSessionChanged(),
+  announceSessionRevoked: () => coordination?.announceSessionRevoked(),
+  onSessionRevoked: navigateToManagerLogin,
 });
 
 export const {
-  restoreStoredSession,
-  tryRefreshToken,
+  restoreSession,
+  recoverAccess,
+  invalidateAccessRecovery,
+  revokeLocalSession,
+  revokeAndAnnounce,
   login,
   bootstrap,
   rotatePassword,
@@ -74,4 +85,12 @@ export const {
   logoutAll,
 } = authSession;
 
-registerAuthRestoration(restoreStoredSession);
+registerAuthRecovery(restoreSession, recoverAccess, revokeAndAnnounce);
+
+export function startAuthCoordination(): void {
+  coordination ??= createAuthCoordination({
+    recoverAccess,
+    invalidateAccessRecovery,
+    revokeLocalSession,
+  });
+}

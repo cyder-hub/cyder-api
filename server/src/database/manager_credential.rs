@@ -510,10 +510,14 @@ mod tests {
             manager_id: MANAGER_ID,
             manager_subject: MANAGER_SUBJECT.to_string(),
             current_refresh_jti: jti.to_string(),
+            refresh_generation: super::super::manager_auth_instance::INITIAL_REFRESH_GENERATION,
             session_version: super::super::manager_auth_instance::INITIAL_SESSION_VERSION,
+            signing_key_id: "a".repeat(64),
+            credential_epoch: "018fa7d8-6a00-7c9a-8f7e-444444444444".to_string(),
             created_at: now,
             last_rotated_at: now,
-            expires_at: now + 3_600,
+            idle_expires_at: now + 3_600,
+            absolute_expires_at: now + 7_200,
             revoked_at: None,
             revoked_reason: None,
         }
@@ -582,8 +586,11 @@ mod tests {
         test_db_context.run_sync(|| {
             let existing = ManagerAuthInstance::create_instance(
                 "duplicate-session-jti".to_string(),
+                "a".repeat(64),
+                "018fa7d8-6a00-7c9a-8f7e-444444444444".to_string(),
                 1_000,
                 4_600,
+                8_200,
             )
             .expect("existing session should create");
 

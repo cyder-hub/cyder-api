@@ -3,9 +3,12 @@ export interface User {
   username: string;
 }
 
-export interface AuthTokenPair {
-  refresh_token: string;
+export interface ManagerAuthAccess {
   access_token: string;
+}
+
+export interface LogoutAllResult {
+  revoked_sessions: number;
 }
 
 export type ManagerBootstrapState = "uninitialized" | "ready";

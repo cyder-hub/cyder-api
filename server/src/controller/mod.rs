@@ -536,7 +536,9 @@ mod tests {
                             .method(method)
                             .uri(uri)
                             .header(header::CONTENT_TYPE, "application/json")
-                            .header(header::ORIGIN, "https://external.example")
+                            .header(header::ORIGIN, "http://127.0.0.1:29528")
+                            .header("sec-fetch-site", "same-origin")
+                            .header("x-cyder-manager-auth", "1")
                             .body(body)
                             .expect("manager matrix request should build"),
                         public_dir.path(),
@@ -594,6 +596,9 @@ mod tests {
                         .method(Method::POST)
                         .uri("/ai/manager/api/auth/login")
                         .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::ORIGIN, "http://127.0.0.1:29528")
+                        .header("sec-fetch-site", "same-origin")
+                        .header("x-cyder-manager-auth", "1")
                         .body(Body::from(
                             r#"{"password":"manager base path no-store password"}"#,
                         ))

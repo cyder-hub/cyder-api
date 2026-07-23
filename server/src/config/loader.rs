@@ -156,6 +156,9 @@ fn load_effective_config_inner(
         .secret_encryption
         .validate_for_runtime()
         .map_err(ConfigLoadError::DeserializeEffective)?;
+    final_config
+        .validate_manager_auth()
+        .map_err(ConfigLoadError::DeserializeEffective)?;
     let final_config = finalize_loaded_config(final_config);
 
     Ok(final_config)
@@ -255,6 +258,50 @@ mod tests {
 
         assert!(
             error.to_string().contains("invalid_mode"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn manager_auth_config_accepts_exact_secure_and_loopback_origins() {
+        let secure = load_user_yaml("manager_auth:\n  browser_origin: https://admin.example.com\n")
+            .expect("secure browser origin should load");
+        assert_eq!(
+            secure.manager_auth.browser_origin.as_deref(),
+            Some("https://admin.example.com")
+        );
+
+        let loopback = load_user_yaml("manager_auth:\n  browser_origin: http://127.0.0.1:29528\n")
+            .expect("loopback development origin should load");
+        assert_eq!(
+            loopback.manager_auth.browser_origin.as_deref(),
+            Some("http://127.0.0.1:29528")
+        );
+    }
+
+    #[test]
+    fn manager_auth_config_rejects_insecure_or_non_origin_values() {
+        for yaml in [
+            "manager_auth:\n  browser_origin: http://admin.example.com\n",
+            "manager_auth:\n  browser_origin: https://admin.example.com/path\n",
+            "manager_auth:\n  browser_origin: https://user@admin.example.com\n",
+            "manager_auth:\n  browser_origin: https://*.example.com\n",
+            "manager_auth:\n  browser_origin: https://a.example,https://b.example\n",
+        ] {
+            let error = load_user_yaml(yaml).expect_err("invalid browser origin should fail");
+            assert!(
+                error.to_string().contains("manager_auth.browser_origin"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn manager_auth_config_rejects_short_jwt_secret() {
+        let error =
+            load_user_yaml("jwt_secret: too-short\n").expect_err("short jwt secret should fail");
+        assert!(
+            error.to_string().contains("jwt_secret"),
             "unexpected error: {error}"
         );
     }

@@ -12,22 +12,22 @@ test("manager auth route matrix prioritizes bootstrap state before session resto
   const decide = (
     bootstrapState,
     routeKind,
-    hasStoredSession = false,
     lifecycle = "unknown",
-  ) => decideAuthRoute({ bootstrapState, routeKind, hasStoredSession, lifecycle });
+  ) => decideAuthRoute({ bootstrapState, routeKind, lifecycle });
 
   assert.equal(decide("uninitialized", "protected"), "bootstrap");
   assert.equal(decide("uninitialized", "login"), "bootstrap");
   assert.equal(decide("uninitialized", "bootstrap"), "allow");
   assert.equal(decide("error", "protected"), "bootstrap");
   assert.equal(decide("error", "bootstrap"), "allow");
-  assert.equal(decide("ready", "protected"), "login");
-  assert.equal(decide("ready", "protected", true), "restore");
-  assert.equal(decide("ready", "protected", true, "authenticated"), "allow");
-  assert.equal(decide("ready", "login", true), "restore");
-  assert.equal(decide("ready", "login", true, "authenticated"), "dashboard");
-  assert.equal(decide("ready", "bootstrap"), "login");
-  assert.equal(decide("ready", "bootstrap", true), "restore");
+  assert.equal(decide("ready", "protected"), "restore");
+  assert.equal(decide("ready", "protected", "anonymous"), "login");
+  assert.equal(decide("ready", "protected", "authenticated"), "allow");
+  assert.equal(decide("ready", "login"), "restore");
+  assert.equal(decide("ready", "login", "anonymous"), "allow");
+  assert.equal(decide("ready", "login", "authenticated"), "dashboard");
+  assert.equal(decide("ready", "bootstrap"), "restore");
+  assert.equal(decide("ready", "bootstrap", "anonymous"), "login");
 });
 
 test("manager password policy counts normalized Unicode code points without trimming", () => {

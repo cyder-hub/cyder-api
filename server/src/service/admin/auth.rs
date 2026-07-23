@@ -4,7 +4,6 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
 use cyder_tools::log::{debug, info, warn};
-use serde::Serialize;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
@@ -16,8 +15,9 @@ use crate::database::manager_credential::{
 };
 use crate::utils::ID_GENERATOR;
 use crate::utils::auth::{
-    ManagerAuthContext, REFRESH_TOKEN_ISSUE_SEC, decode_refresh_token, generate_token_jti,
-    get_current_timestamp, issue_access_token, issue_refresh_token,
+    ManagerAuthContext, REFRESH_TOKEN_ISSUE_SEC, decode_access_token, decode_refresh_token,
+    generate_token_jti, get_current_timestamp, issue_access_token, issue_mediator_token,
+    issue_refresh_token, manager_jwt_key_id,
 };
 
 pub(crate) mod password;
@@ -32,13 +32,17 @@ const LOGIN_FAILURE_WINDOW_SEC: i64 = 60;
 const LOGIN_FAILURE_LOCK_SEC: i64 = 60;
 const GLOBAL_LOGIN_VERIFICATION_LIMIT: usize = 30;
 const GLOBAL_LOGIN_VERIFICATION_WINDOW_SEC: i64 = 60;
+pub const REFRESH_FAMILY_IDLE_SEC: i64 = 7 * 24 * 3600;
+const ACCESS_CACHE_REFRESH_THRESHOLD_SEC: i64 = 60;
 
 type NowFn = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone)]
 pub struct AuthTokenPair {
     pub refresh_token: String,
     pub access_token: String,
+    pub mediator_token: String,
+    pub mediator_expires_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +97,14 @@ pub enum RefreshError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessTokenError {
+    Invalid,
+    Replay,
+    Unavailable,
+    Storage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogoutError {
     InvalidCredential,
     Unavailable,
@@ -114,21 +126,60 @@ enum SessionValidationError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedAccessToken {
+    token: String,
+    access_jti: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveManagerSession {
     manager_id: i64,
     manager_subject: String,
     session_version: i64,
     expires_at: i64,
+    credential_epoch: Uuid,
+    current_refresh_jti: String,
+    refresh_generation: i64,
+    current_refresh_token: String,
+    access: Option<CachedAccessToken>,
 }
 
-impl From<&ManagerAuthInstance> for ActiveManagerSession {
-    fn from(instance: &ManagerAuthInstance) -> Self {
-        Self {
+impl ActiveManagerSession {
+    fn from_persisted(instance: &ManagerAuthInstance) -> Option<Self> {
+        let credential_epoch = Uuid::parse_str(&instance.credential_epoch).ok()?;
+        let current_refresh_token = issue_refresh_token(
+            MANAGER_ID,
+            instance.id,
+            &instance.current_refresh_jti,
+            instance.refresh_generation,
+            &credential_epoch,
+            instance.last_rotated_at,
+            instance.absolute_expires_at,
+        );
+        Some(Self {
             manager_id: instance.manager_id,
             manager_subject: instance.manager_subject.clone(),
             session_version: instance.session_version,
-            expires_at: instance.expires_at,
-        }
+            expires_at: instance.idle_expires_at.min(instance.absolute_expires_at),
+            credential_epoch,
+            current_refresh_jti: instance.current_refresh_jti.clone(),
+            refresh_generation: instance.refresh_generation,
+            current_refresh_token,
+            access: None,
+        })
+    }
+
+    fn from_token_pair(instance: &ManagerAuthInstance, pair: &AuthTokenPair) -> Option<Self> {
+        let mut session = Self::from_persisted(instance)?;
+        let access = decode_access_token(&pair.access_token).ok()?;
+        session.current_refresh_token = pair.refresh_token.clone();
+        session.access = Some(CachedAccessToken {
+            token: pair.access_token.clone(),
+            access_jti: access.access_jti,
+            expires_at: access.expires_at,
+        });
+        Some(session)
     }
 }
 
@@ -154,6 +205,7 @@ pub struct ManagerAuthService {
     login_protection: StdMutex<LoginProtectionState>,
     credential_snapshot: RwLock<ManagerCredentialSnapshot>,
     session_registry: RwLock<SessionRegistryState>,
+    access_flights: StdMutex<HashMap<i64, Arc<AsyncMutex<()>>>>,
     credential_lifecycle: AsyncMutex<()>,
     password_engine: PasswordEngine,
     now: NowFn,
@@ -182,6 +234,17 @@ impl ManagerAuthService {
             );
         }
 
+        if ManagerAuthInstance::revoke_signing_key_mismatches(manager_jwt_key_id(), current_time)
+            .is_err()
+        {
+            warn!(
+                "{}",
+                crate::logging::event_message_with_fields(
+                    "manager.auth.signing_key_session_revocation_failed",
+                    &[("reason", Some("storage".to_string()))],
+                )
+            );
+        }
         if ManagerAuthInstance::cleanup_expired_instances(current_time).is_err() {
             warn!(
                 "{}",
@@ -209,6 +272,7 @@ impl ManagerAuthService {
             login_protection: StdMutex::new(LoginProtectionState::default()),
             credential_snapshot: RwLock::new(credential_snapshot),
             session_registry: RwLock::new(session_registry),
+            access_flights: StdMutex::new(HashMap::new()),
             credential_lifecycle: AsyncMutex::new(()),
             password_engine: PasswordEngine::new(),
             now,
@@ -251,19 +315,33 @@ impl ManagerAuthService {
         let now = self.now();
         let epoch = Uuid::new_v4();
         let refresh_jti = generate_token_jti();
-        let refresh_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
+        let absolute_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
+        let idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(absolute_expires_at);
         let mutation = ManagerCredential::bootstrap_with_session(
             NewManagerCredential {
                 password_verifier: verifier.to_string(),
                 credential_epoch: epoch.to_string(),
                 now,
             },
-            new_session(&refresh_jti, now, refresh_expires_at),
+            new_session(
+                &refresh_jti,
+                &epoch,
+                now,
+                idle_expires_at,
+                absolute_expires_at,
+            ),
             "credential_bootstrap",
         )
         .map_err(map_bootstrap_repository_error)?;
         let ready = self.install_ready_snapshot(mutation.credential)?;
-        self.replace_sessions_with(&mutation.session);
+        let pair = issue_token_pair(
+            &mutation.session,
+            &refresh_jti,
+            ready.credential_epoch(),
+            now,
+            absolute_expires_at,
+        );
+        self.replace_sessions_with(&mutation.session, &pair);
 
         info!(
             "{}",
@@ -278,13 +356,7 @@ impl ManagerAuthService {
                 ],
             )
         );
-        Ok(issue_token_pair(
-            &mutation.session,
-            &refresh_jti,
-            ready.credential_epoch(),
-            now,
-            refresh_expires_at,
-        ))
+        Ok(pair)
     }
 
     pub async fn login(
@@ -339,11 +411,25 @@ impl ManagerAuthService {
         }
 
         let refresh_jti = generate_token_jti();
-        let refresh_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
-        let instance =
-            ManagerAuthInstance::create_instance(refresh_jti.clone(), now, refresh_expires_at)
-                .map_err(|_| LoginError::Storage)?;
-        self.insert_session(&instance);
+        let absolute_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
+        let idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(absolute_expires_at);
+        let instance = ManagerAuthInstance::create_instance(
+            refresh_jti.clone(),
+            manager_jwt_key_id().to_string(),
+            ready.credential_epoch().to_string(),
+            now,
+            idle_expires_at,
+            absolute_expires_at,
+        )
+        .map_err(|_| LoginError::Storage)?;
+        let pair = issue_token_pair(
+            &instance,
+            &refresh_jti,
+            ready.credential_epoch(),
+            now,
+            absolute_expires_at,
+        );
+        self.insert_session(&instance, &pair);
         self.clear_login_failures(source);
         info!(
             "{}",
@@ -353,13 +439,7 @@ impl ManagerAuthService {
             )
         );
 
-        Ok(issue_token_pair(
-            &instance,
-            &refresh_jti,
-            ready.credential_epoch(),
-            now,
-            refresh_expires_at,
-        ))
+        Ok(pair)
     }
 
     pub async fn rotate_password(
@@ -418,7 +498,8 @@ impl ManagerAuthService {
         let now = self.now();
         let new_epoch = Uuid::new_v4();
         let refresh_jti = generate_token_jti();
-        let refresh_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
+        let absolute_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
+        let idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(absolute_expires_at);
         let mutation = ManagerCredential::rotate_with_session(
             &ready.credential_epoch().to_string(),
             RotatedManagerCredential {
@@ -426,14 +507,27 @@ impl ManagerAuthService {
                 credential_epoch: new_epoch.to_string(),
                 now,
             },
-            new_session(&refresh_jti, now, refresh_expires_at),
+            new_session(
+                &refresh_jti,
+                &new_epoch,
+                now,
+                idle_expires_at,
+                absolute_expires_at,
+            ),
             "credential_rotated",
         )
         .map_err(map_rotate_repository_error)?;
         let installed = self
             .install_ready_snapshot(mutation.credential)
             .map_err(|_| RotatePasswordError::Unavailable)?;
-        self.replace_sessions_with(&mutation.session);
+        let pair = issue_token_pair(
+            &mutation.session,
+            &refresh_jti,
+            installed.credential_epoch(),
+            now,
+            absolute_expires_at,
+        );
+        self.replace_sessions_with(&mutation.session, &pair);
 
         info!(
             "{}",
@@ -448,16 +542,65 @@ impl ManagerAuthService {
                 ],
             )
         );
-        Ok(issue_token_pair(
-            &mutation.session,
-            &refresh_jti,
-            installed.credential_epoch(),
-            now,
-            refresh_expires_at,
-        ))
+        Ok(pair)
     }
 
+    pub async fn access_for_session(
+        &self,
+        login_instance_id: i64,
+        credential_epoch: Uuid,
+    ) -> Result<String, AccessTokenError> {
+        self.ensure_session_registry_ready()
+            .map_err(|_| AccessTokenError::Unavailable)?;
+        let now = self.now();
+        let before_flight = self.session_snapshot(login_instance_id, credential_epoch, now)?;
+        if let Some(access) = &before_flight.access
+            && access.expires_at - now > ACCESS_CACHE_REFRESH_THRESHOLD_SEC
+        {
+            return Ok(access.token.clone());
+        }
+
+        let flight = self.access_flight(login_instance_id);
+        let _flight_guard = flight.lock().await;
+        let now = self.now();
+        let after_flight = self.session_snapshot(login_instance_id, credential_epoch, now)?;
+        if let Some(access) = &after_flight.access
+            && access.expires_at - now > ACCESS_CACHE_REFRESH_THRESHOLD_SEC
+        {
+            return Ok(access.token.clone());
+        }
+        let fallback = after_flight
+            .access
+            .clone()
+            .filter(|access| access.expires_at > now);
+
+        match self
+            .rotate_refresh_token(&after_flight.current_refresh_token)
+            .await
+        {
+            Ok(pair) => Ok(pair.access_token),
+            Err(RefreshError::Storage | RefreshError::Unavailable) => fallback
+                .map(|access| access.token)
+                .ok_or(AccessTokenError::Storage),
+            Err(RefreshError::Replay) => Err(AccessTokenError::Replay),
+            Err(RefreshError::Invalid | RefreshError::EpochMismatch) => {
+                Err(AccessTokenError::Invalid)
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub async fn refresh(&self, refresh_token: &str) -> Result<AuthTokenPair, RefreshError> {
+        let refresh = decode_refresh_token(refresh_token).map_err(|_| RefreshError::Invalid)?;
+        let flight = self.access_flight(refresh.login_instance_id);
+        let _flight_guard = flight.lock().await;
+        self.rotate_refresh_token(refresh_token).await
+    }
+
+    async fn rotate_refresh_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<AuthTokenPair, RefreshError> {
         self.ensure_session_registry_ready()
             .map_err(|_| RefreshError::Unavailable)?;
         let refresh = decode_refresh_token(refresh_token).map_err(|_| {
@@ -465,6 +608,27 @@ impl ManagerAuthService {
             RefreshError::Invalid
         })?;
         self.validate_refresh_epoch(refresh.credential_epoch)?;
+        let current_session = self
+            .session_snapshot(
+                refresh.login_instance_id,
+                refresh.credential_epoch,
+                self.now(),
+            )
+            .map_err(|error| match error {
+                AccessTokenError::Unavailable => RefreshError::Unavailable,
+                AccessTokenError::Storage => RefreshError::Storage,
+                AccessTokenError::Invalid | AccessTokenError::Replay => RefreshError::Invalid,
+            })?;
+        if current_session.current_refresh_token != refresh_token
+            || current_session.current_refresh_jti != refresh.jwt_id
+            || current_session.refresh_generation != refresh.refresh_generation
+        {
+            return self.revoke_refresh_replay(
+                refresh.login_instance_id,
+                "stale_token",
+                self.now(),
+            );
+        }
 
         let instance = ManagerAuthInstance::get_instance(refresh.login_instance_id)
             .map_err(|_| RefreshError::Storage)?
@@ -478,26 +642,32 @@ impl ManagerAuthService {
             self.log_refresh_rejected("instance_mismatch", Some(instance.id));
             return Err(RefreshError::Invalid);
         }
-        if instance.revoked_at.is_some() || instance.expires_at <= now {
+        if instance.revoked_at.is_some()
+            || instance.idle_expires_at <= now
+            || instance.absolute_expires_at <= now
+        {
+            self.remove_session(instance.id);
             self.log_refresh_rejected("instance_inactive", Some(instance.id));
             return Err(RefreshError::Invalid);
         }
         if instance.current_refresh_jti != refresh.jwt_id
-            || instance.session_version != refresh.session_version
+            || instance.refresh_generation != refresh.refresh_generation
+            || instance.credential_epoch != refresh.credential_epoch.to_string()
+            || instance.signing_key_id != manager_jwt_key_id()
         {
-            self.log_refresh_replay(instance.id, "stale_token", now);
-            return Err(RefreshError::Replay);
+            return self.revoke_refresh_replay(instance.id, "stale_token", now);
         }
 
         let new_refresh_jti = generate_token_jti();
-        let new_refresh_expires_at = now + REFRESH_TOKEN_ISSUE_SEC;
+        let new_idle_expires_at = (now + REFRESH_FAMILY_IDLE_SEC).min(instance.absolute_expires_at);
         let rotated = ManagerAuthInstance::rotate_refresh_jti(
             instance.id,
             &refresh.jwt_id,
-            refresh.session_version,
+            refresh.refresh_generation,
+            &refresh.credential_epoch.to_string(),
             new_refresh_jti.clone(),
             now,
-            new_refresh_expires_at,
+            new_idle_expires_at,
         )
         .map_err(|_| RefreshError::Storage)?;
         let rotated = match rotated {
@@ -509,18 +679,18 @@ impl ManagerAuthService {
                     current.manager_id == refresh.manager_id
                         && current.manager_subject == MANAGER_SUBJECT
                         && current.revoked_at.is_none()
-                        && current.expires_at > now
+                        && current.idle_expires_at > now
+                        && current.absolute_expires_at > now
                         && (current.current_refresh_jti != refresh.jwt_id
-                            || current.session_version != refresh.session_version)
+                            || current.refresh_generation != refresh.refresh_generation
+                            || current.credential_epoch != refresh.credential_epoch.to_string())
                 }) {
-                    self.log_refresh_replay(instance.id, "rotation_conflict", now);
-                    return Err(RefreshError::Replay);
+                    return self.revoke_refresh_replay(instance.id, "rotation_conflict", now);
                 }
                 self.log_refresh_rejected("rotation_conflict", Some(instance.id));
                 return Err(RefreshError::Invalid);
             }
         };
-        self.insert_session(&rotated);
         self.validate_refresh_epoch(refresh.credential_epoch)?;
         debug!(
             "{}",
@@ -530,41 +700,37 @@ impl ManagerAuthService {
             )
         );
 
-        Ok(issue_token_pair(
+        let pair = issue_token_pair(
             &rotated,
             &new_refresh_jti,
             refresh.credential_epoch,
             now,
-            new_refresh_expires_at,
-        ))
+            rotated.absolute_expires_at,
+        );
+        self.insert_session(&rotated, &pair);
+        Ok(pair)
     }
 
-    pub async fn logout(&self, auth_context: &ManagerAuthContext) -> Result<(), LogoutError> {
-        self.ensure_session_registry_ready()
-            .map_err(|_| LogoutError::Unavailable)?;
-        self.validate_access_context(auth_context)
-            .map_err(|error| match error {
-                AccessCredentialError::EpochMismatchOrUninitialized => {
-                    LogoutError::InvalidCredential
-                }
-                AccessCredentialError::Unavailable => LogoutError::Unavailable,
-                AccessCredentialError::SessionInvalid => LogoutError::InvalidCredential,
-                AccessCredentialError::SessionUnavailable => LogoutError::Unavailable,
-            })?;
+    pub async fn logout_session(
+        &self,
+        login_instance_id: i64,
+        credential_epoch: Uuid,
+    ) -> Result<(), LogoutError> {
         let now = self.now();
-        let revoked =
-            ManagerAuthInstance::revoke_instance(auth_context.login_instance_id, now, "logout")
-                .map_err(|_| LogoutError::Storage)?;
-        self.remove_session(auth_context.login_instance_id);
+        let revoked = ManagerAuthInstance::revoke_instance_for_epoch(
+            login_instance_id,
+            &credential_epoch.to_string(),
+            now,
+            "logout",
+        )
+        .map_err(|_| LogoutError::Storage)?;
+        self.remove_session(login_instance_id);
         info!(
             "{}",
             crate::logging::event_message_with_fields(
                 "manager.auth.logout",
                 &[
-                    (
-                        "login_instance_id",
-                        Some(auth_context.login_instance_id.to_string()),
-                    ),
+                    ("login_instance_id", Some(login_instance_id.to_string())),
                     ("revoked", Some(revoked.is_some().to_string())),
                 ],
             )
@@ -613,6 +779,7 @@ impl ManagerAuthService {
                     auth_context.manager_id,
                     &auth_context.manager_subject,
                     auth_context.session_version,
+                    &auth_context.access_jti,
                 )
                 .map_err(|error| match error {
                     SessionValidationError::Invalid => AccessCredentialError::SessionInvalid,
@@ -647,6 +814,9 @@ impl ManagerAuthService {
             if instance.manager_id != MANAGER_ID
                 || instance.manager_subject != MANAGER_SUBJECT
                 || instance.session_version < 1
+                || instance.refresh_generation < 1
+                || instance.signing_key_id != manager_jwt_key_id()
+                || Uuid::parse_str(&instance.credential_epoch).is_err()
             {
                 warn!(
                     "{}",
@@ -657,7 +827,10 @@ impl ManagerAuthService {
                 );
                 return SessionRegistryState::Unavailable;
             }
-            sessions.insert(instance.id, ActiveManagerSession::from(&instance));
+            let Some(session) = ActiveManagerSession::from_persisted(&instance) else {
+                return SessionRegistryState::Unavailable;
+            };
+            sessions.insert(instance.id, session);
         }
         SessionRegistryState::Ready(sessions)
     }
@@ -679,6 +852,7 @@ impl ManagerAuthService {
         manager_id: i64,
         manager_subject: &str,
         session_version: i64,
+        access_jti: &str,
     ) -> Result<(), SessionValidationError> {
         let now = self.now();
         let mut registry = self
@@ -698,30 +872,50 @@ impl ManagerAuthService {
         if session.manager_id != manager_id
             || session.manager_subject != manager_subject
             || session.session_version != session_version
+            || session
+                .access
+                .as_ref()
+                .is_none_or(|access| access.access_jti != access_jti)
         {
             return Err(SessionValidationError::Invalid);
         }
         Ok(())
     }
 
-    fn insert_session(&self, instance: &ManagerAuthInstance) {
+    fn insert_session(&self, instance: &ManagerAuthInstance, pair: &AuthTokenPair) {
         let mut registry = self
             .session_registry
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let SessionRegistryState::Ready(sessions) = &mut *registry {
-            sessions.insert(instance.id, ActiveManagerSession::from(instance));
+            if let Some(session) = ActiveManagerSession::from_token_pair(instance, pair) {
+                sessions.insert(instance.id, session);
+            } else {
+                *registry = SessionRegistryState::Unavailable;
+            }
         }
     }
 
-    fn replace_sessions_with(&self, instance: &ManagerAuthInstance) {
+    fn replace_sessions_with(&self, instance: &ManagerAuthInstance, pair: &AuthTokenPair) {
         let mut sessions = HashMap::with_capacity(1);
-        sessions.insert(instance.id, ActiveManagerSession::from(instance));
+        let Some(session) = ActiveManagerSession::from_token_pair(instance, pair) else {
+            *self
+                .session_registry
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                SessionRegistryState::Unavailable;
+            return;
+        };
+        sessions.insert(instance.id, session);
         *self
             .session_registry
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
             SessionRegistryState::Ready(sessions);
+        self.access_flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|login_instance_id, _| *login_instance_id == instance.id);
     }
 
     fn remove_session(&self, login_instance_id: i64) {
@@ -732,6 +926,10 @@ impl ManagerAuthService {
         if let SessionRegistryState::Ready(sessions) = &mut *registry {
             sessions.remove(&login_instance_id);
         }
+        self.access_flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&login_instance_id);
     }
 
     fn clear_sessions(&self) {
@@ -741,6 +939,66 @@ impl ManagerAuthService {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let SessionRegistryState::Ready(sessions) = &mut *registry {
             sessions.clear();
+        }
+        self.access_flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    fn access_flight(&self, login_instance_id: i64) -> Arc<AsyncMutex<()>> {
+        self.access_flights
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(login_instance_id)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    fn session_snapshot(
+        &self,
+        login_instance_id: i64,
+        credential_epoch: Uuid,
+        now: i64,
+    ) -> Result<ActiveManagerSession, AccessTokenError> {
+        let mut registry = self
+            .session_registry
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let SessionRegistryState::Ready(sessions) = &mut *registry else {
+            return Err(AccessTokenError::Unavailable);
+        };
+        let Some(session) = sessions.get(&login_instance_id) else {
+            return Err(AccessTokenError::Invalid);
+        };
+        if session.expires_at <= now {
+            sessions.remove(&login_instance_id);
+            return Err(AccessTokenError::Invalid);
+        }
+        if session.credential_epoch != credential_epoch {
+            return Err(AccessTokenError::Invalid);
+        }
+        Ok(session.clone())
+    }
+
+    fn revoke_refresh_replay(
+        &self,
+        login_instance_id: i64,
+        reason: &str,
+        detected_at: i64,
+    ) -> Result<AuthTokenPair, RefreshError> {
+        match ManagerAuthInstance::revoke_instance(login_instance_id, detected_at, "refresh_replay")
+        {
+            Ok(_) => {
+                self.remove_session(login_instance_id);
+                self.log_refresh_replay(login_instance_id, reason, detected_at);
+                Err(RefreshError::Replay)
+            }
+            Err(_) => {
+                self.remove_session(login_instance_id);
+                self.log_refresh_rejected("replay_revocation_storage", Some(login_instance_id));
+                Err(RefreshError::Storage)
+            }
         }
     }
 
@@ -959,16 +1217,26 @@ impl ManagerAuthService {
     }
 }
 
-fn new_session(refresh_jti: &str, now: i64, expires_at: i64) -> NewManagerAuthInstance {
+fn new_session(
+    refresh_jti: &str,
+    credential_epoch: &Uuid,
+    now: i64,
+    idle_expires_at: i64,
+    absolute_expires_at: i64,
+) -> NewManagerAuthInstance {
     NewManagerAuthInstance {
         id: ID_GENERATOR.generate_id(),
         manager_id: MANAGER_ID,
         manager_subject: MANAGER_SUBJECT.to_string(),
         current_refresh_jti: refresh_jti.to_string(),
+        refresh_generation: crate::database::manager_auth_instance::INITIAL_REFRESH_GENERATION,
         session_version: crate::database::manager_auth_instance::INITIAL_SESSION_VERSION,
+        signing_key_id: manager_jwt_key_id().to_string(),
+        credential_epoch: credential_epoch.to_string(),
         created_at: now,
         last_rotated_at: now,
-        expires_at,
+        idle_expires_at,
+        absolute_expires_at,
         revoked_at: None,
         revoked_reason: None,
     }
@@ -987,7 +1255,7 @@ fn issue_token_pair(
             MANAGER_ID,
             session.id,
             refresh_jti,
-            session.session_version,
+            session.refresh_generation,
             &credential_epoch,
             now,
             refresh_expires_at,
@@ -1000,6 +1268,13 @@ fn issue_token_pair(
             &credential_epoch,
             now,
         ),
+        mediator_token: issue_mediator_token(
+            session.id,
+            &credential_epoch,
+            now,
+            session.absolute_expires_at,
+        ),
+        mediator_expires_at: session.absolute_expires_at,
     }
 }
 
@@ -1063,13 +1338,13 @@ mod tests {
     use crate::database::manager_credential::{ManagerCredential, NewManagerCredential};
     use crate::database::{DbConnection, get_connection};
     use crate::service::app_state::create_test_app_state;
-    use crate::utils::auth::{decode_access_token, decode_refresh_token};
+    use crate::utils::auth::{ACCESS_TOKEN_ISSUE_SEC, decode_access_token, decode_refresh_token};
     use diesel::RunQueryDsl;
 
     use super::{
-        AccessCredentialError, BootstrapError, BootstrapStatus, GLOBAL_LOGIN_VERIFICATION_LIMIT,
-        LOGIN_FAILURE_LIMIT, LoginError, LogoutError, ManagerAuthService, RefreshError,
-        RotatePasswordError,
+        AccessCredentialError, AccessTokenError, BootstrapError, BootstrapStatus,
+        GLOBAL_LOGIN_VERIFICATION_LIMIT, LOGIN_FAILURE_LIMIT, LoginError, ManagerAuthService,
+        RefreshError, RotatePasswordError,
     };
 
     const INITIAL_PASSWORD: &str = "correct horse battery staple";
@@ -1099,6 +1374,7 @@ mod tests {
                         bootstrap_access.manager_id,
                         SESSION_MANAGER_SUBJECT,
                         INITIAL_SESSION_VERSION,
+                        &bootstrap_access.access_jti,
                     ),
                     Ok(())
                 );
@@ -1137,6 +1413,7 @@ mod tests {
                         bootstrap_access.manager_id,
                         SESSION_MANAGER_SUBJECT,
                         INITIAL_SESSION_VERSION,
+                        &bootstrap_access.access_jti,
                     ),
                     Ok(()),
                     "manual database changes require restart before affecting memory"
@@ -1149,6 +1426,7 @@ mod tests {
                         bootstrap_access.manager_id,
                         SESSION_MANAGER_SUBJECT,
                         INITIAL_SESSION_VERSION,
+                        &bootstrap_access.access_jti,
                     ),
                     Err(super::SessionValidationError::Invalid)
                 );
@@ -1158,9 +1436,21 @@ mod tests {
                         login_access.manager_id,
                         SESSION_MANAGER_SUBJECT,
                         INITIAL_SESSION_VERSION,
+                        &login_access.access_jti,
                     ),
-                    Ok(())
+                    Err(super::SessionValidationError::Invalid),
+                    "restart intentionally clears the access cache"
                 );
+                let rebuilt_access = restarted
+                    .access_for_session(
+                        login_access.login_instance_id,
+                        login_access.credential_epoch,
+                    )
+                    .await
+                    .expect("first access after restart should rebuild the cache");
+                let rebuilt_access =
+                    decode_access_token(&rebuilt_access).expect("rebuilt access should decode");
+                assert_eq!(restarted.validate_access_context(&rebuilt_access), Ok(()));
 
                 let rotated = service
                     .rotate_password(&bootstrap_access, INITIAL_PASSWORD, ROTATED_PASSWORD)
@@ -1175,6 +1465,7 @@ mod tests {
                         rotated_access.manager_id,
                         SESSION_MANAGER_SUBJECT,
                         INITIAL_SESSION_VERSION,
+                        &rotated_access.access_jti,
                     ),
                     Ok(())
                 );
@@ -1242,8 +1533,15 @@ mod tests {
             TestDbContext::new_sqlite("manager-auth-session-registry-cleanup.sqlite");
 
         test_db_context.run_sync(|| {
-            let expired = ManagerAuthInstance::create_instance("expired".to_string(), 1, 10)
-                .expect("expired fixture should create");
+            let expired = ManagerAuthInstance::create_instance(
+                "expired".to_string(),
+                super::manager_jwt_key_id().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+                1,
+                10,
+                20,
+            )
+            .expect("expired fixture should create");
             let service = ManagerAuthService::new_for_test(Arc::new(|| 11));
             assert_eq!(service.session_count(), Ok(0));
             assert!(
@@ -1279,7 +1577,7 @@ mod tests {
                 );
 
                 service
-                    .logout(&access)
+                    .logout_session(access.login_instance_id, access.credential_epoch)
                     .await
                     .expect("logout should revoke the current session");
                 assert_eq!(
@@ -1342,16 +1640,163 @@ mod tests {
                     .expect("one refresh should win");
                 let winner_access =
                     decode_access_token(&winner.access_token).expect("winner access should decode");
-                assert_eq!(winner_access.session_version, 2);
-                assert_eq!(service.validate_access_context(&winner_access), Ok(()));
+                assert_eq!(winner_access.session_version, INITIAL_SESSION_VERSION);
+                assert_eq!(
+                    service.validate_access_context(&winner_access),
+                    Err(AccessCredentialError::SessionInvalid),
+                    "a valid stale internal refresh is an integrity fault and revokes the family"
+                );
                 assert_eq!(
                     service.validate_access_context(&initial_access),
                     Err(AccessCredentialError::SessionInvalid)
                 );
+                assert_eq!(service.session_count(), Ok(0));
                 assert!(matches!(
                     service.refresh(&initial.refresh_token).await,
-                    Err(RefreshError::Replay)
+                    Err(RefreshError::Invalid)
                 ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manager_auth_access_singleflight_returns_one_rotated_access_to_all_waiters() {
+        let test_db_context = TestDbContext::new_sqlite("manager-auth-access-singleflight.sqlite");
+        let now = Arc::new(AtomicI64::new(crate::utils::auth::get_current_timestamp()));
+
+        test_db_context
+            .run_async({
+                let now = Arc::clone(&now);
+                let spawn_context = test_db_context.clone();
+                async move {
+                    let service_now = Arc::clone(&now);
+                    let service = Arc::new(ManagerAuthService::new_for_test(Arc::new(move || {
+                        service_now.load(Ordering::SeqCst)
+                    })));
+                    let initial = service
+                        .bootstrap(INITIAL_PASSWORD)
+                        .await
+                        .expect("bootstrap should succeed");
+                    let initial_access = decode_access_token(&initial.access_token)
+                        .expect("initial access should decode");
+                    assert_eq!(
+                        service
+                            .access_for_session(
+                                initial_access.login_instance_id,
+                                initial_access.credential_epoch,
+                            )
+                            .await
+                            .expect("fresh cache should return"),
+                        initial.access_token,
+                        "fresh access must be returned without rotation"
+                    );
+
+                    now.fetch_add(ACCESS_TOKEN_ISSUE_SEC - 30, Ordering::SeqCst);
+                    let barrier = Arc::new(Barrier::new(3));
+                    let mut handles = Vec::new();
+                    let login_instance_id = initial_access.login_instance_id;
+                    let credential_epoch = initial_access.credential_epoch;
+                    for _ in 0..2 {
+                        let service = Arc::clone(&service);
+                        let barrier = Arc::clone(&barrier);
+                        handles.push(spawn_context.spawn(async move {
+                            barrier.wait().await;
+                            service
+                                .access_for_session(login_instance_id, credential_epoch)
+                                .await
+                        }));
+                    }
+                    barrier.wait().await;
+                    let first = handles
+                        .remove(0)
+                        .await
+                        .expect("first access task should join")
+                        .expect("first access should succeed");
+                    let second = handles
+                        .remove(0)
+                        .await
+                        .expect("second access task should join")
+                        .expect("second access should succeed");
+                    assert_eq!(first, second, "all waiters must receive one cached access");
+                    assert_ne!(first, initial.access_token);
+
+                    let persisted =
+                        ManagerAuthInstance::get_instance(initial_access.login_instance_id)
+                            .expect("session lookup should succeed")
+                            .expect("session should remain active");
+                    assert_eq!(persisted.refresh_generation, 2);
+                    assert_eq!(persisted.session_version, INITIAL_SESSION_VERSION);
+                    let rotated_access =
+                        decode_access_token(&first).expect("rotated access should decode");
+                    assert_eq!(service.validate_access_context(&rotated_access), Ok(()));
+                    assert_eq!(
+                        service.validate_access_context(&initial_access),
+                        Err(AccessCredentialError::SessionInvalid)
+                    );
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manager_auth_access_cache_degrades_only_until_cached_access_expires() {
+        let test_db_context =
+            TestDbContext::new_sqlite("manager-auth-access-cache-storage-failure.sqlite");
+        let now = Arc::new(AtomicI64::new(crate::utils::auth::get_current_timestamp()));
+
+        test_db_context
+            .run_async({
+                let now = Arc::clone(&now);
+                async move {
+                    let service_now = Arc::clone(&now);
+                    let service = ManagerAuthService::new_for_test(Arc::new(move || {
+                        service_now.load(Ordering::SeqCst)
+                    }));
+                    let initial = service
+                        .bootstrap(INITIAL_PASSWORD)
+                        .await
+                        .expect("bootstrap should succeed");
+                    let access = decode_access_token(&initial.access_token)
+                        .expect("initial access should decode");
+
+                    let mut conn = get_connection().expect("connection should load");
+                    match &mut conn {
+                        DbConnection::Postgres(conn) => {
+                            diesel::sql_query("DROP TABLE manager_auth_instance")
+                                .execute(conn)
+                                .expect("session table should drop");
+                        }
+                        DbConnection::Sqlite(conn) => {
+                            diesel::sql_query("DROP TABLE manager_auth_instance")
+                                .execute(conn)
+                                .expect("session table should drop");
+                        }
+                    }
+                    drop(conn);
+
+                    assert_eq!(
+                        service
+                            .access_for_session(access.login_instance_id, access.credential_epoch)
+                            .await
+                            .expect("fresh cache must not need storage"),
+                        initial.access_token
+                    );
+                    now.fetch_add(ACCESS_TOKEN_ISSUE_SEC - 30, Ordering::SeqCst);
+                    assert_eq!(
+                        service
+                            .access_for_session(access.login_instance_id, access.credential_epoch)
+                            .await
+                            .expect("unexpired fallback should survive storage failure"),
+                        initial.access_token
+                    );
+                    now.fetch_add(31, Ordering::SeqCst);
+                    assert_eq!(
+                        service
+                            .access_for_session(access.login_instance_id, access.credential_epoch)
+                            .await,
+                        Err(AccessTokenError::Storage)
+                    );
+                }
             })
             .await;
     }
@@ -1491,17 +1936,23 @@ mod tests {
                     Err(RotatePasswordError::PasswordPolicy(_))
                 ));
                 service
-                    .logout(&rotated_access)
+                    .logout_session(
+                        rotated_access.login_instance_id,
+                        rotated_access.credential_epoch,
+                    )
                     .await
                     .expect("logout should revoke the current session");
                 assert!(matches!(
                     service.refresh(&rotated.refresh_token).await,
                     Err(RefreshError::Invalid)
                 ));
-                assert!(matches!(
-                    service.logout(&initial_access).await,
-                    Err(LogoutError::InvalidCredential)
-                ));
+                service
+                    .logout_session(
+                        initial_access.login_instance_id,
+                        initial_access.credential_epoch,
+                    )
+                    .await
+                    .expect("stale current-session logout should be idempotent");
             })
             .await;
     }

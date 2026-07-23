@@ -1,12 +1,34 @@
 openapi: 3.1.0
 info:
   title: Cyder Manager Auth Living Contract
-  version: 1.0.0-pre.2
-  description: Single-manager authentication contract for the Cyder management control plane.
+  version: 1.0.0-pre.4
+  description: Single-manager token-mediator authentication contract for the Cyder management control plane.
 servers:
   - url: /
 x-cyder-web-security-client-identity-contract: ../web-security-client-identity.md
 x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434, 1435, 1436]
+x-cyder-default-cache-control: no-store
+x-cyder-refresh-family:
+  browserVisible: false
+  absoluteLifetimeSeconds: 2592000
+  idleLifetimeSeconds: 604800
+  rotation: single-use generation CAS
+  replayBehavior: revoke entire family
+x-cyder-mediator-cookie:
+  productionName: __Secure-cyder_manager_session
+  loopbackDevelopmentName: cyder_manager_session_dev
+  path: <base_path>/manager/api/auth
+  attributes: [HttpOnly, SameSite=Strict, no Domain]
+  productionAttributes: [Secure]
+  ordinaryAccessReissuesCookie: false
+x-cyder-browser-auth-boundary:
+  requiredHeaders:
+    Origin: exact manager_auth.browser_origin, or explicit loopback origin in loopback-only development
+    Sec-Fetch-Site: same-origin
+    Content-Type: application/json
+    X-Cyder-Manager-Auth: "1"
+  rejectionStatus: 403
+  rejectionCode: 1461
 paths:
   /ai/manager/api/auth/bootstrap/status:
     get:
@@ -26,7 +48,7 @@ paths:
     post:
       operationId: bootstrapManagerCredential
       security: []
-      x-cyder-error-codes: [1401, 1402, 1403, 1404, 1405]
+      x-cyder-error-codes: [1401, 1402, 1403, 1404, 1405, 1461]
       requestBody:
         required: true
         content:
@@ -35,7 +57,7 @@ paths:
               $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
-          $ref: "#/components/responses/TokenPair"
+          $ref: "#/components/responses/AccessTokenWithMediatorCookie"
         "409":
           $ref: "#/components/responses/AuthError"
         "422":
@@ -48,7 +70,7 @@ paths:
     post:
       operationId: loginManager
       security: []
-      x-cyder-error-codes: [1411, 1412, 1413, 1414, 1415, 1416, 1417, 1418]
+      x-cyder-error-codes: [1411, 1412, 1413, 1414, 1415, 1416, 1417, 1418, 1461]
       requestBody:
         required: true
         content:
@@ -57,7 +79,7 @@ paths:
               $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
-          $ref: "#/components/responses/TokenPair"
+          $ref: "#/components/responses/AccessTokenWithMediatorCookie"
         "401":
           $ref: "#/components/responses/AuthError"
         "409":
@@ -73,7 +95,8 @@ paths:
       operationId: rotateManagerPassword
       security:
         - managerAccessToken: []
-      x-cyder-error-codes: [1421, 1422, 1423, 1424, 1425, 1426, 1431, 1432, 1433, 1434, 1435, 1436]
+          managerMediatorSession: []
+      x-cyder-error-codes: [1421, 1422, 1423, 1424, 1425, 1426, 1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461]
       requestBody:
         required: true
         content:
@@ -82,7 +105,7 @@ paths:
               $ref: "#/components/schemas/RotatePasswordRequest"
       responses:
         "200":
-          $ref: "#/components/responses/TokenPair"
+          $ref: "#/components/responses/AccessTokenWithMediatorCookie"
         "401":
           $ref: "#/components/responses/AuthError"
         "409":
@@ -93,15 +116,23 @@ paths:
           $ref: "#/components/responses/BusyError"
         "503":
           $ref: "#/components/responses/AuthError"
-  /ai/manager/api/auth/refresh_token:
+  /ai/manager/api/auth/access:
     post:
-      operationId: refreshManagerTokens
+      operationId: getManagerAccessToken
+      description: Returns the current page's Access JWT. The server mediates its internal Refresh Family; no Refresh credential is accepted or returned.
       security:
-        - managerRefreshToken: []
-      x-cyder-error-codes: [1441, 1442, 1443, 1444]
+        - managerMediatorSession: []
+      x-cyder-error-codes: [1441, 1443, 1444, 1461]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
       responses:
         "200":
-          $ref: "#/components/responses/TokenPair"
+          $ref: "#/components/responses/AccessToken"
         "401":
           $ref: "#/components/responses/AuthError"
         "503":
@@ -109,34 +140,26 @@ paths:
   /ai/manager/api/auth/logout:
     post:
       operationId: logoutManager
+      description: Cookie-only, idempotent current-session logout. Missing, invalid, expired, or already revoked cookies still produce 200 and a deletion cookie. Storage failure produces 503 and also deletes the browser cookie.
       security:
-        - managerAccessToken: []
-      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1451]
+        - managerMediatorSession: []
+      x-cyder-error-codes: [1451, 1461]
       responses:
         "200":
-          description: Current manager refresh session was revoked when present.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EmptyEnvelope"
-        "401":
-          $ref: "#/components/responses/AuthError"
+          $ref: "#/components/responses/EmptyWithMediatorCookieDeletion"
         "503":
-          $ref: "#/components/responses/AuthError"
+          $ref: "#/components/responses/AuthErrorWithMediatorCookieDeletion"
   /ai/manager/api/auth/logout_all:
     post:
       operationId: logoutAllManagerSessions
-      description: Revokes every active manager session, including the caller.
+      description: Revokes every active manager session, including the caller. Access and Mediator Cookie must identify the same sid and credential epoch. A 503 preserves the caller cookie and page state.
       security:
         - managerAccessToken: []
-      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1451]
+          managerMediatorSession: []
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1451, 1461]
       responses:
         "200":
-          description: Every active manager session was revoked.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/EmptyEnvelope"
+          $ref: "#/components/responses/LogoutAllWithMediatorCookieDeletion"
         "401":
           $ref: "#/components/responses/AuthError"
         "503":
@@ -146,11 +169,12 @@ components:
     managerAccessToken:
       type: http
       scheme: bearer
-      bearerFormat: JWT access token with required session_version
-    managerRefreshToken:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT refresh token with required session_version
+      bearerFormat: Purpose-isolated 10-minute JWT Access token held only in page memory
+    managerMediatorSession:
+      type: apiKey
+      in: cookie
+      name: __Secure-cyder_manager_session
+      description: Purpose-isolated HttpOnly SameSite=Strict mediator JWT. Production uses Secure and the __Secure- name; explicit loopback development uses cyder_manager_session_dev. It is not a Refresh JWT.
   schemas:
     PasswordRequest:
       type: object
@@ -173,15 +197,14 @@ components:
           type: string
           minLength: 15
           maxLength: 128
-    AuthTokenPair:
+    AuthAccess:
       type: object
-      required: [refresh_token, access_token]
+      additionalProperties: false
+      required: [access_token]
       properties:
-        refresh_token:
-          type: string
         access_token:
           type: string
-    TokenPairEnvelope:
+    AccessTokenEnvelope:
       type: object
       required: [code, data]
       properties:
@@ -189,7 +212,7 @@ components:
           type: integer
           const: 0
         data:
-          $ref: "#/components/schemas/AuthTokenPair"
+          $ref: "#/components/schemas/AuthAccess"
     BootstrapStatus:
       type: object
       required: [state]
@@ -215,6 +238,23 @@ components:
           const: 0
         data:
           type: "null"
+    LogoutAll:
+      type: object
+      additionalProperties: false
+      required: [revoked_sessions]
+      properties:
+        revoked_sessions:
+          type: integer
+          minimum: 0
+    LogoutAllEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/LogoutAll"
     AuthError:
       type: object
       required: [code, msg]
@@ -224,18 +264,62 @@ components:
         msg:
           type: string
   responses:
-    TokenPair:
-      description: New manager access and refresh token pair.
+    AccessToken:
+      description: Current manager access JWT. The response never contains a refresh token and does not reissue the mediator cookie.
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/TokenPairEnvelope"
+            $ref: "#/components/schemas/AccessTokenEnvelope"
+    AccessTokenWithMediatorCookie:
+      description: New page-memory manager Access JWT plus a Path-limited HttpOnly SameSite=Strict mediator Set-Cookie. Production also requires Secure.
+      headers:
+        Set-Cookie:
+          required: true
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AccessTokenEnvelope"
     AuthError:
       description: Stable scenario-specific manager authentication error.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/AuthError"
+    AuthErrorWithMediatorCookieDeletion:
+      description: Stable manager authentication error plus a matching mediator deletion cookie.
+      headers:
+        Set-Cookie:
+          required: true
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
+    EmptyWithMediatorCookieDeletion:
+      description: Idempotent current-session logout with a matching mediator deletion cookie.
+      headers:
+        Set-Cookie:
+          required: true
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EmptyEnvelope"
+    LogoutAllWithMediatorCookieDeletion:
+      description: All active Manager Families were revoked; the caller mediator cookie is deleted.
+      headers:
+        Set-Cookie:
+          required: true
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LogoutAllEnvelope"
     BusyError:
       description: Password operation is already in progress.
       headers:

@@ -4,6 +4,7 @@ import { access, readFile } from "node:fs/promises";
 
 import { createAuthSessionActions } from "../src/services/authSession.ts";
 import {
+  applyManagerAuthBrowserHeaders,
   createHttpAuthRefreshHandler,
   createProtectedManagerRequestGate,
   ManagerAuthenticationRequiredError,
@@ -12,23 +13,14 @@ import { useLoginForm } from "../src/pages/login/composables/useLoginForm.ts";
 
 const ROOT = new URL("../", import.meta.url);
 
-function sessionRecord(revision = 1, suffix = "current") {
-  return {
-    schema_version: 1,
-    revision,
-    refresh_token: `refresh-${suffix}`,
-    access_token: `access-${suffix}`,
-  };
+function authError(code, status = 401) {
+  return { response: { status, data: { code } } };
 }
 
-function authError(code) {
-  return { response: { status: 401, data: { code } } };
-}
-
-function createStore() {
+function createStore(lifecycle = "unknown", accessToken = null) {
   return {
-    accessToken: "access-existing",
-    lifecycle: "unknown",
+    accessToken,
+    lifecycle,
     setRestoring() {
       this.lifecycle = "restoring";
       this.accessToken = null;
@@ -49,68 +41,51 @@ function createStore() {
 }
 
 function createAuthHarness(overrides = {}) {
+  const store = createStore(
+    overrides.lifecycle ?? "unknown",
+    overrides.initialAccess ?? null,
+  );
+  let accessToken = overrides.initialAccess ?? null;
   const calls = {
-    persisted: [],
-    cleared: 0,
-    clearIfCurrent: [],
+    cleanup: 0,
+    requestAccess: 0,
+    setAccess: [],
+    clearAccess: 0,
     logout: 0,
     logoutAll: 0,
+    events: [],
+    navigations: 0,
   };
-  const store = createStore();
-  let storedRefreshToken = overrides.storedRefreshToken ?? "refresh-current";
 
   const actions = createAuthSessionActions({
     getAuthStore: () => store,
-    readStoredAuthSession: () =>
-      storedRefreshToken
-        ? {
-            kind: "record",
-            record: {
-              ...sessionRecord(),
-              refresh_token: storedRefreshToken,
-              access_token: store.accessToken ?? "access-current",
-            },
-          }
-        : null,
-    persistAuthTokenPair: (tokenPair) => {
-      calls.persisted.push(tokenPair);
-      storedRefreshToken = tokenPair.refresh_token;
-      return { schema_version: 1, revision: 2, ...tokenPair };
+    getAccessToken: () => accessToken,
+    setAccessToken: (token) => {
+      accessToken = token;
+      calls.setAccess.push(token);
     },
-    clearStoredAuthSession: () => {
-      calls.cleared += 1;
-      storedRefreshToken = null;
+    clearAccessToken: () => {
+      accessToken = null;
+      calls.clearAccess += 1;
     },
-    clearStoredAuthSessionIfCurrent: (refreshToken) => {
-      calls.clearIfCurrent.push(refreshToken);
-      if (storedRefreshToken !== refreshToken) return false;
-      storedRefreshToken = null;
-      return true;
+    clearLegacyAuthStorage: () => {
+      calls.cleanup += 1;
     },
-    refreshToken:
-      overrides.refreshToken ??
-      (async () => ({
-        refresh_token: "refresh-rotated",
-        access_token: "access-rotated",
-      })),
+    requestAccess:
+      overrides.requestAccess ??
+      (async () => {
+        calls.requestAccess += 1;
+        return { access_token: "access-recovered" };
+      }),
     loginWithPassword:
       overrides.loginWithPassword ??
-      (async () => ({
-        refresh_token: "refresh-login",
-        access_token: "access-login",
-      })),
+      (async () => ({ access_token: "access-login" })),
     bootstrapWithPassword:
       overrides.bootstrapWithPassword ??
-      (async () => ({
-        refresh_token: "refresh-bootstrap",
-        access_token: "access-bootstrap",
-      })),
+      (async () => ({ access_token: "access-bootstrap" })),
     rotateManagerPassword:
       overrides.rotateManagerPassword ??
-      (async () => ({
-        refresh_token: "refresh-rotated-password",
-        access_token: "access-rotated-password",
-      })),
+      (async () => ({ access_token: "access-rotated-password" })),
     logoutRequest:
       overrides.logoutRequest ??
       (async () => {
@@ -120,87 +95,69 @@ function createAuthHarness(overrides = {}) {
       overrides.logoutAllRequest ??
       (async () => {
         calls.logoutAll += 1;
+        return { revoked_sessions: 2 };
       }),
+    announceSessionChanged: () => calls.events.push("session_changed"),
+    announceSessionRevoked: () => calls.events.push("session_revoked"),
+    onSessionRevoked: () => {
+      calls.navigations += 1;
+    },
   });
 
   return {
     actions,
     calls,
-    get storedRefreshToken() {
-      return storedRefreshToken;
-    },
     store,
-    setStoredRefreshToken(value) {
-      storedRefreshToken = value;
+    get accessToken() {
+      return accessToken;
     },
   };
 }
 
 function createHttpHarness(overrides = {}) {
-  let record = overrides.record === undefined ? sessionRecord() : overrides.record;
   let lifecycle = overrides.lifecycle ?? "authenticated";
-  let storageListener = null;
-  const calls = { refresh: 0, retry: [], cleared: [], redirects: 0 };
+  let accessToken =
+    overrides.accessToken === undefined
+      ? "access-current"
+      : overrides.accessToken;
+  const calls = { recover: 0, retry: [], cleared: 0 };
   const deps = {
-    readStoredAuthSession: () =>
-      record ? { kind: "record", record } : null,
-    persistAuthTokenPair: (tokenPair) => {
-      record = { schema_version: 1, revision: (record?.revision ?? 0) + 1, ...tokenPair };
-      return record;
-    },
-    clearStoredAuthSessionIfCurrent: (refreshToken) => {
-      calls.cleared.push(refreshToken);
-      if (record?.refresh_token !== refreshToken) return false;
-      record = null;
-      return true;
-    },
+    getAccessToken: () => accessToken,
     getLifecycle: () => lifecycle,
-    restoreStoredSession: overrides.restoreStoredSession ?? (async () => true),
-    setAuthenticated: (token) => {
-      lifecycle = "authenticated";
-      if (record) record = { ...record, access_token: token };
-    },
-    setAnonymous: () => {
+    restoreSession:
+      overrides.restoreSession ??
+      (async () => {
+        lifecycle = "authenticated";
+        accessToken ??= "access-restored";
+        return true;
+      }),
+    recoverAccess:
+      overrides.recoverAccess ??
+      (async () => {
+        calls.recover += 1;
+        accessToken = "access-recovered";
+        lifecycle = "authenticated";
+        return accessToken;
+      }),
+    revokeSession: () => {
+      calls.cleared += 1;
+      accessToken = null;
       lifecycle = "anonymous";
     },
-    refreshAccessToken:
-      overrides.refreshAccessToken ??
-      (async () => {
-        calls.refresh += 1;
-        return {
-          refresh_token: "refresh-rotated",
-          access_token: "access-rotated",
-        };
-      }),
     retryRequest: async (request) => {
       calls.retry.push({ ...request, headers: { ...request.headers } });
       return { retried: true };
     },
-    redirectToLogin: () => {
-      calls.redirects += 1;
-    },
-    subscribeToSessionChanges: (listener) => {
-      storageListener = listener;
-      return () => {};
-    },
   };
-  const handler = createHttpAuthRefreshHandler(deps);
   return {
     calls,
     deps,
-    handler,
-    emitStorage(session) {
-      record = session?.kind === "record" ? session.record : null;
-      storageListener?.(session);
-    },
+    handler: createHttpAuthRefreshHandler(deps),
     get lifecycle() {
       return lifecycle;
     },
-    get record() {
-      return record;
-    },
-    set record(value) {
-      record = value;
+    get accessToken() {
+      return accessToken;
     },
   };
 }
@@ -211,217 +168,320 @@ function accessFailure(code, request = {}) {
     config: {
       url: "/ai/manager/api/system/dashboard",
       headers: { Authorization: "Bearer access-current" },
-      _authRevision: 1,
-      _authRefreshToken: "refresh-current",
       ...request,
     },
   };
 }
 
-test("login, bootstrap, and password rotation share one persistence owner", async () => {
-  const harness = createAuthHarness();
-  await harness.actions.login("secret");
-  assert.equal(harness.store.lifecycle, "authenticated");
-  await harness.actions.bootstrap("new administrator password");
-  await harness.actions.rotatePassword("current password", "new password");
-  assert.equal(harness.store.accessToken, "access-rotated-password");
-  assert.equal(harness.storedRefreshToken, "refresh-rotated-password");
-  assert.equal(harness.calls.persisted.length, 3);
+test("startup cleanup runs once before any access recovery", async () => {
+  let cleanupObserved = false;
+  const harness = createAuthHarness({
+    requestAccess: async () => {
+      cleanupObserved = harness.calls.cleanup === 1;
+      return { access_token: "access-recovered" };
+    },
+  });
+  assert.equal(harness.calls.cleanup, 1);
+  assert.equal(await harness.actions.restoreSession(), true);
+  assert.equal(cleanupObserved, true);
 });
 
-test("restoration is shared, rotates the pair, and enters authenticated", async () => {
-  let refreshCalls = 0;
-  let resolveRefresh;
+test("login, bootstrap, and password rotation install access-only responses in memory", async () => {
+  const harness = createAuthHarness();
+  await harness.actions.login("secret");
+  await harness.actions.bootstrap("new administrator password");
+  await harness.actions.rotatePassword("current password", "new password");
+  assert.equal(harness.store.lifecycle, "authenticated");
+  assert.equal(harness.accessToken, "access-rotated-password");
+  assert.deepEqual(harness.calls.setAccess, [
+    "access-login",
+    "access-bootstrap",
+    "access-rotated-password",
+  ]);
+  assert.deepEqual(harness.calls.events, [
+    "session_changed",
+    "session_changed",
+    "session_changed",
+  ]);
+});
+
+test("restoration and forced recovery share one in-tab access promise", async () => {
+  let requestCalls = 0;
+  let resolveAccess;
   const pending = new Promise((resolve) => {
-    resolveRefresh = resolve;
+    resolveAccess = resolve;
   });
   const harness = createAuthHarness({
-    refreshToken: async () => {
-      refreshCalls += 1;
+    requestAccess: async () => {
+      requestCalls += 1;
       return pending;
     },
   });
 
-  const first = harness.actions.restoreStoredSession();
-  const second = harness.actions.restoreStoredSession();
+  const first = harness.actions.restoreSession();
+  const second = harness.actions.recoverAccess();
   assert.equal(harness.store.lifecycle, "restoring");
-  resolveRefresh({ refresh_token: "refresh-rotated", access_token: "access-rotated" });
-  assert.deepEqual(await Promise.all([first, second]), [true, true]);
-  assert.equal(refreshCalls, 1);
+  resolveAccess({ access_token: "access-shared" });
+  assert.deepEqual(await Promise.all([first, second]), [true, "access-shared"]);
+  assert.equal(requestCalls, 1);
+  assert.equal(harness.accessToken, "access-shared");
+});
+
+test("revocation discards pending access success and failure without restoring stale state", async () => {
+  for (const outcome of ["success", "failure"]) {
+    let settleAccess;
+    const pending = new Promise((resolve, reject) => {
+      settleAccess = outcome === "success" ? resolve : reject;
+    });
+    const harness = createAuthHarness({
+      lifecycle: "authenticated",
+      initialAccess: "access-existing",
+      requestAccess: async () => pending,
+    });
+
+    const recovery = harness.actions.recoverAccess();
+    harness.actions.revokeLocalSession();
+    if (outcome === "success") {
+      settleAccess({ access_token: "access-stale" });
+      await assert.rejects(recovery, /lifecycle changed/);
+    } else {
+      const failure = authError(1443, 503);
+      settleAccess(failure);
+      await assert.rejects(recovery, (error) => error === failure);
+    }
+
+    assert.equal(harness.store.lifecycle, "anonymous");
+    assert.equal(harness.accessToken, null);
+    assert.deepEqual(harness.calls.setAccess, []);
+  }
+});
+
+test("session change starts a new recovery and stale completion cannot clear it", async () => {
+  const resolvers = [];
+  const harness = createAuthHarness({
+    lifecycle: "authenticated",
+    initialAccess: "access-existing",
+    requestAccess: () =>
+      new Promise((resolve) => {
+        resolvers.push(resolve);
+      }),
+  });
+
+  const staleRecovery = harness.actions.recoverAccess();
+  harness.actions.invalidateAccessRecovery();
+  const currentRecovery = harness.actions.recoverAccess();
+  assert.equal(resolvers.length, 2);
+
+  resolvers[0]({ access_token: "access-stale" });
+  await assert.rejects(staleRecovery, /lifecycle changed/);
+  assert.deepEqual(harness.calls.setAccess, []);
+
+  resolvers[1]({ access_token: "access-current-generation" });
+  assert.equal(await currentRecovery, "access-current-generation");
   assert.equal(harness.store.lifecycle, "authenticated");
+  assert.equal(harness.accessToken, "access-current-generation");
 });
 
-test("definite refresh invalidity clears session while transient failure preserves it", async () => {
-  const invalid = createAuthHarness({ refreshToken: async () => { throw authError(1441); } });
-  assert.equal(await invalid.actions.restoreStoredSession(), false);
-  assert.equal(invalid.store.lifecycle, "anonymous");
-  assert.equal(invalid.storedRefreshToken, null);
-
-  const transient = createAuthHarness({ refreshToken: async () => { throw authError(1443); } });
-  assert.equal(await transient.actions.restoreStoredSession(), false);
-  assert.equal(transient.store.lifecycle, "unknown");
-  assert.equal(transient.storedRefreshToken, "refresh-current");
-});
-
-test("startup restoration adopts a cross-tab winner after refresh replay", async () => {
-  let harness;
-  harness = createAuthHarness({
-    refreshToken: async () => {
-      harness.setStoredRefreshToken("refresh-winner");
-      harness.store.accessToken = "access-winner";
-      throw authError(1444);
+test("definitive mediator failure becomes anonymous while 503 preserves lifecycle", async () => {
+  const invalid = createAuthHarness({
+    requestAccess: async () => {
+      throw authError(1441);
     },
   });
-
-  assert.equal(await harness.actions.restoreStoredSession(), true);
-  assert.equal(harness.store.lifecycle, "authenticated");
-  assert.equal(harness.store.accessToken, "access-winner");
-  assert.deepEqual(harness.calls.clearIfCurrent, []);
-});
-
-test("logout clears local session even when server revocation fails", async () => {
-  const harness = createAuthHarness({
-    logoutRequest: async () => { throw new Error("offline"); },
-  });
-  const outcome = await harness.actions.logout();
-  assert.equal(harness.calls.cleared, 1);
-  assert.equal(harness.store.lifecycle, "anonymous");
-  assert.deepEqual(outcome, { serverRevocationConfirmed: false });
-});
-
-test("logout all clears only on success or a definite invalid-session response", async () => {
-  const success = createAuthHarness();
-  await success.actions.logoutAll();
-  assert.equal(success.storedRefreshToken, null);
-  assert.equal(success.store.lifecycle, "anonymous");
-
-  const invalid = createAuthHarness({
-    logoutAllRequest: async () => { throw authError(1435); },
-  });
-  await invalid.actions.logoutAll();
-  assert.equal(invalid.storedRefreshToken, null);
+  assert.equal(await invalid.actions.restoreSession(), false);
   assert.equal(invalid.store.lifecycle, "anonymous");
+  assert.equal(invalid.accessToken, null);
+
+  const transient = createAuthHarness({
+    requestAccess: async () => {
+      throw authError(1443, 503);
+    },
+  });
+  assert.equal(await transient.actions.restoreSession(), false);
+  assert.equal(transient.store.lifecycle, "unknown");
+
+  const authenticated = createAuthHarness({
+    lifecycle: "authenticated",
+    initialAccess: "access-existing",
+    requestAccess: async () => {
+      throw authError(1443, 503);
+    },
+  });
+  await assert.rejects(authenticated.actions.recoverAccess());
+  assert.equal(authenticated.store.lifecycle, "authenticated");
+  assert.equal(authenticated.accessToken, "access-existing");
+});
+
+test("current logout always clears memory; logout all clears only after success", async () => {
+  const local = createAuthHarness({
+    lifecycle: "authenticated",
+    initialAccess: "access-existing",
+    logoutRequest: async () => {
+      throw new Error("offline");
+    },
+  });
+  assert.deepEqual(await local.actions.logout(), {
+    serverRevocationConfirmed: false,
+  });
+  assert.equal(local.store.lifecycle, "anonymous");
+  assert.equal(local.accessToken, null);
+  assert.deepEqual(local.calls.events, ["session_revoked"]);
+
+  const all = createAuthHarness({
+    lifecycle: "authenticated",
+    initialAccess: "access-existing",
+  });
+  assert.deepEqual(await all.actions.logoutAll(), { revoked_sessions: 2 });
+  assert.equal(all.store.lifecycle, "anonymous");
+  assert.deepEqual(all.calls.events, ["session_revoked"]);
 
   const unavailable = createAuthHarness({
+    lifecycle: "authenticated",
+    initialAccess: "access-existing",
     logoutAllRequest: async () => {
-      throw { response: { status: 503, data: { code: 1436 } } };
+      throw authError(1451, 503);
     },
   });
   await assert.rejects(unavailable.actions.logoutAll());
-  assert.equal(unavailable.storedRefreshToken, "refresh-current");
-  assert.equal(unavailable.store.lifecycle, "unknown");
+  assert.equal(unavailable.store.lifecycle, "authenticated");
+  assert.equal(unavailable.accessToken, "access-existing");
+  assert.deepEqual(unavailable.calls.events, []);
 });
 
-test("protected request gate waits for restore and rejects anonymous locally", async () => {
-  const harness = createHttpHarness({ lifecycle: "restoring" });
+test("protected request gate restores memory access and bypasses mediator endpoints", async () => {
+  const harness = createHttpHarness({
+    lifecycle: "restoring",
+    accessToken: null,
+  });
   const gate = createProtectedManagerRequestGate(harness.deps);
-  const request = await gate({ url: "/ai/manager/api/system/dashboard", headers: {} });
-  assert.equal(request.headers.Authorization, "Bearer access-current");
-  assert.equal(request._authRevision, 1);
+  const request = await gate({
+    url: "/ai/manager/api/system/dashboard",
+    headers: {},
+  });
+  assert.equal(request.headers.Authorization, "Bearer access-restored");
 
-  harness.emitStorage(null);
+  const anonymous = createHttpHarness({
+    lifecycle: "anonymous",
+    accessToken: null,
+  });
   await assert.rejects(
-    gate({ url: "/ai/manager/api/system/dashboard", headers: {} }),
+    createProtectedManagerRequestGate(anonymous.deps)({
+      url: "/ai/manager/api/system/dashboard",
+      headers: {},
+    }),
     ManagerAuthenticationRequiredError,
   );
-  await assert.doesNotReject(
-    gate({ url: "/ai/manager/api/auth/login", headers: {} }),
-  );
+  for (const url of [
+    "/ai/manager/api/auth/login",
+    "/ai/manager/api/auth/access",
+    "/ai/manager/api/auth/logout",
+  ]) {
+    await assert.doesNotReject(gate({ url, headers: {} }));
+  }
 });
 
-test("concurrent 1432 responses run one refresh and retry each request once", async () => {
-  let resolveRefresh;
-  let refreshCalls = 0;
-  const pending = new Promise((resolve) => { resolveRefresh = resolve; });
+test("manager auth POST requests receive the browser boundary headers", () => {
+  const authRequest = {
+    method: "post",
+    url: "/ai/manager/api/auth/access",
+    headers: {},
+  };
+  applyManagerAuthBrowserHeaders(authRequest);
+  assert.equal(authRequest.headers["Content-Type"], "application/json");
+  assert.equal(authRequest.headers["X-Cyder-Manager-Auth"], "1");
+
+  const ordinary = {
+    method: "get",
+    url: "/ai/manager/api/system/dashboard",
+    headers: {},
+  };
+  applyManagerAuthBrowserHeaders(ordinary);
+  assert.deepEqual(ordinary.headers, {});
+});
+
+test("concurrent 1432 responses perform one recovery and replay each request once", async () => {
+  let resolveAccess;
+  let recoverCalls = 0;
+  const pending = new Promise((resolve) => {
+    resolveAccess = resolve;
+  });
   const harness = createHttpHarness({
-    refreshAccessToken: async () => {
-      refreshCalls += 1;
+    recoverAccess: async () => {
+      recoverCalls += 1;
       return pending;
     },
   });
   const first = harness.handler(accessFailure(1432));
-  const second = harness.handler(accessFailure(1432, { headers: { "X-Queued": "yes" } }));
-  resolveRefresh({ refresh_token: "refresh-rotated", access_token: "access-rotated" });
+  const second = harness.handler(
+    accessFailure(1432, { headers: { "X-Queued": "yes" } }),
+  );
+  resolveAccess("access-recovered");
   await Promise.all([first, second]);
-  assert.equal(refreshCalls, 1);
+  assert.equal(recoverCalls, 1);
   assert.equal(harness.calls.retry.length, 2);
   assert.deepEqual(
     harness.calls.retry.map((request) => request.headers.Authorization),
-    ["Bearer access-rotated", "Bearer access-rotated"],
+    ["Bearer access-recovered", "Bearer access-recovered"],
   );
   assert.equal(harness.calls.retry.every((request) => request._retry), true);
 });
 
-test("1431 never refreshes; 1434 and 1436 retain the session", async () => {
-  for (const code of [1431, 1434, 1436]) {
-    const harness = createHttpHarness();
-    const failure = accessFailure(code);
-    await assert.rejects(harness.handler(failure), (error) => error === failure);
-    assert.equal(harness.calls.refresh, 0);
-    assert.equal(harness.record.refresh_token, "refresh-current");
-    assert.equal(harness.calls.redirects, 0);
-  }
-});
-
-test("1433 and 1435 adopt a newer record or invalidate the attempted session", async () => {
+test("stale access 401 recovers through the mediator and replays the request", async () => {
   for (const code of [1433, 1435]) {
-    const winner = createHttpHarness();
-    winner.record = sessionRecord(2, "winner");
-    await winner.handler(accessFailure(code));
-    assert.equal(winner.calls.retry[0].headers.Authorization, "Bearer access-winner");
-    assert.equal(winner.calls.refresh, 0);
-
-    const stale = createHttpHarness();
-    const failure = accessFailure(code);
-    await assert.rejects(stale.handler(failure), (error) => error === failure);
-    assert.equal(stale.record, null);
-    assert.equal(stale.lifecycle, "anonymous");
-    assert.equal(stale.calls.redirects, 1);
+    const harness = createHttpHarness();
+    assert.deepEqual(await harness.handler(accessFailure(code)), {
+      retried: true,
+    });
+    assert.equal(harness.calls.recover, 1);
+    assert.equal(harness.calls.cleared, 0);
+    assert.equal(harness.lifecycle, "authenticated");
+    assert.equal(
+      harness.calls.retry[0].headers.Authorization,
+      "Bearer access-recovered",
+    );
   }
 });
 
-test("1444 adopts the cross-tab winner without a second refresh", async () => {
-  const harness = createHttpHarness({
-    refreshAccessToken: async () => {
-      harness.record = sessionRecord(2, "winner");
-      throw authError(1444);
-    },
-  });
-  await harness.handler(accessFailure(1432));
-  assert.equal(harness.calls.retry.length, 1);
-  assert.equal(harness.calls.retry[0].headers.Authorization, "Bearer access-winner");
-  assert.equal(harness.record.refresh_token, "refresh-winner");
-  assert.equal(harness.calls.redirects, 0);
+test("mediator recovery only revokes stale access after a definitive failure", async () => {
+  for (const recoveryCode of [1441, 1444]) {
+    const recoveryFailure = authError(recoveryCode);
+    const invalid = createHttpHarness({
+      recoverAccess: async () => {
+        throw recoveryFailure;
+      },
+    });
+    await assert.rejects(
+      invalid.handler(accessFailure(recoveryCode === 1441 ? 1433 : 1435)),
+      (error) => error === recoveryFailure,
+    );
+    assert.equal(invalid.lifecycle, "anonymous");
+    assert.equal(invalid.calls.cleared, 1);
+  }
+
+  for (const accessCode of [1432, 1433, 1435]) {
+    const unavailable = createHttpHarness({
+      recoverAccess: async () => {
+        throw authError(1443, 503);
+      },
+    });
+    await assert.rejects(unavailable.handler(accessFailure(accessCode)));
+    assert.equal(unavailable.lifecycle, "authenticated");
+    assert.equal(unavailable.calls.cleared, 0);
+  }
 });
 
-test("1444 without a winner invalidates, while storage deletion rejects the queue", async () => {
-  const replay = createHttpHarness({
-    refreshAccessToken: async () => { throw authError(1444); },
-  });
-  await assert.rejects(replay.handler(accessFailure(1432)), (error) =>
-    error === undefined ? false : true,
-  );
-  assert.equal(replay.record, null);
-  assert.equal(replay.calls.redirects, 1);
-
-  let resolveRefresh;
-  const pending = new Promise((resolve) => { resolveRefresh = resolve; });
-  const deleted = createHttpHarness({ refreshAccessToken: async () => pending });
-  const first = deleted.handler(accessFailure(1432));
-  const queued = deleted.handler(accessFailure(1432));
-  deleted.emitStorage(null);
-  await assert.rejects(queued, ManagerAuthenticationRequiredError);
-  resolveRefresh({ refresh_token: "refresh-late", access_token: "access-late" });
-  await assert.rejects(first, ManagerAuthenticationRequiredError);
-  assert.equal(deleted.calls.retry.length, 0);
-  assert.equal(deleted.lifecycle, "anonymous");
-});
-
-test("a retried request cannot enter another refresh loop", async () => {
+test("a retried or auth endpoint request cannot enter an access recovery loop", async () => {
   const harness = createHttpHarness();
-  const failure = accessFailure(1432, { _retry: true });
-  await assert.rejects(harness.handler(failure), (error) => error === failure);
-  assert.equal(harness.calls.refresh, 0);
+  const retried = accessFailure(1432, { _retry: true });
+  await assert.rejects(harness.handler(retried), (error) => error === retried);
+  const accessEndpoint = accessFailure(1432, {
+    url: "/ai/manager/api/auth/access",
+  });
+  await assert.rejects(
+    harness.handler(accessEndpoint),
+    (error) => error === accessEndpoint,
+  );
+  assert.equal(harness.calls.recover, 0);
 });
 
 test("login form delegates session ownership and reports failures", async () => {
@@ -441,27 +501,60 @@ test("login form delegates session ownership and reports failures", async () => 
   await form.handleLogin();
   assert.equal(form.error.value, "translated:loginPage.loginFailed");
 
-  const loginPageSource = await readFile(new URL("src/pages/login/LoginPage.vue", ROOT), "utf8");
-  const loginFormSource = await readFile(new URL("src/pages/login/components/LoginForm.vue", ROOT), "utf8");
+  const loginPageSource = await readFile(
+    new URL("src/pages/login/LoginPage.vue", ROOT),
+    "utf8",
+  );
+  const loginFormSource = await readFile(
+    new URL("src/pages/login/components/LoginForm.vue", ROOT),
+    "utf8",
+  );
   assert.doesNotMatch(loginPageSource, /localStorage|authTokens|refresh_token/);
   assert.doesNotMatch(loginFormSource, /localStorage|authTokens|refresh_token/);
 });
 
 test("login route uses page entries and removes the legacy top-level page", async () => {
-  const routerSource = await readFile(new URL("src/router/index.ts", ROOT), "utf8");
+  const routerSource = await readFile(
+    new URL("src/router/index.ts", ROOT),
+    "utf8",
+  );
   assert.match(routerSource, /pages\/login\/LoginPage\.vue/);
   assert.match(routerSource, /pages\/bootstrap\/BootstrapPage\.vue/);
   assert.equal(routerSource.includes("@/pages/Login.vue"), false);
   await assert.rejects(access(new URL("src/pages/Login.vue", ROOT)), /ENOENT/);
 });
 
+test("runtime auth sources contain no refresh bearer or persistent access contract", async () => {
+  const sources = await Promise.all(
+    [
+      "src/services/auth.ts",
+      "src/services/authSession.ts",
+      "src/services/http.ts",
+      "src/services/httpAuthRefresh.ts",
+      "src/router/index.ts",
+    ].map((path) => readFile(new URL(path, ROOT), "utf8")),
+  );
+  const runtime = sources.join("\n");
+  assert.doesNotMatch(runtime, /refresh_token|auth\/refresh_token/);
+  assert.doesNotMatch(runtime, /localStorage|sessionStorage|setItem|getItem/);
+  assert.doesNotMatch(runtime, /_authRevision|_authRefreshToken/);
+  assert.match(runtime, /auth\/access/);
+});
+
 test("desktop and mobile layouts expose guarded current and all-session logout", async () => {
-  const layout = await readFile(new URL("src/layouts/DefaultLayout.vue", ROOT), "utf8");
+  const layout = await readFile(
+    new URL("src/layouts/DefaultLayout.vue", ROOT),
+    "utf8",
+  );
   assert.match(layout, /logout as logoutSession, logoutAll/);
   assert.match(layout, /confirm\(\{[\s\S]*logoutAllConfirmTitle/);
   assert.match(layout, /logoutLocalOnlyTitle/);
   assert.match(layout, /logoutAllFailedTitle/);
   assert.equal((layout.match(/@click="handleLogoutAll"/g) ?? []).length, 2);
-  assert.equal((layout.match(/:disabled="isLoggingOut \|\| isLoggingOutAll"/g) ?? []).length, 4);
+  assert.equal(
+    (layout.match(/:disabled="isLoggingOut \|\| isLoggingOutAll"/g) ?? [])
+      .length,
+    4,
+  );
   assert.doesNotMatch(layout, /window\.confirm/);
 });

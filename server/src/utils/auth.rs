@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{Arc, LazyLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::Json;
 use axum::body::Body;
@@ -6,25 +9,43 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use cyder_tools::auth::{DecodingKey, EncodingKey, JwtError, JwtValidation, decode_jwt, issue_jwt};
+use cyder_tools::auth::JwtError;
+use hmac::{Hmac, Mac};
+use jsonwebtoken::{
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::LazyLock;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::CONFIG;
 use crate::database::manager_auth_instance::{MANAGER_ID, MANAGER_SUBJECT};
 use crate::service::admin::auth::AccessCredentialError;
 use crate::service::app_state::AppState;
-use std::sync::Arc;
 
-struct Keys {
+type HmacSha256 = Hmac<Sha256>;
+
+const ISSUER: &str = "cyder-api";
+const ACCESS_AUDIENCE: &str = "cyder-manager-api";
+const REFRESH_AUDIENCE: &str = "cyder-manager-refresh";
+const MEDIATOR_AUDIENCE: &str = "cyder-manager-mediator";
+const ACCESS_TOKEN_USE: &str = "access";
+const REFRESH_TOKEN_USE: &str = "refresh";
+const MEDIATOR_TOKEN_USE: &str = "mediator_session";
+const ACCESS_KEY_LABEL: &[u8] = b"cyder-manager-access-v1";
+const REFRESH_KEY_LABEL: &[u8] = b"cyder-manager-refresh-v1";
+const MEDIATOR_KEY_LABEL: &[u8] = b"cyder-manager-mediator-v1";
+pub const REFRESH_TOKEN_ISSUE_SEC: i64 = 30 * 24 * 3600;
+pub const ACCESS_TOKEN_ISSUE_SEC: i64 = 10 * 60;
+
+struct TokenKeys {
     encoding: EncodingKey,
     decoding: DecodingKey,
 }
 
-impl Keys {
-    fn new(secret: &[u8]) -> Self {
+impl TokenKeys {
+    fn from_derived_secret(secret: &[u8]) -> Self {
         Self {
             encoding: EncodingKey::from_secret(secret),
             decoding: DecodingKey::from_secret(secret),
@@ -32,12 +53,77 @@ impl Keys {
     }
 }
 
-static KEYS: LazyLock<Keys> = LazyLock::new(|| Keys::new(CONFIG.jwt_secret.as_bytes()));
+struct ManagerJwtKeys {
+    key_id: String,
+    access: TokenKeys,
+    refresh: TokenKeys,
+    mediator: TokenKeys,
+}
 
-const ISSUER: &str = "cyder-api";
-const REFRESH_TOKEN_SUBJECT: &str = "MANAGER_REFRESH_TOKEN";
-pub const REFRESH_TOKEN_ISSUE_SEC: i64 = 30 * 24 * 3600;
-pub const ACCESS_TOKEN_ISSUE_SEC: i64 = 10 * 60;
+impl ManagerJwtKeys {
+    fn from_root_secret(secret: &[u8]) -> Self {
+        Self {
+            key_id: root_key_id(secret),
+            access: TokenKeys::from_derived_secret(&derive_domain_key(secret, ACCESS_KEY_LABEL)),
+            refresh: TokenKeys::from_derived_secret(&derive_domain_key(secret, REFRESH_KEY_LABEL)),
+            mediator: TokenKeys::from_derived_secret(&derive_domain_key(
+                secret,
+                MEDIATOR_KEY_LABEL,
+            )),
+        }
+    }
+}
+
+static KEYS: LazyLock<ManagerJwtKeys> =
+    LazyLock::new(|| ManagerJwtKeys::from_root_secret(CONFIG.jwt_secret.as_bytes()));
+
+fn derive_domain_key(root_secret: &[u8], label: &[u8]) -> [u8; 32] {
+    let mut mac =
+        HmacSha256::new_from_slice(root_secret).expect("HMAC accepts manager JWT root keys");
+    mac.update(label);
+    mac.finalize().into_bytes().into()
+}
+
+fn root_key_id(root_secret: &[u8]) -> String {
+    let digest = Sha256::digest(root_secret);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
+pub fn manager_jwt_key_id() -> &'static str {
+    &KEYS.key_id
+}
+
+fn issue_manager_jwt<T: Serialize>(keys: &TokenKeys, claims: &T) -> String {
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some(KEYS.key_id.clone());
+    encode(&header, claims, &keys.encoding).expect("failed to issue a manager jwt")
+}
+
+fn decode_manager_jwt<T: for<'de> Deserialize<'de>>(
+    keys: &TokenKeys,
+    token: &str,
+    audience: &str,
+) -> Result<T, JwtError> {
+    let header = decode_header(token).map_err(|_| JwtError::Decode)?;
+    if header.alg != Algorithm::HS256 || header.kid.as_deref() != Some(KEYS.key_id.as_str()) {
+        return Err(JwtError::Invalid);
+    }
+
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.leeway = 0;
+    validation.set_audience(&[audience]);
+    validation.set_issuer(&[ISSUER]);
+    validation.sub = Some(MANAGER_SUBJECT.to_string());
+    validation.set_required_spec_claims(&["aud", "exp", "iat", "iss", "sub"]);
+    decode::<T>(token, &keys.decoding, &validation)
+        .map(|data| data.claims)
+        .map_err(|_| JwtError::Decode)
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ManagerRefreshClaims {
@@ -46,9 +132,10 @@ pub struct ManagerRefreshClaims {
     iat: u64,
     iss: String,
     sub: String,
-    iid: i64,
+    token_use: String,
+    sid: i64,
     jti: String,
-    session_version: i64,
+    refresh_generation: i64,
     credential_epoch: String,
 }
 
@@ -59,9 +146,22 @@ pub struct ManagerAccessClaims {
     iat: u64,
     iss: String,
     sub: String,
-    iid: i64,
+    token_use: String,
+    sid: i64,
     jti: String,
     session_version: i64,
+    credential_epoch: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ManagerMediatorClaims {
+    aud: String,
+    exp: u64,
+    iat: u64,
+    iss: String,
+    sub: String,
+    token_use: String,
+    sid: i64,
     credential_epoch: String,
 }
 
@@ -70,11 +170,21 @@ pub struct RefreshJwtResult {
     pub manager_id: i64,
     pub login_instance_id: i64,
     pub jwt_id: String,
-    pub session_version: i64,
+    pub refresh_generation: i64,
     pub issued_at: i64,
     pub expires_at: i64,
     pub credential_epoch: Uuid,
     pub token: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ManagerMediatorContext {
+    pub manager_id: i64,
+    pub manager_subject: String,
+    pub login_instance_id: i64,
+    pub issued_at: i64,
+    pub expires_at: i64,
+    pub credential_epoch: Uuid,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -103,84 +213,62 @@ pub fn generate_token_jti() -> String {
 
 impl ManagerRefreshClaims {
     fn new(
-        manager_id: i64,
         login_instance_id: i64,
         refresh_jti: &str,
-        session_version: i64,
+        refresh_generation: i64,
         credential_epoch: &Uuid,
         issued_at: i64,
         expires_at: i64,
     ) -> Self {
         Self {
-            aud: manager_id.to_string(),
+            aud: REFRESH_AUDIENCE.to_string(),
             exp: expires_at as u64,
             iat: issued_at as u64,
             iss: ISSUER.to_string(),
-            sub: REFRESH_TOKEN_SUBJECT.to_string(),
-            iid: login_instance_id,
+            sub: MANAGER_SUBJECT.to_string(),
+            token_use: REFRESH_TOKEN_USE.to_string(),
+            sid: login_instance_id,
             jti: refresh_jti.to_string(),
-            session_version,
+            refresh_generation,
             credential_epoch: credential_epoch.to_string(),
         }
     }
 }
 
 pub fn issue_refresh_token(
-    manager_id: i64,
+    _manager_id: i64,
     login_instance_id: i64,
     refresh_jti: &str,
-    session_version: i64,
+    refresh_generation: i64,
     credential_epoch: &Uuid,
     issued_at: i64,
     expires_at: i64,
 ) -> String {
     let claims = ManagerRefreshClaims::new(
-        manager_id,
         login_instance_id,
         refresh_jti,
-        session_version,
+        refresh_generation,
         credential_epoch,
         issued_at,
         expires_at,
     );
-    issue_jwt(&KEYS.encoding, &claims)
+    issue_manager_jwt(&KEYS.refresh, &claims)
 }
 
 pub fn decode_refresh_token(token: &str) -> Result<RefreshJwtResult, JwtError> {
-    let validate = JwtValidation {
-        validate_aud: false,
-        issuer: ISSUER,
-        required_spec: &[
-            "aud",
-            "jti",
-            "sub",
-            "iat",
-            "exp",
-            "iss",
-            "iid",
-            "session_version",
-            "credential_epoch",
-        ],
-    };
-    let result = decode_jwt::<ManagerRefreshClaims>(&KEYS.decoding, token, validate)?;
-    if result.sub != REFRESH_TOKEN_SUBJECT {
-        return Err(JwtError::Invalid);
-    }
-    let manager_id = result.aud.parse::<i64>().map_err(|_| JwtError::Parse)?;
-    if manager_id != MANAGER_ID {
-        return Err(JwtError::Invalid);
-    }
-    if result.session_version < 1 {
+    let result =
+        decode_manager_jwt::<ManagerRefreshClaims>(&KEYS.refresh, token, REFRESH_AUDIENCE)?;
+    if result.token_use != REFRESH_TOKEN_USE || result.refresh_generation < 1 {
         return Err(JwtError::Invalid);
     }
     let credential_epoch =
         Uuid::parse_str(&result.credential_epoch).map_err(|_| JwtError::Parse)?;
     Ok(RefreshJwtResult {
-        manager_id,
-        login_instance_id: result.iid,
+        manager_id: MANAGER_ID,
+        login_instance_id: result.sid,
         token: token.to_string(),
         jwt_id: result.jti,
-        session_version: result.session_version,
+        refresh_generation: result.refresh_generation,
         issued_at: result.iat as i64,
         expires_at: result.exp as i64,
         credential_epoch,
@@ -189,7 +277,6 @@ pub fn decode_refresh_token(token: &str) -> Result<RefreshJwtResult, JwtError> {
 
 impl ManagerAccessClaims {
     fn new(
-        manager_id: i64,
         login_instance_id: i64,
         access_jti: &str,
         session_version: i64,
@@ -198,12 +285,13 @@ impl ManagerAccessClaims {
         expires_at: i64,
     ) -> Self {
         Self {
-            aud: manager_id.to_string(),
+            aud: ACCESS_AUDIENCE.to_string(),
             exp: expires_at as u64,
             iat: issued_at as u64,
             iss: ISSUER.to_string(),
             sub: MANAGER_SUBJECT.to_string(),
-            iid: login_instance_id,
+            token_use: ACCESS_TOKEN_USE.to_string(),
+            sid: login_instance_id,
             jti: access_jti.to_string(),
             session_version,
             credential_epoch: credential_epoch.to_string(),
@@ -231,7 +319,7 @@ pub fn issue_access_token(
 }
 
 fn issue_access_token_with_expiration(
-    manager_id: i64,
+    _manager_id: i64,
     login_instance_id: i64,
     access_jti: &str,
     session_version: i64,
@@ -240,7 +328,6 @@ fn issue_access_token_with_expiration(
     expires_at: i64,
 ) -> String {
     let claims = ManagerAccessClaims::new(
-        manager_id,
         login_instance_id,
         access_jti,
         session_version,
@@ -248,7 +335,7 @@ fn issue_access_token_with_expiration(
         issued_at,
         expires_at,
     );
-    issue_jwt(&KEYS.encoding, &claims)
+    issue_manager_jwt(&KEYS.access, &claims)
 }
 
 #[cfg(test)]
@@ -273,41 +360,56 @@ pub(crate) fn issue_access_token_with_expiration_for_test(
 }
 
 pub fn decode_access_token(token: &str) -> Result<ManagerAuthContext, JwtError> {
-    let validate = JwtValidation {
-        validate_aud: false,
-        issuer: ISSUER,
-        required_spec: &[
-            "aud",
-            "jti",
-            "sub",
-            "iat",
-            "exp",
-            "iss",
-            "iid",
-            "session_version",
-            "credential_epoch",
-        ],
-    };
-    let result = decode_jwt::<ManagerAccessClaims>(&KEYS.decoding, token, validate)?;
-    if result.sub != MANAGER_SUBJECT {
-        return Err(JwtError::Invalid);
-    }
-    let manager_id = result.aud.parse::<i64>().map_err(|_| JwtError::Parse)?;
-    if manager_id != MANAGER_ID {
-        return Err(JwtError::Invalid);
-    }
-    if result.session_version < 1 {
+    let result = decode_manager_jwt::<ManagerAccessClaims>(&KEYS.access, token, ACCESS_AUDIENCE)?;
+    if result.token_use != ACCESS_TOKEN_USE || result.session_version < 1 {
         return Err(JwtError::Invalid);
     }
     let credential_epoch =
         Uuid::parse_str(&result.credential_epoch).map_err(|_| JwtError::Parse)?;
     Ok(ManagerAuthContext {
-        manager_id,
+        manager_id: MANAGER_ID,
         manager_subject: result.sub,
-        login_instance_id: result.iid,
+        login_instance_id: result.sid,
         token: token.to_string(),
         access_jti: result.jti,
         session_version: result.session_version,
+        issued_at: result.iat as i64,
+        expires_at: result.exp as i64,
+        credential_epoch,
+    })
+}
+
+pub fn issue_mediator_token(
+    login_instance_id: i64,
+    credential_epoch: &Uuid,
+    issued_at: i64,
+    expires_at: i64,
+) -> String {
+    let claims = ManagerMediatorClaims {
+        aud: MEDIATOR_AUDIENCE.to_string(),
+        exp: expires_at as u64,
+        iat: issued_at as u64,
+        iss: ISSUER.to_string(),
+        sub: MANAGER_SUBJECT.to_string(),
+        token_use: MEDIATOR_TOKEN_USE.to_string(),
+        sid: login_instance_id,
+        credential_epoch: credential_epoch.to_string(),
+    };
+    issue_manager_jwt(&KEYS.mediator, &claims)
+}
+
+pub fn decode_mediator_token(token: &str) -> Result<ManagerMediatorContext, JwtError> {
+    let result =
+        decode_manager_jwt::<ManagerMediatorClaims>(&KEYS.mediator, token, MEDIATOR_AUDIENCE)?;
+    if result.token_use != MEDIATOR_TOKEN_USE {
+        return Err(JwtError::Invalid);
+    }
+    let credential_epoch =
+        Uuid::parse_str(&result.credential_epoch).map_err(|_| JwtError::Parse)?;
+    Ok(ManagerMediatorContext {
+        manager_id: MANAGER_ID,
+        manager_subject: result.sub,
+        login_instance_id: result.sid,
         issued_at: result.iat as i64,
         expires_at: result.exp as i64,
         credential_epoch,
@@ -398,46 +500,21 @@ fn log_access_rejected(reason: &str) {
     );
 }
 
-pub async fn authorization_refresh_middleware(
-    mut req: Request,
-    next: Next,
-) -> Result<Response<Body>, AccessGuardError> {
-    let token = extract_bearer_token_from_headers(req.headers())
-        .map_err(access_guard_from_bearer_error)?
-        .to_string();
-    let token_data = decode_refresh_token(&token).map_err(|_| AccessGuardError::InvalidToken)?;
-    req.extensions_mut().insert(token_data);
-    Ok(next.run(req).await)
-}
-
-pub async fn authorization_access_token_middleware(
-    mut req: Request,
-    next: Next,
-) -> Result<Response<Body>, AccessGuardError> {
-    let token = match extract_bearer_token_from_headers(req.headers()) {
-        Ok(token) => token.to_string(),
-        Err(err) => {
-            log_access_rejected("header");
-            return Err(access_guard_from_bearer_error(err));
-        }
-    };
-    let token_data = match decode_access_token(&token) {
-        Ok(data) => data,
-        Err(_) => {
-            log_access_rejected("token");
-            return Err(AccessGuardError::InvalidToken);
-        }
-    };
-    req.extensions_mut().insert(token_data);
-    Ok(next.run(req).await)
-}
-
 pub async fn authorization_access_middleware(
     State(app_state): State<Arc<AppState>>,
     mut req: Request,
     next: Next,
 ) -> Result<Response<Body>, AccessGuardError> {
-    let token = match extract_bearer_token_from_headers(req.headers()) {
+    let token_data = validate_access_headers(&app_state, req.headers())?;
+    req.extensions_mut().insert(token_data);
+    Ok(next.run(req).await)
+}
+
+pub fn validate_access_headers(
+    app_state: &AppState,
+    headers: &HeaderMap,
+) -> Result<ManagerAuthContext, AccessGuardError> {
+    let token = match extract_bearer_token_from_headers(headers) {
         Ok(token) => token.to_string(),
         Err(err) => {
             log_access_rejected("header");
@@ -473,8 +550,7 @@ pub async fn authorization_access_middleware(
                 AccessGuardError::SessionUnavailable
             }
         })?;
-    req.extensions_mut().insert(token_data);
-    Ok(next.run(req).await)
+    Ok(token_data)
 }
 
 fn access_guard_from_bearer_error(error: BearerTokenError) -> AccessGuardError {
@@ -487,15 +563,16 @@ fn access_guard_from_bearer_error(error: BearerTokenError) -> AccessGuardError {
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
-    use cyder_tools::auth::issue_jwt;
+    use jsonwebtoken::{Algorithm, Header, encode};
     use serde::Serialize;
     use uuid::Uuid;
 
     use super::{
-        ACCESS_TOKEN_ISSUE_SEC, BearerTokenError, ISSUER, KEYS, MANAGER_ID, MANAGER_SUBJECT,
-        REFRESH_TOKEN_ISSUE_SEC, decode_access_token, decode_refresh_token,
+        ACCESS_AUDIENCE, ACCESS_TOKEN_ISSUE_SEC, ACCESS_TOKEN_USE, BearerTokenError, ISSUER, KEYS,
+        MANAGER_ID, MANAGER_SUBJECT, ManagerAccessClaims, ManagerJwtKeys, REFRESH_TOKEN_ISSUE_SEC,
+        decode_access_token, decode_mediator_token, decode_refresh_token, derive_domain_key,
         extract_bearer_token_from_headers, get_current_timestamp, issue_access_token,
-        issue_refresh_token,
+        issue_manager_jwt, issue_mediator_token, issue_refresh_token, root_key_id,
     };
 
     fn headers(value: &str) -> HeaderMap {
@@ -527,7 +604,7 @@ mod tests {
         assert_eq!(refresh.manager_id, MANAGER_ID);
         assert_eq!(refresh.login_instance_id, 42);
         assert_eq!(refresh.jwt_id, "refresh-jti");
-        assert_eq!(refresh.session_version, 7);
+        assert_eq!(refresh.refresh_generation, 7);
         assert_eq!(refresh.issued_at, now);
         assert_eq!(refresh.expires_at, now + REFRESH_TOKEN_ISSUE_SEC);
         assert_eq!(refresh.credential_epoch, credential_epoch);
@@ -541,10 +618,53 @@ mod tests {
         assert_eq!(access.issued_at, now);
         assert_eq!(access.expires_at, now + ACCESS_TOKEN_ISSUE_SEC);
         assert_eq!(access.credential_epoch, credential_epoch);
+
+        let mediator =
+            issue_mediator_token(42, &credential_epoch, now, now + REFRESH_TOKEN_ISSUE_SEC);
+        let mediator = decode_mediator_token(&mediator).expect("mediator should decode");
+        assert_eq!(mediator.manager_id, MANAGER_ID);
+        assert_eq!(mediator.manager_subject, MANAGER_SUBJECT);
+        assert_eq!(mediator.login_instance_id, 42);
+        assert_eq!(mediator.credential_epoch, credential_epoch);
     }
 
     #[test]
-    fn pre_epoch_access_and_refresh_tokens_are_rejected() {
+    fn manager_jwt_domains_are_deterministic_and_not_interchangeable() {
+        let root = b"0123456789abcdef0123456789abcdef";
+        assert_eq!(root_key_id(root), root_key_id(root));
+        assert_eq!(root_key_id(root).len(), 64);
+        assert_ne!(
+            derive_domain_key(root, super::ACCESS_KEY_LABEL),
+            derive_domain_key(root, super::REFRESH_KEY_LABEL)
+        );
+        assert_ne!(
+            derive_domain_key(root, super::REFRESH_KEY_LABEL),
+            derive_domain_key(root, super::MEDIATOR_KEY_LABEL)
+        );
+
+        let now = get_current_timestamp();
+        let epoch = Uuid::new_v4();
+        let access = issue_access_token(MANAGER_ID, 42, "access", 1, &epoch, now);
+        let refresh = issue_refresh_token(
+            MANAGER_ID,
+            42,
+            "refresh",
+            1,
+            &epoch,
+            now,
+            now + REFRESH_TOKEN_ISSUE_SEC,
+        );
+        let mediator = issue_mediator_token(42, &epoch, now, now + REFRESH_TOKEN_ISSUE_SEC);
+        assert!(decode_refresh_token(&access).is_err());
+        assert!(decode_mediator_token(&access).is_err());
+        assert!(decode_access_token(&refresh).is_err());
+        assert!(decode_mediator_token(&refresh).is_err());
+        assert!(decode_access_token(&mediator).is_err());
+        assert!(decode_refresh_token(&mediator).is_err());
+    }
+
+    #[test]
+    fn manager_jwt_rejects_missing_epoch_wrong_kid_and_wrong_algorithm() {
         #[derive(Debug, Serialize)]
         struct PreEpochClaims {
             aud: String,
@@ -552,82 +672,70 @@ mod tests {
             iat: u64,
             iss: String,
             sub: String,
-            iid: i64,
+            token_use: String,
+            sid: i64,
             jti: String,
+            session_version: i64,
         }
 
         let now = get_current_timestamp();
-        let access_token = issue_jwt(
-            &KEYS.encoding,
+        let access_token = issue_manager_jwt(
+            &KEYS.access,
             &PreEpochClaims {
-                aud: MANAGER_ID.to_string(),
+                aud: ACCESS_AUDIENCE.to_string(),
                 exp: (now + ACCESS_TOKEN_ISSUE_SEC) as u64,
                 iat: now as u64,
                 iss: ISSUER.to_string(),
                 sub: MANAGER_SUBJECT.to_string(),
-                iid: 42,
+                token_use: ACCESS_TOKEN_USE.to_string(),
+                sid: 42,
                 jti: "pre-epoch-access".to_string(),
+                session_version: 1,
             },
         );
-        let refresh_token = issue_jwt(
-            &KEYS.encoding,
-            &PreEpochClaims {
-                aud: MANAGER_ID.to_string(),
-                exp: (now + REFRESH_TOKEN_ISSUE_SEC) as u64,
-                iat: now as u64,
-                iss: ISSUER.to_string(),
-                sub: super::REFRESH_TOKEN_SUBJECT.to_string(),
-                iid: 42,
-                jti: "pre-epoch-refresh".to_string(),
-            },
-        );
-
         assert!(decode_access_token(&access_token).is_err());
-        assert!(decode_refresh_token(&refresh_token).is_err());
+
+        let claims = ManagerAccessClaims::new(
+            42,
+            "access",
+            1,
+            &Uuid::new_v4(),
+            now,
+            now + ACCESS_TOKEN_ISSUE_SEC,
+        );
+        let mut wrong_kid = Header::new(Algorithm::HS256);
+        wrong_kid.kid = Some("wrong".to_string());
+        let wrong_kid = encode(&wrong_kid, &claims, &KEYS.access.encoding)
+            .expect("wrong-kid token should encode");
+        assert!(decode_access_token(&wrong_kid).is_err());
+
+        let mut wrong_algorithm = Header::new(Algorithm::HS512);
+        wrong_algorithm.kid = Some(KEYS.key_id.clone());
+        let wrong_algorithm = encode(
+            &wrong_algorithm,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(&derive_domain_key(
+                b"0123456789abcdef0123456789abcdef",
+                super::ACCESS_KEY_LABEL,
+            )),
+        )
+        .expect("wrong-algorithm token should encode");
+        assert!(decode_access_token(&wrong_algorithm).is_err());
+
+        let alternate_keys = ManagerJwtKeys::from_root_secret(b"0123456789abcdef0123456789abcdef");
+        let wrong_root = {
+            let mut header = Header::new(Algorithm::HS256);
+            header.kid = Some(alternate_keys.key_id.clone());
+            encode(&header, &claims, &alternate_keys.access.encoding)
+                .expect("wrong-root token should encode")
+        };
+        assert!(decode_access_token(&wrong_root).is_err());
     }
 
     #[test]
-    fn pre_session_version_and_non_positive_version_tokens_are_rejected() {
-        #[derive(Debug, Serialize)]
-        struct PreSessionVersionClaims {
-            aud: String,
-            exp: u64,
-            iat: u64,
-            iss: String,
-            sub: String,
-            iid: i64,
-            jti: String,
-            credential_epoch: String,
-        }
-
+    fn non_positive_access_version_and_refresh_generation_are_rejected() {
         let now = get_current_timestamp();
         let credential_epoch = Uuid::new_v4();
-        let pre_version_access = issue_jwt(
-            &KEYS.encoding,
-            &PreSessionVersionClaims {
-                aud: MANAGER_ID.to_string(),
-                exp: (now + ACCESS_TOKEN_ISSUE_SEC) as u64,
-                iat: now as u64,
-                iss: ISSUER.to_string(),
-                sub: MANAGER_SUBJECT.to_string(),
-                iid: 42,
-                jti: "pre-version-access".to_string(),
-                credential_epoch: credential_epoch.to_string(),
-            },
-        );
-        let pre_version_refresh = issue_jwt(
-            &KEYS.encoding,
-            &PreSessionVersionClaims {
-                aud: MANAGER_ID.to_string(),
-                exp: (now + REFRESH_TOKEN_ISSUE_SEC) as u64,
-                iat: now as u64,
-                iss: ISSUER.to_string(),
-                sub: super::REFRESH_TOKEN_SUBJECT.to_string(),
-                iid: 42,
-                jti: "pre-version-refresh".to_string(),
-                credential_epoch: credential_epoch.to_string(),
-            },
-        );
         let zero_version_access = issue_access_token(
             MANAGER_ID,
             42,
@@ -636,20 +744,18 @@ mod tests {
             &credential_epoch,
             now,
         );
-        let zero_version_refresh = issue_refresh_token(
+        let zero_generation_refresh = issue_refresh_token(
             MANAGER_ID,
             42,
-            "zero-version-refresh",
+            "zero-generation-refresh",
             0,
             &credential_epoch,
             now,
             now + REFRESH_TOKEN_ISSUE_SEC,
         );
 
-        assert!(decode_access_token(&pre_version_access).is_err());
-        assert!(decode_refresh_token(&pre_version_refresh).is_err());
         assert!(decode_access_token(&zero_version_access).is_err());
-        assert!(decode_refresh_token(&zero_version_refresh).is_err());
+        assert!(decode_refresh_token(&zero_generation_refresh).is_err());
     }
 
     #[test]

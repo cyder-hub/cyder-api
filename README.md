@@ -139,7 +139,7 @@ Unknown top-level and nested fields in `config.yaml` and the generated `config.d
 Important config areas include:
 
 - server bind settings: `host`, `port`, `base_path`
-- manager auth: initialize the manager password in the Web Bootstrap page; `jwt_secret` signs manager tokens
+- manager auth: initialize the password in Web Bootstrap; configure a 32-byte-or-longer `jwt_secret` and an exact `manager_auth.browser_origin` for non-loopback browser access
 - trusted reverse proxies: `client_identity` (empty trust list by default)
 - database: `db_url`
 - downstream secret handling: `secret_encryption`
@@ -158,6 +158,7 @@ The only environment variables that can override final config fields are:
 - `CYDER_BASE_PATH`
 - `CYDER_LOG_LEVEL`
 - `CYDER_TIMEZONE`
+- `CYDER_MANAGER_AUTH_BROWSER_ORIGIN`
 
 Startup path environment variables are separate:
 
@@ -166,7 +167,33 @@ Startup path environment variables are separate:
 
 Database URLs, secrets, Redis/cache, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
 
-Pre-1.0 supports one running Cyder server instance. Redis remains optional and can preserve short-lived runtime state across process restarts, but it does not enable a supported multi-instance deployment.
+Before 1.0, Cyder supports exactly one running server instance and does not consider multi-instance compatibility. Redis remains optional and can preserve short-lived runtime state across process restarts, but it does not enable a supported multi-instance deployment. Do not add shared Manager sessions, distributed locks, cross-node singleflight, Pub/Sub invalidation, sticky-session requirements, or other multi-instance scaffolding.
+
+### Manager Browser Authentication
+
+Manager authentication uses three purpose-isolated JWT domains:
+
+- a 10-minute Access JWT, held only in the current page's JavaScript memory and sent as a Bearer credential to ordinary Manager APIs
+- a single-use Refresh JWT Family held only inside the server, with a 30-day absolute lifetime and a 7-day idle lifetime
+- a Mediator Session JWT sent only as an `HttpOnly`, `SameSite=Strict` Cookie on `<base_path>/manager/api/auth`
+
+The browser never receives the Refresh JWT. Login, bootstrap, password rotation, and `POST <base_path>/manager/api/auth/access` return JSON containing only `access_token`. Access is never written to `localStorage`, `sessionStorage`, IndexedDB, a Cookie, or a URL. On first load, the frontend removes only the legacy `auth_token` key from local and session storage, then asks `/auth/access` whether the HttpOnly session is usable.
+
+Set an independent, random root secret of at least 32 bytes and, outside loopback development, configure the exact HTTPS origin that serves both the Manager UI and API:
+
+```yaml
+jwt_secret: "<independent random value of at least 32 bytes>"
+manager_auth:
+  browser_origin: "https://cyder-admin.example.com"
+```
+
+`CYDER_MANAGER_AUTH_BROWSER_ORIGIN` is the only environment override for this field. The value must be one exact `http(s)://host[:port]` origin with no path, query, fragment, userinfo, wildcard, or list. A non-loopback origin must use HTTPS. If the field is omitted, browser Auth commands are accepted only when both the TCP peer and request Origin are loopback.
+
+Production uses `__Secure-cyder_manager_session` with `Secure`; explicit loopback development uses `cyder_manager_session_dev` without the `__Secure-` prefix. Both are `HttpOnly`, `SameSite=Strict`, omit `Domain`, and use `Path=<base_path>/manager/api/auth`. A reverse proxy must preserve the browser's real `Origin`, terminate TLS for production, and must not rely on `Host`, `Forwarded`, or `X-Forwarded-Proto` to infer the Manager origin.
+
+Changing `jwt_secret` is an intentional hard cutover: all Manager sessions become invalid and every browser must log in again. There is no previous-secret overlap or gradual JWT rotation. This does not invalidate downstream Proxy API keys, whose authentication is independent.
+
+The R2.11 pre-1.0 migration clears historical Manager session rows while preserving the Manager password verifier. After upgrading, remove any stale `auth_token` storage through the current UI load and log in again. Do not attempt to preserve or import old Access/Refresh Token Pair data.
 
 ### Secret Encryption and Provider Credentials
 

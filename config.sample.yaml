@@ -9,7 +9,8 @@
 # and path-aware defaults. It is runtime state, not a tracked sample to edit.
 #
 # The only environment variables that override final config fields are
-# CYDER_HOST, CYDER_PORT, CYDER_BASE_PATH, CYDER_LOG_LEVEL, and CYDER_TIMEZONE.
+# CYDER_HOST, CYDER_PORT, CYDER_BASE_PATH, CYDER_LOG_LEVEL, CYDER_TIMEZONE, and
+# CYDER_MANAGER_AUTH_BROWSER_ORIGIN.
 # Use YAML for secrets, database, Redis/cache, runtime state, proxy, and
 # governance settings. Configuration changes take effect after a
 # server restart.
@@ -22,7 +23,15 @@
 host: 0.0.0.0
 port: 8000
 base_path: /ai
+# Independent Manager JWT root secret, at least 32 bytes. Replacing it is a
+# hard cutover that invalidates every Manager session but not Proxy API keys.
+# Previous-secret overlap/rotation is intentionally unsupported.
 jwt_secret: uCK6g1EBERjj2U7FT8sGlMFFzL2M3ufW
+manager_auth:
+  # Exact browser origin for Manager Auth cookie endpoints. Non-loopback origins
+  # must use HTTPS. When omitted, browser auth is limited to loopback peer +
+  # loopback Origin development requests.
+  browser_origin: null
 db_url: /data/cyder/db/cyder.sqlite
 # db_url: postgres://user:pass@host:port/schema_name
 # Supported database URL forms are SQLite paths and PostgreSQL URLs.

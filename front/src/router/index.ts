@@ -2,8 +2,7 @@ import { createRouter, createWebHistory } from "vue-router";
 import DefaultLayout from "@/layouts/DefaultLayout.vue";
 import LoginLayout from "@/layouts/LoginLayout.vue";
 import { useAuthStore } from "@/store/authStore";
-import { getBootstrapStatus, restoreStoredSession } from "@/services/auth";
-import { readStoredAuthSession } from "@/services/authTokens";
+import { getBootstrapStatus, restoreSession } from "@/services/auth";
 import { registerLoginNavigation } from "@/services/authRuntime";
 import { decideAuthRoute, type AuthRouteKind } from "./auth-state";
 
@@ -180,7 +179,6 @@ router.beforeEach(async (to, _from, next) => {
   const authStore = useAuthStore();
   const bootstrapState = await authStore.resolveBootstrapState(getBootstrapStatus);
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
-  const storedSession = readStoredAuthSession();
   const routeKind: AuthRouteKind =
     to.name === "Bootstrap"
       ? "bootstrap"
@@ -192,7 +190,6 @@ router.beforeEach(async (to, _from, next) => {
   const decision = decideAuthRoute({
     bootstrapState,
     routeKind,
-    hasStoredSession: !!storedSession,
     lifecycle: authStore.lifecycle,
   });
 
@@ -209,7 +206,7 @@ router.beforeEach(async (to, _from, next) => {
     return;
   }
   if (decision === "restore") {
-    const refreshed = await restoreStoredSession();
+    const refreshed = await restoreSession();
     if (!refreshed) {
       if (routeKind === "login") {
         next();

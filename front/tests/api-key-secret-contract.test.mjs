@@ -89,23 +89,17 @@ test("Create and Rotate opt out of authentication replay", async () => {
     response: { status: 401, data: { code: 1432 } },
   };
   const handler = createHttpAuthRefreshHandler({
-    readStoredAuthSession: () => null,
-    persistAuthTokenPair: () => {
-      throw new Error("not called");
-    },
-    clearStoredAuthSessionIfCurrent: () => false,
+    getAccessToken: () => "access-current",
     getLifecycle: () => "authenticated",
-    restoreStoredSession: async () => true,
-    setAuthenticated: () => {},
-    setAnonymous: () => {},
-    refreshAccessToken: async () => {
+    restoreSession: async () => true,
+    recoverAccess: async () => {
       refreshCalls += 1;
       throw new Error("not called");
     },
+    revokeSession: () => {},
     retryRequest: async () => {
       retryCalls += 1;
     },
-    redirectToLogin: () => {},
   });
 
   await assert.rejects(handler(error), (caught) => caught === error);

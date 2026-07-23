@@ -535,6 +535,7 @@ dependencies = [
  "flate2",
  "futures",
  "hmac",
+ "httpdate",
  "ipnet",
  "jsonwebtoken 10.3.0",
  "libsqlite3-sys",

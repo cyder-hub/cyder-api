@@ -11,7 +11,42 @@ This document defines the browser boundary and client-IP trust contract for the 
 | System | `/ai/health`, `/ai/ready` | No CORS added by this contract | Not resolved |
 | Base fallback | other `/ai/*` paths | No CORS added by this contract | Not resolved |
 
-Manager Origin and Fetch Metadata enforcement is intentionally deferred to the R2.11 cookie-session contract. This contract does not make Manager cross-origin.
+Manager remains same-origin and now enforces the R2.11 browser Auth boundary described below. This does not make Manager cross-origin.
+
+## Manager Auth browser boundary
+
+The six state-changing or Cookie-consuming Manager Auth commands are:
+
+- `POST /ai/manager/api/auth/bootstrap`
+- `POST /ai/manager/api/auth/login`
+- `POST /ai/manager/api/auth/access`
+- `POST /ai/manager/api/auth/password/rotate`
+- `POST /ai/manager/api/auth/logout`
+- `POST /ai/manager/api/auth/logout_all`
+
+Before body parsing, authentication, rate-limit accounting, or database mutation, every command requires:
+
+```http
+Origin: <exact configured browser origin>
+Sec-Fetch-Site: same-origin
+Content-Type: application/json
+X-Cyder-Manager-Auth: 1
+```
+
+The Origin comparison uses only the request `Origin`. It never derives trust from `Host`, `Forwarded`, `X-Forwarded-Host`, or `X-Forwarded-Proto`. A boundary failure returns `403` with Manager error code `1461`. `GET /auth/bootstrap/status` is a public, read-only probe and does not consume the Mediator Cookie.
+
+Configure one exact origin:
+
+```yaml
+manager_auth:
+  browser_origin: https://cyder-admin.example.com
+```
+
+`CYDER_MANAGER_AUTH_BROWSER_ORIGIN` is the allowlisted environment override. The value cannot contain a path, query, fragment, userinfo, wildcard, or list. Non-loopback values must use HTTPS. When omitted, Auth commands are allowed only if the TCP peer and the request Origin are both explicitly loopback; forwarding metadata cannot create this exception.
+
+The production Cookie is `__Secure-cyder_manager_session`; explicit loopback development uses `cyder_manager_session_dev`. Both are `HttpOnly`, `SameSite=Strict`, omit `Domain`, and use `Path=<base_path>/manager/api/auth`; production additionally uses `Secure`. The Cookie represents only a purpose-limited Mediator JWT. It contains no Access/Refresh JTI, password, permission, or administrator data. Refresh JWTs stay entirely inside the server and Access JWTs stay only in page memory.
+
+Current logout is Cookie-only and idempotent. Its `503` response still deletes the calling browser Cookie because local logout has completed but persistent revocation is unconfirmed. Password rotation and logout-all require a matching Access Bearer plus Mediator Cookie; their `503` responses preserve the Cookie and current page state because the transaction outcome was not confirmed.
 
 ## Manager response security
 
@@ -65,6 +100,8 @@ Client-identity rejection happens outside CORS. Its 400/500 response still recei
 ## Startup configuration
 
 ```yaml
+manager_auth:
+  browser_origin: https://cyder-admin.example.com
 client_identity:
   trusted_proxy_cidrs: []
   max_forwarded_hops: 8
@@ -75,6 +112,7 @@ client_identity:
 - Overlapping but different networks are allowed.
 - `max_forwarded_hops` accepts `1..=32` and defaults to `8`.
 - Configuration is startup-only. Restart after editing the base YAML.
+- Manager browser origin is an independent trust input. Trusted proxy CIDRs affect normalized client IP only and never authorize a browser Origin.
 
 ## Resolution algorithm
 
@@ -122,6 +160,7 @@ At the trusted edge:
 2. Generate one authoritative `Forwarded` or XFF chain. If both are sent, their complete normalized IP chains must match.
 3. Do not use `$proxy_add_x_forwarded_for` until untrusted incoming XFF has already been cleared.
 4. Keep the chain at or below `max_forwarded_hops`.
+5. Terminate TLS for non-loopback Manager deployments and proxy the browser's `Origin` unchanged. Do not synthesize Manager Origin from forwarded scheme/host headers.
 
 Minimal Nginx pattern:
 
@@ -154,5 +193,7 @@ For multiple trusted hops, each controlled proxy must append only after its inbo
 - A 400 at a trusted proxy boundary means malformed, conflicting, unsupported, or overlong forwarding metadata. Inspect proxy configuration and stable server reason fields; do not log raw headers.
 - If every request resolves to the TCP proxy address, confirm the exact proxy CIDR is configured canonically and the server restarted.
 - If requests from an untrusted direct client appear to honor forwarding headers, treat it as a security defect.
+- A Manager Auth `403/1461` means Origin, Fetch Metadata, JSON Content-Type, or `X-Cyder-Manager-Auth` failed before authentication. Compare the browser-visible origin with the exact startup configuration; do not relax CORS or trust forwarded host/proto.
+- A production response setting `cyder_manager_session_dev`, omitting `Secure`, or using a Cookie Path outside `<base_path>/manager/api/auth` is a security defect.
 
 Automated Router and parser matrices are the acceptance mechanism; no real Nginx/Caddy or browser E2E dependency is required for this contract.

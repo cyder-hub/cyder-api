@@ -1,9 +1,11 @@
+use axum::http::Uri;
 use ipnet::IpNet;
 use rand::{Rng, distr::Alphanumeric, rng};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
 use std::{
     collections::HashSet,
     fmt,
+    net::IpAddr,
     sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
@@ -193,6 +195,73 @@ impl SecretEncryptionConfig {
 }
 
 // --- END SECRET ENCRYPTION CONFIG ---
+
+// --- START MANAGER AUTH CONFIG ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ManagerAuthConfig {
+    #[serde(default)]
+    pub browser_origin: Option<String>,
+}
+
+impl ManagerAuthConfig {
+    fn validate(&self) -> Result<(), String> {
+        let Some(origin) = self.browser_origin.as_deref() else {
+            return Ok(());
+        };
+
+        if origin.trim() != origin || origin.is_empty() {
+            return Err(
+                "manager_auth.browser_origin must be one exact scheme://host[:port] origin"
+                    .to_string(),
+            );
+        }
+        let uri = origin.parse::<Uri>().map_err(|_| {
+            "manager_auth.browser_origin must be one exact scheme://host[:port] origin".to_string()
+        })?;
+        let scheme = uri.scheme_str().ok_or_else(|| {
+            "manager_auth.browser_origin must include http or https scheme".to_string()
+        })?;
+        if !matches!(scheme, "http" | "https") {
+            return Err("manager_auth.browser_origin scheme must be http or https".to_string());
+        }
+        let authority = uri
+            .authority()
+            .ok_or_else(|| "manager_auth.browser_origin must include a host".to_string())?;
+        if authority.as_str().contains('@') || authority.as_str().contains('*') {
+            return Err(
+                "manager_auth.browser_origin must not include userinfo or wildcards".to_string(),
+            );
+        }
+        if origin != format!("{scheme}://{authority}") {
+            return Err(
+                "manager_auth.browser_origin must not include path, query, or fragment".to_string(),
+            );
+        }
+        if origin.contains('#') || origin.contains(',') {
+            return Err(
+                "manager_auth.browser_origin must not include fragment or multiple origins"
+                    .to_string(),
+            );
+        }
+
+        let host = authority.host().trim_matches(['[', ']']);
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .map(|address| address.is_loopback())
+                .unwrap_or(false);
+        if scheme != "https" && !loopback {
+            return Err(
+                "manager_auth.browser_origin must use https unless the host is loopback"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+// --- END MANAGER AUTH CONFIG ---
 
 // --- START DEPLOYMENT CONFIG ---
 
@@ -829,6 +898,8 @@ pub struct FinalConfig {
     #[serde(default)]
     pub deployment: DeploymentConfig,
     #[serde(default)]
+    pub manager_auth: ManagerAuthConfig,
+    #[serde(default)]
     pub client_identity: ClientIdentityConfig,
     #[serde(default)]
     pub id: IdConfig,
@@ -845,6 +916,13 @@ pub struct FinalConfig {
 }
 
 impl FinalConfig {
+    pub fn validate_manager_auth(&self) -> Result<(), String> {
+        if self.jwt_secret.len() < 32 {
+            return Err("jwt_secret must contain at least 32 bytes".to_string());
+        }
+        self.manager_auth.validate()
+    }
+
     pub fn validate_runtime_state(&self) -> Result<(), String> {
         let mut errors = Vec::new();
 
@@ -915,6 +993,7 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         db_pool_size: 5,
         redis: None,
         deployment: DeploymentConfig::default(),
+        manager_auth: ManagerAuthConfig::default(),
         client_identity: ClientIdentityConfig::default(),
         id: IdConfig::default(),
         proxy_request: ProxyRequestConfig::default(),

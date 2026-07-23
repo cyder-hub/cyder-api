@@ -1,25 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import {
-  AUTH_SESSION_STORAGE_KEY,
-  clearStoredAuthSession,
-  clearStoredAuthSessionIfCurrent,
-  persistAuthTokenPair,
-  readStoredAuthSession,
-  readStoredSessionRecord,
-  subscribeToAuthSessionStorage,
+  LEGACY_AUTH_STORAGE_KEY,
+  clearAccessToken,
+  clearLegacyAuthStorage,
+  getAccessToken,
+  setAccessToken,
 } from "../src/services/authTokens.ts";
-import { applyStoredAuthSession } from "../src/services/authSession.ts";
 
-function memoryStorage() {
-  const values = new Map();
+const ROOT = new URL("../", import.meta.url);
+
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
   return {
     getItem(key) {
       return values.has(key) ? values.get(key) : null;
-    },
-    setItem(key, value) {
-      values.set(key, value);
     },
     removeItem(key) {
       values.delete(key);
@@ -27,155 +24,44 @@ function memoryStorage() {
   };
 }
 
-function storageEventTarget() {
-  let listener = null;
-  return {
-    addEventListener(type, callback) {
-      assert.equal(type, "storage");
-      listener = callback;
-    },
-    removeEventListener(type, callback) {
-      assert.equal(type, "storage");
-      if (listener === callback) listener = null;
-    },
-    dispatch(key, newValue = null) {
-      listener?.({ key, newValue });
-    },
-  };
-}
+test("manager access token has one process-memory owner", () => {
+  clearAccessToken();
+  assert.equal(getAccessToken(), null);
 
-test("token pair is persisted as one strict versioned session record", () => {
-  const storage = memoryStorage();
+  setAccessToken("access-current");
+  assert.equal(getAccessToken(), "access-current");
 
-  const first = persistAuthTokenPair(
-    { refresh_token: "refresh-old", access_token: "access-old" },
-    storage,
-    () => 100,
-  );
-  assert.deepEqual(first, {
-    schema_version: 1,
-    revision: 100,
-    refresh_token: "refresh-old",
-    access_token: "access-old",
-  });
-  assert.deepEqual(JSON.parse(storage.getItem(AUTH_SESSION_STORAGE_KEY)), first);
+  setAccessToken("access-rotated");
+  assert.equal(getAccessToken(), "access-rotated");
 
-  const second = persistAuthTokenPair(
-    { refresh_token: "refresh-new", access_token: "access-new" },
-    storage,
-    () => 99,
-  );
-  assert.equal(second.revision, 101);
-  assert.deepEqual(readStoredSessionRecord(storage), second);
-
-  clearStoredAuthSession(storage);
-  assert.equal(readStoredAuthSession(storage), null);
+  clearAccessToken();
+  assert.equal(getAccessToken(), null);
 });
 
-test("raw refresh token is read only as a legacy session and migrates on write", () => {
-  const storage = memoryStorage();
-  storage.setItem(AUTH_SESSION_STORAGE_KEY, "legacy-refresh-token");
-
-  assert.deepEqual(readStoredAuthSession(storage), {
-    kind: "legacy",
-    refresh_token: "legacy-refresh-token",
+test("startup cleanup removes only the legacy auth key from both storage scopes", () => {
+  const local = memoryStorage({
+    [LEGACY_AUTH_STORAGE_KEY]: "legacy-local-token",
+    preference: "keep-local",
+  });
+  const session = memoryStorage({
+    [LEGACY_AUTH_STORAGE_KEY]: "legacy-session-token",
+    draft: "keep-session",
   });
 
-  const migrated = persistAuthTokenPair(
-    { refresh_token: "refresh-v1", access_token: "access-v1" },
-    storage,
-    () => 200,
-  );
-  assert.deepEqual(readStoredAuthSession(storage), {
-    kind: "record",
-    record: migrated,
-  });
+  clearLegacyAuthStorage(local, session);
+
+  assert.equal(local.getItem(LEGACY_AUTH_STORAGE_KEY), null);
+  assert.equal(session.getItem(LEGACY_AUTH_STORAGE_KEY), null);
+  assert.equal(local.getItem("preference"), "keep-local");
+  assert.equal(session.getItem("draft"), "keep-session");
 });
 
-test("parsed malformed records are rejected without exposing their values", () => {
-  const storage = memoryStorage();
-  const invalidRecords = [
-    {},
-    { schema_version: 2, revision: 1, refresh_token: "r", access_token: "a" },
-    { schema_version: 1, revision: -1, refresh_token: "r", access_token: "a" },
-    { schema_version: 1, revision: 1, refresh_token: "", access_token: "a" },
-    {
-      schema_version: 1,
-      revision: 1,
-      refresh_token: "r",
-      access_token: "a",
-      unexpected: true,
-    },
-  ];
-
-  for (const invalid of invalidRecords) {
-    storage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(invalid));
-    assert.equal(readStoredAuthSession(storage), null);
-  }
-});
-
-test("conditional clear preserves a session rotated by another tab", () => {
-  const storage = memoryStorage();
-  persistAuthTokenPair(
-    { refresh_token: "refresh-current", access_token: "access-current" },
-    storage,
-    () => 1,
+test("runtime auth token module cannot persist or parse token records", async () => {
+  const source = await readFile(
+    new URL("src/services/authTokens.ts", ROOT),
+    "utf8",
   );
-
-  assert.equal(clearStoredAuthSessionIfCurrent("refresh-stale", storage), false);
-  assert.equal(readStoredSessionRecord(storage).refresh_token, "refresh-current");
-
-  assert.equal(clearStoredAuthSessionIfCurrent("refresh-current", storage), true);
-  assert.equal(readStoredAuthSession(storage), null);
-});
-
-test("storage events reread the current key and deterministically update the store", () => {
-  const storage = memoryStorage();
-  const events = storageEventTarget();
-  const store = {
-    accessToken: "access-existing",
-    lifecycle: "authenticated",
-    setAuthenticated(token) {
-      this.accessToken = token;
-      this.lifecycle = "authenticated";
-    },
-    setAnonymous() {
-      this.accessToken = null;
-      this.lifecycle = "anonymous";
-    },
-  };
-  const seen = [];
-  const unsubscribe = subscribeToAuthSessionStorage(
-    (session) => {
-      seen.push(session);
-      applyStoredAuthSession(store, session);
-    },
-    events,
-    storage,
-  );
-
-  const record = persistAuthTokenPair(
-    { refresh_token: "refresh-current", access_token: "access-current" },
-    storage,
-    () => 10,
-  );
-  events.dispatch(AUTH_SESSION_STORAGE_KEY, "stale-event-value");
-  assert.equal(store.accessToken, "access-current");
-  assert.equal(store.lifecycle, "authenticated");
-  assert.deepEqual(seen.at(-1), { kind: "record", record });
-
-  storage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify({ damaged: true }));
-  events.dispatch(AUTH_SESSION_STORAGE_KEY);
-  assert.equal(store.accessToken, null);
-  assert.equal(store.lifecycle, "anonymous");
-  assert.equal(seen.at(-1), null);
-
-  storage.removeItem(AUTH_SESSION_STORAGE_KEY);
-  events.dispatch(AUTH_SESSION_STORAGE_KEY);
-  assert.equal(store.accessToken, null);
-  assert.equal(seen.at(-1), null);
-
-  events.dispatch("unrelated-key");
-  assert.equal(seen.length, 3);
-  unsubscribe();
+  assert.doesNotMatch(source, /setItem|getItem|JSON\.parse|revision|refresh_token/);
+  assert.match(source, /local\.removeItem\(LEGACY_AUTH_STORAGE_KEY\)/);
+  assert.match(source, /session\.removeItem\(LEGACY_AUTH_STORAGE_KEY\)/);
 });

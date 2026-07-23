@@ -6,7 +6,6 @@ export type AuthRouteDecision = "allow" | "bootstrap" | "login" | "dashboard" | 
 export interface AuthRouteDecisionInput {
   bootstrapState: BootstrapLoadState;
   routeKind: AuthRouteKind;
-  hasStoredSession: boolean;
   lifecycle: AuthLifecycle;
 }
 
@@ -23,15 +22,15 @@ export function decideAuthRoute(input: AuthRouteDecisionInput): AuthRouteDecisio
 
   if (input.routeKind === "bootstrap") {
     if (input.lifecycle === "authenticated") return "dashboard";
-    return input.hasStoredSession ? "restore" : "login";
+    return input.lifecycle === "anonymous" ? "login" : "restore";
   }
   if (input.routeKind === "protected") {
     if (input.lifecycle === "authenticated") return "allow";
-    return input.hasStoredSession ? "restore" : "login";
+    return input.lifecycle === "anonymous" ? "login" : "restore";
   }
   if (input.routeKind === "login") {
     if (input.lifecycle === "authenticated") return "dashboard";
-    return input.hasStoredSession ? "restore" : "allow";
+    return input.lifecycle === "anonymous" ? "allow" : "restore";
   }
   return "allow";
 }

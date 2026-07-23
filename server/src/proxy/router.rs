@@ -177,7 +177,10 @@ pub fn create_proxy_router(client_identity_resolver: Arc<ClientIdentityResolver>
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, sync::Arc};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
+    };
 
     use axum::{
         body::{Body, to_bytes},
@@ -187,11 +190,13 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::config::ClientIdentityConfig;
-    use crate::database::TestDbContext;
     use crate::database::api_key::{ApiKey, CreateApiKeyPayload};
+    use crate::database::{DbConnection, TestDbContext, get_connection};
     use crate::ingress::client_identity::ClientIdentityResolver;
     use crate::schema::enum_def::Action;
+    use crate::service::admin::auth::LoginError;
     use crate::service::app_state::create_test_app_state;
+    use diesel::RunQueryDsl;
 
     use super::create_proxy_router;
 
@@ -408,6 +413,65 @@ mod tests {
                         .expect("proxy auth error should respond");
                     assert_eq!(error.status(), StatusCode::UNAUTHORIZED, "{path}");
                     assert_proxy_security(&error);
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manager_auth_storage_failure_does_not_degrade_proxy_api_key_paths() {
+        let database = TestDbContext::new_sqlite("proxy-manager-auth-isolation.sqlite");
+        database
+            .run_async(async {
+                let created = ApiKey::create(&payload()).expect("proxy key should create");
+                let api_key = created.reveal.api_key;
+
+                let mut conn = get_connection().expect("connection should load");
+                match &mut conn {
+                    DbConnection::Postgres(conn) => {
+                        diesel::sql_query("DROP TABLE manager_auth_instance")
+                            .execute(conn)
+                            .expect("manager session table should drop");
+                    }
+                    DbConnection::Sqlite(conn) => {
+                        diesel::sql_query("DROP TABLE manager_auth_instance")
+                            .execute(conn)
+                            .expect("manager session table should drop");
+                    }
+                }
+                drop(conn);
+
+                let app_state = create_test_app_state(database.clone()).await;
+                assert!(matches!(
+                    app_state
+                        .admin
+                        .auth
+                        .login(
+                            IpAddr::V4(Ipv4Addr::LOCALHOST),
+                            "irrelevant unavailable manager password"
+                        )
+                        .await,
+                    Err(LoginError::Unavailable)
+                ));
+
+                for (path, header_name) in [
+                    ("/openai/v1/models", header::AUTHORIZATION.as_str()),
+                    ("/responses/v1/models", header::AUTHORIZATION.as_str()),
+                    ("/anthropic/v1/models", "x-api-key"),
+                    ("/gemini/v1/models", "x-goog-api-key"),
+                    ("/ollama/api/tags", header::AUTHORIZATION.as_str()),
+                ] {
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(request(path, header_name, Some(&api_key)))
+                        .await
+                        .expect("proxy request should respond");
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{path} must remain available when manager auth storage is broken"
+                    );
+                    assert_proxy_security(&response);
                 }
             })
             .await;

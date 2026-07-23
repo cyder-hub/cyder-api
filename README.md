@@ -163,7 +163,9 @@ Startup path environment variables are separate:
 - `CYDER_DATA_DIR`: data directory root. Docker images set this to `/data/cyder`.
 - `CYDER_CONFIG_PATH`: optional migration hook for an external base config file. It changes only the base config path; generated defaults and SQLite data still belong to the data directory.
 
-Database URLs, secrets, Redis/cache, deployment mode, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
+Database URLs, secrets, Redis/cache, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
+
+Pre-1.0 supports one running Cyder server instance. Redis remains optional and can preserve short-lived runtime state across process restarts, but it does not enable a supported multi-instance deployment.
 
 ### Secret Encryption and Provider Credentials
 

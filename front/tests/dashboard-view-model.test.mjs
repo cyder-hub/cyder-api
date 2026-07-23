@@ -17,21 +17,18 @@ test("buildEmptyDashboard returns stable zero-state dashboard data", () => {
   assert.equal(dashboard.today.success_rate, null);
   assert.equal(dashboard.runtime.window, "1h");
   assert.equal(dashboard.runtime_state_backend.runtime_effective_backend, "memory");
-  assert.equal(dashboard.runtime_state_backend.runtime_shared, false);
   assert.deepEqual(dashboard.operational_signals.open_providers, []);
   assert.deepEqual(dashboard.operational_signals.top_cost_models, []);
 });
 
 test("buildRuntimeStateBackendRows preserves catalog configured and effective backends", () => {
   const rows = buildRuntimeStateBackendRows({
-    deployment_mode: "single_instance",
     catalog_cache_backend: "memory",
     catalog_cache_configured_backend: "redis",
     catalog_cache_effective_backend: "memory",
     catalog_cache_fallback_reason: "redis_config_missing",
     runtime_configured_backend: "memory",
     runtime_effective_backend: "memory",
-    runtime_shared: false,
     runtime_degraded: false,
     fallback_reason: null,
     last_error: null,

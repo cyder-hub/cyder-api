@@ -260,6 +260,36 @@ mod tests {
     }
 
     #[test]
+    fn effective_config_rejects_multi_instance_deployment_mode() {
+        let error = load_user_yaml("deployment:\n  mode: multi_instance\n")
+            .expect_err("multi-instance deployment must not be accepted");
+
+        assert!(
+            error.to_string().contains("multi_instance"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn redis_runtime_state_requires_redis_unless_memory_fallback_is_enabled() {
+        let mut config = crate::config::programmatic_default_config();
+        config.runtime_state.backend = crate::config::RuntimeStateBackendType::Redis;
+
+        let error = config
+            .validate_runtime_state()
+            .expect_err("redis runtime state without redis must fail");
+        assert_eq!(
+            error,
+            "runtime_state.backend=redis requires redis configuration"
+        );
+
+        config.runtime_state.fallback_to_memory = true;
+        config
+            .validate_runtime_state()
+            .expect("explicit memory fallback should permit missing redis");
+    }
+
+    #[test]
     fn effective_config_rejects_invalid_known_field_types() {
         let error = load_user_yaml("port: not-a-number\n")
             .expect_err("invalid known field type should be rejected");

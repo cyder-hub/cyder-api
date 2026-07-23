@@ -97,14 +97,8 @@
         "memory": "Memory",
         "redis": "Redis"
       },
-      "deployment": {
-        "single_instance": "单实例",
-        "multi_instance": "多实例"
-      },
       "status": {
         "recommended": "推荐",
-        "shared": "共享",
-        "nonShared": "非共享",
         "degraded": "异常"
       },
       "scope": {
@@ -113,10 +107,9 @@
       },
       "configured": "配置值",
       "effective": "实际值",
-      "description": "{deployment}；runtime {runtime}；catalog cache {catalog}。",
+      "description": "Runtime {runtime}；catalog cache {catalog}。",
       "recommendedHint": "Memory runtime state 是单实例部署的推荐默认值。",
-      "sharedHint": "Runtime 治理状态通过 Redis 共享。",
-      "nonSharedHint": "Runtime 治理状态仅保存在当前实例。",
+      "redisHint": "Redis 可在进程重启后继续保留短期 Runtime 状态。",
       "fallback": "Runtime fallback：{reason}",
       "catalogFallback": "Catalog cache fallback：{reason}",
       "lastError": "后端错误：{error}",

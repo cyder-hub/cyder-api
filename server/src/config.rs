@@ -198,21 +198,11 @@ impl SecretEncryptionConfig {
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentMode {
     SingleInstance,
-    MultiInstance,
 }
 
 impl Default for DeploymentMode {
     fn default() -> Self {
         Self::SingleInstance
-    }
-}
-
-impl DeploymentMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DeploymentMode::SingleInstance => "single_instance",
-            DeploymentMode::MultiInstance => "multi_instance",
-        }
     }
 }
 
@@ -775,46 +765,8 @@ pub struct FinalConfig {
 }
 
 impl FinalConfig {
-    pub fn deployment_mode(&self) -> &DeploymentMode {
-        &self.deployment.mode
-    }
-
-    pub fn uses_postgres_database(&self) -> bool {
-        self.db_url
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("postgres")
-    }
-
-    pub fn validate_deployment_runtime_state(&self) -> Result<(), String> {
+    pub fn validate_runtime_state(&self) -> Result<(), String> {
         let mut errors = Vec::new();
-
-        if self.deployment.mode == DeploymentMode::MultiInstance {
-            if !self.uses_postgres_database() {
-                errors.push(
-                    "deployment.mode=multi_instance requires a shared PostgreSQL database"
-                        .to_string(),
-                );
-            }
-            if self.cache.catalog_backend() != CacheBackendType::Redis {
-                errors.push(
-                    "deployment.mode=multi_instance requires cache.catalog.backend=redis"
-                        .to_string(),
-                );
-            }
-            if self.runtime_state.backend != RuntimeStateBackendType::Redis {
-                errors.push(
-                    "deployment.mode=multi_instance requires runtime_state.backend=redis"
-                        .to_string(),
-                );
-            }
-            if self.runtime_state.fallback_to_memory {
-                errors.push(
-                    "deployment.mode=multi_instance requires runtime_state.fallback_to_memory=false"
-                        .to_string(),
-                );
-            }
-        }
 
         if self.runtime_state.backend == RuntimeStateBackendType::Redis
             && self.redis.is_none()

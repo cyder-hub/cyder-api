@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::config::{CacheBackendType, DeploymentMode, FinalConfig, RuntimeStateBackendType};
+use crate::config::{CacheBackendType, FinalConfig, RuntimeStateBackendType};
 use crate::service::redis::{self, RedisPool};
 
 use super::api_key_governance::{
@@ -30,11 +30,9 @@ pub enum RuntimeStateBackendError {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct RuntimeStateBackendStatus {
-    pub deployment_mode: DeploymentMode,
     pub catalog_cache_backend: CacheBackendType,
     pub configured_backend: RuntimeStateBackendType,
     pub effective_backend: RuntimeStateBackendType,
-    pub shared: bool,
     pub fallback_reason: Option<String>,
     pub last_error: Option<String>,
     pub last_checked_at: i64,
@@ -42,14 +40,12 @@ pub struct RuntimeStateBackendStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeStateBackendOperatorStatus {
-    pub deployment_mode: String,
     pub catalog_cache_backend: String,
     pub catalog_cache_configured_backend: String,
     pub catalog_cache_effective_backend: String,
     pub catalog_cache_fallback_reason: Option<String>,
     pub runtime_configured_backend: String,
     pub runtime_effective_backend: String,
-    pub runtime_shared: bool,
     pub runtime_degraded: bool,
     pub fallback_reason: Option<String>,
     pub last_error: Option<String>,
@@ -68,14 +64,12 @@ impl RuntimeStateBackendStatus {
         let last_error = runtime_read_error.or_else(|| self.last_error.clone());
 
         RuntimeStateBackendOperatorStatus {
-            deployment_mode: self.deployment_mode.as_str().to_string(),
             catalog_cache_backend: catalog_cache_effective_backend.as_str().to_string(),
             catalog_cache_configured_backend: catalog_cache_configured_backend.as_str().to_string(),
             catalog_cache_effective_backend: catalog_cache_effective_backend.as_str().to_string(),
             catalog_cache_fallback_reason,
             runtime_configured_backend: self.configured_backend.as_str().to_string(),
             runtime_effective_backend: self.effective_backend.as_str().to_string(),
-            runtime_shared: self.shared,
             runtime_degraded: last_error.is_some(),
             fallback_reason: self.fallback_reason.clone(),
             last_error,
@@ -107,7 +101,7 @@ impl RuntimeStateBackendBundle {
         }
 
         config
-            .validate_deployment_runtime_state()
+            .validate_runtime_state()
             .map_err(RuntimeStateBackendError::Config)?;
 
         let redis_pool = if force_memory_backend
@@ -136,7 +130,7 @@ impl RuntimeStateBackendBundle {
         }
 
         config
-            .validate_deployment_runtime_state()
+            .validate_runtime_state()
             .map_err(RuntimeStateBackendError::Config)?;
 
         match config.runtime_state.backend {
@@ -187,11 +181,9 @@ impl RuntimeStateBackendBundle {
         last_error: Option<String>,
     ) -> Self {
         let status = RuntimeStateBackendStatus {
-            deployment_mode: config.deployment.mode.clone(),
             catalog_cache_backend: config.cache.catalog_backend(),
             configured_backend,
             effective_backend: RuntimeStateBackendType::Memory,
-            shared: false,
             fallback_reason,
             last_error,
             last_checked_at: Utc::now().timestamp_millis(),
@@ -226,11 +218,9 @@ impl RuntimeStateBackendBundle {
         );
         let state_ttl = config.runtime_state.state_ttl();
         let status = RuntimeStateBackendStatus {
-            deployment_mode: config.deployment.mode.clone(),
             catalog_cache_backend: config.cache.catalog_backend(),
             configured_backend: RuntimeStateBackendType::Redis,
             effective_backend: RuntimeStateBackendType::Redis,
-            shared: true,
             fallback_reason: None,
             last_error: None,
             last_checked_at: Utc::now().timestamp_millis(),
@@ -272,16 +262,10 @@ impl RuntimeStateBackendBundle {
 
 fn log_backend_selected(status: &RuntimeStateBackendStatus) {
     crate::info_event!(
-        "deployment.mode_selected",
-        mode = status.deployment_mode.as_str(),
-    );
-    crate::info_event!(
         "runtime_state.backend_selected",
-        deployment_mode = status.deployment_mode.as_str(),
         catalog_cache_backend = cache_backend_name(status.catalog_cache_backend.clone()),
         configured_backend = status.configured_backend.as_str(),
         effective_backend = status.effective_backend.as_str(),
-        shared = status.shared,
         fallback_reason = &status.fallback_reason,
         last_error = &status.last_error,
     );

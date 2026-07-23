@@ -183,6 +183,28 @@ test("dashboard page state preserves catalog configured effective fallback statu
   assert.equal(backend.catalog_cache_fallback_reason, "redis_config_missing");
 });
 
+test("dashboard runtime backend presents redis as restart persistence, not deployment sharing", async () => {
+  const state = useDashboardData({
+    api: createApiMock({
+      getSystemDashboard: async () =>
+        buildDashboardResponse({
+          runtime_state_backend: {
+            runtime_configured_backend: "redis",
+            runtime_effective_backend: "redis",
+          },
+        }),
+    }),
+  });
+
+  await state.fetchDashboard();
+
+  assert.equal(
+    state.runtimeBackendBadgeLabel.value,
+    "dashboard.runtimeState.backend.redis",
+  );
+  assert.equal(state.runtimeBackendDetail.value, "dashboard.runtimeState.redisHint");
+});
+
 test("dashboard page state preserves stable empty sections without errors", async () => {
   const state = useDashboardData({
     api: createApiMock({

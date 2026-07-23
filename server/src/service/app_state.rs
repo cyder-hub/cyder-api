@@ -393,7 +393,6 @@ mod tests {
 
         assert_eq!(status.runtime_effective_backend, "memory");
         assert_eq!(status.catalog_cache_backend, "memory");
-        assert!(!status.runtime_shared);
         assert!(status.last_error.is_none());
     }
 

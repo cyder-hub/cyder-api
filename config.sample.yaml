@@ -10,8 +10,8 @@
 #
 # The only environment variables that override final config fields are
 # CYDER_HOST, CYDER_PORT, CYDER_BASE_PATH, CYDER_LOG_LEVEL, and CYDER_TIMEZONE.
-# Use YAML for secrets, database, Redis/cache, deployment, runtime state,
-# proxy, and governance settings. Configuration changes take effect after a
+# Use YAML for secrets, database, Redis/cache, runtime state, proxy, and
+# governance settings. Configuration changes take effect after a
 # server restart.
 # Unknown top-level and nested YAML fields are ignored during 1.0 development,
 # while invalid values for recognized fields still prevent startup.
@@ -46,7 +46,7 @@ redis:
   pool_size: 10
   key_prefix: "cyder:"
 id:
-  # Snowflake worker id. Keep each running instance that shares a database on a distinct value in 0..=31.
+  # Reserved Snowflake worker id. Pre-1.0 supports one running server instance.
   worker_id: 1
 # proxy: http://127.0.0.1:1080
 proxy_request:

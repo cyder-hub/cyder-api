@@ -8,6 +8,7 @@ servers:
 security:
   - managerAccessToken: []
 x-cyder-default-cache-control: no-store
+x-cyder-web-security-client-identity-contract: ../web-security-client-identity.md
 x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434, 1435, 1436]
 paths:
   /ai/manager/api/api_key/list:

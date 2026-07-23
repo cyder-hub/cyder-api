@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     body::Body,
@@ -23,6 +23,7 @@ use super::{
     utility::{UtilityExecutionInput, UtilityOperation, execute_utility_proxy},
 };
 use crate::{
+    ingress::client_identity::ClientIdentity,
     schema::enum_def::LlmApiType,
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
@@ -152,11 +153,15 @@ impl OperationAdapter {
     pub(super) async fn execute(
         self,
         app_state: Arc<AppState>,
-        addr: Option<SocketAddr>,
         query_params: HashMap<String, String>,
         request: Request<Body>,
     ) -> Result<Response<Body>, ProxyError> {
         let start_time = Utc::now().timestamp_millis();
+        let client_ip_addr = request
+            .extensions()
+            .get::<ClientIdentity>()
+            .map(|identity| identity.client_ip.to_string())
+            .ok_or_else(|| ProxyError::InternalError("client identity unavailable".to_string()))?;
         let request_uri = request
             .extensions()
             .get::<OriginalUri>()
@@ -180,7 +185,7 @@ impl OperationAdapter {
             api_key,
             query_params,
             original_headers,
-            client_ip_addr: addr.map(|addr| addr.ip().to_string()),
+            client_ip_addr: Some(client_ip_addr),
             start_time,
         };
         let cancellation = ProxyCancellationContext::new();

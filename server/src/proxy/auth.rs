@@ -413,7 +413,7 @@ mod tests {
     use crate::service::secret_encryption::SecretEncryptionService;
 
     #[test]
-    fn anthropic_auth_prefers_x_api_key_over_authorization() {
+    fn proxy_auth_anthropic_prefers_x_api_key_over_authorization() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-api-key",
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_auth_falls_back_to_authorization_header() {
+    fn proxy_auth_anthropic_falls_back_to_authorization_header() {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_auth_rejects_invalid_authorization_scheme() {
+    fn proxy_auth_anthropic_rejects_invalid_authorization_scheme() {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Basic abc"));
 
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_auth_requires_header_when_none_present() {
+    fn proxy_auth_anthropic_requires_header_when_none_present() {
         let headers = HeaderMap::new();
 
         let err = parse_anthropic_api_key_from_headers(&headers).unwrap_err();
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_key_rotation_immediately_replaces_proxy_hash_authentication() {
+    async fn proxy_auth_api_key_rotation_immediately_replaces_hash_authentication() {
         let database = TestDbContext::new_sqlite("proxy-api-key-rotation.sqlite");
         database
             .run_async(async {

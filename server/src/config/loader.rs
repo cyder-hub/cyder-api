@@ -271,6 +271,120 @@ mod tests {
     }
 
     #[test]
+    fn client_identity_config_uses_safe_programmatic_and_generated_defaults() {
+        let programmatic = crate::config::programmatic_default_config();
+        assert!(programmatic.client_identity.trusted_proxy_cidrs.is_empty());
+        assert_eq!(programmatic.client_identity.max_forwarded_hops, 8);
+
+        let temp_dir = tempfile::tempdir().expect("config test directory should be created");
+        let paths = ConfigPaths::new(
+            temp_dir.path().join("config.default.yaml"),
+            temp_dir.path().join("config.yaml"),
+        );
+        let generated = load_default_config(&paths).expect("default snapshot should serialize");
+        assert!(generated.merged_yaml.contains("client_identity:"));
+        assert!(generated.merged_yaml.contains("trusted_proxy_cidrs: []"));
+        assert!(generated.merged_yaml.contains("max_forwarded_hops: 8"));
+
+        let config =
+            load_user_yaml("").expect("omitted client identity config should use defaults");
+        assert!(config.client_identity.trusted_proxy_cidrs.is_empty());
+        assert_eq!(config.client_identity.max_forwarded_hops, 8);
+    }
+
+    #[test]
+    fn client_identity_config_accepts_canonical_ipv4_ipv6_and_hop_boundaries() {
+        for max_forwarded_hops in [1, 32] {
+            let config = load_user_yaml(&format!(
+                "client_identity:\n  trusted_proxy_cidrs:\n    - 10.0.0.0/8\n    - 2001:db8::/32\n  max_forwarded_hops: {max_forwarded_hops}\n"
+            ))
+            .expect("canonical client identity config should load");
+
+            assert_eq!(
+                config.client_identity.max_forwarded_hops,
+                max_forwarded_hops
+            );
+            assert_eq!(
+                config
+                    .client_identity
+                    .trusted_proxy_cidrs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                ["10.0.0.0/8", "2001:db8::/32"]
+            );
+        }
+    }
+
+    #[test]
+    fn client_identity_config_rejects_invalid_noncanonical_and_duplicate_cidrs() {
+        let cases = [
+            (
+                "client_identity:\n  trusted_proxy_cidrs: [192.0.2.1]\n",
+                "explicit CIDRs",
+            ),
+            (
+                "client_identity:\n  trusted_proxy_cidrs: [10.0.0.1/8]\n",
+                "canonical network addresses",
+            ),
+            (
+                "client_identity:\n  trusted_proxy_cidrs: [not-an-ip/24]\n",
+                "invalid CIDR",
+            ),
+            (
+                "client_identity:\n  trusted_proxy_cidrs: [10.0.0.0/8, 10.0.0.0/8]\n",
+                "duplicate CIDR",
+            ),
+        ];
+
+        for (yaml, expected) in cases {
+            let error =
+                load_user_yaml(yaml).expect_err("invalid client identity CIDR should be rejected");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_identity_config_rejects_out_of_range_hops_and_ignores_unknown_fields() {
+        for max_forwarded_hops in [0, 33] {
+            let error = load_user_yaml(&format!(
+                "client_identity:\n  max_forwarded_hops: {max_forwarded_hops}\n"
+            ))
+            .expect_err("out-of-range forwarding hop limit should be rejected");
+            assert!(
+                error.to_string().contains("must be in 1..=32"),
+                "unexpected error: {error}"
+            );
+        }
+
+        let config = load_user_yaml(
+            "client_identity:\n  trusted_proxy_cidrs: []\n  max_forwarded_hops: 12\n  future_policy: ignored\n",
+        )
+        .expect("unknown nested client identity fields should remain compatible");
+        assert_eq!(config.client_identity.max_forwarded_hops, 12);
+    }
+
+    #[test]
+    fn client_identity_config_tracked_sample_matches_safe_defaults() {
+        let sample = include_str!("../../../config.sample.yaml");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(sample).expect("tracked config sample should parse");
+        let client_identity = &document["client_identity"];
+
+        assert_eq!(
+            client_identity["trusted_proxy_cidrs"],
+            serde_yaml::Value::Sequence(Vec::new())
+        );
+        assert_eq!(
+            client_identity["max_forwarded_hops"],
+            serde_yaml::Value::Number(8.into())
+        );
+    }
+
+    #[test]
     fn redis_runtime_state_requires_redis_unless_memory_fallback_is_enabled() {
         let mut config = crate::config::programmatic_default_config();
         config.runtime_state.backend = crate::config::RuntimeStateBackendType::Redis;

@@ -30,12 +30,14 @@ use tower::ServiceExt;
 
 use super::create_proxy_router;
 use crate::{
+    config::ClientIdentityConfig,
     database::{
         TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
         request_patch::CreateRequestPatchPayload,
     },
+    ingress::client_identity::ClientIdentityResolver,
     schema::enum_def::{
         Action, LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation,
         RequestPatchPlacement, RequestStatus,
@@ -495,6 +497,26 @@ impl RouterFixture {
         stream: bool,
         body: &Value,
     ) -> Response<Body> {
+        self.send_with_client_identity(
+            fixture,
+            stream,
+            body,
+            SocketAddr::from(([127, 0, 0, 1], 3000)),
+            None,
+            Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig::default())),
+        )
+        .await
+    }
+
+    async fn send_with_client_identity(
+        &self,
+        fixture: &DirectExecutionFixture,
+        stream: bool,
+        body: &Value,
+        peer_addr: SocketAddr,
+        forwarded: Option<&str>,
+        resolver: Arc<ClientIdentityResolver>,
+    ) -> Response<Body> {
         let path_template = if stream {
             &fixture.downstream_stream_path
         } else {
@@ -522,13 +544,18 @@ impl RouterFixture {
                 serde_json::to_vec(&render_value(body, &self.requested_model())).unwrap(),
             ))
             .expect("downstream request should build");
+        if let Some(forwarded) = forwarded {
+            request.headers_mut().insert(
+                "forwarded",
+                forwarded
+                    .parse()
+                    .expect("test Forwarded header should construct"),
+            );
+        }
         request
             .extensions_mut()
-            .insert(axum::extract::ConnectInfo(SocketAddr::from((
-                [127, 0, 0, 1],
-                3000,
-            ))));
-        create_proxy_router()
+            .insert(axum::extract::ConnectInfo(peer_addr));
+        create_proxy_router(resolver)
             .with_state(Arc::clone(&self.app_state))
             .oneshot(request)
             .await
@@ -770,6 +797,7 @@ fn assert_log_common(
         log.real_model_name_snapshot.as_deref(),
         Some(UPSTREAM_MODEL)
     );
+    assert_eq!(log.client_ip.as_deref(), Some("127.0.0.1"));
 }
 
 fn assert_usage(log: &RequestLogRecord, usage: &UsageGolden) {
@@ -987,6 +1015,41 @@ fn direct_execution_regression_non_stream_request_response_usage_and_log_golden(
             upstream.shutdown().await;
         });
     }
+}
+
+#[test]
+fn direct_execution_client_identity_http_persists_normalized_forwarded_ip() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let resolver = Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig {
+            trusted_proxy_cidrs: vec!["10.0.0.0/8".parse().expect("test CIDR should parse")],
+            max_forwarded_hops: 8,
+        }));
+
+        let response = router
+            .send_with_client_identity(
+                &fixture,
+                false,
+                &fixture.request.downstream,
+                SocketAddr::from(([10, 0, 0, 9], 3000)),
+                Some("for=\"[::ffff:198.51.100.42]:8443\""),
+                resolver,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        assert_eq!(log.client_ip.as_deref(), Some("198.51.100.42"));
+        upstream.shutdown().await;
+    });
 }
 
 #[test]

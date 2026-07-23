@@ -140,6 +140,7 @@ Important config areas include:
 
 - server bind settings: `host`, `port`, `base_path`
 - manager auth: initialize the manager password in the Web Bootstrap page; `jwt_secret` signs manager tokens
+- trusted reverse proxies: `client_identity` (empty trust list by default)
 - database: `db_url`
 - downstream secret handling: `secret_encryption`
 - proxy request behavior: `proxy_request`
@@ -246,6 +247,18 @@ Assuming `base_path: /ai`:
 
 - health: `/ai/health`
 - readiness: `/ai/ready`
+
+## Web Security and Reverse Proxies
+
+The Manager UI/API is same-origin and does not expose CORS. Its responses carry a strict script CSP, anti-embedding and content-type protections, a minimal permissions policy, and status-aware cache rules.
+
+The five public AI protocol prefixes allow browser calls from any Origin with GET/POST, mirrored request headers, exposed response headers, no credentials, and a 600-second preflight cache. Manager, System, and base fallback routes do not inherit this public CORS policy.
+
+Client IP defaults to the TCP peer. To trust a reverse proxy, add only its canonical CIDR to `client_identity.trusted_proxy_cidrs`; the proxy must clear untrusted forwarding headers before generating `Forwarded` or `X-Forwarded-For`. Invalid metadata from a trusted peer is rejected rather than silently falling back.
+
+`client_identity` is YAML-only startup configuration. `max_forwarded_hops` defaults to 8 and accepts 1 through 32; restart the server after changing either field.
+
+See [Web Security and Client Identity](docs/web-security-client-identity.md) for the exact headers, cache/CORS matrix, configuration validation, resolution algorithm, Nginx/Caddy patterns, privacy rules, and troubleshooting steps.
 
 ## Testing Notes
 

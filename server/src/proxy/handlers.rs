@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{body::Body, extract::Request, response::Response};
 
@@ -11,7 +11,6 @@ use crate::{schema::enum_def::LlmApiType, service::app_state::AppState};
 
 pub async fn openai_utility_handler(
     app_state: Arc<AppState>,
-    addr: SocketAddr,
     params: HashMap<String, String>,
     request: Request<Body>,
     downstream_path: &'static str,
@@ -25,7 +24,7 @@ pub async fn openai_utility_handler(
             downstream_path: downstream_path.to_string(),
         },
     )
-    .execute(app_state, Some(addr), params, request)
+    .execute(app_state, params, request)
     .await
 }
 
@@ -36,6 +35,6 @@ pub async fn list_models_handler(
     api_type: LlmApiType,
 ) -> Result<Response<Body>, ProxyError> {
     OperationAdapter::list_models(api_type)
-        .execute(app_state, None, params, request)
+        .execute(app_state, params, request)
         .await
 }

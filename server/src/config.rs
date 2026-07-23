@@ -1,6 +1,8 @@
+use ipnet::IpNet;
 use rand::{Rng, distr::Alphanumeric, rng};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
 use std::{
+    collections::HashSet,
     fmt,
     sync::{Arc, LazyLock, Mutex},
     time::Duration,
@@ -211,6 +213,82 @@ pub struct DeploymentConfig {
     #[serde(default)]
     pub mode: DeploymentMode,
 }
+
+// --- START CLIENT IDENTITY CONFIG ---
+
+fn default_max_forwarded_hops() -> usize {
+    8
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClientIdentityConfig {
+    pub trusted_proxy_cidrs: Vec<IpNet>,
+    pub max_forwarded_hops: usize,
+}
+
+impl Default for ClientIdentityConfig {
+    fn default() -> Self {
+        Self {
+            trusted_proxy_cidrs: Vec::new(),
+            max_forwarded_hops: default_max_forwarded_hops(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ClientIdentityConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawClientIdentityConfig {
+            #[serde(default)]
+            trusted_proxy_cidrs: Vec<String>,
+            #[serde(default = "default_max_forwarded_hops")]
+            max_forwarded_hops: usize,
+        }
+
+        let raw = RawClientIdentityConfig::deserialize(deserializer)?;
+        if !(1..=32).contains(&raw.max_forwarded_hops) {
+            return Err(serde::de::Error::custom(
+                "client_identity.max_forwarded_hops must be in 1..=32",
+            ));
+        }
+
+        let mut trusted_proxy_cidrs = Vec::with_capacity(raw.trusted_proxy_cidrs.len());
+        let mut seen = HashSet::with_capacity(raw.trusted_proxy_cidrs.len());
+        for raw_cidr in raw.trusted_proxy_cidrs {
+            if !raw_cidr.contains('/') {
+                return Err(serde::de::Error::custom(
+                    "client_identity.trusted_proxy_cidrs entries must be explicit CIDRs",
+                ));
+            }
+            let cidr = raw_cidr.parse::<IpNet>().map_err(|_| {
+                serde::de::Error::custom(
+                    "client_identity.trusted_proxy_cidrs contains an invalid CIDR",
+                )
+            })?;
+            if cidr.addr() != cidr.network() {
+                return Err(serde::de::Error::custom(
+                    "client_identity.trusted_proxy_cidrs entries must use canonical network addresses",
+                ));
+            }
+            if !seen.insert(cidr) {
+                return Err(serde::de::Error::custom(
+                    "client_identity.trusted_proxy_cidrs contains a duplicate CIDR",
+                ));
+            }
+            trusted_proxy_cidrs.push(cidr);
+        }
+
+        Ok(Self {
+            trusted_proxy_cidrs,
+            max_forwarded_hops: raw.max_forwarded_hops,
+        })
+    }
+}
+
+// --- END CLIENT IDENTITY CONFIG ---
 
 // --- START ID CONFIG ---
 
@@ -751,6 +829,8 @@ pub struct FinalConfig {
     #[serde(default)]
     pub deployment: DeploymentConfig,
     #[serde(default)]
+    pub client_identity: ClientIdentityConfig,
+    #[serde(default)]
     pub id: IdConfig,
     #[serde(default)]
     pub proxy_request: ProxyRequestConfig,
@@ -835,6 +915,7 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         db_pool_size: 5,
         redis: None,
         deployment: DeploymentConfig::default(),
+        client_identity: ClientIdentityConfig::default(),
         id: IdConfig::default(),
         proxy_request: ProxyRequestConfig::default(),
         provider_governance: ProviderGovernanceConfig::default(),

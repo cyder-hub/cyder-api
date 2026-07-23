@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use cyder_api::config::CONFIG;
 use cyder_api::controller::{create_manager_router, create_system_router, handle_404};
+use cyder_api::ingress::client_identity::ClientIdentityResolver;
 use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
 use cyder_api::proxy::create_proxy_router;
 use cyder_api::service::app_state::{create_app_state, create_state_router};
@@ -76,6 +77,8 @@ async fn main() {
         );
     }
     let app_state = create_app_state().await;
+    let client_identity_resolver =
+        std::sync::Arc::new(ClientIdentityResolver::new(&CONFIG.client_identity));
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("failed to bind server listener");
@@ -97,8 +100,13 @@ async fn main() {
                 &CONFIG.base_path,
                 create_state_router()
                     .merge(create_system_router())
-                    .merge(create_manager_router(std::sync::Arc::clone(&app_state)))
-                    .merge(create_proxy_router())
+                    .merge(create_manager_router(
+                        std::sync::Arc::clone(&app_state),
+                        std::sync::Arc::clone(&client_identity_resolver),
+                    ))
+                    .merge(create_proxy_router(std::sync::Arc::clone(
+                        &client_identity_resolver,
+                    )))
                     .fallback(handle_404),
             )
             .with_state(app_state) // Call with_state before into_make_service

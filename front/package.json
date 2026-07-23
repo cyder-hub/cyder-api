@@ -8,6 +8,7 @@
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "i18n:check": "node scripts/check-i18n.mjs",
+    "security:check": "node scripts/check-web-security.mjs",
     "test": "node --test tests/**/*.test.mjs"
   },
   "dependencies": {

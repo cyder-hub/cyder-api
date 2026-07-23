@@ -5,6 +5,7 @@ info:
   description: Single-manager authentication contract for the Cyder management control plane.
 servers:
   - url: /
+x-cyder-web-security-client-identity-contract: ../web-security-client-identity.md
 x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434, 1435, 1436]
 paths:
   /ai/manager/api/auth/bootstrap/status:

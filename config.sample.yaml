@@ -45,6 +45,13 @@ redis:
   url: "redis://127.0.0.1:6379/"
   pool_size: 10
   key_prefix: "cyder:"
+client_identity:
+  # Empty by default: forwarding headers are ignored and the TCP peer is used.
+  # Add only canonical CIDRs of reverse proxies that sanitize inbound headers.
+  # Single hosts must be written as /32 or /128.
+  trusted_proxy_cidrs: []
+  # Maximum accepted Forwarded/X-Forwarded-For chain length; valid range 1..=32.
+  max_forwarded_hops: 8
 id:
   # Reserved Snowflake worker id. Pre-1.0 supports one running server instance.
   worker_id: 1

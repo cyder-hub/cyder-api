@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension, Json,
-    extract::{ConnectInfo, DefaultBodyLimit, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     middleware,
     response::{IntoResponse, Response},
@@ -10,8 +10,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::net::SocketAddr;
 
+use crate::ingress::client_identity::ClientIdentity;
 use crate::service::admin::auth::{
     AuthTokenPair, BootstrapError, BootstrapStatus, BootstrapStatusError, LoginError, LogoutError,
     RefreshError, RotatePasswordError,
@@ -350,14 +350,14 @@ async fn bootstrap(
 
 async fn login(
     State(app_state): State<Arc<AppState>>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    Extension(client_identity): Extension<ClientIdentity>,
     request: Result<Json<PasswordRequest>, JsonRejection>,
 ) -> Result<HttpResult<AuthTokenPairResponse>, LoginHttpError> {
     let Json(request) = request.map_err(|_| LoginHttpError::InvalidRequest)?;
     app_state
         .admin
         .auth
-        .login(peer_addr.ip(), &request.password)
+        .login(client_identity.client_ip, &request.password)
         .await
         .map_err(LoginHttpError::from)
         .map(AuthTokenPairResponse::from)
@@ -522,11 +522,13 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
+        config::ClientIdentityConfig,
         controller::create_manager_router,
         database::{
             DbConnection, TestDbContext, get_connection,
             manager_credential::{ManagerCredential, NewManagerCredential},
         },
+        ingress::client_identity::{ClientIdentity, ClientIdentityResolver, ClientIdentitySource},
         service::app_state::{AppState, create_test_app_state},
         utils::auth::{
             AccessGuardError, decode_access_token, generate_token_jti, get_current_timestamp,
@@ -557,7 +559,12 @@ mod tests {
         mut request: Request<Body>,
         peer_addr: SocketAddr,
     ) -> axum::response::Response {
-        request.extensions_mut().insert(ConnectInfo(peer_addr));
+        request.extensions_mut().insert(ClientIdentity {
+            client_ip: peer_addr.ip(),
+            peer_addr,
+            source: ClientIdentitySource::TcpPeer,
+            trusted_proxy_hops: 0,
+        });
         create_auth_router(Arc::clone(app_state))
             .with_state(Arc::clone(app_state))
             .oneshot(request)
@@ -567,12 +574,25 @@ mod tests {
 
     async fn send_manager(
         app_state: &Arc<AppState>,
-        mut request: Request<Body>,
+        request: Request<Body>,
     ) -> axum::response::Response {
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 31_000))));
-        create_manager_router(Arc::clone(app_state))
+        send_manager_with_resolver(
+            app_state,
+            request,
+            Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig::default())),
+            SocketAddr::from(([127, 0, 0, 1], 31_000)),
+        )
+        .await
+    }
+
+    async fn send_manager_with_resolver(
+        app_state: &Arc<AppState>,
+        mut request: Request<Body>,
+        resolver: Arc<ClientIdentityResolver>,
+        peer_addr: SocketAddr,
+    ) -> axum::response::Response {
+        request.extensions_mut().insert(ConnectInfo(peer_addr));
+        create_manager_router(Arc::clone(app_state), resolver)
             .with_state(Arc::clone(app_state))
             .oneshot(request)
             .await
@@ -924,6 +944,93 @@ mod tests {
                         json!({ "password": INITIAL_PASSWORD }),
                     ),
                     second_peer,
+                )
+                .await;
+                assert_eq!(independent.status(), StatusCode::OK);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn auth_http_login_rate_limit_uses_client_identity_from_trusted_proxy() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-auth-forwarded-rate-limit.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+                app_state
+                    .admin
+                    .auth
+                    .bootstrap(INITIAL_PASSWORD)
+                    .await
+                    .expect("bootstrap should succeed");
+                let resolver = Arc::new(ClientIdentityResolver::new(&ClientIdentityConfig {
+                    trusted_proxy_cidrs: vec![
+                        "10.0.0.0/8".parse().expect("test CIDR should parse"),
+                    ],
+                    max_forwarded_hops: 8,
+                }));
+                let trusted_peer = SocketAddr::from(([10, 0, 0, 9], 31_003));
+
+                for _ in 0..5 {
+                    let mut request = json_request(
+                        Method::POST,
+                        "/manager/api/auth/login",
+                        json!({ "password": "wrong horse battery staple" }),
+                    );
+                    request.headers_mut().insert(
+                        "forwarded",
+                        "for=198.51.100.10"
+                            .parse()
+                            .expect("forwarded header should parse"),
+                    );
+                    let response = send_manager_with_resolver(
+                        &app_state,
+                        request,
+                        Arc::clone(&resolver),
+                        trusted_peer,
+                    )
+                    .await;
+                    assert_error(response, StatusCode::UNAUTHORIZED, 1412).await;
+                }
+
+                let mut locked_request = json_request(
+                    Method::POST,
+                    "/manager/api/auth/login",
+                    json!({ "password": INITIAL_PASSWORD }),
+                );
+                locked_request.headers_mut().insert(
+                    "forwarded",
+                    "for=198.51.100.10"
+                        .parse()
+                        .expect("forwarded header should parse"),
+                );
+                let locked = send_manager_with_resolver(
+                    &app_state,
+                    locked_request,
+                    Arc::clone(&resolver),
+                    trusted_peer,
+                )
+                .await;
+                assert_error(locked, StatusCode::TOO_MANY_REQUESTS, 1417).await;
+
+                let mut independent_request = json_request(
+                    Method::POST,
+                    "/manager/api/auth/login",
+                    json!({ "password": INITIAL_PASSWORD }),
+                );
+                independent_request.headers_mut().insert(
+                    "forwarded",
+                    "for=198.51.100.11"
+                        .parse()
+                        .expect("forwarded header should parse"),
+                );
+                let independent = send_manager_with_resolver(
+                    &app_state,
+                    independent_request,
+                    resolver,
+                    trusted_peer,
                 )
                 .await;
                 assert_eq!(independent.status(), StatusCode::OK);

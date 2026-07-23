@@ -8,6 +8,7 @@ servers:
 security:
   - managerAccessToken: []
 x-cyder-default-cache-control: no-store
+x-cyder-web-security-client-identity-contract: ../web-security-client-identity.md
 paths:
   /ai/manager/api/provider/{id}/provider_keys:
     parameters:

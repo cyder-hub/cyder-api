@@ -76,7 +76,7 @@ impl AppState {
         let infra = Arc::new(
             AppInfra::new_with_config(
                 config.proxy_request.clone(),
-                config.proxy.clone(),
+                config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
                 test_db_context.clone(),
             )
             .await,
@@ -84,7 +84,11 @@ impl AppState {
 
         #[cfg(not(test))]
         let infra = Arc::new(
-            AppInfra::new_with_config(config.proxy_request.clone(), config.proxy.clone()).await,
+            AppInfra::new_with_config(
+                config.proxy_request.clone(),
+                config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
+            )
+            .await,
         );
         let metrics = Arc::new(MetricsService::new(config.metrics.clone()));
         let metrics_sink: Arc<dyn RequestLogPersistedSink> = metrics.clone();
@@ -316,8 +320,12 @@ mod tests {
             Arc::clone(&secret_encryption),
         ));
         let infra = Arc::new(
-            AppInfra::new_with_config(config.proxy_request.clone(), config.proxy.clone(), None)
-                .await,
+            AppInfra::new_with_config(
+                config.proxy_request.clone(),
+                config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
+                None,
+            )
+            .await,
         );
         let metrics = Arc::new(MetricsService::new(CONFIG.metrics.clone()));
         let runtime_backend = RuntimeStateBackendBundle::from_config(&CONFIG, true)

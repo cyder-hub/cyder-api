@@ -252,6 +252,27 @@ mod tests {
     }
 
     #[test]
+    fn proxy_credentials_are_available_at_runtime_but_redacted_from_diagnostics() {
+        let raw_proxy = "http://operator:proxy-secret@127.0.0.1:8080";
+        let config = load_user_yaml(&format!("proxy: '{raw_proxy}'\n"))
+            .expect("credential-bearing proxy should load");
+
+        assert_eq!(
+            config.proxy.as_ref().map(|proxy| proxy.expose()),
+            Some(raw_proxy)
+        );
+
+        let debug = format!("{config:?}");
+        let serialized =
+            serde_yaml::to_string(&config).expect("effective config should serialize safely");
+        for output in [debug, serialized] {
+            assert!(!output.contains("operator"));
+            assert!(!output.contains("proxy-secret"));
+            assert!(output.contains("redacted"));
+        }
+    }
+
+    #[test]
     fn effective_config_rejects_invalid_known_field_values() {
         let error = load_user_yaml("deployment:\n  mode: invalid_mode\n")
             .expect_err("invalid known enum value should be rejected");

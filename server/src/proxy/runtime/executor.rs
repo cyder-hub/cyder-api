@@ -30,6 +30,7 @@ use crate::{
         app_state::AppState,
         cache::types::CacheApiKey,
         provider_credential::resolve_selected_provider_credential,
+        provider_http::normalize_provider_endpoint,
         runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
     },
 };
@@ -96,7 +97,7 @@ pub(in crate::proxy) async fn execute_request(
         start_time,
         kind,
     } = input;
-    let target = execution_plan.target.clone();
+    let mut target = execution_plan.target.clone();
     let user_api_type = match &kind {
         RequestExecutionKind::Generation { user_api_type, .. } => *user_api_type,
         RequestExecutionKind::Utility { operation, .. } => operation.api_type,
@@ -144,6 +145,34 @@ pub(in crate::proxy) async fn execute_request(
         check_access_control(&api_key, &target.provider, &target.model, &app_state).await
     {
         return fail_before_send(&app_state, log_context, error).await;
+    }
+
+    let mut normalized_provider = (*target.provider).clone();
+    normalized_provider.endpoint = match normalize_provider_endpoint(&target.provider.endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return fail_before_send(
+                &app_state,
+                log_context,
+                ProxyError::BadGateway(format!(
+                    "Provider endpoint is invalid and must be repaired before use: {error}"
+                )),
+            )
+            .await;
+        }
+    };
+    target.provider = Arc::new(normalized_provider);
+    if let Err(error) = app_state
+        .infra
+        .provider_client(target.provider.use_proxy)
+        .await
+    {
+        return fail_before_send(
+            &app_state,
+            log_context,
+            ProxyError::BadGateway(error.to_string()),
+        )
+        .await;
     }
 
     let request_patch_trace = match load_runtime_request_patch_trace(

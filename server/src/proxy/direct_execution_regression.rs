@@ -12,7 +12,10 @@ use std::{
 use axum::{
     body::{Body, Bytes},
     extract::Request,
-    http::{HeaderMap, Method, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderMap, Method, StatusCode,
+        header::{CONTENT_TYPE, LOCATION},
+    },
     response::Response,
     routing::any,
     serve,
@@ -30,10 +33,11 @@ use tower::ServiceExt;
 
 use super::create_proxy_router;
 use crate::{
-    config::ClientIdentityConfig,
+    config::{ClientIdentityConfig, ProxyRequestConfig},
     database::{
         TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
+        provider::{Provider, UpdateProviderData},
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
         request_patch::CreateRequestPatchPayload,
     },
@@ -46,6 +50,7 @@ use crate::{
         admin::model::UpdateModelInput,
         admin::provider::BootstrapProviderCommand,
         app_state::{AppState, create_test_app_state},
+        infra::AppInfra,
     },
     utils::{ID_GENERATOR, sse::SseParser},
 };
@@ -307,6 +312,10 @@ enum ScriptedReply {
         first_event: GoldenEvent,
         dropped: Arc<DropSignal>,
     },
+    Redirect {
+        status: StatusCode,
+        location: String,
+    },
 }
 
 struct TestUpstream {
@@ -360,6 +369,11 @@ impl TestUpstream {
                                 .body(Body::from_stream(stream))
                                 .unwrap()
                         }
+                        ScriptedReply::Redirect { status, location } => Response::builder()
+                            .status(status)
+                            .header(LOCATION, location)
+                            .body(Body::from("redirect"))
+                            .unwrap(),
                     }
                 }
             }
@@ -870,7 +884,7 @@ fn capability_rejection_does_not_decrypt_provider_credential() {
 }
 
 #[test]
-fn acl_rejection_does_not_decrypt_provider_credential() {
+fn acl_rejection_precedes_invalid_provider_endpoint_preflight() {
     let (name, fixture) = fixtures()
         .into_iter()
         .find(|(name, _)| *name == "openai")
@@ -888,6 +902,25 @@ fn acl_rejection_does_not_decrypt_provider_credential() {
             Action::Deny,
         )
         .await;
+        Provider::update(
+            router.provider_id,
+            &UpdateProviderData {
+                provider_key: None,
+                name: None,
+                endpoint: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
+                use_proxy: None,
+                is_enabled: None,
+                provider_type: None,
+                provider_api_key_mode: None,
+            },
+        )
+        .expect("legacy invalid endpoint should be seeded directly");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("provider cache should invalidate");
         router
             .app_state
             .secret_encryption
@@ -900,6 +933,81 @@ fn acl_rejection_does_not_decrypt_provider_credential() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
         assert!(upstream.requests().await.is_empty());
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.final_error_code.as_deref(), Some("permission_error"));
+        assert!(
+            log.final_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Access denied"))
+        );
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn acl_rejection_precedes_missing_proxy_preflight() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let infra_context = context.clone();
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let mut router = RouterFixture::new_with_default_action(
+            context,
+            &fixture,
+            &upstream.base_url,
+            Action::Deny,
+        )
+        .await;
+        let mut app_state = (*router.app_state).clone();
+        app_state.infra = Arc::new(
+            AppInfra::new_with_config(ProxyRequestConfig::default(), None, Some(infra_context))
+                .await,
+        );
+        router.app_state = Arc::new(app_state);
+        Provider::update(
+            router.provider_id,
+            &UpdateProviderData {
+                provider_key: None,
+                name: None,
+                endpoint: None,
+                use_proxy: Some(true),
+                is_enabled: None,
+                provider_type: None,
+                provider_api_key_mode: None,
+            },
+        )
+        .expect("proxy requirement should be seeded directly");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("provider cache should invalidate");
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        assert!(upstream.requests().await.is_empty());
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.final_error_code.as_deref(), Some("permission_error"));
+        assert!(
+            log.final_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Access denied"))
+        );
         upstream.shutdown().await;
     });
 }
@@ -1151,6 +1259,217 @@ fn direct_execution_regression_upstream_429_is_safe_logged_and_never_retried() {
             upstream.shutdown().await;
         });
     }
+}
+
+#[test]
+fn direct_execution_regression_credential_requests_never_follow_redirects() {
+    for (name, fixture) in fixtures() {
+        run_case(name, move |context| async move {
+            let redirect_target = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: json!({"captured": true}),
+            })
+            .await;
+            let location = format!(
+                "{}/credential-capture?evidence=raw",
+                redirect_target.base_url
+            );
+            let upstream = TestUpstream::spawn(ScriptedReply::Redirect {
+                status: StatusCode::TEMPORARY_REDIRECT,
+                location: location.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{name}");
+            assert_eq!(upstream.requests().await.len(), 1, "{name}");
+            assert!(
+                redirect_target.requests().await.is_empty(),
+                "{name}: redirect target must never receive credentials or request body"
+            );
+
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(log.upstream_http_status, Some(307), "{name}");
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("upstream_error"),
+                "{name}"
+            );
+
+            upstream.shutdown().await;
+            redirect_target.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        Provider::update(
+            router.provider_id,
+            &UpdateProviderData {
+                provider_key: None,
+                name: None,
+                endpoint: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
+                use_proxy: None,
+                is_enabled: None,
+                provider_type: None,
+                provider_api_key_mode: None,
+            },
+        )
+        .expect("legacy invalid endpoint should be seeded directly");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("provider cache should invalidate");
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(upstream.requests().await.is_empty());
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+        assert!(
+            log.final_error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("must not contain embedded credentials"))
+        );
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_database_write() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let legacy_endpoint = format!(
+            "  {}/v1///  ",
+            upstream.base_url.replacen("http://", "HTTP://", 1)
+        );
+        Provider::update(
+            router.provider_id,
+            &UpdateProviderData {
+                provider_key: None,
+                name: None,
+                endpoint: Some(legacy_endpoint.clone()),
+                use_proxy: None,
+                is_enabled: None,
+                provider_type: None,
+                provider_api_key_mode: None,
+            },
+        )
+        .expect("legacy noncanonical endpoint should be seeded directly");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("provider cache should invalidate");
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(upstream.requests().await.len(), 1);
+        assert_eq!(
+            Provider::get_by_id(router.provider_id)
+                .expect("provider should remain persisted")
+                .endpoint,
+            legacy_endpoint
+        );
+        router.wait_for_log(RequestStatus::Success).await;
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let infra_context = context.clone();
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let mut router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let mut app_state = (*router.app_state).clone();
+        app_state.infra = Arc::new(
+            AppInfra::new_with_config(ProxyRequestConfig::default(), None, Some(infra_context))
+                .await,
+        );
+        router.app_state = Arc::new(app_state);
+        Provider::update(
+            router.provider_id,
+            &UpdateProviderData {
+                provider_key: None,
+                name: None,
+                endpoint: None,
+                use_proxy: Some(true),
+                is_enabled: None,
+                provider_type: None,
+                provider_api_key_mode: None,
+            },
+        )
+        .expect("proxy requirement should be seeded directly");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("provider cache should invalidate");
+        router
+            .app_state
+            .secret_encryption
+            .reset_decrypt_call_count();
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(upstream.requests().await.is_empty());
+        assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+        assert_eq!(
+            log.final_error_message.as_deref(),
+            Some("provider requires the global proxy, but no proxy is configured")
+        );
+        upstream.shutdown().await;
+    });
 }
 
 #[test]

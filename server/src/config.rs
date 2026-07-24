@@ -880,6 +880,51 @@ impl Default for MetricsConfig {
 
 // The fully resolved configuration used by the application.
 // This is also the format for the default configuration file.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ProxyConfigUrl(String);
+
+impl ProxyConfigUrl {
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+
+    fn redacted(&self) -> String {
+        let Ok(mut url) = reqwest::Url::parse(&self.0) else {
+            return "<invalid proxy URL>".to_string();
+        };
+        if url.username().is_empty() && url.password().is_none() {
+            return self.0.clone();
+        }
+
+        if url.set_username("redacted").is_err() {
+            return "<configured proxy URL>".to_string();
+        }
+        if url.password().is_some() && url.set_password(Some("redacted")).is_err() {
+            return "<configured proxy URL>".to_string();
+        }
+        url.to_string()
+    }
+}
+
+impl fmt::Debug for ProxyConfigUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("ProxyConfigUrl")
+            .field(&self.redacted())
+            .finish()
+    }
+}
+
+impl Serialize for ProxyConfigUrl {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.redacted())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FinalConfig {
     pub host: String,
@@ -887,7 +932,7 @@ pub struct FinalConfig {
     pub base_path: String,
     pub jwt_secret: String,
     pub db_url: String,
-    pub proxy: Option<String>,
+    pub proxy: Option<ProxyConfigUrl>,
     pub log_level: String,
     pub timezone: Option<String>,
     pub max_body_size: usize,

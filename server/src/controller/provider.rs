@@ -32,6 +32,7 @@ use crate::service::provider_credential::{
     provider_target_api_type, resolve_draft_provider_credential, resolve_saved_provider_credential,
     resolve_selected_provider_credential,
 };
+use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::SensitiveSecret;
 
 #[derive(Serialize)]
@@ -379,11 +380,21 @@ fn provider_credential_error(error: ProviderCredentialError) -> BaseError {
         ProviderCredentialError::RuntimeStateUnavailable => BaseError::ProviderRuntimeRefreshFailed,
         ProviderCredentialError::NoEnabledCredential
         | ProviderCredentialError::VertexTokenUnavailable
+        | ProviderCredentialError::ProxyRequiredButNotConfigured
         | ProviderCredentialError::UnsupportedProtocol
         | ProviderCredentialError::InvalidAuthHeader => {
             BaseError::ParamInvalid(Some(error.to_string()))
         }
     }
+}
+
+fn normalize_provider_for_outbound(mut provider: Provider) -> Result<Provider, BaseError> {
+    provider.endpoint = normalize_provider_endpoint(&provider.endpoint).map_err(|error| {
+        BaseError::ParamInvalid(Some(format!(
+            "provider endpoint is invalid and must be repaired before use: {error}"
+        )))
+    })?;
+    Ok(provider)
 }
 
 fn provider_type_label(provider_type: &ProviderType) -> &'static str {
@@ -559,7 +570,7 @@ async fn check_provider(
         }
     };
 
-    let provider = Provider::get_by_id(id)?;
+    let provider = normalize_provider_for_outbound(Provider::get_by_id(id)?)?;
     let request_patches =
         resolve_provider_check_request_patches(&app_state, &provider, selected_model.as_ref())
             .await?;
@@ -582,11 +593,11 @@ async fn check_provider(
         }
     };
 
-    let client = if provider.use_proxy {
-        app_state.infra.proxy_client().await
-    } else {
-        app_state.infra.client().await
-    };
+    let client = app_state
+        .infra
+        .provider_client(provider.use_proxy)
+        .await
+        .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
     perform_provider_check(
         client.as_ref(),
@@ -631,11 +642,10 @@ async fn bootstrap_provider(
         .await?;
 
     let check_result = if payload.save_and_test {
-        let client = if created.provider.use_proxy {
-            app_state.infra.proxy_client().await
-        } else {
-            app_state.infra.client().await
-        };
+        let client = app_state
+            .infra
+            .provider_client(created.provider.use_proxy)
+            .await;
         let model_name_to_check = created
             .created_model
             .real_model_name
@@ -650,24 +660,25 @@ async fn bootstrap_provider(
         )
         .await;
 
-        let credential_and_patches = match request_patches {
-            Ok(request_patches) => resolve_draft_provider_credential(
+        let credential_and_patches = match (client, request_patches) {
+            (Ok(client), Ok(request_patches)) => resolve_draft_provider_credential(
                 &created.provider,
                 created.created_key.id,
                 SensitiveSecret::new(payload.api_key),
                 &app_state,
             )
             .await
-            .map(|credential| (credential, request_patches))
+            .map(|credential| (client, credential, request_patches))
             .map_err(provider_credential_error),
-            Err(error) => Err(error),
+            (Err(error), _) => Err(BaseError::ParamInvalid(Some(error.to_string()))),
+            (_, Err(error)) => Err(error),
         };
         match credential_and_patches {
             Err(error) => Some(BootstrapCheckResult {
                 success: false,
                 message: base_error_message(&error),
             }),
-            Ok((credential, request_patches)) => match perform_provider_check(
+            Ok((client, credential, request_patches)) => match perform_provider_check(
                 client.as_ref(),
                 &created.provider,
                 &credential,
@@ -708,17 +719,17 @@ async fn get_remote_models(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<HttpResult<Value>, BaseError> {
-    let provider = Provider::get_by_id(id)?;
+    let provider = normalize_provider_for_outbound(Provider::get_by_id(id)?)?;
     let cache_provider = CacheProvider::from(provider.clone());
     let credential = resolve_selected_provider_credential(&cache_provider, &app_state)
         .await
         .map_err(provider_credential_error)?;
 
-    let client = if provider.use_proxy {
-        app_state.infra.proxy_client().await
-    } else {
-        app_state.infra.client().await
-    };
+    let client = app_state
+        .infra
+        .provider_client(provider.use_proxy)
+        .await
+        .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
     let (url, headers) = build_remote_models_request(&provider, &cache_provider, &credential)?;
     let response = client.get(url).headers(headers).send().await.map_err(|e| {
@@ -1415,7 +1426,7 @@ mod tests {
                         json!({
                             "name": "HTTP Provider",
                             "key": "http-provider",
-                            "endpoint": "https://api.example.com/v1",
+                            "endpoint": "  HTTPS://API.EXAMPLE.COM:443/v1///  ",
                             "use_proxy": false,
                             "provider_type": "OPENAI",
                             "provider_api_key_mode": "QUEUE"
@@ -1427,12 +1438,17 @@ mod tests {
                 let create_body = response_json(create_response).await;
                 assert_eq!(create_body["code"], 0);
                 assert_eq!(create_body["data"]["provider_key"], "http-provider");
+                assert_eq!(
+                    create_body["data"]["endpoint"],
+                    "https://api.example.com/v1"
+                );
 
                 let provider_id = create_body["data"]["id"]
                     .as_i64()
                     .expect("provider id should be returned");
                 let provider = Provider::get_by_id(provider_id).expect("provider should persist");
                 assert_eq!(provider.name, "HTTP Provider");
+                assert_eq!(provider.endpoint, "https://api.example.com/v1");
 
                 let provider_cached = app_state
                     .catalog
@@ -1441,6 +1457,7 @@ mod tests {
                     .expect("provider cache should load")
                     .expect("provider should exist in cache");
                 assert_eq!(provider_cached.provider_key, "http-provider");
+                assert_eq!(provider_cached.endpoint, "https://api.example.com/v1");
 
                 let key_response = send(
                     &app_state,
@@ -1607,6 +1624,47 @@ mod tests {
                     .expect("provider key cache should reload after provider delete");
                 assert!(provider_after_delete.is_none());
                 assert!(provider_keys_after_delete.is_empty());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn provider_http_write_rejects_query_endpoint_before_persistence() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-provider-invalid-endpoint-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+                let response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider",
+                        json!({
+                            "name": "Invalid Provider",
+                            "key": "invalid-provider",
+                            "endpoint": "https://api.example.com/v1?tenant=one",
+                            "use_proxy": false,
+                            "provider_type": "OPENAI",
+                            "provider_api_key_mode": "QUEUE"
+                        }),
+                    ),
+                )
+                .await;
+
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let body = response_json(response).await;
+                assert_eq!(body["code"], 1001);
+                assert_eq!(
+                    body["msg"],
+                    "provider endpoint must not contain a query string"
+                );
+                assert!(
+                    Provider::list_all()
+                        .expect("providers should list")
+                        .is_empty()
+                );
             })
             .await;
     }

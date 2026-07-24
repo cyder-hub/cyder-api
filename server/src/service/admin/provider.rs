@@ -10,6 +10,7 @@ use crate::database::provider::{
     UpdateProviderData,
 };
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::{SecretDomain, SecretEncryptionService, SensitiveSecret};
 use crate::service::vertex::{invalidate_vertex_token, validate_vertex_service_account};
 use crate::utils::ID_GENERATOR;
@@ -88,12 +89,14 @@ impl ProviderAdminService {
     }
 
     pub async fn create_provider(&self, input: ProviderUpsertInput) -> Result<Provider, BaseError> {
+        let endpoint = normalize_provider_endpoint(&input.endpoint)
+            .map_err(|error| BaseError::ParamInvalid(Some(format!("provider endpoint {error}"))))?;
         let current_time = Utc::now().timestamp_millis();
         let new_provider_data = NewProvider {
             id: ID_GENERATOR.generate_id(),
             provider_key: input.key,
             name: input.name,
-            endpoint: input.endpoint,
+            endpoint,
             use_proxy: input.use_proxy,
             is_enabled: true,
             created_at: current_time,
@@ -122,10 +125,12 @@ impl ProviderAdminService {
         id: i64,
         input: ProviderUpsertInput,
     ) -> Result<Provider, BaseError> {
+        let endpoint = normalize_provider_endpoint(&input.endpoint)
+            .map_err(|error| BaseError::ParamInvalid(Some(format!("provider endpoint {error}"))))?;
         let update_data = UpdateProviderData {
             provider_key: None,
             name: Some(input.name),
-            endpoint: Some(input.endpoint),
+            endpoint: Some(endpoint),
             use_proxy: Some(input.use_proxy),
             is_enabled: None,
             provider_type: input.provider_type,
@@ -362,6 +367,8 @@ impl ProviderAdminService {
         &self,
         input: BootstrapProviderCommand,
     ) -> Result<BootstrapProviderResult, BaseError> {
+        let endpoint = normalize_provider_endpoint(&input.endpoint)
+            .map_err(|error| BaseError::ParamInvalid(Some(format!("provider endpoint {error}"))))?;
         let key_id = ID_GENERATOR.generate_id();
         let secret = validate_provider_secret(input.api_key)?;
         validate_provider_secret_for_type(&input.provider_type, &secret)?;
@@ -378,7 +385,7 @@ impl ProviderAdminService {
             provider_id: input.provider_id,
             provider_key: input.provider_key,
             name: input.name,
-            endpoint: input.endpoint,
+            endpoint,
             use_proxy: input.use_proxy,
             provider_type: input.provider_type,
             provider_api_key_mode: input.provider_api_key_mode,
@@ -594,8 +601,24 @@ mod tests {
     #[test]
     fn vertex_credentials_require_safe_service_account_structure_and_rsa_key() {
         let marker = "private-sensitive-marker";
-        let malformed = SensitiveSecret::new(format!(
+        let unsupported_token_uri = SensitiveSecret::new(format!(
             r#"{{"client_email":"svc@example.com","token_uri":"https://oauth.example.com/token","private_key_id":"kid","private_key":"{marker}"}}"#
+        ));
+        let error =
+            validate_provider_secret_for_type(&ProviderType::Vertex, &unsupported_token_uri)
+                .expect_err("unsupported token URI must be rejected");
+        let message = match error {
+            BaseError::ParamInvalid(Some(message)) => message,
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert_eq!(
+            message,
+            "Vertex credential token_uri must exactly match https://oauth2.googleapis.com/token"
+        );
+        assert!(!message.contains(marker));
+
+        let malformed = SensitiveSecret::new(format!(
+            r#"{{"client_email":"svc@example.com","token_uri":"https://oauth2.googleapis.com/token","private_key_id":"kid","private_key":"{marker}"}}"#
         ));
         let error = validate_provider_secret_for_type(&ProviderType::Vertex, &malformed)
             .expect_err("invalid RSA key must be rejected");

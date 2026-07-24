@@ -21,6 +21,7 @@ pub enum ProviderCredentialError {
     NoEnabledCredential,
     CredentialUnavailable,
     VertexTokenUnavailable,
+    ProxyRequiredButNotConfigured,
     UnsupportedProtocol,
     InvalidAuthHeader,
 }
@@ -34,6 +35,9 @@ impl fmt::Display for ProviderCredentialError {
                 "provider credential is unavailable; replace the credential"
             }
             Self::VertexTokenUnavailable => "Vertex OAuth token is unavailable",
+            Self::ProxyRequiredButNotConfigured => {
+                "provider requires the global proxy, but no proxy is configured"
+            }
             Self::UnsupportedProtocol => "provider does not support the requested protocol",
             Self::InvalidAuthHeader => "provider credential cannot be used as an auth header",
         })
@@ -98,12 +102,15 @@ async fn materialize_provider_credential(
     })
 }
 
-async fn provider_client(app_state: &AppState, use_proxy: bool) -> Arc<reqwest::Client> {
-    if use_proxy {
-        app_state.infra.proxy_client().await
-    } else {
-        app_state.infra.client().await
-    }
+async fn provider_client(
+    app_state: &AppState,
+    use_proxy: bool,
+) -> Result<Arc<reqwest::Client>, ProviderCredentialError> {
+    app_state
+        .infra
+        .provider_client(use_proxy)
+        .await
+        .map_err(|_| ProviderCredentialError::ProxyRequiredButNotConfigured)
 }
 
 /// Selects one enabled encrypted key, decrypts it, and materializes the
@@ -112,6 +119,7 @@ pub async fn resolve_selected_provider_credential(
     provider: &CacheProvider,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
+    let client = provider_client(app_state, provider.use_proxy).await?;
     let strategy = GroupItemSelectionStrategy::from(provider.provider_api_key_mode.clone());
     let selected_key = app_state
         .provider_key_selector
@@ -127,8 +135,6 @@ pub async fn resolve_selected_provider_credential(
         .secret_encryption
         .decrypt_current(SecretDomain::ProviderApiKey(selected_key.id), &encrypted)
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
-    let client = provider_client(app_state, provider.use_proxy).await;
-
     materialize_provider_credential(
         client.as_ref(),
         &provider.provider_type,
@@ -145,6 +151,7 @@ pub async fn resolve_saved_provider_credential(
     key_id: i64,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
+    let client = provider_client(app_state, provider.use_proxy).await?;
     let stored = ProviderApiKeyRepository::get_stored_by_id(provider.id, key_id)
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
     let encrypted = stored
@@ -154,8 +161,6 @@ pub async fn resolve_saved_provider_credential(
         .secret_encryption
         .decrypt_current(SecretDomain::ProviderApiKey(key_id), &encrypted)
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
-    let client = provider_client(app_state, provider.use_proxy).await;
-
     materialize_provider_credential(client.as_ref(), &provider.provider_type, key_id, secret).await
 }
 
@@ -166,7 +171,7 @@ pub async fn resolve_draft_provider_credential(
     secret: SensitiveSecret,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = provider_client(app_state, provider.use_proxy).await;
+    let client = provider_client(app_state, provider.use_proxy).await?;
     materialize_provider_credential(client.as_ref(), &provider.provider_type, key_id, secret).await
 }
 

@@ -109,10 +109,28 @@ pub(in crate::proxy) async fn send_materialized_request(
 
     let client_bundle = app_state.infra.client_bundle().await;
     let first_byte_timeout = client_bundle.proxy_request.first_byte_timeout();
-    let client = if use_proxy {
-        Arc::clone(&client_bundle.proxy_client)
-    } else {
-        Arc::clone(&client_bundle.client)
+    let client = match client_bundle.provider_client(use_proxy) {
+        Ok(client) => client,
+        Err(error) => {
+            let proxy_error = ProxyError::BadGateway(error.to_string());
+            let completed_at = Utc::now().timestamp_millis();
+            let failure_context = {
+                let mut context = log_context.lock().await;
+                finalize_send_failure_log_context(
+                    &mut context,
+                    &url,
+                    completed_at,
+                    cost_catalog_version.as_ref(),
+                    &proxy_error,
+                );
+                context.clone()
+            };
+            api_key_request_lease.release().await;
+            return Err(ProxyRequestFailure {
+                error: proxy_error,
+                log_context: failure_context,
+            });
+        }
     };
 
     let mut drop_cancellation_guard = CancellationDropGuard::new(

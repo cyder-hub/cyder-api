@@ -190,6 +190,31 @@ fn scan_log_invocations(path: &Path, contents: &str) -> Vec<LintViolation> {
                 excerpt: compact_excerpt(&invocation.snippet),
             });
         }
+
+        if contains_any(
+            &invocation.snippet,
+            &[
+                "totp_secret",
+                "totp_code",
+                "TOTP_CODE",
+                "recovery_code",
+                "code_verifier",
+                "login_challenge",
+                "setup_challenge",
+                "recovery_challenge",
+                "manual_secret",
+                "otpauth_uri",
+                "MANAGER_TOTP_CODE_HEADER",
+                "X-Cyder-TOTP-Code",
+            ],
+        ) {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "manager TOTP/recovery material logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
     }
 
     violations
@@ -530,6 +555,29 @@ mod tests {
                     |violation| violation.reason == "manager token/cookie logging is forbidden"
                 ),
                 "expected manager credential logging violation for {contents}"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_log_invocations_rejects_manager_totp_recovery_and_challenge_material() {
+        let path = PathBuf::from("sample.rs");
+        for contents in [
+            concat!("debug", r#"!("totp {}", totp_code);"#),
+            concat!("warn", r#"!("recovery {}", recovery_code);"#),
+            concat!("info", r#"!("challenge {}", login_challenge);"#),
+            concat!("debug", r#"!("uri {}", otpauth_uri);"#),
+            concat!(
+                "warn",
+                r#"!("header {:?}", headers.get(MANAGER_TOTP_CODE_HEADER));"#
+            ),
+        ] {
+            let violations = scan_log_invocations(&path, contents);
+            assert!(
+                violations.iter().any(|violation| {
+                    violation.reason == "manager TOTP/recovery material logging is forbidden"
+                }),
+                "expected manager TOTP logging violation for {contents}"
             );
         }
     }

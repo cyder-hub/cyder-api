@@ -67,7 +67,7 @@ test("bootstrap and rotate views delegate token storage to auth services", async
 
   assert.doesNotMatch(bootstrapPage, /localStorage|refresh_token|authTokens/);
   assert.doesNotMatch(rotateDialog, /localStorage|refresh_token|authTokens/);
-  assert.match(authService, /auth\/login", \{ password \}/);
+  assert.match(authService, /auth\/login\/password", \{ password \}/);
   assert.match(authService, /auth\/bootstrap/);
   assert.match(authService, /auth\/password\/rotate/);
   assert.doesNotMatch(authService, /\{ key: password \}/);

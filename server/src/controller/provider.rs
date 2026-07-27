@@ -11,7 +11,9 @@ use crate::service::admin::provider::{
 };
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use axum::{
+    Extension,
     extract::{Json, Path, State}, // Added State
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
 use reqwest::{
@@ -22,9 +24,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc; // Added Arc
 
-use crate::utils::{HttpResult, ID_GENERATOR};
+use crate::utils::{HttpResult, ID_GENERATOR, auth::ManagerAuthContext};
 
-use super::BaseError;
+use super::{BaseError, auth::authorize_secret_governance_command};
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
 use crate::service::cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch};
 use crate::service::provider_credential::{
@@ -903,13 +905,16 @@ async fn replace_provider_api_key(
 
 async fn reveal_provider_api_key(
     State(app_state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<ManagerAuthContext>,
     Path((provider_id, key_id)): Path<(i64, i64)>,
-) -> Result<HttpResult<ProviderApiKeyReveal>, BaseError> {
+) -> Result<HttpResult<ProviderApiKeyReveal>, Response> {
+    authorize_secret_governance_command(&app_state, &auth_context)?;
     let revealed = app_state
         .admin
         .provider
         .reveal_provider_api_key(provider_id, key_id)
-        .await?;
+        .await
+        .map_err(IntoResponse::into_response)?;
     Ok(HttpResult::new(revealed))
 }
 
@@ -988,7 +993,7 @@ pub fn create_provider_router() -> StateRouter {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
     use axum::{
         body::{Body, to_bytes},
@@ -1003,6 +1008,7 @@ mod tests {
     use crate::database::model::Model;
     use crate::database::provider::ProviderSummaryItem;
     use crate::database::provider::{Provider, ProviderApiKeyRepository, ProviderApiKeySummary};
+    use crate::ingress::client_identity::{ClientIdentity, ClientIdentitySource};
     use crate::schema::enum_def::{
         ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
     };
@@ -1014,6 +1020,7 @@ mod tests {
     use crate::service::secret_encryption::SecretDomain;
     use crate::service::vertex::{cache_vertex_token_for_test, vertex_token_is_cached_for_test};
     use crate::utils::HttpResult;
+    use crate::utils::auth::decode_access_token;
 
     fn request_patch(
         id: i64,
@@ -1417,6 +1424,14 @@ mod tests {
         test_db_context
             .run_async(async {
                 let app_state = create_test_app_state(test_db_context.clone()).await;
+                let tokens = app_state
+                    .admin
+                    .auth
+                    .bootstrap("controller provider disabled TOTP password")
+                    .await
+                    .expect("manager bootstrap should succeed");
+                let auth_context = decode_access_token(&tokens.access_token)
+                    .expect("bootstrap access should decode");
 
                 let create_response = send(
                     &app_state,
@@ -1529,14 +1544,18 @@ mod tests {
                     .expect("refreshed secret should decrypt");
                 assert_eq!(replaced_plaintext.expose(), "sk-http-provider-updated");
 
-                let reveal_response = send(
-                    &app_state,
-                    empty_request(
-                        Method::POST,
-                        &format!("/provider/{provider_id}/provider_keys/{key_id}/reveal"),
-                    ),
-                )
-                .await;
+                let mut reveal_request = empty_request(
+                    Method::POST,
+                    &format!("/provider/{provider_id}/provider_keys/{key_id}/reveal"),
+                );
+                reveal_request.extensions_mut().insert(auth_context);
+                reveal_request.extensions_mut().insert(ClientIdentity {
+                    client_ip: "127.0.0.1".parse().expect("test IP should parse"),
+                    peer_addr: SocketAddr::from(([127, 0, 0, 1], 31_201)),
+                    source: ClientIdentitySource::TcpPeer,
+                    trusted_proxy_hops: 0,
+                });
+                let reveal_response = send(&app_state, reveal_request).await;
                 assert_eq!(reveal_response.status(), StatusCode::OK);
                 let reveal_body = response_json(reveal_response).await;
                 assert_eq!(reveal_body["data"]["api_key"], "sk-http-provider-updated");
@@ -1711,6 +1730,7 @@ mod tests {
         ))
         .expect("manager Provider OpenAPI should parse");
         assert_eq!(document["openapi"].as_str(), Some("3.1.0"));
+        assert_eq!(document["info"]["version"].as_str(), Some("1.0.0-pre.3"));
         assert_eq!(
             document["x-cyder-default-cache-control"].as_str(),
             Some("no-store")
@@ -1756,6 +1776,37 @@ mod tests {
                     ["Cache-Control"]["$ref"]
                     .as_str(),
                 Some("#/components/headers/NoStore")
+            );
+        }
+
+        let reveal = &document["paths"]["/ai/manager/api/provider/{id}/provider_keys/{key_id}/reveal"]
+            ["post"];
+        assert!(
+            reveal["parameters"].is_null(),
+            "provider reveal must use the session grant instead of a TOTP header"
+        );
+        let reveal_codes = reveal["x-cyder-error-codes"]
+            .as_sequence()
+            .expect("reveal error codes should be a sequence")
+            .iter()
+            .filter_map(serde_yaml::Value::as_u64)
+            .collect::<Vec<_>>();
+        for code in [1479, 1480, 1491] {
+            assert!(reveal_codes.contains(&code), "reveal must include {code}");
+        }
+        for code in [1471, 1472, 1473, 1474, 1475, 1476, 1484, 1485] {
+            assert!(
+                !reveal_codes.contains(&code),
+                "reveal must not expose per-command TOTP error {code}"
+            );
+        }
+        for (path, method) in expected_operations.into_iter().filter(|(path, method)| {
+            !(*path == "/ai/manager/api/provider/{id}/provider_keys/{key_id}/reveal"
+                && *method == "post")
+        }) {
+            assert!(
+                document["paths"][path][method]["parameters"].is_null(),
+                "{method} {path} must not require sensitive TOTP"
             );
         }
 

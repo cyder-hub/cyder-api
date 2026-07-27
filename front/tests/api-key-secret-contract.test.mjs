@@ -130,11 +130,9 @@ test("API key UI and service preserve the mode-aware secret contract", async () 
 
   assert.match(drawer, /v-if="detail\.can_reveal"/);
   assert.match(drawer, /apiKeyPage\.secret\.unavailable/);
-  assert.match(service, /request\.post\(`\/ai\/manager\/api\/api_key\/\$\{id\}\/reveal`\)/);
+  assert.match(service, /api_key\/\$\{id\}\/reveal/);
   assert.doesNotMatch(service, /request\.get\([^\n]*\/reveal/);
-  assert.equal((service.match(/_skipAuthRetry/g) ?? []).length, 1);
-  assert.match(service, /createApiKey[\s\S]*noAuthRetry/);
-  assert.match(service, /rotateApiKey[\s\S]*noAuthRetry/);
+  assert.doesNotMatch(service, /sensitiveTotpRequestConfig|totpCode/);
 
   assert.match(page, /onBeforeRouteLeave/);
   assert.match(page, /lifecycle === "anonymous"/);

@@ -12,18 +12,24 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import TotpField from "@/pages/login/components/TotpField.vue";
 import { rotatePassword } from "@/services/auth";
 import { authErrorCode } from "@/services/authErrors";
+import type { ManagerTotpState } from "@/services/types";
 import { validateManagerPassword } from "@/services/managerPassword";
 import { toastController } from "@/services/uiFeedback";
 
-const props = defineProps<{ open: boolean }>();
+const props = defineProps<{
+  open: boolean;
+  totpState: ManagerTotpState;
+}>();
 const emit = defineEmits<{ (event: "update:open", value: boolean): void }>();
 const { t } = useAppI18n();
 
 const currentPassword = ref("");
 const newPassword = ref("");
 const confirmation = ref("");
+const totpCode = ref("");
 const showPasswords = ref(false);
 const isLoading = ref(false);
 const error = ref<string | null>(null);
@@ -32,6 +38,7 @@ const reset = () => {
   currentPassword.value = "";
   newPassword.value = "";
   confirmation.value = "";
+  totpCode.value = "";
   showPasswords.value = false;
   error.value = null;
 };
@@ -54,11 +61,17 @@ const errorKeyForCode = (code: number | null) => {
   if (code === 1424) return "rotatePassword.errors.busy";
   if (code === 1425) return "rotatePassword.errors.conflict";
   if (code === 1426) return "rotatePassword.errors.unavailable";
+  if (code === 1471) return "rotatePassword.errors.totpRequired";
+  if (code === 1472) return "rotatePassword.errors.totpInvalid";
+  if (code === 1473 || code === 1474) return "rotatePassword.errors.totpWait";
+  if (code === 1475 || code === 1476) return "rotatePassword.errors.totpRateLimited";
+  if (code === 1479) return "rotatePassword.errors.totpUnavailable";
   return "rotatePassword.errors.failed";
 };
 
 const submit = async () => {
   if (isLoading.value) return;
+  if (props.totpState === "unavailable") return;
   error.value = null;
   const validated = validateManagerPassword(newPassword.value);
   if (!validated.valid) {
@@ -72,12 +85,17 @@ const submit = async () => {
 
   isLoading.value = true;
   try {
-    await rotatePassword(currentPassword.value, validated.normalized);
+    await rotatePassword(
+      currentPassword.value,
+      validated.normalized,
+      props.totpState === "enabled" ? totpCode.value : undefined,
+    );
     toastController.success(t("rotatePassword.success"));
     emit("update:open", false);
   } catch (caught) {
     error.value = t(errorKeyForCode(authErrorCode(caught)));
   } finally {
+    totpCode.value = "";
     isLoading.value = false;
   }
 };
@@ -108,6 +126,19 @@ const submit = async () => {
             required
             class="w-full"
           />
+        </div>
+        <TotpField
+          v-if="totpState === 'enabled'"
+          v-model="totpCode"
+          :disabled="isLoading"
+          :label="t('securityPage.currentTotpCode')"
+          :placeholder="t('securityPage.totpPlaceholder')"
+        />
+        <div
+          v-if="totpState === 'unavailable'"
+          class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+        >
+          {{ t("rotatePassword.errors.totpUnavailable") }}
         </div>
         <div class="space-y-2">
           <label class="text-sm font-medium text-gray-700">
@@ -159,7 +190,11 @@ const submit = async () => {
         <Button variant="ghost" class="w-full text-gray-600 sm:w-auto" :disabled="isLoading" @click="handleOpenChange(false)">
           {{ t("common.cancel") }}
         </Button>
-        <Button class="w-full sm:w-auto" :disabled="isLoading" @click="submit">
+        <Button
+          class="w-full sm:w-auto"
+          :disabled="isLoading || totpState === 'unavailable' || (totpState === 'enabled' && totpCode.length !== 6)"
+          @click="submit"
+        >
           {{ isLoading ? t("common.saving") : t("rotatePassword.submit") }}
         </Button>
       </DialogFooter>

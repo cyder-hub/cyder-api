@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::Serialize;
@@ -14,10 +15,10 @@ use crate::{
     },
     service::app_state::{AppState, StateRouter, create_state_router},
     service::runtime::{ApiKeyBilledAmountSnapshot, ApiKeyGovernanceSnapshot},
-    utils::HttpResult,
+    utils::{HttpResult, auth::ManagerAuthContext},
 };
 
-use super::BaseError;
+use super::{BaseError, auth::authorize_secret_governance_command};
 
 #[derive(Debug, Clone, Serialize)]
 struct ApiKeyBilledAmountSnapshotResponse {
@@ -77,9 +78,16 @@ impl From<ApiKeyGovernanceSnapshot> for ApiKeyRuntimeSnapshotResponse {
 
 async fn create_api_key(
     State(app_state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<ManagerAuthContext>,
     Json(payload): Json<CreateApiKeyPayload>,
-) -> Result<HttpResult<ApiKeyDetailWithSecret>, BaseError> {
-    let created = app_state.admin.api_key.create_api_key(payload).await?;
+) -> Result<HttpResult<ApiKeyDetailWithSecret>, Response> {
+    authorize_secret_governance_command(&app_state, &auth_context)?;
+    let created = app_state
+        .admin
+        .api_key
+        .create_api_key(payload)
+        .await
+        .map_err(IntoResponse::into_response)?;
     Ok(HttpResult::new(created))
 }
 
@@ -110,25 +118,47 @@ async fn update_api_key(
 
 async fn rotate_api_key(
     State(app_state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<ManagerAuthContext>,
     Path(id): Path<i64>,
-) -> Result<HttpResult<ApiKeyReveal>, BaseError> {
+) -> Result<HttpResult<ApiKeyReveal>, Response> {
+    authorize_secret_governance_command(&app_state, &auth_context)?;
     Ok(HttpResult::new(
-        app_state.admin.api_key.rotate_api_key(id).await?,
+        app_state
+            .admin
+            .api_key
+            .rotate_api_key(id)
+            .await
+            .map_err(IntoResponse::into_response)?,
     ))
 }
 
 async fn reveal_api_key(
     State(app_state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<ManagerAuthContext>,
     Path(id): Path<i64>,
-) -> Result<HttpResult<ApiKeyReveal>, BaseError> {
-    Ok(HttpResult::new(app_state.admin.api_key.reveal_api_key(id)?))
+) -> Result<HttpResult<ApiKeyReveal>, Response> {
+    authorize_secret_governance_command(&app_state, &auth_context)?;
+    Ok(HttpResult::new(
+        app_state
+            .admin
+            .api_key
+            .reveal_api_key(id)
+            .map_err(IntoResponse::into_response)?,
+    ))
 }
 
 async fn delete_api_key(
     State(app_state): State<Arc<AppState>>,
+    Extension(auth_context): Extension<ManagerAuthContext>,
     Path(id): Path<i64>,
-) -> Result<HttpResult<()>, BaseError> {
-    app_state.admin.api_key.delete_api_key(id).await?;
+) -> Result<HttpResult<()>, Response> {
+    authorize_secret_governance_command(&app_state, &auth_context)?;
+    app_state
+        .admin
+        .api_key
+        .delete_api_key(id)
+        .await
+        .map_err(IntoResponse::into_response)?;
     Ok(HttpResult::new(()))
 }
 
@@ -178,7 +208,7 @@ pub fn create_api_key_management_router() -> StateRouter {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
     use axum::{
         body::{Body, to_bytes},
@@ -191,10 +221,12 @@ mod tests {
     use crate::config::SecretEncryptionConfig;
     use crate::database::TestDbContext;
     use crate::database::api_key::CreateApiKeyPayload;
+    use crate::ingress::client_identity::{ClientIdentity, ClientIdentitySource};
     use crate::schema::enum_def::Action;
     use crate::service::admin::AdminServices;
     use crate::service::app_state::create_test_app_state;
     use crate::service::secret_encryption::SecretEncryptionService;
+    use crate::utils::auth::decode_access_token;
 
     use super::{BaseError, create_api_key_management_router};
 
@@ -246,6 +278,14 @@ mod tests {
                 configured.admin = admin;
                 configured.secret_encryption = encryption;
                 let app_state = Arc::new(configured);
+                let tokens = app_state
+                    .admin
+                    .auth
+                    .bootstrap("controller api key disabled TOTP password")
+                    .await
+                    .expect("manager bootstrap should succeed");
+                let auth_context = decode_access_token(&tokens.access_token)
+                    .expect("bootstrap access should decode");
 
                 let created = app_state
                     .admin
@@ -255,15 +295,21 @@ mod tests {
                     .expect("recoverable API key should create");
                 let route = format!("/api_key/{}/reveal", created.detail.id);
 
+                let mut request = Request::builder()
+                    .method(Method::POST)
+                    .uri(&route)
+                    .body(Body::empty())
+                    .expect("POST request should build");
+                request.extensions_mut().insert(auth_context);
+                request.extensions_mut().insert(ClientIdentity {
+                    client_ip: "127.0.0.1".parse().expect("test IP should parse"),
+                    peer_addr: SocketAddr::from(([127, 0, 0, 1], 31_200)),
+                    source: ClientIdentitySource::TcpPeer,
+                    trusted_proxy_hops: 0,
+                });
                 let response = create_api_key_management_router()
                     .with_state(Arc::clone(&app_state))
-                    .oneshot(
-                        Request::builder()
-                            .method(Method::POST)
-                            .uri(&route)
-                            .body(Body::empty())
-                            .expect("POST request should build"),
-                    )
+                    .oneshot(request)
                     .await
                     .expect("POST reveal should respond");
                 assert_eq!(response.status(), StatusCode::OK);
@@ -294,6 +340,7 @@ mod tests {
         ))
         .expect("manager API key OpenAPI should parse");
         assert_eq!(document["openapi"].as_str(), Some("3.1.0"));
+        assert_eq!(document["info"]["version"].as_str(), Some("1.0.0-pre.3"));
         assert_eq!(
             document["x-cyder-default-cache-control"].as_str(),
             Some("no-store")
@@ -317,6 +364,42 @@ mod tests {
             assert!(
                 operation["x-cyder-error-codes"].is_sequence(),
                 "error contract should exist for {method} {path}"
+            );
+        }
+        for (path, method) in [
+            ("/ai/manager/api/api_key", "post"),
+            ("/ai/manager/api/api_key/{id}", "delete"),
+            ("/ai/manager/api/api_key/{id}/rotate", "post"),
+            ("/ai/manager/api/api_key/{id}/reveal", "post"),
+        ] {
+            assert!(
+                document["paths"][path][method]["parameters"].is_null(),
+                "{method} {path} must use the session grant instead of a TOTP header"
+            );
+            let codes = document["paths"][path][method]["x-cyder-error-codes"]
+                .as_sequence()
+                .expect("secret governance error codes should be a sequence")
+                .iter()
+                .filter_map(serde_yaml::Value::as_u64)
+                .collect::<Vec<_>>();
+            for code in [1479, 1480, 1491] {
+                assert!(codes.contains(&code), "{method} {path} must include {code}");
+            }
+            for code in [1471, 1472, 1473, 1474, 1475, 1476, 1484, 1485] {
+                assert!(
+                    !codes.contains(&code),
+                    "{method} {path} must not expose per-command TOTP error {code}"
+                );
+            }
+        }
+        for (path, method) in [
+            ("/ai/manager/api/api_key/list", "get"),
+            ("/ai/manager/api/api_key/{id}", "get"),
+            ("/ai/manager/api/api_key/{id}", "put"),
+        ] {
+            assert!(
+                document["paths"][path][method]["parameters"].is_null(),
+                "{method} {path} must not require sensitive TOTP"
             );
         }
         assert!(

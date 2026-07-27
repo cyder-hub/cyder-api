@@ -12,6 +12,8 @@ use zeroize::Zeroizing;
 use crate::database::manager_credential::{
     MANAGER_ID, MANAGER_SUBJECT, ManagerCredential, ManagerCredentialRepositoryError,
 };
+use crate::service::admin::auth::totp::validate_manager_totp_secret;
+use crate::service::secret_encryption::{EncryptedSecret, SecretDomain, SecretEncryptionService};
 
 pub const PASSWORD_MIN_CODE_POINTS: usize = 15;
 pub const PASSWORD_MAX_CODE_POINTS: usize = 128;
@@ -43,9 +45,49 @@ pub enum CredentialUnavailableReason {
     InvalidEpoch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerTotpUnavailableReason {
+    IncompleteStoredSecret,
+    InvalidStoredSecret,
+    DecryptFailed,
+    InvalidSecret,
+}
+
+#[derive(Clone)]
+pub struct ReadyManagerTotp {
+    encrypted_secret: EncryptedSecret,
+    last_accepted_step: i64,
+    enabled_at: i64,
+}
+
+impl ReadyManagerTotp {
+    pub fn encrypted_secret(&self) -> &EncryptedSecret {
+        &self.encrypted_secret
+    }
+
+    pub fn last_accepted_step(&self) -> i64 {
+        self.last_accepted_step
+    }
+
+    pub fn enabled_at(&self) -> i64 {
+        self.enabled_at
+    }
+}
+
+#[derive(Clone)]
+pub enum ManagerTotpState {
+    Disabled,
+    Enabled(ReadyManagerTotp),
+    Unavailable {
+        reason: ManagerTotpUnavailableReason,
+        enabled_at: Option<i64>,
+    },
+}
+
 pub struct ReadyManagerCredential {
     password_verifier: Zeroizing<String>,
     credential_epoch: Uuid,
+    totp: ManagerTotpState,
 }
 
 impl Clone for ReadyManagerCredential {
@@ -53,6 +95,7 @@ impl Clone for ReadyManagerCredential {
         Self {
             password_verifier: Zeroizing::new(self.password_verifier.to_string()),
             credential_epoch: self.credential_epoch,
+            totp: self.totp.clone(),
         }
     }
 }
@@ -65,6 +108,10 @@ impl ReadyManagerCredential {
     pub fn credential_epoch(&self) -> Uuid {
         self.credential_epoch
     }
+
+    pub fn totp(&self) -> &ManagerTotpState {
+        &self.totp
+    }
 }
 
 #[derive(Clone)]
@@ -75,11 +122,14 @@ pub enum ManagerCredentialSnapshot {
 }
 
 impl ManagerCredentialSnapshot {
-    pub fn load() -> Self {
-        Self::from_repository_result(ManagerCredential::load())
+    pub fn load(secret_encryption: &SecretEncryptionService) -> Self {
+        Self::from_repository_result(ManagerCredential::load(), secret_encryption)
     }
 
-    pub fn from_credential(credential: ManagerCredential) -> Self {
+    pub fn from_credential(
+        credential: ManagerCredential,
+        secret_encryption: &SecretEncryptionService,
+    ) -> Self {
         if credential.manager_id != MANAGER_ID || credential.manager_subject != MANAGER_SUBJECT {
             return Self::Unavailable(CredentialUnavailableReason::InvalidIdentity);
         }
@@ -89,19 +139,82 @@ impl ManagerCredentialSnapshot {
         let Ok(credential_epoch) = Uuid::parse_str(&credential.credential_epoch) else {
             return Self::Unavailable(CredentialUnavailableReason::InvalidEpoch);
         };
+        let enabled_at = credential.totp_enabled_at;
+        let totp = match (
+            credential.totp_secret_ciphertext,
+            credential.totp_secret_nonce,
+            credential.totp_secret_format_version,
+            credential.totp_secret_key_fingerprint,
+            credential.totp_last_accepted_step,
+            credential.totp_enabled_at,
+        ) {
+            (None, None, None, None, None, None) => ManagerTotpState::Disabled,
+            (
+                Some(ciphertext),
+                Some(nonce),
+                Some(format_version),
+                Some(fingerprint),
+                Some(last_accepted_step),
+                Some(enabled_at),
+            ) => {
+                let encrypted_secret = match EncryptedSecret::from_parts(
+                    ciphertext,
+                    nonce,
+                    format_version,
+                    fingerprint,
+                ) {
+                    Ok(encrypted_secret) => encrypted_secret,
+                    Err(_) => {
+                        return Self::Ready(ReadyManagerCredential {
+                            password_verifier: Zeroizing::new(credential.password_verifier),
+                            credential_epoch,
+                            totp: ManagerTotpState::Unavailable {
+                                reason: ManagerTotpUnavailableReason::InvalidStoredSecret,
+                                enabled_at: Some(enabled_at),
+                            },
+                        });
+                    }
+                };
+                match secret_encryption
+                    .decrypt_current(SecretDomain::ManagerTotp(MANAGER_ID), &encrypted_secret)
+                {
+                    Ok(secret) if validate_manager_totp_secret(&secret).is_ok() => {
+                        ManagerTotpState::Enabled(ReadyManagerTotp {
+                            encrypted_secret,
+                            last_accepted_step,
+                            enabled_at,
+                        })
+                    }
+                    Ok(_) => ManagerTotpState::Unavailable {
+                        reason: ManagerTotpUnavailableReason::InvalidSecret,
+                        enabled_at: Some(enabled_at),
+                    },
+                    Err(_) => ManagerTotpState::Unavailable {
+                        reason: ManagerTotpUnavailableReason::DecryptFailed,
+                        enabled_at: Some(enabled_at),
+                    },
+                }
+            }
+            _ => ManagerTotpState::Unavailable {
+                reason: ManagerTotpUnavailableReason::IncompleteStoredSecret,
+                enabled_at,
+            },
+        };
 
         Self::Ready(ReadyManagerCredential {
             password_verifier: Zeroizing::new(credential.password_verifier),
             credential_epoch,
+            totp,
         })
     }
 
     fn from_repository_result(
         result: Result<Option<ManagerCredential>, ManagerCredentialRepositoryError>,
+        secret_encryption: &SecretEncryptionService,
     ) -> Self {
         match result {
             Ok(None) => Self::Uninitialized,
-            Ok(Some(credential)) => Self::from_credential(credential),
+            Ok(Some(credential)) => Self::from_credential(credential, secret_encryption),
             Err(_) => Self::Unavailable(CredentialUnavailableReason::Storage),
         }
     }
@@ -307,19 +420,30 @@ mod tests {
 
     #[test]
     fn manager_credential_snapshot_distinguishes_missing_and_corrupt_records() {
+        let secret_encryption =
+            SecretEncryptionService::from_config(&crate::config::SecretEncryptionConfig::default());
         assert!(matches!(
-            ManagerCredentialSnapshot::from_repository_result(Ok(None)),
+            ManagerCredentialSnapshot::from_repository_result(Ok(None), &secret_encryption),
             ManagerCredentialSnapshot::Uninitialized
         ));
         assert!(matches!(
-            ManagerCredentialSnapshot::from_credential(ManagerCredential {
-                manager_id: MANAGER_ID,
-                manager_subject: MANAGER_SUBJECT.to_string(),
-                password_verifier: "not-a-phc".to_string(),
-                credential_epoch: Uuid::new_v4().to_string(),
-                created_at: 1,
-                updated_at: 1,
-            }),
+            ManagerCredentialSnapshot::from_credential(
+                ManagerCredential {
+                    manager_id: MANAGER_ID,
+                    manager_subject: MANAGER_SUBJECT.to_string(),
+                    password_verifier: "not-a-phc".to_string(),
+                    credential_epoch: Uuid::new_v4().to_string(),
+                    totp_secret_ciphertext: None,
+                    totp_secret_nonce: None,
+                    totp_secret_format_version: None,
+                    totp_secret_key_fingerprint: None,
+                    totp_last_accepted_step: None,
+                    totp_enabled_at: None,
+                    created_at: 1,
+                    updated_at: 1,
+                },
+                &secret_encryption
+            ),
             ManagerCredentialSnapshot::Unavailable(CredentialUnavailableReason::InvalidVerifier)
         ));
     }

@@ -34,6 +34,7 @@ pub mod api_key_rollup;
 pub mod cost;
 pub mod manager_auth_instance;
 pub mod manager_credential;
+pub mod manager_totp_recovery_code;
 pub mod metrics;
 pub mod model;
 pub mod provider;
@@ -487,6 +488,7 @@ static DB_POOL: OnceLock<DbPool> = OnceLock::new();
 static DB_POOL_INIT_LOCK: Mutex<()> = Mutex::new(());
 const SQLITE_UPGRADE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 const POSTGRES_UPGRADE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
+// Clean baselines and ordered upgrades remain separate embedded migration sources.
 const SQLITE_CLEAN_BASELINE_MIGRATIONS: EmbeddedMigrations =
     embed_migrations!("migrations/sqlite_clean");
 const POSTGRES_CLEAN_BASELINE_MIGRATIONS: EmbeddedMigrations =

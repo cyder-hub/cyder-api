@@ -561,6 +561,7 @@ const {
               </div>
             </div>
           </section>
+
         </div>
 
         <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:px-6">
@@ -573,7 +574,11 @@ const {
           >
             {{ t("common.cancel") }}
           </Button>
-          <Button type="submit" class="w-full sm:w-auto" :disabled="isSubmitting">
+          <Button
+            type="submit"
+            class="w-full sm:w-auto"
+            :disabled="isSubmitting"
+          >
             {{ isSubmitting ? t("common.saving") : t("common.save") }}
           </Button>
         </DialogFooter>

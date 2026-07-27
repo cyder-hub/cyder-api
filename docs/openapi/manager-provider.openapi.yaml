@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Cyder Manager Provider Key Living Contract
-  version: 1.0.0-pre.1
+  version: 1.0.0-pre.3
   description: Provider credential lifecycle contract for the single-manager gateway.
 servers:
   - url: /
@@ -9,6 +9,8 @@ security:
   - managerAccessToken: []
 x-cyder-default-cache-control: no-store
 x-cyder-web-security-client-identity-contract: ../web-security-client-identity.md
+x-cyder-secret-governance-reauth-operation-ids: [revealProviderKeySecret]
+x-cyder-provider-mutation-operation-ids-without-totp: [createProviderKey, updateProviderKeyMetadata, replaceProviderKeySecret, deleteProviderKey]
 paths:
   /ai/manager/api/provider/{id}/provider_keys:
     parameters:
@@ -21,7 +23,7 @@ paths:
           $ref: "#/components/responses/ProviderKeyList"
     post:
       operationId: createProviderKey
-      description: Encrypts a new credential. The plaintext is never returned.
+      description: Encrypts a new credential. The plaintext is never returned. This operation does not accept or require TOTP reauthentication.
       x-cyder-error-codes: [1001, 1002, 1100, 1101, 1201]
       requestBody:
         required: true
@@ -46,7 +48,7 @@ paths:
           $ref: "#/components/responses/ProviderKeySummary"
     put:
       operationId: updateProviderKeyMetadata
-      description: Updates only description and enabled state; it never accepts a credential.
+      description: Updates only description and enabled state; it never accepts a credential or TOTP reauthentication.
       x-cyder-error-codes: [1001, 1002, 1100, 1201]
       requestBody:
         required: true
@@ -61,7 +63,7 @@ paths:
           $ref: "#/components/responses/RuntimeRefreshFailed"
     delete:
       operationId: deleteProviderKey
-      description: Soft-deletes the key and irreversibly clears its encrypted secret material.
+      description: Soft-deletes the key and irreversibly clears its encrypted secret material. This operation does not accept or require TOTP reauthentication.
       x-cyder-error-codes: [1002, 1100, 1201]
       responses:
         "200":
@@ -74,7 +76,7 @@ paths:
       - $ref: "#/components/parameters/ProviderKeyId"
     post:
       operationId: replaceProviderKeySecret
-      description: Replaces the credential while preserving key identity, metadata, and enabled state. Do not replay automatically.
+      description: Replaces the credential while preserving key identity, metadata, and enabled state. It does not accept or require TOTP reauthentication. Do not replay automatically.
       x-cyder-error-codes: [1001, 1002, 1100, 1101, 1201]
       requestBody:
         required: true
@@ -93,13 +95,21 @@ paths:
       - $ref: "#/components/parameters/ProviderKeyId"
     post:
       operationId: revealProviderKeySecret
-      description: Returns the plaintext credential under the current manager session. This request has no body.
-      x-cyder-error-codes: [1002, 1005, 1100]
+      description: Returns the plaintext credential under the current manager session after a secret_governance reauthentication grant has been established. This request has no body.
+      x-cyder-error-codes: [1002, 1005, 1100, 1479, 1480, 1491]
       responses:
         "200":
           $ref: "#/components/responses/ProviderKeyReveal"
+        "401":
+          $ref: "#/components/responses/ManagerError"
         "409":
-          $ref: "#/components/responses/ProviderSecretUnavailable"
+          $ref: "#/components/responses/ProviderRevealConflict"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
+          $ref: "#/components/responses/ManagerError"
+        "503":
+          $ref: "#/components/responses/ManagerError"
 components:
   securitySchemes:
     managerAccessToken:
@@ -233,6 +243,21 @@ components:
               - $ref: "#/components/schemas/Error"
               - properties:
                   code: { const: 1005 }
+    ManagerError:
+      description: Stable manager command, authentication, or sensitive TOTP error.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ProviderRevealConflict:
+      description: Either the stored provider credential is unavailable or the supplied TOTP step is replayed/stale.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     RuntimeRefreshFailed:
       description: The database mutation committed, but the provider is fail-closed because a trustworthy runtime refresh failed. Do not replay automatically.
       headers:

@@ -88,10 +88,12 @@ test("coordination emits exact versioned events without credentials", () => {
 
   coordination.announceSessionChanged();
   coordination.announceSessionRevoked();
+  coordination.announceAuthorizationChanged();
 
   assert.deepEqual(broadcast.sent, [
     { schema_version: 1, type: "session_changed" },
     { schema_version: 1, type: "session_revoked" },
+    { schema_version: 1, type: "authorization_changed" },
   ]);
   assert.equal(JSON.stringify(broadcast.sent).includes("access-not-broadcast"), false);
   assert.equal(MANAGER_AUTH_CHANNEL_NAME, "cyder-manager-auth-v1");
@@ -129,14 +131,20 @@ test("received changed event recovers independently and revoked event only clear
   assert.equal(invalidationCalls, 1);
   assert.equal(revokeCalls, 0);
 
+  broadcast.emit({ schema_version: 1, type: "authorization_changed" });
+  await Promise.resolve();
+  assert.equal(recoverCalls, 2);
+  assert.equal(invalidationCalls, 2);
+  assert.equal(revokeCalls, 0);
+
   broadcast.emit({ schema_version: 1, type: "session_revoked" });
   assert.equal(revokeCalls, 1);
 
   lifecycle.documentTarget.visibilityState = "hidden";
   broadcast.emit({ schema_version: 1, type: "session_changed" });
   await Promise.resolve();
-  assert.equal(invalidationCalls, 2);
-  assert.equal(recoverCalls, 1);
+  assert.equal(invalidationCalls, 3);
+  assert.equal(recoverCalls, 2);
 
   for (const invalid of [
     { schema_version: 2, type: "session_revoked" },
@@ -145,8 +153,8 @@ test("received changed event recovers independently and revoked event only clear
   ]) {
     broadcast.emit(invalid);
   }
-  assert.equal(recoverCalls, 1);
-  assert.equal(invalidationCalls, 2);
+  assert.equal(recoverCalls, 2);
+  assert.equal(invalidationCalls, 3);
   assert.equal(revokeCalls, 1);
 
   coordination.dispose();

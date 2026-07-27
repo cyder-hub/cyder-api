@@ -1,13 +1,14 @@
 openapi: 3.1.0
 info:
   title: Cyder Manager Auth Living Contract
-  version: 1.0.0-pre.4
-  description: Single-manager token-mediator authentication contract for the Cyder management control plane.
+  version: 1.0.0-pre.6
+  description: Single-manager token-mediator authentication, TOTP lifecycle, and session-bound reauthentication contract for the Cyder management control plane.
 servers:
   - url: /
 x-cyder-web-security-client-identity-contract: ../web-security-client-identity.md
 x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434, 1435, 1436]
 x-cyder-default-cache-control: no-store
+x-cyder-auth-body-limit-bytes: 4096
 x-cyder-refresh-family:
   browserVisible: false
   absoluteLifetimeSeconds: 2592000
@@ -29,6 +30,29 @@ x-cyder-browser-auth-boundary:
     X-Cyder-Manager-Auth: "1"
   rejectionStatus: 403
   rejectionCode: 1461
+x-cyder-totp:
+  algorithm: SHA1
+  digits: 6
+  periodSeconds: 30
+  acceptedWindowSteps: [-1, 0, 1]
+  sensitiveHeader: X-Cyder-TOTP-Code
+  challengeStorage: in-memory, bounded, expiring, single-node
+x-cyder-secret-governance-reauth:
+  scope: secret_governance
+  fixedLifetimeSeconds: 300
+  sliding: false
+  storage: in-memory, bound to the current login_instance_id
+  restartBehavior: grant is lost and reauthentication is required again
+  methodByTotpState:
+    disabled: password
+    enabled: totp
+    unavailable: fail closed
+  protectedOperations:
+    - createApiKey
+    - deleteApiKey
+    - rotateApiKey
+    - revealApiKey
+    - revealProviderKeySecret
 paths:
   /ai/manager/api/auth/bootstrap/status:
     get:
@@ -66,11 +90,12 @@ paths:
           $ref: "#/components/responses/BusyError"
         "503":
           $ref: "#/components/responses/AuthError"
-  /ai/manager/api/auth/login:
+  /ai/manager/api/auth/login/password:
     post:
-      operationId: loginManager
+      operationId: loginManagerPassword
       security: []
-      x-cyder-error-codes: [1411, 1412, 1413, 1414, 1415, 1416, 1417, 1418, 1461]
+      description: Verifies the password. Disabled TOTP returns an access token and mediator cookie; enabled TOTP returns only a bounded login challenge and deletes any residual mediator cookie.
+      x-cyder-error-codes: [1411, 1412, 1413, 1414, 1415, 1416, 1417, 1418, 1461, 1479]
       requestBody:
         required: true
         content:
@@ -79,7 +104,7 @@ paths:
               $ref: "#/components/schemas/PasswordRequest"
       responses:
         "200":
-          $ref: "#/components/responses/AccessTokenWithMediatorCookie"
+          $ref: "#/components/responses/LoginPasswordResult"
         "401":
           $ref: "#/components/responses/AuthError"
         "409":
@@ -90,13 +115,267 @@ paths:
           $ref: "#/components/responses/LoginRateLimitError"
         "503":
           $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/login/totp:
+    post:
+      operationId: loginManagerTotp
+      security: []
+      x-cyder-error-codes: [1461, 1472, 1473, 1474, 1475, 1476, 1477, 1478, 1479, 1480, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginTotpRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/AccessTokenWithMediatorCookie"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/TotpRetryError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/reauth:
+    post:
+      operationId: reauthenticateManagerSecretGovernance
+      description: Establishes a fixed five-minute, non-sliding secret_governance grant for the current login instance. The server requires password while TOTP is disabled, TOTP while enabled, and fails closed while TOTP is unavailable.
+      security:
+        - managerAccessToken: []
+          managerMediatorSession: []
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1472, 1473, 1474, 1475, 1476, 1479, 1480, 1481, 1483, 1484, 1485, 1492]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManagerReauthRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ManagerReauth"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/ReauthConflictError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/recovery/start:
+    post:
+      operationId: startManagerTotpRecovery
+      security: []
+      description: Verifies the manager password and one recovery code, consumes that recovery code, revokes all sessions, and returns a replacement TOTP setup challenge. No session is issued.
+      x-cyder-error-codes: [1461, 1475, 1476, 1479, 1482, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveryStartRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/RecoverySetupWithMediatorCookieDeletion"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/recovery/confirm:
+    post:
+      operationId: confirmManagerTotpRecovery
+      security: []
+      x-cyder-error-codes: [1461, 1472, 1473, 1474, 1475, 1476, 1477, 1478, 1479, 1480, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveryConfirmRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TotpLifecycleWithMediatorCookie"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/TotpRetryError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/totp/status:
+    get:
+      operationId: getManagerTotpStatus
+      security:
+        - managerAccessToken: []
+          managerMediatorSession: []
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1479, 1480]
+      responses:
+        "200":
+          $ref: "#/components/responses/TotpStatus"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/AuthError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/totp/enroll/start:
+    post:
+      operationId: startManagerTotpEnrollment
+      security:
+        - managerAccessToken: []
+          managerMediatorSession: []
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1475, 1476, 1479, 1480, 1481, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CurrentPasswordRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TotpSetup"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/AuthError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/totp/enroll/confirm:
+    post:
+      operationId: confirmManagerTotpEnrollment
+      security:
+        - managerAccessToken: []
+          managerMediatorSession: []
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1472, 1473, 1474, 1475, 1476, 1477, 1478, 1479, 1480, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupConfirmRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TotpLifecycleWithMediatorCookie"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/TotpRetryError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/totp/replace/start:
+    post:
+      operationId: startManagerTotpReplacement
+      security:
+        - managerAccessToken: []
+          managerMediatorSession: []
+      parameters:
+        - $ref: "#/components/parameters/ManagerTotpCode"
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1471, 1472, 1473, 1474, 1475, 1476, 1479, 1480, 1481, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CurrentPasswordRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TotpSetup"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/TotpRetryError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "428":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/totp/replace/confirm:
+    post:
+      operationId: confirmManagerTotpReplacement
+      security:
+        - managerAccessToken: []
+          managerMediatorSession: []
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1472, 1473, 1474, 1475, 1476, 1477, 1478, 1479, 1480, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupConfirmRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TotpLifecycleWithMediatorCookie"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/TotpRetryError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
+  /ai/manager/api/auth/totp/disable:
+    post:
+      operationId: disableManagerTotp
+      security:
+        - managerAccessToken: []
+          managerMediatorSession: []
+      parameters:
+        - $ref: "#/components/parameters/ManagerTotpCode"
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1471, 1472, 1473, 1474, 1475, 1476, 1479, 1480, 1481, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CurrentPasswordRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TotpLifecycleWithMediatorCookie"
+        "401":
+          $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/TotpRetryError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "428":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
+        "503":
+          $ref: "#/components/responses/AuthError"
   /ai/manager/api/auth/password/rotate:
     post:
       operationId: rotateManagerPassword
       security:
         - managerAccessToken: []
           managerMediatorSession: []
-      x-cyder-error-codes: [1421, 1422, 1423, 1424, 1425, 1426, 1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461]
+      parameters:
+        - $ref: "#/components/parameters/SensitiveManagerTotpCode"
+      x-cyder-error-codes: [1421, 1422, 1423, 1424, 1425, 1426, 1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1471, 1472, 1473, 1474, 1475, 1476, 1479, 1480, 1484, 1485]
       requestBody:
         required: true
         content:
@@ -111,6 +390,8 @@ paths:
         "409":
           $ref: "#/components/responses/AuthError"
         "422":
+          $ref: "#/components/responses/AuthError"
+        "428":
           $ref: "#/components/responses/AuthError"
         "429":
           $ref: "#/components/responses/BusyError"
@@ -156,15 +437,46 @@ paths:
       security:
         - managerAccessToken: []
           managerMediatorSession: []
-      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1451, 1461]
+      parameters:
+        - $ref: "#/components/parameters/SensitiveManagerTotpCode"
+      x-cyder-error-codes: [1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1471, 1472, 1473, 1474, 1475, 1476, 1479, 1480, 1481, 1483, 1484, 1485]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CurrentPasswordRequest"
       responses:
         "200":
           $ref: "#/components/responses/LogoutAllWithMediatorCookieDeletion"
         "401":
           $ref: "#/components/responses/AuthError"
+        "409":
+          $ref: "#/components/responses/TotpRetryError"
+        "422":
+          $ref: "#/components/responses/AuthError"
+        "428":
+          $ref: "#/components/responses/AuthError"
+        "429":
+          $ref: "#/components/responses/TotpRateLimitError"
         "503":
           $ref: "#/components/responses/AuthError"
 components:
+  parameters:
+    ManagerTotpCode:
+      name: X-Cyder-TOTP-Code
+      in: header
+      required: true
+      description: Current six-digit TOTP code used only for the sensitive operation being authorized.
+      schema:
+        $ref: "#/components/schemas/TotpCode"
+    SensitiveManagerTotpCode:
+      name: X-Cyder-TOTP-Code
+      in: header
+      required: false
+      description: Required exactly when manager TOTP is enabled. It is omitted while disabled; unavailable TOTP fails closed.
+      schema:
+        $ref: "#/components/schemas/TotpCode"
   securitySchemes:
     managerAccessToken:
       type: http
@@ -197,13 +509,229 @@ components:
           type: string
           minLength: 15
           maxLength: 128
+    TotpCode:
+      type: string
+      pattern: '^[0-9]{6}$'
+      minLength: 6
+      maxLength: 6
+    ChallengeId:
+      type: string
+      format: uuid
+      maxLength: 36
+    LoginTotpRequest:
+      type: object
+      additionalProperties: false
+      required: [login_challenge, totp_code]
+      properties:
+        login_challenge:
+          $ref: "#/components/schemas/ChallengeId"
+        totp_code:
+          $ref: "#/components/schemas/TotpCode"
+    RecoveryStartRequest:
+      type: object
+      additionalProperties: false
+      required: [password, recovery_code]
+      properties:
+        password:
+          type: string
+          maxLength: 128
+        recovery_code:
+          type: string
+          maxLength: 64
+    RecoveryConfirmRequest:
+      type: object
+      additionalProperties: false
+      required: [recovery_challenge, totp_code]
+      properties:
+        recovery_challenge:
+          $ref: "#/components/schemas/ChallengeId"
+        totp_code:
+          $ref: "#/components/schemas/TotpCode"
+    CurrentPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [current_password]
+      properties:
+        current_password:
+          type: string
+          maxLength: 128
+    SetupConfirmRequest:
+      type: object
+      additionalProperties: false
+      required: [setup_challenge, totp_code]
+      properties:
+        setup_challenge:
+          $ref: "#/components/schemas/ChallengeId"
+        totp_code:
+          $ref: "#/components/schemas/TotpCode"
+    ManagerReauthPasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [method, password]
+      properties:
+        method:
+          type: string
+          const: password
+        password:
+          type: string
+          maxLength: 128
+    ManagerReauthTotpRequest:
+      type: object
+      additionalProperties: false
+      required: [method, totp_code]
+      properties:
+        method:
+          type: string
+          const: totp
+        totp_code:
+          $ref: "#/components/schemas/TotpCode"
+    ManagerReauthRequest:
+      oneOf:
+        - $ref: "#/components/schemas/ManagerReauthPasswordRequest"
+        - $ref: "#/components/schemas/ManagerReauthTotpRequest"
+      discriminator:
+        propertyName: method
+        mapping:
+          password: "#/components/schemas/ManagerReauthPasswordRequest"
+          totp: "#/components/schemas/ManagerReauthTotpRequest"
+    ManagerReauthStatus:
+      type: object
+      additionalProperties: false
+      required: [scope, method, verified_until]
+      properties:
+        scope:
+          type: string
+          const: secret_governance
+        method:
+          type: string
+          enum: [password, totp, password_totp, recovery_totp]
+        verified_until:
+          type: integer
+          format: int64
+    NullableManagerReauthStatus:
+      oneOf:
+        - $ref: "#/components/schemas/ManagerReauthStatus"
+        - type: "null"
     AuthAccess:
       type: object
       additionalProperties: false
-      required: [access_token]
+      required: [access_token, totp_state, reauth]
       properties:
         access_token:
           type: string
+        totp_state:
+          $ref: "#/components/schemas/TotpState"
+        reauth:
+          $ref: "#/components/schemas/NullableManagerReauthStatus"
+    LoginPasswordAuthenticated:
+      type: object
+      additionalProperties: false
+      required: [state, access_token, totp_state, reauth]
+      properties:
+        state:
+          type: string
+          const: authenticated
+        access_token:
+          type: string
+        totp_state:
+          type: string
+          const: disabled
+        reauth:
+          $ref: "#/components/schemas/NullableManagerReauthStatus"
+    LoginPasswordTotpRequired:
+      type: object
+      additionalProperties: false
+      required: [state, login_challenge, expires_in]
+      properties:
+        state:
+          type: string
+          const: totp_required
+        login_challenge:
+          $ref: "#/components/schemas/ChallengeId"
+        expires_in:
+          type: integer
+          minimum: 1
+    LoginPasswordResult:
+      oneOf:
+        - $ref: "#/components/schemas/LoginPasswordAuthenticated"
+        - $ref: "#/components/schemas/LoginPasswordTotpRequired"
+      discriminator:
+        propertyName: state
+        mapping:
+          authenticated: "#/components/schemas/LoginPasswordAuthenticated"
+          totp_required: "#/components/schemas/LoginPasswordTotpRequired"
+    LoginPasswordEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/LoginPasswordResult"
+    TotpState:
+      type: string
+      enum: [disabled, enabled, unavailable]
+    TotpSetup:
+      type: object
+      additionalProperties: false
+      required: [setup_challenge, manual_secret, otpauth_uri, expires_in]
+      properties:
+        setup_challenge:
+          $ref: "#/components/schemas/ChallengeId"
+        manual_secret:
+          type: string
+          readOnly: true
+        otpauth_uri:
+          type: string
+          readOnly: true
+        expires_in:
+          type: integer
+          minimum: 1
+    RecoverySetup:
+      type: object
+      additionalProperties: false
+      required: [recovery_challenge, manual_secret, otpauth_uri, expires_in]
+      properties:
+        recovery_challenge:
+          $ref: "#/components/schemas/ChallengeId"
+        manual_secret:
+          type: string
+          readOnly: true
+        otpauth_uri:
+          type: string
+          readOnly: true
+        expires_in:
+          type: integer
+          minimum: 1
+    TotpLifecycle:
+      type: object
+      additionalProperties: false
+      required: [access_token, totp_state, reauth]
+      properties:
+        access_token:
+          type: string
+        totp_state:
+          $ref: "#/components/schemas/TotpState"
+        reauth:
+          $ref: "#/components/schemas/NullableManagerReauthStatus"
+        recovery_codes:
+          type: array
+          readOnly: true
+          minItems: 10
+          maxItems: 10
+          items:
+            type: string
+    TotpStatus:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          $ref: "#/components/schemas/TotpState"
+        enabled_at:
+          type: integer
+          format: int64
     AccessTokenEnvelope:
       type: object
       required: [code, data]
@@ -213,6 +741,51 @@ components:
           const: 0
         data:
           $ref: "#/components/schemas/AuthAccess"
+    TotpSetupEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/TotpSetup"
+    RecoverySetupEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/RecoverySetup"
+    TotpLifecycleEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/TotpLifecycle"
+    TotpStatusEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/TotpStatus"
+    ManagerReauthEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/ManagerReauthStatus"
     BootstrapStatus:
       type: object
       required: [state]
@@ -264,12 +837,57 @@ components:
         msg:
           type: string
   responses:
+    LoginPasswordResult:
+      description: Password-only authentication success, either authenticated while TOTP is disabled or a TOTP challenge while enabled. Set-Cookie issues the mediator session for authenticated or deletes residual mediator state for totp_required.
+      headers:
+        Set-Cookie:
+          required: true
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LoginPasswordEnvelope"
     AccessToken:
       description: Current manager access JWT. The response never contains a refresh token and does not reissue the mediator cookie.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/AccessTokenEnvelope"
+    TotpSetup:
+      description: Ephemeral TOTP provisioning material. The manual secret and otpauth URI are returned only from this start response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TotpSetupEnvelope"
+    RecoverySetupWithMediatorCookieDeletion:
+      description: Recovery code consumed, all sessions revoked, and replacement TOTP provisioning material issued. The browser mediator cookie is deleted.
+      headers:
+        Set-Cookie:
+          required: true
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecoverySetupEnvelope"
+    TotpLifecycleWithMediatorCookie:
+      description: TOTP lifecycle mutation completed, all earlier sessions revoked, and a replacement access/mediator pair issued. Enrollment, replacement, and recovery confirmation return a fresh one-time recovery-code set; disable omits it.
+      headers:
+        Set-Cookie:
+          required: true
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TotpLifecycleEnvelope"
+    TotpStatus:
+      description: Authenticated manager TOTP state. This route is not a public state probe.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TotpStatusEnvelope"
     AccessTokenWithMediatorCookie:
       description: New page-memory manager Access JWT plus a Path-limited HttpOnly SameSite=Strict mediator Set-Cookie. Production also requires Secure.
       headers:
@@ -281,6 +899,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/AccessTokenEnvelope"
+    ManagerReauth:
+      description: Current login instance now has a fixed, non-sliding secret_governance grant. No reusable credential or client-carried proof is returned.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ManagerReauthEnvelope"
     AuthError:
       description: Stable scenario-specific manager authentication error.
       content:
@@ -340,6 +964,36 @@ components:
           schema:
             type: integer
             minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
+    TotpRetryError:
+      description: TOTP step replay/staleness conflict. Retry-After is the number of seconds until the next acceptable step.
+      headers:
+        Retry-After:
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
+    ReauthConflictError:
+      description: Reauthentication conflict. TOTP replay/stale responses include Retry-After; method or state changes do not.
+      headers:
+        Retry-After:
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
+    TotpRateLimitError:
+      description: TOTP verification is busy, challenge attempts are exhausted, or source/global anomaly protection is active. Retry-After is present for busy and source/global limits.
       content:
         application/json:
           schema:

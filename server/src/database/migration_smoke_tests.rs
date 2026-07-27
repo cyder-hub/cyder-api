@@ -719,6 +719,170 @@ fn sqlite_r211_manager_token_mediator_upgrade_clears_sessions_and_enforces_famil
 }
 
 #[test]
+fn sqlite_r213_manager_totp_upgrade_preserves_credential_and_sessions() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("r213-manager-totp-upgrade.sqlite");
+    let key_id = "a".repeat(64);
+    connection
+        .batch_execute(&format!(
+            "PRAGMA foreign_keys = ON;
+            CREATE TABLE manager_credential (
+                manager_id BIGINT PRIMARY KEY NOT NULL CHECK (manager_id = 0),
+                manager_subject TEXT NOT NULL CHECK (manager_subject = 'admin'),
+                password_verifier TEXT NOT NULL,
+                credential_epoch TEXT NOT NULL UNIQUE,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            );
+            CREATE TABLE manager_auth_instance (
+                id BIGINT PRIMARY KEY NOT NULL,
+                manager_id BIGINT NOT NULL CHECK (manager_id = 0),
+                manager_subject TEXT NOT NULL CHECK (manager_subject = 'admin'),
+                current_refresh_jti TEXT NOT NULL UNIQUE,
+                refresh_generation BIGINT NOT NULL DEFAULT 1 CHECK (refresh_generation >= 1),
+                session_version BIGINT NOT NULL DEFAULT 1 CHECK (session_version >= 1),
+                signing_key_id TEXT NOT NULL CHECK (length(signing_key_id) = 64),
+                credential_epoch TEXT NOT NULL CHECK (length(credential_epoch) = 36),
+                created_at BIGINT NOT NULL,
+                last_rotated_at BIGINT NOT NULL,
+                idle_expires_at BIGINT NOT NULL,
+                absolute_expires_at BIGINT NOT NULL,
+                revoked_at BIGINT NULL,
+                revoked_reason TEXT NULL
+            );
+            INSERT INTO manager_credential VALUES (
+                0, 'admin', 'preserved-verifier',
+                '018fa7d8-6a00-7c9a-8f7e-111111111111', 10, 20
+            );
+            INSERT INTO manager_auth_instance VALUES (
+                1, 0, 'admin', 'preserved-jti', 2, 3, '{key_id}',
+                '018fa7d8-6a00-7c9a-8f7e-111111111111',
+                10, 11, 100, 200, NULL, NULL
+            );"
+        ))
+        .expect("pre-R2.13 sqlite manager auth schema should create");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-27-090000_manager_totp/up.sql"
+        ))
+        .expect("R2.13 sqlite migration should run");
+
+    let preserved_credential = diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM manager_credential
+         WHERE manager_id = 0
+           AND manager_subject = 'admin'
+           AND password_verifier = 'preserved-verifier'
+           AND credential_epoch = '018fa7d8-6a00-7c9a-8f7e-111111111111'
+           AND created_at = 10
+           AND updated_at = 20
+           AND totp_secret_ciphertext IS NULL
+           AND totp_secret_nonce IS NULL
+           AND totp_secret_format_version IS NULL
+           AND totp_secret_key_fingerprint IS NULL
+           AND totp_last_accepted_step IS NULL
+           AND totp_enabled_at IS NULL",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("migrated credential should query")
+    .count;
+    let preserved_session = diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM manager_auth_instance
+         WHERE id = 1
+           AND current_refresh_jti = 'preserved-jti'
+           AND refresh_generation = 2
+           AND session_version = 3
+           AND revoked_at IS NULL",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("migrated session should query")
+    .count;
+    assert_eq!(preserved_credential, 1, "credential must be preserved");
+    assert_eq!(preserved_session, 1, "active session must be preserved");
+    assert_eq!(
+        sqlite_table_column_count(
+            &mut connection,
+            "manager_totp_recovery_code",
+            "code_verifier"
+        ),
+        1
+    );
+
+    assert!(
+        connection
+            .batch_execute(
+                "UPDATE manager_credential
+                 SET totp_secret_ciphertext = X'01'
+                 WHERE manager_id = 0;"
+            )
+            .is_err(),
+        "partial manager TOTP tuple must be rejected"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO manager_totp_recovery_code
+                    (code_id, manager_id, code_verifier, created_at)
+                 VALUES ('BAD', 0, 'verifier', 30);"
+            )
+            .is_err(),
+        "recovery code id must contain exactly four characters"
+    );
+    connection
+        .batch_execute(
+            "INSERT INTO manager_totp_recovery_code
+                (code_id, manager_id, code_verifier, created_at)
+             VALUES ('A000', 0, 'verifier', 30);",
+        )
+        .expect("valid recovery verifier should insert");
+    let foreign_key_violations =
+        diesel::sql_query("SELECT COUNT(*) AS count FROM pragma_foreign_key_check")
+            .get_result::<CountRow>(&mut connection)
+            .expect("sqlite foreign key check should run")
+            .count;
+    assert_eq!(foreign_key_violations, 0);
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-27-090000_manager_totp/down.sql"
+        ))
+        .expect("R2.13 sqlite down migration should run");
+    assert_eq!(
+        sqlite_table_column_count(
+            &mut connection,
+            "manager_credential",
+            "totp_secret_ciphertext"
+        ),
+        0,
+        "down migration must remove TOTP columns"
+    );
+    assert_eq!(
+        sqlite_table_column_count(
+            &mut connection,
+            "manager_totp_recovery_code",
+            "code_verifier"
+        ),
+        0,
+        "down migration must remove recovery code table"
+    );
+    let down_preserved = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM manager_credential c
+         JOIN manager_auth_instance s ON s.manager_id = c.manager_id
+         WHERE c.password_verifier = 'preserved-verifier'
+           AND c.credential_epoch = '018fa7d8-6a00-7c9a-8f7e-111111111111'
+           AND s.current_refresh_jti = 'preserved-jti'",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("down-migrated manager state should query")
+    .count;
+    assert_eq!(
+        down_preserved, 1,
+        "down migration must preserve credential and sessions"
+    );
+}
+
+#[test]
 #[ignore = "requires a dedicated PostgreSQL 17 database"]
 fn postgres_clean_upgrade_chain_from_empty() {
     let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
@@ -863,6 +1027,166 @@ fn postgres_r211_manager_token_mediator_upgrade() {
         assert_eq!(credential_count, 1, "manager credential must be preserved");
         assert_eq!(session_count, 0, "legacy sessions must be cleared");
         assert_eq!(required_columns, 6, "R2.11 columns must be required");
+    }));
+
+    rebuild_postgres_public_schema(&mut connection);
+    if let Err(panic_payload) = test_result {
+        resume_unwind(panic_payload);
+    }
+}
+
+#[test]
+#[ignore = "requires a dedicated PostgreSQL 17 database"]
+fn postgres_r213_manager_totp_upgrade_preserves_credential_and_sessions() {
+    let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
+        panic!("{POSTGRES_SMOKE_URL_ENV} must point to the dedicated PostgreSQL smoke database")
+    });
+    let mut connection = PgConnection::establish(&database_url)
+        .expect("dedicated postgres smoke database should be reachable");
+    assert_eq!(
+        postgres_database_name(&mut connection),
+        POSTGRES_SMOKE_DATABASE,
+        "refusing to rebuild a non-dedicated PostgreSQL database"
+    );
+
+    rebuild_postgres_public_schema(&mut connection);
+    let test_result = catch_unwind(AssertUnwindSafe(|| {
+        let key_id = "a".repeat(64);
+        connection
+            .batch_execute(&format!(
+                "CREATE TABLE manager_credential (
+                    manager_id BIGINT PRIMARY KEY CHECK (manager_id = 0),
+                    manager_subject TEXT NOT NULL CHECK (manager_subject = 'admin'),
+                    password_verifier TEXT NOT NULL,
+                    credential_epoch TEXT NOT NULL UNIQUE,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL
+                );
+                CREATE TABLE manager_auth_instance (
+                    id BIGINT PRIMARY KEY,
+                    manager_id BIGINT NOT NULL CHECK (manager_id = 0),
+                    manager_subject TEXT NOT NULL CHECK (manager_subject = 'admin'),
+                    current_refresh_jti TEXT NOT NULL UNIQUE,
+                    refresh_generation BIGINT NOT NULL DEFAULT 1 CHECK (refresh_generation >= 1),
+                    session_version BIGINT NOT NULL DEFAULT 1 CHECK (session_version >= 1),
+                    signing_key_id TEXT NOT NULL CHECK (char_length(signing_key_id) = 64),
+                    credential_epoch TEXT NOT NULL CHECK (char_length(credential_epoch) = 36),
+                    created_at BIGINT NOT NULL,
+                    last_rotated_at BIGINT NOT NULL,
+                    idle_expires_at BIGINT NOT NULL,
+                    absolute_expires_at BIGINT NOT NULL,
+                    revoked_at BIGINT NULL,
+                    revoked_reason TEXT NULL
+                );
+                INSERT INTO manager_credential VALUES (
+                    0, 'admin', 'preserved-verifier',
+                    '018fa7d8-6a00-7c9a-8f7e-111111111111', 10, 20
+                );
+                INSERT INTO manager_auth_instance VALUES (
+                    1, 0, 'admin', 'preserved-jti', 2, 3, '{key_id}',
+                    '018fa7d8-6a00-7c9a-8f7e-111111111111',
+                    10, 11, 100, 200, NULL, NULL
+                );"
+            ))
+            .expect("pre-R2.13 postgres manager auth schema should create");
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-27-090000_manager_totp/up.sql"
+            ))
+            .expect("R2.13 postgres migration should run");
+
+        let preserved_credential = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM manager_credential
+             WHERE manager_id = 0
+               AND password_verifier = 'preserved-verifier'
+               AND credential_epoch = '018fa7d8-6a00-7c9a-8f7e-111111111111'
+               AND created_at = 10
+               AND updated_at = 20
+               AND totp_secret_ciphertext IS NULL
+               AND totp_secret_nonce IS NULL
+               AND totp_secret_format_version IS NULL
+               AND totp_secret_key_fingerprint IS NULL
+               AND totp_last_accepted_step IS NULL
+               AND totp_enabled_at IS NULL",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("migrated postgres credential should query")
+        .count;
+        let preserved_session = diesel::sql_query(
+            "SELECT COUNT(*) AS count FROM manager_auth_instance
+             WHERE id = 1
+               AND current_refresh_jti = 'preserved-jti'
+               AND refresh_generation = 2
+               AND session_version = 3
+               AND revoked_at IS NULL",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("migrated postgres session should query")
+        .count;
+        let recovery_table = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM information_schema.tables
+             WHERE table_schema = current_schema()
+               AND table_name = 'manager_totp_recovery_code'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("postgres recovery table should query")
+        .count;
+        assert_eq!(preserved_credential, 1, "credential must be preserved");
+        assert_eq!(preserved_session, 1, "active session must be preserved");
+        assert_eq!(recovery_table, 1, "recovery table must be created");
+
+        assert!(
+            connection
+                .batch_execute(
+                    "UPDATE manager_credential
+                     SET totp_secret_ciphertext = decode('01', 'hex')
+                     WHERE manager_id = 0;"
+                )
+                .is_err(),
+            "partial postgres manager TOTP tuple must be rejected"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO manager_totp_recovery_code
+                        (code_id, manager_id, code_verifier, created_at)
+                     VALUES ('BAD', 0, 'verifier', 30);"
+                )
+                .is_err(),
+            "postgres recovery code id must contain exactly four characters"
+        );
+
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-27-090000_manager_totp/down.sql"
+            ))
+            .expect("R2.13 postgres down migration should run");
+        let down_columns = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'manager_credential'
+               AND column_name LIKE 'totp_%'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("down-migrated postgres columns should query")
+        .count;
+        let down_preserved = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM manager_credential c
+             JOIN manager_auth_instance s ON s.manager_id = c.manager_id
+             WHERE c.password_verifier = 'preserved-verifier'
+               AND s.current_refresh_jti = 'preserved-jti'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("down-migrated postgres manager state should query")
+        .count;
+        assert_eq!(down_columns, 0, "down migration must remove TOTP columns");
+        assert_eq!(
+            down_preserved, 1,
+            "down migration must preserve credential and sessions"
+        );
     }));
 
     rebuild_postgres_public_schema(&mut connection);

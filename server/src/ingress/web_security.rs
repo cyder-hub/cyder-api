@@ -112,7 +112,7 @@ mod tests {
         );
         assert_eq!(
             manager_cache_control(
-                "/ai/manager/api/auth/login",
+                "/ai/manager/api/auth/login/password",
                 StatusCode::OK,
                 Some(&HeaderValue::from_static("application/json"))
             ),

@@ -47,7 +47,7 @@ impl AdminServices {
         let mutation_runner = Arc::new(AdminMutationRunner::new(catalog));
 
         Self {
-            auth: Arc::new(ManagerAuthService::new()),
+            auth: Arc::new(ManagerAuthService::new(Arc::clone(&secret_encryption))),
             provider: Arc::new(ProviderAdminService::new(
                 Arc::clone(&mutation_runner),
                 Arc::clone(&secret_encryption),
@@ -115,6 +115,10 @@ mod tests {
         assert!(Arc::ptr_eq(&services.secret_encryption, &secret_encryption,));
         assert!(Arc::ptr_eq(
             services.api_key.secret_encryption(),
+            &secret_encryption,
+        ));
+        assert!(Arc::ptr_eq(
+            services.auth.secret_encryption(),
             &secret_encryption,
         ));
         assert_eq!(Arc::strong_count(&catalog), 2);

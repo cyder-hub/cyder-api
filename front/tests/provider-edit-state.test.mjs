@@ -284,7 +284,8 @@ test("provider credential service and UI keep saved summaries plaintext-free", a
 
   assert.match(service, /provider\/\$\{id\}\/provider_keys`/);
   assert.match(service, /provider_keys\/\$\{keyId\}\/replace/);
-  assert.match(service, /request\.post\(`\/ai\/manager\/api\/provider\/\$\{id\}\/provider_keys\/\$\{keyId\}\/reveal`\)/);
+  assert.match(service, /provider_keys\/\$\{keyId\}\/reveal/);
+  assert.doesNotMatch(service, /sensitiveTotpRequestConfig|totpCode/);
   assert.doesNotMatch(service, /provider_key\/\$\{keyId\}/);
 
   assert.match(component, /provider_api_key: secretInput\.value/);

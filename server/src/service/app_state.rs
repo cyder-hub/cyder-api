@@ -36,6 +36,8 @@ pub struct AppState {
     pub metrics: Arc<MetricsService>,
     pub runtime_backend_status: Arc<RuntimeStateBackendStatus>,
     pub secret_encryption: Arc<SecretEncryptionService>,
+    pub manager_auth_browser_origin: Option<String>,
+    pub base_path: String,
     pub max_body_size: usize,
     pub timezone: Option<String>,
 }
@@ -71,6 +73,14 @@ impl AppState {
         let force_memory_cache = false;
         let force_memory_runtime_state = force_memory_cache;
         let config = CONFIG.clone();
+        #[cfg(test)]
+        let config = {
+            let mut config = config;
+            if test_db_context.is_some() {
+                config.manager_auth.browser_origin = Some("http://127.0.0.1:29528".to_string());
+            }
+            config
+        };
 
         #[cfg(test)]
         let infra = Arc::new(
@@ -123,6 +133,8 @@ impl AppState {
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
             secret_encryption,
+            manager_auth_browser_origin: config.manager_auth.browser_origin.clone(),
+            base_path: config.base_path.clone(),
             max_body_size: config.max_body_size,
             timezone: config.timezone.clone(),
         })
@@ -348,6 +360,8 @@ mod tests {
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
             secret_encryption,
+            manager_auth_browser_origin: config.manager_auth.browser_origin.clone(),
+            base_path: config.base_path.clone(),
             max_body_size: config.max_body_size,
             timezone: config.timezone,
         }

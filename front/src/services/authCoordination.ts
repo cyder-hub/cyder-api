@@ -3,7 +3,8 @@ export const MANAGER_AUTH_EVENT_SCHEMA_VERSION = 1;
 
 export type ManagerAuthCoordinationEvent =
   | { schema_version: 1; type: "session_changed" }
-  | { schema_version: 1; type: "session_revoked" };
+  | { schema_version: 1; type: "session_revoked" }
+  | { schema_version: 1; type: "authorization_changed" };
 
 interface MessageEventLike {
   data: unknown;
@@ -69,7 +70,9 @@ function isCoordinationEvent(
     keys[0] === "schema_version" &&
     keys[1] === "type" &&
     event.schema_version === MANAGER_AUTH_EVENT_SCHEMA_VERSION &&
-    (event.type === "session_changed" || event.type === "session_revoked")
+    (event.type === "session_changed" ||
+      event.type === "session_revoked" ||
+      event.type === "authorization_changed")
   );
 }
 
@@ -132,6 +135,7 @@ export function createAuthCoordination(
   return {
     announceSessionChanged: () => announce("session_changed"),
     announceSessionRevoked: () => announce("session_revoked"),
+    announceAuthorizationChanged: () => announce("authorization_changed"),
     dispose: () => {
       channel?.removeEventListener("message", onMessage);
       channel?.close();

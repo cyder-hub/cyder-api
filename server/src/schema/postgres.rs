@@ -163,13 +163,30 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::{Binary, Int4, Int8, Nullable, Text};
+
     manager_credential (manager_id) {
         manager_id -> Int8,
         manager_subject -> Text,
         password_verifier -> Text,
         credential_epoch -> Text,
+        totp_secret_ciphertext -> Nullable<Binary>,
+        totp_secret_nonce -> Nullable<Binary>,
+        totp_secret_format_version -> Nullable<Int4>,
+        totp_secret_key_fingerprint -> Nullable<Text>,
+        totp_last_accepted_step -> Nullable<Int8>,
+        totp_enabled_at -> Nullable<Int8>,
         created_at -> Int8,
         updated_at -> Int8,
+    }
+}
+
+diesel::table! {
+    manager_totp_recovery_code (code_id) {
+        code_id -> Text,
+        manager_id -> Int8,
+        code_verifier -> Text,
+        created_at -> Int8,
     }
 }
 
@@ -423,6 +440,7 @@ diesel::joinable!(cost_catalog_versions -> cost_catalogs (catalog_id));
 diesel::joinable!(cost_components -> cost_catalog_versions (catalog_version_id));
 diesel::joinable!(model -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(model -> provider (provider_id));
+diesel::joinable!(manager_totp_recovery_code -> manager_credential (manager_id));
 diesel::joinable!(provider_api_key -> provider (provider_id));
 diesel::joinable!(reasoning_config_preset -> reasoning_config (config_id));
 diesel::joinable!(runtime_feature_config -> model (model_id));
@@ -446,6 +464,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     cost_components,
     manager_auth_instance,
     manager_credential,
+    manager_totp_recovery_code,
     metric_cost_rollup_minute,
     metric_http_status_rollup_minute,
     metric_ingested_request_log,

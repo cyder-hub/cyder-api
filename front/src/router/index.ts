@@ -52,6 +52,17 @@ const router = createRouter({
           },
         },
         {
+          path: "security",
+          name: "Security",
+          component: () => import("@/pages/security/SecurityPage.vue"),
+          meta: {
+            titleKey: "securityPage.title",
+            navKey: "security",
+            navGroup: "governance",
+            operatorPriority: "secondary",
+          },
+        },
+        {
           path: "provider",
           name: "Provider",
           component: () => import("@/pages/provider/ProviderPage.vue"),

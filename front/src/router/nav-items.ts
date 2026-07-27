@@ -7,6 +7,7 @@ import {
   KeyRound,
   LayoutDashboard,
   Server,
+  ShieldCheck,
 } from "lucide-vue-next";
 
 type NavItem = {
@@ -74,6 +75,13 @@ export const navItems: NavItem[] = [
     navKey: "cost",
     i18nKey: "sidebar.cost",
     icon: DollarSign,
+    section: "governance",
+  },
+  {
+    path: "/security",
+    navKey: "security",
+    i18nKey: "sidebar.security",
+    icon: ShieldCheck,
     section: "governance",
   },
 ];

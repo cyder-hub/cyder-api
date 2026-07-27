@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Cyder Manager API Key Living Contract
-  version: 1.0.0-pre.1
+  version: 1.0.0-pre.3
   description: Downstream API key lifecycle contract for the single-manager control plane.
 servers:
   - url: /
@@ -10,6 +10,7 @@ security:
 x-cyder-default-cache-control: no-store
 x-cyder-web-security-client-identity-contract: ../web-security-client-identity.md
 x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434, 1435, 1436]
+x-cyder-secret-governance-reauth-operation-ids: [createApiKey, deleteApiKey, rotateApiKey, revealApiKey]
 paths:
   /ai/manager/api/api_key/list:
     get:
@@ -34,8 +35,8 @@ paths:
   /ai/manager/api/api_key:
     post:
       operationId: createApiKey
-      description: Creates an API key and returns its plaintext exactly once in this successful response. The request must not be replayed automatically.
-      x-cyder-error-codes: [1001, 1100, 1101, 1431, 1432, 1433, 1434, 1435, 1436]
+      description: Creates an API key and returns its plaintext exactly once in this successful response. A current-session secret_governance reauthentication grant is required. The request must not be replayed automatically.
+      x-cyder-error-codes: [1001, 1100, 1101, 1431, 1432, 1433, 1434, 1435, 1436, 1479, 1480, 1491]
       requestBody:
         required: true
         content:
@@ -55,6 +56,12 @@ paths:
         "400":
           $ref: "#/components/responses/ManagerError"
         "401":
+          $ref: "#/components/responses/ManagerError"
+        "409":
+          $ref: "#/components/responses/ManagerError"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
           $ref: "#/components/responses/ManagerError"
         "500":
           $ref: "#/components/responses/ManagerError"
@@ -116,8 +123,8 @@ paths:
           $ref: "#/components/responses/ManagerError"
     delete:
       operationId: deleteApiKey
-      description: Soft-deletes and disables the API key while irreversibly clearing any encrypted secret tuple.
-      x-cyder-error-codes: [1002, 1100, 1431, 1432, 1433, 1434, 1435, 1436]
+      description: Soft-deletes and disables the API key while irreversibly clearing any encrypted secret tuple. A current-session secret_governance reauthentication grant is required.
+      x-cyder-error-codes: [1002, 1100, 1431, 1432, 1433, 1434, 1435, 1436, 1479, 1480, 1491]
       responses:
         "200":
           description: API key deleted.
@@ -132,6 +139,12 @@ paths:
           $ref: "#/components/responses/ManagerError"
         "404":
           $ref: "#/components/responses/ManagerError"
+        "409":
+          $ref: "#/components/responses/ManagerError"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
+          $ref: "#/components/responses/ManagerError"
         "500":
           $ref: "#/components/responses/ManagerError"
         "503":
@@ -141,8 +154,8 @@ paths:
       - $ref: "#/components/parameters/ApiKeyId"
     post:
       operationId: rotateApiKey
-      description: Immediately invalidates the old plaintext and returns the replacement exactly once. This request has no body and must not be replayed automatically.
-      x-cyder-error-codes: [1002, 1100, 1101, 1431, 1432, 1433, 1434, 1435, 1436]
+      description: Immediately invalidates the old plaintext and returns the replacement exactly once. A current-session secret_governance reauthentication grant is required. This request has no body and must not be replayed automatically.
+      x-cyder-error-codes: [1002, 1100, 1101, 1431, 1432, 1433, 1434, 1435, 1436, 1479, 1480, 1491]
       responses:
         "200":
           description: One-time replacement plaintext API key.
@@ -157,6 +170,12 @@ paths:
           $ref: "#/components/responses/ManagerError"
         "404":
           $ref: "#/components/responses/ManagerError"
+        "409":
+          $ref: "#/components/responses/ManagerError"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
+          $ref: "#/components/responses/ManagerError"
         "500":
           $ref: "#/components/responses/ManagerError"
         "503":
@@ -166,8 +185,8 @@ paths:
       - $ref: "#/components/parameters/ApiKeyId"
     post:
       operationId: revealApiKey
-      description: Returns the recoverable plaintext when can_reveal is true. This request has no body. All unavailable causes share one response.
-      x-cyder-error-codes: [1002, 1004, 1100, 1431, 1432, 1433, 1434, 1435, 1436]
+      description: Returns the recoverable plaintext when can_reveal is true. A current-session secret_governance reauthentication grant is required. This request has no body. All unavailable causes share one response.
+      x-cyder-error-codes: [1002, 1004, 1100, 1431, 1432, 1433, 1434, 1435, 1436, 1479, 1480, 1491]
       responses:
         "200":
           description: Recoverable plaintext API key.
@@ -183,14 +202,11 @@ paths:
         "404":
           $ref: "#/components/responses/ManagerError"
         "409":
-          description: The API key plaintext is unavailable. Mode, missing ciphertext, fingerprint mismatch, unsupported format, and decryption failure are intentionally indistinguishable.
-          headers:
-            Cache-Control:
-              $ref: "#/components/headers/NoStore"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiKeySecretUnavailableError"
+          $ref: "#/components/responses/ApiKeyRevealConflict"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
+          $ref: "#/components/responses/ManagerError"
         "500":
           $ref: "#/components/responses/ManagerError"
         "503":
@@ -473,3 +489,14 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ManagerError"
+    ApiKeyRevealConflict:
+      description: Either the API key plaintext is unavailable or the supplied TOTP step is replayed/stale. Secret mode, ciphertext, fingerprint, format, and decryption failures remain intentionally indistinguishable.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/ApiKeySecretUnavailableError"
+              - $ref: "#/components/schemas/ManagerError"

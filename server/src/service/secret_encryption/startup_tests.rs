@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::database::api_key::{_postgres_model, _sqlite_model, ApiKey, CreateApiKeyPayload};
+use crate::database::manager_credential::{MANAGER_ID, ManagerCredential, NewManagerCredential};
 use crate::database::provider::{
     NewProvider, NewProviderApiKey, Provider, ProviderApiKeyRepository, StoredProviderApiKey,
 };
@@ -118,6 +119,61 @@ fn encrypt_for(id: i64, service: &SecretEncryptionService, value: &str) -> Encry
             &SensitiveSecret::new(value.to_string()),
         )
         .expect("test secret should encrypt")
+}
+
+fn create_manager_credential() {
+    ManagerCredential::insert_once(NewManagerCredential {
+        password_verifier: "$argon2id$v=19$m=65536,t=3,p=4$fixture$fixture".to_string(),
+        credential_epoch: "018fa7d8-6a00-7c9a-8f7e-999999999999".to_string(),
+        now: 1,
+    })
+    .expect("manager credential should insert");
+}
+
+fn store_manager_totp_secret(
+    encrypted: &EncryptedSecret,
+    last_accepted_step: i64,
+    enabled_at: i64,
+) {
+    let conn = &mut get_connection().expect("test connection should load");
+    db_execute!(conn, {
+        let updated = diesel::update(
+            manager_credential::table.filter(manager_credential::dsl::manager_id.eq(MANAGER_ID)),
+        )
+        .set((
+            manager_credential::dsl::totp_secret_ciphertext
+                .eq(Some(encrypted.ciphertext().to_vec())),
+            manager_credential::dsl::totp_secret_nonce.eq(Some(encrypted.nonce().to_vec())),
+            manager_credential::dsl::totp_secret_format_version
+                .eq(Some(encrypted.format_version())),
+            manager_credential::dsl::totp_secret_key_fingerprint
+                .eq(Some(encrypted.key_fingerprint().as_str().to_string())),
+            manager_credential::dsl::totp_last_accepted_step.eq(Some(last_accepted_step)),
+            manager_credential::dsl::totp_enabled_at.eq(Some(enabled_at)),
+        ))
+        .execute(conn)
+        .expect("manager TOTP fixture should persist");
+        assert_eq!(updated, 1);
+    });
+}
+
+fn load_manager_totp_secret() -> EncryptedSecret {
+    let credential = ManagerCredential::load()
+        .expect("manager credential should load")
+        .expect("manager credential should exist");
+    EncryptedSecret::from_parts(
+        credential
+            .totp_secret_ciphertext
+            .expect("manager TOTP ciphertext"),
+        credential.totp_secret_nonce.expect("manager TOTP nonce"),
+        credential
+            .totp_secret_format_version
+            .expect("manager TOTP format"),
+        credential
+            .totp_secret_key_fingerprint
+            .expect("manager TOTP fingerprint"),
+    )
+    .expect("manager TOTP tuple should be structurally valid")
 }
 
 fn create_test_provider(id: i64) -> Provider {
@@ -254,6 +310,155 @@ fn startup_rotation_runs_in_one_time_mode() {
             )
             .expect("historical secret should use current key");
         assert_eq!(plaintext.expose(), "preserved-for-future");
+    });
+}
+
+#[test]
+fn startup_manager_totp_authenticates_current_and_rotates_previous_secret() {
+    let context = TestDbContext::new_sqlite("manager-totp-startup-rotation.sqlite");
+    context.run_sync(|| {
+        create_manager_credential();
+        let current_service = service_for_key(KEY_A);
+        let previous_service = service_for_key(KEY_B);
+        let plaintext = SensitiveSecret::new("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".to_string());
+        let previous = previous_service
+            .encrypt_current(SecretDomain::ManagerTotp(MANAGER_ID), &plaintext)
+            .expect("previous manager TOTP secret should encrypt");
+        store_manager_totp_secret(&previous, 123, 456);
+
+        let config = rotation_config(DownstreamSecretMode::OneTime);
+        let summary = prepare_secrets_before_startup(&config)
+            .expect("previous manager TOTP should rotate without blocking startup");
+        assert_eq!(
+            summary.manager_totp.state,
+            ManagerTotpPreparationState::Rotated
+        );
+        assert_eq!(summary.manager_totp.failure, None);
+        assert_eq!(
+            summary.manager_totp.key_fingerprint_short_str(),
+            current_service
+                .current_fingerprint()
+                .map(KeyFingerprint::short)
+        );
+
+        let rotated = load_manager_totp_secret();
+        assert_eq!(
+            current_service
+                .decrypt_current(SecretDomain::ManagerTotp(MANAGER_ID), &rotated)
+                .expect("rotated manager TOTP should use current key")
+                .expose(),
+            plaintext.expose()
+        );
+        let credential = ManagerCredential::load().unwrap().unwrap();
+        assert_eq!(credential.totp_last_accepted_step, Some(123));
+        assert_eq!(credential.totp_enabled_at, Some(456));
+        assert_eq!(
+            credential.credential_epoch,
+            "018fa7d8-6a00-7c9a-8f7e-999999999999"
+        );
+
+        let second = prepare_secrets_before_startup(&config)
+            .expect("current manager TOTP should be authenticated");
+        assert_eq!(
+            second.manager_totp.state,
+            ManagerTotpPreparationState::Current
+        );
+        assert_eq!(second.manager_totp.failure, None);
+    });
+}
+
+#[test]
+fn corrupt_manager_totp_is_preserved_while_other_secret_domains_prepare() {
+    let context = TestDbContext::new_sqlite("manager-totp-startup-degraded.sqlite");
+    context.run_sync(|| {
+        create_manager_credential();
+        let current_service = service_for_key(KEY_A);
+        let previous_service = service_for_key(KEY_B);
+        let plaintext = SensitiveSecret::new("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".to_string());
+        let mut corrupt = current_service
+            .encrypt_current(SecretDomain::ManagerTotp(MANAGER_ID), &plaintext)
+            .expect("current manager TOTP should encrypt");
+        corrupt.ciphertext[0] ^= 1;
+        store_manager_totp_secret(&corrupt, 100, 200);
+        let corrupt_before = load_manager_totp_secret();
+
+        let downstream_id = create_test_api_key("manager-degraded-downstream");
+        store_encrypted_secret(
+            downstream_id,
+            &encrypt_for(
+                downstream_id,
+                &previous_service,
+                "rotatable-downstream-secret",
+            ),
+        );
+        let provider = create_test_provider(9_001);
+        create_test_provider_secret(
+            9_101,
+            provider.id,
+            &current_service,
+            "valid-provider-secret",
+        );
+
+        let config = rotation_config(DownstreamSecretMode::Recoverable);
+        let summary = prepare_secrets_before_startup(&config)
+            .expect("corrupt manager TOTP must not block other secret domains");
+        assert_eq!(summary.downstream.rotated, 1);
+        assert_eq!(summary.provider.current, 1);
+        assert_eq!(
+            summary.manager_totp.state,
+            ManagerTotpPreparationState::UnavailablePreserved
+        );
+        assert_eq!(
+            summary.manager_totp.failure,
+            Some(ManagerTotpPreparationFailure::DecryptFailed)
+        );
+        assert_eq!(load_manager_totp_secret(), corrupt_before);
+        assert!(!config.has_previous_encryption_key());
+    });
+}
+
+#[test]
+fn unknown_key_and_invalid_plaintext_manager_totp_are_preserved() {
+    let unknown_context = TestDbContext::new_sqlite("manager-totp-startup-unknown.sqlite");
+    unknown_context.run_sync(|| {
+        create_manager_credential();
+        let unknown_service = service_for_key(KEY_C);
+        let plaintext = SensitiveSecret::new("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".to_string());
+        let unknown = unknown_service
+            .encrypt_current(SecretDomain::ManagerTotp(MANAGER_ID), &plaintext)
+            .expect("unknown manager TOTP should encrypt");
+        store_manager_totp_secret(&unknown, 10, 20);
+        let before = load_manager_totp_secret();
+
+        let summary =
+            prepare_secrets_before_startup(&rotation_config(DownstreamSecretMode::OneTime))
+                .expect("unknown manager TOTP key should degrade without failing startup");
+        assert_eq!(
+            summary.manager_totp.failure,
+            Some(ManagerTotpPreparationFailure::UnknownKey)
+        );
+        assert_eq!(load_manager_totp_secret(), before);
+    });
+
+    let invalid_context = TestDbContext::new_sqlite("manager-totp-startup-invalid.sqlite");
+    invalid_context.run_sync(|| {
+        create_manager_credential();
+        let previous_service = service_for_key(KEY_B);
+        let invalid_plaintext = SensitiveSecret::new("NOT-VALID-BASE32".to_string());
+        let invalid = previous_service
+            .encrypt_current(SecretDomain::ManagerTotp(MANAGER_ID), &invalid_plaintext)
+            .expect("invalid plaintext fixture should encrypt");
+        store_manager_totp_secret(&invalid, 10, 20);
+        let before = load_manager_totp_secret();
+
+        let summary =
+            prepare_secrets_before_startup(&rotation_config(DownstreamSecretMode::OneTime))
+                .expect("invalid manager TOTP plaintext should not fail startup");
+        assert_eq!(
+            summary.manager_totp.failure,
+            Some(ManagerTotpPreparationFailure::InvalidSecret)
+        );
+        assert_eq!(load_manager_totp_secret(), before);
     });
 }
 
@@ -559,6 +764,16 @@ fn postgres_startup_rotation_reencrypts_previous_and_preserves_unknown() {
             let previous_service = service_for_key(KEY_B);
             let unknown_service = service_for_key(KEY_C);
             let current_service = service_for_key(KEY_A);
+            create_manager_credential();
+            let manager_totp_plaintext =
+                SensitiveSecret::new("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".to_string());
+            let previous_manager_totp = previous_service
+                .encrypt_current(
+                    SecretDomain::ManagerTotp(MANAGER_ID),
+                    &manager_totp_plaintext,
+                )
+                .expect("postgres previous manager TOTP should encrypt");
+            store_manager_totp_secret(&previous_manager_totp, 123, 456);
             let previous_id = create_test_api_key("postgres-previous");
             let unknown_id = create_test_api_key("postgres-unknown");
             let previous = encrypt_for(previous_id, &previous_service, "postgres-secret");
@@ -579,6 +794,10 @@ fn postgres_startup_rotation_reencrypts_previous_and_preserves_unknown() {
             assert_eq!(summary.downstream.rotated, 1);
             assert_eq!(summary.downstream.unavailable_preserved, 1);
             assert_eq!(summary.provider.rotated, 1);
+            assert_eq!(
+                summary.manager_totp.state,
+                ManagerTotpPreparationState::Rotated
+            );
             let plaintext = current_service
                 .decrypt_current(
                     SecretDomain::DownstreamApiKey(previous_id),
@@ -596,6 +815,43 @@ fn postgres_startup_rotation_reencrypts_previous_and_preserves_unknown() {
                 )
                 .expect("postgres provider secret should rotate");
             assert_eq!(provider_plaintext.expose(), "postgres-provider-secret");
+
+            assert_eq!(
+                current_service
+                    .decrypt_current(
+                        SecretDomain::ManagerTotp(MANAGER_ID),
+                        &load_manager_totp_secret(),
+                    )
+                    .expect("postgres manager TOTP should rotate to current")
+                    .expose(),
+                manager_totp_plaintext.expose()
+            );
+            let current_summary = prepare_secrets_before_startup(&config)
+                .expect("postgres current manager TOTP should authenticate");
+            assert_eq!(
+                current_summary.manager_totp.state,
+                ManagerTotpPreparationState::Current
+            );
+
+            let unknown_manager_totp = unknown_service
+                .encrypt_current(
+                    SecretDomain::ManagerTotp(MANAGER_ID),
+                    &manager_totp_plaintext,
+                )
+                .expect("postgres unknown manager TOTP should encrypt");
+            store_manager_totp_secret(&unknown_manager_totp, 124, 457);
+            let unknown_before = load_manager_totp_secret();
+            let unknown_summary = prepare_secrets_before_startup(&config)
+                .expect("postgres unknown manager TOTP must not block startup");
+            assert_eq!(
+                unknown_summary.manager_totp.state,
+                ManagerTotpPreparationState::UnavailablePreserved
+            );
+            assert_eq!(
+                unknown_summary.manager_totp.failure,
+                Some(ManagerTotpPreparationFailure::UnknownKey)
+            );
+            assert_eq!(load_manager_totp_secret(), unknown_before);
         });
     }));
     drop(context);

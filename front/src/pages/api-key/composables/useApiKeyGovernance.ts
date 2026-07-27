@@ -1,7 +1,11 @@
 import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 
 import * as apiKeyService from "@/services/apiKeys";
-import { confirm, toastController } from "@/services/uiFeedback";
+import {
+  isManagerReauthCancelled,
+  runWithSecretGovernanceReauth,
+} from "@/services/managerReauth";
+import { toastController } from "@/services/uiFeedback";
 import { normalizeError } from "@/utils/error";
 import { formatPriceInputFromNanos } from "@/utils/money";
 import type {
@@ -461,8 +465,8 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
         );
         options.emitSaveSuccess({ detail: response });
       } else {
-        const response = await apiKeyService.createApiKey(
-          payloadBase as ApiKeyCreatePayload,
+        const response = await runWithSecretGovernanceReauth(() =>
+          apiKeyService.createApiKey(payloadBase as ApiKeyCreatePayload),
         );
         options.emitSaveSuccess(response);
       }
@@ -470,11 +474,11 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
       toastController.success(options.t("apiKeyEditModal.alert.saveSuccess"));
       options.close();
     } catch (error: unknown) {
-      toastController.error(
-        options.t("apiKeyEditModal.alert.saveFailed", {
-          error: normalizeError(error, options.t("common.unknownError")).message,
-        }),
-      );
+      if (isManagerReauthCancelled(error)) return;
+      const fallback = options.t("apiKeyEditModal.alert.saveFailed", {
+        error: normalizeError(error, options.t("common.unknownError")).message,
+      });
+      toastController.error(fallback);
     } finally {
       isSubmitting.value = false;
     }
@@ -545,47 +549,31 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
     await options.refreshList(payload.detail.id);
   }
 
-  async function handleRotateKey(id: number) {
-    const target = options.apiKeys.value.find((item) => item.id === id);
-    if (
-      !(await confirm({
-        title: options.t("apiKeyPage.confirmRotate", {
-          name: target?.name ?? String(id),
-        }),
-        confirmText: options.t("apiKeyPage.actions.rotate"),
-      }))
-    ) {
-      return;
-    }
-
+  async function handleRotateKey(id: number): Promise<boolean> {
     try {
-      options.setIssuedSecret(await apiKeyService.rotateApiKey(id));
+      options.setIssuedSecret(
+        await runWithSecretGovernanceReauth(() =>
+          apiKeyService.rotateApiKey(id),
+        ),
+      );
       await options.refreshList(id);
       await options.refreshDetail(id);
+      return true;
     } catch (err: unknown) {
-      toastController.error(
-        options.t("apiKeyPage.rotateFailed", {
-          error: normalizeError(err, options.t("common.unknownError")).message,
-        }),
-      );
+      if (isManagerReauthCancelled(err)) return false;
+      const fallback = options.t("apiKeyPage.rotateFailed", {
+        error: normalizeError(err, options.t("common.unknownError")).message,
+      });
+      toastController.error(fallback);
+      return false;
     }
   }
 
   async function handleDeleteKey(id: number): Promise<boolean> {
-    const target = options.apiKeys.value.find((item) => item.id === id);
-    if (
-      !(await confirm({
-        title: options.t("apiKeyPage.confirmDelete", {
-          name: target?.name ?? String(id),
-        }),
-        confirmText: options.t("common.delete"),
-      }))
-    ) {
-      return false;
-    }
-
     try {
-      await apiKeyService.deleteApiKey(id);
+      await runWithSecretGovernanceReauth(() =>
+        apiKeyService.deleteApiKey(id),
+      );
       if (options.selectedKeyId.value === id) {
         options.selectedKeyId.value = null;
         options.selectedDetail.value = null;
@@ -595,11 +583,11 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
       await options.refreshDetail(nextSelectedId);
       return true;
     } catch (err: unknown) {
-      toastController.error(
-        options.t("apiKeyPage.deleteFailed", {
-          error: normalizeError(err, options.t("common.unknownError")).message,
-        }),
-      );
+      if (isManagerReauthCancelled(err)) return false;
+      const fallback = options.t("apiKeyPage.deleteFailed", {
+        error: normalizeError(err, options.t("common.unknownError")).message,
+      });
+      toastController.error(fallback);
       return false;
     }
   }

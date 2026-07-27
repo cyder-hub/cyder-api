@@ -17,12 +17,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use uuid::Uuid;
 
-use crate::config::CONFIG;
 use crate::ingress::client_identity::ClientIdentity;
 use crate::service::admin::auth::{
     AccessTokenError, AuthTokenPair, BootstrapError, BootstrapStatus, BootstrapStatusError,
-    LoginError, LogoutError, RotatePasswordError,
+    LoginPasswordError, LoginPasswordResult, LogoutError, ManagerReauthCredential,
+    ManagerSecretGovernanceReauth, ManagerTotpLifecycleResult, ManagerTotpPublicState,
+    ManagerTotpSetup, ManagerTotpVerificationError, RotatePasswordError,
 };
 use crate::service::app_state::{AppState, StateRouter, create_state_router};
 use crate::utils::{
@@ -39,6 +41,9 @@ const MANAGER_AUTH_REQUEST_HEADER_VALUE: &str = "1";
 const SEC_FETCH_SITE: &str = "sec-fetch-site";
 const PRODUCTION_MEDIATOR_COOKIE: &str = "__Secure-cyder_manager_session";
 const DEVELOPMENT_MEDIATOR_COOKIE: &str = "cyder_manager_session_dev";
+pub(crate) const MANAGER_TOTP_CODE_HEADER: &str = "x-cyder-totp-code";
+const MAX_CHALLENGE_INPUT_BYTES: usize = 36;
+const MAX_RECOVERY_CODE_INPUT_BYTES: usize = 64;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,14 +58,110 @@ struct RotatePasswordRequest {
     new_password: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginTotpRequest {
+    login_challenge: String,
+    totp_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryStartRequest {
+    password: String,
+    recovery_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryConfirmRequest {
+    recovery_challenge: String,
+    totp_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurrentPasswordRequest {
+    current_password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupConfirmRequest {
+    setup_challenge: String,
+    totp_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+enum ManagerReauthRequest {
+    Password { password: String },
+    Totp { totp_code: String },
+}
+
 #[derive(Serialize)]
 struct BootstrapStatusResponse {
     state: &'static str,
 }
 
 #[derive(Serialize)]
+struct ManagerReauthResponse {
+    scope: &'static str,
+    method: &'static str,
+    verified_until: i64,
+}
+
+#[derive(Serialize)]
 struct AuthAccessResponse {
     access_token: String,
+    totp_state: &'static str,
+    reauth: Option<ManagerReauthResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum LoginPasswordResponse {
+    Authenticated {
+        access_token: String,
+        totp_state: &'static str,
+        reauth: Option<ManagerReauthResponse>,
+    },
+    TotpRequired {
+        login_challenge: String,
+        expires_in: u64,
+    },
+}
+
+#[derive(Serialize)]
+struct ManagerTotpSetupResponse {
+    setup_challenge: String,
+    manual_secret: String,
+    otpauth_uri: String,
+    expires_in: u64,
+}
+
+#[derive(Serialize)]
+struct ManagerTotpRecoverySetupResponse {
+    recovery_challenge: String,
+    manual_secret: String,
+    otpauth_uri: String,
+    expires_in: u64,
+}
+
+#[derive(Serialize)]
+struct ManagerTotpLifecycleResponse {
+    access_token: String,
+    totp_state: &'static str,
+    reauth: Option<ManagerReauthResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_codes: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct ManagerTotpStatusResponse {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -68,10 +169,12 @@ struct LogoutAllResponse {
     revoked_sessions: usize,
 }
 
-impl From<&AuthTokenPair> for AuthAccessResponse {
-    fn from(value: &AuthTokenPair) -> Self {
+impl AuthAccessResponse {
+    fn new(value: &AuthTokenPair, totp_state: ManagerTotpPublicState) -> Self {
         Self {
             access_token: value.access_token.clone(),
+            totp_state: manager_totp_state_name(totp_state),
+            reauth: value.reauth.map(manager_reauth_response),
         }
     }
 }
@@ -97,9 +200,31 @@ enum LoginHttpError {
     Busy,
     SourceRateLimited(u64),
     GlobalRateLimited(u64),
+    ManagerTotpUnavailable,
     Unavailable,
     Storage,
     InvalidRequest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagerTotpHttpError {
+    Required,
+    Invalid,
+    StepReplayed(u64),
+    StepStale(u64),
+    SourceRateLimited(u64),
+    GlobalRateLimited(u64),
+    ChallengeInvalidOrExpired,
+    ChallengeAttemptsExhausted,
+    Unavailable,
+    StateConflict,
+    CurrentPasswordInvalid,
+    RecoveryCredentialsInvalid,
+    Busy,
+    Storage,
+    RequestInvalid,
+    ReauthRequired,
+    ReauthMethodChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +335,12 @@ impl IntoResponse for LoginHttpError {
                 "manager login anomaly protection is active",
                 Some(retry_after),
             ),
+            Self::ManagerTotpUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                1479,
+                "manager TOTP unavailable",
+                None,
+            ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 1414,
@@ -226,6 +357,116 @@ impl IntoResponse for LoginHttpError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 1416,
                 "login request is invalid",
+                None,
+            ),
+        };
+        auth_error_response_with_retry_after(status, code, message, retry_after)
+    }
+}
+
+impl IntoResponse for ManagerTotpHttpError {
+    fn into_response(self) -> Response {
+        let (status, code, message, retry_after) = match self {
+            Self::Required => (
+                StatusCode::PRECONDITION_REQUIRED,
+                1471,
+                "manager TOTP is required",
+                None,
+            ),
+            Self::Invalid => (
+                StatusCode::UNAUTHORIZED,
+                1472,
+                "manager TOTP is invalid",
+                None,
+            ),
+            Self::StepReplayed(retry_after) => (
+                StatusCode::CONFLICT,
+                1473,
+                "manager TOTP step was already used",
+                Some(retry_after),
+            ),
+            Self::StepStale(retry_after) => (
+                StatusCode::CONFLICT,
+                1474,
+                "manager TOTP step is stale",
+                Some(retry_after),
+            ),
+            Self::SourceRateLimited(retry_after) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                1475,
+                "manager TOTP source is temporarily locked",
+                Some(retry_after),
+            ),
+            Self::GlobalRateLimited(retry_after) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                1476,
+                "manager TOTP anomaly protection is active",
+                Some(retry_after),
+            ),
+            Self::ChallengeInvalidOrExpired => (
+                StatusCode::UNAUTHORIZED,
+                1477,
+                "manager TOTP challenge is invalid or expired",
+                None,
+            ),
+            Self::ChallengeAttemptsExhausted => (
+                StatusCode::TOO_MANY_REQUESTS,
+                1478,
+                "manager TOTP challenge attempts are exhausted",
+                None,
+            ),
+            Self::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                1479,
+                "manager TOTP unavailable",
+                None,
+            ),
+            Self::StateConflict => (
+                StatusCode::CONFLICT,
+                1480,
+                "manager TOTP state changed concurrently",
+                None,
+            ),
+            Self::CurrentPasswordInvalid => (
+                StatusCode::UNAUTHORIZED,
+                1481,
+                "current manager password is invalid",
+                None,
+            ),
+            Self::RecoveryCredentialsInvalid => (
+                StatusCode::UNAUTHORIZED,
+                1482,
+                "manager TOTP recovery credentials are invalid",
+                None,
+            ),
+            Self::Busy => (
+                StatusCode::TOO_MANY_REQUESTS,
+                1483,
+                "manager TOTP operation is busy",
+                Some(1),
+            ),
+            Self::Storage => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                1484,
+                "manager TOTP storage unavailable",
+                None,
+            ),
+            Self::RequestInvalid => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                1485,
+                "manager TOTP request is invalid",
+                None,
+            ),
+            Self::ReauthRequired => (
+                StatusCode::FORBIDDEN,
+                1491,
+                "manager secret governance reauthentication is required",
+                None,
+            ),
+            Self::ReauthMethodChanged => (
+                StatusCode::CONFLICT,
+                1492,
+                "manager reauthentication method changed",
                 None,
             ),
         };
@@ -289,11 +530,7 @@ impl IntoResponse for AccessHttpError {
         } else {
             StatusCode::UNAUTHORIZED
         };
-        let mut response = auth_error_response(status, code, message, false);
-        if !matches!(self, Self::Unavailable) {
-            delete_mediator_cookie(response.headers_mut());
-        }
-        response
+        auth_error_response(status, code, message, false)
     }
 }
 
@@ -389,10 +626,10 @@ fn mediator_cookie_policy_for(
     }
 }
 
-fn mediator_cookie_policy() -> MediatorCookiePolicy {
+fn mediator_cookie_policy_for_app(app_state: &AppState) -> MediatorCookiePolicy {
     mediator_cookie_policy_for(
-        CONFIG.manager_auth.browser_origin.as_deref(),
-        &CONFIG.base_path,
+        app_state.manager_auth_browser_origin.as_deref(),
+        &app_state.base_path,
     )
 }
 
@@ -414,8 +651,12 @@ fn mediator_cookie_value_for(
     .expect("manager mediator cookie fields are header-safe")
 }
 
-fn mediator_cookie_value(token: &str, expires_at: i64) -> HeaderValue {
-    mediator_cookie_value_for(&mediator_cookie_policy(), token, expires_at)
+fn mediator_cookie_value(app_state: &AppState, token: &str, expires_at: i64) -> HeaderValue {
+    mediator_cookie_value_for(
+        &mediator_cookie_policy_for_app(app_state),
+        token,
+        expires_at,
+    )
 }
 
 fn deleted_mediator_cookie_value_for(policy: &MediatorCookiePolicy) -> HeaderValue {
@@ -428,31 +669,191 @@ fn deleted_mediator_cookie_value_for(policy: &MediatorCookiePolicy) -> HeaderVal
     .expect("manager mediator cookie deletion fields are header-safe")
 }
 
-fn deleted_mediator_cookie_value() -> HeaderValue {
-    deleted_mediator_cookie_value_for(&mediator_cookie_policy())
+fn delete_mediator_cookie_for(app_state: &AppState, headers: &mut HeaderMap) {
+    headers.append(
+        SET_COOKIE,
+        deleted_mediator_cookie_value_for(&mediator_cookie_policy_for_app(app_state)),
+    );
 }
 
-fn delete_mediator_cookie(headers: &mut HeaderMap) {
-    headers.append(SET_COOKIE, deleted_mediator_cookie_value());
-}
-
-fn token_response(pair: AuthTokenPair) -> Response {
-    let mut response = HttpResult::new(AuthAccessResponse::from(&pair)).into_response();
+fn token_response(
+    app_state: &AppState,
+    pair: AuthTokenPair,
+    totp_state: ManagerTotpPublicState,
+) -> Response {
+    let mut response = HttpResult::new(AuthAccessResponse::new(&pair, totp_state)).into_response();
     response.headers_mut().append(
         SET_COOKIE,
-        mediator_cookie_value(&pair.mediator_token, pair.mediator_expires_at),
+        mediator_cookie_value(app_state, &pair.mediator_token, pair.mediator_expires_at),
     );
     response
 }
 
-fn access_response(access_token: String) -> Response {
-    HttpResult::new(AuthAccessResponse { access_token }).into_response()
+fn access_response(
+    access_token: String,
+    totp_state: ManagerTotpPublicState,
+    reauth: Option<ManagerSecretGovernanceReauth>,
+) -> Response {
+    HttpResult::new(AuthAccessResponse {
+        access_token,
+        totp_state: manager_totp_state_name(totp_state),
+        reauth: reauth.map(manager_reauth_response),
+    })
+    .into_response()
+}
+
+fn login_password_authenticated_response(
+    app_state: &AppState,
+    pair: AuthTokenPair,
+    totp_state: ManagerTotpPublicState,
+) -> Response {
+    let mut response = HttpResult::new(LoginPasswordResponse::Authenticated {
+        access_token: pair.access_token.clone(),
+        totp_state: manager_totp_state_name(totp_state),
+        reauth: pair.reauth.map(manager_reauth_response),
+    })
+    .into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        mediator_cookie_value(app_state, &pair.mediator_token, pair.mediator_expires_at),
+    );
+    response
+}
+
+fn login_password_challenge_response(
+    app_state: &AppState,
+    challenge: crate::service::admin::auth::ManagerLoginTotpChallenge,
+) -> Response {
+    let mut response = HttpResult::new(LoginPasswordResponse::TotpRequired {
+        login_challenge: challenge.challenge.to_string(),
+        expires_in: challenge.expires_in,
+    })
+    .into_response();
+    delete_mediator_cookie_for(app_state, response.headers_mut());
+    response
+}
+
+fn manager_totp_setup_response(setup: ManagerTotpSetup) -> ManagerTotpSetupResponse {
+    ManagerTotpSetupResponse {
+        setup_challenge: setup.challenge.to_string(),
+        manual_secret: setup.manual_secret.expose().to_string(),
+        otpauth_uri: setup.otpauth_uri.expose().to_string(),
+        expires_in: setup.expires_in,
+    }
+}
+
+fn manager_totp_recovery_setup_response(
+    setup: ManagerTotpSetup,
+) -> ManagerTotpRecoverySetupResponse {
+    ManagerTotpRecoverySetupResponse {
+        recovery_challenge: setup.challenge.to_string(),
+        manual_secret: setup.manual_secret.expose().to_string(),
+        otpauth_uri: setup.otpauth_uri.expose().to_string(),
+        expires_in: setup.expires_in,
+    }
+}
+
+fn manager_totp_lifecycle_response(
+    app_state: &AppState,
+    result: ManagerTotpLifecycleResult,
+) -> Response {
+    let recovery_codes = result
+        .recovery_codes
+        .as_ref()
+        .map(|codes| codes.expose().map(str::to_string).collect::<Vec<String>>());
+    let mut response = HttpResult::new(ManagerTotpLifecycleResponse {
+        access_token: result.tokens.access_token.clone(),
+        totp_state: manager_totp_state_name(result.state),
+        reauth: result.tokens.reauth.map(manager_reauth_response),
+        recovery_codes,
+    })
+    .into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        mediator_cookie_value(
+            app_state,
+            &result.tokens.mediator_token,
+            result.tokens.mediator_expires_at,
+        ),
+    );
+    response
+}
+
+fn manager_reauth_response(reauth: ManagerSecretGovernanceReauth) -> ManagerReauthResponse {
+    ManagerReauthResponse {
+        scope: "secret_governance",
+        method: reauth.evidence.as_str(),
+        verified_until: reauth.verified_until,
+    }
+}
+
+fn manager_totp_state_name(state: ManagerTotpPublicState) -> &'static str {
+    match state {
+        ManagerTotpPublicState::Disabled => "disabled",
+        ManagerTotpPublicState::Enabled { .. } => "enabled",
+        ManagerTotpPublicState::Unavailable { .. } => "unavailable",
+    }
+}
+
+fn manager_totp_status_response(state: ManagerTotpPublicState) -> ManagerTotpStatusResponse {
+    let enabled_at = match state {
+        ManagerTotpPublicState::Disabled => None,
+        ManagerTotpPublicState::Enabled { enabled_at } => Some(enabled_at),
+        ManagerTotpPublicState::Unavailable { enabled_at } => enabled_at,
+    };
+    ManagerTotpStatusResponse {
+        state: manager_totp_state_name(state),
+        enabled_at,
+    }
+}
+
+pub(crate) fn required_manager_totp_code(headers: &HeaderMap) -> Result<&str, Response> {
+    optional_manager_totp_code(headers)?
+        .ok_or_else(|| ManagerTotpHttpError::Required.into_response())
+}
+
+fn optional_manager_totp_code(headers: &HeaderMap) -> Result<Option<&str>, Response> {
+    let mut values = headers.get_all(MANAGER_TOTP_CODE_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ManagerTotpHttpError::RequestInvalid.into_response());
+    }
+    value
+        .to_str()
+        .map(Some)
+        .map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())
+}
+
+pub(crate) fn manager_totp_error_response(error: ManagerTotpVerificationError) -> Response {
+    ManagerTotpHttpError::from(error).into_response()
+}
+
+pub(crate) fn authorize_secret_governance_command(
+    app_state: &AppState,
+    auth_context: &ManagerAuthContext,
+) -> Result<(), Response> {
+    app_state
+        .admin
+        .auth
+        .authorize_secret_governance(auth_context)
+        .map(|_| ())
+        .map_err(manager_totp_error_response)
+}
+
+fn parse_manager_totp_challenge(value: &str) -> Result<Uuid, Response> {
+    if value.len() > MAX_CHALLENGE_INPUT_BYTES {
+        return Err(ManagerTotpHttpError::RequestInvalid.into_response());
+    }
+    Uuid::parse_str(value).map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())
 }
 
 fn extract_mediator_context(
+    app_state: &AppState,
     headers: &HeaderMap,
 ) -> Result<ManagerMediatorContext, AccessHttpError> {
-    let cookie_name = mediator_cookie_policy().name;
+    let cookie_name = mediator_cookie_policy_for_app(app_state).name;
     let mut token = None;
     for header_value in headers.get_all(COOKIE) {
         let raw = header_value
@@ -473,11 +874,15 @@ fn extract_mediator_context(
         .map_err(|_| AccessHttpError::Invalid)
 }
 
-fn browser_origin_allowed(headers: &HeaderMap, client_identity: &ClientIdentity) -> bool {
+fn browser_origin_allowed(
+    headers: &HeaderMap,
+    client_identity: &ClientIdentity,
+    configured_browser_origin: Option<&str>,
+) -> bool {
     let Some(origin) = headers.get(ORIGIN).and_then(|value| value.to_str().ok()) else {
         return false;
     };
-    if let Some(configured_origin) = CONFIG.manager_auth.browser_origin.as_deref() {
+    if let Some(configured_origin) = configured_browser_origin {
         if origin != configured_origin {
             return false;
         }
@@ -523,6 +928,7 @@ fn browser_origin_allowed(headers: &HeaderMap, client_identity: &ClientIdentity)
 }
 
 async fn manager_auth_browser_boundary(
+    State(app_state): State<Arc<AppState>>,
     Extension(client_identity): Extension<ClientIdentity>,
     request: Request,
     next: Next,
@@ -530,7 +936,11 @@ async fn manager_auth_browser_boundary(
     if request.method() != axum::http::Method::POST {
         return Ok(next.run(request).await);
     }
-    if !browser_origin_allowed(request.headers(), &client_identity) {
+    if !browser_origin_allowed(
+        request.headers(),
+        &client_identity,
+        app_state.manager_auth_browser_origin.as_deref(),
+    ) {
         return Err(BrowserBoundaryHttpError);
     }
     Ok(next.run(request).await)
@@ -562,62 +972,350 @@ async fn bootstrap(
         .bootstrap(&request.password)
         .await
         .map_err(BootstrapHttpError::from)
-        .map(token_response)
+        .map(|tokens| token_response(&app_state, tokens, ManagerTotpPublicState::Disabled))
 }
 
-async fn login(
+async fn login_password(
     State(app_state): State<Arc<AppState>>,
     Extension(client_identity): Extension<ClientIdentity>,
     request: Result<Json<PasswordRequest>, JsonRejection>,
-) -> Result<Response, LoginHttpError> {
-    let Json(request) = request.map_err(|_| LoginHttpError::InvalidRequest)?;
+) -> Result<Response, Response> {
+    let Json(request) = request.map_err(|_| LoginHttpError::InvalidRequest.into_response())?;
+    match app_state
+        .admin
+        .auth
+        .login_password(client_identity.client_ip, &request.password)
+        .await
+        .map_err(|error| LoginHttpError::from(error).into_response())?
+    {
+        LoginPasswordResult::Authenticated(tokens) => Ok(login_password_authenticated_response(
+            &app_state,
+            tokens,
+            ManagerTotpPublicState::Disabled,
+        )),
+        LoginPasswordResult::TotpRequired(challenge) => {
+            Ok(login_password_challenge_response(&app_state, challenge))
+        }
+    }
+}
+
+async fn login_totp(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    request: Result<Json<LoginTotpRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    let login_challenge = parse_manager_totp_challenge(&request.login_challenge)?;
+    let tokens = app_state
+        .admin
+        .auth
+        .login_totp(
+            client_identity.client_ip,
+            login_challenge,
+            &request.totp_code,
+        )
+        .await
+        .map_err(manager_totp_error_response)?;
+    let state = app_state
+        .admin
+        .auth
+        .totp_status()
+        .map_err(manager_totp_error_response)?;
+    if !matches!(state, ManagerTotpPublicState::Enabled { .. }) {
+        return Err(ManagerTotpHttpError::StateConflict.into_response());
+    }
+    Ok(token_response(&app_state, tokens, state))
+}
+
+async fn reauthenticate(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    headers: HeaderMap,
+    request: Result<Json<ManagerReauthRequest>, JsonRejection>,
+) -> Result<HttpResult<ManagerReauthResponse>, Response> {
+    let (auth_context, _) = require_access_and_mediator(&app_state, &headers)?;
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    let reauth = match request {
+        ManagerReauthRequest::Password { password } => {
+            app_state
+                .admin
+                .auth
+                .reauthenticate_secret_governance(
+                    &auth_context,
+                    client_identity.client_ip,
+                    ManagerReauthCredential::Password(&password),
+                )
+                .await
+        }
+        ManagerReauthRequest::Totp { totp_code } => {
+            app_state
+                .admin
+                .auth
+                .reauthenticate_secret_governance(
+                    &auth_context,
+                    client_identity.client_ip,
+                    ManagerReauthCredential::Totp(&totp_code),
+                )
+                .await
+        }
+    }
+    .map_err(manager_totp_error_response)?;
+    Ok(HttpResult::new(manager_reauth_response(reauth)))
+}
+
+async fn recovery_start(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    request: Result<Json<RecoveryStartRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    if request.recovery_code.len() > MAX_RECOVERY_CODE_INPUT_BYTES {
+        return Err(ManagerTotpHttpError::RequestInvalid.into_response());
+    }
+    let setup = app_state
+        .admin
+        .auth
+        .start_totp_recovery(
+            client_identity.client_ip,
+            &request.password,
+            &request.recovery_code,
+        )
+        .await
+        .map_err(manager_totp_error_response)?;
+    let mut response = HttpResult::new(manager_totp_recovery_setup_response(setup)).into_response();
+    delete_mediator_cookie_for(&app_state, response.headers_mut());
+    Ok(response)
+}
+
+async fn recovery_confirm(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    request: Result<Json<RecoveryConfirmRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    let recovery_challenge = parse_manager_totp_challenge(&request.recovery_challenge)?;
     app_state
         .admin
         .auth
-        .login(client_identity.client_ip, &request.password)
+        .confirm_totp_recovery(
+            client_identity.client_ip,
+            recovery_challenge,
+            &request.totp_code,
+        )
         .await
-        .map_err(LoginHttpError::from)
-        .map(token_response)
+        .map(|result| manager_totp_lifecycle_response(&app_state, result))
+        .map_err(manager_totp_error_response)
+}
+
+async fn totp_status(
+    State(app_state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<HttpResult<ManagerTotpStatusResponse>, Response> {
+    require_access_and_mediator(&app_state, &headers)?;
+    app_state
+        .admin
+        .auth
+        .totp_status()
+        .map(manager_totp_status_response)
+        .map(HttpResult::new)
+        .map_err(manager_totp_error_response)
+}
+
+async fn totp_enroll_start(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    headers: HeaderMap,
+    request: Result<Json<CurrentPasswordRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    let (auth_context, _) = require_access_and_mediator(&app_state, &headers)?;
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    app_state
+        .admin
+        .auth
+        .start_totp_enrollment(
+            &auth_context,
+            client_identity.client_ip,
+            &request.current_password,
+        )
+        .await
+        .map(manager_totp_setup_response)
+        .map(HttpResult::new)
+        .map(IntoResponse::into_response)
+        .map_err(manager_totp_error_response)
+}
+
+async fn totp_enroll_confirm(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    headers: HeaderMap,
+    request: Result<Json<SetupConfirmRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    let (auth_context, _) = require_access_and_mediator(&app_state, &headers)?;
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    let setup_challenge = parse_manager_totp_challenge(&request.setup_challenge)?;
+    app_state
+        .admin
+        .auth
+        .confirm_totp_enrollment(
+            &auth_context,
+            client_identity.client_ip,
+            setup_challenge,
+            &request.totp_code,
+        )
+        .await
+        .map(|result| manager_totp_lifecycle_response(&app_state, result))
+        .map_err(manager_totp_error_response)
+}
+
+async fn totp_replace_start(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    headers: HeaderMap,
+    request: Result<Json<CurrentPasswordRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    let (auth_context, _) = require_access_and_mediator(&app_state, &headers)?;
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    let totp_code = required_manager_totp_code(&headers)?;
+    app_state
+        .admin
+        .auth
+        .start_totp_replacement(
+            &auth_context,
+            client_identity.client_ip,
+            &request.current_password,
+            totp_code,
+        )
+        .await
+        .map(manager_totp_setup_response)
+        .map(HttpResult::new)
+        .map(IntoResponse::into_response)
+        .map_err(manager_totp_error_response)
+}
+
+async fn totp_replace_confirm(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    headers: HeaderMap,
+    request: Result<Json<SetupConfirmRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    let (auth_context, _) = require_access_and_mediator(&app_state, &headers)?;
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    let setup_challenge = parse_manager_totp_challenge(&request.setup_challenge)?;
+    app_state
+        .admin
+        .auth
+        .confirm_totp_replacement(
+            &auth_context,
+            client_identity.client_ip,
+            setup_challenge,
+            &request.totp_code,
+        )
+        .await
+        .map(|result| manager_totp_lifecycle_response(&app_state, result))
+        .map_err(manager_totp_error_response)
+}
+
+async fn totp_disable(
+    State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
+    headers: HeaderMap,
+    request: Result<Json<CurrentPasswordRequest>, JsonRejection>,
+) -> Result<Response, Response> {
+    let (auth_context, _) = require_access_and_mediator(&app_state, &headers)?;
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    let totp_code = required_manager_totp_code(&headers)?;
+    app_state
+        .admin
+        .auth
+        .disable_totp(
+            &auth_context,
+            client_identity.client_ip,
+            &request.current_password,
+            totp_code,
+        )
+        .await
+        .map(|result| manager_totp_lifecycle_response(&app_state, result))
+        .map_err(manager_totp_error_response)
 }
 
 async fn rotate_password(
     State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
     headers: HeaderMap,
     request: Result<Json<RotatePasswordRequest>, JsonRejection>,
 ) -> Result<Response, Response> {
     let (auth_context, _) = require_access_and_mediator(&app_state, &headers)?;
     let Json(request) =
         request.map_err(|_| RotatePasswordHttpError::InvalidNewPassword.into_response())?;
+    let totp_code = optional_manager_totp_code(&headers)?;
     app_state
         .admin
         .auth
         .rotate_password(
             &auth_context,
+            client_identity.client_ip,
+            totp_code,
             &request.current_password,
             &request.new_password,
         )
         .await
-        .map_err(rotate_password_error_response)
-        .map(token_response)
+        .map_err(|error| rotate_password_error_response(&app_state, error))
+        .and_then(|tokens| {
+            app_state
+                .admin
+                .auth
+                .totp_status()
+                .map(|state| token_response(&app_state, tokens, state))
+                .map_err(manager_totp_error_response)
+        })
 }
 
 async fn access(
     State(app_state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Response, AccessHttpError> {
-    let mediator = extract_mediator_context(&headers)?;
+) -> Result<Response, Response> {
+    let mediator = extract_mediator_context(&app_state, &headers)
+        .map_err(|error| access_error_response(&app_state, error))?;
     let access_token = app_state
         .admin
         .auth
         .access_for_session(mediator.login_instance_id, mediator.credential_epoch)
         .await
-        .map_err(AccessHttpError::from)?;
-    Ok(access_response(access_token))
+        .map_err(AccessHttpError::from)
+        .map_err(|error| access_error_response(&app_state, error))?;
+    let totp_state = app_state
+        .admin
+        .auth
+        .totp_status()
+        .map_err(|_| access_error_response(&app_state, AccessHttpError::Unavailable))?;
+    let reauth = if matches!(totp_state, ManagerTotpPublicState::Unavailable { .. }) {
+        None
+    } else {
+        app_state
+            .admin
+            .auth
+            .secret_governance_reauth_for_session(
+                mediator.login_instance_id,
+                mediator.credential_epoch,
+            )
+            .map_err(AccessHttpError::from)
+            .map_err(|error| access_error_response(&app_state, error))?
+    };
+    Ok(access_response(access_token, totp_state, reauth))
 }
 
 async fn logout(State(app_state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let Ok(mediator) = extract_mediator_context(&headers) else {
-        return logout_success_response();
+    let Ok(mediator) = extract_mediator_context(&app_state, &headers) else {
+        return logout_success_response(&app_state);
     };
     match app_state
         .admin
@@ -625,10 +1323,10 @@ async fn logout(State(app_state): State<Arc<AppState>>, headers: HeaderMap) -> R
         .logout_session(mediator.login_instance_id, mediator.credential_epoch)
         .await
     {
-        Ok(()) => logout_success_response(),
+        Ok(()) => logout_success_response(&app_state),
         Err(error) => {
             let mut response = LogoutHttpError::from(error).into_response();
-            delete_mediator_cookie(response.headers_mut());
+            delete_mediator_cookie_for(&app_state, response.headers_mut());
             response
         }
     }
@@ -636,17 +1334,27 @@ async fn logout(State(app_state): State<Arc<AppState>>, headers: HeaderMap) -> R
 
 async fn logout_all(
     State(app_state): State<Arc<AppState>>,
+    Extension(client_identity): Extension<ClientIdentity>,
     headers: HeaderMap,
+    request: Result<Json<CurrentPasswordRequest>, JsonRejection>,
 ) -> Result<Response, Response> {
     let (auth_context, _) = require_access_and_mediator(&app_state, &headers)?;
+    let Json(request) =
+        request.map_err(|_| ManagerTotpHttpError::RequestInvalid.into_response())?;
+    let totp_code = optional_manager_totp_code(&headers)?;
     let revoked_sessions = app_state
         .admin
         .auth
-        .logout_all(&auth_context)
+        .logout_all(
+            &auth_context,
+            client_identity.client_ip,
+            &request.current_password,
+            totp_code,
+        )
         .await
-        .map_err(logout_all_error_response)?;
+        .map_err(manager_totp_error_response)?;
     let mut response = HttpResult::new(LogoutAllResponse { revoked_sessions }).into_response();
-    delete_mediator_cookie(response.headers_mut());
+    delete_mediator_cookie_for(&app_state, response.headers_mut());
     Ok(response)
 }
 
@@ -654,7 +1362,8 @@ fn require_access_and_mediator(
     app_state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(ManagerAuthContext, ManagerMediatorContext), Response> {
-    let mediator = extract_mediator_context(headers).map_err(IntoResponse::into_response)?;
+    let mediator = extract_mediator_context(app_state, headers)
+        .map_err(|error| access_error_response(app_state, error))?;
     let access = validate_access_headers(app_state, headers).map_err(|error| {
         let clear_cookie = matches!(
             error,
@@ -662,7 +1371,7 @@ fn require_access_and_mediator(
         );
         let mut response = error.into_response();
         if clear_cookie {
-            delete_mediator_cookie(response.headers_mut());
+            delete_mediator_cookie_for(app_state, response.headers_mut());
         }
         response
     })?;
@@ -671,32 +1380,48 @@ fn require_access_and_mediator(
         || access.manager_id != mediator.manager_id
         || access.manager_subject != mediator.manager_subject
     {
-        return Err(AccessHttpError::Invalid.into_response());
+        return Err(access_error_response(app_state, AccessHttpError::Invalid));
     }
     Ok((access, mediator))
 }
 
-fn rotate_password_error_response(error: RotatePasswordError) -> Response {
+fn access_error_response(app_state: &AppState, error: AccessHttpError) -> Response {
+    let clear_cookie = !matches!(error, AccessHttpError::Unavailable);
+    let mut response = error.into_response();
+    if clear_cookie {
+        delete_mediator_cookie_for(app_state, response.headers_mut());
+    }
+    response
+}
+
+fn rotate_password_error_response(app_state: &AppState, error: RotatePasswordError) -> Response {
+    if let RotatePasswordError::Totp(error) = error {
+        return manager_totp_error_response(error);
+    }
     let clear_cookie = matches!(error, RotatePasswordError::EpochConflict);
-    let mut response = RotatePasswordHttpError::from(error).into_response();
+    let http_error = match error {
+        RotatePasswordError::InvalidCurrentPassword => {
+            RotatePasswordHttpError::InvalidCurrentPassword
+        }
+        RotatePasswordError::PasswordPolicy(_) => RotatePasswordHttpError::InvalidNewPassword,
+        RotatePasswordError::SamePassword => RotatePasswordHttpError::SamePassword,
+        RotatePasswordError::Busy => RotatePasswordHttpError::Busy,
+        RotatePasswordError::EpochConflict => RotatePasswordHttpError::EpochConflict,
+        RotatePasswordError::Unavailable | RotatePasswordError::Storage => {
+            RotatePasswordHttpError::Unavailable
+        }
+        RotatePasswordError::Totp(_) => unreachable!("handled above"),
+    };
+    let mut response = http_error.into_response();
     if clear_cookie {
-        delete_mediator_cookie(response.headers_mut());
+        delete_mediator_cookie_for(app_state, response.headers_mut());
     }
     response
 }
 
-fn logout_success_response() -> Response {
+fn logout_success_response(app_state: &AppState) -> Response {
     let mut response = HttpResult::new(()).into_response();
-    delete_mediator_cookie(response.headers_mut());
-    response
-}
-
-fn logout_all_error_response(error: LogoutError) -> Response {
-    let clear_cookie = matches!(error, LogoutError::InvalidCredential);
-    let mut response = LogoutHttpError::from(error).into_response();
-    if clear_cookie {
-        delete_mediator_cookie(response.headers_mut());
-    }
+    delete_mediator_cookie_for(app_state, response.headers_mut());
     response
 }
 
@@ -712,29 +1437,57 @@ impl From<BootstrapError> for BootstrapHttpError {
     }
 }
 
-impl From<LoginError> for LoginHttpError {
-    fn from(error: LoginError) -> Self {
+impl From<LoginPasswordError> for LoginHttpError {
+    fn from(error: LoginPasswordError) -> Self {
         match error {
-            LoginError::Uninitialized => Self::Uninitialized,
-            LoginError::InvalidPassword => Self::InvalidPassword,
-            LoginError::SourceRateLimited { retry_after } => Self::SourceRateLimited(retry_after),
-            LoginError::GlobalRateLimited { retry_after } => Self::GlobalRateLimited(retry_after),
-            LoginError::Busy => Self::Busy,
-            LoginError::Unavailable => Self::Unavailable,
-            LoginError::Storage => Self::Storage,
+            LoginPasswordError::Uninitialized => Self::Uninitialized,
+            LoginPasswordError::InvalidPassword => Self::InvalidPassword,
+            LoginPasswordError::SourceRateLimited { retry_after } => {
+                Self::SourceRateLimited(retry_after)
+            }
+            LoginPasswordError::GlobalRateLimited { retry_after } => {
+                Self::GlobalRateLimited(retry_after)
+            }
+            LoginPasswordError::Busy => Self::Busy,
+            LoginPasswordError::ManagerTotpUnavailable => Self::ManagerTotpUnavailable,
+            LoginPasswordError::Unavailable => Self::Unavailable,
+            LoginPasswordError::Storage => Self::Storage,
         }
     }
 }
 
-impl From<RotatePasswordError> for RotatePasswordHttpError {
-    fn from(error: RotatePasswordError) -> Self {
+impl From<ManagerTotpVerificationError> for ManagerTotpHttpError {
+    fn from(error: ManagerTotpVerificationError) -> Self {
         match error {
-            RotatePasswordError::InvalidCurrentPassword => Self::InvalidCurrentPassword,
-            RotatePasswordError::PasswordPolicy(_) => Self::InvalidNewPassword,
-            RotatePasswordError::SamePassword => Self::SamePassword,
-            RotatePasswordError::Busy => Self::Busy,
-            RotatePasswordError::EpochConflict => Self::EpochConflict,
-            RotatePasswordError::Unavailable | RotatePasswordError::Storage => Self::Unavailable,
+            ManagerTotpVerificationError::Required => Self::Required,
+            ManagerTotpVerificationError::Invalid => Self::Invalid,
+            ManagerTotpVerificationError::StepReplayed { retry_after } => {
+                Self::StepReplayed(retry_after)
+            }
+            ManagerTotpVerificationError::StepStale { retry_after } => Self::StepStale(retry_after),
+            ManagerTotpVerificationError::SourceRateLimited { retry_after } => {
+                Self::SourceRateLimited(retry_after)
+            }
+            ManagerTotpVerificationError::GlobalRateLimited { retry_after } => {
+                Self::GlobalRateLimited(retry_after)
+            }
+            ManagerTotpVerificationError::ChallengeInvalidOrExpired => {
+                Self::ChallengeInvalidOrExpired
+            }
+            ManagerTotpVerificationError::ChallengeAttemptsExhausted => {
+                Self::ChallengeAttemptsExhausted
+            }
+            ManagerTotpVerificationError::Unavailable => Self::Unavailable,
+            ManagerTotpVerificationError::StateConflict => Self::StateConflict,
+            ManagerTotpVerificationError::CurrentPasswordInvalid => Self::CurrentPasswordInvalid,
+            ManagerTotpVerificationError::RecoveryCredentialsInvalid => {
+                Self::RecoveryCredentialsInvalid
+            }
+            ManagerTotpVerificationError::Busy => Self::Busy,
+            ManagerTotpVerificationError::Storage => Self::Storage,
+            ManagerTotpVerificationError::RequestInvalid => Self::RequestInvalid,
+            ManagerTotpVerificationError::ReauthRequired => Self::ReauthRequired,
+            ManagerTotpVerificationError::ReauthMethodChanged => Self::ReauthMethodChanged,
         }
     }
 }
@@ -758,18 +1511,31 @@ impl From<LogoutError> for LogoutHttpError {
     }
 }
 
-pub fn create_auth_router(_app_state: Arc<AppState>) -> StateRouter {
+pub fn create_auth_router(app_state: Arc<AppState>) -> StateRouter {
     create_state_router().nest(
         "/auth",
         create_state_router()
             .route("/bootstrap/status", get(bootstrap_status))
             .route("/bootstrap", post(bootstrap))
-            .route("/login", post(login))
+            .route("/login/password", post(login_password))
+            .route("/login/totp", post(login_totp))
+            .route("/reauth", post(reauthenticate))
+            .route("/recovery/start", post(recovery_start))
+            .route("/recovery/confirm", post(recovery_confirm))
+            .route("/totp/status", get(totp_status))
+            .route("/totp/enroll/start", post(totp_enroll_start))
+            .route("/totp/enroll/confirm", post(totp_enroll_confirm))
+            .route("/totp/replace/start", post(totp_replace_start))
+            .route("/totp/replace/confirm", post(totp_replace_confirm))
+            .route("/totp/disable", post(totp_disable))
             .route("/access", post(access))
             .route("/password/rotate", post(rotate_password))
             .route("/logout", post(logout))
             .route("/logout_all", post(logout_all))
-            .layer(middleware::from_fn(manager_auth_browser_boundary))
+            .layer(middleware::from_fn_with_state(
+                app_state,
+                manager_auth_browser_boundary,
+            ))
             .layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)),
     )
 }
@@ -778,6 +1544,7 @@ pub fn create_auth_router(_app_state: Arc<AppState>) -> StateRouter {
 mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     use axum::{
         body::{Body, to_bytes},
@@ -789,14 +1556,24 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        config::ClientIdentityConfig,
+        config::{ClientIdentityConfig, SecretEncryptionConfig},
         controller::create_manager_router,
         database::{
             DbConnection, TestDbContext, get_connection,
+            manager_auth_instance::ManagerAuthInstance,
             manager_credential::{ManagerCredential, NewManagerCredential},
+            manager_totp_recovery_code::ManagerTotpRecoveryCode,
         },
         ingress::client_identity::{ClientIdentity, ClientIdentityResolver, ClientIdentitySource},
-        service::app_state::{AppState, create_test_app_state},
+        service::{
+            admin::AdminServices,
+            admin::auth::{
+                ManagerAuthService, SECRET_GOVERNANCE_REAUTH_TTL_SEC,
+                totp::generate_manager_totp_code,
+            },
+            app_state::{AppState, create_test_app_state},
+            secret_encryption::{SecretEncryptionService, SensitiveSecret},
+        },
         utils::auth::{
             AccessGuardError, decode_access_token, generate_token_jti, get_current_timestamp,
             issue_access_token,
@@ -804,14 +1581,24 @@ mod tests {
     };
 
     use super::{
-        AccessHttpError, BootstrapHttpError, LoginHttpError, LogoutHttpError,
-        RotatePasswordHttpError, create_auth_router, deleted_mediator_cookie_value_for,
-        mediator_cookie_policy_for, mediator_cookie_value_for,
+        AUTH_BODY_LIMIT_BYTES, AccessHttpError, BootstrapHttpError, LoginHttpError,
+        LogoutHttpError, MANAGER_TOTP_CODE_HEADER, ManagerTotpHttpError, RotatePasswordHttpError,
+        create_auth_router, deleted_mediator_cookie_value_for, mediator_cookie_policy_for,
+        mediator_cookie_value_for,
     };
     use diesel::RunQueryDsl;
 
     const INITIAL_PASSWORD: &str = "correct horse battery staple";
     const ROTATED_PASSWORD: &str = "correct horse battery staple rotated";
+    const TEST_SECRET_ENCRYPTION_KEY: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    struct EnrolledHttpManager {
+        access_token: String,
+        cookie: String,
+        manual_secret: String,
+        recovery_codes: Vec<String>,
+    }
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
         send_from(
@@ -964,6 +1751,197 @@ mod tests {
             .expect("cookie request should build")
     }
 
+    fn with_totp_header(mut request: Request<Body>, code: &str) -> Request<Body> {
+        request.headers_mut().insert(
+            MANAGER_TOTP_CODE_HEADER,
+            code.parse().expect("test TOTP header should be valid"),
+        );
+        request
+    }
+
+    fn manager_command_request(
+        method: Method,
+        uri: &str,
+        access_token: &str,
+        payload: Option<Value>,
+        totp_code: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {access_token}"));
+        let body = if let Some(payload) = payload {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&payload).expect("payload should serialize"))
+        } else {
+            Body::empty()
+        };
+        if let Some(totp_code) = totp_code {
+            builder = builder.header(MANAGER_TOTP_CODE_HEADER, totp_code);
+        }
+        builder
+            .body(body)
+            .expect("manager command request should build")
+    }
+
+    fn totp_code_at(manual_secret: &str, timestamp: i64) -> String {
+        generate_manager_totp_code(&SensitiveSecret::new(manual_secret.to_string()), timestamp)
+            .expect("test TOTP code should generate")
+            .to_string()
+    }
+
+    async fn create_totp_test_app_state(
+        test_db_context: TestDbContext,
+    ) -> (Arc<AppState>, Arc<AtomicI64>) {
+        let mut app_state = AppState::new_for_test(test_db_context).await;
+        let now = Arc::new(AtomicI64::new(get_current_timestamp()));
+        let config: SecretEncryptionConfig = serde_yaml::from_str(&format!(
+            "downstream_mode: recoverable\nencryption_key: '{TEST_SECRET_ENCRYPTION_KEY}'\n"
+        ))
+        .expect("test secret encryption config should parse");
+        let secret_encryption = Arc::new(SecretEncryptionService::from_config(&config));
+        app_state.admin = Arc::new(AdminServices::new(
+            Arc::clone(&app_state.catalog),
+            Arc::clone(&secret_encryption),
+        ));
+        let service_now = Arc::clone(&now);
+        Arc::get_mut(&mut app_state.admin)
+            .expect("fresh test AdminServices should be uniquely owned")
+            .auth = Arc::new(ManagerAuthService::new_for_test_with_secret_encryption(
+            Arc::new(move || service_now.load(Ordering::SeqCst)),
+            Arc::clone(&secret_encryption),
+        ));
+        app_state.secret_encryption = secret_encryption;
+        let app_state = Arc::new(app_state);
+        app_state.catalog.clear_cache().await;
+        app_state.catalog.reload().await;
+        (app_state, now)
+    }
+
+    fn restart_with_corrupt_totp(app_state: &Arc<AppState>, now: &Arc<AtomicI64>) -> Arc<AppState> {
+        let mut connection = get_connection().expect("test connection should load");
+        match &mut connection {
+            DbConnection::Postgres(connection) => {
+                diesel::sql_query(
+                    "UPDATE manager_credential SET totp_secret_ciphertext = $1 WHERE manager_id = 0",
+                )
+                .bind::<diesel::sql_types::Binary, _>(vec![1_u8])
+                .execute(connection)
+                .expect("PostgreSQL TOTP corruption should succeed");
+            }
+            DbConnection::Sqlite(connection) => {
+                diesel::sql_query(
+                    "UPDATE manager_credential SET totp_secret_ciphertext = ? WHERE manager_id = 0",
+                )
+                .bind::<diesel::sql_types::Binary, _>(vec![1_u8])
+                .execute(connection)
+                .expect("SQLite TOTP corruption should succeed");
+            }
+        }
+        drop(connection);
+
+        let mut restarted = (**app_state).clone();
+        let mut admin = AdminServices::new(
+            Arc::clone(&restarted.catalog),
+            Arc::clone(&restarted.secret_encryption),
+        );
+        let service_now = Arc::clone(now);
+        admin.auth = Arc::new(ManagerAuthService::new_for_test_with_secret_encryption(
+            Arc::new(move || service_now.load(Ordering::SeqCst)),
+            Arc::clone(&restarted.secret_encryption),
+        ));
+        restarted.admin = Arc::new(admin);
+        Arc::new(restarted)
+    }
+
+    async fn enroll_totp_over_http(
+        app_state: &Arc<AppState>,
+        confirmation_timestamp: i64,
+    ) -> EnrolledHttpManager {
+        let bootstrap = send(
+            app_state,
+            json_request(
+                Method::POST,
+                "/auth/bootstrap",
+                json!({ "password": INITIAL_PASSWORD }),
+            ),
+        )
+        .await;
+        assert_eq!(bootstrap.status(), StatusCode::OK);
+        let bootstrap_cookie = mediator_cookie(&bootstrap);
+        let bootstrap_body = response_json(bootstrap).await;
+        assert_eq!(bootstrap_body["data"]["totp_state"], "disabled");
+        let bootstrap_access = access_token(&bootstrap_body);
+
+        let start = send(
+            app_state,
+            cookie_request(
+                Method::POST,
+                "/auth/totp/enroll/start",
+                &bootstrap_cookie,
+                Some(&bootstrap_access),
+                json!({ "current_password": INITIAL_PASSWORD }),
+            ),
+        )
+        .await;
+        assert_eq!(start.status(), StatusCode::OK);
+        assert!(
+            start.headers().get(header::SET_COOKIE).is_none(),
+            "enrollment start must not mutate the browser session"
+        );
+        let start = response_json(start).await;
+        let setup_challenge = start["data"]["setup_challenge"]
+            .as_str()
+            .expect("setup challenge should exist");
+        let manual_secret = start["data"]["manual_secret"]
+            .as_str()
+            .expect("manual secret should exist")
+            .to_string();
+        assert!(
+            start["data"]["otpauth_uri"]
+                .as_str()
+                .is_some_and(|uri| uri.contains(&manual_secret))
+        );
+        assert_eq!(start["data"]["expires_in"], 600);
+
+        let confirm = send(
+            app_state,
+            cookie_request(
+                Method::POST,
+                "/auth/totp/enroll/confirm",
+                &bootstrap_cookie,
+                Some(&bootstrap_access),
+                json!({
+                    "setup_challenge": setup_challenge,
+                    "totp_code": totp_code_at(&manual_secret, confirmation_timestamp),
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(confirm.status(), StatusCode::OK);
+        let cookie = mediator_cookie(&confirm);
+        let body = response_json(confirm).await;
+        assert_eq!(body["data"]["totp_state"], "enabled");
+        let recovery_codes = body["data"]["recovery_codes"]
+            .as_array()
+            .expect("enrollment should return recovery codes")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("recovery code should be text")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recovery_codes.len(), 10);
+        EnrolledHttpManager {
+            access_token: access_token(&body),
+            cookie,
+            manual_secret,
+            recovery_codes,
+        }
+    }
+
     async fn assert_error(response: axum::response::Response, status: StatusCode, code: u64) {
         assert_eq!(response.status(), status);
         let body = response_json(response).await;
@@ -1010,6 +1988,7 @@ mod tests {
                 assert!(bootstrap_set_cookie.contains("SameSite=Strict"));
                 assert!(!bootstrap_set_cookie.contains("Secure"));
                 let bootstrap_body = response_json(bootstrap_response).await;
+                assert_eq!(bootstrap_body["data"]["totp_state"], "disabled");
                 let bootstrap_access = access_token(&bootstrap_body);
 
                 let duplicate = send(
@@ -1027,14 +2006,14 @@ mod tests {
                     &app_state,
                     json_request(
                         Method::POST,
-                        "/auth/login",
+                        "/auth/login/password",
                         json!({ "key": INITIAL_PASSWORD }),
                     ),
                 )
                 .await;
                 assert_error(legacy_key, StatusCode::UNPROCESSABLE_ENTITY, 1416).await;
 
-                let login_response = send(
+                let removed_single_stage_login = send(
                     &app_state,
                     json_request(
                         Method::POST,
@@ -1043,9 +2022,23 @@ mod tests {
                     ),
                 )
                 .await;
+                assert_eq!(removed_single_stage_login.status(), StatusCode::NOT_FOUND);
+
+                let login_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/login/password",
+                        json!({ "password": INITIAL_PASSWORD }),
+                    ),
+                )
+                .await;
                 assert_eq!(login_response.status(), StatusCode::OK);
                 let login_cookie = mediator_cookie(&login_response);
-                let login_access = access_token(&response_json(login_response).await);
+                let login_body = response_json(login_response).await;
+                assert_eq!(login_body["data"]["state"], "authenticated");
+                assert_eq!(login_body["data"]["totp_state"], "disabled");
+                let login_access = access_token(&login_body);
 
                 let mismatched_rotate = send(
                     &app_state,
@@ -1209,6 +2202,1306 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_http_totp_enrollment_status_and_two_stage_login_contract() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-auth-totp-login-enrollment.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let enrolled =
+                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    1
+                );
+
+                let status = send(
+                    &app_state,
+                    cookie_request(
+                        Method::GET,
+                        "/auth/totp/status",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({}),
+                    ),
+                )
+                .await;
+                assert_eq!(status.status(), StatusCode::OK);
+                assert!(
+                    status.headers().get(header::SET_COOKIE).is_none(),
+                    "status must not mutate the mediator cookie"
+                );
+                let status = response_json(status).await;
+                assert_eq!(status["data"]["state"], "enabled");
+                assert!(status["data"]["enabled_at"].as_i64().is_some());
+                assert!(status["data"].get("manual_secret").is_none());
+
+                let password_stage = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/login/password",
+                        json!({ "password": INITIAL_PASSWORD }),
+                    ),
+                )
+                .await;
+                assert_eq!(password_stage.status(), StatusCode::OK);
+                assert!(
+                    password_stage
+                        .headers()
+                        .get_all(header::SET_COOKIE)
+                        .iter()
+                        .any(|value| value
+                            .to_str()
+                            .is_ok_and(|value| value.contains("Max-Age=0"))),
+                    "TOTP-required password stage must clear residual mediator cookies"
+                );
+                let password_stage = response_json(password_stage).await;
+                assert_eq!(password_stage["data"]["state"], "totp_required");
+                assert_eq!(password_stage["data"]["expires_in"], 300);
+                assert!(password_stage["data"].get("access_token").is_none());
+                assert!(password_stage["data"].get("totp_state").is_none());
+                let login_challenge = password_stage["data"]["login_challenge"]
+                    .as_str()
+                    .expect("login challenge should exist")
+                    .to_string();
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    1,
+                    "password stage must not create a database session"
+                );
+
+                let invalid_totp = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/login/totp",
+                        json!({
+                            "login_challenge": login_challenge,
+                            "totp_code": "abcdef",
+                        }),
+                    ),
+                )
+                .await;
+                assert!(
+                    invalid_totp.headers().get(header::SET_COOKIE).is_none(),
+                    "failed TOTP login must not issue a cookie"
+                );
+                assert_error(invalid_totp, StatusCode::UNAUTHORIZED, 1472).await;
+
+                let totp_stage = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/login/totp",
+                        json!({
+                            "login_challenge": login_challenge,
+                            "totp_code": totp_code_at(
+                                &enrolled.manual_secret,
+                                now.load(Ordering::SeqCst),
+                            ),
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(totp_stage.status(), StatusCode::OK);
+                let _login_cookie = mediator_cookie(&totp_stage);
+                let totp_stage = response_json(totp_stage).await;
+                assert_eq!(totp_stage["data"]["totp_state"], "enabled");
+                assert!(totp_stage["data"].get("recovery_codes").is_none());
+                access_token(&totp_stage);
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    2
+                );
+
+                let reused_challenge = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/login/totp",
+                        json!({
+                            "login_challenge": login_challenge,
+                            "totp_code": "000000",
+                        }),
+                    ),
+                )
+                .await;
+                assert_error(reused_challenge, StatusCode::UNAUTHORIZED, 1477).await;
+
+                for alias in [
+                    "/auth/login",
+                    "/auth/recovery",
+                    "/auth/totp/reset",
+                    "/auth/totp/recovery/start",
+                ] {
+                    let response =
+                        send(&app_state, json_request(Method::POST, alias, json!({}))).await;
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{alias}");
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn auth_http_totp_replacement_rotates_epoch_session_and_recovery_material() {
+        let test_db_context = TestDbContext::new_sqlite("controller-auth-totp-replacement.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let enrolled =
+                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+                let old_recovery_rows = ManagerTotpRecoveryCode::list().unwrap();
+
+                let missing_header = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/totp/replace/start",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({ "current_password": INITIAL_PASSWORD }),
+                    ),
+                )
+                .await;
+                assert_error(missing_header, StatusCode::PRECONDITION_REQUIRED, 1471).await;
+                assert_eq!(ManagerTotpRecoveryCode::list().unwrap(), old_recovery_rows);
+
+                let replace_start = send(
+                    &app_state,
+                    with_totp_header(
+                        cookie_request(
+                            Method::POST,
+                            "/auth/totp/replace/start",
+                            &enrolled.cookie,
+                            Some(&enrolled.access_token),
+                            json!({ "current_password": INITIAL_PASSWORD }),
+                        ),
+                        &totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst)),
+                    ),
+                )
+                .await;
+                assert_eq!(replace_start.status(), StatusCode::OK);
+                assert!(replace_start.headers().get(header::SET_COOKIE).is_none());
+                let replace_start = response_json(replace_start).await;
+                let setup_challenge = replace_start["data"]["setup_challenge"]
+                    .as_str()
+                    .expect("replacement challenge should exist");
+                let replacement_secret = replace_start["data"]["manual_secret"]
+                    .as_str()
+                    .expect("replacement secret should exist")
+                    .to_string();
+                assert_eq!(ManagerTotpRecoveryCode::list().unwrap(), old_recovery_rows);
+
+                now.fetch_add(30, Ordering::SeqCst);
+                let replace_confirm = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/totp/replace/confirm",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({
+                            "setup_challenge": setup_challenge,
+                            "totp_code": totp_code_at(
+                                &replacement_secret,
+                                now.load(Ordering::SeqCst) + 30,
+                            ),
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(replace_confirm.status(), StatusCode::OK);
+                let replacement_cookie = mediator_cookie(&replace_confirm);
+                let replace_confirm = response_json(replace_confirm).await;
+                assert_eq!(replace_confirm["data"]["totp_state"], "enabled");
+                assert_eq!(
+                    replace_confirm["data"]["recovery_codes"]
+                        .as_array()
+                        .expect("replacement codes should exist")
+                        .len(),
+                    10
+                );
+                assert!(replace_confirm["data"].get("manual_secret").is_none());
+                let replacement_access = access_token(&replace_confirm);
+                assert_ne!(ManagerTotpRecoveryCode::list().unwrap(), old_recovery_rows);
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    1
+                );
+
+                let old_status = send(
+                    &app_state,
+                    cookie_request(
+                        Method::GET,
+                        "/auth/totp/status",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({}),
+                    ),
+                )
+                .await;
+                assert_eq!(old_status.status(), StatusCode::UNAUTHORIZED);
+                let new_status = send(
+                    &app_state,
+                    cookie_request(
+                        Method::GET,
+                        "/auth/totp/status",
+                        &replacement_cookie,
+                        Some(&replacement_access),
+                        json!({}),
+                    ),
+                )
+                .await;
+                assert_eq!(new_status.status(), StatusCode::OK);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn auth_http_totp_disable_returns_disabled_access_and_clears_recovery_codes() {
+        let test_db_context = TestDbContext::new_sqlite("controller-auth-totp-disable.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let enrolled =
+                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+                let disable = send(
+                    &app_state,
+                    with_totp_header(
+                        cookie_request(
+                            Method::POST,
+                            "/auth/totp/disable",
+                            &enrolled.cookie,
+                            Some(&enrolled.access_token),
+                            json!({ "current_password": INITIAL_PASSWORD }),
+                        ),
+                        &totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst)),
+                    ),
+                )
+                .await;
+                assert_eq!(disable.status(), StatusCode::OK);
+                let disabled_cookie = mediator_cookie(&disable);
+                let disable = response_json(disable).await;
+                assert_eq!(disable["data"]["totp_state"], "disabled");
+                assert!(disable["data"].get("recovery_codes").is_none());
+                let disabled_access = access_token(&disable);
+                assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 0);
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    1
+                );
+
+                let status = send(
+                    &app_state,
+                    cookie_request(
+                        Method::GET,
+                        "/auth/totp/status",
+                        &disabled_cookie,
+                        Some(&disabled_access),
+                        json!({}),
+                    ),
+                )
+                .await;
+                assert_eq!(response_json(status).await["data"]["state"], "disabled");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn auth_http_password_reauth_contract_tracks_access_state() {
+        let test_db_context = TestDbContext::new_sqlite("controller-auth-password-reauth.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let bootstrap = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/bootstrap",
+                        json!({ "password": INITIAL_PASSWORD }),
+                    ),
+                )
+                .await;
+                assert_eq!(bootstrap.status(), StatusCode::OK);
+                let cookie = mediator_cookie(&bootstrap);
+                let bootstrap = response_json(bootstrap).await;
+                let access = access_token(&bootstrap);
+                assert_eq!(bootstrap["data"]["reauth"]["scope"], "secret_governance");
+                assert_eq!(bootstrap["data"]["reauth"]["method"], "password");
+
+                let wrong_method = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/reauth",
+                        &cookie,
+                        Some(&access),
+                        json!({ "method": "totp", "totp_code": "000000" }),
+                    ),
+                )
+                .await;
+                assert_error(wrong_method, StatusCode::CONFLICT, 1492).await;
+
+                now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
+                let expired_access = send(
+                    &app_state,
+                    cookie_request(Method::POST, "/auth/access", &cookie, None, json!({})),
+                )
+                .await;
+                assert_eq!(expired_access.status(), StatusCode::OK);
+                assert!(response_json(expired_access).await["data"]["reauth"].is_null());
+
+                let blocked_create = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/api_key",
+                        &access,
+                        Some(json!({
+                            "name": "password-reauth-api-key",
+                            "default_action": "ALLOW",
+                        })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_error(blocked_create, StatusCode::FORBIDDEN, 1491).await;
+                assert!(app_state.admin.api_key.list_api_keys().unwrap().is_empty());
+
+                let invalid_password = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/reauth",
+                        &cookie,
+                        Some(&access),
+                        json!({
+                            "method": "password",
+                            "password": "wrong horse battery staple",
+                        }),
+                    ),
+                )
+                .await;
+                assert_error(invalid_password, StatusCode::UNAUTHORIZED, 1481).await;
+
+                let reauthenticated = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/reauth",
+                        &cookie,
+                        Some(&access),
+                        json!({
+                            "method": "password",
+                            "password": INITIAL_PASSWORD,
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(reauthenticated.status(), StatusCode::OK);
+                let reauthenticated = response_json(reauthenticated).await;
+                assert_eq!(reauthenticated["data"]["scope"], "secret_governance");
+                assert_eq!(reauthenticated["data"]["method"], "password");
+                assert_eq!(
+                    reauthenticated["data"]["verified_until"].as_i64(),
+                    Some(now.load(Ordering::SeqCst) + SECRET_GOVERNANCE_REAUTH_TTL_SEC)
+                );
+
+                let created = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/api_key",
+                        &access,
+                        Some(json!({
+                            "name": "password-reauth-api-key",
+                            "default_action": "ALLOW",
+                        })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(created.status(), StatusCode::OK);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn auth_http_totp_recovery_consumes_code_revokes_sessions_and_returns_one_new_session() {
+        let test_db_context = TestDbContext::new_sqlite("controller-auth-totp-recovery.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let enrolled =
+                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+                let recovery_start = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/recovery/start",
+                        json!({
+                            "password": INITIAL_PASSWORD,
+                            "recovery_code": enrolled.recovery_codes[0],
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(recovery_start.status(), StatusCode::OK);
+                assert!(
+                    recovery_start
+                        .headers()
+                        .get_all(header::SET_COOKIE)
+                        .iter()
+                        .any(|value| value
+                            .to_str()
+                            .is_ok_and(|value| value.contains("Max-Age=0")))
+                );
+                let recovery_start = response_json(recovery_start).await;
+                assert!(recovery_start["data"].get("access_token").is_none());
+                assert!(recovery_start["data"].get("recovery_codes").is_none());
+                let recovery_challenge = recovery_start["data"]["recovery_challenge"]
+                    .as_str()
+                    .expect("recovery challenge should exist");
+                let recovery_secret = recovery_start["data"]["manual_secret"]
+                    .as_str()
+                    .expect("recovery secret should exist")
+                    .to_string();
+                assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 9);
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    0
+                );
+
+                let recovery_confirm = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/auth/recovery/confirm",
+                        json!({
+                            "recovery_challenge": recovery_challenge,
+                            "totp_code": totp_code_at(
+                                &recovery_secret,
+                                now.load(Ordering::SeqCst),
+                            ),
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(recovery_confirm.status(), StatusCode::OK);
+                mediator_cookie(&recovery_confirm);
+                let recovery_confirm = response_json(recovery_confirm).await;
+                assert_eq!(recovery_confirm["data"]["totp_state"], "enabled");
+                assert_eq!(
+                    recovery_confirm["data"]["recovery_codes"]
+                        .as_array()
+                        .expect("new recovery codes should exist")
+                        .len(),
+                    10
+                );
+                access_token(&recovery_confirm);
+                assert_eq!(ManagerTotpRecoveryCode::list().unwrap().len(), 10);
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn secret_governance_grant_protects_api_key_commands_before_business_side_effects() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-api-key-secret-governance-reauth.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let enrolled =
+                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+                now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
+                let create_payload = json!({
+                    "name": "sensitive-api-key",
+                    "default_action": "ALLOW"
+                });
+
+                let missing = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/api_key",
+                        &enrolled.access_token,
+                        Some(create_payload.clone()),
+                        None,
+                    ),
+                )
+                .await;
+                assert_error(missing, StatusCode::FORBIDDEN, 1491).await;
+                assert!(app_state.admin.api_key.list_api_keys().unwrap().is_empty());
+
+                let ignored_business_header = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/api_key",
+                        &enrolled.access_token,
+                        Some(create_payload.clone()),
+                        Some("000000"),
+                    ),
+                )
+                .await;
+                assert_error(ignored_business_header, StatusCode::FORBIDDEN, 1491).await;
+                assert!(app_state.admin.api_key.list_api_keys().unwrap().is_empty());
+
+                let invalid_reauth = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/reauth",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({ "method": "totp", "totp_code": "000000" }),
+                    ),
+                )
+                .await;
+                assert_error(invalid_reauth, StatusCode::UNAUTHORIZED, 1472).await;
+
+                let reauth_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+                let reauthenticated = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/reauth",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({ "method": "totp", "totp_code": reauth_code }),
+                    ),
+                )
+                .await;
+                assert_eq!(reauthenticated.status(), StatusCode::OK);
+                let reauthenticated = response_json(reauthenticated).await;
+                assert_eq!(reauthenticated["data"]["scope"], "secret_governance");
+                assert_eq!(reauthenticated["data"]["method"], "totp");
+                assert_eq!(
+                    reauthenticated["data"]["verified_until"].as_i64(),
+                    Some(now.load(Ordering::SeqCst) + SECRET_GOVERNANCE_REAUTH_TTL_SEC)
+                );
+
+                let created = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/api_key",
+                        &enrolled.access_token,
+                        Some(create_payload),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(created.status(), StatusCode::OK);
+                let created = response_json(created).await;
+                let api_key_id = created["data"]["detail"]["id"]
+                    .as_i64()
+                    .expect("created API key id should exist");
+                let original_secret = created["data"]["reveal"]["api_key"]
+                    .as_str()
+                    .expect("one-time API key should exist")
+                    .to_string();
+
+                let metadata_update_path = format!("/manager/api/api_key/{api_key_id}");
+                let metadata_update = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::PUT,
+                        &metadata_update_path,
+                        &enrolled.access_token,
+                        Some(json!({ "name": "sensitive-api-key-updated" })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    metadata_update.status(),
+                    StatusCode::OK,
+                    "API key metadata update must not require TOTP"
+                );
+
+                let reveal_path = format!("/manager/api/api_key/{api_key_id}/reveal");
+                let missing_target = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/api_key/999999/reveal",
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(missing_target.status(), StatusCode::NOT_FOUND);
+                let revealed = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &reveal_path,
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(revealed.status(), StatusCode::OK);
+                assert_eq!(
+                    response_json(revealed).await["data"]["api_key"],
+                    original_secret
+                );
+
+                let rotate_path = format!("/manager/api/api_key/{api_key_id}/rotate");
+                let rotated = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &rotate_path,
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(rotated.status(), StatusCode::OK);
+                let rotated_secret = response_json(rotated).await["data"]["api_key"]
+                    .as_str()
+                    .expect("rotated API key should exist")
+                    .to_string();
+                assert_ne!(rotated_secret, original_secret);
+
+                let delete_path = format!("/manager/api/api_key/{api_key_id}");
+                let deleted = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::DELETE,
+                        &delete_path,
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(deleted.status(), StatusCode::OK);
+                assert!(
+                    app_state
+                        .admin
+                        .api_key
+                        .get_api_key_detail(api_key_id)
+                        .is_err()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn provider_reveal_uses_secret_governance_grant_while_other_mutations_do_not() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-provider-reveal-secret-governance.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let enrolled =
+                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+                now.fetch_add(SECRET_GOVERNANCE_REAUTH_TTL_SEC, Ordering::SeqCst);
+
+                let provider = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/provider",
+                        &enrolled.access_token,
+                        Some(json!({
+                            "name": "Sensitive Provider",
+                            "key": "sensitive-provider",
+                            "endpoint": "https://api.example.com/v1",
+                            "use_proxy": false,
+                            "provider_type": "OPENAI",
+                            "provider_api_key_mode": "QUEUE"
+                        })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(provider.status(), StatusCode::OK);
+                let provider_id = response_json(provider).await["data"]["id"]
+                    .as_i64()
+                    .expect("provider id should exist");
+
+                let collection = format!("/manager/api/provider/{provider_id}/provider_keys");
+                let created_key = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &collection,
+                        &enrolled.access_token,
+                        Some(json!({
+                            "api_key": "sk-provider-original",
+                            "description": "primary"
+                        })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    created_key.status(),
+                    StatusCode::OK,
+                    "provider key creation must not require TOTP"
+                );
+                let key_id = response_json(created_key).await["data"]["id"]
+                    .as_i64()
+                    .expect("provider key id should exist");
+
+                let replace_path =
+                    format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}/replace");
+                let replaced = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &replace_path,
+                        &enrolled.access_token,
+                        Some(json!({ "api_key": "sk-provider-replaced" })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    replaced.status(),
+                    StatusCode::OK,
+                    "provider key replacement must not require TOTP"
+                );
+
+                let reveal_path =
+                    format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}/reveal");
+                let missing = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &reveal_path,
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_error(missing, StatusCode::FORBIDDEN, 1491).await;
+                let invalid = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &reveal_path,
+                        &enrolled.access_token,
+                        None,
+                        Some("abcdef"),
+                    ),
+                )
+                .await;
+                assert_error(invalid, StatusCode::FORBIDDEN, 1491).await;
+
+                let reauth_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+                let reauthenticated = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/reauth",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({ "method": "totp", "totp_code": reauth_code }),
+                    ),
+                )
+                .await;
+                assert_eq!(reauthenticated.status(), StatusCode::OK);
+
+                let missing_target = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &format!("/manager/api/provider/{provider_id}/provider_keys/999999/reveal"),
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(missing_target.status(), StatusCode::NOT_FOUND);
+                let revealed = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &reveal_path,
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(revealed.status(), StatusCode::OK);
+                assert_eq!(
+                    response_json(revealed).await["data"]["api_key"],
+                    "sk-provider-replaced"
+                );
+
+                let key_path =
+                    format!("/manager/api/provider/{provider_id}/provider_keys/{key_id}");
+                let updated = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::PUT,
+                        &key_path,
+                        &enrolled.access_token,
+                        Some(json!({ "description": "updated", "is_enabled": true })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    updated.status(),
+                    StatusCode::OK,
+                    "provider metadata update must not require TOTP"
+                );
+
+                let second_key = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &collection,
+                        &enrolled.access_token,
+                        Some(json!({
+                            "api_key": "sk-provider-delete",
+                            "description": null
+                        })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(second_key.status(), StatusCode::OK);
+                let second_key_id = response_json(second_key).await["data"]["id"]
+                    .as_i64()
+                    .expect("second provider key id should exist");
+                let deleted_key = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::DELETE,
+                        &format!(
+                            "/manager/api/provider/{provider_id}/provider_keys/{second_key_id}"
+                        ),
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    deleted_key.status(),
+                    StatusCode::OK,
+                    "provider key deletion must not require TOTP"
+                );
+
+                let second_provider = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/provider",
+                        &enrolled.access_token,
+                        Some(json!({
+                            "name": "Delete Provider",
+                            "key": "delete-provider",
+                            "endpoint": "https://delete.example.com/v1",
+                            "use_proxy": false,
+                            "provider_type": "OPENAI",
+                            "provider_api_key_mode": "QUEUE"
+                        })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(second_provider.status(), StatusCode::OK);
+                let second_provider_id = response_json(second_provider).await["data"]["id"]
+                    .as_i64()
+                    .expect("second provider id should exist");
+                let deleted_provider = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::DELETE,
+                        &format!("/manager/api/provider/{second_provider_id}"),
+                        &enrolled.access_token,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    deleted_provider.status(),
+                    StatusCode::OK,
+                    "provider deletion must not require TOTP"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn password_rotation_and_logout_all_verify_totp_at_the_required_command_boundary() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-sensitive-auth-commands-totp.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let enrolled =
+                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+
+                let rotate_request = |current_password: &str, totp_code: Option<&str>| {
+                    let request = cookie_request(
+                        Method::POST,
+                        "/auth/password/rotate",
+                        &enrolled.cookie,
+                        Some(&enrolled.access_token),
+                        json!({
+                            "current_password": current_password,
+                            "new_password": ROTATED_PASSWORD,
+                        }),
+                    );
+                    match totp_code {
+                        Some(code) => with_totp_header(request, code),
+                        None => request,
+                    }
+                };
+
+                let missing = send(&app_state, rotate_request(INITIAL_PASSWORD, None)).await;
+                assert_error(missing, StatusCode::PRECONDITION_REQUIRED, 1471).await;
+                let invalid =
+                    send(&app_state, rotate_request(INITIAL_PASSWORD, Some("abcdef"))).await;
+                assert_error(invalid, StatusCode::UNAUTHORIZED, 1472).await;
+
+                let current_code =
+                    totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+                let wrong_password = send(
+                    &app_state,
+                    rotate_request("wrong horse battery staple", Some(&current_code)),
+                )
+                .await;
+                assert_error(wrong_password, StatusCode::UNAUTHORIZED, 1421).await;
+
+                let rotated = send(
+                    &app_state,
+                    rotate_request(INITIAL_PASSWORD, Some(&current_code)),
+                )
+                .await;
+                assert_eq!(
+                    rotated.status(),
+                    StatusCode::OK,
+                    "wrong current password must not consume the TOTP step"
+                );
+                let rotated_cookie = mediator_cookie(&rotated);
+                let rotated = response_json(rotated).await;
+                assert_eq!(rotated["data"]["totp_state"], "enabled");
+                let rotated_access = access_token(&rotated);
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    1
+                );
+
+                let logout_request = |current_password: &str, totp_code: Option<&str>| {
+                    let request = cookie_request(
+                        Method::POST,
+                        "/auth/logout_all",
+                        &rotated_cookie,
+                        Some(&rotated_access),
+                        json!({ "current_password": current_password }),
+                    );
+                    match totp_code {
+                        Some(code) => with_totp_header(request, code),
+                        None => request,
+                    }
+                };
+                let missing = send(&app_state, logout_request(ROTATED_PASSWORD, None)).await;
+                assert_error(missing, StatusCode::PRECONDITION_REQUIRED, 1471).await;
+                let invalid =
+                    send(&app_state, logout_request(ROTATED_PASSWORD, Some("000000"))).await;
+                assert_error(invalid, StatusCode::UNAUTHORIZED, 1472).await;
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    1,
+                    "failed TOTP must not revoke sessions"
+                );
+
+                now.fetch_add(30, Ordering::SeqCst);
+                let logout_code = totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+                let wrong_password = send(
+                    &app_state,
+                    logout_request("wrong horse battery staple", Some(&logout_code)),
+                )
+                .await;
+                assert_error(wrong_password, StatusCode::UNAUTHORIZED, 1481).await;
+                let logged_out = send(
+                    &app_state,
+                    logout_request(ROTATED_PASSWORD, Some(&logout_code)),
+                )
+                .await;
+                assert_eq!(logged_out.status(), StatusCode::OK);
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    0
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sensitive_command_matrix_fails_closed_when_totp_is_unavailable() {
+        let test_db_context =
+            TestDbContext::new_sqlite("controller-sensitive-totp-unavailable.sqlite");
+        test_db_context
+            .run_async(async {
+                let (app_state, now) = create_totp_test_app_state(test_db_context.clone()).await;
+                let enrolled =
+                    enroll_totp_over_http(&app_state, now.load(Ordering::SeqCst) - 30).await;
+                let create_code =
+                    totp_code_at(&enrolled.manual_secret, now.load(Ordering::SeqCst));
+                let created = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/api_key",
+                        &enrolled.access_token,
+                        Some(json!({
+                            "name": "unavailable-api-key",
+                            "default_action": "ALLOW"
+                        })),
+                        Some(&create_code),
+                    ),
+                )
+                .await;
+                assert_eq!(created.status(), StatusCode::OK);
+                let created = response_json(created).await;
+                let api_key_id = created["data"]["detail"]["id"]
+                    .as_i64()
+                    .expect("API key id should exist");
+                let api_key_secret = created["data"]["reveal"]["api_key"]
+                    .as_str()
+                    .expect("API key secret should exist")
+                    .to_string();
+
+                let provider = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        "/manager/api/provider",
+                        &enrolled.access_token,
+                        Some(json!({
+                            "name": "Unavailable Provider",
+                            "key": "unavailable-provider",
+                            "endpoint": "https://api.example.com/v1",
+                            "use_proxy": false,
+                            "provider_type": "OPENAI",
+                            "provider_api_key_mode": "QUEUE"
+                        })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(provider.status(), StatusCode::OK);
+                let provider_id = response_json(provider).await["data"]["id"]
+                    .as_i64()
+                    .expect("provider id should exist");
+                let provider_key = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &format!("/manager/api/provider/{provider_id}/provider_keys"),
+                        &enrolled.access_token,
+                        Some(json!({
+                            "api_key": "sk-unavailable-provider",
+                            "description": null
+                        })),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(provider_key.status(), StatusCode::OK);
+                let provider_key_id = response_json(provider_key).await["data"]["id"]
+                    .as_i64()
+                    .expect("provider key id should exist");
+
+                let credential_before = ManagerCredential::load()
+                    .unwrap()
+                    .expect("manager credential should exist");
+                let sessions_before =
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len();
+                let enrolled_context = decode_access_token(&enrolled.access_token)
+                    .expect("enrollment access should decode");
+                let app_state = restart_with_corrupt_totp(&app_state, &now);
+                let restarted_access = app_state
+                    .admin
+                    .auth
+                    .access_for_session(
+                        enrolled_context.login_instance_id,
+                        enrolled_context.credential_epoch,
+                    )
+                    .await
+                    .expect("mediator recovery should rebuild page access after restart");
+
+                let api_commands = [
+                    (
+                        Method::POST,
+                        "/manager/api/api_key".to_string(),
+                        Some(json!({
+                            "name": "must-not-create",
+                            "default_action": "ALLOW"
+                        })),
+                    ),
+                    (
+                        Method::POST,
+                        format!("/manager/api/api_key/{api_key_id}/reveal"),
+                        None,
+                    ),
+                    (
+                        Method::POST,
+                        format!("/manager/api/api_key/{api_key_id}/rotate"),
+                        None,
+                    ),
+                    (
+                        Method::DELETE,
+                        format!("/manager/api/api_key/{api_key_id}"),
+                        None,
+                    ),
+                ];
+                for (method, path, payload) in api_commands {
+                    let response = send_manager(
+                        &app_state,
+                        manager_command_request(
+                            method.clone(),
+                            &path,
+                            &restarted_access,
+                            payload,
+                            None,
+                        ),
+                    )
+                    .await;
+                    let status = response.status();
+                    let body = response_json(response).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "{method} {path}: {body}"
+                    );
+                    assert_eq!(body["code"].as_u64(), Some(1479), "{method} {path}");
+                }
+                assert_eq!(app_state.admin.api_key.list_api_keys().unwrap().len(), 1);
+                assert_eq!(
+                    app_state
+                        .admin
+                        .api_key
+                        .reveal_api_key(api_key_id)
+                        .unwrap()
+                        .api_key,
+                    api_key_secret,
+                    "unavailable TOTP must precede reveal, rotation, and deletion"
+                );
+
+                let provider_reveal = send_manager(
+                    &app_state,
+                    manager_command_request(
+                        Method::POST,
+                        &format!(
+                            "/manager/api/provider/{provider_id}/provider_keys/{provider_key_id}/reveal"
+                        ),
+                        &restarted_access,
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+                assert_error(
+                    provider_reveal,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    1479,
+                )
+                .await;
+                assert_eq!(
+                    app_state
+                        .admin
+                        .provider
+                        .reveal_provider_api_key(provider_id, provider_key_id)
+                        .await
+                        .unwrap()
+                        .api_key,
+                    "sk-unavailable-provider"
+                );
+
+                let rotate = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/password/rotate",
+                        &enrolled.cookie,
+                        Some(&restarted_access),
+                        json!({
+                            "current_password": INITIAL_PASSWORD,
+                            "new_password": ROTATED_PASSWORD,
+                        }),
+                    ),
+                )
+                .await;
+                assert_error(rotate, StatusCode::SERVICE_UNAVAILABLE, 1479).await;
+
+                let logout_all = send(
+                    &app_state,
+                    cookie_request(
+                        Method::POST,
+                        "/auth/logout_all",
+                        &enrolled.cookie,
+                        Some(&restarted_access),
+                        json!({ "current_password": INITIAL_PASSWORD }),
+                    ),
+                )
+                .await;
+                assert_error(logout_all, StatusCode::SERVICE_UNAVAILABLE, 1479).await;
+                let credential_after = ManagerCredential::load()
+                    .unwrap()
+                    .expect("manager credential should remain");
+                assert_eq!(
+                    credential_after.password_verifier,
+                    credential_before.password_verifier,
+                    "unavailable TOTP must precede password mutation"
+                );
+                assert_eq!(
+                    ManagerAuthInstance::list_active_instances(now.load(Ordering::SeqCst))
+                        .unwrap()
+                        .len(),
+                    sessions_before,
+                    "unavailable TOTP must precede logout-all revocation"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn auth_http_logout_all_revokes_current_and_other_sessions() {
         let test_db_context = TestDbContext::new_sqlite("controller-auth-logout-all.sqlite");
 
@@ -1231,7 +3524,7 @@ mod tests {
                     &app_state,
                     json_request(
                         Method::POST,
-                        "/auth/login",
+                        "/auth/login/password",
                         json!({ "password": INITIAL_PASSWORD }),
                     ),
                 )
@@ -1247,7 +3540,7 @@ mod tests {
                         "/auth/logout_all",
                         &first_cookie,
                         Some(&second_access),
-                        json!({}),
+                        json!({ "current_password": INITIAL_PASSWORD }),
                     ),
                 )
                 .await;
@@ -1270,7 +3563,7 @@ mod tests {
                         "/auth/logout_all",
                         &second_cookie,
                         Some(&second_access),
-                        json!({}),
+                        json!({ "current_password": INITIAL_PASSWORD }),
                     ),
                 )
                 .await;
@@ -1369,7 +3662,7 @@ mod tests {
                         "/auth/logout_all",
                         &cookie,
                         Some(&access),
-                        json!({}),
+                        json!({ "current_password": INITIAL_PASSWORD }),
                     ),
                 )
                 .await;
@@ -1380,7 +3673,7 @@ mod tests {
                         .is_none(),
                     "logout-all storage failure must preserve the caller cookie"
                 );
-                assert_error(logout_all_failure, StatusCode::SERVICE_UNAVAILABLE, 1451).await;
+                assert_error(logout_all_failure, StatusCode::SERVICE_UNAVAILABLE, 1484).await;
 
                 let logout_failure = send(
                     &app_state,
@@ -1501,18 +3794,33 @@ mod tests {
             .run_async(async {
                 let app_state = create_test_app_state(test_db_context.clone()).await;
 
-                let mut missing_origin = json_request(
-                    Method::POST,
+                for path in [
                     "/auth/bootstrap",
-                    json!({ "password": INITIAL_PASSWORD }),
-                );
-                missing_origin.headers_mut().remove(header::ORIGIN);
-                assert_error(
-                    send(&app_state, missing_origin).await,
-                    StatusCode::FORBIDDEN,
-                    1461,
-                )
-                .await;
+                    "/auth/login/password",
+                    "/auth/login/totp",
+                    "/auth/reauth",
+                    "/auth/recovery/start",
+                    "/auth/recovery/confirm",
+                    "/auth/totp/enroll/start",
+                    "/auth/totp/enroll/confirm",
+                    "/auth/totp/replace/start",
+                    "/auth/totp/replace/confirm",
+                    "/auth/totp/disable",
+                    "/auth/access",
+                    "/auth/password/rotate",
+                    "/auth/logout",
+                    "/auth/logout_all",
+                ] {
+                    let mut missing_origin =
+                        json_request(Method::POST, path, json!({ "password": INITIAL_PASSWORD }));
+                    missing_origin.headers_mut().remove(header::ORIGIN);
+                    assert_error(
+                        send(&app_state, missing_origin).await,
+                        StatusCode::FORBIDDEN,
+                        1461,
+                    )
+                    .await;
+                }
 
                 let mut origin_with_path = json_request(
                     Method::POST,
@@ -1624,7 +3932,7 @@ mod tests {
                 for index in 0..5 {
                     let mut request = json_request(
                         Method::POST,
-                        "/auth/login",
+                        "/auth/login/password",
                         json!({ "password": "wrong horse battery staple" }),
                     );
                     request.headers_mut().insert(
@@ -1645,7 +3953,7 @@ mod tests {
 
                 let mut locked_request = json_request(
                     Method::POST,
-                    "/auth/login",
+                    "/auth/login/password",
                     json!({ "password": INITIAL_PASSWORD }),
                 );
                 locked_request.headers_mut().insert(
@@ -1670,7 +3978,7 @@ mod tests {
                     &app_state,
                     json_request(
                         Method::POST,
-                        "/auth/login",
+                        "/auth/login/password",
                         json!({ "password": INITIAL_PASSWORD }),
                     ),
                     second_peer,
@@ -1706,7 +4014,7 @@ mod tests {
                 for _ in 0..5 {
                     let mut request = json_request(
                         Method::POST,
-                        "/manager/api/auth/login",
+                        "/manager/api/auth/login/password",
                         json!({ "password": "wrong horse battery staple" }),
                     );
                     request.headers_mut().insert(
@@ -1727,7 +4035,7 @@ mod tests {
 
                 let mut locked_request = json_request(
                     Method::POST,
-                    "/manager/api/auth/login",
+                    "/manager/api/auth/login/password",
                     json!({ "password": INITIAL_PASSWORD }),
                 );
                 locked_request.headers_mut().insert(
@@ -1747,7 +4055,7 @@ mod tests {
 
                 let mut independent_request = json_request(
                     Method::POST,
-                    "/manager/api/auth/login",
+                    "/manager/api/auth/login/password",
                     json!({ "password": INITIAL_PASSWORD }),
                 );
                 independent_request.headers_mut().insert(
@@ -1827,7 +4135,13 @@ mod tests {
                 let rotated = app_state
                     .admin
                     .auth
-                    .rotate_password(&initial_context, INITIAL_PASSWORD, ROTATED_PASSWORD)
+                    .rotate_password(
+                        &initial_context,
+                        SocketAddr::from(([127, 0, 0, 1], 31_000)).ip(),
+                        None,
+                        INITIAL_PASSWORD,
+                        ROTATED_PASSWORD,
+                    )
                     .await
                     .expect("rotation should succeed");
                 let stale = send_manager(
@@ -1981,6 +4295,16 @@ mod tests {
         for (response, expected_retry_after) in [
             (LoginHttpError::SourceRateLimited(37).into_response(), "37"),
             (LoginHttpError::GlobalRateLimited(23).into_response(), "23"),
+            (ManagerTotpHttpError::StepReplayed(19).into_response(), "19"),
+            (ManagerTotpHttpError::StepStale(17).into_response(), "17"),
+            (
+                ManagerTotpHttpError::SourceRateLimited(13).into_response(),
+                "13",
+            ),
+            (
+                ManagerTotpHttpError::GlobalRateLimited(11).into_response(),
+                "11",
+            ),
         ] {
             assert_eq!(
                 response
@@ -2053,6 +4377,97 @@ mod tests {
                 LoginHttpError::InvalidRequest.into_response(),
                 422,
                 1416,
+                false,
+            ),
+            (
+                LoginHttpError::ManagerTotpUnavailable.into_response(),
+                503,
+                1479,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::Required.into_response(),
+                428,
+                1471,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::Invalid.into_response(),
+                401,
+                1472,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::StepReplayed(19).into_response(),
+                409,
+                1473,
+                true,
+            ),
+            (
+                ManagerTotpHttpError::StepStale(17).into_response(),
+                409,
+                1474,
+                true,
+            ),
+            (
+                ManagerTotpHttpError::SourceRateLimited(13).into_response(),
+                429,
+                1475,
+                true,
+            ),
+            (
+                ManagerTotpHttpError::GlobalRateLimited(11).into_response(),
+                429,
+                1476,
+                true,
+            ),
+            (
+                ManagerTotpHttpError::ChallengeInvalidOrExpired.into_response(),
+                401,
+                1477,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::ChallengeAttemptsExhausted.into_response(),
+                429,
+                1478,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::Unavailable.into_response(),
+                503,
+                1479,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::StateConflict.into_response(),
+                409,
+                1480,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::CurrentPasswordInvalid.into_response(),
+                401,
+                1481,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::RecoveryCredentialsInvalid.into_response(),
+                401,
+                1482,
+                false,
+            ),
+            (ManagerTotpHttpError::Busy.into_response(), 429, 1483, true),
+            (
+                ManagerTotpHttpError::Storage.into_response(),
+                503,
+                1484,
+                false,
+            ),
+            (
+                ManagerTotpHttpError::RequestInvalid.into_response(),
+                422,
+                1485,
                 false,
             ),
             (
@@ -2164,7 +4579,7 @@ mod tests {
         ))
         .expect("manager auth OpenAPI should parse");
         assert_eq!(document["openapi"].as_str(), Some("3.1.0"));
-        assert_eq!(document["info"]["version"].as_str(), Some("1.0.0-pre.4"));
+        assert_eq!(document["info"]["version"].as_str(), Some("1.0.0-pre.6"));
         assert_eq!(
             document["x-cyder-default-cache-control"].as_str(),
             Some("no-store")
@@ -2199,16 +4614,88 @@ mod tests {
                 vec![1401, 1402, 1403, 1404, 1405, 1461],
             ),
             (
-                "/ai/manager/api/auth/login",
+                "/ai/manager/api/auth/login/password",
                 "post",
-                vec![1411, 1412, 1413, 1414, 1415, 1416, 1417, 1418, 1461],
+                vec![1411, 1412, 1413, 1414, 1415, 1416, 1417, 1418, 1461, 1479],
+            ),
+            (
+                "/ai/manager/api/auth/login/totp",
+                "post",
+                vec![
+                    1461, 1472, 1473, 1474, 1475, 1476, 1477, 1478, 1479, 1480, 1483, 1484, 1485,
+                ],
+            ),
+            (
+                "/ai/manager/api/auth/reauth",
+                "post",
+                vec![
+                    1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1472, 1473, 1474, 1475, 1476,
+                    1479, 1480, 1481, 1483, 1484, 1485, 1492,
+                ],
+            ),
+            (
+                "/ai/manager/api/auth/recovery/start",
+                "post",
+                vec![1461, 1475, 1476, 1479, 1482, 1483, 1484, 1485],
+            ),
+            (
+                "/ai/manager/api/auth/recovery/confirm",
+                "post",
+                vec![
+                    1461, 1472, 1473, 1474, 1475, 1476, 1477, 1478, 1479, 1480, 1483, 1484, 1485,
+                ],
+            ),
+            (
+                "/ai/manager/api/auth/totp/status",
+                "get",
+                vec![1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1479, 1480],
+            ),
+            (
+                "/ai/manager/api/auth/totp/enroll/start",
+                "post",
+                vec![
+                    1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1475, 1476, 1479, 1480, 1481,
+                    1483, 1484, 1485,
+                ],
+            ),
+            (
+                "/ai/manager/api/auth/totp/enroll/confirm",
+                "post",
+                vec![
+                    1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1472, 1473, 1474, 1475, 1476,
+                    1477, 1478, 1479, 1480, 1483, 1484, 1485,
+                ],
+            ),
+            (
+                "/ai/manager/api/auth/totp/replace/start",
+                "post",
+                vec![
+                    1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1471, 1472, 1473, 1474, 1475,
+                    1476, 1479, 1480, 1481, 1483, 1484, 1485,
+                ],
+            ),
+            (
+                "/ai/manager/api/auth/totp/replace/confirm",
+                "post",
+                vec![
+                    1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1472, 1473, 1474, 1475, 1476,
+                    1477, 1478, 1479, 1480, 1483, 1484, 1485,
+                ],
+            ),
+            (
+                "/ai/manager/api/auth/totp/disable",
+                "post",
+                vec![
+                    1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1471, 1472, 1473, 1474, 1475,
+                    1476, 1479, 1480, 1481, 1483, 1484, 1485,
+                ],
             ),
             (
                 "/ai/manager/api/auth/password/rotate",
                 "post",
                 vec![
                     1421, 1422, 1423, 1424, 1425, 1426, 1431, 1432, 1433, 1434, 1435, 1436, 1441,
-                    1461,
+                    1461, 1471, 1472, 1473, 1474, 1475, 1476, 1479, 1480, 1484, 1485,
                 ],
             ),
             (
@@ -2220,7 +4707,10 @@ mod tests {
             (
                 "/ai/manager/api/auth/logout_all",
                 "post",
-                vec![1431, 1432, 1433, 1434, 1435, 1436, 1441, 1451, 1461],
+                vec![
+                    1431, 1432, 1433, 1434, 1435, 1436, 1441, 1461, 1471, 1472, 1473, 1474, 1475,
+                    1476, 1479, 1480, 1481, 1483, 1484, 1485,
+                ],
             ),
         ];
         for (path, method, error_codes) in expected {
@@ -2253,6 +4743,10 @@ mod tests {
             2
         );
         assert!(
+            document["paths"]["/ai/manager/api/auth/login"].is_null(),
+            "removed single-stage login route must not exist"
+        );
+        assert!(
             document["paths"]["/ai/manager/api/auth/refresh_token"].is_null(),
             "legacy public refresh route must not exist"
         );
@@ -2267,11 +4761,55 @@ mod tests {
                 .iter()
                 .filter_map(serde_yaml::Value::as_str)
                 .collect::<Vec<_>>(),
-            vec!["access_token"]
+            vec!["access_token", "totp_state", "reauth"]
         );
         assert!(
             document["components"]["schemas"]["AuthAccess"]["properties"]["refresh_token"]
                 .is_null()
+        );
+        assert_eq!(
+            document["components"]["schemas"]["TotpCode"]["pattern"].as_str(),
+            Some("^[0-9]{6}$")
+        );
+        assert_eq!(
+            document["components"]["parameters"]["ManagerTotpCode"]["name"].as_str(),
+            Some("X-Cyder-TOTP-Code")
+        );
+        assert_eq!(
+            document["components"]["parameters"]["SensitiveManagerTotpCode"]["required"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            document["x-cyder-secret-governance-reauth"]["fixedLifetimeSeconds"].as_u64(),
+            Some(crate::service::admin::auth::SECRET_GOVERNANCE_REAUTH_TTL_SEC as u64)
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ManagerReauthStatus"]["properties"]["scope"]
+                ["const"]
+                .as_str(),
+            Some("secret_governance")
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ManagerReauthRequest"]["discriminator"]
+                ["propertyName"]
+                .as_str(),
+            Some("method")
+        );
+        assert_eq!(
+            document["x-cyder-auth-body-limit-bytes"].as_u64(),
+            Some(AUTH_BODY_LIMIT_BYTES as u64)
+        );
+        assert_eq!(
+            document["paths"]["/ai/manager/api/auth/login/password"]["post"]["responses"]["200"]
+                ["$ref"]
+                .as_str(),
+            Some("#/components/responses/LoginPasswordResult")
+        );
+        assert_eq!(
+            document["paths"]["/ai/manager/api/auth/recovery/start"]["post"]["responses"]["200"]
+                ["$ref"]
+                .as_str(),
+            Some("#/components/responses/RecoverySetupWithMediatorCookieDeletion")
         );
         assert_eq!(
             document["paths"]["/ai/manager/api/auth/logout"]["post"]["responses"]["200"]["$ref"]
@@ -2282,6 +4820,12 @@ mod tests {
             document["paths"]["/ai/manager/api/auth/logout_all"]["post"]["responses"]["200"]["$ref"]
                 .as_str(),
             Some("#/components/responses/LogoutAllWithMediatorCookieDeletion")
+        );
+        assert_eq!(
+            document["paths"]["/ai/manager/api/auth/logout_all"]["post"]["requestBody"]["content"]
+                ["application/json"]["schema"]["$ref"]
+                .as_str(),
+            Some("#/components/schemas/CurrentPasswordRequest")
         );
     }
 }

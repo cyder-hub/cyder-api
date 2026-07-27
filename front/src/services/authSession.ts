@@ -1,11 +1,26 @@
-import type { LogoutAllResult, ManagerAuthAccess } from "./types";
+import type {
+  LogoutAllResult,
+  ManagerAuthAccess,
+  ManagerPasswordLoginResult,
+  ManagerReauthStatus,
+  ManagerTotpLifecycleResult,
+  ManagerTotpRecoveryResult,
+  ManagerTotpRecoverySetup,
+  ManagerTotpState,
+} from "./types";
 import { authErrorCode } from "./authErrors.ts";
 
 export interface AuthSessionStore {
   lifecycle: "unknown" | "restoring" | "authenticated" | "anonymous";
+  totpState: ManagerTotpState | null;
+  reauth: ManagerReauthStatus | null;
   setRestoring: () => void;
   setUnknown: () => void;
-  setAuthenticated: (token: string) => void;
+  setAuthenticated: (
+    token: string,
+    totpState: ManagerTotpState,
+    reauth: ManagerReauthStatus | null,
+  ) => void;
   setAnonymous: () => void;
 }
 
@@ -16,14 +31,42 @@ export interface AuthSessionDependencies {
   clearAccessToken: () => void;
   clearLegacyAuthStorage: () => void;
   requestAccess: () => Promise<ManagerAuthAccess>;
-  loginWithPassword: (password: string) => Promise<ManagerAuthAccess>;
+  loginWithPassword: (password: string) => Promise<ManagerPasswordLoginResult>;
+  loginWithTotp: (
+    loginChallenge: string,
+    totpCode: string,
+  ) => Promise<ManagerAuthAccess>;
+  startTotpRecovery: (
+    password: string,
+    recoveryCode: string,
+  ) => Promise<ManagerTotpRecoverySetup>;
+  confirmTotpRecovery: (
+    recoveryChallenge: string,
+    totpCode: string,
+  ) => Promise<ManagerTotpRecoveryResult>;
+  confirmTotpEnrollmentRequest: (
+    setupChallenge: string,
+    totpCode: string,
+  ) => Promise<ManagerTotpLifecycleResult>;
+  confirmTotpReplacementRequest: (
+    setupChallenge: string,
+    totpCode: string,
+  ) => Promise<ManagerTotpLifecycleResult>;
+  disableTotpRequest: (
+    currentPassword: string,
+    currentTotpCode: string,
+  ) => Promise<ManagerTotpLifecycleResult>;
   bootstrapWithPassword: (password: string) => Promise<ManagerAuthAccess>;
   rotateManagerPassword: (
     currentPassword: string,
     newPassword: string,
+    totpCode?: string,
   ) => Promise<ManagerAuthAccess>;
   logoutRequest: () => Promise<void>;
-  logoutAllRequest: () => Promise<LogoutAllResult>;
+  logoutAllRequest: (
+    currentPassword: string,
+    totpCode?: string,
+  ) => Promise<LogoutAllResult>;
   announceSessionChanged: () => void;
   announceSessionRevoked: () => void;
   onSessionRevoked: () => void;
@@ -51,7 +94,9 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
 
   const installAccess = (access: ManagerAuthAccess): string => {
     deps.setAccessToken(access.access_token);
-    deps.getAuthStore().setAuthenticated(access.access_token);
+    deps
+      .getAuthStore()
+      .setAuthenticated(access.access_token, access.totp_state, access.reauth);
     return access.access_token;
   };
 
@@ -106,7 +151,17 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
           previousLifecycle === "authenticated" &&
           previousAccess !== null
         ) {
-          store.setAuthenticated(previousAccess);
+          const previousTotpState = store.totpState;
+          const previousReauth = store.reauth;
+          if (previousTotpState) {
+            store.setAuthenticated(
+              previousAccess,
+              previousTotpState,
+              previousReauth,
+            );
+          } else {
+            store.setUnknown();
+          }
         } else {
           store.setUnknown();
         }
@@ -137,9 +192,77 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
     }
   };
 
-  const login = async (password: string): Promise<void> => {
-    replaceAccess(await deps.loginWithPassword(password));
+  const login = async (
+    password: string,
+  ): Promise<ManagerPasswordLoginResult> => {
+    const result = await deps.loginWithPassword(password);
+    if (result.state === "authenticated") {
+      replaceAccess(result);
+      deps.announceSessionChanged();
+    }
+    return result;
+  };
+
+  const completeTotpLogin = async (
+    loginChallenge: string,
+    totpCode: string,
+  ): Promise<void> => {
+    replaceAccess(await deps.loginWithTotp(loginChallenge, totpCode));
     deps.announceSessionChanged();
+  };
+
+  const startRecovery = async (
+    password: string,
+    recoveryCode: string,
+  ): Promise<ManagerTotpRecoverySetup> => {
+    const setup = await deps.startTotpRecovery(password, recoveryCode);
+    invalidateAccessRecovery();
+    clearSession();
+    deps.announceSessionRevoked();
+    return setup;
+  };
+
+  const confirmRecovery = async (
+    recoveryChallenge: string,
+    totpCode: string,
+  ): Promise<ManagerTotpRecoveryResult> => {
+    const result = await deps.confirmTotpRecovery(recoveryChallenge, totpCode);
+    replaceAccess(result);
+    deps.announceSessionChanged();
+    return result;
+  };
+
+  const installTotpLifecycle = (
+    result: ManagerTotpLifecycleResult,
+  ): ManagerTotpLifecycleResult => {
+    replaceAccess(result);
+    deps.announceSessionChanged();
+    return result;
+  };
+
+  const confirmTotpEnrollment = async (
+    setupChallenge: string,
+    totpCode: string,
+  ): Promise<ManagerTotpLifecycleResult> =>
+    installTotpLifecycle(
+      await deps.confirmTotpEnrollmentRequest(setupChallenge, totpCode),
+    );
+
+  const confirmTotpReplacement = async (
+    setupChallenge: string,
+    totpCode: string,
+  ): Promise<ManagerTotpLifecycleResult> =>
+    installTotpLifecycle(
+      await deps.confirmTotpReplacementRequest(setupChallenge, totpCode),
+    );
+
+  const disableTotp = async (
+    currentPassword: string,
+    currentTotpCode: string,
+  ): Promise<void> => {
+    installTotpLifecycle(
+      await deps.disableTotpRequest(currentPassword, currentTotpCode),
+    );
   };
 
   const bootstrap = async (password: string): Promise<void> => {
@@ -150,9 +273,14 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
   const rotatePassword = async (
     currentPassword: string,
     newPassword: string,
+    totpCode?: string,
   ): Promise<void> => {
     replaceAccess(
-      await deps.rotateManagerPassword(currentPassword, newPassword),
+      await deps.rotateManagerPassword(
+        currentPassword,
+        newPassword,
+        totpCode,
+      ),
     );
     deps.announceSessionChanged();
   };
@@ -170,9 +298,12 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
     return { serverRevocationConfirmed };
   };
 
-  const logoutAll = async (): Promise<LogoutAllResult> => {
+  const logoutAll = async (
+    currentPassword: string,
+    totpCode?: string,
+  ): Promise<LogoutAllResult> => {
     try {
-      const result = await deps.logoutAllRequest();
+      const result = await deps.logoutAllRequest(currentPassword, totpCode);
       revokeLocalSession(true);
       return result;
     } catch (error) {
@@ -191,6 +322,12 @@ export function createAuthSessionActions(deps: AuthSessionDependencies) {
     revokeLocalSession: () => revokeLocalSession(false),
     revokeAndAnnounce: () => revokeLocalSession(true),
     login,
+    completeTotpLogin,
+    startRecovery,
+    confirmRecovery,
+    confirmTotpEnrollment,
+    confirmTotpReplacement,
+    disableTotp,
     bootstrap,
     rotatePassword,
     logout,

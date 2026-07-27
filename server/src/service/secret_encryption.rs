@@ -20,7 +20,9 @@ use crate::config::{DownstreamSecretMode, SecretEncryptionConfig, SecretEncrypti
 use crate::controller::BaseError;
 use crate::database::api_key::{_postgres_model, _sqlite_model};
 use crate::database::get_connection;
+use crate::database::manager_credential::MANAGER_ID;
 use crate::db_execute;
+use crate::service::admin::auth::totp::validate_manager_totp_secret;
 
 pub const SECRET_FORMAT_VERSION: i32 = 1;
 pub const SECRET_NONCE_LEN: usize = 24;
@@ -46,6 +48,16 @@ type StoredProviderSecretTuple = (
     Option<String>,
 );
 
+type StoredManagerTotpTuple = (
+    String,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<i32>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SecretRotationSummary {
     pub current: usize,
@@ -63,6 +75,68 @@ impl SecretRotationSummary {
 pub struct SecretPreparationSummary {
     pub downstream: SecretRotationSummary,
     pub provider: SecretRotationSummary,
+    pub manager_totp: ManagerTotpPreparationSummary,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ManagerTotpPreparationState {
+    #[default]
+    Disabled,
+    Current,
+    Rotated,
+    UnavailablePreserved,
+}
+
+impl ManagerTotpPreparationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Current => "current",
+            Self::Rotated => "rotated",
+            Self::UnavailablePreserved => "unavailable_preserved",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerTotpPreparationFailure {
+    IncompleteFields,
+    InvalidFormat,
+    UnknownKey,
+    DecryptFailed,
+    InvalidSecret,
+    EncryptFailed,
+    ConcurrentChange,
+}
+
+impl ManagerTotpPreparationFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IncompleteFields => "incomplete_fields",
+            Self::InvalidFormat => "invalid_format",
+            Self::UnknownKey => "unknown_key",
+            Self::DecryptFailed => "decrypt_failed",
+            Self::InvalidSecret => "invalid_secret",
+            Self::EncryptFailed => "encrypt_failed",
+            Self::ConcurrentChange => "concurrent_change",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ManagerTotpPreparationSummary {
+    pub state: ManagerTotpPreparationState,
+    pub failure: Option<ManagerTotpPreparationFailure>,
+    pub secret_format_version: Option<i32>,
+    pub key_fingerprint_short: Option<[u8; 8]>,
+}
+
+impl ManagerTotpPreparationSummary {
+    pub fn key_fingerprint_short_str(&self) -> Option<&str> {
+        self.key_fingerprint_short
+            .as_ref()
+            .and_then(|value| std::str::from_utf8(value).ok())
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -88,17 +162,22 @@ impl fmt::Debug for KeyFingerprint {
 pub enum SecretDomain {
     DownstreamApiKey(i64),
     ProviderApiKey(i64),
+    ManagerTotp(i64),
 }
 
 impl SecretDomain {
-    fn aad(self) -> Zeroizing<Vec<u8>> {
+    fn aad(self) -> Result<Zeroizing<Vec<u8>>, SecretEncryptionError> {
         match self {
-            Self::DownstreamApiKey(id) => {
-                Zeroizing::new(format!("cyder-secret:v1:downstream-api-key:{id}").into_bytes())
+            Self::DownstreamApiKey(id) => Ok(Zeroizing::new(
+                format!("cyder-secret:v1:downstream-api-key:{id}").into_bytes(),
+            )),
+            Self::ProviderApiKey(id) => Ok(Zeroizing::new(
+                format!("cyder-secret:v1:provider-api-key:{id}").into_bytes(),
+            )),
+            Self::ManagerTotp(MANAGER_ID) => {
+                Ok(Zeroizing::new(b"cyder-secret:v1:manager-totp:0".to_vec()))
             }
-            Self::ProviderApiKey(id) => {
-                Zeroizing::new(format!("cyder-secret:v1:provider-api-key:{id}").into_bytes())
-            }
+            Self::ManagerTotp(_) => Err(SecretEncryptionError::InvalidDomain),
         }
     }
 }
@@ -217,6 +296,8 @@ pub enum SecretEncryptionError {
     InvalidPlaintext,
     #[error("stored secret fields are incomplete")]
     IncompleteStoredSecret,
+    #[error("secret encryption domain is invalid")]
+    InvalidDomain,
 }
 
 #[derive(Clone)]
@@ -318,6 +399,226 @@ impl SecretEncryptionService {
             plaintext,
         ))
     }
+}
+
+struct ManagerTotpRotation {
+    expected_epoch: String,
+    expected_ciphertext: Vec<u8>,
+    expected_nonce: Vec<u8>,
+    expected_format_version: i32,
+    expected_fingerprint: String,
+    expected_last_accepted_step: i64,
+    expected_enabled_at: i64,
+    replacement: EncryptedSecret,
+}
+
+struct ManagerTotpInspection {
+    summary: ManagerTotpPreparationSummary,
+    rotation: Option<ManagerTotpRotation>,
+}
+
+fn inspect_manager_totp(
+    row: Option<StoredManagerTotpTuple>,
+    current_key: &SecretEncryptionKey,
+    current_fingerprint: &KeyFingerprint,
+    previous_key: Option<&SecretEncryptionKey>,
+    previous_fingerprint: Option<&KeyFingerprint>,
+) -> ManagerTotpInspection {
+    let Some((
+        expected_epoch,
+        ciphertext,
+        nonce,
+        format_version,
+        fingerprint,
+        last_accepted_step,
+        enabled_at,
+    )) = row
+    else {
+        return ManagerTotpInspection {
+            summary: ManagerTotpPreparationSummary::default(),
+            rotation: None,
+        };
+    };
+
+    if [
+        ciphertext.is_some(),
+        nonce.is_some(),
+        format_version.is_some(),
+        fingerprint.is_some(),
+        last_accepted_step.is_some(),
+        enabled_at.is_some(),
+    ]
+    .iter()
+    .all(|present| !present)
+    {
+        return ManagerTotpInspection {
+            summary: ManagerTotpPreparationSummary::default(),
+            rotation: None,
+        };
+    }
+
+    let summary_context = ManagerTotpPreparationSummary {
+        state: ManagerTotpPreparationState::UnavailablePreserved,
+        failure: None,
+        secret_format_version: format_version,
+        key_fingerprint_short: fingerprint.as_deref().and_then(short_fingerprint_bytes),
+    };
+    let (
+        Some(ciphertext),
+        Some(nonce),
+        Some(format_version),
+        Some(fingerprint),
+        Some(last_accepted_step),
+        Some(enabled_at),
+    ) = (
+        ciphertext,
+        nonce,
+        format_version,
+        fingerprint,
+        last_accepted_step,
+        enabled_at,
+    )
+    else {
+        return ManagerTotpInspection {
+            summary: ManagerTotpPreparationSummary {
+                failure: Some(ManagerTotpPreparationFailure::IncompleteFields),
+                ..summary_context
+            },
+            rotation: None,
+        };
+    };
+
+    let encrypted = match EncryptedSecret::from_parts(
+        ciphertext.clone(),
+        nonce.clone(),
+        format_version,
+        fingerprint.clone(),
+    ) {
+        Ok(encrypted) => encrypted,
+        Err(_) => {
+            return ManagerTotpInspection {
+                summary: ManagerTotpPreparationSummary {
+                    failure: Some(ManagerTotpPreparationFailure::InvalidFormat),
+                    ..summary_context
+                },
+                rotation: None,
+            };
+        }
+    };
+
+    let (plaintext, rotate) = if fingerprint.eq_ignore_ascii_case(current_fingerprint.as_str()) {
+        match decrypt_with_key(
+            current_key,
+            SecretDomain::ManagerTotp(MANAGER_ID),
+            &encrypted,
+        ) {
+            Ok(plaintext) => (plaintext, false),
+            Err(_) => {
+                return ManagerTotpInspection {
+                    summary: ManagerTotpPreparationSummary {
+                        failure: Some(ManagerTotpPreparationFailure::DecryptFailed),
+                        ..summary_context
+                    },
+                    rotation: None,
+                };
+            }
+        }
+    } else if let Some(previous_key) = previous_key.filter(|_| {
+        previous_fingerprint
+            .is_some_and(|previous| fingerprint.eq_ignore_ascii_case(previous.as_str()))
+    }) {
+        match decrypt_with_key(
+            previous_key,
+            SecretDomain::ManagerTotp(MANAGER_ID),
+            &encrypted,
+        ) {
+            Ok(plaintext) => (plaintext, true),
+            Err(_) => {
+                return ManagerTotpInspection {
+                    summary: ManagerTotpPreparationSummary {
+                        failure: Some(ManagerTotpPreparationFailure::DecryptFailed),
+                        ..summary_context
+                    },
+                    rotation: None,
+                };
+            }
+        }
+    } else {
+        return ManagerTotpInspection {
+            summary: ManagerTotpPreparationSummary {
+                failure: Some(ManagerTotpPreparationFailure::UnknownKey),
+                ..summary_context
+            },
+            rotation: None,
+        };
+    };
+
+    if validate_manager_totp_secret(&plaintext).is_err() {
+        return ManagerTotpInspection {
+            summary: ManagerTotpPreparationSummary {
+                failure: Some(ManagerTotpPreparationFailure::InvalidSecret),
+                ..summary_context
+            },
+            rotation: None,
+        };
+    }
+    if !rotate {
+        return ManagerTotpInspection {
+            summary: ManagerTotpPreparationSummary {
+                state: ManagerTotpPreparationState::Current,
+                failure: None,
+                ..summary_context
+            },
+            rotation: None,
+        };
+    }
+
+    let replacement = match encrypt_with_key(
+        current_key,
+        SecretDomain::ManagerTotp(MANAGER_ID),
+        &plaintext,
+    ) {
+        Ok(replacement) => replacement,
+        Err(_) => {
+            return ManagerTotpInspection {
+                summary: ManagerTotpPreparationSummary {
+                    failure: Some(ManagerTotpPreparationFailure::EncryptFailed),
+                    ..summary_context
+                },
+                rotation: None,
+            };
+        }
+    };
+    ManagerTotpInspection {
+        summary: ManagerTotpPreparationSummary {
+            state: ManagerTotpPreparationState::Rotated,
+            failure: None,
+            secret_format_version: Some(replacement.format_version()),
+            key_fingerprint_short: short_fingerprint_bytes(replacement.key_fingerprint().as_str()),
+        },
+        rotation: Some(ManagerTotpRotation {
+            expected_epoch,
+            expected_ciphertext: ciphertext,
+            expected_nonce: nonce,
+            expected_format_version: format_version,
+            expected_fingerprint: fingerprint,
+            expected_last_accepted_step: last_accepted_step,
+            expected_enabled_at: enabled_at,
+            replacement,
+        }),
+    }
+}
+
+fn short_fingerprint_bytes(value: &str) -> Option<[u8; 8]> {
+    let prefix = value.as_bytes().get(..8)?;
+    if !prefix.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let mut short = [0_u8; 8];
+    for (target, source) in short.iter_mut().zip(prefix.iter().copied()) {
+        *target = source.to_ascii_lowercase();
+    }
+    Some(short)
 }
 
 pub fn prepare_secrets_before_startup(
@@ -435,6 +736,90 @@ pub fn prepare_secrets_before_startup(
                     ))));
                 }
                 downstream.rotated += 1;
+            }
+
+            let manager_totp_row = manager_credential::table
+                .filter(manager_credential::dsl::manager_id.eq(MANAGER_ID))
+                .select((
+                    manager_credential::dsl::credential_epoch,
+                    manager_credential::dsl::totp_secret_ciphertext,
+                    manager_credential::dsl::totp_secret_nonce,
+                    manager_credential::dsl::totp_secret_format_version,
+                    manager_credential::dsl::totp_secret_key_fingerprint,
+                    manager_credential::dsl::totp_last_accepted_step,
+                    manager_credential::dsl::totp_enabled_at,
+                ))
+                .first::<StoredManagerTotpTuple>(conn)
+                .optional()
+                .map_err(|error| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to scan manager TOTP secret: {error}"
+                    )))
+                })?;
+            let mut manager_totp = inspect_manager_totp(
+                manager_totp_row,
+                &current_key,
+                &current_fingerprint,
+                previous_key.as_ref(),
+                previous_fingerprint.as_ref(),
+            );
+            if let Some(rotation) = manager_totp.rotation.take() {
+                let updated = diesel::update(
+                    manager_credential::table.filter(
+                        manager_credential::dsl::manager_id
+                            .eq(MANAGER_ID)
+                            .and(
+                                manager_credential::dsl::credential_epoch
+                                    .eq(&rotation.expected_epoch),
+                            )
+                            .and(
+                                manager_credential::dsl::totp_secret_ciphertext
+                                    .eq(Some(&rotation.expected_ciphertext)),
+                            )
+                            .and(
+                                manager_credential::dsl::totp_secret_nonce
+                                    .eq(Some(&rotation.expected_nonce)),
+                            )
+                            .and(
+                                manager_credential::dsl::totp_secret_format_version
+                                    .eq(Some(rotation.expected_format_version)),
+                            )
+                            .and(
+                                manager_credential::dsl::totp_secret_key_fingerprint
+                                    .eq(Some(&rotation.expected_fingerprint)),
+                            )
+                            .and(
+                                manager_credential::dsl::totp_last_accepted_step
+                                    .eq(Some(rotation.expected_last_accepted_step)),
+                            )
+                            .and(
+                                manager_credential::dsl::totp_enabled_at
+                                    .eq(Some(rotation.expected_enabled_at)),
+                            ),
+                    ),
+                )
+                .set((
+                    manager_credential::dsl::totp_secret_ciphertext
+                        .eq(Some(rotation.replacement.ciphertext().to_vec())),
+                    manager_credential::dsl::totp_secret_nonce
+                        .eq(Some(rotation.replacement.nonce().to_vec())),
+                    manager_credential::dsl::totp_secret_format_version
+                        .eq(Some(rotation.replacement.format_version())),
+                    manager_credential::dsl::totp_secret_key_fingerprint.eq(Some(
+                        rotation.replacement.key_fingerprint().as_str().to_string(),
+                    )),
+                ))
+                .execute(conn)
+                .map_err(|error| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to rotate manager TOTP secret: {error}"
+                    )))
+                })?;
+                if updated != 1 {
+                    manager_totp.summary.state = ManagerTotpPreparationState::UnavailablePreserved;
+                    manager_totp.summary.failure =
+                        Some(ManagerTotpPreparationFailure::ConcurrentChange);
+                }
             }
 
             let provider_rows = provider_api_key::table
@@ -586,6 +971,7 @@ pub fn prepare_secrets_before_startup(
             Ok(SecretPreparationSummary {
                 downstream,
                 provider,
+                manager_totp: manager_totp.summary,
             })
         })
     });
@@ -629,7 +1015,7 @@ pub(crate) fn encrypt_with_key(
         .map_err(|_| SecretEncryptionError::EncryptFailed)?;
     let mut nonce = [0_u8; SECRET_NONCE_LEN];
     rng().fill(&mut nonce);
-    let aad = domain.aad();
+    let aad = domain.aad()?;
     let ciphertext = cipher
         .encrypt(
             &XNonce::from(nonce),
@@ -660,7 +1046,7 @@ pub(crate) fn decrypt_with_key(
     }
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes())
         .map_err(|_| SecretEncryptionError::DecryptFailed)?;
-    let aad = domain.aad();
+    let aad = domain.aad()?;
     let plaintext = cipher
         .decrypt(
             &XNonce::from(encrypted.nonce),
@@ -781,7 +1167,10 @@ mod tests {
     #[test]
     fn provider_domain_uses_fixed_aad_and_cannot_cross_decrypt() {
         assert_eq!(
-            SecretDomain::ProviderApiKey(41).aad().as_slice(),
+            SecretDomain::ProviderApiKey(41)
+                .aad()
+                .expect("provider domain should be valid")
+                .as_slice(),
             b"cyder-secret:v1:provider-api-key:41"
         );
 
@@ -805,6 +1194,46 @@ mod tests {
         assert!(matches!(
             service.decrypt_current(SecretDomain::DownstreamApiKey(41), &encrypted),
             Err(SecretEncryptionError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn manager_totp_domain_uses_fixed_aad_and_rejects_cross_domain_or_manager_id() {
+        assert_eq!(
+            SecretDomain::ManagerTotp(MANAGER_ID)
+                .aad()
+                .expect("singleton manager TOTP domain should be valid")
+                .as_slice(),
+            b"cyder-secret:v1:manager-totp:0"
+        );
+        assert_eq!(
+            SecretDomain::ManagerTotp(1).aad(),
+            Err(SecretEncryptionError::InvalidDomain)
+        );
+
+        let service = SecretEncryptionService::from_config(&recoverable_config());
+        let plaintext = SensitiveSecret::new("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string());
+        let encrypted = service
+            .encrypt_current(SecretDomain::ManagerTotp(MANAGER_ID), &plaintext)
+            .expect("manager TOTP secret should encrypt");
+        assert_eq!(
+            service
+                .decrypt_current(SecretDomain::ManagerTotp(MANAGER_ID), &encrypted)
+                .expect("matching manager TOTP domain should decrypt")
+                .expose(),
+            plaintext.expose()
+        );
+        assert!(matches!(
+            service.decrypt_current(SecretDomain::DownstreamApiKey(MANAGER_ID), &encrypted),
+            Err(SecretEncryptionError::DecryptFailed)
+        ));
+        assert!(matches!(
+            service.decrypt_current(SecretDomain::ProviderApiKey(MANAGER_ID), &encrypted),
+            Err(SecretEncryptionError::DecryptFailed)
+        ));
+        assert!(matches!(
+            service.decrypt_current(SecretDomain::ManagerTotp(1), &encrypted),
+            Err(SecretEncryptionError::InvalidDomain)
         ));
     }
 

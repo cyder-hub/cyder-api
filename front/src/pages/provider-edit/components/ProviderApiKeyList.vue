@@ -75,7 +75,12 @@
             <Check v-else class="mr-1.5 h-4 w-4" />
             {{ $t("common.check") }}
           </Button>
-          <Button variant="outline" size="sm" @click="handleReveal(keyItem)">
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="busyKeyId === keyItem.id"
+            @click="openRevealDialog(keyItem)"
+          >
             <Eye class="mr-1.5 h-4 w-4" />
             {{ $t("providerEditPage.credentials.reveal") }}
           </Button>
@@ -204,11 +209,20 @@
       </DialogContent>
     </Dialog>
 
-    <Dialog :open="revealedSecret !== null" @update:open="handleRevealDialogOpen">
+    <Dialog
+      :open="revealTargetKey !== null || revealedSecret !== null"
+      @update:open="handleRevealDialogOpen"
+    >
       <DialogContent class="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{{ $t("providerEditPage.credentials.revealTitle") }}</DialogTitle>
-          <DialogDescription>{{ $t("providerEditPage.credentials.secretLocalOnly") }}</DialogDescription>
+          <DialogDescription>
+            {{
+              revealedSecret
+                ? $t("providerEditPage.credentials.secretLocalOnly")
+                : $t("providerEditPage.credentials.revealConfirm")
+            }}
+          </DialogDescription>
         </DialogHeader>
         <textarea
           v-if="revealedSecret"
@@ -218,7 +232,23 @@
           :value="revealedSecret.api_key"
         />
         <DialogFooter>
-          <Button @click="clearReveal">{{ $t("common.close") }}</Button>
+          <template v-if="revealTargetKey && !revealedSecret">
+            <Button
+              variant="ghost"
+              :disabled="isRevealBusy"
+              @click="clearReveal"
+            >
+              {{ $t("common.cancel") }}
+            </Button>
+            <Button
+              :disabled="isRevealBusy"
+              @click="handleReveal"
+            >
+              <Loader2 v-if="isRevealBusy" class="mr-1.5 h-4 w-4 animate-spin" />
+              {{ $t("providerEditPage.credentials.reveal") }}
+            </Button>
+          </template>
+          <Button v-else @click="clearReveal">{{ $t("common.close") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -244,6 +274,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import * as providerService from "@/services/providers";
+import {
+  isManagerReauthCancelled,
+  runWithSecretGovernanceReauth,
+} from "@/services/managerReauth";
 import { toastController } from "@/services/uiFeedback";
 import { useAuthStore } from "@/store/authStore";
 import {
@@ -283,6 +317,8 @@ const metadataDescription = ref("");
 const metadataEnabled = ref(true);
 const isBusy = ref(false);
 const busyKeyId = ref<number | null>(null);
+const revealTargetKey = ref<LocalProviderApiKeyItem | null>(null);
+const isRevealBusy = ref(false);
 
 const isVertex = computed(() =>
   ["VERTEX", "VERTEX_OPENAI"].includes(editingData.value.provider_type),
@@ -317,10 +353,11 @@ const handleSecretDialogOpen = (open: boolean) => {
 };
 
 const clearReveal = () => {
+  revealTargetKey.value = null;
   secretState.setRevealed(null);
 };
 const handleRevealDialogOpen = (open: boolean) => {
-  if (!open) clearReveal();
+  if (!open && !isRevealBusy.value) clearReveal();
 };
 
 const validateSecret = (): boolean => {
@@ -425,22 +462,40 @@ const handleDraftCheck = async () => {
   }
 };
 
-const handleReveal = async (key: LocalProviderApiKeyItem) => {
-  if (!editingData.value.id) return;
+const performReveal = async (key: LocalProviderApiKeyItem) => {
+  if (!editingData.value.id || !key || isRevealBusy.value) return;
+  isRevealBusy.value = true;
   busyKeyId.value = key.id;
   try {
     secretState.setRevealed(
-      await providerService.revealProviderKey(editingData.value.id, key.id),
+      await runWithSecretGovernanceReauth(() =>
+        providerService.revealProviderKey(
+          editingData.value.id as number,
+          key.id,
+        ),
+      ),
     );
+    revealTargetKey.value = null;
   } catch (error) {
-    toastController.error(
-      $t("providerEditPage.credentials.revealFailed", {
-        error: (error as Error).message || $t("common.unknownError"),
-      }),
-    );
+    if (isManagerReauthCancelled(error)) return;
+    const fallback = $t("providerEditPage.credentials.revealFailed", {
+      error: (error as Error).message || $t("common.unknownError"),
+    });
+    toastController.error(fallback);
   } finally {
+    isRevealBusy.value = false;
     busyKeyId.value = null;
   }
+};
+
+const openRevealDialog = (key: LocalProviderApiKeyItem) => {
+  clearReveal();
+  revealTargetKey.value = key;
+};
+
+const handleReveal = async () => {
+  const key = revealTargetKey.value;
+  if (key) await performReveal(key);
 };
 
 const openMetadataDialog = (key: LocalProviderApiKeyItem) => {
@@ -514,6 +569,7 @@ const handleDelete = async (key: LocalProviderApiKeyItem) => {
 watch(
   () => editingData.value.id,
   () => {
+    clearReveal();
     secretState.providerChanged();
     clearSecretState();
   },
@@ -522,12 +578,14 @@ watch(
   () => authStore.lifecycle,
   (lifecycle) => {
     if (lifecycle === "anonymous") {
+      clearReveal();
       secretState.logout();
       clearSecretState();
     }
   },
 );
 onBeforeUnmount(() => {
+  clearReveal();
   secretState.leaveRoute();
   clearSecretState();
 });

@@ -66,7 +66,10 @@ function setAuthorizationHeader(
 const PUBLIC_MANAGER_AUTH_PATHS = [
   "/ai/manager/api/auth/bootstrap/status",
   "/ai/manager/api/auth/bootstrap",
-  "/ai/manager/api/auth/login",
+  "/ai/manager/api/auth/login/password",
+  "/ai/manager/api/auth/login/totp",
+  "/ai/manager/api/auth/recovery/start",
+  "/ai/manager/api/auth/recovery/confirm",
   "/ai/manager/api/auth/access",
   "/ai/manager/api/auth/logout",
 ];

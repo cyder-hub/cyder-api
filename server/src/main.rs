@@ -6,7 +6,9 @@ use cyder_api::ingress::client_identity::ClientIdentityResolver;
 use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
 use cyder_api::proxy::create_proxy_router;
 use cyder_api::service::app_state::{create_app_state, create_state_router};
-use cyder_api::service::secret_encryption::prepare_secrets_before_startup;
+use cyder_api::service::secret_encryption::{
+    ManagerTotpPreparationState, prepare_secrets_before_startup,
+};
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -75,6 +77,28 @@ async fn main() {
             current_records = secret_preparation.provider.current,
             rotated_records = secret_preparation.provider.rotated,
         );
+    }
+    match secret_preparation.manager_totp.state {
+        ManagerTotpPreparationState::Disabled => {}
+        ManagerTotpPreparationState::UnavailablePreserved => {
+            cyder_api::warn_event!(
+                "startup.manager_totp_rotation_degraded",
+                reason = secret_preparation
+                    .manager_totp
+                    .failure
+                    .map(|reason| reason.as_str()),
+                secret_format_version = secret_preparation.manager_totp.secret_format_version,
+                key_fingerprint_short = secret_preparation.manager_totp.key_fingerprint_short_str(),
+            );
+        }
+        state => {
+            cyder_api::info_event!(
+                "startup.manager_totp_rotation_completed",
+                state = state.as_str(),
+                secret_format_version = secret_preparation.manager_totp.secret_format_version,
+                key_fingerprint_short = secret_preparation.manager_totp.key_fingerprint_short_str(),
+            );
+        }
     }
     let app_state = create_app_state().await;
     let client_identity_resolver =

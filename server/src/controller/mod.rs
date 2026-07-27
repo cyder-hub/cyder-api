@@ -508,9 +508,23 @@ mod tests {
                     ),
                     (
                         Method::POST,
-                        "/manager/api/auth/login",
+                        "/manager/api/auth/login/password",
                         Body::from("{"),
                         StatusCode::UNPROCESSABLE_ENTITY,
+                        "no-store",
+                    ),
+                    (
+                        Method::POST,
+                        "/manager/api/auth/login/totp",
+                        Body::from("{"),
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "no-store",
+                    ),
+                    (
+                        Method::GET,
+                        "/manager/api/auth/totp/status",
+                        Body::empty(),
+                        StatusCode::UNAUTHORIZED,
                         "no-store",
                     ),
                     (
@@ -553,7 +567,7 @@ mod tests {
                     &app_state,
                     Request::builder()
                         .method(Method::OPTIONS)
-                        .uri("/manager/api/auth/login")
+                        .uri("/manager/api/auth/login/password")
                         .header(header::ORIGIN, "https://external.example")
                         .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                         .body(Body::empty())
@@ -594,7 +608,7 @@ mod tests {
                     &app_state,
                     Request::builder()
                         .method(Method::POST)
-                        .uri("/ai/manager/api/auth/login")
+                        .uri("/ai/manager/api/auth/login/password")
                         .header(header::CONTENT_TYPE, "application/json")
                         .header(header::ORIGIN, "http://127.0.0.1:29528")
                         .header("sec-fetch-site", "same-origin")

@@ -87,7 +87,9 @@ export function revealProviderKey(
   id: number | string,
   keyId: number | string,
 ): Promise<ProviderApiKeyReveal> {
-  return request.post(`/ai/manager/api/provider/${id}/provider_keys/${keyId}/reveal`);
+  return request.post(
+    `/ai/manager/api/provider/${id}/provider_keys/${keyId}/reveal`,
+  );
 }
 
 export function deleteProviderKey(

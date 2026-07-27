@@ -1,7 +1,11 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 
 import * as apiKeyService from "@/services/apiKeys";
-import { confirm, toastController } from "@/services/uiFeedback";
+import {
+  isManagerReauthCancelled,
+  runWithSecretGovernanceReauth,
+} from "@/services/managerReauth";
+import { toastController } from "@/services/uiFeedback";
 import { copyText } from "@/utils/clipboard";
 import { formatTimestamp } from "@/utils/datetime";
 import { normalizeError } from "@/utils/error";
@@ -290,7 +294,6 @@ export function aclRuleTarget(
 
 export function useApiKeyDetail(
   t: TranslateFn,
-  apiKeys: ComputedRef<ApiKeyItem[]>,
   runtimeById: ComputedRef<ApiKeyRuntimeById>,
   revealedSecret: Ref<ApiKeyReveal | null>,
   setRevealedSecret: (reveal: ApiKeyReveal | null) => void,
@@ -355,29 +358,24 @@ export function useApiKeyDetail(
     selectedKeyId.value = detail?.id ?? null;
   }
 
-  async function handleRevealKey(id: number) {
-    const target = apiKeys.value.find((item) => item.id === id);
-    if (
-      !(await confirm({
-        title: t("apiKeyPage.confirmReveal", { name: target?.name ?? String(id) }),
-        description: t("apiKeyPage.confirmRevealDescription"),
-        confirmText: t("apiKeyPage.actions.reveal"),
-      }))
-    ) {
-      return;
-    }
-
+  async function handleRevealKey(id: number): Promise<boolean> {
     try {
-      setRevealedSecret(await apiKeyService.revealApiKey(id));
+      setRevealedSecret(
+        await runWithSecretGovernanceReauth(() =>
+          apiKeyService.revealApiKey(id),
+        ),
+      );
       if (selectedKeyId.value !== id) {
         await loadSelectedKey(id);
       }
+      return true;
     } catch (err: unknown) {
-      toastController.error(
-        t("apiKeyPage.revealFailed", {
-          error: normalizeError(err, t("common.unknownError")).message,
-        }),
-      );
+      if (isManagerReauthCancelled(err)) return false;
+      const fallback = t("apiKeyPage.revealFailed", {
+        error: normalizeError(err, t("common.unknownError")).message,
+      });
+      toastController.error(fallback);
+      return false;
     }
   }
 

@@ -196,6 +196,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-backend-v4-${{ steps.rust-cache.outputs.version }}-
 
+      - name: Prepare backend test configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ci_data_dir="$RUNNER_TEMP/cyder-backend-data"
+          ci_config_dir="$ci_data_dir/config"
+          ci_encryption_key="$(openssl rand -hex 32)"
+
+          umask 077
+          mkdir -p "$ci_config_dir"
+          printf 'secret_encryption:\n  encryption_key: "%s"\n' \
+            "$ci_encryption_key" > "$ci_config_dir/config.yaml"
+          echo "CYDER_DATA_DIR=$ci_data_dir" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --check
 

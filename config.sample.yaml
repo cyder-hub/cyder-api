@@ -3,70 +3,75 @@
 # Docker and packaged deployments use CYDER_DATA_DIR=/data/cyder by default.
 # Runtime load priority is:
 # program defaults < generated config.default.yaml < base config.yaml <
-# allowlisted CYDER_* environment variables < managed config.override.yaml.
+# allowlisted CYDER_* environment variables.
 #
 # config.default.yaml is generated on first startup to persist random secrets
 # and path-aware defaults. It is runtime state, not a tracked sample to edit.
 #
 # The only environment variables that override final config fields are
-# CYDER_HOST, CYDER_PORT, CYDER_BASE_PATH, CYDER_LOG_LEVEL, and CYDER_TIMEZONE.
-# Use YAML for secrets, database, Redis/cache, storage, deployment, runtime
-# state, proxy, and governance settings.
-#
-# config.override.yaml is managed by the System Config page and should only
-# contain the hot-reload allowlist fields accepted by the backend. Do not copy
-# override-only edits into this sample; use the base config for restart-required
-# settings such as bind, secrets, database, Redis/cache, storage, deployment, and
-# runtime state backend.
+# CYDER_HOST, CYDER_PORT, CYDER_BASE_PATH, CYDER_LOG_LEVEL, CYDER_TIMEZONE, and
+# CYDER_MANAGER_AUTH_BROWSER_ORIGIN.
+# Use YAML for secrets, database, Redis/cache, runtime state, proxy, and
+# governance settings. Configuration changes take effect after a
+# server restart.
+# Unknown top-level and nested YAML fields are ignored during 1.0 development,
+# while invalid values for recognized fields still prevent startup.
 #
 # Local development is zero-config through just dev. Generated files live under
-# .cyder/dev, which is git-ignored. To migrate an old local config, copy it to
-# .cyder/dev/config/config.yaml or set CYDER_CONFIG_PATH explicitly.
+# .cyder/dev, which is git-ignored. Older config files can be reused while the
+# current sample remains the source of truth for recognized fields.
 host: 0.0.0.0
 port: 8000
 base_path: /ai
-secret_key: your_secret_key
-password_salt: jKnDj%pNoJerZGPA&AG7Rwuwo&8tC6QW
+# Independent Manager JWT root secret, at least 32 bytes. Replacing it is a
+# hard cutover that invalidates every Manager session but not Proxy API keys.
+# Previous-secret overlap/rotation is intentionally unsupported.
 jwt_secret: uCK6g1EBERjj2U7FT8sGlMFFzL2M3ufW
-# api_key_jwt_secret: another_secret_key
+manager_auth:
+  # Exact browser origin for Manager Auth cookie endpoints. Non-loopback origins
+  # must use HTTPS. When omitted, browser auth is limited to loopback peer +
+  # loopback Origin development requests.
+  browser_origin: null
 db_url: /data/cyder/db/cyder.sqlite
 # db_url: postgres://user:pass@host:port/schema_name
 # Supported database URL forms are SQLite paths and PostgreSQL URLs.
+secret_encryption:
+  # one_time stores only the downstream API key authentication hash.
+  # recoverable additionally stores downstream ciphertext and permits explicit reveal.
+  # Provider credentials are always encrypted and revealable in both modes.
+  downstream_mode: one_time
+  # Required in every mode. Generate an independent value, for example with
+  # `openssl rand -hex 32`, and replace null in config.yaml before startup.
+  # The server deliberately refuses to start while this remains null.
+  # Keys use exactly 64 hexadecimal characters (32 bytes), without a prefix.
+  encryption_key: null
+  # During rotation, set this to the old key and encryption_key to the new key.
+  # Startup rotates downstream and Provider ciphertext in one transaction;
+  # any invalid Provider credential rolls everything back and refuses startup.
+  # Remove this field after one successful startup.
+  previous_encryption_key: null
 redis:
   url: "redis://127.0.0.1:6379/"
   pool_size: 10
   key_prefix: "cyder:"
+client_identity:
+  # Empty by default: forwarding headers are ignored and the TCP peer is used.
+  # Add only canonical CIDRs of reverse proxies that sanitize inbound headers.
+  # Single hosts must be written as /32 or /128.
+  trusted_proxy_cidrs: []
+  # Maximum accepted Forwarded/X-Forwarded-For chain length; valid range 1..=32.
+  max_forwarded_hops: 8
 id:
-  # Snowflake worker id. Keep each running instance that shares a database on a distinct value in 0..=31.
+  # Reserved Snowflake worker id. Pre-1.0 supports one running server instance.
   worker_id: 1
-proxy: http://10.0.0.2:1081
+# proxy: http://127.0.0.1:1080
 proxy_request:
   connect_timeout_seconds: 10
   # LLM 流式/长生成请求可能持续很久，因此默认建议留空关闭整体超时。
   # total_timeout_seconds: 1800
-routing_resilience:
-  same_candidate_max_retries: 1
-  max_candidates_per_request: 2
-  base_backoff_ms: 250
-  max_backoff_ms: 1500
-  respect_retry_after_up_to_seconds: 3
 # cache:
 #   backend: memory # memory or redis
 #   ttl: 3600 # 1 hour
 #   negative_ttl: 60 # 1 minute
 #   redis:
 #     key_prefix: "cache:"
-
-storage:
-  driver: local # local/s3
-  local:
-    root: /data/cyder/storage
-  s3:
-    endpoint: s3.amazonaws.com
-    region: us-east-1
-    bucket: your-bucket-name
-    access_mode: proxy # proxy/redirect
-    access_key: your_access_key
-    secret_key: your_secret_key
-    force_path_style: true 
-    public_url: https://cdn.example.com

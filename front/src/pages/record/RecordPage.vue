@@ -17,8 +17,6 @@
           :model-options="modelOptions"
           :status-options="statusOptions"
           :user-api-type-options="userApiTypeOptions"
-          :resolved-scope-options="resolvedScopeOptions"
-          :boolean-options="booleanOptions"
           @toggle-filter-panel="toggleFilterPanel"
           @toggle-advanced-filters="toggleAdvancedFilters"
           @update-filter="handleFilterChange"
@@ -49,17 +47,8 @@
       v-model:active-tab="selectedTab"
       :loading="isDetailLoading"
       :record="detailedRecord"
-      :attempts="detailedAttempts"
-      :artifacts="artifacts"
-      :artifacts-loading="artifactsLoading"
-      :artifacts-error="artifactsError"
-      :selected-attempt-id="selectedAttemptId"
-      :selected-replay-run-id="selectedReplayRunId"
       :api-key-name="detailApiKeyName"
       :provider-name="detailProviderName"
-      @reload-artifacts="loadArtifacts(true)"
-      @update:selected-attempt-id="handleSelectedAttemptIdChange"
-      @update:selected-replay-run-id="handleSelectedReplayRunIdChange"
     />
   </div>
 </template>
@@ -79,10 +68,7 @@ import { useApiKeyStore } from "../../store/apiKeyStore";
 import { useModelStore } from "../../store/modelStore";
 import { useProviderStore } from "../../store/providerStore";
 import type { RecordFilters as RecordFiltersState } from "./types";
-import {
-  RECORD_DETAIL_TABS,
-  shouldLoadRecordArtifacts,
-} from "./composables/useRecordDetail";
+import { RECORD_DETAIL_TABS } from "./composables/useRecordDetail";
 import { useRecordDetail } from "./composables/useRecordDetail";
 import { useRecordList } from "./composables/useRecordList";
 import {
@@ -120,8 +106,6 @@ const {
   isAdvancedFilterOpen,
   selectedRecordId,
   selectedTab,
-  selectedAttemptId,
-  selectedReplayRunId,
   applyQueryToState,
   syncRouteWithState,
   buildListParams,
@@ -146,13 +130,11 @@ const {
   totalPages,
   isLoading,
   errorMsg,
-  booleanOptions,
   apiKeyOptions,
   providerOptions,
   modelOptions,
   statusOptions,
   userApiTypeOptions,
-  resolvedScopeOptions,
   hasActiveFilters,
   advancedActiveFilterCount,
   filterSummary,
@@ -172,14 +154,9 @@ const recordDetail = useRecordDetail({
 const {
   isDetailLoading,
   detailedRecord,
-  detailedAttempts,
   detailApiKeyName,
   detailProviderName,
-  artifacts,
-  artifactsLoading,
-  artifactsError,
   loadDetail,
-  loadArtifacts,
   resetDetail,
 } = recordDetail;
 
@@ -273,18 +250,6 @@ const handlePageSizeChange = (value: string) => {
 const handleViewDetails = (id: number) => {
   selectedRecordId.value = id;
   selectedTab.value = "overview";
-  selectedAttemptId.value = null;
-  selectedReplayRunId.value = null;
-  void syncRouteWithState();
-};
-
-const handleSelectedAttemptIdChange = (attemptId: number | null) => {
-  selectedAttemptId.value = attemptId;
-  void syncRouteWithState();
-};
-
-const handleSelectedReplayRunIdChange = (replayRunId: number | null) => {
-  selectedReplayRunId.value = replayRunId;
   void syncRouteWithState();
 };
 
@@ -324,21 +289,9 @@ watch(selectedRecordId, async (recordId) => {
   }
 });
 
-watch(
-  [selectedTab, detailedRecord],
-  ([tab]) => {
-    if (shouldLoadRecordArtifacts(tab)) {
-      void loadArtifacts();
-    }
-  },
-);
-
 watch(selectedTab, (tab) => {
   if (!RECORD_DETAIL_TABS.some((item) => item.value === tab)) {
     selectedTab.value = "overview";
-  }
-  if (tab !== "replay") {
-    selectedReplayRunId.value = null;
   }
   void syncRouteWithState();
 });

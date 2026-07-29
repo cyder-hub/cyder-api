@@ -9,10 +9,10 @@ import SectionHeader from "@/components/SectionHeader.vue";
 import UsageChart from "@/components/UsageChart.vue";
 import { Button } from "@/components/ui/button";
 import * as dashboardService from "@/services/dashboard";
-import DashboardAlertPanel from "./components/DashboardAlertPanel.vue";
+import DashboardOperationsPanel from "./components/DashboardOperationsPanel.vue";
 import DashboardKpiGrid from "./components/DashboardKpiGrid.vue";
 import DashboardRuntimePanel from "./components/DashboardRuntimePanel.vue";
-import { useDashboardAlerts } from "./composables/useDashboardAlerts";
+import { useDashboardOperations } from "./composables/useDashboardOperations";
 import { useDashboardData } from "./composables/useDashboardData";
 
 const { t: $t } = useI18n();
@@ -28,9 +28,9 @@ const dashboardData = useDashboardData({
 });
 
 const {
-  alertsError,
-  alertsLoading,
-  alertsSection,
+  operationsError,
+  operationsLoading,
+  operationsSection,
   fetchDashboard,
   formatDateTime,
   isRefreshing,
@@ -50,18 +50,18 @@ const {
   runtimeItems,
 } = dashboardData;
 
-const dashboardAlerts = useDashboardAlerts(alertsSection, { t: $t });
+const dashboardOperations = useDashboardOperations(operationsSection, { t: $t });
 const {
   formatCostEntries,
   formatCount,
-  formatDateTime: formatAlertDateTime,
+  formatDateTime: formatOperationsDateTime,
   formatLatency,
   formatPercentage,
   runtimeLevelBadgeClass,
   runtimeLevelLabel,
   showCostHotspots,
   unstableProviders,
-} = dashboardAlerts;
+} = dashboardOperations;
 
 const goToRuntime = () => {
   router.push({ name: "ProviderRuntime" });
@@ -118,17 +118,17 @@ onMounted(() => {
         </div>
 
         <div class="md:col-span-2 lg:col-span-1">
-          <DashboardAlertPanel
+          <DashboardOperationsPanel
             class="h-full"
-            :loading="alertsLoading"
-            :error="alertsError"
-            :alerts-section="alertsSection"
+            :loading="operationsLoading"
+            :error="operationsError"
+            :operations-section="operationsSection"
             :unstable-providers="unstableProviders"
             :show-cost-hotspots="showCostHotspots"
             :format-count="formatCount"
             :format-percentage="formatPercentage"
             :format-latency="formatLatency"
-            :format-date-time="formatAlertDateTime"
+            :format-date-time="formatOperationsDateTime"
             :format-cost-entries="formatCostEntries"
             :runtime-level-badge-class="runtimeLevelBadgeClass"
             :runtime-level-label="runtimeLevelLabel"

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{body::Body, extract::Request, response::Response};
 
@@ -14,7 +14,6 @@ const GEMINI_UTILITY_ACTIONS: [&str; 3] = ["countMessageTokens", "countTextToken
 
 pub async fn handle_gemini_request(
     app_state: Arc<AppState>,
-    addr: SocketAddr,
     path_segment: String,
     query_params: HashMap<String, String>,
     request: Request<Body>,
@@ -52,9 +51,7 @@ pub async fn handle_gemini_request(
         return Err(ProxyError::BadRequest(err_msg));
     };
 
-    adapter
-        .execute(app_state, Some(addr), query_params, request)
-        .await
+    adapter.execute(app_state, query_params, request).await
 }
 
 fn parse_gemini_model_action(path_segment: &str) -> Result<(&str, &str), ProxyError> {

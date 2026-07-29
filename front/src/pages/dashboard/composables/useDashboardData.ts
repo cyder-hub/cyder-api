@@ -1,6 +1,6 @@
 import { computed, ref } from "vue";
 import type {
-  DashboardAlertsSection,
+  DashboardOperationsSection,
   DashboardKpiSection,
   DashboardResponse,
   DashboardRuntimeSummary,
@@ -58,7 +58,7 @@ export function buildEmptyDashboard(): DashboardResponse {
       no_traffic_count: 0,
     },
     runtime_state_backend: buildDefaultRuntimeStateBackendStatus(),
-    alerts: {
+    operational_signals: {
       open_providers: [],
       half_open_providers: [],
       degraded_providers: [],
@@ -89,10 +89,10 @@ export function buildEmptyDashboardResourcesSection() {
   };
 }
 
-export function buildEmptyDashboardAlertsSection(): DashboardAlertsSection {
+export function buildEmptyDashboardOperationsSection(): DashboardOperationsSection {
   const dashboard = buildEmptyDashboard();
   return {
-    alerts: dashboard.alerts,
+    operational_signals: dashboard.operational_signals,
     top_providers: dashboard.top_providers,
     top_models: dashboard.top_models,
   };
@@ -118,71 +118,61 @@ export function useDashboardData(options: UseDashboardDataOptions) {
 
   const kpiSection = ref(buildEmptyDashboardKpiSection());
   const resourcesSection = ref(buildEmptyDashboardResourcesSection());
-  const alertsSection = ref(buildEmptyDashboardAlertsSection());
+  const operationsSection = ref(buildEmptyDashboardOperationsSection());
 
   const kpiLoading = ref(true);
   const resourcesLoading = ref(true);
-  const alertsLoading = ref(true);
+  const operationsLoading = ref(true);
 
   const kpiError = ref<string | null>(null);
   const resourcesError = ref<string | null>(null);
-  const alertsError = ref<string | null>(null);
+  const operationsError = ref<string | null>(null);
 
   const isRefreshing = computed(
-    () => kpiLoading.value || resourcesLoading.value || alertsLoading.value,
+    () => kpiLoading.value || resourcesLoading.value || operationsLoading.value,
   );
 
   const toErrorMessage = (error: unknown) =>
     error instanceof Error && error.message ? error.message : getUnknownErrorMessage();
 
-  const fetchKpiSection = async () => {
+  const fetchDashboard = async () => {
     kpiLoading.value = true;
+    resourcesLoading.value = true;
+    operationsLoading.value = true;
     kpiError.value = null;
+    resourcesError.value = null;
+    operationsError.value = null;
     try {
-      kpiSection.value = await api.getSystemDashboardKpi();
+      const dashboard = await api.getSystemDashboard();
+      kpiSection.value = {
+        today: dashboard.today,
+        runtime: dashboard.runtime,
+      };
+      resourcesSection.value = {
+        overview: dashboard.overview,
+        today: dashboard.today,
+        runtime: dashboard.runtime,
+        runtime_state_backend: dashboard.runtime_state_backend,
+      };
+      operationsSection.value = {
+        operational_signals: dashboard.operational_signals,
+        top_providers: dashboard.top_providers,
+        top_models: dashboard.top_models,
+      };
     } catch (error) {
-      logError("Failed to fetch dashboard KPI section:", error);
+      logError("Failed to fetch dashboard snapshot:", error);
       kpiSection.value = buildEmptyDashboardKpiSection();
-      kpiError.value = toErrorMessage(error);
+      resourcesSection.value = buildEmptyDashboardResourcesSection();
+      operationsSection.value = buildEmptyDashboardOperationsSection();
+      const message = toErrorMessage(error);
+      kpiError.value = message;
+      resourcesError.value = message;
+      operationsError.value = message;
     } finally {
       kpiLoading.value = false;
-    }
-  };
-
-  const fetchResourcesSection = async () => {
-    resourcesLoading.value = true;
-    resourcesError.value = null;
-    try {
-      resourcesSection.value = await api.getSystemDashboardResources();
-    } catch (error) {
-      logError("Failed to fetch dashboard resources section:", error);
-      resourcesSection.value = buildEmptyDashboardResourcesSection();
-      resourcesError.value = toErrorMessage(error);
-    } finally {
       resourcesLoading.value = false;
+      operationsLoading.value = false;
     }
-  };
-
-  const fetchAlertsSection = async () => {
-    alertsLoading.value = true;
-    alertsError.value = null;
-    try {
-      alertsSection.value = await api.getSystemDashboardAlerts();
-    } catch (error) {
-      logError("Failed to fetch dashboard alerts section:", error);
-      alertsSection.value = buildEmptyDashboardAlertsSection();
-      alertsError.value = toErrorMessage(error);
-    } finally {
-      alertsLoading.value = false;
-    }
-  };
-
-  const fetchDashboard = async () => {
-    await Promise.allSettled([
-      fetchKpiSection(),
-      fetchResourcesSection(),
-      fetchAlertsSection(),
-    ]);
   };
 
   const formatCount = (value: number | null | undefined) =>
@@ -221,11 +211,6 @@ export function useDashboardData(options: UseDashboardDataOptions) {
       ? t(`dashboard.runtimeState.backend.${backend}`)
       : backend;
 
-  const deploymentModeLabel = (mode: RuntimeStateBackendStatus["deployment_mode"]) =>
-    mode === "single_instance" || mode === "multi_instance"
-      ? t(`dashboard.runtimeState.deployment.${mode}`)
-      : mode;
-
   const runtimeBadgeClass = (key: string) => {
     switch (key) {
       case "open_count":
@@ -262,7 +247,6 @@ export function useDashboardData(options: UseDashboardDataOptions) {
 
   const runtimeBackendHeadline = computed(() =>
     t("dashboard.runtimeState.description", {
-      deployment: deploymentModeLabel(runtimeBackendStatus.value.deployment_mode),
       runtime: backendLabel(runtimeBackendStatus.value.runtime_effective_backend),
       catalog: backendLabel(runtimeBackendStatus.value.catalog_cache_backend),
     }),
@@ -283,23 +267,17 @@ export function useDashboardData(options: UseDashboardDataOptions) {
       return t("dashboard.runtimeState.status.degraded");
     }
     if (
-      runtimeBackendStatus.value.deployment_mode === "single_instance" &&
       runtimeBackendStatus.value.runtime_effective_backend === "memory" &&
       !runtimeBackendStatus.value.fallback_reason
     ) {
       return t("dashboard.runtimeState.status.recommended");
     }
-    return runtimeBackendStatus.value.runtime_shared
-      ? t("dashboard.runtimeState.status.shared")
-      : t("dashboard.runtimeState.status.nonShared");
+    return backendLabel(runtimeBackendStatus.value.runtime_effective_backend);
   });
 
   const runtimeBackendBadgeClass = computed(() => {
     if (runtimeBackendStatus.value.runtime_degraded) {
       return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-    }
-    if (runtimeBackendStatus.value.runtime_shared) {
-      return "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-50";
     }
     return "border-gray-200 bg-gray-50 text-gray-700 hover:bg-gray-50";
   });
@@ -316,14 +294,14 @@ export function useDashboardData(options: UseDashboardDataOptions) {
       });
     }
     if (
-      runtimeBackendStatus.value.deployment_mode === "single_instance" &&
       runtimeBackendStatus.value.runtime_effective_backend === "memory"
     ) {
       return t("dashboard.runtimeState.recommendedHint");
     }
-    return runtimeBackendStatus.value.runtime_shared
-      ? t("dashboard.runtimeState.sharedHint")
-      : t("dashboard.runtimeState.nonSharedHint");
+    if (runtimeBackendStatus.value.runtime_effective_backend === "redis") {
+      return t("dashboard.runtimeState.redisHint");
+    }
+    return "";
   });
 
   const kpiCards = computed(() => [
@@ -460,13 +438,10 @@ export function useDashboardData(options: UseDashboardDataOptions) {
   ]);
 
   return {
-    alertsError,
-    alertsLoading,
-    alertsSection,
-    fetchAlertsSection,
+    operationsError,
+    operationsLoading,
+    operationsSection,
     fetchDashboard,
-    fetchKpiSection,
-    fetchResourcesSection,
     formatCount,
     formatCostEntries,
     formatDateTime,

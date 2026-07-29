@@ -69,7 +69,6 @@ export interface ProviderRuntimeItem {
   last_error_summary: string | null;
   status_code_breakdown: ProviderRuntimeStatusCodeStat[];
   total_cost: ProviderRuntimeCostStat[];
-  sort_score: number;
 }
 
 export interface ProviderRuntimeSummary {
@@ -82,6 +81,11 @@ export interface ProviderRuntimeSummary {
   window: ProviderRuntimeWindow;
   generated_at: number;
   runtime_state_backend: RuntimeStateBackendStatus;
+}
+
+export interface ProviderRuntimeSnapshot {
+  items: ProviderRuntimeItem[];
+  summary: ProviderRuntimeSummary;
 }
 
 export interface ProviderRuntimeListParams {

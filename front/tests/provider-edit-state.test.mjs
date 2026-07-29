@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+
+const ROOT = new URL("../", import.meta.url);
 
 import {
   buildProviderUpdatePayload,
@@ -11,6 +14,7 @@ import {
   normalizeBootstrapCheckResult,
   syncProviderBootstrapFormState,
 } from "../src/pages/provider-edit/composables/providerEditState.ts";
+import { useProviderCredentialSecretState } from "../src/pages/provider-edit/composables/useProviderCredentialSecretState.ts";
 
 test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () => {
   const payload = buildProviderBootstrapPayload(
@@ -77,9 +81,13 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
   });
   editingData.provider_keys.push({
     id: 11,
-    api_key: "old-key",
+    provider_id: 99,
     description: "legacy",
-    isEditing: false,
+    key_prefix: "old-",
+    key_last4: "-key",
+    is_enabled: true,
+    created_at: 1,
+    updated_at: 1,
     checkStatus: "unchecked",
   });
 
@@ -94,8 +102,13 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
     },
     created_key: {
       id: 12,
-      api_key: "sk-bootstrap",
+      provider_id: 99,
       description: "bootstrap key",
+      key_prefix: "sk-b",
+      key_last4: "trap",
+      is_enabled: true,
+      created_at: 2,
+      updated_at: 2,
     },
     created_model: {
       id: 13,
@@ -117,9 +130,13 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
   assert.equal(hydrated.provider_keys.length, 2);
   assert.deepEqual(hydrated.provider_keys[1], {
     id: 12,
-    api_key: "sk-bootstrap",
+    provider_id: 99,
     description: "bootstrap key",
-    isEditing: false,
+    key_prefix: "sk-b",
+    key_last4: "trap",
+    is_enabled: true,
+    created_at: 2,
+    updated_at: 2,
     checkStatus: "unchecked",
   });
   assert.equal(hydrated.models.length, 2);
@@ -204,7 +221,76 @@ test("buildProviderUpdatePayload keeps the existing provider key immutable", () 
     endpoint: "https://new.example.com/v1",
     use_proxy: true,
     provider_type: "RESPONSES",
-    omit_config: null,
-    api_keys: [],
   });
+});
+
+test("provider credential plaintext stays in dialog-local state and clears on every boundary", () => {
+  const state = useProviderCredentialSecretState();
+  state.draftSecret.value = "draft-sensitive-marker";
+  state.openReplace(41);
+  state.draftSecret.value = "replacement-sensitive-marker";
+  state.setRevealed({
+    id: 41,
+    provider_id: 7,
+    description: null,
+    key_prefix: "sk-a",
+    key_last4: "last",
+    is_enabled: true,
+    created_at: 1,
+    updated_at: 2,
+    api_key: "revealed-sensitive-marker",
+  });
+
+  state.providerChanged();
+  assert.equal(state.draftSecret.value, "");
+  assert.equal(state.replacementKeyId.value, null);
+  assert.equal(state.revealedSecret.value, null);
+
+  state.draftSecret.value = "route-sensitive-marker";
+  state.leaveRoute();
+  assert.equal(state.draftSecret.value, "");
+
+  state.draftSecret.value = "logout-sensitive-marker";
+  state.logout();
+  assert.equal(state.draftSecret.value, "");
+});
+
+test("provider credential service and UI keep saved summaries plaintext-free", async () => {
+  const [types, service, component, bootstrap, check] = await Promise.all([
+    readFile(new URL("src/services/types/providers.ts", ROOT), "utf8"),
+    readFile(new URL("src/services/providers.ts", ROOT), "utf8"),
+    readFile(
+      new URL("src/pages/provider-edit/components/ProviderApiKeyList.vue", ROOT),
+      "utf8",
+    ),
+    readFile(
+      new URL("src/pages/provider-edit/components/ProviderBaseInfoForm.vue", ROOT),
+      "utf8",
+    ),
+    readFile(
+      new URL("src/pages/provider-edit/composables/useProviderCheck.ts", ROOT),
+      "utf8",
+    ),
+  ]);
+
+  const summaryContract = types.match(
+    /interface ProviderApiKeySummary \{[\s\S]*?\n\}/,
+  )?.[0];
+  assert.ok(summaryContract);
+  assert.doesNotMatch(summaryContract, /api_key\s*:/);
+  assert.match(summaryContract, /key_prefix: string/);
+  assert.match(summaryContract, /key_last4: string/);
+  assert.match(summaryContract, /is_enabled: boolean/);
+
+  assert.match(service, /provider\/\$\{id\}\/provider_keys`/);
+  assert.match(service, /provider_keys\/\$\{keyId\}\/replace/);
+  assert.match(service, /provider_keys\/\$\{keyId\}\/reveal/);
+  assert.doesNotMatch(service, /sensitiveTotpRequestConfig|totpCode/);
+  assert.doesNotMatch(service, /provider_key\/\$\{keyId\}/);
+
+  assert.match(component, /provider_api_key: secretInput\.value/);
+  assert.match(check, /provider_api_key_id: keyItem\.id/);
+  assert.doesNotMatch(check, /provider_api_key: keyItem/);
+  assert.doesNotMatch(component, /localStorage|sessionStorage|console\.error/);
+  assert.doesNotMatch(bootstrap, /localStorage|sessionStorage|console\.error/);
 });

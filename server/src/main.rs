@@ -2,9 +2,13 @@ use std::net::SocketAddr;
 
 use cyder_api::config::CONFIG;
 use cyder_api::controller::{create_manager_router, create_system_router, handle_404};
+use cyder_api::ingress::client_identity::ClientIdentityResolver;
 use cyder_api::logging::{self, THIRD_PARTY_DEBUG_ENV};
 use cyder_api::proxy::create_proxy_router;
 use cyder_api::service::app_state::{create_app_state, create_state_router};
+use cyder_api::service::secret_encryption::{
+    ManagerTotpPreparationState, prepare_secrets_before_startup,
+};
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -49,6 +53,56 @@ async fn main() {
             log_level = &CONFIG.log_level,
         );
     }
+    let secret_preparation = prepare_secrets_before_startup(&CONFIG.secret_encryption)
+        .unwrap_or_else(|error| {
+            panic!("failed to prepare encrypted secrets before startup: {error:?}")
+        });
+    if secret_preparation.downstream.unavailable_preserved > 0 {
+        cyder_api::warn_event!(
+            "startup.downstream_secret_rotation_degraded",
+            current_records = secret_preparation.downstream.current,
+            rotated_records = secret_preparation.downstream.rotated,
+            unavailable_records = secret_preparation.downstream.unavailable_preserved,
+        );
+    } else if secret_preparation.downstream.total() > 0 {
+        cyder_api::info_event!(
+            "startup.downstream_secret_rotation_completed",
+            current_records = secret_preparation.downstream.current,
+            rotated_records = secret_preparation.downstream.rotated,
+        );
+    }
+    if secret_preparation.provider.total() > 0 {
+        cyder_api::info_event!(
+            "startup.provider_secret_preparation_completed",
+            current_records = secret_preparation.provider.current,
+            rotated_records = secret_preparation.provider.rotated,
+        );
+    }
+    match secret_preparation.manager_totp.state {
+        ManagerTotpPreparationState::Disabled => {}
+        ManagerTotpPreparationState::UnavailablePreserved => {
+            cyder_api::warn_event!(
+                "startup.manager_totp_rotation_degraded",
+                reason = secret_preparation
+                    .manager_totp
+                    .failure
+                    .map(|reason| reason.as_str()),
+                secret_format_version = secret_preparation.manager_totp.secret_format_version,
+                key_fingerprint_short = secret_preparation.manager_totp.key_fingerprint_short_str(),
+            );
+        }
+        state => {
+            cyder_api::info_event!(
+                "startup.manager_totp_rotation_completed",
+                state = state.as_str(),
+                secret_format_version = secret_preparation.manager_totp.secret_format_version,
+                key_fingerprint_short = secret_preparation.manager_totp.key_fingerprint_short_str(),
+            );
+        }
+    }
+    let app_state = create_app_state().await;
+    let client_identity_resolver =
+        std::sync::Arc::new(ClientIdentityResolver::new(&CONFIG.client_identity));
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("failed to bind server listener");
@@ -56,7 +110,6 @@ async fn main() {
         .local_addr()
         .map(|addr| addr.to_string())
         .unwrap_or(addr.clone());
-    let app_state = create_app_state().await;
     let shutdown_app_state = std::sync::Arc::clone(&app_state);
     cyder_api::info_event!(
         "startup.server_started",
@@ -71,8 +124,13 @@ async fn main() {
                 &CONFIG.base_path,
                 create_state_router()
                     .merge(create_system_router())
-                    .merge(create_manager_router())
-                    .merge(create_proxy_router())
+                    .merge(create_manager_router(
+                        std::sync::Arc::clone(&app_state),
+                        std::sync::Arc::clone(&client_identity_resolver),
+                    ))
+                    .merge(create_proxy_router(std::sync::Arc::clone(
+                        &client_identity_resolver,
+                    )))
                     .fallback(handle_404),
             )
             .with_state(app_state) // Call with_state before into_make_service

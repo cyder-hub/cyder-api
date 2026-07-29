@@ -1,4 +1,4 @@
-import type { JsonObject, JsonValue } from "./shared";
+import type { JsonValue } from "./shared";
 import type { ModelDetail, ModelItem } from "./models";
 import type { RequestPatchRule } from "./requestPatch";
 
@@ -19,17 +19,25 @@ export interface ProviderSummaryItem {
   is_enabled: boolean;
 }
 
-export interface ProviderApiKeyItem {
+export interface ProviderApiKeySummary {
   id: number;
-  api_key: string;
+  provider_id: number;
   description: string | null;
+  key_prefix: string;
+  key_last4: string;
+  is_enabled: boolean;
+  created_at: number;
+  updated_at: number;
 }
 
+export interface ProviderApiKeyReveal extends ProviderApiKeySummary {
+  api_key: string;
+}
 
 export interface ProviderListItem {
   provider: ProviderBase;
   models: ModelDetail[];
-  provider_keys: ProviderApiKeyItem[];
+  provider_keys: ProviderApiKeySummary[];
   request_patches: RequestPatchRule[];
 }
 
@@ -71,7 +79,7 @@ export interface ProviderBootstrapPayload {
 
 export interface ProviderBootstrapResponse {
   provider?: ProviderBase;
-  created_key?: ProviderApiKeyItem | null;
+  created_key?: ProviderApiKeySummary | null;
   created_model?: ModelItem | null;
   provider_name?: string | null;
   provider_key?: string | null;
@@ -84,11 +92,18 @@ export interface ProviderPayload {
   endpoint: string;
   use_proxy: boolean;
   provider_type: string;
-  omit_config?: JsonObject | null;
-  api_keys?: ProviderKeyPayload[];
 }
 
 export interface ProviderKeyPayload {
   api_key: string;
   description?: string | null;
+}
+
+export interface ProviderKeyUpdatePayload {
+  description: string | null;
+  is_enabled: boolean;
+}
+
+export interface ProviderKeyReplacePayload {
+  api_key: string;
 }

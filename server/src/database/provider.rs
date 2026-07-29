@@ -12,6 +12,9 @@ use crate::{db_execute, db_object};
 use crate::controller::BaseError;
 use crate::database::request_patch::{RequestPatchRule, RequestPatchRuleResponse};
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+use crate::service::secret_encryption::{
+    EncryptedSecret, ProviderSecretFingerprint, SecretEncryptionError,
+};
 use crate::utils::ID_GENERATOR;
 
 // Define the main Provider struct and its DB representations using db_object!
@@ -66,41 +69,249 @@ db_object! {
         pub provider_api_key_mode: Option<ProviderApiKeyMode>,
     }
 
-// Define ProviderApiKey struct and its DB representations
-    #[derive(Queryable, Selectable, Identifiable, Associations, AsChangeset)]
-    #[diesel(belongs_to(Provider))]
-    #[diesel(table_name = provider_api_key)]
-    pub struct ProviderApiKey {
-        pub id: i64,
-        pub provider_id: i64,
-        pub api_key: String,
-        pub description: Option<String>,
-        pub deleted_at: Option<i64>,
-        pub is_enabled: bool,
-        pub created_at: i64,
-        pub updated_at: i64,
-    }
+}
 
-    #[derive(Insertable, Deserialize, Debug)]
-    #[diesel(table_name = provider_api_key)]
-    pub struct NewProviderApiKey {
-        pub id: i64,
-        pub provider_id: i64,
-        pub api_key: String,
-        pub description: Option<String>,
-        pub is_enabled: bool,
-        pub created_at: i64,
-        pub updated_at: i64,
-    }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderApiKeySummary {
+    pub id: i64,
+    pub provider_id: i64,
+    pub description: Option<String>,
+    pub key_prefix: String,
+    pub key_last4: String,
+    pub is_enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
 
-    #[derive(AsChangeset, Deserialize, Debug)]
-    #[diesel(table_name = provider_api_key)]
-    pub struct UpdateProviderApiKeyData {
-        pub api_key: Option<String>,
-        pub description: Option<String>,
-        pub is_enabled: Option<bool>,
+#[derive(Clone)]
+pub(crate) struct StoredProviderApiKey {
+    pub id: i64,
+    pub provider_id: i64,
+    pub description: Option<String>,
+    pub key_prefix: String,
+    pub key_last4: String,
+    pub secret_ciphertext: Option<Vec<u8>>,
+    pub secret_nonce: Option<Vec<u8>>,
+    pub secret_format_version: Option<i32>,
+    pub secret_key_fingerprint: Option<String>,
+    #[cfg(test)]
+    pub secret_hmac: Option<String>,
+    pub deleted_at: Option<i64>,
+    pub is_enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone)]
+pub(crate) struct ProviderApiKeySelection {
+    pub id: i64,
+    pub provider_id: i64,
+    pub secret_ciphertext: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    pub secret_format_version: i32,
+    pub secret_key_fingerprint: String,
+}
+
+impl std::fmt::Debug for ProviderApiKeySelection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderApiKeySelection")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("secret_material", &"<redacted>")
+            .finish()
     }
 }
+
+impl std::fmt::Debug for StoredProviderApiKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StoredProviderApiKey")
+            .field("id", &self.id)
+            .field("provider_id", &self.provider_id)
+            .field("description", &self.description)
+            .field("key_prefix", &self.key_prefix)
+            .field("key_last4", &self.key_last4)
+            .field("secret_material", &"<redacted>")
+            .field("deleted_at", &self.deleted_at)
+            .field("is_enabled", &self.is_enabled)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+impl StoredProviderApiKey {
+    pub(crate) fn encrypted_secret(&self) -> Result<EncryptedSecret, SecretEncryptionError> {
+        EncryptedSecret::from_parts(
+            self.secret_ciphertext
+                .clone()
+                .ok_or(SecretEncryptionError::IncompleteStoredSecret)?,
+            self.secret_nonce
+                .clone()
+                .ok_or(SecretEncryptionError::IncompleteStoredSecret)?,
+            self.secret_format_version
+                .ok_or(SecretEncryptionError::IncompleteStoredSecret)?,
+            self.secret_key_fingerprint
+                .clone()
+                .ok_or(SecretEncryptionError::IncompleteStoredSecret)?,
+        )
+    }
+}
+
+pub(crate) struct NewProviderApiKey {
+    pub id: i64,
+    pub provider_id: i64,
+    pub description: Option<String>,
+    pub key_prefix: String,
+    pub key_last4: String,
+    pub encrypted_secret: EncryptedSecret,
+    pub secret_hmac: ProviderSecretFingerprint,
+    pub is_enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub(crate) struct UpdateProviderApiKeyMetadata {
+    pub description: Option<String>,
+    pub is_enabled: bool,
+}
+
+type StoredProviderApiKeyTuple = (
+    i64,
+    i64,
+    Option<String>,
+    String,
+    String,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<i32>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    bool,
+    i64,
+    i64,
+);
+
+type ProviderApiKeySummaryTuple = (i64, i64, Option<String>, String, String, bool, i64, i64);
+
+fn provider_api_key_summary_from_tuple(row: ProviderApiKeySummaryTuple) -> ProviderApiKeySummary {
+    ProviderApiKeySummary {
+        id: row.0,
+        provider_id: row.1,
+        description: row.2,
+        key_prefix: row.3,
+        key_last4: row.4,
+        is_enabled: row.5,
+        created_at: row.6,
+        updated_at: row.7,
+    }
+}
+
+fn stored_provider_api_key_from_tuple(row: StoredProviderApiKeyTuple) -> StoredProviderApiKey {
+    StoredProviderApiKey {
+        id: row.0,
+        provider_id: row.1,
+        description: row.2,
+        key_prefix: row.3,
+        key_last4: row.4,
+        secret_ciphertext: row.5,
+        secret_nonce: row.6,
+        secret_format_version: row.7,
+        secret_key_fingerprint: row.8,
+        #[cfg(test)]
+        secret_hmac: row.9,
+        deleted_at: row.10,
+        is_enabled: row.11,
+        created_at: row.12,
+        updated_at: row.13,
+    }
+}
+
+fn map_provider_api_key_write_error(
+    action: &'static str,
+    error: diesel::result::Error,
+) -> BaseError {
+    match error {
+        diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        ) => BaseError::DatabaseDup(Some(
+            "provider API key already exists for this provider".to_string(),
+        )),
+        other => BaseError::DatabaseFatal(Some(format!(
+            "Failed to {action} provider API key: {other}"
+        ))),
+    }
+}
+
+macro_rules! insert_provider_api_key {
+    ($conn:expr, $new_key:expr) => {{
+        let new_key = $new_key;
+        let row = diesel::insert_into(provider_api_key::table)
+            .values((
+                provider_api_key::dsl::id.eq(new_key.id),
+                provider_api_key::dsl::provider_id.eq(new_key.provider_id),
+                provider_api_key::dsl::description.eq(new_key.description.clone()),
+                provider_api_key::dsl::key_prefix.eq(new_key.key_prefix.clone()),
+                provider_api_key::dsl::key_last4.eq(new_key.key_last4.clone()),
+                provider_api_key::dsl::secret_ciphertext
+                    .eq(Some(new_key.encrypted_secret.ciphertext().to_vec())),
+                provider_api_key::dsl::secret_nonce
+                    .eq(Some(new_key.encrypted_secret.nonce().to_vec())),
+                provider_api_key::dsl::secret_format_version
+                    .eq(Some(new_key.encrypted_secret.format_version())),
+                provider_api_key::dsl::secret_key_fingerprint.eq(Some(
+                    new_key
+                        .encrypted_secret
+                        .key_fingerprint()
+                        .as_str()
+                        .to_string(),
+                )),
+                provider_api_key::dsl::secret_hmac
+                    .eq(Some(new_key.secret_hmac.as_str().to_string())),
+                provider_api_key::dsl::is_enabled.eq(new_key.is_enabled),
+                provider_api_key::dsl::created_at.eq(new_key.created_at),
+                provider_api_key::dsl::updated_at.eq(new_key.updated_at),
+            ))
+            .returning((
+                provider_api_key::dsl::id,
+                provider_api_key::dsl::provider_id,
+                provider_api_key::dsl::description,
+                provider_api_key::dsl::key_prefix,
+                provider_api_key::dsl::key_last4,
+                provider_api_key::dsl::is_enabled,
+                provider_api_key::dsl::created_at,
+                provider_api_key::dsl::updated_at,
+            ))
+            .get_result::<ProviderApiKeySummaryTuple>($conn)
+            .map_err(|error| map_provider_api_key_write_error("insert", error))?;
+        provider_api_key_summary_from_tuple(row)
+    }};
+}
+
+macro_rules! stored_provider_key_columns {
+    () => {
+        (
+            provider_api_key::dsl::id,
+            provider_api_key::dsl::provider_id,
+            provider_api_key::dsl::description,
+            provider_api_key::dsl::key_prefix,
+            provider_api_key::dsl::key_last4,
+            provider_api_key::dsl::secret_ciphertext,
+            provider_api_key::dsl::secret_nonce,
+            provider_api_key::dsl::secret_format_version,
+            provider_api_key::dsl::secret_key_fingerprint,
+            provider_api_key::dsl::secret_hmac,
+            provider_api_key::dsl::deleted_at,
+            provider_api_key::dsl::is_enabled,
+            provider_api_key::dsl::created_at,
+            provider_api_key::dsl::updated_at,
+        )
+    };
+}
+
 #[derive(Clone, Debug)]
 pub struct BootstrapProviderInput {
     pub provider_id: i64,
@@ -110,8 +321,12 @@ pub struct BootstrapProviderInput {
     pub use_proxy: bool,
     pub provider_type: ProviderType,
     pub provider_api_key_mode: ProviderApiKeyMode,
-    pub api_key: String,
+    pub provider_api_key_id: i64,
     pub api_key_description: Option<String>,
+    pub key_prefix: String,
+    pub key_last4: String,
+    pub encrypted_secret: EncryptedSecret,
+    pub secret_hmac: ProviderSecretFingerprint,
     pub model_name: String,
     pub real_model_name: Option<String>,
 }
@@ -119,7 +334,7 @@ pub struct BootstrapProviderInput {
 #[derive(Debug, Serialize)]
 pub struct BootstrapProviderResult {
     pub provider: Provider,
-    pub created_key: ProviderApiKey,
+    pub created_key: ProviderApiKeySummary,
     pub created_model: Model,
 }
 
@@ -170,26 +385,19 @@ macro_rules! bootstrap_transaction {
             let provider = provider_db.from_db();
 
             let new_provider_api_key_data = NewProviderApiKey {
-                id: ID_GENERATOR.generate_id(),
+                id: bootstrap_input.provider_api_key_id,
                 provider_id: provider.id,
-                api_key: bootstrap_input.api_key.clone(),
                 description: bootstrap_input.api_key_description.clone(),
+                key_prefix: bootstrap_input.key_prefix.clone(),
+                key_last4: bootstrap_input.key_last4.clone(),
+                encrypted_secret: bootstrap_input.encrypted_secret.clone(),
+                secret_hmac: bootstrap_input.secret_hmac.clone(),
                 is_enabled: true,
                 created_at: current_time,
                 updated_at: current_time,
             };
 
-            let created_key_db = diesel::insert_into(provider_api_key::table)
-                .values(NewProviderApiKeyDb::to_db(&new_provider_api_key_data))
-                .returning(ProviderApiKeyDb::as_returning())
-                .get_result::<ProviderApiKeyDb>($conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to insert bootstrap provider API key: {}",
-                        e
-                    )))
-                })?;
-            let created_key = created_key_db.from_db();
+            let created_key = insert_provider_api_key!($conn, &new_provider_api_key_data);
 
             let new_model_data = NewModel {
                 id: ID_GENERATOR.generate_id(),
@@ -247,7 +455,7 @@ macro_rules! bootstrap_transaction {
 #[derive(Debug, Serialize)]
 pub struct ProviderDetail {
     pub provider: Provider,
-    pub api_keys: Vec<ProviderApiKey>,
+    pub api_keys: Vec<ProviderApiKeySummary>,
     pub request_patches: Vec<RequestPatchRuleResponse>,
 }
 impl Provider {
@@ -361,39 +569,6 @@ impl Provider {
                         )))
                     })?;
 
-                let model_ids = model::table
-                    .filter(model::dsl::provider_id.eq(target_id_value))
-                    .select(model::dsl::id)
-                    .load::<i64>(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to list models for provider {} while deleting dependents: {}",
-                            target_id_value, e
-                        )))
-                    })?;
-
-                if !model_ids.is_empty() {
-                    diesel::update(
-                        model_route_candidate::table.filter(
-                            model_route_candidate::dsl::model_id
-                                .eq_any(model_ids)
-                                .and(model_route_candidate::dsl::deleted_at.is_null()),
-                        ),
-                    )
-                    .set((
-                        model_route_candidate::dsl::deleted_at.eq(Some(current_time)),
-                        model_route_candidate::dsl::is_enabled.eq(false),
-                        model_route_candidate::dsl::updated_at.eq(current_time),
-                    ))
-                    .execute(conn)
-                    .map_err(|e| {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Failed to delete model route candidates for provider {}: {}",
-                            target_id_value, e
-                        )))
-                    })?;
-                }
-
                 diesel::update(
                     provider_api_key::table.filter(
                         provider_api_key::dsl::provider_id
@@ -404,6 +579,11 @@ impl Provider {
                 .set((
                     provider_api_key::dsl::deleted_at.eq(current_time),
                     provider_api_key::dsl::is_enabled.eq(false),
+                    provider_api_key::dsl::secret_ciphertext.eq(Option::<Vec<u8>>::None),
+                    provider_api_key::dsl::secret_nonce.eq(Option::<Vec<u8>>::None),
+                    provider_api_key::dsl::secret_format_version.eq(Option::<i32>::None),
+                    provider_api_key::dsl::secret_key_fingerprint.eq(Option::<String>::None),
+                    provider_api_key::dsl::secret_hmac.eq(Option::<String>::None),
                     provider_api_key::dsl::updated_at.eq(current_time),
                 ))
                 .execute(conn)
@@ -578,7 +758,7 @@ impl Provider {
     /// Retrieves a provider's details including API keys and direct request patches by its ID.
     pub fn get_detail_by_id(provider_id_val: i64) -> DbResult<ProviderDetail> {
         let provider = Provider::get_by_id(provider_id_val)?;
-        let api_keys = ProviderApiKey::list_by_provider_id(provider_id_val)?;
+        let api_keys = ProviderApiKeyRepository::list_summaries_by_provider_id(provider_id_val)?;
         let request_patches = RequestPatchRule::list_by_provider_id(provider_id_val)?;
 
         Ok(ProviderDetail {
@@ -589,164 +769,392 @@ impl Provider {
     }
 }
 
-impl ProviderApiKey {
-    /// Inserts a new provider API key record.
-    pub fn insert(new_key_data: &NewProviderApiKey) -> DbResult<ProviderApiKey> {
+pub struct ProviderApiKeyRepository;
+
+impl ProviderApiKeyRepository {
+    pub(crate) fn insert(new_key: &NewProviderApiKey) -> DbResult<ProviderApiKeySummary> {
         let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            let db_key = diesel::insert_into(provider_api_key::table)
-                .values(NewProviderApiKeyDb::to_db(new_key_data))
-                .returning(ProviderApiKeyDb::as_returning())
-                .get_result::<ProviderApiKeyDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to insert provider API key: {}",
-                        e
-                    )))
-                })?;
-            Ok(db_key.from_db())
-        })
+        db_execute!(conn, { Ok(insert_provider_api_key!(conn, new_key)) })
     }
 
-    /// Updates an existing provider API key.
-    pub fn update(key_id: i64, update_data: &UpdateProviderApiKeyData) -> DbResult<ProviderApiKey> {
+    pub(crate) fn replace_secret(
+        provider_id_value: i64,
+        key_id: i64,
+        key_prefix_value: String,
+        key_last4_value: String,
+        encrypted_secret: &EncryptedSecret,
+        secret_hmac_value: &ProviderSecretFingerprint,
+    ) -> DbResult<ProviderApiKeySummary> {
         let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
         db_execute!(conn, {
-            let db_key = diesel::update(provider_api_key::table.find(key_id))
-                .set((
-                    UpdateProviderApiKeyDataDb::to_db(update_data),
-                    provider_api_key::dsl::updated_at.eq(current_time),
-                ))
-                .returning(ProviderApiKeyDb::as_returning())
-                .get_result::<ProviderApiKeyDb>(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to update provider API key {}: {}",
-                        key_id, e
-                    )))
-                })?;
-            Ok(db_key.from_db())
+            let row = diesel::update(
+                provider_api_key::table.filter(
+                    provider_api_key::dsl::id
+                        .eq(key_id)
+                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
+                        .and(provider_api_key::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                provider_api_key::dsl::key_prefix.eq(key_prefix_value),
+                provider_api_key::dsl::key_last4.eq(key_last4_value),
+                provider_api_key::dsl::secret_ciphertext
+                    .eq(Some(encrypted_secret.ciphertext().to_vec())),
+                provider_api_key::dsl::secret_nonce.eq(Some(encrypted_secret.nonce().to_vec())),
+                provider_api_key::dsl::secret_format_version
+                    .eq(Some(encrypted_secret.format_version())),
+                provider_api_key::dsl::secret_key_fingerprint.eq(Some(
+                    encrypted_secret.key_fingerprint().as_str().to_string(),
+                )),
+                provider_api_key::dsl::secret_hmac.eq(Some(secret_hmac_value.as_str().to_string())),
+                provider_api_key::dsl::updated_at.eq(current_time),
+            ))
+            .returning((
+                provider_api_key::dsl::id,
+                provider_api_key::dsl::provider_id,
+                provider_api_key::dsl::description,
+                provider_api_key::dsl::key_prefix,
+                provider_api_key::dsl::key_last4,
+                provider_api_key::dsl::is_enabled,
+                provider_api_key::dsl::created_at,
+                provider_api_key::dsl::updated_at,
+            ))
+            .get_result::<ProviderApiKeySummaryTuple>(conn)
+            .map_err(|error| map_provider_api_key_write_error("replace", error))?;
+            Ok(provider_api_key_summary_from_tuple(row))
         })
     }
 
-    /// Soft deletes a provider API key.
-    pub fn delete(key_id: i64) -> DbResult<usize> {
+    pub(crate) fn update_metadata(
+        provider_id_value: i64,
+        key_id: i64,
+        update: &UpdateProviderApiKeyMetadata,
+    ) -> DbResult<ProviderApiKeySummary> {
         let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
         db_execute!(conn, {
-            diesel::update(provider_api_key::table.find(key_id))
-                .set((
-                    provider_api_key::dsl::deleted_at.eq(current_time),
-                    provider_api_key::dsl::is_enabled.eq(false),
-                    provider_api_key::dsl::updated_at.eq(current_time),
-                ))
-                .execute(conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to delete provider API key {}: {}",
-                        key_id, e
-                    )))
-                })
+            let row = diesel::update(
+                provider_api_key::table.filter(
+                    provider_api_key::dsl::id
+                        .eq(key_id)
+                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
+                        .and(provider_api_key::dsl::deleted_at.is_null()),
+                ),
+            )
+            .set((
+                provider_api_key::dsl::description.eq(update.description.clone()),
+                provider_api_key::dsl::is_enabled.eq(update.is_enabled),
+                provider_api_key::dsl::updated_at.eq(current_time),
+            ))
+            .returning((
+                provider_api_key::dsl::id,
+                provider_api_key::dsl::provider_id,
+                provider_api_key::dsl::description,
+                provider_api_key::dsl::key_prefix,
+                provider_api_key::dsl::key_last4,
+                provider_api_key::dsl::is_enabled,
+                provider_api_key::dsl::created_at,
+                provider_api_key::dsl::updated_at,
+            ))
+            .get_result::<ProviderApiKeySummaryTuple>(conn)
+            .map_err(|error| match error {
+                diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                    "Provider API key {key_id} not found for provider {provider_id_value}"
+                ))),
+                other => map_provider_api_key_write_error("update metadata for", other),
+            })?;
+            Ok(provider_api_key_summary_from_tuple(row))
         })
     }
 
-    /// Soft deletes all provider API keys for a provider.
-    pub fn soft_delete_by_provider_id(provider_id_value: i64) -> DbResult<usize> {
+    pub(crate) fn soft_delete(provider_id_value: i64, key_id: i64) -> DbResult<usize> {
         let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
         db_execute!(conn, {
             diesel::update(
                 provider_api_key::table.filter(
-                    provider_api_key::dsl::provider_id
-                        .eq(provider_id_value)
+                    provider_api_key::dsl::id
+                        .eq(key_id)
+                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
                         .and(provider_api_key::dsl::deleted_at.is_null()),
                 ),
             )
             .set((
-                provider_api_key::dsl::deleted_at.eq(current_time),
+                provider_api_key::dsl::deleted_at.eq(Some(current_time)),
                 provider_api_key::dsl::is_enabled.eq(false),
+                provider_api_key::dsl::secret_ciphertext.eq(Option::<Vec<u8>>::None),
+                provider_api_key::dsl::secret_nonce.eq(Option::<Vec<u8>>::None),
+                provider_api_key::dsl::secret_format_version.eq(Option::<i32>::None),
+                provider_api_key::dsl::secret_key_fingerprint.eq(Option::<String>::None),
+                provider_api_key::dsl::secret_hmac.eq(Option::<String>::None),
                 provider_api_key::dsl::updated_at.eq(current_time),
             ))
             .execute(conn)
-            .map_err(|e| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to delete provider API keys for provider {}: {}",
-                    provider_id_value, e
-                )))
-            })
+            .map_err(|error| map_provider_api_key_write_error("delete", error))
         })
     }
 
-    /// Retrieves a provider API key by its ID.
-    pub fn get_by_id(key_id: i64) -> DbResult<ProviderApiKey> {
+    pub fn get_summary_by_id(
+        provider_id_value: i64,
+        key_id: i64,
+    ) -> DbResult<ProviderApiKeySummary> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
-            let db_key = provider_api_key::table
+            let row = provider_api_key::table
                 .filter(
                     provider_api_key::dsl::id
                         .eq(key_id)
+                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
                         .and(provider_api_key::dsl::deleted_at.is_null()),
                 )
-                .select(ProviderApiKeyDb::as_select())
-                .first::<ProviderApiKeyDb>(conn)
-                .map_err(|e| {
-                    if matches!(e, diesel::result::Error::NotFound) {
-                        BaseError::ParamInvalid(Some(format!(
-                            "Provider API key with id {} not found",
-                            key_id
-                        )))
-                    } else {
-                        BaseError::DatabaseFatal(Some(format!(
-                            "Error fetching provider API key {}: {}",
-                            key_id, e
-                        )))
-                    }
+                .select((
+                    provider_api_key::dsl::id,
+                    provider_api_key::dsl::provider_id,
+                    provider_api_key::dsl::description,
+                    provider_api_key::dsl::key_prefix,
+                    provider_api_key::dsl::key_last4,
+                    provider_api_key::dsl::is_enabled,
+                    provider_api_key::dsl::created_at,
+                    provider_api_key::dsl::updated_at,
+                ))
+                .first::<ProviderApiKeySummaryTuple>(conn)
+                .map_err(|error| match error {
+                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                        "Provider API key {key_id} not found for provider {provider_id_value}"
+                    ))),
+                    other => BaseError::DatabaseFatal(Some(format!(
+                        "Failed to load provider API key summary: {other}"
+                    ))),
                 })?;
-            Ok(db_key.from_db())
+            Ok(provider_api_key_summary_from_tuple(row))
         })
     }
 
-    /// Lists all non-deleted API keys for a specific provider.
-    pub fn list_by_provider_id(p_id: i64) -> DbResult<Vec<ProviderApiKey>> {
+    pub fn list_summaries_by_provider_id(
+        provider_id_value: i64,
+    ) -> DbResult<Vec<ProviderApiKeySummary>> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
-            let db_keys = provider_api_key::table
+            let rows = provider_api_key::table
                 .filter(
                     provider_api_key::dsl::provider_id
-                        .eq(p_id)
+                        .eq(provider_id_value)
                         .and(provider_api_key::dsl::deleted_at.is_null()),
                 )
                 .order(provider_api_key::dsl::created_at.desc())
-                .select(ProviderApiKeyDb::as_select())
-                .load::<ProviderApiKeyDb>(conn)
-                .map_err(|e| {
+                .select((
+                    provider_api_key::dsl::id,
+                    provider_api_key::dsl::provider_id,
+                    provider_api_key::dsl::description,
+                    provider_api_key::dsl::key_prefix,
+                    provider_api_key::dsl::key_last4,
+                    provider_api_key::dsl::is_enabled,
+                    provider_api_key::dsl::created_at,
+                    provider_api_key::dsl::updated_at,
+                ))
+                .load::<ProviderApiKeySummaryTuple>(conn)
+                .map_err(|error| {
                     BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list API keys for provider {}: {}",
-                        p_id, e
+                        "Failed to list provider API key summaries: {error}"
                     )))
                 })?;
-            Ok(db_keys.into_iter().map(|db_k| db_k.from_db()).collect())
+            Ok(rows
+                .into_iter()
+                .map(provider_api_key_summary_from_tuple)
+                .collect())
         })
     }
 
-    /// Lists all provider API key records that are not marked as deleted.
-    pub fn list_all() -> DbResult<Vec<ProviderApiKey>> {
+    pub fn list_all_summaries() -> DbResult<Vec<ProviderApiKeySummary>> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
-            let db_keys = provider_api_key::table
+            let rows = provider_api_key::table
                 .filter(provider_api_key::dsl::deleted_at.is_null())
                 .order(provider_api_key::dsl::created_at.desc())
-                .select(ProviderApiKeyDb::as_select())
-                .load::<ProviderApiKeyDb>(conn)
-                .map_err(|e| {
+                .select((
+                    provider_api_key::dsl::id,
+                    provider_api_key::dsl::provider_id,
+                    provider_api_key::dsl::description,
+                    provider_api_key::dsl::key_prefix,
+                    provider_api_key::dsl::key_last4,
+                    provider_api_key::dsl::is_enabled,
+                    provider_api_key::dsl::created_at,
+                    provider_api_key::dsl::updated_at,
+                ))
+                .load::<ProviderApiKeySummaryTuple>(conn)
+                .map_err(|error| {
                     BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list all provider API keys: {}",
-                        e
+                        "Failed to list provider API key summaries: {error}"
+                    )))
+                })?;
+            Ok(rows
+                .into_iter()
+                .map(provider_api_key_summary_from_tuple)
+                .collect())
+        })
+    }
+
+    pub(crate) fn list_selections_by_provider_id(
+        provider_id_value: i64,
+    ) -> DbResult<Vec<ProviderApiKeySelection>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let rows = provider_api_key::table
+                .filter(
+                    provider_api_key::dsl::provider_id
+                        .eq(provider_id_value)
+                        .and(provider_api_key::dsl::deleted_at.is_null())
+                        .and(provider_api_key::dsl::is_enabled.eq(true)),
+                )
+                .order((
+                    provider_api_key::dsl::created_at.asc(),
+                    provider_api_key::dsl::id.asc(),
+                ))
+                .select((
+                    provider_api_key::dsl::id,
+                    provider_api_key::dsl::provider_id,
+                    provider_api_key::dsl::secret_ciphertext,
+                    provider_api_key::dsl::secret_nonce,
+                    provider_api_key::dsl::secret_format_version,
+                    provider_api_key::dsl::secret_key_fingerprint,
+                ))
+                .load::<(
+                    i64,
+                    i64,
+                    Option<Vec<u8>>,
+                    Option<Vec<u8>>,
+                    Option<i32>,
+                    Option<String>,
+                )>(conn)
+                .map_err(|error| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list provider API key selections: {error}"
                     )))
                 })?;
 
-            Ok(db_keys.into_iter().map(|db_k| db_k.from_db()).collect())
+            rows.into_iter()
+                .map(|row| {
+                    Ok(ProviderApiKeySelection {
+                        id: row.0,
+                        provider_id: row.1,
+                        secret_ciphertext: row.2.ok_or_else(|| {
+                            BaseError::DatabaseFatal(Some(
+                                "Provider API key secret contract is incomplete".to_string(),
+                            ))
+                        })?,
+                        secret_nonce: row.3.ok_or_else(|| {
+                            BaseError::DatabaseFatal(Some(
+                                "Provider API key secret contract is incomplete".to_string(),
+                            ))
+                        })?,
+                        secret_format_version: row.4.ok_or_else(|| {
+                            BaseError::DatabaseFatal(Some(
+                                "Provider API key secret contract is incomplete".to_string(),
+                            ))
+                        })?,
+                        secret_key_fingerprint: row.5.ok_or_else(|| {
+                            BaseError::DatabaseFatal(Some(
+                                "Provider API key secret contract is incomplete".to_string(),
+                            ))
+                        })?,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    pub(crate) fn list_all_selections() -> DbResult<Vec<ProviderApiKeySelection>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let rows = provider_api_key::table
+                .filter(
+                    provider_api_key::dsl::deleted_at
+                        .is_null()
+                        .and(provider_api_key::dsl::is_enabled.eq(true)),
+                )
+                .order((
+                    provider_api_key::dsl::provider_id.asc(),
+                    provider_api_key::dsl::created_at.asc(),
+                    provider_api_key::dsl::id.asc(),
+                ))
+                .select((
+                    provider_api_key::dsl::id,
+                    provider_api_key::dsl::provider_id,
+                    provider_api_key::dsl::secret_ciphertext,
+                    provider_api_key::dsl::secret_nonce,
+                    provider_api_key::dsl::secret_format_version,
+                    provider_api_key::dsl::secret_key_fingerprint,
+                ))
+                .load::<(
+                    i64,
+                    i64,
+                    Option<Vec<u8>>,
+                    Option<Vec<u8>>,
+                    Option<i32>,
+                    Option<String>,
+                )>(conn)
+                .map_err(|error| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to list provider API key selections: {error}"
+                    )))
+                })?;
+
+            rows.into_iter()
+                .map(|row| {
+                    Ok(ProviderApiKeySelection {
+                        id: row.0,
+                        provider_id: row.1,
+                        secret_ciphertext: row.2.ok_or_else(|| {
+                            BaseError::DatabaseFatal(Some(
+                                "Provider API key secret contract is incomplete".to_string(),
+                            ))
+                        })?,
+                        secret_nonce: row.3.ok_or_else(|| {
+                            BaseError::DatabaseFatal(Some(
+                                "Provider API key secret contract is incomplete".to_string(),
+                            ))
+                        })?,
+                        secret_format_version: row.4.ok_or_else(|| {
+                            BaseError::DatabaseFatal(Some(
+                                "Provider API key secret contract is incomplete".to_string(),
+                            ))
+                        })?,
+                        secret_key_fingerprint: row.5.ok_or_else(|| {
+                            BaseError::DatabaseFatal(Some(
+                                "Provider API key secret contract is incomplete".to_string(),
+                            ))
+                        })?,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    pub(crate) fn get_stored_by_id(
+        provider_id_value: i64,
+        key_id: i64,
+    ) -> DbResult<StoredProviderApiKey> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let row = provider_api_key::table
+                .filter(
+                    provider_api_key::dsl::id
+                        .eq(key_id)
+                        .and(provider_api_key::dsl::provider_id.eq(provider_id_value))
+                        .and(provider_api_key::dsl::deleted_at.is_null()),
+                )
+                .select(stored_provider_key_columns!())
+                .first::<StoredProviderApiKeyTuple>(conn)
+                .map_err(|error| match error {
+                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
+                        "Provider API key {key_id} not found for provider {provider_id_value}"
+                    ))),
+                    other => BaseError::DatabaseFatal(Some(format!(
+                        "Failed to load provider API key secret: {other}"
+                    ))),
+                })?;
+            Ok(stored_provider_api_key_from_tuple(row))
         })
     }
 }
@@ -754,7 +1162,11 @@ impl ProviderApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SecretEncryptionConfig;
     use crate::database::_sqlite_schema::provider_api_key;
+    use crate::service::secret_encryption::{
+        SecretDomain, SecretEncryptionService, SensitiveSecret,
+    };
     use serde_json::Value;
 
     struct TestSqliteDb {
@@ -785,16 +1197,33 @@ mod tests {
     }
 
     fn sample_input(real_model_name: Option<&str>) -> BootstrapProviderInput {
+        let provider_id = 101;
+        let provider_api_key_id = 102;
+        let api_key = "sk-test";
+        let config: SecretEncryptionConfig = serde_yaml::from_str(
+            "downstream_mode: one_time\nencryption_key: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
+        )
+        .expect("test secret config should parse");
+        let service = SecretEncryptionService::from_config(&config);
+        let secret = SensitiveSecret::new(api_key.to_string());
         BootstrapProviderInput {
-            provider_id: 101,
+            provider_id,
             provider_key: "openai-api-example-com".to_string(),
             name: "OpenAI api.example.com".to_string(),
             endpoint: "https://api.example.com/v1".to_string(),
             use_proxy: false,
             provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
-            api_key: "sk-test".to_string(),
+            provider_api_key_id,
             api_key_description: Some("bootstrap key".to_string()),
+            key_prefix: "sk-t".to_string(),
+            key_last4: "test".to_string(),
+            encrypted_secret: service
+                .encrypt_current(SecretDomain::ProviderApiKey(provider_api_key_id), &secret)
+                .expect("test provider secret should encrypt"),
+            secret_hmac: service
+                .provider_secret_fingerprint(provider_id, &secret)
+                .expect("test provider secret should fingerprint"),
             model_name: "gpt-4o-mini".to_string(),
             real_model_name: real_model_name.map(ToString::to_string),
         }
@@ -863,7 +1292,8 @@ mod tests {
         assert_eq!(result.provider.provider_key, "openai-api-example-com");
         assert_eq!(result.provider.name, "OpenAI api.example.com");
         assert_eq!(result.created_key.provider_id, result.provider.id);
-        assert_eq!(result.created_key.api_key, "sk-test");
+        assert_eq!(result.created_key.key_prefix, "sk-t");
+        assert_eq!(result.created_key.key_last4, "test");
         assert_eq!(result.created_model.provider_id, result.provider.id);
         assert_eq!(result.created_model.model_name, "gpt-4o-mini");
 
@@ -955,5 +1385,114 @@ mod tests {
             serde_json::json!({ "temperature": 0.2 })
         );
         assert!(object.get("custom_fields").is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_key_repository_enforces_safe_projection_membership_and_hmac_lifecycle() {
+        let database = crate::database::TestDbContext::new_sqlite("provider-key-repository.sqlite");
+        database
+            .run_async(async {
+                Provider::create(&NewProvider {
+                    id: 501,
+                    provider_key: "repository-provider".to_string(),
+                    name: "Repository Provider".to_string(),
+                    endpoint: "https://api.example.com/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_type: ProviderType::Openai,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                })
+                .expect("provider should seed");
+                Provider::create(&NewProvider {
+                    id: 502,
+                    provider_key: "other-provider".to_string(),
+                    name: "Other Provider".to_string(),
+                    endpoint: "https://other.example.com/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    created_at: 1,
+                    updated_at: 1,
+                    provider_type: ProviderType::Openai,
+                    provider_api_key_mode: ProviderApiKeyMode::Queue,
+                })
+                .expect("other provider should seed");
+
+                let config: SecretEncryptionConfig = serde_yaml::from_str(
+                    "downstream_mode: one_time\nencryption_key: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\n",
+                )
+                .expect("test secret config should parse");
+                let service = SecretEncryptionService::from_config(&config);
+                let secret = SensitiveSecret::new("sk-repository-secret".to_string());
+                let new_key = |id| NewProviderApiKey {
+                    id,
+                    provider_id: 501,
+                    description: Some("primary".to_string()),
+                    key_prefix: "sk-r".to_string(),
+                    key_last4: "cret".to_string(),
+                    encrypted_secret: service
+                        .encrypt_current(SecretDomain::ProviderApiKey(id), &secret)
+                        .expect("secret should encrypt"),
+                    secret_hmac: service
+                        .provider_secret_fingerprint(501, &secret)
+                        .expect("secret should fingerprint"),
+                    is_enabled: true,
+                    created_at: id,
+                    updated_at: id,
+                };
+
+                let summary = ProviderApiKeyRepository::insert(&new_key(601))
+                    .expect("provider key should insert");
+                let json = serde_json::to_value(&summary).expect("summary should serialize");
+                let object = json.as_object().expect("summary should be an object");
+                for forbidden in [
+                    "api_key",
+                    "secret_ciphertext",
+                    "secret_nonce",
+                    "secret_format_version",
+                    "secret_key_fingerprint",
+                    "secret_hmac",
+                ] {
+                    assert!(!object.contains_key(forbidden));
+                }
+                assert!(ProviderApiKeyRepository::insert(&new_key(602)).is_err());
+                assert!(
+                    ProviderApiKeyRepository::update_metadata(
+                        502,
+                        601,
+                        &UpdateProviderApiKeyMetadata {
+                            description: None,
+                            is_enabled: false,
+                        },
+                    )
+                    .is_err()
+                );
+
+                ProviderApiKeyRepository::update_metadata(
+                    501,
+                    601,
+                    &UpdateProviderApiKeyMetadata {
+                        description: Some("disabled".to_string()),
+                        is_enabled: false,
+                    },
+                )
+                .expect("metadata update should succeed");
+                assert!(ProviderApiKeyRepository::insert(&new_key(602)).is_err());
+
+                let stored = ProviderApiKeyRepository::get_stored_by_id(501, 601)
+                    .expect("stored provider key should load");
+                let debug = format!("{stored:?}");
+                assert!(debug.contains("<redacted>"));
+                assert!(!debug.contains("sk-repository-secret"));
+                assert!(!debug.contains(stored.secret_hmac.as_deref().unwrap_or_default()));
+
+                ProviderApiKeyRepository::soft_delete(501, 601)
+                    .expect("provider key soft delete should succeed");
+                assert!(ProviderApiKeyRepository::get_stored_by_id(501, 601).is_err());
+                ProviderApiKeyRepository::insert(&new_key(602))
+                    .expect("soft deletion should release the HMAC uniqueness slot");
+            })
+            .await;
     }
 }

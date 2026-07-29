@@ -5,7 +5,6 @@ use reqwest::{
     Url,
     header::{HeaderName, HeaderValue as ReqwestHeaderValue},
 };
-use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::{
@@ -14,19 +13,17 @@ use crate::{
         reasoning_suffix::{
             GeneratedReasoningPatch, ReasoningPatchContext, generate_reasoning_patches,
         },
-        runtime::route_resolver::ExecutionCandidate,
+        runtime::route_resolver::ExecutionTarget,
     },
     schema::enum_def::{RequestPatchOperation, RequestPatchPlacement},
     service::{
         app_state::AppState,
         cache::types::{
-            CacheModel, CacheProvider, CacheRequestPatchConflict, CacheRequestPatchExplainEntry,
-            CacheResolvedRequestPatch, RequestPatchSource, RuntimeRequestPatchConflict,
-            RuntimeResolvedRequestPatch,
+            CacheModel, CacheProvider, CacheRequestPatchConflict, CacheResolvedRequestPatch,
+            RequestPatchSource, RuntimeRequestPatchConflict, RuntimeResolvedRequestPatch,
         },
         request_patch::resolve_effective_request_patches,
     },
-    utils::storage::RequestLogBundleQueryParam,
 };
 use cyder_tools::log::{debug, error};
 
@@ -35,18 +32,6 @@ pub(crate) struct RuntimeRequestPatchTrace {
     pub applied_rules: Vec<RuntimeResolvedRequestPatch>,
     pub conflicts: Vec<RuntimeRequestPatchConflict>,
     pub has_conflicts: bool,
-    pub applied_request_patch_ids_json: Option<String>,
-    pub request_patch_summary_json: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct RequestPatchTraceSummary {
-    provider_id: i64,
-    model_id: Option<i64>,
-    effective_rules: Vec<RuntimeResolvedRequestPatch>,
-    explain: Vec<CacheRequestPatchExplainEntry>,
-    conflicts: Vec<RuntimeRequestPatchConflict>,
-    has_conflicts: bool,
 }
 
 impl RuntimeRequestPatchTrace {
@@ -299,92 +284,6 @@ fn apply_query_request_patch(
     Ok(())
 }
 
-pub(in crate::proxy) fn rebuild_gemini_url_query_from_snapshot(
-    final_url: &str,
-    snapshot_query_params: &[RequestLogBundleQueryParam],
-    is_stream: bool,
-    request_patches: &[RuntimeResolvedRequestPatch],
-) -> Result<String, ProxyError> {
-    let mut url = Url::parse(final_url)
-        .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
-    let mut query_params = snapshot_query_params
-        .iter()
-        .filter(|param| !param.name.eq_ignore_ascii_case("key"))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if is_stream {
-        query_params.push(RequestLogBundleQueryParam {
-            name: "alt".to_string(),
-            value: Some("sse".to_string()),
-            value_present: true,
-            encoded_name: None,
-            encoded_value: None,
-        });
-    }
-
-    for rule in request_patches
-        .iter()
-        .filter(|rule| rule.placement == RequestPatchPlacement::Query)
-    {
-        query_params.retain(|param| param.name != rule.target);
-        if rule.operation == RequestPatchOperation::Set {
-            query_params.push(RequestLogBundleQueryParam {
-                name: rule.target.clone(),
-                value: Some(scalar_request_patch_value(rule)?),
-                value_present: true,
-                encoded_name: None,
-                encoded_value: None,
-            });
-        }
-    }
-
-    set_url_query_from_ordered_params(&mut url, &query_params);
-    Ok(url.to_string())
-}
-
-fn set_url_query_from_ordered_params(url: &mut Url, query_params: &[RequestLogBundleQueryParam]) {
-    if query_params.is_empty() {
-        url.set_query(None);
-        return;
-    }
-
-    let query = query_params
-        .iter()
-        .map(|param| {
-            let name = param
-                .encoded_name
-                .as_ref()
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .unwrap_or_else(|| percent_encode_query_component(&param.name));
-            if param.has_value() {
-                let value = param.encoded_value.clone().unwrap_or_else(|| {
-                    percent_encode_query_component(param.value.as_deref().unwrap_or_default())
-                });
-                format!("{name}={value}")
-            } else {
-                name
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("&");
-    url.set_query(Some(&query));
-}
-
-fn percent_encode_query_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.as_bytes() {
-        match *byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(*byte as char);
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
-}
-
 fn apply_header_request_patch(
     headers: &mut HeaderMap,
     rule: &RuntimeResolvedRequestPatch,
@@ -454,10 +353,7 @@ pub(crate) fn apply_request_patches(
 }
 
 fn build_runtime_request_patch_trace(
-    provider_id: i64,
-    model_id: Option<i64>,
     effective_rules: Vec<CacheResolvedRequestPatch>,
-    explain: Vec<CacheRequestPatchExplainEntry>,
     conflicts: Vec<CacheRequestPatchConflict>,
     has_conflicts: bool,
     generated_rules: Vec<RuntimeResolvedRequestPatch>,
@@ -485,42 +381,10 @@ fn build_runtime_request_patch_trace(
         runtime_rules.clone()
     };
 
-    let applied_request_patch_ids_json = serde_json::to_string(
-        &applied_rules
-            .iter()
-            .filter_map(|rule| rule.source.rule_id())
-            .collect::<Vec<_>>(),
-    )
-    .map(Some)
-    .map_err(|err| {
-        ProxyError::InternalError(format!(
-            "Failed to serialize applied request patch IDs: {}",
-            err
-        ))
-    })?;
-
-    let request_patch_summary_json = serde_json::to_string(&RequestPatchTraceSummary {
-        provider_id,
-        model_id,
-        effective_rules: runtime_rules,
-        explain,
-        conflicts: runtime_conflicts.clone(),
-        has_conflicts,
-    })
-    .map(Some)
-    .map_err(|err| {
-        ProxyError::InternalError(format!(
-            "Failed to serialize request patch summary: {}",
-            err
-        ))
-    })?;
-
     Ok(RuntimeRequestPatchTrace {
         applied_rules,
         conflicts: runtime_conflicts,
         has_conflicts,
-        applied_request_patch_ids_json,
-        request_patch_summary_json,
     })
 }
 
@@ -707,25 +571,25 @@ fn merge_runtime_request_patches(
 }
 
 fn generated_reasoning_patch_to_runtime(
-    candidate: &ExecutionCandidate,
+    target: &ExecutionTarget,
     patch: GeneratedReasoningPatch,
 ) -> Result<RuntimeResolvedRequestPatch, ProxyError> {
-    let config_id = candidate.reasoning_config_id.ok_or_else(|| {
+    let config_id = target.reasoning_config_id.ok_or_else(|| {
         ProxyError::InternalError(format!(
-            "candidate provider '{}' model '{}' is missing reasoning_config_id for generated patch",
-            candidate.provider.provider_key, candidate.model.model_name
+            "target provider '{}' model '{}' is missing reasoning_config_id for generated patch",
+            target.provider.provider_key, target.model.model_name
         ))
     })?;
-    let config_preset_id = candidate.reasoning_config_preset_id.ok_or_else(|| {
+    let config_preset_id = target.reasoning_config_preset_id.ok_or_else(|| {
         ProxyError::InternalError(format!(
-            "candidate provider '{}' model '{}' is missing reasoning_config_preset_id for generated patch",
-            candidate.provider.provider_key, candidate.model.model_name
+            "target provider '{}' model '{}' is missing reasoning_config_preset_id for generated patch",
+            target.provider.provider_key, target.model.model_name
         ))
     })?;
-    let config_scope = candidate.reasoning_config_scope.ok_or_else(|| {
+    let config_scope = target.reasoning_config_scope.ok_or_else(|| {
         ProxyError::InternalError(format!(
-            "candidate provider '{}' model '{}' is missing reasoning_config_scope for generated patch",
-            candidate.provider.provider_key, candidate.model.model_name
+            "target provider '{}' model '{}' is missing reasoning_config_scope for generated patch",
+            target.provider.provider_key, target.model.model_name
         ))
     })?;
 
@@ -750,41 +614,41 @@ fn generated_reasoning_patch_to_runtime(
     })
 }
 
-fn generate_candidate_reasoning_request_patches(
-    candidate: Option<&ExecutionCandidate>,
+fn generate_target_reasoning_request_patches(
+    target: Option<&ExecutionTarget>,
 ) -> Result<Vec<RuntimeResolvedRequestPatch>, ProxyError> {
-    let Some(candidate) = candidate else {
+    let Some(target) = target else {
         return Ok(Vec::new());
     };
 
-    let Some(family) = candidate.reasoning_family else {
+    let Some(family) = target.reasoning_family else {
         return Ok(Vec::new());
     };
-    let preset = candidate.reasoning_preset.ok_or_else(|| {
+    let preset = target.reasoning_preset.ok_or_else(|| {
         ProxyError::InternalError(format!(
-            "candidate provider '{}' model '{}' has reasoning family but no preset",
-            candidate.provider.provider_key, candidate.model.model_name
+            "target provider '{}' model '{}' has reasoning family but no preset",
+            target.provider.provider_key, target.model.model_name
         ))
     })?;
 
     generate_reasoning_patches(
         family,
         preset,
-        ReasoningPatchContext::for_model(candidate.llm_api_type, &candidate.model),
+        ReasoningPatchContext::for_model(target.llm_api_type, &target.model),
     )
     .map_err(|err| ProxyError::BadRequest(err.to_string()))?
     .into_iter()
-    .map(|patch| generated_reasoning_patch_to_runtime(candidate, patch))
+    .map(|patch| generated_reasoning_patch_to_runtime(target, patch))
     .collect()
 }
 
 pub(crate) async fn load_runtime_request_patch_trace(
     provider: &CacheProvider,
     model: Option<&CacheModel>,
-    candidate: Option<&ExecutionCandidate>,
+    target: Option<&ExecutionTarget>,
     app_state: &Arc<AppState>,
 ) -> Result<RuntimeRequestPatchTrace, ProxyError> {
-    let generated_rules = generate_candidate_reasoning_request_patches(candidate)?;
+    let generated_rules = generate_target_reasoning_request_patches(target)?;
 
     if let Some(model) = model {
         let resolved = app_state
@@ -809,10 +673,7 @@ pub(crate) async fn load_runtime_request_patch_trace(
             })?;
 
         return build_runtime_request_patch_trace(
-            provider.id,
-            Some(model.id),
             resolved.effective_rules.clone(),
-            resolved.explain.clone(),
             resolved.conflicts.clone(),
             resolved.has_conflicts,
             generated_rules,
@@ -836,705 +697,9 @@ pub(crate) async fn load_runtime_request_patch_trace(
 
     let resolved = resolve_effective_request_patches(provider.id, 0, &provider_rules, &[]);
     build_runtime_request_patch_trace(
-        provider.id,
-        None,
         resolved.effective_rules,
-        resolved.explain,
         resolved.conflicts,
         resolved.has_conflicts,
         generated_rules,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use axum::http::{HeaderMap, HeaderValue};
-    use reqwest::Url;
-    use serde_json::{Value, json};
-
-    use super::*;
-    use crate::{
-        database::reasoning_config::{ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset},
-        proxy::runtime::route_resolver::{CandidateRuntimeFeatures, RuntimeFeatureConfigSource},
-        schema::enum_def::{LlmApiType, ProviderApiKeyMode, ProviderType},
-        service::cache::types::{RequestPatchRuleOrigin, RuntimeResolvedRequestPatch},
-    };
-
-    fn provider(id: i64, provider_key: &str, provider_type: ProviderType) -> CacheProvider {
-        CacheProvider {
-            id,
-            provider_key: provider_key.to_string(),
-            name: provider_key.to_string(),
-            endpoint: "https://example.com".to_string(),
-            use_proxy: false,
-            provider_type,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-            is_enabled: true,
-        }
-    }
-
-    fn model_with_id(
-        id: i64,
-        provider_id: i64,
-        model_name: &str,
-        real_model_name: Option<&str>,
-    ) -> CacheModel {
-        CacheModel {
-            id,
-            provider_id,
-            model_name: model_name.to_string(),
-            real_model_name: real_model_name.map(str::to_string),
-            cost_catalog_id: None,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_reasoning: true,
-            supports_image_input: true,
-            supports_embeddings: true,
-            supports_rerank: true,
-            is_enabled: true,
-        }
-    }
-
-    fn bound_reasoning_candidate() -> ExecutionCandidate {
-        ExecutionCandidate {
-            candidate_position: 1,
-            route_id: None,
-            route_name: None,
-            route_candidate_priority: None,
-            provider: Arc::new(provider(1, "openai", ProviderType::Openai)),
-            model: Arc::new(model_with_id(10, 1, "gpt-primary", Some("gpt-real"))),
-            llm_api_type: LlmApiType::Openai,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-            reasoning_config_id: Some(900),
-            reasoning_config_scope: Some(ReasoningConfigScope::Provider),
-            reasoning_config_source: None,
-            reasoning_config_preset_id: Some(9000),
-            reasoning_family: Some(ReasoningPatchFamily::OpenAiChatReasoningEffort),
-            reasoning_preset: Some(ReasoningPreset::High),
-            reasoning_suffix: Some("high".to_string()),
-            runtime_features: CandidateRuntimeFeatures {
-                openai_reasoning_content_repair_enabled: false,
-                openai_reasoning_content_repair_source: RuntimeFeatureConfigSource::DefaultFalse,
-            },
-        }
-    }
-
-    fn request_patch(
-        id: i64,
-        placement: RequestPatchPlacement,
-        target: &str,
-        operation: RequestPatchOperation,
-        value: Option<Value>,
-    ) -> RuntimeResolvedRequestPatch {
-        RuntimeResolvedRequestPatch {
-            placement,
-            target: target.to_string(),
-            operation,
-            value_json: value.map(|item| serde_json::to_string(&item).unwrap()),
-            source: RequestPatchSource::ProviderRule { rule_id: id },
-            source_rule_id: Some(id),
-            source_origin: Some(RequestPatchRuleOrigin::ProviderDirect),
-            overridden_rule_ids: Vec::new(),
-            overridden_sources: Vec::new(),
-            description: None,
-        }
-    }
-
-    fn cache_request_patch(
-        id: i64,
-        origin: RequestPatchRuleOrigin,
-        placement: RequestPatchPlacement,
-        target: &str,
-        value: Option<Value>,
-    ) -> CacheResolvedRequestPatch {
-        CacheResolvedRequestPatch {
-            placement,
-            target: target.to_string(),
-            operation: RequestPatchOperation::Set,
-            value_json: value.map(|item| serde_json::to_string(&item).unwrap()),
-            source_rule_id: id,
-            source_origin: origin,
-            overridden_rule_ids: Vec::new(),
-            description: None,
-        }
-    }
-
-    fn reasoning_runtime_patch(target: &str, value: Value) -> RuntimeResolvedRequestPatch {
-        RuntimeResolvedRequestPatch {
-            placement: RequestPatchPlacement::Body,
-            target: target.to_string(),
-            operation: RequestPatchOperation::Set,
-            value_json: Some(serde_json::to_string(&value).unwrap()),
-            source: RequestPatchSource::ReasoningPreset {
-                config_id: 900,
-                config_scope: ReasoningConfigScope::Provider,
-                config_preset_id: 9000,
-                family: ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                preset: ReasoningPreset::High,
-                suffix: "high".to_string(),
-            },
-            source_rule_id: None,
-            source_origin: None,
-            overridden_rule_ids: Vec::new(),
-            overridden_sources: Vec::new(),
-            description: Some("generated test reasoning patch".to_string()),
-        }
-    }
-
-    fn reasoning_runtime_remove_patch(target: &str) -> RuntimeResolvedRequestPatch {
-        RuntimeResolvedRequestPatch {
-            placement: RequestPatchPlacement::Body,
-            target: target.to_string(),
-            operation: RequestPatchOperation::Remove,
-            value_json: None,
-            source: RequestPatchSource::ReasoningPreset {
-                config_id: 900,
-                config_scope: ReasoningConfigScope::Provider,
-                config_preset_id: 9000,
-                family: ReasoningPatchFamily::DeepSeekOpenAiReasoning,
-                preset: ReasoningPreset::Disabled,
-                suffix: "no-think".to_string(),
-            },
-            source_rule_id: None,
-            source_origin: None,
-            overridden_rule_ids: Vec::new(),
-            overridden_sources: Vec::new(),
-            description: Some("generated test reasoning removal patch".to_string()),
-        }
-    }
-
-    #[test]
-    fn apply_request_patches_creates_missing_body_parents_and_removes_object_fields() {
-        let mut data = json!({
-            "generation_config": {
-                "temperature": 0.2,
-                "remove_me": "stale"
-            }
-        });
-        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
-        let mut headers = HeaderMap::new();
-        let request_patches = vec![
-            request_patch(
-                1,
-                RequestPatchPlacement::Body,
-                "/generation_config/temperature",
-                RequestPatchOperation::Set,
-                Some(json!(0.8)),
-            ),
-            request_patch(
-                2,
-                RequestPatchPlacement::Body,
-                "/generation_config/response_schema",
-                RequestPatchOperation::Set,
-                Some(json!({
-                    "type": "object",
-                    "strict": true
-                })),
-            ),
-            request_patch(
-                3,
-                RequestPatchPlacement::Body,
-                "/generation_config/remove_me",
-                RequestPatchOperation::Remove,
-                None,
-            ),
-        ];
-
-        apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
-            .expect("request patches should apply");
-
-        assert_eq!(
-            data["generation_config"]["response_schema"],
-            json!({
-                "type": "object",
-                "strict": true
-            })
-        );
-        assert!(data["generation_config"]["remove_me"].is_null());
-        let temperature = data["generation_config"]["temperature"].as_f64().unwrap();
-        assert!((temperature - 0.8).abs() < 1e-6);
-    }
-
-    #[test]
-    fn apply_request_patches_rejects_body_type_conflicts_without_rewriting_structure() {
-        let mut data = json!({
-            "metadata": "raw"
-        });
-        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
-        let mut headers = HeaderMap::new();
-        let request_patches = vec![request_patch(
-            1,
-            RequestPatchPlacement::Body,
-            "/metadata/flags/enabled",
-            RequestPatchOperation::Set,
-            Some(json!(true)),
-        )];
-
-        let err = apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
-            .expect_err("scalar parent should fail closed");
-
-        assert!(matches!(err, ProxyError::InternalError(_)));
-        assert_eq!(data, json!({ "metadata": "raw" }));
-    }
-
-    #[test]
-    fn apply_request_patches_replaces_query_values_and_supports_remove() {
-        let mut data = Value::Null;
-        let mut url =
-            Url::parse("https://example.com/v1/chat?keep=1&mode=old&remove=gone").unwrap();
-        let mut headers = HeaderMap::new();
-        let request_patches = vec![
-            request_patch(
-                1,
-                RequestPatchPlacement::Query,
-                "mode",
-                RequestPatchOperation::Set,
-                Some(json!("new")),
-            ),
-            request_patch(
-                2,
-                RequestPatchPlacement::Query,
-                "enabled",
-                RequestPatchOperation::Set,
-                Some(json!(true)),
-            ),
-            request_patch(
-                3,
-                RequestPatchPlacement::Query,
-                "remove",
-                RequestPatchOperation::Remove,
-                None,
-            ),
-        ];
-
-        apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
-            .expect("query request patches should apply");
-
-        let params: Vec<(String, String)> = url
-            .query_pairs()
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-
-        assert_eq!(
-            params,
-            vec![
-                ("keep".to_string(), "1".to_string()),
-                ("mode".to_string(), "new".to_string()),
-                ("enabled".to_string(), "true".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn rebuild_gemini_url_query_from_snapshot_preserves_order_flags_empty_and_encoding() {
-        let snapshot = vec![
-            RequestLogBundleQueryParam {
-                name: "tag".to_string(),
-                value: Some("a".to_string()),
-                value_present: true,
-                encoded_name: Some("tag".to_string()),
-                encoded_value: Some("a".to_string()),
-            },
-            RequestLogBundleQueryParam {
-                name: "tag".to_string(),
-                value: Some("b".to_string()),
-                value_present: true,
-                encoded_name: Some("tag".to_string()),
-                encoded_value: Some("b".to_string()),
-            },
-            RequestLogBundleQueryParam {
-                name: "flag".to_string(),
-                value: None,
-                value_present: false,
-                encoded_name: Some("flag".to_string()),
-                encoded_value: None,
-            },
-            RequestLogBundleQueryParam {
-                name: "mode".to_string(),
-                value: Some(String::new()),
-                value_present: true,
-                encoded_name: Some("mode".to_string()),
-                encoded_value: Some(String::new()),
-            },
-            RequestLogBundleQueryParam {
-                name: "q".to_string(),
-                value: Some("a b".to_string()),
-                value_present: true,
-                encoded_name: Some("q".to_string()),
-                encoded_value: Some("a%20b".to_string()),
-            },
-        ];
-
-        let final_url = rebuild_gemini_url_query_from_snapshot(
-            "https://example.com/v1beta/models/gemini:generateContent?stale=1",
-            &snapshot,
-            false,
-            &[],
-        )
-        .expect("query should rebuild");
-
-        assert_eq!(
-            final_url,
-            "https://example.com/v1beta/models/gemini:generateContent?tag=a&tag=b&flag&mode=&q=a%20b"
-        );
-    }
-
-    #[test]
-    fn rebuild_gemini_url_query_from_snapshot_preserves_original_plus_and_percent_encoding() {
-        let snapshot = vec![
-            RequestLogBundleQueryParam {
-                name: "space".to_string(),
-                value: Some("a b".to_string()),
-                value_present: true,
-                encoded_name: Some("space".to_string()),
-                encoded_value: Some("a%20b".to_string()),
-            },
-            RequestLogBundleQueryParam {
-                name: "plus".to_string(),
-                value: Some("a b".to_string()),
-                value_present: true,
-                encoded_name: Some("plus".to_string()),
-                encoded_value: Some("a+b".to_string()),
-            },
-            RequestLogBundleQueryParam {
-                name: "literal".to_string(),
-                value: Some("a+b".to_string()),
-                value_present: true,
-                encoded_name: Some("literal".to_string()),
-                encoded_value: Some("a%2Bb".to_string()),
-            },
-        ];
-
-        let final_url = rebuild_gemini_url_query_from_snapshot(
-            "https://example.com/v1beta/models/gemini:generateContent?stale=1",
-            &snapshot,
-            false,
-            &[],
-        )
-        .expect("query should rebuild");
-
-        assert_eq!(
-            final_url,
-            "https://example.com/v1beta/models/gemini:generateContent?space=a%20b&plus=a+b&literal=a%2Bb"
-        );
-    }
-
-    #[test]
-    fn rebuild_gemini_url_query_from_snapshot_applies_query_patches_after_snapshot() {
-        let snapshot = vec![
-            RequestLogBundleQueryParam {
-                name: "flag".to_string(),
-                value: None,
-                value_present: false,
-                encoded_name: Some("flag".to_string()),
-                encoded_value: None,
-            },
-            RequestLogBundleQueryParam {
-                name: "mode".to_string(),
-                value: Some("old".to_string()),
-                value_present: true,
-                encoded_name: Some("mode".to_string()),
-                encoded_value: Some("old".to_string()),
-            },
-        ];
-        let request_patches = vec![
-            request_patch(
-                1,
-                RequestPatchPlacement::Query,
-                "flag",
-                RequestPatchOperation::Remove,
-                None,
-            ),
-            request_patch(
-                2,
-                RequestPatchPlacement::Query,
-                "mode",
-                RequestPatchOperation::Set,
-                Some(json!("new")),
-            ),
-        ];
-
-        let final_url = rebuild_gemini_url_query_from_snapshot(
-            "https://example.com/v1beta/models/gemini:streamGenerateContent?flag&mode=old",
-            &snapshot,
-            true,
-            &request_patches,
-        )
-        .expect("query should rebuild");
-
-        assert_eq!(
-            final_url,
-            "https://example.com/v1beta/models/gemini:streamGenerateContent?alt=sse&mode=new"
-        );
-    }
-
-    #[test]
-    fn apply_request_patches_updates_headers_and_supports_remove() {
-        let mut data = Value::Null;
-        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert("x-existing", HeaderValue::from_static("old"));
-        headers.insert("x-remove", HeaderValue::from_static("remove-me"));
-        let request_patches = vec![
-            request_patch(
-                1,
-                RequestPatchPlacement::Header,
-                "x-existing",
-                RequestPatchOperation::Set,
-                Some(json!("new")),
-            ),
-            request_patch(
-                2,
-                RequestPatchPlacement::Header,
-                "x-remove",
-                RequestPatchOperation::Remove,
-                None,
-            ),
-        ];
-
-        apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
-            .expect("header request patches should apply");
-
-        assert_eq!(headers.get("x-existing").unwrap(), "new");
-        assert!(headers.get("x-remove").is_none());
-    }
-
-    #[test]
-    fn apply_request_patches_rejects_invalid_header_value() {
-        let mut data = Value::Null;
-        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
-        let mut headers = HeaderMap::new();
-        let request_patches = vec![request_patch(
-            1,
-            RequestPatchPlacement::Header,
-            "x-invalid-value",
-            RequestPatchOperation::Set,
-            Some(json!("bad\nvalue")),
-        )];
-
-        let err = apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
-            .expect_err("invalid header value should fail closed");
-
-        assert!(matches!(err, ProxyError::InternalError(_)));
-    }
-
-    #[test]
-    fn apply_request_patches_rejects_array_removal_that_rewrites_structure() {
-        let mut data = json!({
-            "messages": [
-                { "role": "user", "content": "hi" }
-            ]
-        });
-        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
-        let mut headers = HeaderMap::new();
-        let request_patches = vec![request_patch(
-            1,
-            RequestPatchPlacement::Body,
-            "/messages/0",
-            RequestPatchOperation::Remove,
-            None,
-        )];
-
-        let err = apply_request_patches(&mut data, &mut url, &mut headers, &request_patches)
-            .expect_err("array removal should fail closed");
-
-        assert!(matches!(err, ProxyError::InternalError(_)));
-    }
-
-    #[test]
-    fn runtime_trace_merges_reasoning_patch_after_provider_model_patches() {
-        let base_rules = vec![cache_request_patch(
-            11,
-            RequestPatchRuleOrigin::ProviderDirect,
-            RequestPatchPlacement::Body,
-            "/reasoning_effort",
-            Some(json!("low")),
-        )];
-        let generated_rules = vec![reasoning_runtime_patch("/reasoning_effort", json!("high"))];
-
-        let trace = build_runtime_request_patch_trace(
-            1,
-            Some(10),
-            base_rules,
-            Vec::new(),
-            Vec::new(),
-            false,
-            generated_rules,
-        )
-        .expect("runtime trace should build");
-
-        assert!(!trace.has_conflicts);
-        assert_eq!(trace.applied_rules.len(), 1);
-        let applied = &trace.applied_rules[0];
-        assert!(matches!(
-            &applied.source,
-            RequestPatchSource::ReasoningPreset {
-                config_id: 900,
-                config_scope: ReasoningConfigScope::Provider,
-                config_preset_id: 9000,
-                ..
-            }
-        ));
-        assert_eq!(applied.source_rule_id, None);
-        assert_eq!(applied.source_origin, None);
-        assert_eq!(applied.overridden_rule_ids, vec![11]);
-        assert!(matches!(
-            applied.overridden_sources.as_slice(),
-            [RequestPatchSource::ProviderRule { rule_id: 11 }]
-        ));
-        assert_eq!(trace.applied_request_patch_ids_json.as_deref(), Some("[]"));
-
-        let summary: Value = serde_json::from_str(
-            trace
-                .request_patch_summary_json
-                .as_deref()
-                .expect("summary should serialize"),
-        )
-        .expect("summary should be json");
-        assert_eq!(
-            summary["effective_rules"][0]["source"]["kind"],
-            "reasoning_preset"
-        );
-        assert_eq!(summary["effective_rules"][0]["source"]["config_id"], 900);
-        assert_eq!(
-            summary["effective_rules"][0]["source"]["config_scope"],
-            "provider"
-        );
-        assert_eq!(
-            summary["effective_rules"][0]["source"]["config_preset_id"],
-            9000
-        );
-        assert_eq!(
-            summary["effective_rules"][0]["source"]["profile_id"],
-            Value::Null
-        );
-        assert_eq!(summary["effective_rules"][0]["source_rule_id"], Value::Null);
-        assert_eq!(
-            summary["effective_rules"][0]["overridden_sources"][0]["kind"],
-            "provider_rule"
-        );
-
-        let mut data = json!({ "reasoning_effort": "client" });
-        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
-        let mut headers = HeaderMap::new();
-        apply_request_patches(&mut data, &mut url, &mut headers, &trace.applied_rules)
-            .expect("merged runtime patch should apply");
-        assert_eq!(data["reasoning_effort"], json!("high"));
-    }
-
-    #[test]
-    fn generated_reasoning_remove_patch_deletes_client_reasoning_effort() {
-        let generated_rules = vec![
-            reasoning_runtime_patch("/thinking/type", json!("disabled")),
-            reasoning_runtime_remove_patch("/reasoning_effort"),
-        ];
-
-        let trace = build_runtime_request_patch_trace(
-            1,
-            Some(10),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            false,
-            generated_rules,
-        )
-        .expect("runtime trace should build");
-
-        assert!(!trace.has_conflicts);
-        assert_eq!(trace.applied_rules.len(), 2);
-
-        let mut data = json!({
-            "model": "deepseek-chat",
-            "thinking": { "type": "enabled" },
-            "reasoning_effort": "high"
-        });
-        let mut url = Url::parse("https://example.com/v1/chat").unwrap();
-        let mut headers = HeaderMap::new();
-        apply_request_patches(&mut data, &mut url, &mut headers, &trace.applied_rules)
-            .expect("generated runtime patches should apply");
-
-        assert_eq!(data["thinking"]["type"], json!("disabled"));
-        assert!(data.get("reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn runtime_trace_reports_reasoning_body_ancestor_conflict() {
-        let base_rules = vec![cache_request_patch(
-            11,
-            RequestPatchRuleOrigin::ProviderDirect,
-            RequestPatchPlacement::Body,
-            "/reasoning",
-            Some(json!({ "effort": "low" })),
-        )];
-        let generated_rules = vec![reasoning_runtime_patch("/reasoning/effort", json!("high"))];
-
-        let trace = build_runtime_request_patch_trace(
-            1,
-            Some(10),
-            base_rules,
-            Vec::new(),
-            Vec::new(),
-            false,
-            generated_rules,
-        )
-        .expect("runtime trace should build");
-
-        assert!(trace.has_conflicts);
-        assert!(trace.applied_rules.is_empty());
-        assert_eq!(trace.applied_request_patch_ids_json.as_deref(), Some("[]"));
-        assert_eq!(trace.conflicts.len(), 1);
-        assert!(matches!(
-            &trace.conflicts[0].lower_priority_source,
-            RequestPatchSource::ProviderRule { rule_id: 11 }
-        ));
-        assert!(matches!(
-            &trace.conflicts[0].higher_priority_source,
-            RequestPatchSource::ReasoningPreset { .. }
-        ));
-        assert!(
-            trace.conflicts[0].reason.contains("reasoning preset patch"),
-            "{:?}",
-            trace.conflicts[0]
-        );
-        assert!(
-            trace.conflicts[0]
-                .reason
-                .contains("config=provider/900 preset_row=9000"),
-            "{:?}",
-            trace.conflicts[0]
-        );
-        let err = trace
-            .conflict_error("gpt-primary")
-            .expect("conflict should become proxy error");
-        assert!(matches!(err, ProxyError::RequestPatchConflict(_)));
-    }
-
-    #[test]
-    fn generated_reasoning_patch_uses_bound_config_fields() {
-        let candidate = bound_reasoning_candidate();
-
-        let generated_rules = generate_candidate_reasoning_request_patches(Some(&candidate))
-            .expect("bound config fields should generate reasoning patch");
-
-        assert_eq!(generated_rules.len(), 1);
-        let RequestPatchSource::ReasoningPreset {
-            config_id,
-            config_scope,
-            config_preset_id,
-            family,
-            preset,
-            suffix,
-        } = generated_rules[0].source.clone()
-        else {
-            panic!("expected generated reasoning preset source");
-        };
-        assert_eq!(config_id, 900);
-        assert_eq!(config_scope, ReasoningConfigScope::Provider);
-        assert_eq!(config_preset_id, 9000);
-        assert_eq!(family, ReasoningPatchFamily::OpenAiChatReasoningEffort);
-        assert_eq!(preset, ReasoningPreset::High);
-        assert_eq!(suffix, "high");
-    }
 }

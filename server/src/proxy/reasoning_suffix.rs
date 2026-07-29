@@ -16,21 +16,6 @@ const GEMINI_THINKING_BUDGET_MEDIUM: i64 = 4096;
 const GEMINI_THINKING_BUDGET_HIGH: i64 = 8192;
 const GEMINI_THINKING_BUDGET_AUTO: i64 = -1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ReasoningOperationKind {
-    Generation,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ReasoningPresetRuntimeMetadata {
-    pub preset: ReasoningPreset,
-    pub preset_key: String,
-    pub suffix: String,
-    pub requires_reasoning: bool,
-    pub allowed_operation_kinds: Vec<ReasoningOperationKind>,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReasoningPatchContext<'a> {
     pub target_api_type: LlmApiType,
@@ -181,18 +166,6 @@ impl std::fmt::Display for ReasoningPresetUnsupported {
 }
 
 impl std::error::Error for ReasoningPresetUnsupported {}
-
-pub(crate) fn reasoning_preset_runtime_metadata(
-    preset: ReasoningPreset,
-) -> ReasoningPresetRuntimeMetadata {
-    ReasoningPresetRuntimeMetadata {
-        preset,
-        preset_key: preset.as_key().to_string(),
-        suffix: preset.canonical_suffix().to_string(),
-        requires_reasoning: preset.requires_reasoning(),
-        allowed_operation_kinds: vec![ReasoningOperationKind::Generation],
-    }
-}
 
 pub(crate) fn generate_reasoning_patches(
     family: ReasoningPatchFamily,
@@ -772,18 +745,6 @@ mod tests {
         );
         assert_eq!(entry.generated_patches.len(), 1);
         entry.generated_patches.into_iter().next().unwrap()
-    }
-
-    #[test]
-    fn preset_runtime_metadata_is_derived_from_builtin_preset() {
-        let metadata = reasoning_preset_runtime_metadata(ReasoningPreset::Disabled);
-        assert_eq!(metadata.preset_key, "disabled");
-        assert_eq!(metadata.suffix, "no-think");
-        assert!(!metadata.requires_reasoning);
-        assert_eq!(
-            metadata.allowed_operation_kinds,
-            vec![ReasoningOperationKind::Generation]
-        );
     }
 
     #[test]

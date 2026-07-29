@@ -9,7 +9,7 @@ The project is already suitable for:
 - proxying multiple upstream providers behind a unified gateway
 - operating the system through a management console
 
-It is not yet a fully mature high-availability gateway. The biggest remaining gaps are request-level retry/fallback, replay/debug tooling, proactive alerting, and a few legacy naming/security cleanups.
+It is not yet a fully mature high-availability gateway. Before 1.0, the focus is a small, stable direct-routing core, manager-auth hardening, transform quality, and removal of legacy contracts. Retry/fallback, replay, and proactive alerting require new designs and are intentionally absent from the current baseline.
 
 ## Current Product Position
 
@@ -36,12 +36,12 @@ Current code already provides:
 
 - multi-protocol proxying for OpenAI, Responses, Anthropic, Gemini, and Ollama
 - deep request/response transformation, including streaming, tool calls, reasoning, and multimodal content
-- provider, model, model route, and API key override management
+- provider, model, and downstream API key management
 - API key governance: expiry, RPM, concurrency, daily/monthly quota, daily/monthly budget
 - provider circuit governance and runtime status views
 - request patch rules with inheritance, conflict detection, and runtime trace
-- request log persistence with request/response body bundles
-- dashboard, provider runtime, record, API key, route, and cost management pages
+- request-level log persistence with status, timing, token, and cost summaries
+- dashboard, provider runtime, record, API key, and cost management pages
 - cost catalog/version/component/template/preview management
 
 ## Tech Stack
@@ -63,7 +63,7 @@ Current code already provides:
 - Pinia
 - Vue Router
 - Tailwind CSS 4
-- `reka-ui` / `radix-vue`
+- `reka-ui`
 
 ## Repository Layout
 
@@ -71,7 +71,7 @@ Current code already provides:
 
 - `server/src/controller`: management API endpoints
 - `server/src/proxy`: gateway request path, routing, auth, proxy execution, logging
-- `server/src/service`: app state, cache, storage, transform, request patch resolution
+- `server/src/service`: app state, cache, transform, runtime state, and request patch resolution
 - `server/src/database`: persistence models and DB operations
 - `server/src/cost`: rating, normalization, ledger, templates
 - `server/migrations`: SQLite and PostgreSQL migrations
@@ -100,13 +100,13 @@ Current code already provides:
 
 ### Configuration
 
-For local development, the default command is zero-config:
+For local development, the default command prepares the data directory and generated defaults:
 
 ```bash
 just dev
 ```
 
-When `CYDER_DATA_DIR` and `CYDER_CONFIG_PATH` are not set, `just dev` and `just dev-backend` run the backend with:
+Before the first successful server start, create `.cyder/dev/config/config.yaml` and set the required `secret_encryption.encryption_key`. When `CYDER_DATA_DIR` and `CYDER_CONFIG_PATH` are not set, `just dev` and `just dev-backend` run the backend with:
 
 ```txt
 CYDER_DATA_DIR=<repo>/.cyder/dev
@@ -116,15 +116,12 @@ The directory is git-ignored and holds generated local state:
 
 - `.cyder/dev/config/config.default.yaml`
 - `.cyder/dev/config/config.yaml`, if you create one
-- `.cyder/dev/config/config.override.yaml`
-- `.cyder/dev/config/config.override.history.jsonl`
 - `.cyder/dev/db/cyder.sqlite`
-- `.cyder/dev/storage`
 - `.cyder/dev/tmp`
 
-Repository-root `config.local.yaml` and `config.yaml` are no longer read automatically for development. To migrate an older local setup, copy the old base config to `.cyder/dev/config/config.yaml`, or run with `CYDER_CONFIG_PATH=/path/to/config.yaml`.
+Repository-root `config.local.yaml` and `config.yaml` are no longer read automatically for development. To migrate an older local setup, copy it to `.cyder/dev/config/config.yaml`, or run with `CYDER_CONFIG_PATH=/path/to/config.yaml`; settings no longer recognized by the current schema are ignored.
 
-Release and packaged runs also do not use application-root `config.default.yaml`, `config.yaml`, `config.override.yaml`, or `config.override.history.jsonl` as implicit persistence paths. If `CYDER_DATA_DIR` is unset, persistent paths are still derived from `/data/cyder`; use `CYDER_CONFIG_PATH` only when the base config file must live outside that data directory.
+Release and packaged runs also do not use application-root `config.default.yaml` or `config.yaml` as implicit persistence paths. If `CYDER_DATA_DIR` is unset, persistent paths are still derived from `/data/cyder`; use `CYDER_CONFIG_PATH` only when the base config file must live outside that data directory.
 
 Runtime config is loaded in this order, from lowest to highest priority:
 
@@ -132,28 +129,23 @@ Runtime config is loaded in this order, from lowest to highest priority:
 2. bootstrapped `config.default.yaml`
 3. base config, normally `${CYDER_DATA_DIR}/config/config.yaml`
 4. allowlisted environment variables
-5. managed `config.override.yaml`
 
 `config.default.yaml` is generated on first startup to persist random secrets and path-aware defaults. It is runtime state, not a tracked sample that should be hand-maintained.
 
-`config.override.yaml` is a managed override file written by the System Config page in the management console. It is only for the hot-reload allowlist exposed by that page, such as log level, timezone, proxy request timeout settings, routing resilience, provider governance, and diagnostics retention/capture settings.
+Configuration is startup-only. Change the base YAML or an allowlisted environment variable, then restart the server. The retired `config.override.yaml` and `config.override.history.jsonl` files are ignored; move any settings that must remain active into `config.yaml`.
 
-Do not use `config.override.yaml` as a general replacement for `config.yaml`. Bind settings, manager secrets, database, Redis/cache, storage, deployment mode, runtime state backend, and other non-allowlisted settings must be changed in the base config file and applied with a server restart. If a non-allowlisted path is present in `config.override.yaml`, startup/reload/apply validation rejects it instead of treating it as a restart-only override.
-
-The management console can reload `config.override.yaml` after a manual edit, but routine edits should be made through the UI so preview, validation, and audit history stay consistent. `config.override.history.jsonl` records apply/reset/reload history for audit display only; it is not part of configuration loading.
-
-In the first version of this feature, multi-instance deployments are read-only for System Config writes. This prevents multiple instances from diverging through separate local override files.
+Unknown top-level and nested fields in `config.yaml` and the generated `config.default.yaml` are ignored during 1.0 development. This lets older experimental settings remain temporarily while the schema changes. Recognized fields still fail startup when their type, enum value, or validated value is invalid.
 
 Important config areas include:
 
 - server bind settings: `host`, `port`, `base_path`
-- manager auth: `secret_key`, `jwt_secret`
-- downstream API key JWT: `api_key_jwt_secret`
+- manager auth: initialize the password in Web Bootstrap; configure a 32-byte-or-longer `jwt_secret` and an exact `manager_auth.browser_origin` for non-loopback browser access
+- trusted reverse proxies: `client_identity` (empty trust list by default)
 - database: `db_url`
+- downstream secret handling: `secret_encryption`
 - proxy request behavior: `proxy_request`
 - provider governance: `provider_governance`
 - cache: `cache`, optional `redis`
-- storage: local filesystem or S3-compatible object storage
 
 Current built-in database backends are SQLite and PostgreSQL; other database URL schemes are not supported.
 
@@ -166,13 +158,74 @@ The only environment variables that can override final config fields are:
 - `CYDER_BASE_PATH`
 - `CYDER_LOG_LEVEL`
 - `CYDER_TIMEZONE`
+- `CYDER_MANAGER_AUTH_BROWSER_ORIGIN`
 
 Startup path environment variables are separate:
 
 - `CYDER_DATA_DIR`: data directory root. Docker images set this to `/data/cyder`.
-- `CYDER_CONFIG_PATH`: optional migration hook for an external base config file. It changes only the base config path; default config, System Config override/history, SQLite defaults, and local storage still belong to the data directory.
+- `CYDER_CONFIG_PATH`: optional migration hook for an external base config file. It changes only the base config path; generated defaults and SQLite data still belong to the data directory.
 
-Database URLs, secrets, Redis/cache, S3, local storage roots, deployment mode, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
+Database URLs, secrets, Redis/cache, runtime state, proxy settings, and governance settings are configured through YAML, not environment variables. `CYDER_LOG_THIRD_PARTY_DEBUG` remains a logging diagnostic switch and is not part of `FinalConfig`.
+
+Before 1.0, Cyder supports exactly one running server instance and does not consider multi-instance compatibility. Redis remains optional and can preserve short-lived runtime state across process restarts, but it does not enable a supported multi-instance deployment. Do not add shared Manager sessions, distributed locks, cross-node singleflight, Pub/Sub invalidation, sticky-session requirements, or other multi-instance scaffolding.
+
+### Manager Browser Authentication
+
+Manager authentication uses three purpose-isolated JWT domains:
+
+- a 10-minute Access JWT, held only in the current page's JavaScript memory and sent as a Bearer credential to ordinary Manager APIs
+- a single-use Refresh JWT Family held only inside the server, with a 30-day absolute lifetime and a 7-day idle lifetime
+- a Mediator Session JWT sent only as an `HttpOnly`, `SameSite=Strict` Cookie on `<base_path>/manager/api/auth`
+
+The browser never receives the Refresh JWT. Login, bootstrap, password rotation, and `POST <base_path>/manager/api/auth/access` return JSON containing only `access_token`. Access is never written to `localStorage`, `sessionStorage`, IndexedDB, a Cookie, or a URL. On first load, the frontend removes only the legacy `auth_token` key from local and session storage, then asks `/auth/access` whether the HttpOnly session is usable.
+
+Set an independent, random root secret of at least 32 bytes and, outside loopback development, configure the exact HTTPS origin that serves both the Manager UI and API:
+
+```yaml
+jwt_secret: "<independent random value of at least 32 bytes>"
+manager_auth:
+  browser_origin: "https://cyder-admin.example.com"
+```
+
+`CYDER_MANAGER_AUTH_BROWSER_ORIGIN` is the only environment override for this field. The value must be one exact `http(s)://host[:port]` origin with no path, query, fragment, userinfo, wildcard, or list. A non-loopback origin must use HTTPS. If the field is omitted, browser Auth commands are accepted only when both the TCP peer and request Origin are loopback.
+
+Production uses `__Secure-cyder_manager_session` with `Secure`; explicit loopback development uses `cyder_manager_session_dev` without the `__Secure-` prefix. Both are `HttpOnly`, `SameSite=Strict`, omit `Domain`, and use `Path=<base_path>/manager/api/auth`. A reverse proxy must preserve the browser's real `Origin`, terminate TLS for production, and must not rely on `Host`, `Forwarded`, or `X-Forwarded-Proto` to infer the Manager origin.
+
+Changing `jwt_secret` is an intentional hard cutover: all Manager sessions become invalid and every browser must log in again. There is no previous-secret overlap or gradual JWT rotation. This does not invalidate downstream Proxy API keys, whose authentication is independent.
+
+The R2.11 pre-1.0 migration clears historical Manager session rows while preserving the Manager password verifier. After upgrading, remove any stale `auth_token` storage through the current UI load and log in again. Do not attempt to preserve or import old Access/Refresh Token Pair data.
+
+### Secret Encryption and Provider Credentials
+
+Every installation must configure one current 32-byte master key, regardless of downstream mode. Generate an independent random value (for example, `openssl rand -hex 32`) and place it in the base YAML before startup:
+
+```yaml
+secret_encryption:
+  downstream_mode: one_time
+  encryption_key: "<exactly 64 hexadecimal characters>"
+  previous_encryption_key: null
+```
+
+`encryption_key` must contain exactly 64 hexadecimal characters without an encoding prefix. It is required even in the default `one_time` mode because Provider credentials are always stored as XChaCha20-Poly1305 ciphertext. The keys are read only from normal YAML configuration; there is no environment-variable, generated fallback, key-file, or KMS source.
+
+Downstream API keys always authenticate through a stored SHA-256 hash. `one_time` makes Create and Rotate return plaintext once and stores no recoverable copy. Save that response immediately; if it is lost, rotate the downstream API key again. `recoverable` additionally stores downstream ciphertext and enables an explicit manager Reveal action.
+
+Provider credentials use the same master key with a separate authenticated-encryption domain. Manager list/detail responses, runtime caches, and normal logs contain only identifiers, masks, or ciphertext—not usable plaintext. Create and Replace accept a new secret, Reveal is an explicit POST action, and disabled or deleted Provider keys are not selected. Vertex and Vertex OpenAI credentials must be complete Google service-account JSON; the service account is decrypted only long enough to obtain an OAuth token.
+
+To replace a configured master key, set the new value as `encryption_key` and the existing value as `previous_encryption_key`, then restart. Before Axum begins serving requests, Cyder processes downstream and Provider ciphertext in one database transaction. Matching Previous ciphertext is re-encrypted with Current; every non-deleted Provider credential must also authenticate, decrypt, and match its keyed fingerprint. Remove `previous_encryption_key` only after a successful startup. Unknown or damaged downstream ciphertext is preserved and becomes unavailable to Reveal, but an unknown, incomplete, damaged, or mismatched Provider credential rolls back the whole rotation and prevents startup.
+
+Losing the master key does not invalidate downstream callers because their authentication remains hash-based, but it does make encrypted downstream plaintext unavailable and prevents Provider credentials from being used. Restore the correct key configuration; after startup, rotate affected downstream keys and Replace affected Provider credentials as necessary.
+
+### R2.7 Development Upgrade Boundary
+
+R2.7 is intentionally destructive for pre-1.0 Provider credentials. Its paired SQLite/PostgreSQL migration deletes every historical `provider_api_key` row, clears `request_log.provider_api_key_id`, and preserves providers, models, and request logs. Before upgrading:
+
+1. Back up the database if you need a rollback snapshot.
+2. Configure the required current `secret_encryption.encryption_key`.
+3. Apply/start the upgraded application.
+4. Re-enter each Provider credential in the Provider management page and verify connectivity.
+
+Historical Provider secrets are not migrated or recoverable after this migration. The final pre-1.0-to-1.0 upgrade will require a clean database as described in the roadmap. The previous Portable Config import/export implementation has also been removed; no current endpoint, UI, file format, or compatibility path can be used to preserve or transfer these credentials. Portable Config will be redesigned from a new 1.0 domain contract in R7.9.
 
 ## Common Commands
 
@@ -200,48 +253,6 @@ Human local shortcuts are available through `just` from the repository root:
 | `just transform-gate` | Run transform quality gate |
 | `just transform-gate-report` | Run transform quality gate and write a JSON report |
 
-## Portable Config Export And Import
-
-Portable Config is the v1 migration and backup path for gateway configuration. It exports a `.cyd` bundle from the manager API and imports it into a fresh or existing environment through a required preview step.
-
-Manager API endpoints:
-
-- `GET /ai/manager/api/system/portable/modules`
-- `POST /ai/manager/api/system/portable/export`
-- `POST /ai/manager/api/system/portable/import/preview`
-- `POST /ai/manager/api/system/portable/import/apply`
-
-Supported modules:
-
-- `provider_profile`: providers, provider API keys, provider models, request patch rules, and reasoning config.
-- `api_keys`: downstream API keys, ACL rules, and model override references to routes that already exist in the target environment.
-- `cost_catalogs`: cost catalogs, versions, and components.
-- `cost_bindings`: model-to-cost-catalog bindings through `model.cost_catalog_id`.
-
-Export files can be plaintext JSON or password-encrypted armored `.cyd` files. Use password encryption when the bundle contains provider keys or downstream API keys. The encrypted format hides the whole JSON bundle; plaintext export intentionally contains raw secrets so the target environment can preserve existing downstream keys.
-
-Import always starts with preview. Preview validates the schema, password and integrity status, module versions, dependencies, conflicts, missing provider/model/route/cost references, and dangerous request patch targets. Apply must submit the same bundle digest returned by preview.
-
-For existing downstream API keys, `overwrite_existing` updates API key metadata and governance limits only. Bundle ACL rules and model overrides for an already-existing raw API key are counted as skipped and are not appended, upserted, replaced, or used to delete target-environment child rows. ACL rules and model overrides are imported only when the API key itself is newly created.
-
-Portable Config intentionally does not migrate these runtime, history, audit, or deployment records:
-
-- `request_log`, `request_attempt`, `request_replay_run`, replay artifacts, object-storage bundles, and object-storage artifacts.
-- `metric_ingested_request_log`, `metric_request_rollup_minute`, `metric_attempt_rollup_minute`, `metric_http_status_rollup_minute`, and `metric_cost_rollup_minute`.
-- `alert_event`, `alert_rule_state`, `notification_channel`, `notification_channel_state`, `notification_delivery`, and notification test results.
-- `api_key_rollup_daily`, `api_key_rollup_monthly`, `manager_auth_instance`, refresh sessions, and manager login rate-limit runtime.
-- Provider circuit runtime state, provider key cursors, API key concurrency windows, API key RPM windows, and Redis-backed runtime state.
-- `config.default.yaml`, `config.yaml`, `config.override.yaml`, and `config.override.history.jsonl`.
-
-Those are runtime facts or deployment configuration, not portable gateway configuration.
-
-Release verification for this feature must include:
-
-- plaintext core bundle export/import into fresh SQLite
-- password-encrypted full bundle export/import into fresh SQLite
-- provider/provider key/model/API key/cost catalog/model cost binding lookups after import
-- frontend export/import state tests
-
 ## Main Routes
 
 Assuming `base_path: /ai`:
@@ -264,6 +275,18 @@ Assuming `base_path: /ai`:
 - health: `/ai/health`
 - readiness: `/ai/ready`
 
+## Web Security and Reverse Proxies
+
+The Manager UI/API is same-origin and does not expose CORS. Its responses carry a strict script CSP, anti-embedding and content-type protections, a minimal permissions policy, and status-aware cache rules.
+
+The five public AI protocol prefixes allow browser calls from any Origin with GET/POST, mirrored request headers, exposed response headers, no credentials, and a 600-second preflight cache. Manager, System, and base fallback routes do not inherit this public CORS policy.
+
+Client IP defaults to the TCP peer. To trust a reverse proxy, add only its canonical CIDR to `client_identity.trusted_proxy_cidrs`; the proxy must clear untrusted forwarding headers before generating `Forwarded` or `X-Forwarded-For`. Invalid metadata from a trusted peer is rejected rather than silently falling back.
+
+`client_identity` is YAML-only startup configuration. `max_forwarded_hops` defaults to 8 and accepts 1 through 32; restart the server after changing either field.
+
+See [Web Security and Client Identity](docs/web-security-client-identity.md) for the exact headers, cache/CORS matrix, configuration validation, resolution algorithm, Nginx/Caddy patterns, privacy rules, and troubleshooting steps.
+
 ## Testing Notes
 
 Primary backend verification:
@@ -276,18 +299,17 @@ Frontend verification:
 - `just test-front`
 - `just build-front`
 
-Current test coverage is strong across transform, proxy, cost, governance, and runtime logic. However, storage integration around S3 may require a working S3-compatible environment when configured. Do not assume object-storage paths are verified unless you have run the relevant tests in a valid environment.
+Current test coverage is strong across transform, proxy, cost, governance, and runtime logic.
 
 ## Current Priorities
 
 Based on the current codebase, the most valuable next steps are:
 
-1. make `model_route` candidates participate in real execution
-2. add request-level retry/fallback and attempt trace
-3. add replay/debug tooling for request logs
-4. productize transform diagnostics for operations/debugging
-5. add proactive alert channels
-6. tighten manager auth and finish the remaining `api_key` convergence/docs/test cleanup
+1. stabilize and verify the direct `provider/model` execution path
+2. tighten manager authentication and secret ownership
+3. productize transform diagnostics without recreating the retired request-bundle contract
+4. finish the remaining `api_key` naming, documentation, and test convergence
+5. redesign retry/fallback, replay, and proactive alerts as separate domains before implementation
 
 ## Docker
 
@@ -317,11 +339,10 @@ The runtime image keeps application artifacts under `/opt/cyder`:
 
 Mutable local state is under `/data/cyder`:
 
-- config files and System Config override/history: `/data/cyder/config`
+- generated defaults and base configuration: `/data/cyder/config`
 - SQLite database files: `/data/cyder/db`
-- local request log and replay object storage: `/data/cyder/storage`
 
-The image sets `CYDER_DATA_DIR=/data/cyder`, declares `/data/cyder` as the only volume, and runs the service process as the non-root `cyder` user. Temporary request-log spool files use `/tmp/cyder-api` and are not persisted.
+The image sets `CYDER_DATA_DIR=/data/cyder`, declares `/data/cyder` as the only volume, and runs the service process as the non-root `cyder` user. Temporary process files use `/tmp/cyder-api` and are not persisted.
 
 Advanced deployments can override `CYDER_DATA_DIR`, but the default and recommended path remains `/data/cyder`. When overriding it, mount the replacement directory explicitly:
 
@@ -332,9 +353,7 @@ docker run --rm -p 8000:8000 \
   cyder-api:latest
 ```
 
-Maintainer verification on 2026-05-06 built `cyder-api:task10` from this Dockerfile and confirmed zero-config startup, empty `/data/cyder` volume startup, container recreation with persisted `config.default.yaml`/SQLite/override/history, request-log bundle writes under `/data/cyder/storage`, read-only `/opt/cyder` behavior for the service user, and management UI asset loading from `/opt/cyder/public`. S3 persistence was not verified in this smoke test.
-
-PostgreSQL, S3-compatible object storage, and Redis are external state. Configure those services in `/data/cyder/config/config.yaml` and restart the container; do not pass database, secret, Redis, or S3 settings through environment variables.
+PostgreSQL and Redis are external state. Configure those services in `/data/cyder/config/config.yaml` and restart the container; do not pass database, secret, or Redis settings through environment variables.
 
 For an existing deployment, mount the old config file into the container and point `CYDER_CONFIG_PATH` at it while keeping `/data/cyder` as the persistent data root:
 
@@ -346,7 +365,7 @@ docker run --rm -p 8000:8000 \
   cyder-api:latest
 ```
 
-This migration hook only changes the base config file path. Managed override/history files and default local SQLite/storage paths remain under `/data/cyder`.
+This migration hook only changes the base config file path. Generated defaults and the default SQLite path remain under `/data/cyder`.
 
 ## Release Workflow
 
@@ -362,4 +381,4 @@ Do not publish releases directly from the GitHub Release UI. Use the same tag wi
 
 ## Summary
 
-Cyder API is already beyond the "CRUD plus proxy" stage. It now has the core shape of a serious single-admin LLM gateway, with strong transformation logic and a growing operations console. The next stage is not more platform surface area; it is resilience, replay, alerting, and tighter operational feedback loops.
+Cyder API is already beyond the "CRUD plus proxy" stage. It has the core shape of a single-admin LLM gateway with strong transformation logic and an operations console. The next stage is to make that core smaller, safer, and easier to reason about before selectively rebuilding advanced resilience and debugging capabilities.

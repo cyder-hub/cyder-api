@@ -1,10 +1,9 @@
-use diesel::{Connection, prelude::*};
+use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::{DbConnection, DbResult, ListResult, get_connection};
+use super::{DbResult, ListResult, get_connection};
 use crate::controller::BaseError;
-use crate::database::request_attempt::RequestAttempt;
-use crate::schema::enum_def::{LlmApiType, RequestStatus, StorageType};
+use crate::schema::enum_def::{LlmApiType, RequestStatus};
 use crate::{db_execute, db_object};
 
 db_object! {
@@ -17,41 +16,28 @@ db_object! {
         pub base_requested_model_name: Option<String>,
         pub resolved_reasoning_suffix: Option<String>,
         pub resolved_reasoning_preset: Option<String>,
-        pub resolved_name_scope: Option<String>,
-        pub resolved_route_id: Option<i64>,
-        pub resolved_route_name: Option<String>,
         pub user_api_type: LlmApiType,
         #[diesel(column_name = status)]
         pub overall_status: RequestStatus,
         pub final_error_code: Option<String>,
         pub final_error_message: Option<String>,
-        pub attempt_count: i32,
-        pub retry_count: i32,
-        pub fallback_count: i32,
         pub request_received_at: i64,
-        #[diesel(column_name = llm_request_sent_at)]
-        pub first_attempt_started_at: Option<i64>,
+        pub upstream_request_sent_at: Option<i64>,
         #[diesel(column_name = llm_response_first_chunk_at)]
         pub response_started_to_client_at: Option<i64>,
         #[diesel(column_name = llm_response_completed_at)]
         pub completed_at: Option<i64>,
         pub is_stream: bool,
         pub client_ip: Option<String>,
-        pub final_attempt_id: Option<i64>,
-        #[diesel(column_name = provider_id)]
-        pub final_provider_id: Option<i64>,
-        #[diesel(column_name = provider_api_key_id)]
-        pub final_provider_api_key_id: Option<i64>,
-        #[diesel(column_name = model_id)]
-        pub final_model_id: Option<i64>,
-        pub final_provider_key_snapshot: Option<String>,
-        pub final_provider_name_snapshot: Option<String>,
-        #[diesel(column_name = model_name)]
-        pub final_model_name_snapshot: Option<String>,
-        #[diesel(column_name = real_model_name)]
-        pub final_real_model_name_snapshot: Option<String>,
-        #[diesel(column_name = llm_api_type)]
-        pub final_llm_api_type: Option<LlmApiType>,
+        pub provider_id: Option<i64>,
+        pub provider_api_key_id: Option<i64>,
+        pub model_id: Option<i64>,
+        pub provider_key_snapshot: Option<String>,
+        pub provider_name_snapshot: Option<String>,
+        pub model_name_snapshot: Option<String>,
+        pub real_model_name_snapshot: Option<String>,
+        pub llm_api_type: Option<LlmApiType>,
+        pub upstream_http_status: Option<i32>,
         pub estimated_cost_nanos: Option<i64>,
         pub estimated_cost_currency: Option<String>,
         pub cost_catalog_id: Option<i64>,
@@ -67,13 +53,6 @@ db_object! {
         pub cache_write_tokens: Option<i32>,
         pub reasoning_tokens: Option<i32>,
         pub total_tokens: Option<i32>,
-        pub has_transform_diagnostics: bool,
-        pub transform_diagnostic_count: i32,
-        pub transform_diagnostic_max_loss_level: Option<String>,
-        pub bundle_version: Option<i32>,
-        #[diesel(column_name = storage_type)]
-        pub bundle_storage_type: Option<StorageType>,
-        pub bundle_storage_key: Option<String>,
         pub created_at: i64,
         pub updated_at: i64,
     }
@@ -87,30 +66,21 @@ db_object! {
         pub base_requested_model_name: Option<String>,
         pub resolved_reasoning_suffix: Option<String>,
         pub resolved_reasoning_preset: Option<String>,
-        pub resolved_name_scope: Option<String>,
-        pub resolved_route_name: Option<String>,
         #[diesel(column_name = status)]
         pub overall_status: RequestStatus,
-        pub attempt_count: i32,
-        pub retry_count: i32,
-        pub fallback_count: i32,
         pub request_received_at: i64,
-        #[diesel(column_name = llm_request_sent_at)]
-        pub first_attempt_started_at: Option<i64>,
+        pub upstream_request_sent_at: Option<i64>,
         #[diesel(column_name = llm_response_first_chunk_at)]
         pub response_started_to_client_at: Option<i64>,
         #[diesel(column_name = llm_response_completed_at)]
         pub completed_at: Option<i64>,
         pub is_stream: bool,
-        #[diesel(column_name = provider_id)]
-        pub final_provider_id: Option<i64>,
-        pub final_provider_name_snapshot: Option<String>,
-        #[diesel(column_name = model_id)]
-        pub final_model_id: Option<i64>,
-        #[diesel(column_name = model_name)]
-        pub final_model_name_snapshot: Option<String>,
-        #[diesel(column_name = real_model_name)]
-        pub final_real_model_name_snapshot: Option<String>,
+        pub provider_id: Option<i64>,
+        pub provider_name_snapshot: Option<String>,
+        pub model_id: Option<i64>,
+        pub model_name_snapshot: Option<String>,
+        pub real_model_name_snapshot: Option<String>,
+        pub upstream_http_status: Option<i32>,
         pub estimated_cost_nanos: Option<i64>,
         pub estimated_cost_currency: Option<String>,
         pub total_input_tokens: Option<i32>,
@@ -118,22 +88,10 @@ db_object! {
         pub output_text_tokens: Option<i32>,
         pub reasoning_tokens: Option<i32>,
         pub total_tokens: Option<i32>,
-        pub has_transform_diagnostics: bool,
-        pub transform_diagnostic_count: i32,
-        pub transform_diagnostic_max_loss_level: Option<String>,
     }
 }
 
 pub type RequestLogRecord = RequestLog;
-
-#[derive(Debug, Clone)]
-pub struct RequestLogBundleRetentionRecord {
-    pub id: i64,
-    pub bundle_version: Option<i32>,
-    pub bundle_storage_type: StorageType,
-    pub bundle_storage_key: String,
-    pub created_at: i64,
-}
 
 #[derive(Deserialize, Debug, Default)]
 pub struct RequestLogQueryPayload {
@@ -142,11 +100,7 @@ pub struct RequestLogQueryPayload {
     pub model_id: Option<i64>,
     pub status: Option<RequestStatus>,
     pub user_api_type: Option<LlmApiType>,
-    pub resolved_name_scope: Option<String>,
     pub final_error_code: Option<String>,
-    pub has_retry: Option<bool>,
-    pub has_fallback: Option<bool>,
-    pub has_transform_diagnostics: Option<bool>,
     pub latency_ms_min: Option<i64>,
     pub latency_ms_max: Option<i64>,
     pub total_tokens_min: Option<i32>,
@@ -203,153 +157,6 @@ impl RequestLog {
         })
     }
 
-    pub fn insert_with_attempts(
-        new_log_data: &RequestLog,
-        new_attempts: &[RequestAttempt],
-    ) -> DbResult<RequestLog> {
-        let conn = &mut get_connection()?;
-        match conn {
-            DbConnection::Postgres(conn) => {
-                use crate::database::_postgres_schema::{
-                    cost_catalog_versions, request_attempt, request_log,
-                };
-                use crate::database::request_attempt::_postgres_model::RequestAttemptDb;
-                use _postgres_model::RequestLogDb;
-
-                conn.transaction::<RequestLog, BaseError, _>(|conn| {
-                    let mut initial_log = new_log_data.clone();
-                    initial_log.final_attempt_id = None;
-
-                    diesel::insert_into(request_log::table)
-                        .values(RequestLogDb::to_db(&initial_log))
-                        .execute(conn)
-                        .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to insert request log: {}",
-                                e
-                            )))
-                        })?;
-
-                    for attempt in new_attempts {
-                        diesel::insert_into(request_attempt::table)
-                            .values(RequestAttemptDb::to_db(attempt))
-                            .execute(conn)
-                            .map_err(|err| {
-                                map_request_attempt_write_error(
-                                    "Failed to insert request attempt",
-                                    err,
-                                )
-                            })?;
-                    }
-
-                    let updated_log_db = diesel::update(request_log::table.find(new_log_data.id))
-                        .set(RequestLogDb::to_db(new_log_data))
-                        .returning(RequestLogDb::as_returning())
-                        .get_result::<RequestLogDb>(conn)
-                        .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to finalize request log {}: {}",
-                                new_log_data.id, e
-                            )))
-                        })?;
-
-                    if let Some(cost_catalog_version_id) = new_log_data.cost_catalog_version_id {
-                        diesel::update(
-                            cost_catalog_versions::table.filter(
-                                cost_catalog_versions::dsl::id
-                                    .eq(cost_catalog_version_id)
-                                    .and(cost_catalog_versions::dsl::first_used_at.is_null()),
-                            ),
-                        )
-                        .set((
-                            cost_catalog_versions::dsl::first_used_at
-                                .eq(Some(new_log_data.request_received_at)),
-                            cost_catalog_versions::dsl::updated_at.eq(new_log_data.updated_at),
-                        ))
-                        .execute(conn)
-                        .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to freeze cost catalog version {} after request log insert: {}",
-                                cost_catalog_version_id, e
-                            )))
-                        })?;
-                    }
-
-                    Ok(updated_log_db.from_db())
-                })
-            }
-            DbConnection::Sqlite(conn) => {
-                use crate::database::_sqlite_schema::{
-                    cost_catalog_versions, request_attempt, request_log,
-                };
-                use crate::database::request_attempt::_sqlite_model::RequestAttemptDb;
-                use _sqlite_model::RequestLogDb;
-
-                conn.transaction::<RequestLog, BaseError, _>(|conn| {
-                    let mut initial_log = new_log_data.clone();
-                    initial_log.final_attempt_id = None;
-
-                    diesel::insert_into(request_log::table)
-                        .values(RequestLogDb::to_db(&initial_log))
-                        .execute(conn)
-                        .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to insert request log: {}",
-                                e
-                            )))
-                        })?;
-
-                    for attempt in new_attempts {
-                        diesel::insert_into(request_attempt::table)
-                            .values(RequestAttemptDb::to_db(attempt))
-                            .execute(conn)
-                            .map_err(|err| {
-                                map_request_attempt_write_error(
-                                    "Failed to insert request attempt",
-                                    err,
-                                )
-                            })?;
-                    }
-
-                    let updated_log_db = diesel::update(request_log::table.find(new_log_data.id))
-                        .set(RequestLogDb::to_db(new_log_data))
-                        .returning(RequestLogDb::as_returning())
-                        .get_result::<RequestLogDb>(conn)
-                        .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to finalize request log {}: {}",
-                                new_log_data.id, e
-                            )))
-                        })?;
-
-                    if let Some(cost_catalog_version_id) = new_log_data.cost_catalog_version_id {
-                        diesel::update(
-                            cost_catalog_versions::table.filter(
-                                cost_catalog_versions::dsl::id
-                                    .eq(cost_catalog_version_id)
-                                    .and(cost_catalog_versions::dsl::first_used_at.is_null()),
-                            ),
-                        )
-                        .set((
-                            cost_catalog_versions::dsl::first_used_at
-                                .eq(Some(new_log_data.request_received_at)),
-                            cost_catalog_versions::dsl::updated_at.eq(new_log_data.updated_at),
-                        ))
-                        .execute(conn)
-                        .map_err(|e| {
-                            BaseError::DatabaseFatal(Some(format!(
-                                "Failed to freeze cost catalog version {} after request log insert: {}",
-                                cost_catalog_version_id, e
-                            )))
-                        })?;
-                    }
-
-                    Ok(updated_log_db.from_db())
-                })
-            }
-        }
-    }
-
     pub fn get_by_id(log_id: i64) -> DbResult<RequestLogRecord> {
         let conn = &mut get_connection()?;
         db_execute!(conn, {
@@ -368,108 +175,6 @@ impl RequestLog {
                         log_id, other
                     ))),
                 })
-        })
-    }
-
-    pub fn list_bundle_retention_candidates(
-        cutoff_created_at: i64,
-        limit: i64,
-    ) -> DbResult<Vec<RequestLogBundleRetentionRecord>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            request_log::table
-                .filter(request_log::dsl::created_at.lt(cutoff_created_at))
-                .filter(request_log::dsl::storage_type.is_not_null())
-                .filter(request_log::dsl::bundle_storage_key.is_not_null())
-                .order(request_log::dsl::created_at.asc())
-                .limit(limit)
-                .select(RequestLogDb::as_select())
-                .load::<RequestLogDb>(conn)
-                .map(|rows| {
-                    rows.into_iter()
-                        .filter_map(|row| {
-                            let record = row.from_db();
-                            Some(RequestLogBundleRetentionRecord {
-                                id: record.id,
-                                bundle_version: record.bundle_version,
-                                bundle_storage_type: record.bundle_storage_type?,
-                                bundle_storage_key: record.bundle_storage_key?,
-                                created_at: record.created_at,
-                            })
-                        })
-                        .collect()
-                })
-                .map_err(|err| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list request log bundle retention candidates: {}",
-                        err
-                    )))
-                })
-        })
-    }
-
-    pub fn list_bundle_storage_locators(
-        limit: i64,
-    ) -> DbResult<Vec<RequestLogBundleRetentionRecord>> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            request_log::table
-                .filter(request_log::dsl::storage_type.is_not_null())
-                .filter(request_log::dsl::bundle_storage_key.is_not_null())
-                .order(request_log::dsl::created_at.asc())
-                .limit(limit)
-                .select(RequestLogDb::as_select())
-                .load::<RequestLogDb>(conn)
-                .map(|rows| {
-                    rows.into_iter()
-                        .filter_map(|row| {
-                            let record = row.from_db();
-                            Some(RequestLogBundleRetentionRecord {
-                                id: record.id,
-                                bundle_version: record.bundle_version,
-                                bundle_storage_type: record.bundle_storage_type?,
-                                bundle_storage_key: record.bundle_storage_key?,
-                                created_at: record.created_at,
-                            })
-                        })
-                        .collect()
-                })
-                .map_err(|err| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to list request log bundle storage locators: {}",
-                        err
-                    )))
-                })
-        })
-    }
-
-    pub fn clear_bundle_locator_if_matches(
-        log_id: i64,
-        storage_type: StorageType,
-        storage_key: &str,
-        updated_at: i64,
-    ) -> DbResult<bool> {
-        let conn = &mut get_connection()?;
-        db_execute!(conn, {
-            diesel::update(
-                request_log::table
-                    .find(log_id)
-                    .filter(request_log::dsl::storage_type.eq(Some(storage_type)))
-                    .filter(request_log::dsl::bundle_storage_key.eq(Some(storage_key))),
-            )
-            .set((
-                request_log::dsl::storage_type.eq(Option::<StorageType>::None),
-                request_log::dsl::bundle_storage_key.eq(Option::<String>::None),
-                request_log::dsl::updated_at.eq(updated_at),
-            ))
-            .execute(conn)
-            .map(|updated_rows| updated_rows > 0)
-            .map_err(|err| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to clear request log {} bundle locator: {}",
-                    log_id, err
-                )))
-            })
         })
     }
 
@@ -503,42 +208,12 @@ impl RequestLog {
                 query = query.filter(request_log::dsl::user_api_type.eq(val));
                 count_query = count_query.filter(request_log::dsl::user_api_type.eq(val));
             }
-            if let Some(val) = payload.resolved_name_scope.as_ref() {
-                if !val.is_empty() {
-                    query = query.filter(request_log::dsl::resolved_name_scope.eq(Some(val)));
-                    count_query =
-                        count_query.filter(request_log::dsl::resolved_name_scope.eq(Some(val)));
-                }
-            }
             if let Some(val) = payload.final_error_code.as_ref() {
                 if !val.is_empty() {
                     query = query.filter(request_log::dsl::final_error_code.eq(Some(val)));
                     count_query =
                         count_query.filter(request_log::dsl::final_error_code.eq(Some(val)));
                 }
-            }
-            if let Some(val) = payload.has_retry {
-                if val {
-                    query = query.filter(request_log::dsl::retry_count.gt(0));
-                    count_query = count_query.filter(request_log::dsl::retry_count.gt(0));
-                } else {
-                    query = query.filter(request_log::dsl::retry_count.eq(0));
-                    count_query = count_query.filter(request_log::dsl::retry_count.eq(0));
-                }
-            }
-            if let Some(val) = payload.has_fallback {
-                if val {
-                    query = query.filter(request_log::dsl::fallback_count.gt(0));
-                    count_query = count_query.filter(request_log::dsl::fallback_count.gt(0));
-                } else {
-                    query = query.filter(request_log::dsl::fallback_count.eq(0));
-                    count_query = count_query.filter(request_log::dsl::fallback_count.eq(0));
-                }
-            }
-            if let Some(val) = payload.has_transform_diagnostics {
-                query = query.filter(request_log::dsl::has_transform_diagnostics.eq(val));
-                count_query =
-                    count_query.filter(request_log::dsl::has_transform_diagnostics.eq(val));
             }
             if let Some(val) = payload.latency_ms_min {
                 let filter = request_log::dsl::llm_response_completed_at
@@ -597,10 +272,10 @@ impl RequestLog {
             if let Some(search_term) = payload.search.as_ref() {
                 if !search_term.is_empty() {
                     let pattern = format!("%{}%", search_term);
-                    let text_filter = request_log::dsl::model_name
+                    let text_filter = request_log::dsl::model_name_snapshot
                         .is_not_null()
                         .and(
-                            request_log::dsl::model_name
+                            request_log::dsl::model_name_snapshot
                                 .assume_not_null()
                                 .like(pattern.clone()),
                         )
@@ -630,18 +305,11 @@ impl RequestLog {
                                     .assume_not_null()
                                     .like(pattern.clone()),
                             ))
-                        .or(request_log::dsl::resolved_route_name.is_not_null().and(
-                            request_log::dsl::resolved_route_name
+                        .or(request_log::dsl::provider_name_snapshot.is_not_null().and(
+                            request_log::dsl::provider_name_snapshot
                                 .assume_not_null()
                                 .like(pattern.clone()),
                         ))
-                        .or(request_log::dsl::final_provider_name_snapshot
-                            .is_not_null()
-                            .and(
-                                request_log::dsl::final_provider_name_snapshot
-                                    .assume_not_null()
-                                    .like(pattern.clone()),
-                            ))
                         .or(request_log::dsl::final_error_code.is_not_null().and(
                             request_log::dsl::final_error_code
                                 .assume_not_null()
@@ -724,42 +392,12 @@ impl RequestLog {
                 query = query.filter(request_log::dsl::user_api_type.eq(val));
                 count_query = count_query.filter(request_log::dsl::user_api_type.eq(val));
             }
-            if let Some(val) = payload.resolved_name_scope.as_ref() {
-                if !val.is_empty() {
-                    query = query.filter(request_log::dsl::resolved_name_scope.eq(Some(val)));
-                    count_query =
-                        count_query.filter(request_log::dsl::resolved_name_scope.eq(Some(val)));
-                }
-            }
             if let Some(val) = payload.final_error_code.as_ref() {
                 if !val.is_empty() {
                     query = query.filter(request_log::dsl::final_error_code.eq(Some(val)));
                     count_query =
                         count_query.filter(request_log::dsl::final_error_code.eq(Some(val)));
                 }
-            }
-            if let Some(val) = payload.has_retry {
-                if val {
-                    query = query.filter(request_log::dsl::retry_count.gt(0));
-                    count_query = count_query.filter(request_log::dsl::retry_count.gt(0));
-                } else {
-                    query = query.filter(request_log::dsl::retry_count.eq(0));
-                    count_query = count_query.filter(request_log::dsl::retry_count.eq(0));
-                }
-            }
-            if let Some(val) = payload.has_fallback {
-                if val {
-                    query = query.filter(request_log::dsl::fallback_count.gt(0));
-                    count_query = count_query.filter(request_log::dsl::fallback_count.gt(0));
-                } else {
-                    query = query.filter(request_log::dsl::fallback_count.eq(0));
-                    count_query = count_query.filter(request_log::dsl::fallback_count.eq(0));
-                }
-            }
-            if let Some(val) = payload.has_transform_diagnostics {
-                query = query.filter(request_log::dsl::has_transform_diagnostics.eq(val));
-                count_query =
-                    count_query.filter(request_log::dsl::has_transform_diagnostics.eq(val));
             }
             if let Some(val) = payload.latency_ms_min {
                 let filter = request_log::dsl::llm_response_completed_at
@@ -818,10 +456,10 @@ impl RequestLog {
             if let Some(search_term) = payload.search.as_ref() {
                 if !search_term.is_empty() {
                     let pattern = format!("%{}%", search_term);
-                    let text_filter = request_log::dsl::model_name
+                    let text_filter = request_log::dsl::model_name_snapshot
                         .is_not_null()
                         .and(
-                            request_log::dsl::model_name
+                            request_log::dsl::model_name_snapshot
                                 .assume_not_null()
                                 .like(pattern.clone()),
                         )
@@ -851,18 +489,11 @@ impl RequestLog {
                                     .assume_not_null()
                                     .like(pattern.clone()),
                             ))
-                        .or(request_log::dsl::resolved_route_name.is_not_null().and(
-                            request_log::dsl::resolved_route_name
+                        .or(request_log::dsl::provider_name_snapshot.is_not_null().and(
+                            request_log::dsl::provider_name_snapshot
                                 .assume_not_null()
                                 .like(pattern.clone()),
                         ))
-                        .or(request_log::dsl::final_provider_name_snapshot
-                            .is_not_null()
-                            .and(
-                                request_log::dsl::final_provider_name_snapshot
-                                    .assume_not_null()
-                                    .like(pattern.clone()),
-                            ))
                         .or(request_log::dsl::final_error_code.is_not_null().and(
                             request_log::dsl::final_error_code
                                 .assume_not_null()
@@ -913,17 +544,5 @@ impl RequestLog {
                 list,
             })
         })
-    }
-}
-
-fn map_request_attempt_write_error(context: &str, err: diesel::result::Error) -> BaseError {
-    match err {
-        diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::UniqueViolation,
-            _,
-        ) => BaseError::DatabaseDup(Some(format!(
-            "{context}: request_log_id + attempt_index must be unique"
-        ))),
-        other => BaseError::DatabaseFatal(Some(format!("{context}: {other}"))),
     }
 }

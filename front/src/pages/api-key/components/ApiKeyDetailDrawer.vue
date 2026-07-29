@@ -23,7 +23,6 @@ defineProps<{
   secretReveal: ApiKeyReveal | null;
   providerNameById: Map<number, string>;
   modelNameById: Map<number, string>;
-  routeNameById: Map<number, string>;
 }>();
 
 defineEmits<{
@@ -62,7 +61,12 @@ const { t } = useI18n();
             </div>
 
         <div v-if="detail" class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <Button variant="outline" class="w-full sm:w-auto" @click="$emit('reveal', detail.id)">
+          <Button
+            v-if="detail.can_reveal"
+            variant="outline"
+            class="w-full sm:w-auto"
+            @click="$emit('reveal', detail.id)"
+          >
             <Eye class="mr-1.5 h-4 w-4" />
             {{ t("apiKeyPage.actions.reveal") }}
           </Button>
@@ -80,6 +84,12 @@ const { t } = useI18n();
           </Button>
         </div>
           </div>
+          <p
+            v-if="detail && !detail.can_reveal"
+            class="mt-3 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500"
+          >
+            {{ t("apiKeyPage.secret.unavailable") }}
+          </p>
         </div>
 
         <div v-if="detailLoading" class="flex items-center justify-center px-4 py-16 xl:flex-1">
@@ -104,7 +114,7 @@ const { t } = useI18n();
               {{ t("apiKeyPage.secret.title") }}
             </h3>
             <p class="mt-1 text-xs leading-5 text-gray-500">
-              {{ t("apiKeyPage.secret.description") }}
+              {{ t("apiKeyPage.secret.revealedDescription") }}
             </p>
           </div>
           <div class="flex gap-2">
@@ -140,7 +150,6 @@ const { t } = useI18n();
           :runtime="runtime"
           :provider-name-by-id="providerNameById"
           :model-name-by-id="modelNameById"
-          :route-name-by-id="routeNameById"
         />
       </div>
       </div>

@@ -21,6 +21,7 @@ jobs:
       run_frontend: ${{ steps.detect.outputs.run_frontend }}
       run_transform: ${{ steps.detect.outputs.run_transform }}
       run_docker_smoke: ${{ steps.detect.outputs.run_docker_smoke }}
+      run_migration_smoke: ${{ steps.detect.outputs.run_migration_smoke }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -41,6 +42,7 @@ jobs:
           run_frontend=false
           run_transform=false
           run_docker_smoke=false
+          run_migration_smoke=false
           changed_files="$(mktemp)"
           : > "$changed_files"
 
@@ -91,6 +93,12 @@ jobs:
                   run_docker_smoke=true
                   ;;
               esac
+
+              case "$file" in
+                Cargo.toml|Cargo.lock|server/Cargo.toml|server/src/database/mod.rs|server/src/database/migration_smoke_tests.rs|server/migrations/**|.github/workflows/ci.yml)
+                  run_migration_smoke=true
+                  ;;
+              esac
             done < "$changed_files"
 
             if [[ "$EVENT_NAME" == "push" ]]; then
@@ -103,6 +111,7 @@ jobs:
             run_frontend=true
             run_transform=true
             run_docker_smoke=true
+            run_migration_smoke=true
           fi
 
           {
@@ -110,6 +119,7 @@ jobs:
             echo "run_frontend=$run_frontend"
             echo "run_transform=$run_transform"
             echo "run_docker_smoke=$run_docker_smoke"
+            echo "run_migration_smoke=$run_migration_smoke"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -119,6 +129,7 @@ jobs:
             echo "- run_frontend: $run_frontend"
             echo "- run_transform: $run_transform"
             echo "- run_docker_smoke: $run_docker_smoke"
+            echo "- run_migration_smoke: $run_migration_smoke"
             if [[ -s "$changed_files" ]]; then
               echo ""
               echo "Changed files:"
@@ -185,6 +196,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-backend-v4-${{ steps.rust-cache.outputs.version }}-
 
+      - name: Prepare backend test configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ci_data_dir="$RUNNER_TEMP/cyder-backend-data"
+          ci_config_dir="$ci_data_dir/config"
+          ci_encryption_key="$(openssl rand -hex 32)"
+
+          umask 077
+          mkdir -p "$ci_config_dir"
+          printf 'secret_encryption:\n  encryption_key: "%s"\n' \
+            "$ci_encryption_key" > "$ci_config_dir/config.yaml"
+          echo "CYDER_DATA_DIR=$ci_data_dir" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -197,6 +223,62 @@ jobs:
 
       - name: Run backend tests
         run: cargo test --locked -p cyder-api
+
+  migration-smoke:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run_migration_smoke == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: cyder_r1_migration_smoke
+          POSTGRES_USER: cyder
+          POSTGRES_PASSWORD: cyder
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cyder -d cyder_r1_migration_smoke"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Resolve Rust cache key
+        id: rust-cache
+        shell: bash
+        run: echo "version=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: ${{ runner.os }}-cargo-migration-smoke-v1-${{ steps.rust-cache.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-migration-smoke-v1-${{ steps.rust-cache.outputs.version }}-
+            ${{ runner.os }}-cargo-backend-v4-${{ steps.rust-cache.outputs.version }}-
+
+      - name: Run SQLite migration smoke
+        run: cargo test --locked -p cyder-api migration_smoke_tests::sqlite_clean_upgrade_chain_from_empty -- --nocapture
+
+      - name: Run PostgreSQL migration smoke
+        env:
+          CYDER_R1_POSTGRES_MIGRATION_SMOKE_URL: postgres://cyder:cyder@127.0.0.1:5432/cyder_r1_migration_smoke
+        run: cargo test --locked -p cyder-api migration_smoke_tests::postgres_clean_upgrade_chain_from_empty -- --ignored --nocapture
 
   frontend:
     needs: detect-changes

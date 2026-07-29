@@ -8,14 +8,12 @@ use super::{
     request::ParsedProxyRequest,
     runtime::{
         facade::{UtilityOrchestrationInput, execute_utility},
-        policy::RuntimeExecutionPolicy as ProxyExecutionPolicy,
         route_resolver::ExecutionPlan,
     },
 };
 use crate::{
     schema::enum_def::LlmApiType,
     service::{app_state::AppState, cache::types::CacheApiKey},
-    utils::storage::RequestLogBundleRequestSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +37,6 @@ pub(super) struct UtilityExecutionInput {
     pub execution_plan: ExecutionPlan,
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
-    pub request_snapshot: RequestLogBundleRequestSnapshot,
     pub client_ip_addr: Option<String>,
     pub start_time: i64,
     pub parsed_request: ParsedProxyRequest,
@@ -74,16 +71,11 @@ pub(super) async fn execute_utility_proxy(
         execution_plan,
         query_params,
         original_headers,
-        request_snapshot,
         client_ip_addr,
         start_time,
         parsed_request,
     } = input;
-    let ParsedProxyRequest {
-        data,
-        original_request_body,
-        ..
-    } = parsed_request;
+    let ParsedProxyRequest { data } = parsed_request;
 
     execute_utility(
         app_state,
@@ -93,14 +85,10 @@ pub(super) async fn execute_utility_proxy(
             operation,
             execution_plan,
             query_params,
-            replay_query_params: None,
             original_headers,
-            request_snapshot,
             client_ip_addr,
             start_time,
             data,
-            original_request_body,
-            execution_policy: ProxyExecutionPolicy::Normal,
         },
     )
     .await

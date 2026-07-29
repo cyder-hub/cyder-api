@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::config::ProviderGovernanceConfig;
-use tokio::sync::RwLock;
 
 use super::memory_store::MemoryProviderCircuitStore;
 use super::types::{
@@ -9,30 +8,9 @@ use super::types::{
     ProviderCircuitStore, ProviderHealthSnapshot,
 };
 
-#[derive(Debug)]
-pub struct ProviderGovernanceConfigManager {
-    current: RwLock<ProviderGovernanceConfig>,
-}
-
-impl ProviderGovernanceConfigManager {
-    pub fn new(config: ProviderGovernanceConfig) -> Self {
-        Self {
-            current: RwLock::new(config),
-        }
-    }
-
-    pub async fn current(&self) -> ProviderGovernanceConfig {
-        self.current.read().await.clone()
-    }
-
-    pub async fn update(&self, config: ProviderGovernanceConfig) {
-        *self.current.write().await = config;
-    }
-}
-
 pub struct ProviderCircuitService {
     store: Arc<dyn ProviderCircuitStore>,
-    config_manager: Arc<ProviderGovernanceConfigManager>,
+    config: ProviderGovernanceConfig,
 }
 
 impl ProviderCircuitService {
@@ -44,68 +22,25 @@ impl ProviderCircuitService {
         store: Arc<dyn ProviderCircuitStore>,
         config: ProviderGovernanceConfig,
     ) -> Self {
-        Self::new_with_config_manager(
-            store,
-            Arc::new(ProviderGovernanceConfigManager::new(config)),
-        )
-    }
-
-    pub fn new_with_config_manager(
-        store: Arc<dyn ProviderCircuitStore>,
-        config_manager: Arc<ProviderGovernanceConfigManager>,
-    ) -> Self {
-        Self {
-            store,
-            config_manager,
-        }
+        Self { store, config }
     }
 
     pub fn new_memory() -> Self {
         Self::new(Arc::new(MemoryProviderCircuitStore::default()))
     }
 
-    pub fn config_manager(&self) -> Arc<ProviderGovernanceConfigManager> {
-        Arc::clone(&self.config_manager)
-    }
-
-    pub async fn current_config(&self) -> ProviderGovernanceConfig {
-        self.config_manager.current().await
-    }
-
-    pub async fn update_config(&self, config: ProviderGovernanceConfig) {
-        self.config_manager.update(config).await;
-    }
-
     pub async fn allow_provider_request(
         &self,
         provider_id: i64,
     ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-        let config = self.config_manager.current().await;
-        if !config.is_enabled() {
+        if !self.config.is_enabled() {
             return Ok(ProviderCircuitDecision::allowed(
                 ProviderHealthSnapshot::synthetic_healthy(),
                 None,
             ));
         }
 
-        self.store.allow_request(provider_id, &config).await
-    }
-
-    pub async fn allow_last_candidate_request(
-        &self,
-        provider_id: i64,
-    ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-        let config = self.config_manager.current().await;
-        if !config.is_enabled() {
-            return Ok(ProviderCircuitDecision::allowed(
-                ProviderHealthSnapshot::synthetic_healthy(),
-                None,
-            ));
-        }
-
-        self.store
-            .allow_last_candidate_request(provider_id, &config)
-            .await
+        self.store.allow_request(provider_id, &self.config).await
     }
 
     pub async fn record_provider_success(
@@ -113,13 +48,12 @@ impl ProviderCircuitService {
         provider_id: i64,
         permit: Option<&ProviderCircuitProbePermit>,
     ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-        let config = self.config_manager.current().await;
-        if !config.is_enabled() {
+        if !self.config.is_enabled() {
             return Ok(ProviderHealthSnapshot::synthetic_healthy());
         }
 
         self.store
-            .record_success(provider_id, &config, permit)
+            .record_success(provider_id, &self.config, permit)
             .await
     }
 
@@ -129,13 +63,12 @@ impl ProviderCircuitService {
         error_message: String,
         permit: Option<&ProviderCircuitProbePermit>,
     ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-        let config = self.config_manager.current().await;
-        if !config.is_enabled() {
+        if !self.config.is_enabled() {
             return Ok(ProviderHealthSnapshot::synthetic_healthy());
         }
 
         self.store
-            .record_failure(provider_id, &config, error_message, permit)
+            .record_failure(provider_id, &self.config, error_message, permit)
             .await
     }
 
@@ -143,8 +76,7 @@ impl ProviderCircuitService {
         &self,
         provider_id: i64,
     ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-        let config = self.config_manager.current().await;
-        if !config.is_enabled() {
+        if !self.config.is_enabled() {
             return Ok(ProviderHealthSnapshot::synthetic_healthy());
         }
 
@@ -226,8 +158,7 @@ mod tests {
             ProviderHealthStatus::Open
         );
 
-        let service = ProviderCircuitService::new_with_config(store.clone(), enabled_config);
-        service.update_config(disabled_config).await;
+        let service = ProviderCircuitService::new_with_config(store.clone(), disabled_config);
         let allow = service
             .allow_provider_request(provider_id)
             .await
@@ -263,20 +194,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_uses_updated_threshold_for_later_failures() {
-        let initial_config = ProviderGovernanceConfig {
-            enabled: true,
-            consecutive_failure_threshold: 3,
-            open_cooldown_seconds: 30,
-        };
-        let updated_config = ProviderGovernanceConfig {
+    async fn service_uses_startup_threshold_for_failures() {
+        let config = ProviderGovernanceConfig {
             enabled: true,
             consecutive_failure_threshold: 2,
             open_cooldown_seconds: 30,
         };
         let service = ProviderCircuitService::new_with_config(
             Arc::new(MemoryProviderCircuitStore::default()),
-            initial_config,
+            config,
         );
         let provider_id = 31;
 
@@ -287,11 +213,10 @@ mod tests {
         assert_eq!(first.status, ProviderHealthStatus::Healthy);
         assert_eq!(first.consecutive_failures, 1);
 
-        service.update_config(updated_config).await;
         let second = service
             .record_provider_failure(provider_id, "timeout again".to_string(), None)
             .await
-            .expect("second failure should use updated threshold");
+            .expect("second failure should use startup threshold");
 
         assert_eq!(second.status, ProviderHealthStatus::Open);
         assert_eq!(second.consecutive_failures, 2);

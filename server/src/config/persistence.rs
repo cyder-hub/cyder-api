@@ -6,6 +6,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use cyder_tools::log::warn;
+
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -16,7 +18,6 @@ pub const CYDER_CONFIG_PATH_ENV: &str = "CYDER_CONFIG_PATH";
 
 const DEFAULT_RELEASE_DATA_DIR: &str = "/data/cyder";
 const CONTAINER_TMP_DIR: &str = "/tmp/cyder-api";
-const REQUEST_LOG_SPOOL_DIR: &str = "request-log-spool";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildProfile {
@@ -40,9 +41,7 @@ pub struct PersistencePaths {
     pub config_dir: PathBuf,
     pub db_dir: PathBuf,
     pub sqlite_db_path: PathBuf,
-    pub local_storage_root: PathBuf,
     pub tmp_dir: PathBuf,
-    pub request_log_spool_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,8 +49,6 @@ pub struct ResolvedPathSet {
     pub default_config_path: PathBuf,
     pub user_config_path: PathBuf,
     pub user_config_path_required: bool,
-    pub override_config_path: PathBuf,
-    pub override_history_path: PathBuf,
     pub persistence: PersistencePaths,
     pub ignored_empty_environment_variables: Vec<String>,
 }
@@ -121,22 +118,21 @@ pub fn bootstrap_config_paths(paths: &ConfigPaths) -> Result<(), ConfigBootstrap
     }
     create_dir(&paths.persistence.config_dir, "create config directory")?;
     create_dir(&paths.persistence.tmp_dir, "create temporary directory")?;
-    create_dir(
-        &paths.persistence.request_log_spool_dir,
-        "create request log spool directory",
-    )?;
 
-    create_default_config_if_missing(paths)?;
-    create_file_if_missing(
-        &paths.override_config_path,
-        "create override configuration file",
-        b"{}\n",
-    )?;
-    create_file_if_missing(
-        &paths.override_history_path,
-        "create override history file",
-        b"",
-    )
+    warn_about_retired_managed_config_files(&paths.persistence.config_dir);
+    create_default_config_if_missing(paths)
+}
+
+fn warn_about_retired_managed_config_files(config_dir: &Path) {
+    for file_name in ["config.override.yaml", "config.override.history.jsonl"] {
+        let path = config_dir.join(file_name);
+        if path.exists() {
+            warn!(
+                "ignoring retired managed configuration file '{}'; move any required settings to config.yaml and restart",
+                path.display()
+            );
+        }
+    }
 }
 
 fn create_default_config_if_missing(paths: &ConfigPaths) -> Result<(), ConfigBootstrapError> {
@@ -376,24 +372,18 @@ fn data_dir_path_set(
 ) -> ResolvedPathSet {
     let config_dir = data_dir.join("config");
     let db_dir = data_dir.join("db");
-    let local_storage_root = data_dir.join("storage");
-    let request_log_spool_dir = tmp_dir.join(REQUEST_LOG_SPOOL_DIR);
     let user_config_path_required = user_config_override.is_some();
 
     ResolvedPathSet {
         default_config_path: config_dir.join("config.default.yaml"),
         user_config_path: user_config_override.unwrap_or_else(|| config_dir.join("config.yaml")),
         user_config_path_required,
-        override_config_path: config_dir.join("config.override.yaml"),
-        override_history_path: config_dir.join("config.override.history.jsonl"),
         persistence: PersistencePaths {
             data_dir: Some(data_dir),
             config_dir,
             db_dir: db_dir.clone(),
             sqlite_db_path: db_dir.join("cyder.sqlite"),
-            local_storage_root,
             tmp_dir,
-            request_log_spool_dir,
         },
         ignored_empty_environment_variables,
     }
@@ -463,6 +453,9 @@ mod tests {
         paths::ConfigPaths,
     };
 
+    const TEST_ENCRYPTION_KEY: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
     fn write_test_config(path: &Path, yaml: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("config parent should be created");
@@ -489,24 +482,8 @@ mod tests {
         );
         assert!(!resolved.user_config_path_required);
         assert_eq!(
-            resolved.override_config_path,
-            PathBuf::from("/data/cyder/config/config.override.yaml")
-        );
-        assert_eq!(
-            resolved.override_history_path,
-            PathBuf::from("/data/cyder/config/config.override.history.jsonl")
-        );
-        assert_eq!(
             resolved.persistence.sqlite_db_path,
             PathBuf::from("/data/cyder/db/cyder.sqlite")
-        );
-        assert_eq!(
-            resolved.persistence.local_storage_root,
-            PathBuf::from("/data/cyder/storage")
-        );
-        assert_eq!(
-            resolved.persistence.request_log_spool_dir,
-            PathBuf::from("/tmp/cyder-api/request-log-spool")
         );
     }
 
@@ -531,14 +508,6 @@ mod tests {
             resolved.default_config_path,
             PathBuf::from("/data/cyder/config/config.default.yaml")
         );
-        assert_eq!(
-            resolved.override_config_path,
-            PathBuf::from("/data/cyder/config/config.override.yaml")
-        );
-        assert_eq!(
-            resolved.override_history_path,
-            PathBuf::from("/data/cyder/config/config.override.history.jsonl")
-        );
     }
 
     #[test]
@@ -562,14 +531,6 @@ mod tests {
         assert_eq!(
             resolved.persistence.sqlite_db_path,
             PathBuf::from("/repo/.cyder/dev/db/cyder.sqlite")
-        );
-        assert_eq!(
-            resolved.persistence.local_storage_root,
-            PathBuf::from("/repo/.cyder/dev/storage")
-        );
-        assert_eq!(
-            resolved.persistence.request_log_spool_dir,
-            PathBuf::from("/repo/.cyder/dev/tmp/request-log-spool")
         );
     }
 
@@ -613,49 +574,31 @@ mod tests {
             default_config_path: resolved.default_config_path,
             user_config_path: resolved.user_config_path,
             user_config_path_required: resolved.user_config_path_required,
-            override_config_path: resolved.override_config_path,
-            override_history_path: resolved.override_history_path,
             persistence: resolved.persistence,
             ignored_empty_environment_variables: resolved.ignored_empty_environment_variables,
         };
 
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
+        write_test_config(
+            &paths.user_config_path,
+            &format!("secret_encryption:\n  encryption_key: '{TEST_ENCRYPTION_KEY}'\n"),
+        );
         let loaded = load_effective_config(
             &paths,
             ConfigLoadOptions {
                 include_environment: false,
-                include_override: true,
             },
         )
         .expect("config should load");
 
-        assert_eq!(loaded.config.port, 8000);
+        assert_eq!(loaded.port, 8000);
         assert!(
             debug_data_dir
                 .join("config")
                 .join("config.default.yaml")
                 .is_file()
         );
-        assert!(
-            debug_data_dir
-                .join("config")
-                .join("config.override.yaml")
-                .is_file()
-        );
-        assert!(
-            debug_data_dir
-                .join("config")
-                .join("config.override.history.jsonl")
-                .is_file()
-        );
         assert!(!temp_dir.path().join("config.default.yaml").exists());
-        assert!(!temp_dir.path().join("config.override.yaml").exists());
-        assert!(
-            !temp_dir
-                .path()
-                .join("config.override.history.jsonl")
-                .exists()
-        );
     }
 
     #[test]
@@ -723,24 +666,12 @@ mod tests {
         );
         assert!(!resolved.user_config_path_required);
         assert_eq!(
-            resolved.override_config_path,
-            PathBuf::from("/data/cyder/config/config.override.yaml")
-        );
-        assert_eq!(
-            resolved.override_history_path,
-            PathBuf::from("/data/cyder/config/config.override.history.jsonl")
-        );
-        assert_eq!(
             resolved.persistence.data_dir,
             Some(PathBuf::from("/data/cyder"))
         );
         assert_eq!(
             resolved.persistence.sqlite_db_path,
             PathBuf::from("/data/cyder/db/cyder.sqlite")
-        );
-        assert_eq!(
-            resolved.persistence.local_storage_root,
-            PathBuf::from("/data/cyder/storage")
         );
     }
 
@@ -774,10 +705,6 @@ mod tests {
             resolved.persistence.sqlite_db_path,
             PathBuf::from("/data/cyder/db/cyder.sqlite")
         );
-        assert_eq!(
-            resolved.persistence.local_storage_root,
-            PathBuf::from("/data/cyder/storage")
-        );
     }
 
     #[test]
@@ -788,20 +715,8 @@ mod tests {
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
 
         assert!(paths.default_config_path.is_file());
-        assert!(paths.override_config_path.is_file());
-        assert!(paths.override_history_path.is_file());
         assert!(!paths.persistence.db_dir.exists());
-        assert!(!paths.persistence.local_storage_root.exists());
         assert!(paths.persistence.tmp_dir.is_dir());
-        assert!(paths.persistence.request_log_spool_dir.is_dir());
-        assert_eq!(
-            fs::read_to_string(&paths.override_config_path).expect("override should read"),
-            "{}\n"
-        );
-        assert_eq!(
-            fs::read_to_string(&paths.override_history_path).expect("history should read"),
-            ""
-        );
     }
 
     #[cfg(unix)]
@@ -812,11 +727,7 @@ mod tests {
 
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
 
-        for path in [
-            &paths.default_config_path,
-            &paths.override_config_path,
-            &paths.override_history_path,
-        ] {
+        for path in [&paths.default_config_path] {
             let mode = fs::metadata(path)
                 .unwrap_or_else(|err| panic!("{} metadata should read: {err}", path.display()))
                 .permissions()
@@ -830,7 +741,7 @@ mod tests {
     fn bootstrap_does_not_overwrite_existing_default_config() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
         let paths = ConfigPaths::for_test(temp_dir.path());
-        let existing = "secret_key: existing-secret\n";
+        let existing = "port: 9123\n";
         write_test_config(&paths.default_config_path, existing);
 
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
@@ -873,7 +784,7 @@ mod tests {
         let error = create_file_if_missing_inner(
             &path,
             "create default configuration file",
-            b"secret_key: temporary\n",
+            b"port: 9124\n",
             true,
         )
         .expect_err("simulated install failure should fail");
@@ -897,12 +808,15 @@ mod tests {
         let paths = ConfigPaths::for_test(temp_dir.path());
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
         let before = fs::read_to_string(&paths.default_config_path).expect("default should read");
+        write_test_config(
+            &paths.user_config_path,
+            &format!("secret_encryption:\n  encryption_key: '{TEST_ENCRYPTION_KEY}'\n"),
+        );
 
         let first = load_effective_config(
             &paths,
             ConfigLoadOptions {
                 include_environment: false,
-                include_override: true,
             },
         )
         .expect("first load should succeed");
@@ -912,7 +826,6 @@ mod tests {
             &paths,
             ConfigLoadOptions {
                 include_environment: false,
-                include_override: true,
             },
         )
         .expect("second load should succeed");
@@ -921,8 +834,8 @@ mod tests {
 
         assert_eq!(before, after_first);
         assert_eq!(before, after_second);
-        assert_eq!(first.config.secret_key, second.config.secret_key);
-        assert_eq!(first.config.jwt_secret, second.config.jwt_secret);
+        assert_eq!(first.jwt_secret, second.jwt_secret);
+        assert_eq!(first.db_url, second.db_url);
     }
 
     #[test]

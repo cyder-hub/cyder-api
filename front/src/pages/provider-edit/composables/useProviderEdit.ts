@@ -10,6 +10,7 @@ import type { ProviderListItem } from "@/services/types";
 import type { ReasoningConfigActions } from "@/components/reasoning/types";
 import type { EditingProviderData } from "../types";
 import { createEmptyEditingProviderData } from "./providerEditState";
+import { mapProviderApiKeySummary } from "./providerEditState";
 
 export function useProviderEdit() {
   const { t } = useI18n();
@@ -110,13 +111,9 @@ export function useProviderEdit() {
             isEditing: false,
             checkStatus: "unchecked" as const,
           })),
-          provider_keys: detail.provider_keys.map((k) => ({
-            id: k.id,
-            api_key: k.api_key,
-            description: k.description ?? null,
-            isEditing: false,
-            checkStatus: "unchecked" as const,
-          })),
+          provider_keys: detail.provider_keys
+            .map(mapProviderApiKeySummary)
+            .filter((key): key is NonNullable<typeof key> => key !== null),
           request_patches: detail.request_patches || [],
         };
       } else {

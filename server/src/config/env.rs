@@ -13,6 +13,7 @@ pub const CYDER_PORT_ENV: &str = "CYDER_PORT";
 pub const CYDER_BASE_PATH_ENV: &str = "CYDER_BASE_PATH";
 pub const CYDER_LOG_LEVEL_ENV: &str = "CYDER_LOG_LEVEL";
 pub const CYDER_TIMEZONE_ENV: &str = "CYDER_TIMEZONE";
+pub const CYDER_MANAGER_AUTH_BROWSER_ORIGIN_ENV: &str = "CYDER_MANAGER_AUTH_BROWSER_ORIGIN";
 
 pub const ALLOWED_CONFIG_ENV_VARS: &[&str] = &[
     CYDER_HOST_ENV,
@@ -20,9 +21,10 @@ pub const ALLOWED_CONFIG_ENV_VARS: &[&str] = &[
     CYDER_BASE_PATH_ENV,
     CYDER_LOG_LEVEL_ENV,
     CYDER_TIMEZONE_ENV,
+    CYDER_MANAGER_AUTH_BROWSER_ORIGIN_ENV,
 ];
 
-pub const ENVIRONMENT_SOURCE_NAME: &str = "allowlisted environment variables: CYDER_HOST, CYDER_PORT, CYDER_BASE_PATH, CYDER_LOG_LEVEL, CYDER_TIMEZONE";
+pub const ENVIRONMENT_SOURCE_NAME: &str = "allowlisted environment variables: CYDER_HOST, CYDER_PORT, CYDER_BASE_PATH, CYDER_LOG_LEVEL, CYDER_TIMEZONE, CYDER_MANAGER_AUTH_BROWSER_ORIGIN";
 
 #[derive(Debug, Clone)]
 pub struct EnvironmentConfigSource {
@@ -49,6 +51,12 @@ impl EnvironmentConfigSource {
         insert_base_path_env(&mut values, &environment)?;
         insert_log_level_env(&mut values, &environment)?;
         insert_timezone_env(&mut values, &environment)?;
+        insert_string_env(
+            &mut values,
+            &environment,
+            CYDER_MANAGER_AUTH_BROWSER_ORIGIN_ENV,
+            "manager_auth.browser_origin",
+        )?;
 
         Ok(Self { values })
     }
@@ -167,13 +175,8 @@ fn ignored_environment_variable(name: &str) -> Option<IgnoredEnvironmentVariable
                 reason: "unprefixed configuration variables are ignored; use the CYDER_* allowlist",
             })
         }
-        "DB_URL"
-        | "SECRET_KEY"
-        | "PASSWORD_SALT"
-        | "JWT_SECRET"
-        | "API_KEY_JWT_SECRET"
-        | "REDIS_URL"
-        | "STORAGE__LOCAL__ROOT" => Some(IgnoredEnvironmentVariable {
+        "DB_URL" | "SECRET_KEY" | "PASSWORD_SALT" | "JWT_SECRET" | "API_KEY_JWT_SECRET"
+        | "REDIS_URL" => Some(IgnoredEnvironmentVariable {
             name: name.to_string(),
             reason: "this configuration field must come from YAML and cannot be overridden by environment",
         }),
@@ -312,6 +315,10 @@ mod tests {
             (CYDER_BASE_PATH_ENV, "/gateway"),
             (CYDER_LOG_LEVEL_ENV, "DEBUG"),
             (CYDER_TIMEZONE_ENV, "Asia/Shanghai"),
+            (
+                CYDER_MANAGER_AUTH_BROWSER_ORIGIN_ENV,
+                "https://admin.example.com",
+            ),
             ("LOG_LEVEL", "error"),
             ("CYDER_DB_URL", "postgres://ignored"),
         ])
@@ -323,6 +330,7 @@ mod tests {
         assert!(values.contains_key("base_path"));
         assert!(values.contains_key("log_level"));
         assert!(values.contains_key("timezone"));
+        assert!(values.contains_key("manager_auth.browser_origin"));
         assert!(!values.contains_key("db_url"));
         assert!(!values.contains_key("cyder_db_url"));
     }

@@ -10,7 +10,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod acl;
 pub mod auth;
 pub mod sse;
-pub mod storage;
 pub mod usage;
 
 #[derive(Debug, Serialize)]

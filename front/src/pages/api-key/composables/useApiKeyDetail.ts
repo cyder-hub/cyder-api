@@ -1,7 +1,11 @@
-import { computed, ref, type ComputedRef } from "vue";
+import { computed, ref, type ComputedRef, type Ref } from "vue";
 
 import * as apiKeyService from "@/services/apiKeys";
-import { confirm, toastController } from "@/services/uiFeedback";
+import {
+  isManagerReauthCancelled,
+  runWithSecretGovernanceReauth,
+} from "@/services/managerReauth";
+import { toastController } from "@/services/uiFeedback";
 import { copyText } from "@/utils/clipboard";
 import { formatTimestamp } from "@/utils/datetime";
 import { normalizeError } from "@/utils/error";
@@ -12,7 +16,6 @@ import type {
   ApiKeyAclRuleScope,
   ApiKeyDetail,
   ApiKeyItem,
-  ApiKeyModelOverrideItem,
   ApiKeyReveal,
   ApiKeyRuntimeBilledAmount,
   ApiKeyRuntimeSnapshot,
@@ -289,28 +292,17 @@ export function aclRuleTarget(
   return modelNameById.get(rule.model_id ?? -1) ?? t("common.notAvailable");
 }
 
-export function modelOverrideTargetLabel(
-  item: ApiKeyModelOverrideItem,
-  routeNameById: Map<number, string>,
-  t: TranslateFn,
-) {
-  return (
-    item.target_route_name ??
-    routeNameById.get(item.target_route_id) ??
-    t("common.notAvailable")
-  );
-}
-
 export function useApiKeyDetail(
   t: TranslateFn,
-  apiKeys: ComputedRef<ApiKeyItem[]>,
   runtimeById: ComputedRef<ApiKeyRuntimeById>,
+  revealedSecret: Ref<ApiKeyReveal | null>,
+  setRevealedSecret: (reveal: ApiKeyReveal | null) => void,
+  selectSecretKey: (id: number | null) => void,
 ) {
   const detailLoading = ref(false);
   const selectedKeyId = ref<number | null>(null);
   const selectedDetail = ref<ApiKeyDetail | null>(null);
   const selectedRuntime = ref<ApiKeyRuntimeSnapshot | null>(null);
-  const secretReveal = ref<ApiKeyReveal | null>(null);
 
   const selectedRuntimeView = computed(() => {
     if (selectedRuntime.value) {
@@ -326,11 +318,11 @@ export function useApiKeyDetail(
   });
 
   async function loadSelectedKey(id: number | null) {
+    selectSecretKey(id);
     selectedKeyId.value = id;
     if (id == null) {
       selectedDetail.value = null;
       selectedRuntime.value = null;
-      secretReveal.value = null;
       return;
     }
 
@@ -342,9 +334,6 @@ export function useApiKeyDetail(
       ]);
       selectedDetail.value = detail;
       selectedRuntime.value = runtime;
-      if (secretReveal.value && secretReveal.value.id !== id) {
-        secretReveal.value = null;
-      }
     } catch (err: unknown) {
       toastController.error(
         t("apiKeyPage.loadDetailFailed", {
@@ -360,6 +349,7 @@ export function useApiKeyDetail(
     if (selectedKeyId.value === id && selectedDetail.value) {
       return;
     }
+    selectSecretKey(id);
     void loadSelectedKey(id);
   }
 
@@ -368,33 +358,24 @@ export function useApiKeyDetail(
     selectedKeyId.value = detail?.id ?? null;
   }
 
-  function setSecretReveal(reveal: ApiKeyReveal | null) {
-    secretReveal.value = reveal;
-  }
-
-  async function handleRevealKey(id: number) {
-    const target = apiKeys.value.find((item) => item.id === id);
-    if (
-      !(await confirm({
-        title: t("apiKeyPage.confirmReveal", { name: target?.name ?? String(id) }),
-        description: t("apiKeyPage.confirmRevealDescription"),
-        confirmText: t("apiKeyPage.actions.reveal"),
-      }))
-    ) {
-      return;
-    }
-
+  async function handleRevealKey(id: number): Promise<boolean> {
     try {
-      secretReveal.value = await apiKeyService.revealApiKey(id);
+      setRevealedSecret(
+        await runWithSecretGovernanceReauth(() =>
+          apiKeyService.revealApiKey(id),
+        ),
+      );
       if (selectedKeyId.value !== id) {
         await loadSelectedKey(id);
       }
+      return true;
     } catch (err: unknown) {
-      toastController.error(
-        t("apiKeyPage.revealFailed", {
-          error: normalizeError(err, t("common.unknownError")).message,
-        }),
-      );
+      if (isManagerReauthCancelled(err)) return false;
+      const fallback = t("apiKeyPage.revealFailed", {
+        error: normalizeError(err, t("common.unknownError")).message,
+      });
+      toastController.error(fallback);
+      return false;
     }
   }
 
@@ -413,12 +394,12 @@ export function useApiKeyDetail(
     selectedDetail,
     selectedRuntime,
     selectedRuntimeView,
-    secretReveal,
+    secretReveal: revealedSecret,
     loadSelectedKey,
     handleSelectKey,
     handleRevealKey,
     copySecret,
     setSelectedDetail,
-    setSecretReveal,
+    setSecretReveal: setRevealedSecret,
   };
 }

@@ -30,7 +30,6 @@ import CostEditorSheet from "@/pages/cost/CostEditorSheet.vue";
 import CostTemplateDrawer from "@/pages/cost/CostTemplateDrawer.vue";
 import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./components/ModelBaseInfoForm.vue";
-import ModelRoutePreviewPanel from "./components/ModelRoutePreviewPanel.vue";
 import ModelRequestPatchPanel from "./components/ModelRequestPatchPanel.vue";
 import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
 import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
@@ -54,7 +53,6 @@ const {
   handleRuntimeFeatureConfigSaved,
   handleNavigateToModels,
   handleNavigateToProviders,
-  handleNavigateToRoutes,
   handleOpenSelectedCostCatalog,
   handleCreateCostCatalog,
   handleDuplicateSelectedCostCatalog,
@@ -123,11 +121,6 @@ const {
             </Badge>
           </div>
         </section>
-
-        <ModelRoutePreviewPanel
-          :route-references="modelDetail.route_references"
-          @open-routes="handleNavigateToRoutes"
-        />
 
         <ModelBaseInfoForm
           v-model:editingData="editingData"

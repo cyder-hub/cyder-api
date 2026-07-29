@@ -5,7 +5,6 @@ use diesel::{
     sql_types::Text,
 };
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-use sha2::{Digest, Sha256};
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs::File;
@@ -29,26 +28,26 @@ use std::{
 #[cfg(test)]
 use tempfile::TempDir;
 
-pub mod alert;
 pub mod api_key;
 pub mod api_key_acl_rule;
 pub mod api_key_rollup;
 pub mod cost;
 pub mod manager_auth_instance;
+pub mod manager_credential;
+pub mod manager_totp_recovery_code;
 pub mod metrics;
 pub mod model;
-pub mod model_route;
-pub mod notification;
 pub mod provider;
 pub mod provider_runtime;
 pub mod reasoning_config;
-pub mod request_attempt;
 pub mod request_log;
 pub mod request_patch;
-pub mod request_replay_run;
 pub mod runtime_feature_config;
 pub mod stat;
 //pub mod record; // Assuming this will be replaced or removed if request_log supersedes it
+
+#[cfg(test)]
+mod migration_smoke_tests;
 
 pub enum DbType {
     Postgres,
@@ -185,7 +184,7 @@ pub(crate) struct TestDbContext {
 
 #[cfg(test)]
 struct TestDbContextInner {
-    _temp_dir: TempDir,
+    _temp_dir: Option<TempDir>,
     pool: DbPool,
 }
 
@@ -215,8 +214,17 @@ impl TestDbContext {
 
         Self {
             inner: Arc::new(TestDbContextInner {
-                _temp_dir: temp_dir,
+                _temp_dir: Some(temp_dir),
                 pool,
+            }),
+        }
+    }
+
+    pub(crate) fn new_postgres(database_url: &str) -> Self {
+        Self {
+            inner: Arc::new(TestDbContextInner {
+                _temp_dir: None,
+                pool: DbPool::establish_for_url(database_url),
             }),
         }
     }
@@ -323,10 +331,6 @@ pub enum DatabaseInitError {
         backend: &'static str,
         source: String,
     },
-    Backfill {
-        backend: &'static str,
-        source: diesel::result::Error,
-    },
     Pool {
         backend: &'static str,
         source: String,
@@ -359,12 +363,6 @@ impl fmt::Display for DatabaseInitError {
             ),
             Self::Migration { backend, source } => {
                 write!(f, "failed to run {backend} migrations: {source}")
-            }
-            Self::Backfill { backend, source } => {
-                write!(
-                    f,
-                    "failed to backfill {backend} api_key shadow table: {source}"
-                )
             }
             Self::Pool { backend, source } => {
                 write!(f, "failed to create {backend} database pool: {source}")
@@ -490,6 +488,7 @@ static DB_POOL: OnceLock<DbPool> = OnceLock::new();
 static DB_POOL_INIT_LOCK: Mutex<()> = Mutex::new(());
 const SQLITE_UPGRADE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 const POSTGRES_UPGRADE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
+// Clean baselines and ordered upgrades remain separate embedded migration sources.
 const SQLITE_CLEAN_BASELINE_MIGRATIONS: EmbeddedMigrations =
     embed_migrations!("migrations/sqlite_clean");
 const POSTGRES_CLEAN_BASELINE_MIGRATIONS: EmbeddedMigrations =
@@ -543,14 +542,6 @@ struct SqliteTableInfoRow {
 }
 
 #[derive(QueryableByName)]
-struct ApiKeyBackfillRow {
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    id: i64,
-    #[diesel(sql_type = Text)]
-    api_key: String,
-}
-
-#[derive(QueryableByName)]
 struct DbCountRow {
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     count: i64,
@@ -579,81 +570,6 @@ fn repair_legacy_sqlite_schema(
             connection.batch_execute("ALTER TABLE model ADD COLUMN cost_catalog_id BIGINT;")
         }
     }
-}
-
-fn compute_api_key_hash(api_key: &str) -> String {
-    format!("{:x}", Sha256::digest(api_key.as_bytes()))
-}
-
-fn compute_key_prefix(api_key: &str) -> String {
-    api_key.chars().take(12).collect()
-}
-
-fn compute_key_last4(api_key: &str) -> String {
-    let last4: String = api_key.chars().rev().take(4).collect();
-    last4.chars().rev().collect()
-}
-
-fn backfill_api_key_shadow_sqlite(
-    connection: &mut SqliteConnection,
-) -> Result<(), diesel::result::Error> {
-    let rows = diesel::sql_query(
-        "SELECT id, api_key
-         FROM api_key
-         WHERE api_key_hash IS NULL
-            OR api_key_hash = ''
-            OR key_prefix = ''
-            OR key_last4 = ''",
-    )
-    .load::<ApiKeyBackfillRow>(connection)?;
-
-    for row in rows {
-        diesel::sql_query(
-            "UPDATE api_key
-             SET api_key_hash = ?,
-                 key_prefix = ?,
-                 key_last4 = ?
-             WHERE id = ?",
-        )
-        .bind::<diesel::sql_types::Text, _>(compute_api_key_hash(&row.api_key))
-        .bind::<diesel::sql_types::Text, _>(compute_key_prefix(&row.api_key))
-        .bind::<diesel::sql_types::Text, _>(compute_key_last4(&row.api_key))
-        .bind::<diesel::sql_types::BigInt, _>(row.id)
-        .execute(connection)?;
-    }
-
-    Ok(())
-}
-
-fn backfill_api_key_shadow_postgres(
-    connection: &mut PgConnection,
-) -> Result<(), diesel::result::Error> {
-    let rows = diesel::sql_query(
-        "SELECT id, api_key
-         FROM api_key
-         WHERE api_key_hash IS NULL
-            OR api_key_hash = ''
-            OR key_prefix = ''
-            OR key_last4 = ''",
-    )
-    .load::<ApiKeyBackfillRow>(connection)?;
-
-    for row in rows {
-        diesel::sql_query(
-            "UPDATE api_key
-             SET api_key_hash = $1,
-                 key_prefix = $2,
-                 key_last4 = $3
-             WHERE id = $4",
-        )
-        .bind::<diesel::sql_types::Text, _>(compute_api_key_hash(&row.api_key))
-        .bind::<diesel::sql_types::Text, _>(compute_key_prefix(&row.api_key))
-        .bind::<diesel::sql_types::Text, _>(compute_key_last4(&row.api_key))
-        .bind::<diesel::sql_types::BigInt, _>(row.id)
-        .execute(connection)?;
-    }
-
-    Ok(())
 }
 
 fn sqlite_user_table_count(
@@ -845,13 +761,6 @@ fn init_sqlite_pool(
         backend: "sqlite",
         source: source.to_string(),
     })?;
-    backfill_api_key_shadow_sqlite(&mut connection).map_err(|source| {
-        DatabaseInitError::Backfill {
-            backend: "sqlite",
-            source,
-        }
-    })?;
-
     let manager = ConnectionManager::<SqliteConnection>::new(db_url);
     Pool::builder()
         .test_on_check_out(true)
@@ -881,13 +790,6 @@ fn init_pg_pool(db_url: &str) -> Result<Pool<ConnectionManager<PgConnection>>, D
         backend: "postgres",
         source: source.to_string(),
     })?;
-    backfill_api_key_shadow_postgres(&mut connection).map_err(|source| {
-        DatabaseInitError::Backfill {
-            backend: "postgres",
-            source,
-        }
-    })?;
-
     let manager = ConnectionManager::<PgConnection>::new(db_url);
     Pool::builder()
         .max_size(CONFIG.db_pool_size)
@@ -906,853 +808,4 @@ pub struct ListResult<T> {
     pub page: i64,
     pub page_size: i64,
     pub list: Vec<T>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    fn apply_sql(connection: &mut SqliteConnection, sql_text: &str) {
-        if let Err(err) = connection.batch_execute(sql_text) {
-            panic!("sql should execute successfully: {err}\n{sql_text}");
-        }
-    }
-
-    fn provider_exists(connection: &mut SqliteConnection, provider_id: i64) -> bool {
-        diesel::sql_query("SELECT COUNT(*) AS count FROM provider WHERE id = ?")
-            .bind::<diesel::sql_types::BigInt, _>(provider_id)
-            .get_result::<DbCountRow>(connection)
-            .map(|row| row.count > 0)
-            .expect("provider existence query should succeed")
-    }
-
-    fn insert_provider_marker(connection: &mut SqliteConnection, provider_id: i64) {
-        diesel::sql_query(
-            "INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
-                updated_at, provider_type, provider_api_key_mode
-            ) VALUES (?, ?, ?, ?, 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE')",
-        )
-        .bind::<diesel::sql_types::BigInt, _>(provider_id)
-        .bind::<diesel::sql_types::Text, _>(format!("provider-{provider_id}"))
-        .bind::<diesel::sql_types::Text, _>(format!("Provider {provider_id}"))
-        .bind::<diesel::sql_types::Text, _>("https://example.com")
-        .execute(connection)
-        .expect("provider marker should insert");
-    }
-
-    #[test]
-    fn sqlite_db_file_creation_creates_parent_directory_and_file() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("db").join("cyder.sqlite");
-
-        ensure_sqlite_db_file(db_path.to_str().expect("db path should be utf8"))
-            .expect("sqlite db file should be created");
-
-        assert!(db_path.is_file());
-    }
-
-    #[test]
-    fn sqlite_db_file_creation_error_includes_operation_and_path() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        let blocked_parent = temp_dir.path().join("blocked");
-        std::fs::write(&blocked_parent, "not a directory")
-            .expect("blocking file should be written");
-        let db_path = blocked_parent.join("cyder.sqlite");
-
-        let error = ensure_sqlite_db_file(db_path.to_str().expect("db path should be utf8"))
-            .expect_err("blocked parent should fail sqlite db file creation");
-        let message = error.to_string();
-
-        assert!(
-            message.contains("create sqlite database directory"),
-            "unexpected error: {message}"
-        );
-        assert!(
-            message.contains(&blocked_parent.display().to_string()),
-            "unexpected error: {message}"
-        );
-    }
-
-    #[test]
-    fn sqlite_pool_initialization_creates_configured_db_file() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        let db_path = temp_dir.path().join("db").join("cyder.sqlite");
-
-        let _pool =
-            DbPool::try_establish_for_url(db_path.to_str().expect("db path should be utf8"))
-                .expect("sqlite pool should initialize");
-
-        assert!(db_path.is_file());
-    }
-
-    #[test]
-    fn sqlite_pool_initialization_error_includes_operation_and_path() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-        let blocked_parent = temp_dir.path().join("blocked-db-dir");
-        std::fs::write(&blocked_parent, "not a directory")
-            .expect("blocking file should be written");
-        let db_path = blocked_parent.join("cyder.sqlite");
-
-        let error = match DbPool::try_establish_for_url(
-            db_path.to_str().expect("db path should be utf8"),
-        ) {
-            Ok(_) => panic!("sqlite pool should fail before panic when db dir is blocked"),
-            Err(error) => error,
-        };
-        let message = error.to_string();
-
-        assert!(
-            message.contains("create sqlite database directory"),
-            "unexpected error: {message}"
-        );
-        assert!(
-            message.contains(&blocked_parent.display().to_string()),
-            "unexpected error: {message}"
-        );
-    }
-
-    #[test]
-    fn retryable_global_initializer_does_not_cache_failed_attempts() {
-        static CELL: OnceLock<&'static str> = OnceLock::new();
-        static LOCK: Mutex<()> = Mutex::new(());
-        static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
-
-        let first = get_or_try_init_retryable(&CELL, &LOCK, || {
-            ATTEMPTS.fetch_add(1, Ordering::SeqCst);
-            Err::<&'static str, &'static str>("database is temporarily unavailable")
-        });
-        assert_eq!(
-            first,
-            Err("database is temporarily unavailable"),
-            "first initialization should surface the transient error"
-        );
-        assert!(
-            CELL.get().is_none(),
-            "failed initialization must not populate the global cell"
-        );
-
-        let second = get_or_try_init_retryable(&CELL, &LOCK, || {
-            ATTEMPTS.fetch_add(1, Ordering::SeqCst);
-            Ok::<&'static str, &'static str>("ready")
-        })
-        .expect("second initialization should retry and succeed");
-        assert_eq!(*second, "ready");
-
-        let third = get_or_try_init_retryable(&CELL, &LOCK, || {
-            ATTEMPTS.fetch_add(1, Ordering::SeqCst);
-            Ok::<&'static str, &'static str>("wrong")
-        })
-        .expect("initialized value should be reused");
-        assert_eq!(*third, "ready");
-        assert_eq!(ATTEMPTS.load(Ordering::SeqCst), 2);
-    }
-
-    fn mark_sqlite_migration_applied(connection: &mut SqliteConnection, version: &str) {
-        connection
-            .batch_execute(
-                "CREATE TABLE IF NOT EXISTS __diesel_schema_migrations (
-                    version VARCHAR(50) PRIMARY KEY NOT NULL,
-                    run_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );",
-            )
-            .expect("migration metadata table should be created");
-
-        diesel::sql_query(format!(
-            "INSERT INTO __diesel_schema_migrations (version) VALUES ('{version}')"
-        ))
-        .execute(connection)
-        .expect("migration version should be recorded");
-    }
-
-    #[derive(QueryableByName)]
-    struct NullableBigIntRow {
-        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
-        cost_catalog_id: Option<i64>,
-    }
-
-    #[test]
-    fn sqlite_cost_foundation_migration_tolerates_legacy_model_billing_plan_id() {
-        let (_temp_dir, mut connection) = open_test_sqlite_connection("legacy.sqlite");
-
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!("../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"),
-        );
-        apply_sql(
-            &mut connection,
-            include_str!(
-                "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
-            ),
-        );
-
-        for version in [
-            "20250320062357",
-            "20250702140210",
-            "20260128233111",
-            "20260203230221",
-            "20260408090000",
-        ] {
-            mark_sqlite_migration_applied(&mut connection, version);
-        }
-
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
-                updated_at, provider_type, provider_api_key_mode
-            ) VALUES (
-                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO billing_plans (
-                id, name, description, is_default, currency, created_at, updated_at, deleted_at
-            ) VALUES (
-                9999, 'legacy-plan', NULL, 0, 'USD', 1, 1, NULL
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO model (
-                id, provider_id, billing_plan_id, model_name, real_model_name, is_enabled,
-                deleted_at, created_at, updated_at
-            ) VALUES (
-                10, 1, 9999, 'demo-model', NULL, 1, NULL, 1, 1
-            );",
-        );
-
-        run_sqlite_migrations(&mut connection).expect("remaining sqlite migrations should succeed");
-
-        let migrated_cost_catalog_id =
-            diesel::sql_query("SELECT cost_catalog_id FROM model WHERE id = 10")
-                .get_result::<NullableBigIntRow>(&mut connection)
-                .expect("migrated model row should be readable")
-                .cost_catalog_id;
-
-        assert_eq!(migrated_cost_catalog_id, None);
-    }
-
-    #[derive(QueryableByName)]
-    struct CountRow {
-        #[diesel(sql_type = diesel::sql_types::BigInt)]
-        count: i64,
-    }
-
-    #[derive(QueryableByName)]
-    struct ApiKeyShadowRow {
-        #[diesel(sql_type = diesel::sql_types::BigInt)]
-        id: i64,
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        api_key_hash: String,
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        key_prefix: String,
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        key_last4: String,
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        default_action: String,
-    }
-
-    #[test]
-    fn sqlite_api_key_shadow_backfill_populates_hash_and_request_log_links() {
-        let (_temp_dir, mut connection) =
-            open_test_sqlite_connection_with_migrations("api-key-shadow.sqlite");
-
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
-                updated_at, provider_type, provider_api_key_mode
-            ) VALUES (
-                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO model (
-                id, provider_id, cost_catalog_id, model_name, real_model_name, is_enabled,
-                deleted_at, created_at, updated_at
-            ) VALUES (
-                10, 1, NULL, 'demo-model', 'demo-model', 1, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO api_key (
-                id, api_key, api_key_hash, key_prefix, key_last4, name, description,
-                default_action, is_enabled, expires_at, rate_limit_rpm, max_concurrent_requests,
-                quota_daily_requests, quota_daily_tokens, quota_monthly_tokens,
-                budget_daily_nanos, budget_daily_currency, budget_monthly_nanos,
-                budget_monthly_currency, deleted_at, created_at, updated_at
-            ) VALUES (
-                3, 'cyder-abcdefghijklmnopqrstuvwxyz', NULL, 'cyder-abcdef', 'wxyz', 'demo', NULL,
-                'ALLOW', 1, NULL, NULL, NULL,
-                NULL, NULL, NULL,
-                NULL, NULL, NULL,
-                NULL, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO api_key_acl_rule (
-                id, api_key_id, effect, scope, provider_id, model_id, priority, is_enabled,
-                description, created_at, updated_at, deleted_at
-            ) VALUES (
-                31, 3, 'DENY', 'MODEL', 1, 10, 5, 1, 'deny demo model', 1, 1, NULL
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO request_log (
-                id, api_key_id, requested_model_name, resolved_name_scope, user_api_type,
-                overall_status, attempt_count, retry_count, fallback_count, request_received_at,
-                created_at, updated_at, has_transform_diagnostics, transform_diagnostic_count
-            ) VALUES (
-                20, 3, 'demo-model', 'direct', 'OPENAI',
-                'SUCCESS', 1, 0, 0, 123456,
-                123456, 123456, 0, 0
-            );",
-        );
-
-        backfill_api_key_shadow_sqlite(&mut connection)
-            .expect("api_key shadow backfill should succeed");
-
-        let api_key = diesel::sql_query(
-            "SELECT id, api_key_hash, key_prefix, key_last4, default_action
-             FROM api_key
-             WHERE id = 3",
-        )
-        .get_result::<ApiKeyShadowRow>(&mut connection)
-        .expect("api_key row should be readable");
-
-        assert_eq!(api_key.id, 3);
-        assert_eq!(
-            api_key.api_key_hash,
-            compute_api_key_hash("cyder-abcdefghijklmnopqrstuvwxyz")
-        );
-        assert_eq!(api_key.key_prefix, "cyder-abcdef");
-        assert_eq!(api_key.key_last4, "wxyz");
-        assert_eq!(api_key.default_action, "ALLOW");
-
-        let acl_rule_count = diesel::sql_query(
-            "SELECT COUNT(*) AS count
-             FROM api_key_acl_rule
-             WHERE api_key_id = 3
-               AND scope = 'MODEL'",
-        )
-        .get_result::<CountRow>(&mut connection)
-        .expect("api_key_acl_rule count should be readable")
-        .count;
-        assert_eq!(acl_rule_count, 1);
-
-        let join_count = diesel::sql_query(
-            "SELECT COUNT(*) AS count
-             FROM request_log AS rl
-             JOIN api_key AS ak
-               ON rl.api_key_id = ak.id
-             WHERE rl.id = 20
-               AND ak.id = 3",
-        )
-        .get_result::<CountRow>(&mut connection)
-        .expect("request_log/api_key join count should be readable")
-        .count;
-        assert_eq!(join_count, 1);
-    }
-
-    #[test]
-    fn sqlite_fresh_install_bootstraps_clean_baseline_and_marks_upgrade_history_applied() {
-        let (_temp_dir, mut connection) = open_test_sqlite_connection("clean-baseline.sqlite");
-        let legacy_tables = [
-            ["system", "_api_key"].concat(),
-            ["access", "_control_rule"].concat(),
-            ["access", "_control_policy"].concat(),
-            ["model", "_alias"].concat(),
-        ];
-
-        run_sqlite_migrations(&mut connection)
-            .expect("fresh install should bootstrap the clean baseline");
-
-        for table_name in [
-            "api_key",
-            "request_log",
-            "request_attempt",
-            "request_patch_rule",
-        ] {
-            assert!(
-                sqlite_table_exists(&mut connection, table_name),
-                "{table_name} should exist after clean baseline bootstrap"
-            );
-        }
-
-        for table_name in &legacy_tables {
-            assert!(
-                !sqlite_table_exists(&mut connection, table_name.as_str()),
-                "{table_name} should not exist after clean baseline bootstrap"
-            );
-        }
-
-        let baseline_count = diesel::sql_query(format!(
-            "SELECT COUNT(*) AS count
-             FROM __diesel_schema_migrations
-             WHERE version = '{SQLITE_CLEAN_BASELINE_VERSION}'"
-        ))
-        .get_result::<CountRow>(&mut connection)
-        .expect("clean baseline migration count should be readable")
-        .count;
-        assert_eq!(baseline_count, 1);
-
-        let archived_upgrade_count = diesel::sql_query(
-            "SELECT COUNT(*) AS count
-             FROM __diesel_schema_migrations
-             WHERE version = '20250702140210'
-                OR version = '20260423120000'",
-        )
-        .get_result::<CountRow>(&mut connection)
-        .expect("archived upgrade migration count should be readable")
-        .count;
-        assert_eq!(archived_upgrade_count, 2);
-    }
-
-    fn sqlite_table_exists(connection: &mut SqliteConnection, table_name: &str) -> bool {
-        super::sqlite_table_has_column(connection, table_name, "id")
-            .expect("table existence should be readable")
-            .unwrap_or(false)
-    }
-
-    fn apply_sqlite_migrations_through_request_diagnostics_replay(
-        connection: &mut SqliteConnection,
-    ) {
-        for (version, sql_text) in [
-            (
-                "20250320062357",
-                include_str!("../../migrations/sqlite/2025-03-20-062357_initial_setup/up.sql"),
-            ),
-            (
-                "20250702140210",
-                include_str!("../../migrations/sqlite/2025-07-02-140210_api_key_jwt/up.sql"),
-            ),
-            (
-                "20260128233111",
-                include_str!(
-                    "../../migrations/sqlite/2026-01-28-233111_request_log_optimize/up.sql"
-                ),
-            ),
-            (
-                "20260203230221",
-                include_str!(
-                    "../../migrations/sqlite/2026-02-03-230221_request_log_field_opt/up.sql"
-                ),
-            ),
-            (
-                "20260408090000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-08-090000_expand_llm_api_type_for_request_log/up.sql"
-                ),
-            ),
-            (
-                "20260410120000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-10-120000_cost_schema_foundation/up.sql"
-                ),
-            ),
-            (
-                "20260414090000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-14-090000_cost_catalog_version_freeze_flags/up.sql"
-                ),
-            ),
-            (
-                "20260417100000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-17-100000_model_route_foundation/up.sql"
-                ),
-            ),
-            (
-                "20260417120000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-17-120000_api_key_governance_foundation/up.sql"
-                ),
-            ),
-            (
-                "20260417130000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-17-130000_request_log_route_trace/up.sql"
-                ),
-            ),
-            (
-                "20260420120000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-20-120000_request_patch_rule_foundation/up.sql"
-                ),
-            ),
-            (
-                "20260421090000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-21-090000_routing_resilience_foundation/up.sql"
-                ),
-            ),
-            (
-                "20260422120000",
-                include_str!(
-                    "../../migrations/sqlite/2026-04-22-120000_request_diagnostics_replay_foundation/up.sql"
-                ),
-            ),
-        ] {
-            apply_sql(connection, sql_text);
-            mark_sqlite_migration_applied(connection, version);
-        }
-    }
-
-    #[test]
-    fn sqlite_drop_legacy_tables_migration_removes_legacy_tables_on_existing_schema() {
-        let (_temp_dir, mut connection) = open_test_sqlite_connection("drop-legacy.sqlite");
-        let legacy_tables = [
-            ["system", "_api_key"].concat(),
-            ["access", "_control_rule"].concat(),
-            ["access", "_control_policy"].concat(),
-            ["model", "_alias"].concat(),
-        ];
-
-        apply_sqlite_migrations_through_request_diagnostics_replay(&mut connection);
-
-        for table_name in &legacy_tables {
-            assert!(
-                sqlite_table_exists(&mut connection, table_name.as_str()),
-                "{table_name} should exist before the drop migration runs"
-            );
-        }
-
-        run_sqlite_migrations(&mut connection)
-            .expect("drop migration should succeed on the current sqlite schema");
-
-        for table_name in &legacy_tables {
-            assert!(
-                !sqlite_table_exists(&mut connection, table_name.as_str()),
-                "{table_name} should be removed by the drop migration"
-            );
-        }
-
-        assert!(sqlite_table_exists(&mut connection, "api_key"));
-        assert!(sqlite_table_exists(&mut connection, "request_log"));
-    }
-
-    #[test]
-    fn sqlite_reasoning_profile_cleanup_preserves_model_acl_rules() {
-        let (_temp_dir, mut connection) =
-            open_test_sqlite_connection("reasoning-cleanup-acl-rule.sqlite");
-
-        apply_sqlite_migrations_through_request_diagnostics_replay(&mut connection);
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
-                updated_at, provider_type, provider_api_key_mode
-            ) VALUES (
-                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO model (
-                id, provider_id, cost_catalog_id, model_name, real_model_name, is_enabled,
-                deleted_at, created_at, updated_at
-            ) VALUES (
-                10, 1, NULL, 'demo-model', 'demo-model', 1, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO api_key (
-                id, api_key, api_key_hash, key_prefix, key_last4, name, description,
-                default_action, is_enabled, expires_at, rate_limit_rpm, max_concurrent_requests,
-                quota_daily_requests, quota_daily_tokens, quota_monthly_tokens,
-                budget_daily_nanos, budget_daily_currency, budget_monthly_nanos,
-                budget_monthly_currency, deleted_at, created_at, updated_at
-            ) VALUES (
-                3, 'cyder-abcdefghijklmnopqrstuvwxyz', NULL, 'cyder-abcdef', 'wxyz', 'demo', NULL,
-                'ALLOW', 1, NULL, NULL, NULL,
-                NULL, NULL, NULL,
-                NULL, NULL, NULL,
-                NULL, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO api_key_acl_rule (
-                id, api_key_id, effect, scope, provider_id, model_id, priority, is_enabled,
-                description, created_at, updated_at, deleted_at
-            ) VALUES (
-                31, 3, 'DENY', 'MODEL', 1, 10, 5, 1, 'deny demo model', 1, 1, NULL
-            );",
-        );
-
-        run_sqlite_migrations(&mut connection)
-            .expect("reasoning cleanup should not corrupt API key ACL rule FKs");
-
-        let acl_rule_count = diesel::sql_query(
-            "SELECT COUNT(*) AS count
-             FROM api_key_acl_rule
-             WHERE id = 31
-               AND api_key_id = 3
-               AND scope = 'MODEL'
-               AND provider_id = 1
-               AND model_id = 10",
-        )
-        .get_result::<CountRow>(&mut connection)
-        .expect("api_key_acl_rule count should be readable")
-        .count;
-        assert_eq!(acl_rule_count, 1);
-
-        assert!(
-            !sqlite_table_has_column(&mut connection, "provider", "default_reasoning_profile_id")
-                .expect("provider columns should be readable")
-                .unwrap_or(false)
-        );
-        assert!(
-            !sqlite_table_has_column(&mut connection, "model", "reasoning_profile_override_id")
-                .expect("model columns should be readable")
-                .unwrap_or(false)
-        );
-    }
-
-    #[test]
-    fn sqlite_request_patch_rule_migration_replaces_legacy_tables_and_adds_request_log_trace_columns()
-     {
-        let (_temp_dir, mut connection) =
-            open_test_sqlite_connection_with_migrations("request-patch-rule.sqlite");
-
-        let request_patch_table_count = diesel::sql_query(
-            "SELECT COUNT(*) AS count
-             FROM sqlite_master
-             WHERE type = 'table'
-               AND name = 'request_patch_rule'",
-        )
-        .get_result::<CountRow>(&mut connection)
-        .expect("request_patch_rule table count should be readable")
-        .count;
-        assert_eq!(request_patch_table_count, 1);
-
-        for legacy_table in [
-            "custom_field_definition",
-            "provider_custom_field_assignment",
-            "model_custom_field_assignment",
-        ] {
-            let legacy_table_count = diesel::sql_query(format!(
-                "SELECT COUNT(*) AS count
-                 FROM sqlite_master
-                 WHERE type = 'table'
-                   AND name = '{legacy_table}'"
-            ))
-            .get_result::<CountRow>(&mut connection)
-            .expect("legacy table count should be readable")
-            .count;
-            assert_eq!(legacy_table_count, 0, "{legacy_table} should be removed");
-        }
-
-        for column in [
-            "applied_request_patch_ids_json",
-            "request_patch_summary_json",
-        ] {
-            let column_count = diesel::sql_query(format!(
-                "SELECT COUNT(*) AS count
-                 FROM pragma_table_info('request_attempt')
-                 WHERE name = '{column}'"
-            ))
-            .get_result::<CountRow>(&mut connection)
-            .expect("request_attempt column count should be readable")
-            .count;
-            assert_eq!(column_count, 1, "{column} should exist on request_attempt");
-        }
-
-        apply_sql(
-            &mut connection,
-            "INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at, created_at,
-                updated_at, provider_type, provider_api_key_mode
-            ) VALUES (
-                1, 'p', 'Provider', 'https://example.com', 0, 1, NULL, 1, 1, 'OPENAI', 'QUEUE'
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO model (
-                id, provider_id, cost_catalog_id, model_name, real_model_name, is_enabled,
-                deleted_at, created_at, updated_at
-            ) VALUES (
-                10, 1, NULL, 'demo-model', NULL, 1, NULL, 1, 1
-            );",
-        );
-        apply_sql(
-            &mut connection,
-            "INSERT INTO request_patch_rule (
-                id, provider_id, model_id, placement, target, operation, value_json, description,
-                is_enabled, deleted_at, created_at, updated_at
-            ) VALUES (
-                100, 1, NULL, 'HEADER', 'x-demo', 'SET', '\"demo\"', NULL, 1, NULL, 1, 1
-            );",
-        );
-
-        assert!(
-            connection
-                .batch_execute(
-                    "INSERT INTO request_patch_rule (
-                        id, provider_id, model_id, placement, target, operation, value_json,
-                        description, is_enabled, deleted_at, created_at, updated_at
-                    ) VALUES (
-                        101, 1, NULL, 'HEADER', 'x-demo', 'SET', '\"another\"', NULL, 1, NULL, 1, 1
-                    );"
-                )
-                .is_err(),
-            "duplicate active provider identity should be rejected"
-        );
-
-        assert!(
-            connection
-                .batch_execute(
-                    "INSERT INTO request_patch_rule (
-                        id, provider_id, model_id, placement, target, operation, value_json,
-                        description, is_enabled, deleted_at, created_at, updated_at
-                    ) VALUES (
-                        102, NULL, 10, 'QUERY', 'debug', 'REMOVE', 'true', NULL, 1, NULL, 1, 1
-                    );"
-                )
-                .is_err(),
-            "REMOVE with value_json should be rejected"
-        );
-
-        assert!(
-            connection
-                .batch_execute(
-                    "INSERT INTO request_patch_rule (
-                        id, provider_id, model_id, placement, target, operation, value_json,
-                        description, is_enabled, deleted_at, created_at, updated_at
-                    ) VALUES (
-                        103, 1, 10, 'BODY', '/temperature', 'SET', '0.1', NULL, 1, NULL, 1, 1
-                    );"
-                )
-                .is_err(),
-            "provider/model xor constraint should be enforced"
-        );
-
-        assert!(
-            connection
-                .batch_execute(
-                    "INSERT INTO request_patch_rule (
-                        id, provider_id, model_id, placement, target, operation, value_json,
-                        description, is_enabled, deleted_at, created_at, updated_at
-                    ) VALUES (
-                        104, NULL, 10, 'BODY', '/temperature', 'SET', 'not-json', NULL, 1, NULL, 1, 1
-                    );"
-                )
-                .is_err(),
-            "invalid json payload should be rejected"
-        );
-    }
-
-    #[test]
-    fn test_db_context_run_sync_uses_scoped_pool_and_restores_default_after_exit() {
-        let scoped = TestDbContext::new_sqlite("scoped-run-sync.sqlite");
-        let marker_id = 991_001;
-
-        scoped.run_sync(|| {
-            let DbConnection::Sqlite(mut connection) =
-                get_connection().expect("scoped sqlite connection should be available")
-            else {
-                panic!("expected sqlite connection");
-            };
-            insert_provider_marker(&mut connection, marker_id);
-            assert!(provider_exists(&mut connection, marker_id));
-        });
-
-        let DbConnection::Sqlite(mut default_connection) =
-            get_connection().expect("default sqlite connection should be available")
-        else {
-            panic!("expected sqlite connection");
-        };
-        assert!(!provider_exists(&mut default_connection, marker_id));
-    }
-
-    #[tokio::test]
-    async fn test_db_context_run_async_uses_scoped_pool() {
-        let scoped = TestDbContext::new_sqlite("scoped-run-async.sqlite");
-        let marker_id = 991_002;
-
-        scoped
-            .run_async(async {
-                let DbConnection::Sqlite(mut connection) =
-                    get_connection().expect("scoped sqlite connection should be available")
-                else {
-                    panic!("expected sqlite connection");
-                };
-                insert_provider_marker(&mut connection, marker_id);
-                assert!(provider_exists(&mut connection, marker_id));
-            })
-            .await;
-
-        let DbConnection::Sqlite(mut default_connection) =
-            get_connection().expect("default sqlite connection should be available")
-        else {
-            panic!("expected sqlite connection");
-        };
-        assert!(!provider_exists(&mut default_connection, marker_id));
-    }
-
-    #[test]
-    fn nested_test_db_context_scopes_restore_outer_pool() {
-        let outer = TestDbContext::new_sqlite("outer-scope.sqlite");
-        let inner = TestDbContext::new_sqlite("inner-scope.sqlite");
-        let outer_marker = 991_003;
-        let inner_marker = 991_004;
-
-        outer.run_sync(|| {
-            let DbConnection::Sqlite(mut outer_connection) =
-                get_connection().expect("outer sqlite connection should be available")
-            else {
-                panic!("expected sqlite connection");
-            };
-            insert_provider_marker(&mut outer_connection, outer_marker);
-            assert!(provider_exists(&mut outer_connection, outer_marker));
-            assert!(!provider_exists(&mut outer_connection, inner_marker));
-            drop(outer_connection);
-
-            inner.run_sync(|| {
-                let DbConnection::Sqlite(mut inner_connection) =
-                    get_connection().expect("inner sqlite connection should be available")
-                else {
-                    panic!("expected sqlite connection");
-                };
-                insert_provider_marker(&mut inner_connection, inner_marker);
-                assert!(provider_exists(&mut inner_connection, inner_marker));
-                assert!(!provider_exists(&mut inner_connection, outer_marker));
-            });
-
-            let DbConnection::Sqlite(mut restored_outer_connection) =
-                get_connection().expect("outer sqlite connection should be restored")
-            else {
-                panic!("expected sqlite connection");
-            };
-            assert!(provider_exists(
-                &mut restored_outer_connection,
-                outer_marker
-            ));
-            assert!(!provider_exists(
-                &mut restored_outer_connection,
-                inner_marker
-            ));
-        });
-    }
 }

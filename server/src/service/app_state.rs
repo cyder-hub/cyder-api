@@ -4,19 +4,11 @@ use axum::Router;
 use chrono::Utc;
 use thiserror::Error;
 
-use crate::config::{
-    LOADED_CONFIG, RuntimeStateBackendType,
-    loader::{ConfigLoadOptions, LoadedConfig},
-};
+use crate::config::{CONFIG, RuntimeStateBackendType};
 use crate::proxy::logging::RequestLogPersistedSink;
 use crate::service::cache::CacheError;
-use crate::service::{
-    alerts::AlertsService,
-    diagnostics::{DiagnosticsPolicy, DiagnosticsPolicyManager, DiagnosticsService},
-    metrics::MetricsService,
-    notification::NotificationService,
-    system_config::SystemConfigService,
-};
+use crate::service::metrics::MetricsService;
+use crate::service::secret_encryption::SecretEncryptionService;
 
 #[cfg(test)]
 use crate::database::TestDbContext;
@@ -41,12 +33,13 @@ pub struct AppState {
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
     pub provider_circuit: Arc<ProviderCircuitService>,
     pub reasoning_continuation_store: Arc<dyn ReasoningContinuationStore>,
-    pub diagnostics: Arc<DiagnosticsService>,
     pub metrics: Arc<MetricsService>,
-    pub alerts: Arc<AlertsService>,
-    pub notification: Arc<NotificationService>,
     pub runtime_backend_status: Arc<RuntimeStateBackendStatus>,
-    pub system_config: Arc<SystemConfigService>,
+    pub secret_encryption: Arc<SecretEncryptionService>,
+    pub manager_auth_browser_origin: Option<String>,
+    pub base_path: String,
+    pub max_body_size: usize,
+    pub timezone: Option<String>,
 }
 
 impl AppState {
@@ -79,19 +72,21 @@ impl AppState {
         #[cfg(not(test))]
         let force_memory_cache = false;
         let force_memory_runtime_state = force_memory_cache;
-        let loaded_config = load_initial_config()?;
-        let system_config = Arc::new(SystemConfigService::new(
-            loaded_config.clone(),
-            ConfigLoadOptions::default(),
-        ));
-        let initial_snapshot = system_config.runtime_snapshot().await;
+        let config = CONFIG.clone();
+        #[cfg(test)]
+        let config = {
+            let mut config = config;
+            if test_db_context.is_some() {
+                config.manager_auth.browser_origin = Some("http://127.0.0.1:29528".to_string());
+            }
+            config
+        };
 
         #[cfg(test)]
         let infra = Arc::new(
             AppInfra::new_with_config(
-                initial_snapshot.version,
-                initial_snapshot.proxy_request.clone(),
-                initial_snapshot.proxy.clone(),
+                config.proxy_request.clone(),
+                config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
                 test_db_context.clone(),
             )
             .await,
@@ -100,47 +95,27 @@ impl AppState {
         #[cfg(not(test))]
         let infra = Arc::new(
             AppInfra::new_with_config(
-                initial_snapshot.version,
-                initial_snapshot.proxy_request.clone(),
-                initial_snapshot.proxy.clone(),
+                config.proxy_request.clone(),
+                config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
             )
             .await,
         );
-        system_config
-            .register_http_client_manager(infra.http_clients())
-            .await;
-        let diagnostics_policy_manager = Arc::new(DiagnosticsPolicyManager::new(
-            DiagnosticsPolicy::from_config(&initial_snapshot.diagnostics),
-        ));
-        system_config
-            .register_diagnostics_policy_manager(Arc::clone(&diagnostics_policy_manager))
-            .await;
-        let diagnostics = Arc::new(DiagnosticsService::new(diagnostics_policy_manager));
-        let metrics = Arc::new(MetricsService::new(loaded_config.config.metrics.clone()));
-        let alerts = Arc::new(AlertsService::new(loaded_config.config.alerts.clone()));
-        let notification = Arc::new(
-            NotificationService::new_with_default_channel_cooldown_seconds(
-                loaded_config.config.notification.clone(),
-                loaded_config.config.alerts.default_cooldown_seconds,
-            ),
-        );
+        let metrics = Arc::new(MetricsService::new(config.metrics.clone()));
         let metrics_sink: Arc<dyn RequestLogPersistedSink> = metrics.clone();
         infra
             .log_manager()
             .set_request_log_persisted_sink(metrics_sink);
 
-        let runtime_backend = RuntimeStateBackendBundle::from_config(
-            &loaded_config.config,
-            force_memory_runtime_state,
-        )
-        .await?;
-        system_config
-            .register_provider_governance_config_manager(
-                runtime_backend.provider_circuit.config_manager(),
-            )
-            .await;
+        let runtime_backend =
+            RuntimeStateBackendBundle::from_config(&config, force_memory_runtime_state).await?;
         let catalog = Arc::new(CatalogService::new(force_memory_cache).await);
-        let admin = Arc::new(AdminServices::new(Arc::clone(&catalog)));
+        let secret_encryption = Arc::new(SecretEncryptionService::from_config(
+            &config.secret_encryption,
+        ));
+        let admin = Arc::new(AdminServices::new(
+            Arc::clone(&catalog),
+            Arc::clone(&secret_encryption),
+        ));
         let provider_key_selector = ProviderKeySelector::new(
             Arc::clone(&catalog),
             Arc::clone(&runtime_backend.provider_key_cursor_store),
@@ -155,12 +130,13 @@ impl AppState {
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
             reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
-            diagnostics,
             metrics,
-            alerts,
-            notification,
             runtime_backend_status: Arc::new(runtime_backend.status),
-            system_config,
+            secret_encryption,
+            manager_auth_browser_origin: config.manager_auth.browser_origin.clone(),
+            base_path: config.base_path.clone(),
+            max_body_size: config.max_body_size,
+            timezone: config.timezone.clone(),
         })
     }
 
@@ -206,8 +182,7 @@ impl AppState {
     #[cfg(not(test))]
     pub fn start_background_workers(self: &Arc<Self>) {
         self.spawn_metrics_reconciliation_worker();
-        self.spawn_alert_evaluation_worker();
-        self.spawn_notification_delivery_worker();
+        self.spawn_manager_session_cleanup_worker();
     }
 
     #[cfg(not(test))]
@@ -246,77 +221,35 @@ impl AppState {
     }
 
     #[cfg(not(test))]
-    fn spawn_alert_evaluation_worker(self: &Arc<Self>) {
-        if !self.alerts.config().enabled {
-            return;
-        }
+    fn spawn_manager_session_cleanup_worker(self: &Arc<Self>) {
         let app_state = Arc::clone(self);
-        let interval_seconds = app_state.alerts.config().evaluation_interval_seconds.max(1);
         self.infra.spawn_background_task(async move {
+            let period = std::time::Duration::from_secs(60 * 60);
             let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             loop {
                 interval.tick().await;
-                let result = app_state.alerts.tick_evaluation_worker(&app_state).await;
-                if result.failed > 0 {
-                    crate::warn_event!(
-                        "alerts.evaluation_worker_tick_degraded",
-                        evaluated = result.evaluated,
-                        fired = result.fired,
-                        resolved = result.resolved,
-                        failed = result.failed
-                    );
-                } else if result.fired > 0 || result.resolved > 0 {
-                    crate::debug_event!(
-                        "alerts.evaluation_worker_tick_completed",
-                        evaluated = result.evaluated,
-                        fired = result.fired,
-                        resolved = result.resolved
-                    );
-                }
+                app_state.tick_manager_session_cleanup();
             }
         });
     }
 
-    #[cfg(not(test))]
-    fn spawn_notification_delivery_worker(self: &Arc<Self>) {
-        if !self.notification.config().enabled {
-            return;
-        }
-        let app_state = Arc::clone(self);
-        let interval_seconds = app_state
-            .notification
-            .config()
-            .worker_interval_seconds
-            .max(1);
-        self.infra.spawn_background_task(async move {
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(interval_seconds));
-            loop {
-                interval.tick().await;
-                let client = app_state.infra.client().await;
-                let result = app_state
-                    .notification
-                    .tick_delivery_worker(client.as_ref())
-                    .await;
-                if result.failed > 0 {
-                    crate::warn_event!(
-                        "notification.delivery_worker_tick_degraded",
-                        processed = result.processed,
-                        succeeded = result.succeeded,
-                        retry_scheduled = result.retry_scheduled,
-                        failed = result.failed
-                    );
-                } else if result.processed > 0 {
+    fn tick_manager_session_cleanup(&self) -> Option<usize> {
+        match self.admin.auth.cleanup_expired_instances() {
+            Ok(removed) => {
+                if removed > 0 {
                     crate::debug_event!(
-                        "notification.delivery_worker_tick_completed",
-                        processed = result.processed,
-                        succeeded = result.succeeded,
-                        retry_scheduled = result.retry_scheduled
+                        "manager.auth.session_cleanup_completed",
+                        removed_sessions = removed
                     );
                 }
+                Some(removed)
             }
-        });
+            Err(_) => {
+                crate::warn_event!("manager.auth.session_cleanup_failed", reason = "storage");
+                None
+            }
+        }
     }
 }
 
@@ -373,69 +306,43 @@ pub fn create_state_router() -> StateRouter {
     Router::<Arc<AppState>>::new()
 }
 
-fn load_initial_config() -> Result<LoadedConfig, RuntimeStateBackendError> {
-    Ok(LOADED_CONFIG.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::admin::AdminServices;
     use super::AppState;
-    use crate::config::{CONFIG, LOADED_CONFIG, RuntimeStateBackendType};
-    use crate::database::TestDbContext;
-    use crate::service::alerts::AlertsService;
+    use crate::config::{CONFIG, RuntimeStateBackendType};
+    use crate::database::manager_auth_instance::ManagerAuthInstance;
+    use crate::database::{DbConnection, TestDbContext, get_connection};
     use crate::service::catalog::CatalogService;
-    use crate::service::diagnostics::{
-        DiagnosticsPolicy, DiagnosticsPolicyManager, DiagnosticsService,
-    };
     use crate::service::infra::AppInfra;
     use crate::service::metrics::MetricsService;
-    use crate::service::notification::NotificationService;
     use crate::service::runtime::{ProviderKeySelector, RuntimeStateBackendBundle};
-    use crate::service::system_config::SystemConfigService;
+    use crate::service::secret_encryption::SecretEncryptionService;
+    use diesel::RunQueryDsl;
     use std::sync::Arc;
 
     async fn test_app_state() -> AppState {
         let catalog = Arc::new(CatalogService::new(true).await);
-        let admin = Arc::new(AdminServices::new(Arc::clone(&catalog)));
-        let loaded_config = super::load_initial_config().expect("config should load");
-        let system_config = Arc::new(SystemConfigService::new_with_default_options(loaded_config));
-        let initial_snapshot = system_config.runtime_snapshot().await;
+        let config = CONFIG.clone();
+        let secret_encryption = Arc::new(SecretEncryptionService::from_config(
+            &config.secret_encryption,
+        ));
+        let admin = Arc::new(AdminServices::new(
+            Arc::clone(&catalog),
+            Arc::clone(&secret_encryption),
+        ));
         let infra = Arc::new(
             AppInfra::new_with_config(
-                initial_snapshot.version,
-                initial_snapshot.proxy_request.clone(),
-                initial_snapshot.proxy.clone(),
+                config.proxy_request.clone(),
+                config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
                 None,
             )
             .await,
         );
-        system_config
-            .register_http_client_manager(infra.http_clients())
-            .await;
-        let diagnostics_policy_manager = Arc::new(DiagnosticsPolicyManager::new(
-            DiagnosticsPolicy::from_config(&initial_snapshot.diagnostics),
-        ));
-        system_config
-            .register_diagnostics_policy_manager(Arc::clone(&diagnostics_policy_manager))
-            .await;
-        let diagnostics = Arc::new(DiagnosticsService::new(diagnostics_policy_manager));
         let metrics = Arc::new(MetricsService::new(CONFIG.metrics.clone()));
-        let alerts = Arc::new(AlertsService::new(CONFIG.alerts.clone()));
-        let notification = Arc::new(
-            NotificationService::new_with_default_channel_cooldown_seconds(
-                CONFIG.notification.clone(),
-                CONFIG.alerts.default_cooldown_seconds,
-            ),
-        );
         let runtime_backend = RuntimeStateBackendBundle::from_config(&CONFIG, true)
             .await
             .expect("test runtime backend should initialize");
-        system_config
-            .register_provider_governance_config_manager(
-                runtime_backend.provider_circuit.config_manager(),
-            )
-            .await;
         let provider_key_selector = ProviderKeySelector::new(
             Arc::clone(&catalog),
             Arc::clone(&runtime_backend.provider_key_cursor_store),
@@ -450,12 +357,13 @@ mod tests {
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
             provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
             reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
-            diagnostics,
             metrics,
-            alerts,
-            notification,
             runtime_backend_status: Arc::new(runtime_backend.status),
-            system_config,
+            secret_encryption,
+            manager_auth_browser_origin: config.manager_auth.browser_origin.clone(),
+            base_path: config.base_path.clone(),
+            max_body_size: config.max_body_size,
+            timezone: config.timezone,
         }
     }
 
@@ -473,9 +381,11 @@ mod tests {
             Arc::strong_count(&app_state.reasoning_continuation_store),
             1
         );
-        assert_eq!(Arc::strong_count(&app_state.diagnostics), 1);
         assert_eq!(Arc::strong_count(&app_state.runtime_backend_status), 1);
-        assert_eq!(Arc::strong_count(&app_state.system_config), 1);
+        assert!(Arc::ptr_eq(
+            &app_state.secret_encryption,
+            &app_state.admin.secret_encryption,
+        ));
     }
 
     #[tokio::test]
@@ -505,24 +415,65 @@ mod tests {
 
         assert_eq!(status.runtime_effective_backend, "memory");
         assert_eq!(status.catalog_cache_backend, "memory");
-        assert!(!status.runtime_shared);
         assert!(status.last_error.is_none());
     }
 
     #[tokio::test]
-    async fn app_state_exposes_initial_system_config_snapshot() {
+    async fn app_state_exposes_static_request_settings() {
         let app_state =
-            AppState::new_for_test(TestDbContext::new_sqlite("app-state-system-config.sqlite"))
+            AppState::new_for_test(TestDbContext::new_sqlite("app-state-static-config.sqlite"))
                 .await;
 
-        let snapshot = app_state.system_config.runtime_snapshot().await;
+        assert_eq!(app_state.max_body_size, CONFIG.max_body_size);
+        assert_eq!(app_state.timezone, CONFIG.timezone);
+    }
 
-        assert_eq!(snapshot.version, 1);
-        assert_eq!(snapshot.log_level, LOADED_CONFIG.config.log_level);
-        assert_eq!(
-            &app_state.system_config.paths().default_config_path,
-            &LOADED_CONFIG.paths.default_config_path
-        );
-        assert_eq!(CONFIG.secret_key.as_str(), LOADED_CONFIG.config.secret_key);
+    #[tokio::test]
+    async fn manager_session_cleanup_tick_removes_expired_rows_and_survives_storage_failure() {
+        let test_db_context = TestDbContext::new_sqlite("app-state-session-cleanup.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let app_state = super::create_test_app_state(test_db_context.clone()).await;
+                let now = crate::utils::auth::get_current_timestamp();
+                let expired = ManagerAuthInstance::create_instance(
+                    "expired-cleanup".to_string(),
+                    crate::utils::auth::manager_jwt_key_id().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
+                    now - 2,
+                    now - 1,
+                    now + 100,
+                )
+                .expect("expired fixture should create");
+
+                assert_eq!(app_state.tick_manager_session_cleanup(), Some(1));
+                assert!(
+                    ManagerAuthInstance::get_instance(expired.id)
+                        .expect("expired lookup should query")
+                        .is_none()
+                );
+
+                let mut conn = get_connection().expect("connection should load");
+                match &mut conn {
+                    DbConnection::Postgres(conn) => {
+                        diesel::sql_query("DROP TABLE manager_auth_instance")
+                            .execute(conn)
+                            .expect("session table should drop");
+                    }
+                    DbConnection::Sqlite(conn) => {
+                        diesel::sql_query("DROP TABLE manager_auth_instance")
+                            .execute(conn)
+                            .expect("session table should drop");
+                    }
+                }
+                drop(conn);
+
+                assert_eq!(app_state.tick_manager_session_cleanup(), None);
+                assert!(
+                    app_state.max_body_size > 0,
+                    "proxy state must remain usable"
+                );
+            })
+            .await;
     }
 }

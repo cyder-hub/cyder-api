@@ -12,14 +12,12 @@ export interface RuntimeStateBackendRow {
 
 export function buildDefaultRuntimeStateBackendStatus(): RuntimeStateBackendStatus {
   return {
-    deployment_mode: "single_instance",
     catalog_cache_backend: "memory",
     catalog_cache_configured_backend: "memory",
     catalog_cache_effective_backend: "memory",
     catalog_cache_fallback_reason: null,
     runtime_configured_backend: "memory",
     runtime_effective_backend: "memory",
-    runtime_shared: false,
     runtime_degraded: false,
     fallback_reason: null,
     last_error: null,

@@ -3,8 +3,12 @@ import { computed, ref, watch } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import LanguageSwitcher from "@/components/LanguageSwitcher.vue";
+import ManagerReauthDialog from "@/components/manager/ManagerReauthDialog.vue";
+import { Badge } from "@/components/ui/badge";
 import { navItems, navSectionOrder, type NavSection } from "@/router/nav-items";
 import { logout as logoutSession } from "@/services/auth";
+import { toastController } from "@/services/uiFeedback";
+import { useAuthStore } from "@/store/authStore";
 import {
   LogOut,
   Menu,
@@ -17,9 +21,11 @@ import { Drawer, DrawerContent } from "@/components/ui/drawer";
 const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
 
 const isCollapsed = ref(false);
 const isMobileNavOpen = ref(false);
+const isLoggingOut = ref(false);
 
 type ManagerRouteMeta = {
   titleKey?: string;
@@ -43,9 +49,21 @@ const closeMobileNav = () => {
 };
 
 const handleLogout = async () => {
-  await logoutSession();
-  closeMobileNav();
-  router.replace({ name: "Login" });
+  if (isLoggingOut.value) return;
+  isLoggingOut.value = true;
+  try {
+    const outcome = await logoutSession();
+    closeMobileNav();
+    await router.replace({ name: "Login" });
+    if (!outcome.serverRevocationConfirmed) {
+      toastController.warn(
+        t("app.logoutLocalOnlyTitle"),
+        t("app.logoutLocalOnlyDescription"),
+      );
+    }
+  } finally {
+    isLoggingOut.value = false;
+  }
 };
 
 const translateNavItem = (item: { text?: string; i18nKey?: string }) => {
@@ -180,10 +198,22 @@ watch(
                 </span>
                 <span
                   v-if="!isCollapsed"
-                  class="ml-2.5 overflow-hidden whitespace-nowrap"
+                  class="ml-2.5 min-w-0 flex-1 overflow-hidden whitespace-nowrap"
                 >
                   {{ translateNavItem(item) }}
                 </span>
+                <Badge
+                  v-if="item.navKey === 'security' && authStore.totpState === 'disabled' && !isCollapsed"
+                  variant="outline"
+                  class="ml-2 border-amber-200 bg-amber-50 px-1.5 text-[10px] text-amber-700"
+                >
+                  {{ t("securityPage.states.disabled") }}
+                </Badge>
+                <span
+                  v-if="item.navKey === 'security' && authStore.totpState === 'disabled' && isCollapsed"
+                  class="absolute ml-4 mt-[-1rem] h-2 w-2 rounded-full border border-white bg-amber-500"
+                  :aria-label="t('securityPage.states.disabled')"
+                />
               </RouterLink>
             </li>
           </ul>
@@ -207,6 +237,7 @@ watch(
           :title="isCollapsed ? t('app.logout') : undefined"
           :aria-label="t('app.logout')"
           @click="handleLogout"
+          :disabled="isLoggingOut"
         >
           <LogOut class="h-4 w-4 flex-shrink-0 text-gray-400 group-hover:text-gray-600" />
           <span
@@ -284,7 +315,14 @@ watch(
                     "
                   >
                     <component :is="item.icon" class="h-4 w-4 flex-shrink-0" />
-                    <span class="truncate">{{ translateNavItem(item) }}</span>
+                    <span class="min-w-0 flex-1 truncate">{{ translateNavItem(item) }}</span>
+                    <Badge
+                      v-if="item.navKey === 'security' && authStore.totpState === 'disabled'"
+                      variant="outline"
+                      class="border-amber-200 bg-amber-50 px-1.5 text-[10px] text-amber-700"
+                    >
+                      {{ t("securityPage.states.disabled") }}
+                    </Badge>
                   </RouterLink>
                 </li>
               </ul>
@@ -297,6 +335,7 @@ watch(
               class="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
               :aria-label="t('app.logout')"
               @click="handleLogout"
+              :disabled="isLoggingOut"
             >
               <LogOut class="h-4 w-4 flex-shrink-0 text-gray-400" />
               <span class="truncate">{{ t("app.logout") }}</span>
@@ -310,6 +349,7 @@ watch(
         <RouterView />
       </main>
     </div>
+    <ManagerReauthDialog />
   </div>
 </template>
 

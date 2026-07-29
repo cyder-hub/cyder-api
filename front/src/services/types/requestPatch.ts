@@ -144,40 +144,6 @@ export interface ModelReasoningConfigPayload {
   presets?: ReasoningConfigPresetPayload[];
 }
 
-export interface ReasoningRouteCandidatePreview {
-  candidate_position: number;
-  runtime_status: "valid" | "stale_skipped";
-  provider_id: number | null;
-  provider_key: string | null;
-  model_id: number;
-  model_name: string | null;
-  preset_key: ReasoningPresetKey;
-  suffix: string;
-  supported: boolean;
-  reason: string | null;
-  config_source: ReasoningConfigSource | null;
-  config_scope: ReasoningConfigScope | null;
-  config_id: number | null;
-  config_preset_id: number | null;
-  family: ReasoningPatchFamilyKey | null;
-}
-
-export interface ReasoningRoutePresetPreview {
-  preset_key: ReasoningPresetKey;
-  suffix: string;
-  requires_reasoning: boolean;
-  allowed_operation_kinds: string[];
-  stable: boolean;
-  reason: string | null;
-  candidates: ReasoningRouteCandidatePreview[];
-}
-
-export interface ReasoningRoutePreview {
-  route_id: number;
-  route_name: string;
-  presets: ReasoningRoutePresetPreview[];
-}
-
 export type RequestPatchSource =
   | {
       kind: "provider_rule";

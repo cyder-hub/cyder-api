@@ -89,63 +89,6 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
       "front/src/components/request-patch/RequestPatchRulesPanel.vue props.textPrefix",
   },
   {
-    id: "alerts",
-    keyTemplates: [
-      "alertsPage.severity.{severity}",
-      "alertsPage.status.{status}",
-      "alertsPage.delivery.status.{deliveryStatus}",
-    ],
-    values: [
-      "critical",
-      "warning",
-      "info",
-      "active",
-      "resolved",
-      "failed",
-      "retry_scheduled",
-      "skipped",
-      "in_progress",
-      "pending",
-      "succeeded",
-    ],
-    placeholders: {
-      severity: ["critical", "warning", "info"],
-      status: ["active", "resolved"],
-      deliveryStatus: [
-        "failed",
-        "retry_scheduled",
-        "skipped",
-        "in_progress",
-        "pending",
-        "succeeded",
-      ],
-    },
-    valueSource: "front/src/pages/alerts/** alert and delivery state values",
-  },
-  {
-    id: "notifications",
-    keyTemplates: ["notificationPage.delivery.status.{deliveryStatus}"],
-    values: [
-      "failed",
-      "retry_scheduled",
-      "skipped",
-      "in_progress",
-      "pending",
-      "succeeded",
-    ],
-    placeholders: {
-      deliveryStatus: [
-        "failed",
-        "retry_scheduled",
-        "skipped",
-        "in_progress",
-        "pending",
-        "succeeded",
-      ],
-    },
-    valueSource: "front/src/pages/notifications/** delivery state values",
-  },
-  {
     id: "api-key-governance",
     keyTemplates: [
       "apiKeyPage.status.{lifecycle}",
@@ -242,63 +185,6 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
     valueSource: "front/src/pages/cost/** validation message path mapping",
   },
   {
-    id: "portable-config-enums",
-    keyTemplates: [
-      "portableConfigPage.fileProtection.{mode}",
-      "portableConfigPage.conflictStrategy.{strategy}",
-      "portableConfigPage.applyStatus.{status}",
-      "portableConfigPage.import.applyDisabledReason.{code}",
-    ],
-    values: [],
-    placeholders: {
-      mode: ["plaintext", "password_encrypted"],
-      strategy: ["fail_on_conflict", "skip_existing", "overwrite_existing"],
-      status: ["applied", "skipped", "blocked", "failed"],
-      code: [
-        "no_preview",
-        "top_level_blocking",
-        "no_selected_modules",
-        "missing_reason",
-        "module_blocking",
-        "dangerous_patch_confirmation",
-      ],
-    },
-    valueSource:
-      "front/src/services/types/portableConfig.ts and PortableApplyDisabledReasonCode",
-  },
-  {
-    id: "portable-config-known-ids",
-    keyTemplates: [
-      "portableConfigPage.modules.{moduleId}",
-      "portableConfigPage.subranges.{subrangeId}",
-    ],
-    values: [],
-    placeholders: {
-      moduleId: [
-        "provider_profile",
-        "api_keys",
-        "cost_catalogs",
-        "cost_bindings",
-      ],
-      subrangeId: [
-        "provider_core",
-        "provider_keys",
-        "provider_models",
-        "provider_request_patches",
-        "provider_reasoning_config",
-        "api_key_core",
-        "api_key_acl",
-        "api_key_model_override",
-        "cost_catalog_core",
-        "cost_catalog_versions",
-        "cost_components",
-        "cost_model_bindings",
-      ],
-    },
-    valueSource:
-      "KnownPortableModuleId and KnownPortableSubrangeId; unknown backend IDs use backend labels",
-  },
-  {
     id: "record-detail-tabs",
     keyTemplates: ["{tab.labelKey}"],
     values: [],
@@ -306,18 +192,5 @@ export const DYNAMIC_I18N_KEY_SOURCES = [
   },
 ] as const satisfies readonly DynamicI18nKeySource[];
 
-export const DYNAMIC_I18N_FALLBACK_EXCEPTIONS = [
-  {
-    id: "record-replay-unavailable-reason",
-    keyTemplate: "recordPage.detailDialog.replay.reasons.{reason}",
-    guard: "te(key)",
-    fallback: "raw backend reason",
-  },
-  {
-    id: "portable-config-unknown-module-or-subrange",
-    keyTemplate:
-      "portableConfigPage.modules.{moduleId} / portableConfigPage.subranges.{subrangeId}",
-    guard: "known ID check",
-    fallback: "backend-provided label",
-  },
-] as const satisfies readonly DynamicI18nFallbackException[];
+export const DYNAMIC_I18N_FALLBACK_EXCEPTIONS =
+  [] as const satisfies readonly DynamicI18nFallbackException[];

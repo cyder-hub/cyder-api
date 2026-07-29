@@ -139,34 +139,6 @@
             :options="userApiTypeOptions"
             @update:model-value="$emit('updateFilter', 'user_api_type', $event)"
           />
-          <FilterSelect
-            class="xl:col-span-3"
-            :label="$t('recordPage.filter.resolvedScopeLabel')"
-            :model-value="filters.resolved_name_scope"
-            :options="resolvedScopeOptions"
-            @update:model-value="$emit('updateFilter', 'resolved_name_scope', $event)"
-          />
-          <FilterSelect
-            class="xl:col-span-2"
-            :label="$t('recordPage.filter.retryLabel')"
-            :model-value="filters.has_retry"
-            :options="booleanOptions"
-            @update:model-value="$emit('updateFilter', 'has_retry', $event)"
-          />
-          <FilterSelect
-            class="xl:col-span-2"
-            :label="$t('recordPage.filter.fallbackLabel')"
-            :model-value="filters.has_fallback"
-            :options="booleanOptions"
-            @update:model-value="$emit('updateFilter', 'has_fallback', $event)"
-          />
-          <FilterSelect
-            class="xl:col-span-2"
-            :label="$t('recordPage.filter.diagnosticsLabel')"
-            :model-value="filters.has_transform_diagnostics"
-            :options="booleanOptions"
-            @update:model-value="$emit('updateFilter', 'has_transform_diagnostics', $event)"
-          />
           <FilterInput
             class="xl:col-span-2"
             :label="$t('recordPage.filter.errorCodeLabel')"
@@ -286,8 +258,6 @@ defineProps<{
   modelOptions: FilterOption[];
   statusOptions: FilterOption[];
   userApiTypeOptions: FilterOption[];
-  resolvedScopeOptions: FilterOption[];
-  booleanOptions: FilterOption[];
 }>();
 
 defineEmits<{

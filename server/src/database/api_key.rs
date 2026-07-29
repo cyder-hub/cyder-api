@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use chrono::Utc;
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric, rng};
@@ -10,10 +8,11 @@ use super::{
     DbResult,
     api_key_acl_rule::{self as api_key_acl_repository, ApiKeyAclRule, ApiKeyAclRuleInput},
     get_connection,
-    model_route::NewApiKeyModelOverride,
 };
 use crate::controller::BaseError;
 use crate::schema::enum_def::Action;
+use crate::service::secret_encryption::EncryptedSecret;
+#[cfg(test)]
 use crate::utils::ID_GENERATOR;
 use crate::{db_execute, db_object};
 
@@ -22,9 +21,7 @@ db_object! {
     #[diesel(table_name = api_key)]
     pub struct ApiKey {
         pub id: i64,
-        #[diesel(column_name = api_key_value)]
-        pub api_key: String,
-        pub api_key_hash: Option<String>,
+        pub api_key_hash: String,
         pub key_prefix: String,
         pub key_last4: String,
         pub name: String,
@@ -50,9 +47,7 @@ db_object! {
     #[diesel(table_name = api_key)]
     pub struct NewApiKey {
         pub id: i64,
-        #[diesel(column_name = api_key_value)]
-        pub api_key: String,
-        pub api_key_hash: Option<String>,
+        pub api_key_hash: String,
         pub key_prefix: String,
         pub key_last4: String,
         pub name: String,
@@ -164,6 +159,7 @@ pub struct ApiKeySummary {
     pub budget_monthly_currency: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub can_reveal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,9 +184,10 @@ pub struct ApiKeyDetail {
     pub created_at: i64,
     pub updated_at: i64,
     pub acl_rules: Vec<ApiKeyAclRule>,
+    pub can_reveal: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ApiKeyReveal {
     pub id: i64,
     pub name: String,
@@ -198,74 +195,137 @@ pub struct ApiKeyReveal {
     pub key_last4: String,
     pub api_key: String,
     pub updated_at: i64,
+    pub can_reveal: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for ApiKeyReveal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiKeyReveal")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("key_prefix", &self.key_prefix)
+            .field("key_last4", &self.key_last4)
+            .field("api_key", &"<redacted>")
+            .field("updated_at", &self.updated_at)
+            .field("can_reveal", &self.can_reveal)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ApiKeyDetailWithSecret {
     pub detail: ApiKeyDetail,
     pub reveal: ApiKeyReveal,
 }
 
-#[derive(Debug, Clone)]
-pub struct ApiKeyModelOverrideWriteInput {
-    pub source_name: String,
-    pub target_route_id: i64,
-    pub description: Option<String>,
-    pub is_enabled: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ApiKeyModelOverrideWriteSummary {
-    pub old_source_names: Vec<String>,
-    pub new_source_names: Vec<String>,
-    pub override_count: usize,
-    pub enabled_override_count: usize,
-}
-
-impl ApiKeyModelOverrideWriteSummary {
-    pub fn invalidation_source_names(&self) -> Vec<String> {
-        collect_source_names(self.old_source_names.clone(), self.new_source_names.clone())
-    }
-
-    fn from_rows(
-        old_source_names: Vec<String>,
-        rows: &[NewApiKeyModelOverride],
-    ) -> ApiKeyModelOverrideWriteSummary {
-        ApiKeyModelOverrideWriteSummary {
-            old_source_names,
-            new_source_names: rows.iter().map(|row| row.source_name.clone()).collect(),
-            override_count: rows.len(),
-            enabled_override_count: rows.iter().filter(|row| row.is_enabled).count(),
-        }
+impl std::fmt::Debug for ApiKeyDetailWithSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiKeyDetailWithSecret")
+            .field("detail", &self.detail)
+            .field("reveal", &"<redacted>")
+            .finish()
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CreateApiKeyWithOverridesResult {
-    pub created: ApiKeyDetailWithSecret,
-    pub override_summary: ApiKeyModelOverrideWriteSummary,
-}
-
-#[derive(Debug, Clone)]
-pub struct UpdateApiKeyWithOverridesResult {
-    pub updated: ApiKeyDetail,
-    pub override_summary: ApiKeyModelOverrideWriteSummary,
-}
-
-#[derive(Debug, Clone)]
-pub struct DeleteApiKeyWithOverridesResult {
-    pub deleted: ApiKey,
-    pub old_api_key_hash: String,
-    pub override_summary: ApiKeyModelOverrideWriteSummary,
-}
-
-fn generate_api_key_secret() -> String {
+pub(crate) fn generate_api_key_secret() -> String {
     let random_part: String = rng()
         .sample_iter(&Alphanumeric)
         .take(48)
         .map(char::from)
         .collect();
     format!("cyder-{}", random_part)
+}
+
+pub(crate) struct ApiKeyIssuance {
+    id: i64,
+    api_key_hash: String,
+    key_prefix: String,
+    key_last4: String,
+    encrypted_secret: Option<EncryptedSecret>,
+}
+
+impl ApiKeyIssuance {
+    pub(crate) fn new(id: i64, secret: &str, encrypted_secret: Option<EncryptedSecret>) -> Self {
+        Self {
+            id,
+            api_key_hash: hash_api_key(secret),
+            key_prefix: key_prefix(secret),
+            key_last4: key_last4(secret),
+            encrypted_secret,
+        }
+    }
+
+    pub(crate) fn has_encrypted_secret(&self) -> bool {
+        self.encrypted_secret.is_some()
+    }
+}
+
+impl std::fmt::Debug for ApiKeyIssuance {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiKeyIssuance")
+            .field("id", &self.id)
+            .field("api_key_hash", &"<redacted>")
+            .field("key_prefix", &self.key_prefix)
+            .field("key_last4", &self.key_last4)
+            .field(
+                "encrypted_secret",
+                &self.encrypted_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ApiKeyRevealMetadata {
+    pub id: i64,
+    pub secret_tuple_complete: bool,
+    pub secret_key_fingerprint: Option<String>,
+}
+
+impl std::fmt::Debug for ApiKeyRevealMetadata {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiKeyRevealMetadata")
+            .field("id", &self.id)
+            .field("secret_tuple_complete", &self.secret_tuple_complete)
+            .field(
+                "secret_key_fingerprint",
+                &self.secret_key_fingerprint.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+pub(crate) struct ApiKeyStoredSecret {
+    pub id: i64,
+    pub name: String,
+    pub key_prefix: String,
+    pub key_last4: String,
+    pub updated_at: i64,
+    pub ciphertext: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub format_version: i32,
+    pub key_fingerprint: String,
+}
+
+impl std::fmt::Debug for ApiKeyStoredSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiKeyStoredSecret")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("key_prefix", &self.key_prefix)
+            .field("key_last4", &self.key_last4)
+            .field("updated_at", &self.updated_at)
+            .field("ciphertext", &"<redacted>")
+            .field("nonce", &"<redacted>")
+            .field("format_version", &self.format_version)
+            .field("key_fingerprint", &"<redacted>")
+            .finish()
+    }
 }
 
 pub(crate) fn hash_api_key(secret: &str) -> String {
@@ -279,46 +339,6 @@ pub(crate) fn key_prefix(secret: &str) -> String {
 pub(crate) fn key_last4(secret: &str) -> String {
     let last4: String = secret.chars().rev().take(4).collect();
     last4.chars().rev().collect()
-}
-
-fn normalize_required_name(field: &str, value: &str) -> DbResult<String> {
-    let normalized = value.trim();
-    if normalized.is_empty() {
-        return Err(BaseError::ParamInvalid(Some(format!(
-            "{field} must not be empty"
-        ))));
-    }
-    Ok(normalized.to_string())
-}
-
-fn make_model_override_rows(
-    api_key_id: i64,
-    payloads: &[ApiKeyModelOverrideWriteInput],
-    now: i64,
-) -> DbResult<Vec<NewApiKeyModelOverride>> {
-    let mut rows = Vec::with_capacity(payloads.len());
-    for payload in payloads {
-        rows.push(NewApiKeyModelOverride {
-            id: ID_GENERATOR.generate_id(),
-            api_key_id,
-            source_name: normalize_required_name("source_name", &payload.source_name)?,
-            target_route_id: payload.target_route_id,
-            description: payload.description.clone(),
-            is_enabled: payload.is_enabled.unwrap_or(true),
-            created_at: now,
-            updated_at: now,
-        });
-    }
-    Ok(rows)
-}
-
-fn collect_source_names(existing: Vec<String>, created: Vec<String>) -> Vec<String> {
-    existing
-        .into_iter()
-        .chain(created)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 fn map_write_error(context: &str, e: diesel::result::Error) -> BaseError {
@@ -341,8 +361,6 @@ macro_rules! api_key_admin_db_execute {
                 #[allow(unused_imports)]
                 use crate::database::api_key_acl_rule::_postgres_model::*;
                 #[allow(unused_imports)]
-                use crate::database::model_route::_postgres_model::*;
-                #[allow(unused_imports)]
                 use diesel::prelude::*;
 
                 $block
@@ -353,8 +371,6 @@ macro_rules! api_key_admin_db_execute {
                 use crate::database::_sqlite_schema::*;
                 #[allow(unused_imports)]
                 use crate::database::api_key_acl_rule::_sqlite_model::*;
-                #[allow(unused_imports)]
-                use crate::database::model_route::_sqlite_model::*;
                 #[allow(unused_imports)]
                 use diesel::prelude::*;
 
@@ -431,119 +447,6 @@ macro_rules! replace_api_key_acl_rules_in_tx {
     }};
 }
 
-macro_rules! replace_api_key_model_overrides_in_tx {
-    ($conn:ident, $api_key_id:expr, $override_rows:expr, $now:expr) => {{
-        let override_rows = $override_rows;
-
-        if !override_rows.is_empty() {
-            let direct_model_names = provider::table
-                .inner_join(model::table.on(model::dsl::provider_id.eq(provider::dsl::id)))
-                .filter(
-                    provider::dsl::deleted_at
-                        .is_null()
-                        .and(provider::dsl::is_enabled.eq(true))
-                        .and(model::dsl::deleted_at.is_null())
-                        .and(model::dsl::is_enabled.eq(true)),
-                )
-                .select((provider::dsl::provider_key, model::dsl::model_name))
-                .load::<(String, String)>($conn)
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to load active direct provider/model names: {}",
-                        e
-                    )))
-                })?;
-
-            for override_row in override_rows {
-                let source_name = &override_row.source_name;
-                if direct_model_names.iter().any(|(provider_key, model_name)| {
-                    format!("{provider_key}/{model_name}") == *source_name
-                }) {
-                    Err(BaseError::ParamInvalid(Some(format!(
-                        "name '{}' conflicts with an active direct provider/model address",
-                        source_name
-                    ))))?;
-                }
-            }
-        }
-
-        let existing_rows = api_key_model_override::table
-            .filter(
-                api_key_model_override::dsl::api_key_id
-                    .eq($api_key_id)
-                    .and(api_key_model_override::dsl::deleted_at.is_null()),
-            )
-            .order(api_key_model_override::dsl::created_at.asc())
-            .select(ApiKeyModelOverrideDb::as_select())
-            .load::<ApiKeyModelOverrideDb>($conn)
-            .map_err(|e| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to list api key model overrides for {}: {}",
-                    $api_key_id, e
-                )))
-            })?;
-        let old_source_names = existing_rows
-            .into_iter()
-            .map(ApiKeyModelOverrideDb::from_db)
-            .map(|override_row| override_row.source_name)
-            .collect::<Vec<_>>();
-
-        diesel::update(
-            api_key_model_override::table.filter(
-                api_key_model_override::dsl::api_key_id
-                    .eq($api_key_id)
-                    .and(api_key_model_override::dsl::deleted_at.is_null()),
-            ),
-        )
-        .set((
-            api_key_model_override::dsl::deleted_at.eq(Some($now)),
-            api_key_model_override::dsl::is_enabled.eq(false),
-            api_key_model_override::dsl::updated_at.eq($now),
-        ))
-        .execute($conn)
-        .map_err(|e| {
-            BaseError::DatabaseFatal(Some(format!(
-                "Failed to replace api key model overrides for {}: {}",
-                $api_key_id, e
-            )))
-        })?;
-
-        for override_row in override_rows {
-            model_route::table
-                .filter(
-                    model_route::dsl::id
-                        .eq(override_row.target_route_id)
-                        .and(model_route::dsl::deleted_at.is_null()),
-                )
-                .select(model_route::dsl::id)
-                .first::<i64>($conn)
-                .optional()
-                .map_err(|e| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to fetch model route {}: {}",
-                        override_row.target_route_id, e
-                    )))
-                })?
-                .ok_or_else(|| {
-                    BaseError::NotFound(Some(format!(
-                        "Model route {} not found",
-                        override_row.target_route_id
-                    )))
-                })?;
-
-            let db_row = NewApiKeyModelOverrideDb::to_db(override_row);
-            diesel::insert_into(api_key_model_override::table)
-                .values(&db_row)
-                .execute($conn)
-                .map_err(|e| map_write_error("Failed to create api key model override", e))?;
-        }
-
-        Ok::<ApiKeyModelOverrideWriteSummary, BaseError>(
-            ApiKeyModelOverrideWriteSummary::from_rows(old_source_names, override_rows),
-        )
-    }};
-}
-
 fn default_api_key_action() -> Action {
     Action::Allow
 }
@@ -569,17 +472,19 @@ fn build_summary(row: &ApiKey) -> ApiKeySummary {
         budget_monthly_currency: row.budget_monthly_currency.clone(),
         created_at: row.created_at,
         updated_at: row.updated_at,
+        can_reveal: false,
     }
 }
 
-fn build_reveal(row: &ApiKey) -> ApiKeyReveal {
+pub(crate) fn build_reveal(row: &ApiKey, secret: String, can_reveal: bool) -> ApiKeyReveal {
     ApiKeyReveal {
         id: row.id,
         name: row.name.clone(),
         key_prefix: row.key_prefix.clone(),
         key_last4: row.key_last4.clone(),
-        api_key: row.api_key.clone(),
+        api_key: secret,
         updated_at: row.updated_at,
+        can_reveal,
     }
 }
 
@@ -605,23 +510,22 @@ fn build_detail(row: &ApiKey, acl_rules: Vec<ApiKeyAclRule>) -> ApiKeyDetail {
         created_at: row.created_at,
         updated_at: row.updated_at,
         acl_rules,
+        can_reveal: false,
     }
 }
 
 impl ApiKey {
-    pub fn create_with_model_overrides(
+    pub(crate) fn create_issued(
         payload: &CreateApiKeyPayload,
-        model_overrides: &[ApiKeyModelOverrideWriteInput],
-    ) -> DbResult<CreateApiKeyWithOverridesResult> {
+        issuance: &ApiKeyIssuance,
+    ) -> DbResult<ApiKeyDetail> {
         let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
-        let secret = generate_api_key_secret();
         let new_key = NewApiKey {
-            id: ID_GENERATOR.generate_id(),
-            api_key: secret.clone(),
-            api_key_hash: Some(hash_api_key(&secret)),
-            key_prefix: key_prefix(&secret),
-            key_last4: key_last4(&secret),
+            id: issuance.id,
+            api_key_hash: issuance.api_key_hash.clone(),
+            key_prefix: issuance.key_prefix.clone(),
+            key_last4: issuance.key_last4.clone(),
             name: payload.name.clone(),
             description: payload.description.clone(),
             default_action: payload
@@ -647,10 +551,8 @@ impl ApiKey {
             Some(rules) => api_key_acl_repository::map_rule_inputs(new_key.id, rules, now)?,
             None => Vec::new(),
         };
-        let override_rows = make_model_override_rows(new_key.id, model_overrides, now)?;
-
         api_key_admin_db_execute!(conn, {
-            conn.transaction::<CreateApiKeyWithOverridesResult, BaseError, _>(|conn| {
+            conn.transaction::<ApiKeyDetail, BaseError, _>(|conn| {
                 let inserted = diesel::insert_into(api_key::table)
                     .values(NewApiKeyDb::to_db(&new_key))
                     .returning(ApiKeyDb::as_returning())
@@ -658,27 +560,45 @@ impl ApiKey {
                     .map(ApiKeyDb::from_db)
                     .map_err(|e| map_write_error("Failed to create api key", e))?;
 
+                if let Some(encrypted) = issuance.encrypted_secret.as_ref() {
+                    diesel::update(api_key::table.filter(api_key::dsl::id.eq(inserted.id)))
+                        .set((
+                            api_key::dsl::secret_ciphertext
+                                .eq(Some(encrypted.ciphertext().to_vec())),
+                            api_key::dsl::secret_nonce.eq(Some(encrypted.nonce().to_vec())),
+                            api_key::dsl::secret_format_version
+                                .eq(Some(encrypted.format_version())),
+                            api_key::dsl::secret_key_fingerprint
+                                .eq(Some(encrypted.key_fingerprint().as_str().to_string())),
+                        ))
+                        .execute(conn)
+                        .map_err(|e| map_write_error("Failed to store api key secret", e))?;
+                }
+
                 insert_api_key_acl_rules_in_tx!(conn, inserted.id, &acl_rows)?;
-                let override_summary =
-                    replace_api_key_model_overrides_in_tx!(conn, inserted.id, &override_rows, now)?;
                 let acl_rules = load_api_key_acl_rules_in_tx!(conn, inserted.id)?;
 
-                Ok(CreateApiKeyWithOverridesResult {
-                    created: ApiKeyDetailWithSecret {
-                        detail: build_detail(&inserted, acl_rules),
-                        reveal: build_reveal(&inserted),
-                    },
-                    override_summary,
-                })
+                Ok(build_detail(&inserted, acl_rules))
             })
         })
     }
 
-    pub fn update_metadata_with_model_overrides(
+    #[cfg(test)]
+    pub fn create(payload: &CreateApiKeyPayload) -> DbResult<ApiKeyDetailWithSecret> {
+        let secret = generate_api_key_secret();
+        let issuance = ApiKeyIssuance::new(ID_GENERATOR.generate_id(), &secret, None);
+        let detail = Self::create_issued(payload, &issuance)?;
+        let row = Self::get_by_id(detail.id)?;
+        Ok(ApiKeyDetailWithSecret {
+            detail,
+            reveal: build_reveal(&row, secret, false),
+        })
+    }
+
+    pub fn update_metadata(
         id_value: i64,
         payload: &UpdateApiKeyMetadataPayload,
-        model_overrides: &[ApiKeyModelOverrideWriteInput],
-    ) -> DbResult<UpdateApiKeyWithOverridesResult> {
+    ) -> DbResult<ApiKeyDetail> {
         let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
         let update_data = UpdateApiKeyData {
@@ -703,10 +623,8 @@ impl ApiKey {
             )?),
             None => None,
         };
-        let override_rows = make_model_override_rows(id_value, model_overrides, now)?;
-
         api_key_admin_db_execute!(conn, {
-            conn.transaction::<UpdateApiKeyWithOverridesResult, BaseError, _>(|conn| {
+            conn.transaction::<ApiKeyDetail, BaseError, _>(|conn| {
                 let updated = diesel::update(
                     api_key::table.filter(
                         api_key::dsl::id
@@ -733,8 +651,6 @@ impl ApiKey {
                 if let Some(acl_rows) = acl_rows.as_ref() {
                     replace_api_key_acl_rules_in_tx!(conn, id_value, acl_rows)?;
                 }
-                let override_summary =
-                    replace_api_key_model_overrides_in_tx!(conn, id_value, &override_rows, now)?;
 
                 let row = api_key::table
                     .filter(
@@ -756,77 +672,17 @@ impl ApiKey {
                     })?;
                 let acl_rules = load_api_key_acl_rules_in_tx!(conn, id_value)?;
 
-                Ok(UpdateApiKeyWithOverridesResult {
-                    updated: build_detail(&row, acl_rules),
-                    override_summary,
-                })
+                Ok(build_detail(&row, acl_rules))
             })
         })
     }
 
-    pub fn replace_model_overrides(
-        id_value: i64,
-        model_overrides: &[ApiKeyModelOverrideWriteInput],
-    ) -> DbResult<ApiKeyModelOverrideWriteSummary> {
+    pub fn delete(id_value: i64) -> DbResult<usize> {
         let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
-        let override_rows = make_model_override_rows(id_value, model_overrides, now)?;
 
         api_key_admin_db_execute!(conn, {
-            conn.transaction::<ApiKeyModelOverrideWriteSummary, BaseError, _>(|conn| {
-                api_key::table
-                    .filter(
-                        api_key::dsl::id
-                            .eq(id_value)
-                            .and(api_key::dsl::deleted_at.is_null()),
-                    )
-                    .select(ApiKeyDb::as_select())
-                    .first::<ApiKeyDb>(conn)
-                    .map_err(|e| match e {
-                        diesel::result::Error::NotFound => {
-                            BaseError::NotFound(Some(format!("Api key {} not found", id_value)))
-                        }
-                        other => BaseError::DatabaseFatal(Some(format!(
-                            "Failed to fetch api key {}: {}",
-                            id_value, other
-                        ))),
-                    })?;
-
-                replace_api_key_model_overrides_in_tx!(conn, id_value, &override_rows, now)
-            })
-        })
-    }
-
-    pub fn delete_with_model_overrides(id_value: i64) -> DbResult<DeleteApiKeyWithOverridesResult> {
-        let conn = &mut get_connection()?;
-        let now = Utc::now().timestamp_millis();
-        let empty_override_rows = Vec::<NewApiKeyModelOverride>::new();
-
-        api_key_admin_db_execute!(conn, {
-            conn.transaction::<DeleteApiKeyWithOverridesResult, BaseError, _>(|conn| {
-                let existing = api_key::table
-                    .filter(
-                        api_key::dsl::id
-                            .eq(id_value)
-                            .and(api_key::dsl::deleted_at.is_null()),
-                    )
-                    .select(ApiKeyDb::as_select())
-                    .first::<ApiKeyDb>(conn)
-                    .map(ApiKeyDb::from_db)
-                    .map_err(|e| match e {
-                        diesel::result::Error::NotFound => {
-                            BaseError::NotFound(Some(format!("Api key {} not found", id_value)))
-                        }
-                        other => BaseError::DatabaseFatal(Some(format!(
-                            "Failed to fetch api key {}: {}",
-                            id_value, other
-                        ))),
-                    })?;
-                let old_api_key_hash = existing
-                    .api_key_hash
-                    .clone()
-                    .unwrap_or_else(|| hash_api_key(&existing.api_key));
-
+            conn.transaction::<usize, BaseError, _>(|conn| {
                 let updated = diesel::update(
                     api_key::table.filter(
                         api_key::dsl::id
@@ -837,6 +693,10 @@ impl ApiKey {
                 .set((
                     api_key::dsl::deleted_at.eq(Some(now)),
                     api_key::dsl::is_enabled.eq(false),
+                    api_key::dsl::secret_ciphertext.eq(None::<Vec<u8>>),
+                    api_key::dsl::secret_nonce.eq(None::<Vec<u8>>),
+                    api_key::dsl::secret_format_version.eq(None::<i32>),
+                    api_key::dsl::secret_key_fingerprint.eq(None::<String>),
                     api_key::dsl::updated_at.eq(now),
                 ))
                 .execute(conn)
@@ -874,76 +734,26 @@ impl ApiKey {
                     )))
                 })?;
 
-                let override_summary = replace_api_key_model_overrides_in_tx!(
-                    conn,
-                    id_value,
-                    &empty_override_rows,
-                    now
-                )?;
-
-                Ok(DeleteApiKeyWithOverridesResult {
-                    deleted: existing,
-                    old_api_key_hash,
-                    override_summary,
-                })
+                Ok(1)
             })
         })
     }
 
-    pub fn create(payload: &CreateApiKeyPayload) -> DbResult<ApiKeyDetailWithSecret> {
-        Ok(Self::create_with_model_overrides(payload, &[])?.created)
-    }
-
-    pub fn update_metadata(
-        id_value: i64,
-        payload: &UpdateApiKeyMetadataPayload,
-    ) -> DbResult<ApiKeyDetail> {
+    pub(crate) fn rotate_issued(id_value: i64, issuance: &ApiKeyIssuance) -> DbResult<ApiKey> {
         let conn = &mut get_connection()?;
         let now = Utc::now().timestamp_millis();
-        let update_data = UpdateApiKeyData {
-            name: payload.name.clone(),
-            description: payload.description.clone(),
-            default_action: payload.default_action.clone(),
-            is_enabled: payload.is_enabled,
-            expires_at: payload.expires_at,
-            rate_limit_rpm: payload.rate_limit_rpm,
-            max_concurrent_requests: payload.max_concurrent_requests,
-            quota_daily_requests: payload.quota_daily_requests,
-            quota_daily_tokens: payload.quota_daily_tokens,
-            quota_monthly_tokens: payload.quota_monthly_tokens,
-            budget_daily_nanos: payload.budget_daily_nanos,
-            budget_daily_currency: payload.budget_daily_currency.clone(),
-            budget_monthly_nanos: payload.budget_monthly_nanos,
-            budget_monthly_currency: payload.budget_monthly_currency.clone(),
-        };
-
-        db_execute!(conn, {
-            diesel::update(
-                api_key::table.filter(
-                    api_key::dsl::id
-                        .eq(id_value)
-                        .and(api_key::dsl::deleted_at.is_null()),
-                ),
-            )
-            .set((
-                UpdateApiKeyDataDb::to_db(&update_data),
-                api_key::dsl::updated_at.eq(now),
-            ))
-            .execute(conn)
-            .map_err(|e| map_write_error(&format!("Failed to update api key {}", id_value), e))
-        })?;
-
-        if let Some(rules) = payload.acl_rules.as_ref() {
-            ApiKeyAclRule::replace_for_api_key(id_value, rules)?;
-        }
-
-        Self::get_detail(id_value)
-    }
-
-    pub fn rotate_key(id_value: i64) -> DbResult<ApiKeyReveal> {
-        let conn = &mut get_connection()?;
-        let now = Utc::now().timestamp_millis();
-        let secret = generate_api_key_secret();
+        let (ciphertext, nonce, format_version, fingerprint) = issuance
+            .encrypted_secret
+            .as_ref()
+            .map(|encrypted| {
+                (
+                    Some(encrypted.ciphertext().to_vec()),
+                    Some(encrypted.nonce().to_vec()),
+                    Some(encrypted.format_version()),
+                    Some(encrypted.key_fingerprint().as_str().to_string()),
+                )
+            })
+            .unwrap_or((None, None, None, None));
         let rotated = db_execute!(conn, {
             diesel::update(
                 api_key::table.filter(
@@ -953,10 +763,13 @@ impl ApiKey {
                 ),
             )
             .set((
-                api_key::dsl::api_key_value.eq(secret.clone()),
-                api_key::dsl::api_key_hash.eq(Some(hash_api_key(&secret))),
-                api_key::dsl::key_prefix.eq(key_prefix(&secret)),
-                api_key::dsl::key_last4.eq(key_last4(&secret)),
+                api_key::dsl::api_key_hash.eq(&issuance.api_key_hash),
+                api_key::dsl::key_prefix.eq(&issuance.key_prefix),
+                api_key::dsl::key_last4.eq(&issuance.key_last4),
+                api_key::dsl::secret_ciphertext.eq(ciphertext),
+                api_key::dsl::secret_nonce.eq(nonce),
+                api_key::dsl::secret_format_version.eq(format_version),
+                api_key::dsl::secret_key_fingerprint.eq(fingerprint),
                 api_key::dsl::updated_at.eq(now),
             ))
             .returning(ApiKeyDb::as_returning())
@@ -965,16 +778,154 @@ impl ApiKey {
             .map_err(|e| map_write_error(&format!("Failed to rotate api key {}", id_value), e))
         })?;
 
-        Ok(build_reveal(&rotated))
+        Ok(rotated)
     }
 
-    pub fn reveal_key(id_value: i64) -> DbResult<ApiKeyReveal> {
-        let api_key = Self::get_by_id(id_value)?;
-        Ok(build_reveal(&api_key))
+    #[cfg(test)]
+    pub fn rotate_key(id_value: i64) -> DbResult<ApiKeyReveal> {
+        let secret = generate_api_key_secret();
+        let issuance = ApiKeyIssuance::new(id_value, &secret, None);
+        let rotated = Self::rotate_issued(id_value, &issuance)?;
+        Ok(build_reveal(&rotated, secret, false))
     }
 
-    pub fn delete(id_value: i64) -> DbResult<usize> {
-        Self::delete_with_model_overrides(id_value).map(|_| 1)
+    pub(crate) fn list_reveal_metadata() -> DbResult<Vec<ApiKeyRevealMetadata>> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let rows = api_key::table
+                .filter(api_key::dsl::deleted_at.is_null())
+                .select((
+                    api_key::dsl::id,
+                    api_key::dsl::secret_ciphertext.is_not_null(),
+                    api_key::dsl::secret_nonce.is_not_null(),
+                    api_key::dsl::secret_format_version.is_not_null(),
+                    api_key::dsl::secret_key_fingerprint,
+                ))
+                .load::<(i64, bool, bool, bool, Option<String>)>(conn)
+                .map_err(|e| {
+                    BaseError::DatabaseFatal(Some(format!(
+                        "Failed to load api key reveal metadata: {e}"
+                    )))
+                })?;
+            Ok(rows
+                .into_iter()
+                .map(
+                    |(id, has_ciphertext, has_nonce, has_version, fingerprint)| {
+                        ApiKeyRevealMetadata {
+                            id,
+                            secret_tuple_complete: has_ciphertext
+                                && has_nonce
+                                && has_version
+                                && fingerprint.is_some(),
+                            secret_key_fingerprint: fingerprint,
+                        }
+                    },
+                )
+                .collect())
+        })
+    }
+
+    pub(crate) fn get_reveal_metadata(id_value: i64) -> DbResult<ApiKeyRevealMetadata> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let (id, has_ciphertext, has_nonce, has_version, fingerprint) = api_key::table
+                .filter(
+                    api_key::dsl::id
+                        .eq(id_value)
+                        .and(api_key::dsl::deleted_at.is_null()),
+                )
+                .select((
+                    api_key::dsl::id,
+                    api_key::dsl::secret_ciphertext.is_not_null(),
+                    api_key::dsl::secret_nonce.is_not_null(),
+                    api_key::dsl::secret_format_version.is_not_null(),
+                    api_key::dsl::secret_key_fingerprint,
+                ))
+                .first::<(i64, bool, bool, bool, Option<String>)>(conn)
+                .map_err(|error| match error {
+                    diesel::result::Error::NotFound => {
+                        BaseError::NotFound(Some(format!("Api key {id_value} not found")))
+                    }
+                    other => BaseError::DatabaseFatal(Some(format!(
+                        "Failed to load api key reveal metadata {id_value}: {other}"
+                    ))),
+                })?;
+            Ok(ApiKeyRevealMetadata {
+                id,
+                secret_tuple_complete: has_ciphertext
+                    && has_nonce
+                    && has_version
+                    && fingerprint.is_some(),
+                secret_key_fingerprint: fingerprint,
+            })
+        })
+    }
+
+    pub(crate) fn get_stored_secret(id_value: i64) -> DbResult<ApiKeyStoredSecret> {
+        let conn = &mut get_connection()?;
+        db_execute!(conn, {
+            let row = api_key::table
+                .filter(
+                    api_key::dsl::id
+                        .eq(id_value)
+                        .and(api_key::dsl::deleted_at.is_null()),
+                )
+                .select((
+                    api_key::dsl::id,
+                    api_key::dsl::name,
+                    api_key::dsl::key_prefix,
+                    api_key::dsl::key_last4,
+                    api_key::dsl::updated_at,
+                    api_key::dsl::secret_ciphertext,
+                    api_key::dsl::secret_nonce,
+                    api_key::dsl::secret_format_version,
+                    api_key::dsl::secret_key_fingerprint,
+                ))
+                .first::<(
+                    i64,
+                    String,
+                    String,
+                    String,
+                    i64,
+                    Option<Vec<u8>>,
+                    Option<Vec<u8>>,
+                    Option<i32>,
+                    Option<String>,
+                )>(conn)
+                .map_err(|e| match e {
+                    diesel::result::Error::NotFound => {
+                        BaseError::NotFound(Some(format!("Api key {id_value} not found")))
+                    }
+                    other => BaseError::DatabaseFatal(Some(format!(
+                        "Failed to load api key secret {id_value}: {other}"
+                    ))),
+                })?;
+            let (
+                id,
+                name,
+                key_prefix,
+                key_last4,
+                updated_at,
+                Some(ciphertext),
+                Some(nonce),
+                Some(format_version),
+                Some(key_fingerprint),
+            ) = row
+            else {
+                return Err(BaseError::ApiKeySecretUnavailable);
+            };
+            Ok(ApiKeyStoredSecret {
+                id,
+                name,
+                key_prefix,
+                key_last4,
+                updated_at,
+                ciphertext,
+                nonce,
+                format_version,
+                key_fingerprint,
+            })
+        })
     }
 
     pub fn load_acl_rules(id_value: i64) -> DbResult<Vec<ApiKeyAclRule>> {
@@ -1063,17 +1014,16 @@ impl ApiKey {
             api_key::table
                 .filter(
                     api_key::dsl::api_key_hash
-                        .eq(Some(api_key_hash_value.to_string()))
+                        .eq(api_key_hash_value)
                         .and(api_key::dsl::deleted_at.is_null()),
                 )
                 .select(ApiKeyDb::as_select())
                 .first::<ApiKeyDb>(conn)
                 .map(ApiKeyDb::from_db)
                 .map_err(|e| match e {
-                    diesel::result::Error::NotFound => BaseError::NotFound(Some(format!(
-                        "Api key hash {} not found",
-                        api_key_hash_value
-                    ))),
+                    diesel::result::Error::NotFound => {
+                        BaseError::NotFound(Some("Api key hash not found".to_string()))
+                    }
                     other => BaseError::DatabaseFatal(Some(format!(
                         "Failed to fetch api key by hash: {}",
                         other
@@ -1089,7 +1039,7 @@ impl ApiKey {
             api_key::table
                 .filter(
                     api_key::dsl::api_key_hash
-                        .eq(Some(api_key_hash_value.to_string()))
+                        .eq(api_key_hash_value)
                         .and(api_key::dsl::deleted_at.is_null())
                         .and(api_key::dsl::is_enabled.eq(true))
                         .and(
@@ -1120,6 +1070,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ordinary_api_key_projection_does_not_select_secret_columns() {
+        use crate::database::api_key::_postgres_model::ApiKeyDb as PostgresApiKeyDb;
+        use crate::database::api_key::_sqlite_model::ApiKeyDb as SqliteApiKeyDb;
+
+        let sqlite_query =
+            crate::database::_sqlite_schema::api_key::table.select(SqliteApiKeyDb::as_select());
+        let sqlite_sql =
+            diesel::debug_query::<diesel::sqlite::Sqlite, _>(&sqlite_query).to_string();
+        let postgres_query =
+            crate::database::_postgres_schema::api_key::table.select(PostgresApiKeyDb::as_select());
+        let postgres_sql = diesel::debug_query::<diesel::pg::Pg, _>(&postgres_query).to_string();
+
+        for sql in [sqlite_sql, postgres_sql] {
+            for secret_column in [
+                "secret_ciphertext",
+                "secret_nonce",
+                "secret_format_version",
+                "secret_key_fingerprint",
+            ] {
+                assert!(
+                    !sql.contains(secret_column),
+                    "ordinary api key projection selected {secret_column}: {sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn update_payload_distinguishes_explicit_null_from_missing_fields() {
         let payload: UpdateApiKeyMetadataPayload = serde_json::from_value(serde_json::json!({
             "quota_daily_requests": null,
@@ -1147,5 +1125,17 @@ mod tests {
         );
         assert_eq!(key_prefix(secret), "cyder-abcdef");
         assert_eq!(key_last4(secret), "wxyz");
+    }
+
+    #[test]
+    fn missing_hash_error_does_not_echo_authentication_material() {
+        let context = crate::database::TestDbContext::new_sqlite("api-key-hash-error.sqlite");
+        context.run_sync(|| {
+            let hash = "f".repeat(64);
+            let error = ApiKey::get_by_hash(&hash).expect_err("hash should not exist");
+            let debug = format!("{error:?}");
+            assert!(!debug.contains(&hash));
+            assert!(!debug.contains("api_key_hash="));
+        });
     }
 }

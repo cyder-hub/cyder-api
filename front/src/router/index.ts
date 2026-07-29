@@ -2,8 +2,9 @@ import { createRouter, createWebHistory } from "vue-router";
 import DefaultLayout from "@/layouts/DefaultLayout.vue";
 import LoginLayout from "@/layouts/LoginLayout.vue";
 import { useAuthStore } from "@/store/authStore";
-import { tryRefreshToken } from "@/services/auth";
-import { readStoredRefreshToken } from "@/services/authTokens";
+import { getBootstrapStatus, restoreSession } from "@/services/auth";
+import { registerLoginNavigation } from "@/services/authRuntime";
+import { decideAuthRoute, type AuthRouteKind } from "./auth-state";
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -40,17 +41,6 @@ const router = createRouter({
           },
         },
         {
-          path: "model_route",
-          name: "ModelRoute",
-          component: () => import("@/pages/model-route/ModelRoutePage.vue"),
-          meta: {
-            titleKey: "modelRoutePage.title",
-            navKey: "modelRoute",
-            navGroup: "traffic",
-            operatorPriority: "secondary",
-          },
-        },
-        {
           path: "cost",
           name: "Cost",
           component: () => import("@/pages/cost/CostPage.vue"),
@@ -62,23 +52,12 @@ const router = createRouter({
           },
         },
         {
-          path: "system/portable",
-          name: "PortableConfig",
-          component: () => import("@/pages/export-import/ExportImportPage.vue"),
+          path: "security",
+          name: "Security",
+          component: () => import("@/pages/security/SecurityPage.vue"),
           meta: {
-            titleKey: "portableConfigPage.title",
-            navKey: "portableConfig",
-            navGroup: "governance",
-            operatorPriority: "secondary",
-          },
-        },
-        {
-          path: "system/config",
-          name: "SystemConfig",
-          component: () => import("@/pages/system-config/SystemConfigPage.vue"),
-          meta: {
-            titleKey: "systemConfigPage.title",
-            navKey: "systemConfig",
+            titleKey: "securityPage.title",
+            navKey: "security",
             navGroup: "governance",
             operatorPriority: "secondary",
           },
@@ -112,28 +91,6 @@ const router = createRouter({
           meta: {
             titleKey: "providerRuntimePage.title",
             navKey: "providerRuntime",
-            navGroup: "operations",
-            operatorPriority: "secondary",
-          },
-        },
-        {
-          path: "alerts",
-          name: "Alerts",
-          component: () => import("@/pages/alerts/AlertsPage.vue"),
-          meta: {
-            titleKey: "alertsPage.title",
-            navKey: "alerts",
-            navGroup: "operations",
-            operatorPriority: "secondary",
-          },
-        },
-        {
-          path: "notifications",
-          name: "Notification",
-          component: () => import("@/pages/notifications/NotificationsPage.vue"),
-          meta: {
-            titleKey: "notificationPage.title",
-            navKey: "notifications",
             navGroup: "operations",
             operatorPriority: "secondary",
           },
@@ -188,11 +145,6 @@ const router = createRouter({
       ],
     },
     {
-      path: "/:pathMatch(.*)*",
-      name: "NotFound",
-      component: () => import("@/pages/NotFound.vue"),
-    },
-    {
       path: "/login",
       component: LoginLayout,
       children: [
@@ -206,36 +158,82 @@ const router = createRouter({
         },
       ],
     },
+    {
+      path: "/bootstrap",
+      component: LoginLayout,
+      children: [
+        {
+          path: "",
+          name: "Bootstrap",
+          component: () => import("@/pages/bootstrap/BootstrapPage.vue"),
+          meta: {
+            titleKey: "bootstrapPage.title",
+          },
+        },
+      ],
+    },
+    {
+      path: "/:pathMatch(.*)*",
+      name: "NotFound",
+      component: () => import("@/pages/NotFound.vue"),
+    },
   ],
 });
 
-router.beforeEach(async (to, _from, next) => {
-  const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
-  const refreshToken = readStoredRefreshToken();
-  const isAuthenticated = !!refreshToken;
-
-  if (requiresAuth) {
-    if (!isAuthenticated) {
-      next({ name: "Login" });
-    } else {
-      const authStore = useAuthStore();
-      // Proactively refresh access_token if missing (e.g., after reload)
-      if (!authStore.accessToken) {
-        const refreshed = await tryRefreshToken();
-        if (refreshed) {
-          next();
-        } else {
-          next({ name: "Login" });
-        }
-      } else {
-        next();
-      }
-    }
-  } else if (to.name === "Login" && isAuthenticated) {
-    next({ name: "Dashboard" });
-  } else {
-    next();
+registerLoginNavigation(() => {
+  if (router.currentRoute.value.name !== "Login") {
+    void router.push({ name: "Login" });
   }
+});
+
+router.beforeEach(async (to, _from, next) => {
+  const authStore = useAuthStore();
+  const bootstrapState = await authStore.resolveBootstrapState(getBootstrapStatus);
+  const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
+  const routeKind: AuthRouteKind =
+    to.name === "Bootstrap"
+      ? "bootstrap"
+      : to.name === "Login"
+        ? "login"
+        : requiresAuth
+          ? "protected"
+          : "public";
+  const decision = decideAuthRoute({
+    bootstrapState,
+    routeKind,
+    lifecycle: authStore.lifecycle,
+  });
+
+  if (decision === "bootstrap") {
+    next({ name: "Bootstrap" });
+    return;
+  }
+  if (decision === "login") {
+    next({ name: "Login" });
+    return;
+  }
+  if (decision === "dashboard") {
+    next({ name: "Dashboard" });
+    return;
+  }
+  if (decision === "restore") {
+    const refreshed = await restoreSession();
+    if (!refreshed) {
+      if (routeKind === "login") {
+        next();
+      } else {
+        next({ name: "Login" });
+      }
+      return;
+    }
+    if (routeKind === "protected") {
+      next();
+    } else {
+      next({ name: "Dashboard" });
+    }
+    return;
+  }
+  next();
 });
 
 export default router;

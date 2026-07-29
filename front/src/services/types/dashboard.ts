@@ -57,7 +57,7 @@ export interface DashboardRuntimeSummary {
   no_traffic_count: number;
 }
 
-export interface DashboardProviderAlertItem {
+export interface DashboardProviderSignalItem {
   provider_id: number;
   provider_key: string;
   provider_name: string;
@@ -70,7 +70,7 @@ export interface DashboardProviderAlertItem {
   last_error_summary: string | null;
 }
 
-export interface DashboardCostProviderAlertItem {
+export interface DashboardCostProviderItem {
   provider_id: number;
   provider_key: string;
   provider_name: string;
@@ -80,7 +80,7 @@ export interface DashboardCostProviderAlertItem {
   total_cost: Record<string, number>;
 }
 
-export interface DashboardCostModelAlertItem {
+export interface DashboardCostModelItem {
   provider_id: number;
   provider_key: string;
   model_id: number;
@@ -91,13 +91,13 @@ export interface DashboardCostModelAlertItem {
   total_cost: Record<string, number>;
 }
 
-export interface DashboardAlerts {
-  open_providers: DashboardProviderAlertItem[];
-  half_open_providers: DashboardProviderAlertItem[];
-  degraded_providers: DashboardProviderAlertItem[];
-  top_error_providers: DashboardProviderAlertItem[];
-  top_cost_providers: DashboardCostProviderAlertItem[];
-  top_cost_models: DashboardCostModelAlertItem[];
+export interface DashboardOperationalSignals {
+  open_providers: DashboardProviderSignalItem[];
+  half_open_providers: DashboardProviderSignalItem[];
+  degraded_providers: DashboardProviderSignalItem[];
+  top_error_providers: DashboardProviderSignalItem[];
+  top_cost_providers: DashboardCostProviderItem[];
+  top_cost_models: DashboardCostModelItem[];
 }
 
 export interface DashboardTopProviderItem {
@@ -128,7 +128,7 @@ export interface DashboardResponse {
   today: DashboardTodayStats;
   runtime: DashboardRuntimeSummary;
   runtime_state_backend: RuntimeStateBackendStatus;
-  alerts: DashboardAlerts;
+  operational_signals: DashboardOperationalSignals;
   top_providers: DashboardTopProviderItem[];
   top_models: DashboardTopModelItem[];
 }
@@ -145,8 +145,8 @@ export interface DashboardResourcesSection {
   runtime_state_backend: RuntimeStateBackendStatus;
 }
 
-export interface DashboardAlertsSection {
-  alerts: DashboardAlerts;
+export interface DashboardOperationsSection {
+  operational_signals: DashboardOperationalSignals;
   top_providers: DashboardTopProviderItem[];
   top_models: DashboardTopModelItem[];
 }

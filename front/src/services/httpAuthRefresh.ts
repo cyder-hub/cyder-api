@@ -1,8 +1,21 @@
-import type { AuthTokenPair } from "./types";
+import { authErrorCode } from "./authErrors.ts";
+
+export type AuthLifecycle =
+  | "unknown"
+  | "restoring"
+  | "authenticated"
+  | "anonymous";
+
+type MutableHeaders = Record<string, string> & {
+  set?: (name: string, value: string) => void;
+};
 
 export interface RetriableHttpRequest {
   _retry?: boolean;
-  headers?: Record<string, string>;
+  _skipAuthRetry?: boolean;
+  headers?: MutableHeaders;
+  method?: string;
+  url?: string;
   [key: string]: unknown;
 }
 
@@ -10,112 +23,162 @@ export interface HttpAuthRefreshError {
   config?: RetriableHttpRequest;
   response?: {
     status?: number;
+    data?: { code?: unknown };
   };
 }
 
 export interface HttpAuthRefreshDependencies {
-  readStoredRefreshToken: () => string | null;
-  persistAuthTokenPair: (tokenPair: AuthTokenPair) => string;
-  clearStoredRefreshTokenIfCurrent: (refreshToken: string) => boolean;
-  setAccessToken: (token: string | null) => void;
-  refreshAccessToken: (refreshToken: string) => Promise<AuthTokenPair>;
+  getAccessToken: () => string | null;
+  getLifecycle: () => AuthLifecycle;
+  restoreSession: () => Promise<boolean>;
+  recoverAccess: () => Promise<string>;
+  revokeSession: () => void;
   retryRequest: (request: RetriableHttpRequest) => Promise<unknown>;
-  redirectToLogin: () => void;
 }
 
-interface PendingRefresh {
-  resolve: (token: string) => void;
-  reject: (reason: unknown) => void;
-}
-
-function httpStatus(error: unknown): number | undefined {
-  if (!error || typeof error !== "object" || !("response" in error)) {
-    return undefined;
+export class ManagerAuthenticationRequiredError extends Error {
+  constructor() {
+    super("manager authentication is required");
+    this.name = "ManagerAuthenticationRequiredError";
   }
+}
 
-  const response = (error as { response?: { status?: unknown } }).response;
-  return typeof response?.status === "number" ? response.status : undefined;
+function setRequestHeader(
+  request: RetriableHttpRequest,
+  name: string,
+  value: string,
+): void {
+  request.headers ??= {};
+  if (typeof request.headers.set === "function") {
+    request.headers.set(name, value);
+  } else {
+    request.headers[name] = value;
+  }
 }
 
 function setAuthorizationHeader(
   request: RetriableHttpRequest,
   token: string,
 ): void {
-  request.headers ??= {};
-  request.headers.Authorization = `Bearer ${token}`;
+  setRequestHeader(request, "Authorization", `Bearer ${token}`);
+}
+
+const PUBLIC_MANAGER_AUTH_PATHS = [
+  "/ai/manager/api/auth/bootstrap/status",
+  "/ai/manager/api/auth/bootstrap",
+  "/ai/manager/api/auth/login/password",
+  "/ai/manager/api/auth/login/totp",
+  "/ai/manager/api/auth/recovery/start",
+  "/ai/manager/api/auth/recovery/confirm",
+  "/ai/manager/api/auth/access",
+  "/ai/manager/api/auth/logout",
+];
+
+export function isPublicManagerAuthRequest(
+  request: RetriableHttpRequest,
+): boolean {
+  const url = request.url ?? "";
+  return PUBLIC_MANAGER_AUTH_PATHS.some(
+    (path) => url === path || url.startsWith(`${path}?`),
+  );
+}
+
+function isManagerAuthPost(request: RetriableHttpRequest): boolean {
+  return (
+    (request.method ?? "get").toLowerCase() === "post" &&
+    (request.url ?? "").startsWith("/ai/manager/api/auth/")
+  );
+}
+
+export function applyManagerAuthBrowserHeaders(
+  request: RetriableHttpRequest,
+): void {
+  if (!isManagerAuthPost(request)) return;
+  setRequestHeader(request, "Content-Type", "application/json");
+  setRequestHeader(request, "X-Cyder-Manager-Auth", "1");
+}
+
+function isProtectedManagerRequest(request: RetriableHttpRequest): boolean {
+  return (
+    (request.url ?? "").startsWith("/ai/manager/api/") &&
+    !isPublicManagerAuthRequest(request)
+  );
+}
+
+export function createProtectedManagerRequestGate(
+  deps: Pick<
+    HttpAuthRefreshDependencies,
+    "getAccessToken" | "getLifecycle" | "restoreSession"
+  >,
+) {
+  return async function gateProtectedManagerRequest(
+    request: RetriableHttpRequest,
+  ): Promise<RetriableHttpRequest> {
+    if (!isProtectedManagerRequest(request)) return request;
+
+    const lifecycle = deps.getLifecycle();
+    if (
+      (lifecycle === "unknown" || lifecycle === "restoring") &&
+      !(await deps.restoreSession())
+    ) {
+      throw new ManagerAuthenticationRequiredError();
+    }
+    if (deps.getLifecycle() === "anonymous") {
+      throw new ManagerAuthenticationRequiredError();
+    }
+
+    const token = deps.getAccessToken();
+    if (!token) throw new ManagerAuthenticationRequiredError();
+    setAuthorizationHeader(request, token);
+    return request;
+  };
 }
 
 export function createHttpAuthRefreshHandler(
   deps: HttpAuthRefreshDependencies,
 ) {
-  let isRefreshing = false;
-  let failedQueue: PendingRefresh[] = [];
+  let recoveryPromise: Promise<string> | null = null;
 
-  const processQueue = (error: unknown, token: string | null): void => {
-    failedQueue.forEach((pending) => {
-      if (error) {
-        pending.reject(error);
-      } else if (token) {
-        pending.resolve(token);
-      }
+  const invalidateSession = (): void => {
+    deps.revokeSession();
+  };
+
+  const sharedRecovery = (): Promise<string> => {
+    if (recoveryPromise) return recoveryPromise;
+    recoveryPromise = deps.recoverAccess().finally(() => {
+      recoveryPromise = null;
     });
-    failedQueue = [];
+    return recoveryPromise;
   };
 
   return async function handleHttpAuthRefresh(
     error: HttpAuthRefreshError,
   ): Promise<unknown> {
     const originalRequest = error.config;
+    const code = authErrorCode(error);
 
     if (
       error.response?.status !== 401 ||
       !originalRequest ||
-      originalRequest._retry
+      originalRequest._retry ||
+      originalRequest._skipAuthRetry ||
+      isPublicManagerAuthRequest(originalRequest)
     ) {
       throw error;
     }
 
-    if (isRefreshing) {
-      originalRequest._retry = true;
-      return new Promise<string>((resolve, reject) => {
-        failedQueue.push({ resolve, reject });
-      }).then((token) => {
-        setAuthorizationHeader(originalRequest, token);
-        return deps.retryRequest(originalRequest);
-      });
-    }
-
-    const refreshToken = deps.readStoredRefreshToken();
-    if (!refreshToken) {
-      throw error;
-    }
+    if (![1432, 1433, 1435].includes(code ?? -1)) throw error;
 
     originalRequest._retry = true;
-    isRefreshing = true;
-
     try {
-      const tokenPair = await deps.refreshAccessToken(refreshToken);
-      const newAccessToken = deps.persistAuthTokenPair(tokenPair);
-
-      deps.setAccessToken(newAccessToken);
-      setAuthorizationHeader(originalRequest, newAccessToken);
-      processQueue(null, newAccessToken);
-
+      const token = await sharedRecovery();
+      setAuthorizationHeader(originalRequest, token);
       return deps.retryRequest(originalRequest);
-    } catch (refreshError) {
-      processQueue(refreshError, null);
-
-      if (
-        httpStatus(refreshError) === 401 &&
-        deps.clearStoredRefreshTokenIfCurrent(refreshToken)
-      ) {
-        deps.setAccessToken(null);
-        deps.redirectToLogin();
+    } catch (recoveryError) {
+      if ([1441, 1444].includes(authErrorCode(recoveryError) ?? -1)) {
+        invalidateSession();
       }
-
-      throw refreshError;
-    } finally {
-      isRefreshing = false;
+      throw recoveryError;
     }
   };
 }

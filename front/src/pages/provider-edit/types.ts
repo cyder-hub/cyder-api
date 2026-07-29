@@ -1,10 +1,14 @@
 import type { RequestPatchRule } from "@/services/types";
 
 export interface LocalProviderApiKeyItem {
-  id: number | null;
-  api_key: string;
+  id: number;
+  provider_id: number;
   description: string | null;
-  isEditing: boolean;
+  key_prefix: string;
+  key_last4: string;
+  is_enabled: boolean;
+  created_at: number;
+  updated_at: number;
   checkStatus: "unchecked" | "checking" | "success" | "error";
   checkMessage?: string;
 }

@@ -169,6 +169,52 @@ fn scan_log_invocations(path: &Path, contents: &str) -> Vec<LintViolation> {
                 excerpt: compact_excerpt(&invocation.snippet),
             });
         }
+
+        if contains_any(
+            &invocation.snippet,
+            &[
+                "access_token",
+                "refresh_token",
+                "mediator_token",
+                "access_jti",
+                "current_refresh_jti",
+                "refresh.jwt_id",
+                "Cookie",
+                "COOKIE",
+            ],
+        ) {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "manager token/cookie logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
+
+        if contains_any(
+            &invocation.snippet,
+            &[
+                "totp_secret",
+                "totp_code",
+                "TOTP_CODE",
+                "recovery_code",
+                "code_verifier",
+                "login_challenge",
+                "setup_challenge",
+                "recovery_challenge",
+                "manual_secret",
+                "otpauth_uri",
+                "MANAGER_TOTP_CODE_HEADER",
+                "X-Cyder-TOTP-Code",
+            ],
+        ) {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "manager TOTP/recovery material logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
     }
 
     violations
@@ -493,6 +539,47 @@ mod tests {
                 .iter()
                 .any(|violation| violation.reason == "auth header/value logging is forbidden")
         );
+    }
+
+    #[test]
+    fn scan_log_invocations_rejects_manager_token_cookie_and_jti_values() {
+        let path = PathBuf::from("sample.rs");
+        for contents in [
+            concat!("debug", r#"!("access {:?}", access_token);"#),
+            concat!("warn", r#"!("refresh jti {}", refresh.jwt_id);"#),
+            concat!("info", r#"!("cookie {:?}", headers.get(COOKIE));"#),
+        ] {
+            let violations = scan_log_invocations(&path, contents);
+            assert!(
+                violations.iter().any(
+                    |violation| violation.reason == "manager token/cookie logging is forbidden"
+                ),
+                "expected manager credential logging violation for {contents}"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_log_invocations_rejects_manager_totp_recovery_and_challenge_material() {
+        let path = PathBuf::from("sample.rs");
+        for contents in [
+            concat!("debug", r#"!("totp {}", totp_code);"#),
+            concat!("warn", r#"!("recovery {}", recovery_code);"#),
+            concat!("info", r#"!("challenge {}", login_challenge);"#),
+            concat!("debug", r#"!("uri {}", otpauth_uri);"#),
+            concat!(
+                "warn",
+                r#"!("header {:?}", headers.get(MANAGER_TOTP_CODE_HEADER));"#
+            ),
+        ] {
+            let violations = scan_log_invocations(&path, contents);
+            assert!(
+                violations.iter().any(|violation| {
+                    violation.reason == "manager TOTP/recovery material logging is forbidden"
+                }),
+                "expected manager TOTP logging violation for {contents}"
+            );
+        }
     }
 
     #[test]

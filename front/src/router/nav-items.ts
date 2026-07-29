@@ -1,16 +1,13 @@
 import type { Component } from "vue";
 import {
   Activity,
-  Archive,
   ArrowRightLeft,
-  BellRing,
   ClipboardList,
   DollarSign,
   KeyRound,
   LayoutDashboard,
   Server,
-  Settings,
-  Webhook,
+  ShieldCheck,
 } from "lucide-vue-next";
 
 type NavItem = {
@@ -46,31 +43,10 @@ export const navItems: NavItem[] = [
     section: "operations",
   },
   {
-    path: "/alerts",
-    navKey: "alerts",
-    i18nKey: "sidebar.alerts",
-    icon: BellRing,
-    section: "operations",
-  },
-  {
-    path: "/notifications",
-    navKey: "notifications",
-    i18nKey: "sidebar.notifications",
-    icon: Webhook,
-    section: "operations",
-  },
-  {
     path: "/record",
     navKey: "record",
     i18nKey: "sidebar.record",
     icon: ClipboardList,
-    section: "traffic",
-  },
-  {
-    path: "/model_route",
-    navKey: "modelRoute",
-    i18nKey: "sidebar.modelRoute",
-    icon: ArrowRightLeft,
     section: "traffic",
   },
   {
@@ -102,17 +78,10 @@ export const navItems: NavItem[] = [
     section: "governance",
   },
   {
-    path: "/system/portable",
-    navKey: "portableConfig",
-    i18nKey: "sidebar.portableConfig",
-    icon: Archive,
-    section: "governance",
-  },
-  {
-    path: "/system/config",
-    navKey: "systemConfig",
-    i18nKey: "sidebar.systemConfig",
-    icon: Settings,
+    path: "/security",
+    navKey: "security",
+    i18nKey: "sidebar.security",
+    icon: ShieldCheck,
     section: "governance",
   },
 ];

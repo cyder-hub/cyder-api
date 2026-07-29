@@ -7,7 +7,9 @@ use reqwest::{Client, header::CONTENT_TYPE};
 use serde::Deserialize;
 use std::sync::LazyLock;
 
-#[derive(Clone, Debug)]
+use super::provider_http::validate_vertex_token_uri;
+
+#[derive(Clone)]
 struct CachedToken {
     access_token: String,
     expiry_time: u64, // Store expiry time as Unix timestamp
@@ -41,7 +43,7 @@ struct Claims<'a> {
     exp: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct VertexServiceAccount {
     client_email: String,
     token_uri: String,
@@ -49,7 +51,43 @@ struct VertexServiceAccount {
     private_key_id: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+pub fn validate_vertex_service_account(service_account_str: &str) -> Result<(), String> {
+    let account: VertexServiceAccount = serde_json::from_str(service_account_str)
+        .map_err(|_| "Vertex credential must be a valid service account JSON".to_string())?;
+    if account.client_email.trim().is_empty()
+        || account.token_uri.trim().is_empty()
+        || account.private_key_id.trim().is_empty()
+    {
+        return Err("Vertex credential is missing required service account fields".to_string());
+    }
+    validate_vertex_token_uri(&account.token_uri)
+        .map_err(|error| format!("Vertex credential token_uri {error}"))?;
+    EncodingKey::from_rsa_pem(account.private_key.as_bytes())
+        .map_err(|_| "Vertex credential contains an invalid RSA private key".to_string())?;
+    Ok(())
+}
+
+pub fn invalidate_vertex_token(provider_key_id: i64) {
+    VERTEX_TOKEN_CACHE.remove(&provider_key_id);
+}
+
+#[cfg(test)]
+pub(crate) fn cache_vertex_token_for_test(provider_key_id: i64, access_token: &str) {
+    VERTEX_TOKEN_CACHE.insert(
+        provider_key_id,
+        CachedToken {
+            access_token: access_token.to_string(),
+            expiry_time: u64::MAX,
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn vertex_token_is_cached_for_test(provider_key_id: i64) -> bool {
+    VERTEX_TOKEN_CACHE.contains_key(&provider_key_id)
+}
+
+#[derive(Deserialize, Clone)]
 pub struct VertexTokenResult {
     pub access_token: String,
     pub expires_in: u32,
@@ -83,6 +121,11 @@ pub async fn get_vertex_token(
     provider_key_id: i64,
     service_account_str: &str,
 ) -> Result<String, String> {
+    let account: VertexServiceAccount = serde_json::from_str(service_account_str)
+        .map_err(|_| "Vertex credential must be a valid service account JSON".to_string())?;
+    validate_vertex_token_uri(&account.token_uri)
+        .map_err(|error| format!("Vertex credential token_uri {error}"))?;
+
     if let Some(token) = get_token_from_cache(&provider_key_id) {
         return Ok(token);
     }
@@ -106,12 +149,14 @@ pub async fn request_google_token(
     client: &Client,
     service_account_str: &str,
 ) -> Result<VertexTokenResult, String> {
-    let vertex_account: VertexServiceAccount =
-        serde_json::from_str(service_account_str).map_err(|e| e.to_string())?;
+    let vertex_account: VertexServiceAccount = serde_json::from_str(service_account_str)
+        .map_err(|_| "Vertex credential must be a valid service account JSON".to_string())?;
     let client_email = &vertex_account.client_email;
     let token_uri = &vertex_account.token_uri;
     let private_key_str = &vertex_account.private_key;
     let private_key_id = &vertex_account.private_key_id;
+    validate_vertex_token_uri(token_uri)
+        .map_err(|error| format!("Vertex credential token_uri {error}"))?;
 
     let scope = "https://www.googleapis.com/auth/cloud-platform";
 
@@ -119,7 +164,7 @@ pub async fn request_google_token(
     let iat = issued_at();
 
     let private_key = EncodingKey::from_rsa_pem(private_key_str.as_bytes())
-        .map_err(|e| format!("Failed to load private key: {}", e))?;
+        .map_err(|_| "Vertex credential contains an invalid RSA private key".to_string())?;
 
     let claims = Claims {
         iss: client_email,
@@ -134,13 +179,14 @@ pub async fn request_google_token(
     header.alg = Algorithm::RS256;
     header.kid = Some(private_key_id.to_string());
 
-    let assertion = encode(&header, &claims, &private_key).map_err(|e| e.to_string())?;
+    let assertion = encode(&header, &claims, &private_key)
+        .map_err(|_| "Failed to sign Vertex OAuth assertion".to_string())?;
 
     let body_str = serde_urlencoded::to_string(&Payload {
         grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
         assertion: &assertion,
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|_| "Failed to encode Vertex OAuth request".to_string())?;
 
     let response = client
         .post(token_uri)
@@ -148,24 +194,95 @@ pub async fn request_google_token(
         .body(body_str)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| "Failed to send Vertex OAuth request".to_string())?;
 
     let status = response.status();
     if status.is_success() {
-        let token_result: VertexTokenResult = response.json().await.map_err(|e| e.to_string())?;
+        let token_result: VertexTokenResult = response
+            .json()
+            .await
+            .map_err(|_| "Vertex OAuth response was invalid".to_string())?;
         Ok(token_result)
     } else {
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        error!(
-            "Vertex token request failed with status {}: {}",
-            status, error_text
-        );
+        error!("Vertex token request failed with status {}", status);
         Err(format!(
-            "Vertex token request failed with status {}: {}",
-            status, error_text
+            "Vertex token request failed with status {}",
+            status
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn malformed_service_account_error_never_echoes_input() {
+        let marker = "vertex-private-sensitive-marker";
+        let error = match request_google_token(&Client::new(), marker).await {
+            Ok(_) => panic!("malformed credential should fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            "Vertex credential must be a valid service account JSON"
+        );
+        assert!(!error.contains(marker));
+    }
+
+    #[tokio::test]
+    async fn cached_oauth_token_avoids_reusing_service_account_material() {
+        let key_id = 98_765;
+        cache_vertex_token_for_test(key_id, "cached-oauth-token");
+
+        let token = get_vertex_token(
+            &Client::new(),
+            key_id,
+            r#"{"client_email":"svc@example.com","token_uri":"https://oauth2.googleapis.com/token","private_key_id":"kid","private_key":"not-a-key"}"#,
+        )
+        .await
+        .expect("cached token should be returned without parsing the private key");
+
+        assert_eq!(token, "cached-oauth-token");
+        invalidate_vertex_token(key_id);
+    }
+
+    #[tokio::test]
+    async fn cached_oauth_token_does_not_bypass_token_uri_validation() {
+        let key_id = 98_766;
+        cache_vertex_token_for_test(key_id, "cached-oauth-token");
+
+        let error = get_vertex_token(
+            &Client::new(),
+            key_id,
+            r#"{"client_email":"svc@example.com","token_uri":"https://oauth.example.com/token","private_key_id":"kid","private_key":"not-a-key"}"#,
+        )
+        .await
+        .expect_err("legacy unsupported token URI must fail even when a token was cached");
+
+        assert_eq!(
+            error,
+            "Vertex credential token_uri must exactly match https://oauth2.googleapis.com/token"
+        );
+        invalidate_vertex_token(key_id);
+    }
+
+    #[tokio::test]
+    async fn unsupported_vertex_token_uri_fails_before_signing_or_network_access() {
+        let error = match request_google_token(
+            &Client::new(),
+            r#"{"client_email":"svc@example.com","token_uri":"https://oauth.example.com/token","private_key_id":"kid","private_key":"not-a-key"}"#,
+        )
+        .await
+        {
+            Ok(_) => panic!("unsupported token URI should fail before key parsing"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            "Vertex credential token_uri must exactly match https://oauth2.googleapis.com/token"
+        );
     }
 }

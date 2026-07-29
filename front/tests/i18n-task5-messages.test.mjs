@@ -19,8 +19,6 @@ const REQUIRED_KEYS = [
   "providerEditPage.sections.quickStart.identityTitle",
   "providerPage.table.status",
   "providerRuntimePage.metrics.totalLatency",
-  "recordPage.diagnostics.retentionFailed",
-  "recordPage.diagnostics.storageInventoryFailed",
 ];
 
 const RENAMED_KEYS = [
@@ -78,20 +76,12 @@ test("dynamic i18n key candidates cover known high-risk sources", () => {
     "route-title",
     "sidebar-item",
     "request-patch-prefix",
-    "alerts",
-    "notifications",
     "api-key-governance",
     "cost-options",
-    "portable-config-enums",
     "record-detail-tabs",
   ]) {
     assert.equal(sourceIds.has(id), true, `${id} dynamic key source exists`);
   }
 
-  assert.equal(
-    DYNAMIC_I18N_FALLBACK_EXCEPTIONS.some(
-      (exception) => exception.id === "record-replay-unavailable-reason",
-    ),
-    true,
-  );
+  assert.equal(DYNAMIC_I18N_FALLBACK_EXCEPTIONS.length, 0);
 });

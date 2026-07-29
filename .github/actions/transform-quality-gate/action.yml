@@ -38,7 +38,18 @@ runs:
         RUSTC_WRAPPER: sccache
         SCCACHE_GHA_ENABLED: "true"
       run: |
-        CYDER_DATA_DIR="${RUNNER_TEMP:-/tmp}/transform-quality-data" \
+        set -euo pipefail
+
+        transform_data_dir="${RUNNER_TEMP:-/tmp}/transform-quality-data"
+        transform_config_dir="$transform_data_dir/config"
+        transform_encryption_key="$(openssl rand -hex 32)"
+
+        umask 077
+        mkdir -p "$transform_config_dir"
+        printf 'secret_encryption:\n  encryption_key: "%s"\n' \
+          "$transform_encryption_key" > "$transform_config_dir/config.yaml"
+
+        CYDER_DATA_DIR="$transform_data_dir" \
           cargo bench --locked -p cyder-api --bench transform_benchmark -- \
             --quick \
             --json-out /tmp/transform-benchmark-summary.json \

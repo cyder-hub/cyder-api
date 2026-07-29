@@ -1,0 +1,502 @@
+openapi: 3.1.0
+info:
+  title: Cyder Manager API Key Living Contract
+  version: 1.0.0-pre.3
+  description: Downstream API key lifecycle contract for the single-manager control plane.
+servers:
+  - url: /
+security:
+  - managerAccessToken: []
+x-cyder-default-cache-control: no-store
+x-cyder-web-security-client-identity-contract: ../web-security-client-identity.md
+x-cyder-access-guard-error-codes: [1431, 1432, 1433, 1434, 1435, 1436]
+x-cyder-secret-governance-reauth-operation-ids: [createApiKey, deleteApiKey, rotateApiKey, revealApiKey]
+paths:
+  /ai/manager/api/api_key/list:
+    get:
+      operationId: listApiKeys
+      x-cyder-error-codes: [1100, 1431, 1432, 1433, 1434, 1435, 1436]
+      responses:
+        "200":
+          description: Safe API key metadata. No authentication hash or encrypted secret fields are returned.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyListEnvelope"
+        "401":
+          $ref: "#/components/responses/ManagerError"
+        "500":
+          $ref: "#/components/responses/ManagerError"
+        "503":
+          $ref: "#/components/responses/ManagerError"
+  /ai/manager/api/api_key:
+    post:
+      operationId: createApiKey
+      description: Creates an API key and returns its plaintext exactly once in this successful response. A current-session secret_governance reauthentication grant is required. The request must not be replayed automatically.
+      x-cyder-error-codes: [1001, 1100, 1101, 1431, 1432, 1433, 1434, 1435, 1436, 1479, 1480, 1491]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApiKeyCreateMutation"
+      responses:
+        "200":
+          description: Created metadata and the one-time plaintext API key.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyCreateEnvelope"
+        "400":
+          $ref: "#/components/responses/ManagerError"
+        "401":
+          $ref: "#/components/responses/ManagerError"
+        "409":
+          $ref: "#/components/responses/ManagerError"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
+          $ref: "#/components/responses/ManagerError"
+        "500":
+          $ref: "#/components/responses/ManagerError"
+        "503":
+          $ref: "#/components/responses/ManagerError"
+  /ai/manager/api/api_key/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ApiKeyId"
+    get:
+      operationId: getApiKeyDetail
+      x-cyder-error-codes: [1002, 1100, 1431, 1432, 1433, 1434, 1435, 1436]
+      responses:
+        "200":
+          description: Safe API key metadata, ACL rules, and reveal capability.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyDetailEnvelope"
+        "401":
+          $ref: "#/components/responses/ManagerError"
+        "404":
+          $ref: "#/components/responses/ManagerError"
+        "500":
+          $ref: "#/components/responses/ManagerError"
+        "503":
+          $ref: "#/components/responses/ManagerError"
+    put:
+      operationId: updateApiKey
+      description: Updates metadata, lifecycle, governance, and ACL rules without changing the secret.
+      x-cyder-error-codes: [1001, 1002, 1100, 1101, 1431, 1432, 1433, 1434, 1435, 1436]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApiKeyMutation"
+      responses:
+        "200":
+          description: Updated safe API key detail.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyDetailEnvelope"
+        "400":
+          $ref: "#/components/responses/ManagerError"
+        "401":
+          $ref: "#/components/responses/ManagerError"
+        "404":
+          $ref: "#/components/responses/ManagerError"
+        "500":
+          $ref: "#/components/responses/ManagerError"
+        "503":
+          $ref: "#/components/responses/ManagerError"
+    delete:
+      operationId: deleteApiKey
+      description: Soft-deletes and disables the API key while irreversibly clearing any encrypted secret tuple. A current-session secret_governance reauthentication grant is required.
+      x-cyder-error-codes: [1002, 1100, 1431, 1432, 1433, 1434, 1435, 1436, 1479, 1480, 1491]
+      responses:
+        "200":
+          description: API key deleted.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmptyEnvelope"
+        "401":
+          $ref: "#/components/responses/ManagerError"
+        "404":
+          $ref: "#/components/responses/ManagerError"
+        "409":
+          $ref: "#/components/responses/ManagerError"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
+          $ref: "#/components/responses/ManagerError"
+        "500":
+          $ref: "#/components/responses/ManagerError"
+        "503":
+          $ref: "#/components/responses/ManagerError"
+  /ai/manager/api/api_key/{id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/ApiKeyId"
+    post:
+      operationId: rotateApiKey
+      description: Immediately invalidates the old plaintext and returns the replacement exactly once. A current-session secret_governance reauthentication grant is required. This request has no body and must not be replayed automatically.
+      x-cyder-error-codes: [1002, 1100, 1101, 1431, 1432, 1433, 1434, 1435, 1436, 1479, 1480, 1491]
+      responses:
+        "200":
+          description: One-time replacement plaintext API key.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyRevealEnvelope"
+        "401":
+          $ref: "#/components/responses/ManagerError"
+        "404":
+          $ref: "#/components/responses/ManagerError"
+        "409":
+          $ref: "#/components/responses/ManagerError"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
+          $ref: "#/components/responses/ManagerError"
+        "500":
+          $ref: "#/components/responses/ManagerError"
+        "503":
+          $ref: "#/components/responses/ManagerError"
+  /ai/manager/api/api_key/{id}/reveal:
+    parameters:
+      - $ref: "#/components/parameters/ApiKeyId"
+    post:
+      operationId: revealApiKey
+      description: Returns the recoverable plaintext when can_reveal is true. A current-session secret_governance reauthentication grant is required. This request has no body. All unavailable causes share one response.
+      x-cyder-error-codes: [1002, 1004, 1100, 1431, 1432, 1433, 1434, 1435, 1436, 1479, 1480, 1491]
+      responses:
+        "200":
+          description: Recoverable plaintext API key.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyRevealEnvelope"
+        "401":
+          $ref: "#/components/responses/ManagerError"
+        "404":
+          $ref: "#/components/responses/ManagerError"
+        "409":
+          $ref: "#/components/responses/ApiKeyRevealConflict"
+        "422":
+          $ref: "#/components/responses/ManagerError"
+        "403":
+          $ref: "#/components/responses/ManagerError"
+        "500":
+          $ref: "#/components/responses/ManagerError"
+        "503":
+          $ref: "#/components/responses/ManagerError"
+components:
+  securitySchemes:
+    managerAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT access token with required session_version
+  parameters:
+    ApiKeyId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+  headers:
+    NoStore:
+      required: true
+      schema:
+        type: string
+        const: no-store
+  schemas:
+    ApiKeyCreateMutation:
+      allOf:
+        - $ref: "#/components/schemas/ApiKeyMutation"
+        - type: object
+          required: [name]
+    ApiKeyMutation:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        default_action:
+          $ref: "#/components/schemas/ApiKeyAction"
+        is_enabled:
+          type: boolean
+        expires_at:
+          type: [integer, "null"]
+          format: int64
+        rate_limit_rpm:
+          type: [integer, "null"]
+          format: int32
+        max_concurrent_requests:
+          type: [integer, "null"]
+          format: int32
+        quota_daily_requests:
+          type: [integer, "null"]
+          format: int64
+        quota_daily_tokens:
+          type: [integer, "null"]
+          format: int64
+        quota_monthly_tokens:
+          type: [integer, "null"]
+          format: int64
+        budget_daily_nanos:
+          type: [integer, "null"]
+          format: int64
+        budget_daily_currency:
+          type: [string, "null"]
+        budget_monthly_nanos:
+          type: [integer, "null"]
+          format: int64
+        budget_monthly_currency:
+          type: [string, "null"]
+        acl_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiKeyAclRuleInput"
+    ApiKeyAction:
+      type: string
+      enum: [ALLOW, DENY]
+    ApiKeyAclScope:
+      type: string
+      enum: [PROVIDER, MODEL]
+    ApiKeyAclRuleInput:
+      type: object
+      additionalProperties: false
+      required: [effect, priority, scope, provider_id, model_id]
+      properties:
+        id:
+          type: integer
+          format: int64
+        effect:
+          $ref: "#/components/schemas/ApiKeyAction"
+        priority:
+          type: integer
+          format: int32
+        scope:
+          $ref: "#/components/schemas/ApiKeyAclScope"
+        provider_id:
+          type: [integer, "null"]
+          format: int64
+        model_id:
+          type: [integer, "null"]
+          format: int64
+        is_enabled:
+          type: boolean
+        description:
+          type: [string, "null"]
+    ApiKeyAclRule:
+      allOf:
+        - $ref: "#/components/schemas/ApiKeyAclRuleInput"
+        - type: object
+          required: [id, is_enabled]
+    ApiKeySummary:
+      type: object
+      required: [id, key_prefix, key_last4, name, description, default_action, is_enabled, expires_at, rate_limit_rpm, max_concurrent_requests, quota_daily_requests, quota_daily_tokens, quota_monthly_tokens, budget_daily_nanos, budget_daily_currency, budget_monthly_nanos, budget_monthly_currency, created_at, updated_at, can_reveal]
+      properties:
+        id:
+          type: integer
+          format: int64
+        key_prefix:
+          type: string
+        key_last4:
+          type: string
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        default_action:
+          $ref: "#/components/schemas/ApiKeyAction"
+        is_enabled:
+          type: boolean
+        expires_at:
+          type: [integer, "null"]
+          format: int64
+        rate_limit_rpm:
+          type: [integer, "null"]
+          format: int32
+        max_concurrent_requests:
+          type: [integer, "null"]
+          format: int32
+        quota_daily_requests:
+          type: [integer, "null"]
+          format: int64
+        quota_daily_tokens:
+          type: [integer, "null"]
+          format: int64
+        quota_monthly_tokens:
+          type: [integer, "null"]
+          format: int64
+        budget_daily_nanos:
+          type: [integer, "null"]
+          format: int64
+        budget_daily_currency:
+          type: [string, "null"]
+        budget_monthly_nanos:
+          type: [integer, "null"]
+          format: int64
+        budget_monthly_currency:
+          type: [string, "null"]
+        created_at:
+          type: integer
+          format: int64
+        updated_at:
+          type: integer
+          format: int64
+        can_reveal:
+          type: boolean
+          description: The only public reveal capability signal. False intentionally does not disclose why plaintext is unavailable.
+    ApiKeyDetail:
+      allOf:
+        - $ref: "#/components/schemas/ApiKeySummary"
+        - type: object
+          required: [acl_rules]
+          properties:
+            acl_rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/ApiKeyAclRule"
+    ApiKeyReveal:
+      type: object
+      additionalProperties: false
+      required: [id, name, key_prefix, key_last4, api_key, updated_at, can_reveal]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        key_prefix:
+          type: string
+        key_last4:
+          type: string
+        api_key:
+          type: string
+          format: password
+          description: Sensitive plaintext. It must not be logged, persisted by the client, or included in diagnostics.
+        updated_at:
+          type: integer
+          format: int64
+        can_reveal:
+          type: boolean
+          description: Whether this plaintext remains available through a later Reveal action.
+    ApiKeyListEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiKeySummary"
+    ApiKeyDetailEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/ApiKeyDetail"
+    ApiKeyRevealEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          $ref: "#/components/schemas/ApiKeyReveal"
+    ApiKeyCreateEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          type: object
+          required: [detail, reveal]
+          properties:
+            detail:
+              $ref: "#/components/schemas/ApiKeyDetail"
+            reveal:
+              $ref: "#/components/schemas/ApiKeyReveal"
+    EmptyEnvelope:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          const: 0
+        data:
+          type: "null"
+    ManagerError:
+      type: object
+      required: [code, msg]
+      properties:
+        code:
+          type: integer
+        msg:
+          type: string
+    ApiKeySecretUnavailableError:
+      type: object
+      additionalProperties: false
+      required: [code, msg]
+      properties:
+        code:
+          type: integer
+          const: 1004
+        msg:
+          type: string
+          const: api key secret is unavailable
+  responses:
+    ManagerError:
+      description: Stable manager API error.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ManagerError"
+    ApiKeyRevealConflict:
+      description: Either the API key plaintext is unavailable or the supplied TOTP step is replayed/stale. Secret mode, ciphertext, fingerprint, format, and decryption failures remain intentionally indistinguishable.
+      headers:
+        Cache-Control:
+          $ref: "#/components/headers/NoStore"
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/ApiKeySecretUnavailableError"
+              - $ref: "#/components/schemas/ManagerError"

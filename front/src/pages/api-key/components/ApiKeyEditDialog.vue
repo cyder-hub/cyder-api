@@ -25,7 +25,6 @@ import {
 import type {
   ApiKeyAction,
   ApiKeyDetail,
-  ModelRouteListItem,
   ModelSummaryItem,
   ProviderSummaryItem,
 } from "@/services/types";
@@ -35,7 +34,6 @@ import type { ApiKeyEditSuccessPayload } from "../types";
 interface ApiKeyEditDialogProps {
   isOpen: boolean;
   initialData: ApiKeyDetail | null;
-  modelRoutes: ModelRouteListItem[];
   providers: ProviderSummaryItem[];
   models: ModelSummaryItem[];
 }
@@ -59,23 +57,18 @@ const {
   scopeOptions,
   providerOptions,
   budgetCurrencyOptions,
-  routeOptions,
   updateBudgetCurrency,
   clearQuotaLimits,
   clearBudgetLimits,
   addRule,
   removeRule,
-  addOverride,
-  removeOverride,
   updateRuleScope,
   updateRuleProvider,
-  updateOverrideTargetRoute,
   modelOptionsForRule,
   handleCommit,
 } = useApiKeyEditDialog({
   isOpen: toRef(props, "isOpen"),
   initialData: toRef(props, "initialData"),
-  modelRoutes: toRef(props, "modelRoutes"),
   providers: toRef(props, "providers"),
   models: toRef(props, "models"),
   t,
@@ -387,125 +380,6 @@ const {
 
           <section class="space-y-4 border-t border-gray-100 pt-6">
             <SectionHeader
-              :title="t('apiKeyEditModal.sections.overrides')"
-              :help="t('apiKeyEditModal.sections.overridesDescription')"
-              :help-label="t('apiKeyEditModal.sections.overrides')"
-            >
-              <template #actions>
-              <Button
-                type="button"
-                variant="outline"
-                class="w-full sm:w-auto"
-                :disabled="!routeOptions.length"
-                @click="addOverride"
-              >
-                <Plus class="mr-1.5 h-4 w-4" />
-                {{ t("apiKeyEditModal.addOverride") }}
-              </Button>
-              </template>
-            </SectionHeader>
-
-            <div
-              v-if="!routeOptions.length"
-              class="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-sm text-gray-500"
-            >
-              {{ t("apiKeyEditModal.noRoutes") }}
-            </div>
-
-            <div
-              v-else-if="!editingData.model_overrides.length"
-              class="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-sm text-gray-500"
-            >
-              {{ t("apiKeyEditModal.noOverrides") }}
-            </div>
-
-            <div v-else class="space-y-4">
-              <div
-                v-for="(item, index) in editingData.model_overrides"
-                :key="item.local_id"
-                class="rounded-lg bg-gray-50/70 p-4"
-              >
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <h4 class="text-sm font-semibold text-gray-900">
-                      {{ t("apiKeyEditModal.overrideTitle", { index: index + 1 }) }}
-                    </h4>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    class="text-gray-400 hover:text-red-600"
-                    @click="removeOverride(index)"
-                  >
-                    <Trash2 class="mr-1 h-3.5 w-3.5" />
-                    {{ t("common.delete") }}
-                  </Button>
-                </div>
-
-                <div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div class="space-y-1.5">
-                    <Label class="text-gray-700">
-                      {{ t("apiKeyEditModal.labelOverrideSourceName") }}
-                    </Label>
-                    <Input
-                      v-model="item.source_name"
-                      :placeholder="t('apiKeyEditModal.placeholderOverrideSourceName')"
-                    />
-                  </div>
-
-                  <div class="space-y-1.5">
-                    <Label class="text-gray-700">
-                      {{ t("apiKeyEditModal.labelOverrideTargetRoute") }}
-                    </Label>
-                    <Select
-                      :model-value="
-                        item.target_route_id == null ? 'none' : String(item.target_route_id)
-                      "
-                      @update:model-value="
-                        (value) => updateOverrideTargetRoute(index, String(value ?? 'none'))
-                      "
-                    >
-                      <SelectTrigger class="w-full">
-                        <SelectValue
-                          :placeholder="t('apiKeyEditModal.placeholderOverrideTargetRoute')"
-                        />
-                      </SelectTrigger>
-                      <SelectContent :body-lock="false">
-                        <SelectItem value="none">
-                          {{ t("apiKeyEditModal.placeholderOverrideTargetRoute") }}
-                        </SelectItem>
-                        <SelectItem
-                          v-for="route in routeOptions"
-                          :key="route.value"
-                          :value="String(route.value)"
-                        >
-                          {{ route.label }}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div class="space-y-1.5 sm:col-span-2">
-                    <Label class="text-gray-700">
-                      {{ t("apiKeyEditModal.labelOverrideDescription") }}
-                    </Label>
-                    <Input v-model="item.description" />
-                  </div>
-                </div>
-
-                <div class="mt-4 flex items-center justify-between rounded-lg border border-gray-200 bg-white p-3.5">
-                  <Label class="cursor-pointer text-sm font-medium leading-none">
-                    {{ t("apiKeyEditModal.labelOverrideEnabled") }}
-                  </Label>
-                  <Checkbox v-model="item.is_enabled" />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section class="space-y-4 border-t border-gray-100 pt-6">
-            <SectionHeader
               :title="t('apiKeyEditModal.sections.acl')"
               :help="t('apiKeyEditModal.sections.aclDescription')"
               :help-label="t('apiKeyEditModal.sections.acl')"
@@ -687,6 +561,7 @@ const {
               </div>
             </div>
           </section>
+
         </div>
 
         <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:px-6">
@@ -699,7 +574,11 @@ const {
           >
             {{ t("common.cancel") }}
           </Button>
-          <Button type="submit" class="w-full sm:w-auto" :disabled="isSubmitting">
+          <Button
+            type="submit"
+            class="w-full sm:w-auto"
+            :disabled="isSubmitting"
+          >
             {{ isSubmitting ? t("common.saving") : t("common.save") }}
           </Button>
         </DialogFooter>

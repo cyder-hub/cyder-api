@@ -13,6 +13,8 @@ use cyder_api::service::transform::quality::{
 
 const DEFAULT_THRESHOLDS_PATH: &str =
     "server/src/service/transform/quality/default-thresholds.json";
+const BENCHMARK_ENCRYPTION_KEY: &str =
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 struct GateArgs {
     quick: bool,
@@ -126,6 +128,7 @@ fn run_benchmark(
     json_out: &Path,
 ) -> Result<BenchmarkSummary, String> {
     let benchmark_data_dir = temp_report_path("transform-benchmark-data");
+    prepare_benchmark_config(&benchmark_data_dir)?;
     let mut command = build_benchmark_command(workspace_root, quick, json_out, &benchmark_data_dir);
 
     let status = command
@@ -140,6 +143,22 @@ fn run_benchmark(
             .map_err(|err| format!("read benchmark summary {}: {err}", json_out.display()))?,
     )
     .map_err(|err| format!("parse benchmark summary {}: {err}", json_out.display()))
+}
+
+fn prepare_benchmark_config(benchmark_data_dir: &Path) -> Result<(), String> {
+    let config_dir = benchmark_data_dir.join("config");
+    fs::create_dir_all(&config_dir).map_err(|err| {
+        format!(
+            "create benchmark config directory {}: {err}",
+            config_dir.display()
+        )
+    })?;
+    let config_path = config_dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!("secret_encryption:\n  encryption_key: '{BENCHMARK_ENCRYPTION_KEY}'\n"),
+    )
+    .map_err(|err| format!("write benchmark config {}: {err}", config_path.display()))
 }
 
 fn build_benchmark_command(
@@ -219,6 +238,17 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::*;
+
+    #[test]
+    fn benchmark_config_supplies_required_secret_encryption_key() {
+        let data_dir = tempfile::tempdir().expect("temporary benchmark data dir should exist");
+
+        prepare_benchmark_config(data_dir.path()).expect("benchmark config should be written");
+
+        let config = fs::read_to_string(data_dir.path().join("config/config.yaml"))
+            .expect("benchmark config should be readable");
+        assert!(config.contains(BENCHMARK_ENCRYPTION_KEY));
+    }
 
     #[test]
     fn benchmark_command_uses_isolated_data_dir() {

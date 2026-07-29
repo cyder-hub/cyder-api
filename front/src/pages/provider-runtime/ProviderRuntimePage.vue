@@ -147,19 +147,12 @@ function backendLabel(backend: RuntimeStateBackendStatus["runtime_effective_back
     : backend;
 }
 
-function deploymentModeLabel(mode: RuntimeStateBackendStatus["deployment_mode"]) {
-  return mode === "single_instance" || mode === "multi_instance"
-    ? $t(`dashboard.runtimeState.deployment.${mode}`)
-    : mode;
-}
-
 const runtimeBackendHeadline = computed(() => {
   const status = runtimeBackendStatus.value;
   if (!status) {
     return "";
   }
   return $t("dashboard.runtimeState.description", {
-    deployment: deploymentModeLabel(status.deployment_mode),
     runtime: backendLabel(status.runtime_effective_backend),
     catalog: backendLabel(status.catalog_cache_backend),
   });
@@ -188,24 +181,18 @@ const runtimeBackendBadgeLabel = computed(() => {
     return $t("dashboard.runtimeState.status.degraded");
   }
   if (
-    status.deployment_mode === "single_instance" &&
     status.runtime_effective_backend === "memory" &&
     !status.fallback_reason
   ) {
     return $t("dashboard.runtimeState.status.recommended");
   }
-  return status.runtime_shared
-    ? $t("dashboard.runtimeState.status.shared")
-    : $t("dashboard.runtimeState.status.nonShared");
+  return backendLabel(status.runtime_effective_backend);
 });
 
 const runtimeBackendBadgeClass = computed(() => {
   const status = runtimeBackendStatus.value;
   if (status?.runtime_degraded) {
     return "border-red-200 bg-red-50 text-red-700 hover:bg-red-50";
-  }
-  if (status?.runtime_shared) {
-    return "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-50";
   }
   return "border-gray-200 bg-white text-gray-700 hover:bg-white";
 });
@@ -233,14 +220,14 @@ const runtimeBackendDetail = computed(() => {
     });
   }
   if (
-    status.deployment_mode === "single_instance" &&
     status.runtime_effective_backend === "memory"
   ) {
     return $t("dashboard.runtimeState.recommendedHint");
   }
-  return status.runtime_shared
-    ? $t("dashboard.runtimeState.sharedHint")
-    : $t("dashboard.runtimeState.nonSharedHint");
+  if (status.runtime_effective_backend === "redis") {
+    return $t("dashboard.runtimeState.redisHint");
+  }
+  return "";
 });
 
 async function applyRouteQueryAndFetch() {
@@ -321,10 +308,6 @@ function buildPrimaryMetrics(item: ProviderRuntimeItem) {
     {
       label: $t("providerRuntimePage.metrics.failures"),
       value: formatCount(item.consecutive_failures),
-    },
-    {
-      label: $t("providerRuntimePage.metrics.sortScore"),
-      value: item.sort_score.toFixed(2),
     },
     {
       label: $t("providerRuntimePage.metrics.proxy"),
@@ -469,7 +452,7 @@ onMounted(() => {
             <p class="mt-1 text-sm font-medium text-gray-900">
               {{ runtimeBackendHeadline }}
             </p>
-            <p class="mt-1 text-xs text-gray-500">
+            <p v-if="runtimeBackendDetail" class="mt-1 text-xs text-gray-500">
               {{ runtimeBackendDetail }}
             </p>
             <dl class="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-2">

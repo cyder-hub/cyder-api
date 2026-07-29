@@ -12,8 +12,7 @@ use crate::controller::BaseError;
 use crate::database::api_key::ApiKey;
 use crate::database::cost::{CostCatalogVersion, CostComponent};
 use crate::database::model::Model;
-use crate::database::model_route::{ApiKeyModelOverride, ModelRoute};
-use crate::database::provider::{Provider, ProviderApiKey};
+use crate::database::provider::{Provider, ProviderApiKeyRepository};
 use crate::database::reasoning_config::ReasoningConfig;
 use crate::database::request_patch::RequestPatchRule;
 use crate::database::runtime_feature_config::RuntimeFeatureConfig;
@@ -22,9 +21,9 @@ use crate::service::cache::memory::MemoryCacheBackend;
 use crate::service::cache::redis::RedisCacheBackend;
 use crate::service::cache::repository::{CacheRepository, DynCacheRepo};
 use crate::service::cache::types::{
-    CacheApiKey, CacheApiKeyModelOverride, CacheCostCatalogVersion, CacheEntry, CacheModel,
-    CacheModelRoute, CacheModelsCatalog, CacheProvider, CacheProviderKey, CacheReasoningConfig,
-    CacheRequestPatchRule, CacheResolvedModelRequestPatches, CacheRuntimeFeatureConfig,
+    CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModel, CacheModelsCatalog,
+    CacheProvider, CacheProviderKey, CacheReasoningConfig, CacheRequestPatchRule,
+    CacheResolvedModelRequestPatches, CacheRuntimeFeatureConfig,
 };
 use crate::service::redis::{self, RedisPool};
 use crate::service::request_patch::resolve_effective_request_patches;
@@ -35,8 +34,17 @@ use super::reload::{
 };
 
 type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
-type ProviderApiKeysInvalidationHook =
-    Arc<dyn Fn(i64) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
+type ProviderApiKeysInvalidationHook = Arc<
+    dyn Fn(i64) -> Pin<Box<dyn Future<Output = Result<(), AppStoreError>> + Send + 'static>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
+enum ProviderApiKeyRuntimeSnapshot {
+    Trusted(Arc<Vec<CacheProviderKey>>),
+    FailClosed,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CatalogCacheBackendStatus {
@@ -47,8 +55,6 @@ pub struct CatalogCacheBackendStatus {
 
 pub struct CatalogService {
     api_key_cache: CacheRepo<CacheApiKey>,
-    model_route_cache: CacheRepo<CacheModelRoute>,
-    api_key_override_route_cache: CacheRepo<CacheModelRoute>,
     models_catalog_cache: CacheRepo<CacheModelsCatalog>,
     provider_cache: CacheRepo<CacheProvider>,
     model_cache: CacheRepo<CacheModel>,
@@ -61,6 +67,9 @@ pub struct CatalogService {
     negative_cache_ttl: Duration,
     provider_api_keys_invalidation_hook:
         tokio::sync::RwLock<Option<ProviderApiKeysInvalidationHook>>,
+    provider_api_key_runtime_snapshots:
+        tokio::sync::RwLock<HashMap<i64, ProviderApiKeyRuntimeSnapshot>>,
+    provider_api_key_refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl CatalogService {
@@ -92,8 +101,6 @@ impl CatalogService {
 
         Self {
             api_key_cache: Self::create_repo(ttl, pool),
-            model_route_cache: Self::create_repo(ttl, pool),
-            api_key_override_route_cache: Self::create_repo(ttl, pool),
             models_catalog_cache: Self::create_repo(ttl, pool),
             provider_cache: Self::create_repo(ttl, pool),
             model_cache: Self::create_repo(ttl, pool),
@@ -105,6 +112,8 @@ impl CatalogService {
             backend_status,
             negative_cache_ttl,
             provider_api_keys_invalidation_hook: tokio::sync::RwLock::new(None),
+            provider_api_key_runtime_snapshots: tokio::sync::RwLock::new(HashMap::new()),
+            provider_api_key_refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -205,15 +214,11 @@ impl CatalogService {
         let mut failure_counts: HashMap<&'static str, usize> = HashMap::new();
         let mut catalog_providers = Vec::new();
         let mut catalog_models = Vec::new();
-        let mut catalog_routes = Vec::new();
-        let mut catalog_api_key_overrides = Vec::new();
         let mut catalog_reasoning_configs = Vec::new();
         let mut catalog_runtime_feature_configs = Vec::new();
         let mut api_key_count = 0usize;
         let mut provider_count = 0usize;
         let mut model_count = 0usize;
-        let mut model_route_count = 0usize;
-        let mut api_key_override_count = 0usize;
         let mut reasoning_config_count = 0usize;
         let mut runtime_feature_config_count = 0usize;
         let mut provider_api_key_count = 0usize;
@@ -309,84 +314,6 @@ impl CatalogService {
             }
         }
 
-        match ModelRoute::list_summary() {
-            Ok(routes) => {
-                model_route_count = routes.len();
-                for route_item in routes {
-                    match ModelRoute::get_detail(route_item.route.id) {
-                        Ok(route_detail) => {
-                            let cache_item = CacheModelRoute::from_detail(&route_detail);
-                            catalog_routes.push(cache_item.clone());
-                            let _ = self
-                                .model_route_cache
-                                .set_positive(
-                                    &CacheKey::ModelRouteById(cache_item.id).to_compact_string(),
-                                    &cache_item,
-                                )
-                                .await;
-                            let _ = self
-                                .model_route_cache
-                                .set_positive(
-                                    &CacheKey::ModelRouteByName(&cache_item.route_name)
-                                        .to_compact_string(),
-                                    &cache_item,
-                                )
-                                .await;
-                        }
-                        Err(_) => {
-                            increment_failure_counter(&mut failure_counts, "model_route_detail");
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                increment_failure_counter(&mut failure_counts, "model_route_list");
-            }
-        }
-
-        match ApiKeyModelOverride::list_all() {
-            Ok(overrides) => {
-                api_key_override_count = overrides.len();
-                for override_row in overrides {
-                    catalog_api_key_overrides
-                        .push(CacheApiKeyModelOverride::from(override_row.clone()));
-
-                    if !override_row.is_enabled {
-                        continue;
-                    }
-
-                    match self
-                        .get_model_route_by_id(override_row.target_route_id)
-                        .await
-                    {
-                        Ok(Some(route)) => {
-                            let _ = self
-                                .api_key_override_route_cache
-                                .set_positive(
-                                    &CacheKey::ApiKeyModelOverride(
-                                        override_row.api_key_id,
-                                        &override_row.source_name,
-                                    )
-                                    .to_compact_string(),
-                                    route.as_ref(),
-                                )
-                                .await;
-                        }
-                        Ok(None) => {}
-                        Err(_) => {
-                            increment_failure_counter(
-                                &mut failure_counts,
-                                "api_key_model_override_route",
-                            );
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                increment_failure_counter(&mut failure_counts, "api_key_model_override_list");
-            }
-        }
-
         match ReasoningConfig::list_active_with_presets() {
             Ok(configs) => {
                 reasoning_config_count = configs.len();
@@ -412,8 +339,6 @@ impl CatalogService {
         let models_catalog = CacheModelsCatalog {
             providers: catalog_providers.clone(),
             models: catalog_models.clone(),
-            routes: catalog_routes.clone(),
-            api_key_overrides: catalog_api_key_overrides.clone(),
             reasoning_configs: catalog_reasoning_configs.clone(),
             runtime_feature_configs: catalog_runtime_feature_configs.clone(),
         };
@@ -425,7 +350,7 @@ impl CatalogService {
             )
             .await;
 
-        match ProviderApiKey::list_all() {
+        match ProviderApiKeyRepository::list_all_selections() {
             Ok(keys) => {
                 provider_api_key_count = keys.len();
                 let mut by_provider: HashMap<i64, Vec<CacheProviderKey>> = HashMap::new();
@@ -436,7 +361,20 @@ impl CatalogService {
                         .push(CacheProviderKey::from(key));
                 }
                 provider_api_key_group_count = by_provider.len();
+                let mut snapshots = provider_id_to_key
+                    .keys()
+                    .map(|provider_id| {
+                        (
+                            *provider_id,
+                            ProviderApiKeyRuntimeSnapshot::Trusted(Arc::new(Vec::new())),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
                 for (provider_id, provider_keys) in by_provider {
+                    snapshots.insert(
+                        provider_id,
+                        ProviderApiKeyRuntimeSnapshot::Trusted(Arc::new(provider_keys.clone())),
+                    );
                     let _ = self
                         .provider_api_keys_cache
                         .set_positive(
@@ -445,9 +383,14 @@ impl CatalogService {
                         )
                         .await;
                 }
+                *self.provider_api_key_runtime_snapshots.write().await = snapshots;
             }
             Err(_) => {
                 increment_failure_counter(&mut failure_counts, "provider_api_key_list");
+                *self.provider_api_key_runtime_snapshots.write().await = provider_id_to_key
+                    .keys()
+                    .map(|provider_id| (*provider_id, ProviderApiKeyRuntimeSnapshot::FailClosed))
+                    .collect();
             }
         }
 
@@ -575,8 +518,6 @@ impl CatalogService {
                 api_key_count = api_key_count,
                 provider_count = provider_count,
                 model_count = model_count,
-                model_route_count = model_route_count,
-                api_key_override_count = api_key_override_count,
                 reasoning_config_count = reasoning_config_count,
                 runtime_feature_config_count = runtime_feature_config_count,
                 provider_api_key_count = provider_api_key_count,
@@ -596,8 +537,6 @@ impl CatalogService {
                 api_key_count = api_key_count,
                 provider_count = provider_count,
                 model_count = model_count,
-                model_route_count = model_route_count,
-                api_key_override_count = api_key_override_count,
                 reasoning_config_count = reasoning_config_count,
                 runtime_feature_config_count = runtime_feature_config_count,
                 provider_api_key_count = provider_api_key_count,
@@ -617,16 +556,15 @@ impl CatalogService {
     pub async fn clear_cache(&self) {
         crate::info_event!("cache.clear_started");
 
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .clear();
+
         let mut failed_repos = Vec::new();
 
         if self.api_key_cache.clear().await.is_err() {
             failed_repos.push("api_key_cache");
-        }
-        if self.model_route_cache.clear().await.is_err() {
-            failed_repos.push("model_route_cache");
-        }
-        if self.api_key_override_route_cache.clear().await.is_err() {
-            failed_repos.push("api_key_override_route_cache");
         }
         if self.models_catalog_cache.clear().await.is_err() {
             failed_repos.push("models_catalog_cache");
@@ -663,7 +601,7 @@ impl CatalogService {
             failed_repos.push("cost_catalog_version_cache");
         }
 
-        let total_repo_count = 11usize;
+        let total_repo_count = 9usize;
         let failed_repo_count = failed_repos.len();
         let failed_repo_summary = summarize_repo_names(&failed_repos);
 
@@ -795,10 +733,7 @@ impl CatalogService {
 
     pub async fn invalidate_api_key_id(&self, id: i64) -> Result<(), AppStoreError> {
         if let Ok(row) = ApiKey::get_by_id(id) {
-            let api_key_hash = row
-                .api_key_hash
-                .unwrap_or_else(|| crate::database::api_key::hash_api_key(&row.api_key));
-            self.invalidate_api_key_hash(&api_key_hash).await?;
+            self.invalidate_api_key_hash(&row.api_key_hash).await?;
         }
 
         Ok(())
@@ -806,190 +741,6 @@ impl CatalogService {
 
     pub async fn invalidate_api_key(&self, key: &str) -> Result<(), AppStoreError> {
         self.invalidate_api_key_hash(&Self::hash_api_key(key)).await
-    }
-
-    pub async fn get_model_route_by_id(
-        &self,
-        id: i64,
-    ) -> Result<Option<Arc<CacheModelRoute>>, AppStoreError> {
-        let cache_key = CacheKey::ModelRouteById(id).to_compact_string();
-
-        self.get_or_load(&self.model_route_cache, &cache_key, || async {
-            match ModelRoute::get_detail(id) {
-                Ok(detail) => {
-                    let cache_item = CacheModelRoute::from_detail(&detail);
-                    self.model_route_cache
-                        .set_positive(
-                            &CacheKey::ModelRouteByName(&cache_item.route_name).to_compact_string(),
-                            &cache_item,
-                        )
-                        .await?;
-                    Ok(Some(cache_item))
-                }
-                Err(BaseError::NotFound(_)) => Ok(None),
-                Err(err) => Err(AppStoreError::DatabaseError(format!(
-                    "failed to load model route by id {}: {:?}",
-                    id, err
-                ))),
-            }
-        })
-        .await
-    }
-
-    pub async fn get_model_route_by_name(
-        &self,
-        name: &str,
-    ) -> Result<Option<Arc<CacheModelRoute>>, AppStoreError> {
-        let cache_key = CacheKey::ModelRouteByName(name).to_compact_string();
-
-        self.get_or_load(&self.model_route_cache, &cache_key, || async {
-            match ModelRoute::get_active_by_name(name) {
-                Ok(Some(route)) => {
-                    let detail = ModelRoute::get_detail(route.id).map_err(|err| {
-                        AppStoreError::DatabaseError(format!(
-                            "failed to load model route detail {}: {:?}",
-                            route.id, err
-                        ))
-                    })?;
-                    let cache_item = CacheModelRoute::from_detail(&detail);
-                    self.model_route_cache
-                        .set_positive(
-                            &CacheKey::ModelRouteById(cache_item.id).to_compact_string(),
-                            &cache_item,
-                        )
-                        .await?;
-                    Ok(Some(cache_item))
-                }
-                Ok(None) => Ok(None),
-                Err(err) => Err(AppStoreError::DatabaseError(format!(
-                    "failed to load model route by name '{}': {:?}",
-                    name, err
-                ))),
-            }
-        })
-        .await
-    }
-
-    pub async fn get_api_key_override_route(
-        &self,
-        api_key_id: i64,
-        source_name: &str,
-    ) -> Result<Option<Arc<CacheModelRoute>>, AppStoreError> {
-        let cache_key = CacheKey::ApiKeyModelOverride(api_key_id, source_name).to_compact_string();
-
-        self.get_or_load(&self.api_key_override_route_cache, &cache_key, || async {
-            match ApiKeyModelOverride::get_active_by_source_name(api_key_id, source_name) {
-                Ok(Some(override_row)) => {
-                    if !override_row.is_enabled {
-                        return Ok(None);
-                    }
-                    let route = self
-                        .get_model_route_by_id(override_row.target_route_id)
-                        .await?
-                        .map(|route| route.as_ref().clone());
-                    Ok(route)
-                }
-                Ok(None) => Ok(None),
-                Err(err) => Err(AppStoreError::DatabaseError(format!(
-                    "failed to load api key override {}:{}: {:?}",
-                    api_key_id, source_name, err
-                ))),
-            }
-        })
-        .await
-    }
-
-    pub async fn invalidate_model_route_by_name(&self, name: &str) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::ModelRouteByName(name).to_compact_string();
-        Ok(self.model_route_cache.delete(&cache_key).await?)
-    }
-
-    pub async fn invalidate_api_key_model_override(
-        &self,
-        api_key_id: i64,
-        source_name: &str,
-    ) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::ApiKeyModelOverride(api_key_id, source_name).to_compact_string();
-        self.invalidate_models_catalog().await?;
-        Ok(self.api_key_override_route_cache.delete(&cache_key).await?)
-    }
-
-    pub async fn invalidate_api_key_model_overrides_by_route(
-        &self,
-        route_id: i64,
-    ) -> Result<(), AppStoreError> {
-        for override_row in
-            ApiKeyModelOverride::list_by_target_route_id(route_id).map_err(|err| {
-                AppStoreError::DatabaseError(format!(
-                    "failed to list api key overrides for route {}: {:?}",
-                    route_id, err
-                ))
-            })?
-        {
-            let _ = self
-                .invalidate_api_key_model_override(
-                    override_row.api_key_id,
-                    &override_row.source_name,
-                )
-                .await;
-        }
-
-        Ok(())
-    }
-
-    pub async fn invalidate_model_route(
-        &self,
-        route_id: i64,
-        route_name: Option<&str>,
-    ) -> Result<(), AppStoreError> {
-        self.invalidate_models_catalog().await?;
-        if let Some(name) = route_name {
-            let _ = self.invalidate_model_route_by_name(name).await;
-        } else if let Some(route) = self.get_model_route_by_id(route_id).await? {
-            let _ = self.invalidate_model_route_by_name(&route.route_name).await;
-        }
-        self.invalidate_api_key_model_overrides_by_route(route_id)
-            .await?;
-        Ok(self
-            .model_route_cache
-            .delete(&CacheKey::ModelRouteById(route_id).to_compact_string())
-            .await?)
-    }
-
-    pub async fn invalidate_model_routes_for_model(
-        &self,
-        model_id: i64,
-    ) -> Result<(), AppStoreError> {
-        for route in ModelRoute::list_by_model_id(model_id).map_err(|err| {
-            AppStoreError::DatabaseError(format!(
-                "failed to list model routes for model {}: {:?}",
-                model_id, err
-            ))
-        })? {
-            let _ = self
-                .invalidate_model_route(route.id, Some(&route.route_name))
-                .await;
-        }
-
-        Ok(())
-    }
-
-    pub async fn invalidate_model_routes_for_provider(
-        &self,
-        provider_id: i64,
-    ) -> Result<(), AppStoreError> {
-        for route in ModelRoute::list_by_provider_id(provider_id).map_err(|err| {
-            AppStoreError::DatabaseError(format!(
-                "failed to list model routes for provider {}: {:?}",
-                provider_id, err
-            ))
-        })? {
-            let _ = self
-                .invalidate_model_route(route.id, Some(&route.route_name))
-                .await;
-        }
-
-        Ok(())
     }
 
     pub async fn get_models_catalog(&self) -> Result<Arc<CacheModelsCatalog>, AppStoreError> {
@@ -1076,7 +827,6 @@ impl CatalogService {
         key: Option<&str>,
     ) -> Result<(), AppStoreError> {
         self.invalidate_models_catalog().await?;
-        let _ = self.invalidate_model_routes_for_provider(id).await;
         let _ = self.invalidate_provider_request_patch_rules(id).await;
         if let Some(k) = key {
             let _ = self.invalidate_provider_by_key(k).await;
@@ -1121,7 +871,7 @@ impl CatalogService {
             }
         }
 
-        self.invalidate_model_routes_for_provider(provider_id).await
+        Ok(())
     }
 
     pub async fn get_model_by_name(
@@ -1185,7 +935,6 @@ impl CatalogService {
 
     pub async fn invalidate_model(&self, id: i64, name: Option<&str>) -> Result<(), AppStoreError> {
         self.invalidate_models_catalog().await?;
-        let _ = self.invalidate_model_routes_for_model(id).await;
         let _ = self.invalidate_model_request_patch_rules(id).await;
         if let Some(n) = name {
             let parts: Vec<&str> = n.splitn(2, '/').collect();
@@ -1219,7 +968,6 @@ impl CatalogService {
             }
         }
 
-        let _ = self.invalidate_model_routes_for_model(model_id).await;
         Ok(self
             .model_cache
             .delete(&CacheKey::ModelById(model_id).to_compact_string())
@@ -1244,41 +992,132 @@ impl CatalogService {
         &self,
         provider_id: i64,
     ) -> Result<Arc<Vec<CacheProviderKey>>, AppStoreError> {
-        let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
+        if let Some(snapshot) = self
+            .provider_api_key_runtime_snapshots
+            .read()
+            .await
+            .get(&provider_id)
+            .cloned()
+        {
+            return Self::resolve_provider_key_snapshot(provider_id, snapshot);
+        }
 
-        let arc_list = self
-            .get_or_load(&self.provider_api_keys_cache, &cache_key, || async {
-                if let Ok(db_keys) = ProviderApiKey::list_by_provider_id(provider_id) {
-                    Ok(Some(
-                        db_keys.into_iter().map(CacheProviderKey::from).collect(),
-                    ))
-                } else {
-                    Ok(None)
-                }
-            })
-            .await?;
-
-        Ok(arc_list.unwrap_or_else(|| Arc::new(Vec::new())))
+        let _refresh_guard = self.provider_api_key_refresh_lock.lock().await;
+        if let Some(snapshot) = self
+            .provider_api_key_runtime_snapshots
+            .read()
+            .await
+            .get(&provider_id)
+            .cloned()
+        {
+            return Self::resolve_provider_key_snapshot(provider_id, snapshot);
+        }
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .insert(provider_id, ProviderApiKeyRuntimeSnapshot::FailClosed);
+        let snapshot = Arc::new(Self::load_provider_api_key_snapshot(provider_id)?);
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .insert(
+                provider_id,
+                ProviderApiKeyRuntimeSnapshot::Trusted(Arc::clone(&snapshot)),
+            );
+        self.publish_provider_api_key_snapshot_best_effort(provider_id, snapshot.as_ref())
+            .await;
+        Ok(snapshot)
     }
 
-    async fn run_provider_api_keys_invalidation_hook(&self, provider_id: i64) {
+    fn resolve_provider_key_snapshot(
+        provider_id: i64,
+        snapshot: ProviderApiKeyRuntimeSnapshot,
+    ) -> Result<Arc<Vec<CacheProviderKey>>, AppStoreError> {
+        match snapshot {
+            ProviderApiKeyRuntimeSnapshot::Trusted(keys) => Ok(keys),
+            ProviderApiKeyRuntimeSnapshot::FailClosed => Err(AppStoreError::CacheError(format!(
+                "provider credential snapshot is fail-closed for provider {provider_id}"
+            ))),
+        }
+    }
+
+    fn load_provider_api_key_snapshot(
+        provider_id: i64,
+    ) -> Result<Vec<CacheProviderKey>, AppStoreError> {
+        ProviderApiKeyRepository::list_selections_by_provider_id(provider_id)
+            .map(|rows| rows.into_iter().map(CacheProviderKey::from).collect())
+            .map_err(|_| {
+                AppStoreError::DatabaseError(format!(
+                    "failed to load provider credential snapshot for provider {provider_id}"
+                ))
+            })
+    }
+
+    async fn publish_provider_api_key_snapshot_best_effort(
+        &self,
+        provider_id: i64,
+        snapshot: &Vec<CacheProviderKey>,
+    ) {
+        let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
+        if let Err(error) = self.provider_api_keys_cache.delete(&cache_key).await {
+            crate::warn_event!(
+                "provider_credential.remote_cache_delete_failed",
+                provider_id = provider_id,
+                error = &error.to_string(),
+            );
+        }
+        if let Err(error) = self
+            .provider_api_keys_cache
+            .set_positive(&cache_key, snapshot)
+            .await
+        {
+            crate::warn_event!(
+                "provider_credential.remote_cache_write_failed",
+                provider_id = provider_id,
+                error = &error.to_string(),
+            );
+        }
+    }
+
+    async fn run_provider_api_keys_invalidation_hook(
+        &self,
+        provider_id: i64,
+    ) -> Result<(), AppStoreError> {
         let hook = self
             .provider_api_keys_invalidation_hook
             .read()
             .await
             .clone();
         if let Some(hook) = hook {
-            (hook)(provider_id).await;
+            (hook)(provider_id).await?;
         }
+        Ok(())
     }
 
     pub async fn invalidate_provider_api_keys(
         &self,
         provider_id: i64,
     ) -> Result<(), AppStoreError> {
-        let cache_key = CacheKey::ProviderApiKeys(provider_id).to_compact_string();
-        self.provider_api_keys_cache.delete(&cache_key).await?;
-        self.run_provider_api_keys_invalidation_hook(provider_id)
+        let _refresh_guard = self.provider_api_key_refresh_lock.lock().await;
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .insert(provider_id, ProviderApiKeyRuntimeSnapshot::FailClosed);
+        let snapshot = Arc::new(Self::load_provider_api_key_snapshot(provider_id)?);
+        if let Err(error) = self
+            .run_provider_api_keys_invalidation_hook(provider_id)
+            .await
+        {
+            return Err(error);
+        }
+        self.provider_api_key_runtime_snapshots
+            .write()
+            .await
+            .insert(
+                provider_id,
+                ProviderApiKeyRuntimeSnapshot::Trusted(Arc::clone(&snapshot)),
+            );
+        self.publish_provider_api_key_snapshot_best_effort(provider_id, snapshot.as_ref())
             .await;
         Ok(())
     }
@@ -1469,27 +1308,6 @@ impl CatalogService {
             .into_iter()
             .map(CacheModel::from)
             .collect();
-        let mut routes = Vec::new();
-        for route_item in ModelRoute::list_summary().map_err(|e| {
-            AppStoreError::DatabaseError(format!("failed to list model routes: {e:?}"))
-        })? {
-            let detail = ModelRoute::get_detail(route_item.route.id).map_err(|e| {
-                AppStoreError::DatabaseError(format!(
-                    "failed to load model route detail {}: {e:?}",
-                    route_item.route.id
-                ))
-            })?;
-            routes.push(CacheModelRoute::from_detail(&detail));
-        }
-        let api_key_overrides = ApiKeyModelOverride::list_all()
-            .map_err(|e| {
-                AppStoreError::DatabaseError(format!(
-                    "failed to list api key model overrides: {e:?}"
-                ))
-            })?
-            .into_iter()
-            .map(CacheApiKeyModelOverride::from)
-            .collect();
         let reasoning_configs = ReasoningConfig::list_active_with_presets()
             .map_err(|e| {
                 AppStoreError::DatabaseError(format!("failed to list reasoning configs: {e:?}"))
@@ -1510,8 +1328,6 @@ impl CatalogService {
         Ok(CacheModelsCatalog {
             providers,
             models,
-            routes,
-            api_key_overrides,
             reasoning_configs,
             runtime_feature_configs,
         })
@@ -1570,8 +1386,8 @@ mod tests {
     use crate::database::runtime_feature_config::{RuntimeFeatureConfig, RuntimeFeatureKey};
     use crate::schema::enum_def::{Action, ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::{
-        CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModel, CacheModelRoute,
-        CacheModelRouteCandidate, CacheModelsCatalog, CacheProvider,
+        CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModel, CacheModelsCatalog,
+        CacheProvider,
     };
     use crate::service::catalog::keys::CacheKey;
     use chrono::Utc;
@@ -1735,82 +1551,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidate_model_route_by_name_removes_cached_snapshot() {
-        let catalog = CatalogService::new(true).await;
-        let cache_key = CacheKey::ModelRouteByName("manual-smoke-route").to_compact_string();
-        let route = CacheModelRoute {
-            id: 88,
-            route_name: "manual-smoke-route".to_string(),
-            description: None,
-            is_enabled: true,
-            expose_in_models: true,
-            candidates: vec![CacheModelRouteCandidate {
-                route_id: 88,
-                model_id: 2,
-                provider_id: 1,
-                priority: 0,
-                is_enabled: true,
-            }],
-        };
-
-        catalog
-            .model_route_cache
-            .set_positive(&cache_key, &route)
-            .await
-            .expect("seed route cache");
-
-        catalog
-            .invalidate_model_route_by_name("manual-smoke-route")
-            .await
-            .expect("invalidate route");
-
-        let cached_after = catalog
-            .model_route_cache
-            .get_entry(&cache_key)
-            .await
-            .expect("read route cache after invalidate");
-        assert!(cached_after.is_none());
-    }
-
-    #[tokio::test]
-    async fn invalidate_api_key_model_override_removes_cached_snapshot() {
-        let catalog = CatalogService::new(true).await;
-        let cache_key = CacheKey::ApiKeyModelOverride(7, "manual-cli-model").to_compact_string();
-        let route = CacheModelRoute {
-            id: 88,
-            route_name: "manual-smoke-route".to_string(),
-            description: None,
-            is_enabled: true,
-            expose_in_models: true,
-            candidates: vec![CacheModelRouteCandidate {
-                route_id: 88,
-                model_id: 2,
-                provider_id: 1,
-                priority: 0,
-                is_enabled: true,
-            }],
-        };
-
-        catalog
-            .api_key_override_route_cache
-            .set_positive(&cache_key, &route)
-            .await
-            .expect("seed override cache");
-
-        catalog
-            .invalidate_api_key_model_override(7, "manual-cli-model")
-            .await
-            .expect("invalidate override");
-
-        let cached_after = catalog
-            .api_key_override_route_cache
-            .get_entry(&cache_key)
-            .await
-            .expect("read override cache after invalidate");
-        assert!(cached_after.is_none());
-    }
-
-    #[tokio::test]
     async fn reload_preheats_reasoning_config_snapshots() {
         let db = TestDbContext::new_sqlite("catalog-reasoning-config-reload.sqlite");
         db.run_async(async {
@@ -1932,8 +1672,6 @@ mod tests {
             let empty_catalog = CacheModelsCatalog {
                 providers: vec![cached_provider.clone()],
                 models: vec![model.clone()],
-                routes: vec![],
-                api_key_overrides: vec![],
                 reasoning_configs: vec![],
                 runtime_feature_configs: vec![],
             };

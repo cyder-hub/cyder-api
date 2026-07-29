@@ -35,15 +35,15 @@ export function updateApiKey(
 export function createApiKey(
   payload: ApiKeyCreatePayload,
 ): Promise<ApiKeyCreateResponse> {
-  return request.post("/ai/manager/api/api_key/", payload);
+  return request.post("/ai/manager/api/api_key", payload);
 }
 
 export function rotateApiKey(id: number): Promise<ApiKeyReveal> {
-  return request.post(`/ai/manager/api/api_key/${id}/rotate`, {});
+  return request.post(`/ai/manager/api/api_key/${id}/rotate`);
 }
 
 export function revealApiKey(id: number): Promise<ApiKeyReveal> {
-  return request.get(`/ai/manager/api/api_key/${id}/reveal`);
+  return request.post(`/ai/manager/api/api_key/${id}/reveal`);
 }
 
 export function deleteApiKey(id: number): Promise<void> {

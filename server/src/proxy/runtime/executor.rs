@@ -1,66 +1,46 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
-use axum::{
-    body::{Body, Bytes},
-    http::HeaderMap,
-    response::Response,
-};
+use axum::{body::Body, http::HeaderMap, response::Response};
 use chrono::Utc;
-use reqwest::header::RETRY_AFTER;
 use serde_json::Value;
 
 use crate::{
-    config::RoutingResilienceConfig,
     proxy::{
         ProxyError,
         auth::{admit_api_key_request, check_access_control},
         cancellation::ProxyCancellationContext,
-        logging::RequestLogContext,
-        provider_governance::{
-            ProviderGovernanceCheckError, ensure_provider_request_allowed,
-            preview_provider_request_allowed,
-        },
+        provider_governance::{ProviderGovernanceCheckError, ensure_provider_request_allowed},
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
-            attempt::{
-                RequestAttemptDraft, classify_attempt_failure, classify_provider_governance_skip,
-                complete_attempt_from_response, sync_attempt_from_proxy_failure,
-                sync_attempt_timing_and_usage,
-            },
-            credential::resolve_provider_credentials,
+            capability::{validate_generation_capabilities, validate_utility_capabilities},
             log_writer::{
-                AttemptLogContextInput, finalize_attempt_failure_context, log_provider_skipped,
-                maybe_record_attempt_failure, new_attempt_log_context,
+                RequestLogContextInput, finalize_request_failure_context, new_request_log_context,
+                record_completion,
             },
-            materializer::{materialize_generation_attempt, materialize_utility_attempt},
-            policy::{RuntimeExecutionPolicy, RuntimeLogMode},
+            materializer::{materialize_generation_request, materialize_utility_request},
             request_patch::load_runtime_request_patch_trace,
-            route_resolver::ExecutionCandidate,
+            route_resolver::{ExecutionPlan, ExecutionTarget},
             transport::{ReasoningContinuationCaptureContext, send_materialized_request},
         },
-        util::{get_cost_catalog_version, serialize_downstream_request_headers_for_log},
+        util::get_cost_catalog_version,
         utility::{UtilityOperation, validate_utility_target},
     },
     schema::enum_def::LlmApiType,
     service::{
         app_state::AppState,
         cache::types::CacheApiKey,
+        provider_credential::resolve_selected_provider_credential,
+        provider_http::normalize_provider_endpoint,
         runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
-    },
-    utils::storage::{
-        RequestLogBundleCandidateManifest, RequestLogBundleQueryParam,
-        RequestLogBundleRequestSnapshot, RequestLogBundleTransformDiagnosticItem,
-        RequestLogBundleTransformDiagnosticPhase,
     },
 };
 
 #[derive(Debug, Clone)]
-pub(in crate::proxy) enum AttemptExecutionKind {
+pub(in crate::proxy) enum RequestExecutionKind {
     Generation {
         user_api_type: LlmApiType,
         is_stream: bool,
         data: Value,
-        original_request_value: Value,
     },
     Utility {
         operation: UtilityOperation,
@@ -68,527 +48,238 @@ pub(in crate::proxy) enum AttemptExecutionKind {
     },
 }
 
-pub(in crate::proxy) struct AttemptExecutionInput {
+pub(in crate::proxy) struct RequestExecutionInput {
     pub cancellation: ProxyCancellationContext,
     pub api_key: Arc<CacheApiKey>,
-    pub candidate: ExecutionCandidate,
-    pub requested_model_name: String,
-    pub base_requested_model_name: String,
-    pub resolved_reasoning_suffix: Option<String>,
-    pub resolved_reasoning_preset: Option<String>,
-    pub resolved_name_scope: String,
-    pub resolved_route_id: Option<i64>,
-    pub resolved_route_name: Option<String>,
+    pub execution_plan: ExecutionPlan,
     pub query_params: HashMap<String, String>,
-    pub replay_query_params: Option<Vec<RequestLogBundleQueryParam>>,
     pub original_headers: HeaderMap,
-    pub request_snapshot: RequestLogBundleRequestSnapshot,
-    pub candidate_manifest: RequestLogBundleCandidateManifest,
-    pub original_request_body: Bytes,
     pub client_ip_addr: Option<String>,
     pub start_time: i64,
-    pub skipped_attempts: Vec<RequestAttemptDraft>,
-    pub prior_transform_diagnostics: Vec<RequestLogBundleTransformDiagnosticItem>,
-    pub same_candidate_retry_count: u32,
-    pub attempted_candidate_count: u32,
-    pub next_candidate_available: bool,
-    pub routing_resilience: RoutingResilienceConfig,
-    pub log_mode: RuntimeLogMode,
-    pub execution_policy: RuntimeExecutionPolicy,
-    pub kind: AttemptExecutionKind,
+    pub kind: RequestExecutionKind,
 }
 
-pub(in crate::proxy) struct AttemptExecutionResult {
-    pub attempt: RequestAttemptDraft,
-    pub response: Result<Response<Body>, ProxyError>,
-    pub log_context: RequestLogContext,
-}
-
-#[derive(Clone)]
-struct AttemptSchedulingContext {
-    same_candidate_retry_count: u32,
-    attempted_candidate_count: u32,
-    next_candidate_available: bool,
-    routing_resilience: RoutingResilienceConfig,
-}
-
-fn retry_after_from_headers(headers: Option<&HeaderMap>) -> Option<Duration> {
-    headers
-        .and_then(|headers| headers.get(RETRY_AFTER))
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-}
-
-async fn finalize_early_attempt_failure(
+async fn fail_before_send(
     app_state: &Arc<AppState>,
-    log_context: RequestLogContext,
-    skipped_attempts_for_log: &[RequestAttemptDraft],
-    attempt: &mut RequestAttemptDraft,
-    proxy_error: &ProxyError,
-    scheduling: &AttemptSchedulingContext,
-    log_mode: RuntimeLogMode,
-    execution_policy: RuntimeExecutionPolicy,
-) -> RequestLogContext {
-    attempt.completed_at = Some(Utc::now().timestamp_millis());
-    classify_attempt_failure(
-        &scheduling.routing_resilience,
-        attempt,
-        proxy_error,
-        scheduling.same_candidate_retry_count,
-        scheduling.attempted_candidate_count,
-        scheduling.next_candidate_available,
-        None,
-    );
-    maybe_record_attempt_failure(
-        app_state,
-        log_context,
-        skipped_attempts_for_log,
-        attempt,
-        proxy_error,
-        log_mode,
-        execution_policy,
-    )
-    .await
+    mut context: crate::proxy::logging::RequestLogContext,
+    error: ProxyError,
+) -> Result<Response<Body>, ProxyError> {
+    finalize_request_failure_context(&mut context, &error);
+    record_completion(app_state, context).await;
+    Err(error)
 }
 
-async fn ensure_provider_governance_for_policy(
+async fn allow_provider(
     app_state: &AppState,
-    execution_policy: RuntimeExecutionPolicy,
-    provider_id: i64,
+    target: &ExecutionTarget,
     provider_label: &str,
-    next_candidate_available: bool,
-) -> Result<Option<ProviderCircuitProbePermit>, ProviderGovernanceCheckError> {
-    if execution_policy.uses_mutating_provider_governance() {
-        ensure_provider_request_allowed(
-            app_state,
-            provider_id,
-            provider_label,
-            next_candidate_available,
-        )
-        .await
-    } else {
-        debug_assert!(execution_policy.uses_read_only_provider_governance());
-        match preview_provider_request_allowed(app_state, provider_id).await {
-            Ok(()) => Ok(None),
-            Err(ProviderGovernanceCheckError::Rejected(_)) if !next_candidate_available => Ok(None),
-            Err(err) => Err(err),
+) -> Result<Option<ProviderCircuitProbePermit>, ProxyError> {
+    match ensure_provider_request_allowed(app_state, target.provider.id, provider_label).await {
+        Ok(permit) => Ok(permit),
+        Err(ProviderGovernanceCheckError::Rejected(rejection)) => {
+            Err(rejection.to_proxy_error(provider_label))
         }
+        Err(ProviderGovernanceCheckError::Backend(error)) => Err(error),
     }
 }
 
-fn clear_provider_governance_skip_runtime_fields(
-    attempt: &mut RequestAttemptDraft,
-    log_context: &mut RequestLogContext,
-) {
-    attempt.started_at = None;
-    attempt.provider_api_key_id = None;
-    attempt.request_uri = None;
-    attempt.request_headers_json = None;
-    attempt.llm_request_body_for_log = None;
-    log_context.provider_api_key_id = None;
-    log_context.request_url = None;
-    log_context.llm_request_sent_at = None;
-    log_context.llm_status = None;
-    log_context.llm_request_body = None;
-    log_context.llm_response_body = None;
-    log_context.user_response_body = None;
-    log_context.first_chunk_ts = None;
-}
-
-pub(in crate::proxy) async fn execute_attempt(
+pub(in crate::proxy) async fn execute_request(
     app_state: Arc<AppState>,
-    input: AttemptExecutionInput,
-) -> AttemptExecutionResult {
-    let AttemptExecutionInput {
+    input: RequestExecutionInput,
+) -> Result<Response<Body>, ProxyError> {
+    let RequestExecutionInput {
         cancellation,
         api_key,
-        candidate,
-        requested_model_name,
-        base_requested_model_name,
-        resolved_reasoning_suffix,
-        resolved_reasoning_preset,
-        resolved_name_scope,
-        resolved_route_id,
-        resolved_route_name,
+        execution_plan,
         query_params,
-        replay_query_params,
         original_headers,
-        request_snapshot,
-        candidate_manifest,
-        original_request_body,
         client_ip_addr,
         start_time,
-        skipped_attempts,
-        prior_transform_diagnostics,
-        same_candidate_retry_count,
-        attempted_candidate_count,
-        next_candidate_available,
-        routing_resilience,
-        log_mode,
-        execution_policy,
         kind,
     } = input;
-
-    let scheduling = AttemptSchedulingContext {
-        same_candidate_retry_count,
-        attempted_candidate_count,
-        next_candidate_available,
-        routing_resilience: routing_resilience.clone(),
+    let mut target = execution_plan.target.clone();
+    let user_api_type = match &kind {
+        RequestExecutionKind::Generation { user_api_type, .. } => *user_api_type,
+        RequestExecutionKind::Utility { operation, .. } => operation.api_type,
     };
-    let mut attempt = RequestAttemptDraft::pending_for_candidate(&candidate);
-    let skipped_attempts_for_log = skipped_attempts.clone();
-
-    let user_api_type_for_log = match &kind {
-        AttemptExecutionKind::Generation { user_api_type, .. } => *user_api_type,
-        AttemptExecutionKind::Utility { operation, .. } => operation.api_type,
-    };
-    let mut log_context = new_attempt_log_context(AttemptLogContextInput {
+    let mut log_context = new_request_log_context(RequestLogContextInput {
         api_key: &api_key,
-        candidate: &candidate,
-        requested_model_name: &requested_model_name,
-        base_requested_model_name: &base_requested_model_name,
-        resolved_reasoning_suffix: resolved_reasoning_suffix.as_deref(),
-        resolved_reasoning_preset: resolved_reasoning_preset.as_deref(),
-        resolved_name_scope: &resolved_name_scope,
-        resolved_route_id,
-        resolved_route_name: resolved_route_name.as_deref(),
-        request_snapshot: request_snapshot.clone(),
-        candidate_manifest,
-        prior_transform_diagnostics: &prior_transform_diagnostics,
-        original_request_body,
+        target: &target,
+        requested_model_name: &execution_plan.requested_name,
+        base_requested_model_name: &execution_plan.base_requested_name,
+        resolved_reasoning_suffix: execution_plan.resolved_reasoning_suffix.as_deref(),
+        resolved_reasoning_preset: execution_plan
+            .resolved_reasoning_preset
+            .map(|preset| preset.as_key()),
         client_ip_addr: &client_ip_addr,
         start_time,
-        user_api_type: user_api_type_for_log,
-        current_attempt: attempt.clone(),
-        skipped_attempts: &skipped_attempts_for_log,
+        user_api_type,
     });
 
-    let provider_credentials =
-        match resolve_provider_credentials(&candidate.provider, &app_state).await {
-            Ok(credentials) => credentials,
-            Err(proxy_error) => {
-                let log_context = finalize_early_attempt_failure(
-                    &app_state,
-                    log_context,
-                    &skipped_attempts_for_log,
-                    &mut attempt,
-                    &proxy_error,
-                    &scheduling,
-                    log_mode,
-                    execution_policy,
-                )
-                .await;
-                return AttemptExecutionResult {
-                    attempt,
-                    response: Err(proxy_error),
-                    log_context,
-                };
+    let capability_result = match &kind {
+        RequestExecutionKind::Generation {
+            is_stream, data, ..
+        } => validate_generation_capabilities(
+            &target,
+            data,
+            *is_stream,
+            execution_plan.resolved_reasoning_preset,
+        ),
+        RequestExecutionKind::Utility { operation, data } => {
+            if execution_plan.resolved_reasoning_preset.is_some() {
+                Err(ProxyError::BadRequest(format!(
+                    "Reasoning suffixes are only supported for generation requests; '{}' is a utility operation.",
+                    operation.name
+                )))
+            } else {
+                validate_utility_target(operation, target.llm_api_type)
+                    .and_then(|()| validate_utility_capabilities(&target, &operation.name, data))
             }
-        };
-    attempt.provider_api_key_id = Some(provider_credentials.key_id);
-    log_context.provider_api_key_id = Some(provider_credentials.key_id);
-    log_context.set_attempts_for_logging(&skipped_attempts_for_log, Some(attempt.clone()));
-
-    if let AttemptExecutionKind::Utility { operation, .. } = &kind {
-        if let Err(proxy_error) = validate_utility_target(operation, candidate.llm_api_type) {
-            let log_context = finalize_early_attempt_failure(
-                &app_state,
-                log_context,
-                &skipped_attempts_for_log,
-                &mut attempt,
-                &proxy_error,
-                &scheduling,
-                log_mode,
-                execution_policy,
-            )
-            .await;
-            return AttemptExecutionResult {
-                attempt,
-                response: Err(proxy_error),
-                log_context,
-            };
         }
+    };
+    if let Err(error) = capability_result {
+        return fail_before_send(&app_state, log_context, error).await;
     }
 
-    if let Err(proxy_error) =
-        check_access_control(&api_key, &candidate.provider, &candidate.model, &app_state).await
+    if let Err(error) =
+        check_access_control(&api_key, &target.provider, &target.model, &app_state).await
     {
-        let log_context = finalize_early_attempt_failure(
+        return fail_before_send(&app_state, log_context, error).await;
+    }
+
+    let mut normalized_provider = (*target.provider).clone();
+    normalized_provider.endpoint = match normalize_provider_endpoint(&target.provider.endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return fail_before_send(
+                &app_state,
+                log_context,
+                ProxyError::BadGateway(format!(
+                    "Provider endpoint is invalid and must be repaired before use: {error}"
+                )),
+            )
+            .await;
+        }
+    };
+    target.provider = Arc::new(normalized_provider);
+    if let Err(error) = app_state
+        .infra
+        .provider_client(target.provider.use_proxy)
+        .await
+    {
+        return fail_before_send(
             &app_state,
             log_context,
-            &skipped_attempts_for_log,
-            &mut attempt,
-            &proxy_error,
-            &scheduling,
-            log_mode,
-            execution_policy,
+            ProxyError::BadGateway(error.to_string()),
         )
         .await;
-        return AttemptExecutionResult {
-            attempt,
-            response: Err(proxy_error),
-            log_context,
-        };
     }
 
     let request_patch_trace = match load_runtime_request_patch_trace(
-        &candidate.provider,
-        Some(&candidate.model),
-        Some(&candidate),
+        &target.provider,
+        Some(&target.model),
+        Some(&target),
         &app_state,
     )
     .await
     {
         Ok(trace) => trace,
-        Err(proxy_error) => {
-            let log_context = finalize_early_attempt_failure(
-                &app_state,
-                log_context,
-                &skipped_attempts_for_log,
-                &mut attempt,
-                &proxy_error,
-                &scheduling,
-                log_mode,
-                execution_policy,
-            )
-            .await;
-            return AttemptExecutionResult {
-                attempt,
-                response: Err(proxy_error),
-                log_context,
-            };
-        }
+        Err(error) => return fail_before_send(&app_state, log_context, error).await,
     };
-    attempt.applied_request_patch_ids_json =
-        request_patch_trace.applied_request_patch_ids_json.clone();
-    attempt.request_patch_summary_json = request_patch_trace.request_patch_summary_json.clone();
-
-    if let Some(proxy_error) = request_patch_trace.conflict_error(&candidate.model.model_name) {
-        let log_context = finalize_early_attempt_failure(
-            &app_state,
-            log_context,
-            &skipped_attempts_for_log,
-            &mut attempt,
-            &proxy_error,
-            &scheduling,
-            log_mode,
-            execution_policy,
-        )
-        .await;
-        return AttemptExecutionResult {
-            attempt,
-            response: Err(proxy_error),
-            log_context,
-        };
+    if let Some(error) = request_patch_trace.conflict_error(&target.model.model_name) {
+        return fail_before_send(&app_state, log_context, error).await;
     }
 
-    let cost_catalog_version = get_cost_catalog_version(&candidate.model, &app_state).await;
+    let cost_catalog_version = get_cost_catalog_version(&target.model, &app_state).await;
+    let request_lease = match admit_api_key_request(&app_state, &api_key).await {
+        Ok(lease) => lease,
+        Err(error) => return fail_before_send(&app_state, log_context, error).await,
+    };
+    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
+
+    let provider_credential =
+        match resolve_selected_provider_credential(&target.provider, &app_state).await {
+            Ok(credential) => credential,
+            Err(error) => {
+                request_lease.release().await;
+                return fail_before_send(
+                    &app_state,
+                    log_context,
+                    ProxyError::InternalError(error.to_string()),
+                )
+                .await;
+            }
+        };
+    log_context.provider_api_key_id = Some(provider_credential.key_id());
+
     let materialized = match kind {
-        AttemptExecutionKind::Generation {
+        RequestExecutionKind::Generation {
             user_api_type,
             is_stream,
             data,
-            original_request_value,
         } => {
-            match materialize_generation_attempt(
-                &candidate,
+            match materialize_generation_request(
+                &target,
                 data,
                 user_api_type,
                 is_stream,
-                &original_request_value,
                 &original_headers,
                 &query_params,
-                replay_query_params.as_deref(),
                 &request_patch_trace.applied_rules,
-                &provider_credentials,
+                &provider_credential,
                 api_key.id,
                 app_state.reasoning_continuation_store.as_ref(),
             )
             .await
             {
-                Ok(materialized) => materialized,
-                Err(proxy_error) => {
-                    let log_context = finalize_early_attempt_failure(
-                        &app_state,
-                        log_context,
-                        &skipped_attempts_for_log,
-                        &mut attempt,
-                        &proxy_error,
-                        &scheduling,
-                        log_mode,
-                        execution_policy,
-                    )
-                    .await;
-                    return AttemptExecutionResult {
-                        attempt,
-                        response: Err(proxy_error),
-                        log_context,
-                    };
+                Ok(request) => request,
+                Err(error) => {
+                    request_lease.release().await;
+                    return fail_before_send(&app_state, log_context, error).await;
                 }
             }
         }
-        AttemptExecutionKind::Utility { operation, data } => match materialize_utility_attempt(
-            &candidate,
+        RequestExecutionKind::Utility { operation, data } => match materialize_utility_request(
+            &target,
             &operation,
             data,
             &original_headers,
             &query_params,
-            replay_query_params.as_deref(),
             &request_patch_trace.applied_rules,
-            &provider_credentials,
+            &provider_credential,
         )
         .await
         {
-            Ok(materialized) => materialized,
-            Err(proxy_error) => {
-                let log_context = finalize_early_attempt_failure(
-                    &app_state,
-                    log_context,
-                    &skipped_attempts_for_log,
-                    &mut attempt,
-                    &proxy_error,
-                    &scheduling,
-                    log_mode,
-                    execution_policy,
-                )
-                .await;
-                return AttemptExecutionResult {
-                    attempt,
-                    response: Err(proxy_error),
-                    log_context,
-                };
+            Ok(request) => request,
+            Err(error) => {
+                request_lease.release().await;
+                return fail_before_send(&app_state, log_context, error).await;
             }
         },
     };
-    let _reasoning_repair_count = materialized
-        .reasoning_repair_report
-        .as_ref()
-        .map(|report| report.repaired_count);
-    attempt.llm_request_body_for_log = materialized.llm_request_body_for_log.clone();
-    debug_assert_eq!(
-        attempt.provider_api_key_id,
-        Some(materialized.provider_api_key_id)
-    );
-    log_context.llm_request_body = materialized.llm_request_body_for_log;
-    log_context.append_transform_diagnostics(
-        RequestLogBundleTransformDiagnosticPhase::Request,
-        &materialized.transform_diagnostics,
-    );
-    attempt.request_uri = Some(materialized.final_url.clone());
-    attempt.request_headers_json =
-        serialize_downstream_request_headers_for_log(&materialized.final_headers);
-    attempt.started_at = Some(Utc::now().timestamp_millis());
-    sync_attempt_timing_and_usage(&mut attempt, &log_context, cost_catalog_version.as_ref());
-    log_context.set_attempts_for_logging(&skipped_attempts_for_log, Some(attempt.clone()));
-    let reasoning_capture_context =
-        execution_policy
-            .captures_reasoning_continuations()
-            .then(|| ReasoningContinuationCaptureContext {
-                scope: ReasoningContinuationScope {
-                    api_key_id: api_key.id,
-                    provider_id: candidate.provider.id,
-                    model_id: candidate.model.id,
-                    route_id: candidate.route_id,
-                    route_name: candidate.route_name.clone(),
-                    candidate_position: candidate.candidate_position,
-                },
-                feature_enabled: candidate
-                    .runtime_features
-                    .openai_reasoning_content_repair_enabled,
-            });
 
-    let api_key_request_lease = if execution_policy.admits_api_key_requests() {
-        match admit_api_key_request(&app_state, &api_key).await {
-            Ok(lease) => lease,
-            Err(proxy_error) => {
-                let log_context = finalize_early_attempt_failure(
-                    &app_state,
-                    log_context,
-                    &skipped_attempts_for_log,
-                    &mut attempt,
-                    &proxy_error,
-                    &scheduling,
-                    log_mode,
-                    execution_policy,
-                )
-                .await;
-                return AttemptExecutionResult {
-                    attempt,
-                    response: Err(proxy_error),
-                    log_context,
-                };
-            }
-        }
-    } else {
-        None
-    };
-    let mut api_key_request_lease =
-        ApiKeyRequestLeaseFinalizer::new(&app_state, api_key_request_lease);
+    log_context.request_url = Some(materialized.final_url.clone());
+    log_context.llm_request_sent_at = Some(Utc::now().timestamp_millis());
 
-    let provider_circuit_permit = match ensure_provider_governance_for_policy(
-        &app_state,
-        execution_policy,
-        candidate.provider.id,
-        materialized.model_str.as_str(),
-        next_candidate_available,
-    )
-    .await
-    {
+    let provider_permit = match allow_provider(&app_state, &target, &materialized.model_str).await {
         Ok(permit) => permit,
-        Err(ProviderGovernanceCheckError::Rejected(rejection)) => {
-            let completed_at = Utc::now().timestamp_millis();
-            attempt.completed_at = Some(completed_at);
-            clear_provider_governance_skip_runtime_fields(&mut attempt, &mut log_context);
-            classify_provider_governance_skip(
-                &routing_resilience,
-                &mut attempt,
-                rejection,
-                materialized.model_str.as_str(),
-                attempted_candidate_count,
-                next_candidate_available,
-            );
-            let proxy_error = rejection.to_proxy_error(materialized.model_str.as_str());
-            let log_context = maybe_record_attempt_failure(
-                &app_state,
-                log_context,
-                &skipped_attempts_for_log,
-                &attempt,
-                &proxy_error,
-                log_mode,
-                execution_policy,
-            )
-            .await;
-            log_provider_skipped(&log_context, &attempt, &proxy_error);
-            api_key_request_lease.release().await;
-            return AttemptExecutionResult {
-                attempt,
-                response: Err(proxy_error),
-                log_context,
-            };
-        }
-        Err(ProviderGovernanceCheckError::Backend(proxy_error)) => {
-            let log_context = finalize_early_attempt_failure(
-                &app_state,
-                log_context,
-                &skipped_attempts_for_log,
-                &mut attempt,
-                &proxy_error,
-                &scheduling,
-                log_mode,
-                execution_policy,
-            )
-            .await;
-            api_key_request_lease.release().await;
-            return AttemptExecutionResult {
-                attempt,
-                response: Err(proxy_error),
-                log_context,
-            };
+        Err(error) => {
+            request_lease.release().await;
+            return fail_before_send(&app_state, log_context, error).await;
         }
     };
+    let reasoning_capture = Some(ReasoningContinuationCaptureContext {
+        scope: ReasoningContinuationScope {
+            api_key_id: api_key.id,
+            provider_id: target.provider.id,
+            model_id: target.model.id,
+        },
+        feature_enabled: target
+            .runtime_features
+            .openai_reasoning_content_repair_enabled,
+    });
 
-    let proxy_result = send_materialized_request(
+    match send_materialized_request(
         Arc::clone(&app_state),
         cancellation,
         log_context,
@@ -596,351 +287,25 @@ pub(in crate::proxy) async fn execute_attempt(
         materialized.final_body,
         materialized.final_headers,
         materialized.model_str,
-        candidate.provider.use_proxy,
-        cost_catalog_version.clone(),
-        api_key_request_lease,
-        provider_circuit_permit,
+        target.provider.use_proxy,
+        cost_catalog_version,
+        request_lease,
+        provider_permit,
         materialized.response_mode,
-        reasoning_capture_context,
-        log_mode.proxy_log_mode(),
-        execution_policy,
+        reasoning_capture,
     )
-    .await;
-    let completed_at = Utc::now().timestamp_millis();
-    let (response, mut log_context) = match proxy_result {
+    .await
+    {
         Ok(outcome) => {
-            attempt.llm_response_body_for_log = outcome.log_context.llm_response_body.clone();
-            sync_attempt_timing_and_usage(
-                &mut attempt,
-                &outcome.log_context,
-                cost_catalog_version.as_ref(),
-            );
-            complete_attempt_from_response(&mut attempt, &outcome.response, completed_at);
-            (Ok(outcome.response), outcome.log_context)
-        }
-        Err(failure) => {
-            let retry_after = retry_after_from_headers(failure.response_headers.as_ref());
-            attempt.llm_response_body_for_log = failure.log_context.llm_response_body.clone();
-            sync_attempt_from_proxy_failure(&mut attempt, &failure, cost_catalog_version.as_ref());
-            attempt.completed_at = Some(completed_at);
-            classify_attempt_failure(
-                &routing_resilience,
-                &mut attempt,
-                &failure.error,
-                same_candidate_retry_count,
-                attempted_candidate_count,
-                next_candidate_available,
-                retry_after,
-            );
-            let mut log_context = failure.log_context;
-            if !log_mode.should_record_attempt_failure() {
-                log_context = finalize_attempt_failure_context(
-                    log_context,
-                    &skipped_attempts_for_log,
-                    &attempt,
-                    &failure.error,
-                );
+            if !outcome.log_context.is_stream {
+                record_completion(&app_state, outcome.log_context).await;
             }
-            (Err(failure.error), log_context)
+            Ok(outcome.response)
         }
-    };
-    log_context.set_attempts_for_logging(&skipped_attempts_for_log, Some(attempt.clone()));
-
-    AttemptExecutionResult {
-        attempt,
-        response,
-        log_context,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ensure_provider_governance_for_policy, retry_after_from_headers};
-    use async_trait::async_trait;
-    use axum::http::HeaderMap;
-    use reqwest::header::{HeaderValue, RETRY_AFTER};
-    use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Duration,
-    };
-
-    use crate::{
-        config::ProviderGovernanceConfig,
-        proxy::{ProxyError, runtime::policy::RuntimeExecutionPolicy},
-        service::{
-            app_state::AppState,
-            runtime::{
-                ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitProbePermit,
-                ProviderCircuitService, ProviderCircuitStore, ProviderHealthSnapshot,
-                ProviderHealthStatus,
-            },
-        },
-    };
-
-    struct RecordingProviderCircuitStore {
-        allow_calls: AtomicUsize,
-        snapshot: tokio::sync::Mutex<ProviderHealthSnapshot>,
-    }
-
-    impl RecordingProviderCircuitStore {
-        fn new(snapshot: ProviderHealthSnapshot) -> Self {
-            Self {
-                allow_calls: AtomicUsize::new(0),
-                snapshot: tokio::sync::Mutex::new(snapshot),
-            }
+        Err(mut failure) => {
+            finalize_request_failure_context(&mut failure.log_context, &failure.error);
+            record_completion(&app_state, failure.log_context).await;
+            Err(failure.error)
         }
-
-        fn open_snapshot() -> ProviderHealthSnapshot {
-            ProviderHealthSnapshot {
-                status: ProviderHealthStatus::Open,
-                consecutive_failures: 1,
-                half_open_probe_in_flight: false,
-                opened_at: None,
-                last_failure_at: Some(1),
-                last_recovered_at: None,
-                last_error: Some("forced open".to_string()),
-            }
-        }
-    }
-
-    struct FailingProviderCircuitStore;
-
-    #[async_trait]
-    impl ProviderCircuitStore for RecordingProviderCircuitStore {
-        async fn allow_request(
-            &self,
-            _provider_id: i64,
-            _config: &ProviderGovernanceConfig,
-        ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-            self.allow_calls.fetch_add(1, Ordering::SeqCst);
-            let mut snapshot = self.snapshot.lock().await;
-            snapshot.status = ProviderHealthStatus::HalfOpen;
-            snapshot.half_open_probe_in_flight = true;
-            Ok(ProviderCircuitDecision {
-                snapshot: snapshot.clone(),
-                allowed: true,
-                rejection: None,
-                retry_after: None,
-                probe_permit: None,
-            })
-        }
-
-        async fn allow_last_candidate_request(
-            &self,
-            provider_id: i64,
-            config: &ProviderGovernanceConfig,
-        ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-            self.allow_request(provider_id, config).await
-        }
-
-        async fn record_success(
-            &self,
-            _provider_id: i64,
-            _config: &ProviderGovernanceConfig,
-            _permit: Option<&ProviderCircuitProbePermit>,
-        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-            Ok(self.snapshot.lock().await.clone())
-        }
-
-        async fn record_failure(
-            &self,
-            _provider_id: i64,
-            _config: &ProviderGovernanceConfig,
-            _error_message: String,
-            _permit: Option<&ProviderCircuitProbePermit>,
-        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-            Ok(self.snapshot.lock().await.clone())
-        }
-
-        async fn snapshot(
-            &self,
-            _provider_id: i64,
-        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-            Ok(self.snapshot.lock().await.clone())
-        }
-    }
-
-    #[async_trait]
-    impl ProviderCircuitStore for FailingProviderCircuitStore {
-        async fn allow_request(
-            &self,
-            _provider_id: i64,
-            _config: &ProviderGovernanceConfig,
-        ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-            Err(ProviderCircuitError::Backend(
-                "redis unavailable".to_string(),
-            ))
-        }
-
-        async fn allow_last_candidate_request(
-            &self,
-            provider_id: i64,
-            config: &ProviderGovernanceConfig,
-        ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-            self.allow_request(provider_id, config).await
-        }
-
-        async fn record_success(
-            &self,
-            _provider_id: i64,
-            _config: &ProviderGovernanceConfig,
-            _permit: Option<&ProviderCircuitProbePermit>,
-        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-            Err(ProviderCircuitError::Backend(
-                "redis unavailable".to_string(),
-            ))
-        }
-
-        async fn record_failure(
-            &self,
-            _provider_id: i64,
-            _config: &ProviderGovernanceConfig,
-            _error_message: String,
-            _permit: Option<&ProviderCircuitProbePermit>,
-        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-            Err(ProviderCircuitError::Backend(
-                "redis unavailable".to_string(),
-            ))
-        }
-
-        async fn snapshot(
-            &self,
-            _provider_id: i64,
-        ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-            Err(ProviderCircuitError::Backend(
-                "redis unavailable".to_string(),
-            ))
-        }
-    }
-
-    #[test]
-    fn retry_after_from_headers_parses_delta_seconds() {
-        let mut headers = HeaderMap::new();
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
-
-        assert_eq!(
-            retry_after_from_headers(Some(&headers)),
-            Some(Duration::from_secs(7))
-        );
-    }
-
-    #[test]
-    fn retry_after_from_headers_ignores_invalid_values() {
-        let mut headers = HeaderMap::new();
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("not-seconds"));
-
-        assert_eq!(retry_after_from_headers(Some(&headers)), None);
-        assert_eq!(retry_after_from_headers(None), None);
-    }
-
-    #[tokio::test]
-    async fn replay_live_provider_governance_uses_read_only_preview() {
-        let store = Arc::new(RecordingProviderCircuitStore::new(
-            RecordingProviderCircuitStore::open_snapshot(),
-        ));
-        let mut app_state = AppState::new().await;
-        app_state.provider_circuit = Arc::new(ProviderCircuitService::new(store.clone()));
-
-        let result = ensure_provider_governance_for_policy(
-            &app_state,
-            RuntimeExecutionPolicy::ReplayLive,
-            7,
-            "model",
-            true,
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert_eq!(store.allow_calls.load(Ordering::SeqCst), 0);
-        let snapshot = app_state
-            .provider_circuit
-            .get_provider_health_snapshot(7)
-            .await
-            .expect("snapshot should load");
-        assert_eq!(snapshot.status, ProviderHealthStatus::Open);
-        assert!(!snapshot.half_open_probe_in_flight);
-    }
-
-    #[tokio::test]
-    async fn replay_live_provider_governance_allows_open_last_candidate_without_mutating() {
-        let store = Arc::new(RecordingProviderCircuitStore::new(
-            RecordingProviderCircuitStore::open_snapshot(),
-        ));
-        let mut app_state = AppState::new().await;
-        app_state.provider_circuit = Arc::new(ProviderCircuitService::new(store.clone()));
-
-        let result = ensure_provider_governance_for_policy(
-            &app_state,
-            RuntimeExecutionPolicy::ReplayLive,
-            7,
-            "model",
-            false,
-        )
-        .await;
-
-        assert!(matches!(result, Ok(None)));
-        assert_eq!(store.allow_calls.load(Ordering::SeqCst), 0);
-        let snapshot = app_state
-            .provider_circuit
-            .get_provider_health_snapshot(7)
-            .await
-            .expect("snapshot should load");
-        assert_eq!(snapshot.status, ProviderHealthStatus::Open);
-        assert!(!snapshot.half_open_probe_in_flight);
-    }
-
-    #[tokio::test]
-    async fn normal_provider_governance_uses_mutating_allow() {
-        let store = Arc::new(RecordingProviderCircuitStore::new(
-            RecordingProviderCircuitStore::open_snapshot(),
-        ));
-        let mut app_state = AppState::new().await;
-        app_state.provider_circuit = Arc::new(ProviderCircuitService::new(store.clone()));
-
-        let result = ensure_provider_governance_for_policy(
-            &app_state,
-            RuntimeExecutionPolicy::Normal,
-            7,
-            "model",
-            true,
-        )
-        .await;
-
-        assert!(result.is_ok());
-        assert_eq!(store.allow_calls.load(Ordering::SeqCst), 1);
-        let snapshot = app_state
-            .provider_circuit
-            .get_provider_health_snapshot(7)
-            .await
-            .expect("snapshot should load");
-        assert_eq!(snapshot.status, ProviderHealthStatus::HalfOpen);
-        assert!(snapshot.half_open_probe_in_flight);
-    }
-
-    #[tokio::test]
-    async fn normal_provider_governance_surfaces_backend_errors() {
-        let mut app_state = AppState::new().await;
-        app_state.provider_circuit = Arc::new(ProviderCircuitService::new(Arc::new(
-            FailingProviderCircuitStore,
-        )));
-
-        let result = ensure_provider_governance_for_policy(
-            &app_state,
-            RuntimeExecutionPolicy::Normal,
-            7,
-            "model",
-            true,
-        )
-        .await;
-
-        let Err(super::ProviderGovernanceCheckError::Backend(ProxyError::InternalError(message))) =
-            result
-        else {
-            panic!("provider circuit backend error should be surfaced as internal error");
-        };
-        assert!(message.contains("Provider circuit state backend error"));
     }
 }

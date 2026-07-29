@@ -3,361 +3,590 @@
     <SectionHeader :title="$t('providerEditPage.sectionApiKeys')">
       <template #meta>
         <p class="mt-1 text-xs text-gray-500">
-          {{ editingData.provider_keys.length }} items
+          {{ editingData.provider_keys.length }} {{ $t("providerEditPage.credentials.items") }}
         </p>
       </template>
       <template #actions>
-      <Button
-        variant="outline"
-        size="sm"
-        class="w-full sm:w-auto"
-        @click="emit('checkBatch')"
-        :disabled="!editingData.id || editingData.provider_keys.length === 0"
-      >
-        <Check class="mr-1.5 h-4 w-4" />
-        {{ $t("providerEditPage.alert.buttonCheckAll") }}
-      </Button>
+        <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="!editingData.id || editingData.provider_keys.length === 0"
+            @click="emit('checkBatch')"
+          >
+            <Check class="mr-1.5 h-4 w-4" />
+            {{ $t("providerEditPage.alert.buttonCheckAll") }}
+          </Button>
+          <Button size="sm" :disabled="!editingData.id" @click="openCreateDialog">
+            <Plus class="mr-1.5 h-4 w-4" />
+            {{ $t("providerEditPage.buttonAddApiKey") }}
+          </Button>
+        </div>
       </template>
     </SectionHeader>
 
-    <div v-if="editingData.provider_keys.length === 0" class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10">
-      <Key class="mb-2 h-10 w-10 stroke-1 text-gray-400" />
-      <span class="text-sm font-medium text-gray-500">{{ $t('providerEditPage.alert.noApiKeys') }}</span>
+    <div
+      v-if="editingData.provider_keys.length === 0"
+      class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10"
+    >
+      <KeyRound class="mb-2 h-9 w-9 stroke-1 text-gray-400" />
+      <span class="text-sm font-medium text-gray-500">
+        {{ $t("providerEditPage.alert.noApiKeys") }}
+      </span>
     </div>
 
-    <div v-else class="space-y-3 md:hidden">
-      <MobileCrudCard
-        v-for="(keyItem, index) in editingData.provider_keys"
-        :key="index"
-        :title="keyItem.description || `API Key ${index + 1}`"
-        :description="keyPreview(keyItem.api_key)"
+    <div v-else class="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200">
+      <div
+        v-for="keyItem in editingData.provider_keys"
+        :key="keyItem.id"
+        class="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between"
       >
-        <div class="space-y-3">
-          <div class="space-y-1.5">
-            <Label class="text-gray-700">
-              {{ $t("providerEditPage.tableHeaderApiKey") }}
-            </Label>
-            <Input
-              v-model="keyItem.api_key"
-              :disabled="!!keyItem.id"
-              :placeholder="$t('providerEditPage.placeholderApiKey')"
-              :type="editingData.provider_type === 'VERTEX' || !!keyItem.id ? 'text' : 'password'"
-              class="font-mono text-sm"
-            />
+        <div class="min-w-0 space-y-1">
+          <div class="flex flex-wrap items-center gap-2">
+            <code class="rounded bg-gray-100 px-2 py-1 text-xs text-gray-800">
+              {{ keyMask(keyItem) }}
+            </code>
+            <Badge :variant="keyItem.is_enabled ? 'secondary' : 'outline'">
+              {{
+                $t(
+                  keyItem.is_enabled
+                    ? "providerEditPage.credentials.enabled"
+                    : "providerEditPage.credentials.disabled",
+                )
+              }}
+            </Badge>
           </div>
-          <div class="space-y-1.5">
-            <Label class="text-gray-700">
-              {{ $t("providerEditPage.tableHeaderDescription") }}
-            </Label>
-            <Input
-              :model-value="keyItem.description ?? ''"
-              :disabled="!!keyItem.id && !keyItem.isEditing"
-              :placeholder="$t('providerEditPage.placeholderDescription')"
-              class="text-sm"
-              @update:model-value="(v: string | number) => (keyItem.description = String(v) || null)"
-            />
-          </div>
+          <p class="truncate text-sm text-gray-600">
+            {{ keyItem.description || $t("providerEditPage.credentials.noDescription") }}
+          </p>
+          <p v-if="keyItem.checkMessage" class="text-xs text-red-600">
+            {{ keyItem.checkMessage }}
+          </p>
         </div>
 
-        <template #header>
-          <Badge variant="secondary" class="font-mono text-xs">
-            {{ keyItem.id ? (keyItem.isEditing ? "editing" : "saved") : "draft" }}
-          </Badge>
-        </template>
-
-        <template #actions>
-          <div class="grid grid-cols-1 gap-2 min-[360px]:grid-cols-2">
-            <Button
-              v-if="!keyItem.id && editingData.id"
-              variant="default"
-              size="sm"
-              class="w-full"
-              @click="handleSaveSingleApiKey(index)"
-            >
-              {{ $t("providerEditPage.buttonSaveThisKey") }}
-            </Button>
-            <Button
-              v-if="keyItem.id && keyItem.isEditing"
-              variant="default"
-              size="sm"
-              class="w-full"
-              @click="handleSaveSingleApiKey(index)"
-            >
-              {{ $t("common.save") }}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              class="w-full"
-              :title="keyItem.checkMessage"
-              @click="emit('checkSingle', index)"
-            >
-              <Loader2 v-if="keyItem.checkStatus === 'checking'" class="h-4 w-4 animate-spin text-blue-500" />
-              <AlertCircle v-else-if="keyItem.checkStatus === 'error'" class="h-4 w-4 text-red-500" />
-              <Check v-else-if="keyItem.checkStatus === 'success'" class="h-4 w-4 text-green-500" />
-              <Check v-else class="h-4 w-4" />
-            </Button>
-            <Button
-              v-if="keyItem.id && !keyItem.isEditing"
-              variant="outline"
-              size="sm"
-              class="w-full"
-              @click="keyItem.isEditing = true"
-            >
-              <Edit2 class="mr-1.5 h-4 w-4" />
-              {{ $t("common.edit") }}
-            </Button>
-            <Button
-              v-if="keyItem.id && keyItem.isEditing"
-              variant="ghost"
-              size="sm"
-              class="w-full"
-              @click="keyItem.isEditing = false"
-            >
-              <X class="mr-1.5 h-4 w-4" />
-              {{ $t("common.cancel") }}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="w-full text-red-600 hover:bg-red-50 hover:text-red-700"
-              @click="handleDeleteApiKey(index)"
-            >
-              <Trash2 class="mr-1.5 h-4 w-4" />
-              {{ $t("common.delete") }}
-            </Button>
-          </div>
-        </template>
-      </MobileCrudCard>
-    </div>
-
-    <div class="hidden overflow-hidden rounded-lg border border-gray-200 md:block">
-      <div class="grid grid-cols-[2fr_1fr_auto] gap-4 items-center border-b border-gray-200 bg-gray-50/80 px-4 py-3">
-        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderApiKey") }}</span>
-        <span class="text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t("providerEditPage.tableHeaderDescription") }}</span>
-        <span class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">{{ $t('common.actions') }}</span>
-      </div>
-
-      <div
-        v-for="(keyItem, index) in editingData.provider_keys"
-        :key="`desktop-${index}`"
-        class="grid grid-cols-[2fr_1fr_auto] gap-4 items-center border-b border-gray-100 px-4 py-3 last:border-0 hover:bg-gray-50/50 transition-colors"
-      >
-        <Input
-          v-model="keyItem.api_key"
-          :disabled="!!keyItem.id"
-          :placeholder="$t('providerEditPage.placeholderApiKey')"
-          :type="editingData.provider_type === 'VERTEX' || !!keyItem.id ? 'text' : 'password'"
-          class="h-8 font-mono text-sm"
-        />
-        <Input
-          :model-value="keyItem.description ?? ''"
-          :disabled="!!keyItem.id && !keyItem.isEditing"
-          :placeholder="$t('providerEditPage.placeholderDescription')"
-          class="h-8 text-sm"
-          @update:model-value="(v: string | number) => (keyItem.description = String(v) || null)"
-        />
-        <div class="flex items-center justify-end space-x-1">
-          <template v-if="!keyItem.id && editingData.id">
-            <Button variant="default" size="sm" class="h-8" @click="handleSaveSingleApiKey(index)">
-              {{ $t("providerEditPage.buttonSaveThisKey") }}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-gray-600"
-              :title="keyItem.checkMessage"
-              @click="emit('checkSingle', index)"
-            >
-              <Loader2 v-if="keyItem.checkStatus === 'checking'" class="h-4 w-4 animate-spin text-blue-500" />
-              <AlertCircle v-else-if="keyItem.checkStatus === 'error'" class="h-4 w-4 text-red-500" />
-              <Check v-else-if="keyItem.checkStatus === 'success'" class="h-4 w-4 text-green-500" />
-              <Check v-else class="h-4 w-4" />
-            </Button>
-          </template>
-          <template v-if="keyItem.id && !keyItem.isEditing">
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-gray-600"
-              :title="keyItem.checkMessage"
-              @click="emit('checkSingle', index)"
-            >
-              <Loader2 v-if="keyItem.checkStatus === 'checking'" class="h-4 w-4 animate-spin text-blue-500" />
-              <AlertCircle v-else-if="keyItem.checkStatus === 'error'" class="h-4 w-4 text-red-500" />
-              <Check v-else-if="keyItem.checkStatus === 'success'" class="h-4 w-4 text-green-500" />
-              <Check v-else class="h-4 w-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-gray-600"
-              @click="keyItem.isEditing = true"
-            >
-              <Edit2 class="h-4 w-4" />
-            </Button>
-          </template>
-          <template v-if="keyItem.id && keyItem.isEditing">
-            <Button variant="default" size="sm" class="h-8" @click="handleSaveSingleApiKey(index)">
-              {{ $t("common.save") }}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-gray-600"
-              @click="keyItem.isEditing = false"
-            >
-              <X class="h-4 w-4" />
-            </Button>
-          </template>
+        <div class="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="busyKeyId === keyItem.id"
+            @click="emit('checkSingle', editingData.provider_keys.indexOf(keyItem))"
+          >
+            <Loader2 v-if="keyItem.checkStatus === 'checking'" class="mr-1.5 h-4 w-4 animate-spin" />
+            <Check v-else class="mr-1.5 h-4 w-4" />
+            {{ $t("common.check") }}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            :disabled="busyKeyId === keyItem.id"
+            @click="openRevealDialog(keyItem)"
+          >
+            <Eye class="mr-1.5 h-4 w-4" />
+            {{ $t("providerEditPage.credentials.reveal") }}
+          </Button>
+          <Button variant="outline" size="sm" @click="openReplaceDialog(keyItem)">
+            <RefreshCw class="mr-1.5 h-4 w-4" />
+            {{ $t("providerEditPage.credentials.replace") }}
+          </Button>
+          <Button variant="outline" size="sm" @click="openMetadataDialog(keyItem)">
+            <Pencil class="mr-1.5 h-4 w-4" />
+            {{ $t("common.edit") }}
+          </Button>
           <Button
             variant="ghost"
             size="sm"
-            class="h-8 px-2 text-gray-400 hover:text-red-600"
-            @click="handleDeleteApiKey(index)"
+            :disabled="busyKeyId === keyItem.id"
+            @click="handleToggle(keyItem)"
           >
-            <Trash2 class="h-4 w-4" />
+            <Power class="mr-1.5 h-4 w-4" />
+            {{
+              $t(
+                keyItem.is_enabled
+                  ? "providerEditPage.credentials.disable"
+                  : "providerEditPage.credentials.enable",
+              )
+            }}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="text-red-600 hover:bg-red-50 hover:text-red-700"
+            :disabled="busyKeyId === keyItem.id"
+            @click="handleDelete(keyItem)"
+          >
+            <Trash2 class="mr-1.5 h-4 w-4" />
+            {{ $t("common.delete") }}
           </Button>
         </div>
       </div>
     </div>
 
-    <div class="border-t border-gray-100 pt-2">
-      <Button variant="outline" size="sm" class="w-full sm:w-auto" @click="addApiKey">
-        <Plus class="mr-1.5 h-4 w-4" />
-        {{ $t("providerEditPage.buttonAddApiKey") }}
-      </Button>
-    </div>
+    <Dialog :open="secretDialogOpen" @update:open="handleSecretDialogOpen">
+      <DialogContent class="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>
+            {{
+              $t(
+                secretDialogMode === "create"
+                  ? "providerEditPage.credentials.createTitle"
+                  : "providerEditPage.credentials.replaceTitle",
+              )
+            }}
+          </DialogTitle>
+          <DialogDescription>
+            {{ $t("providerEditPage.credentials.secretLocalOnly") }}
+          </DialogDescription>
+        </DialogHeader>
+        <div class="space-y-4">
+          <div class="space-y-1.5">
+            <Label>{{ $t("providerEditPage.tableHeaderApiKey") }}</Label>
+            <textarea
+              v-if="isVertex"
+              v-model="secretInput"
+              rows="9"
+              class="flex w-full resize-y rounded-md border border-gray-200 bg-white px-3 py-2 font-mono text-sm text-gray-900 outline-none focus:border-gray-400"
+              :placeholder="$t('providerEditPage.credentials.vertexPlaceholder')"
+            />
+            <Input
+              v-else
+              v-model="secretInput"
+              type="password"
+              class="font-mono"
+              :placeholder="$t('providerEditPage.placeholderApiKey')"
+            />
+            <p v-if="isVertex" class="text-xs leading-5 text-gray-500">
+              {{ $t("providerEditPage.credentials.vertexHelp") }}
+            </p>
+          </div>
+          <div v-if="secretDialogMode === 'create'" class="space-y-1.5">
+            <Label>{{ $t("providerEditPage.tableHeaderDescription") }}</Label>
+            <Input v-model="createDescription" :placeholder="$t('providerEditPage.placeholderDescription')" />
+          </div>
+        </div>
+        <DialogFooter class="gap-2 sm:gap-0">
+          <Button variant="ghost" @click="closeSecretDialog">{{ $t("common.cancel") }}</Button>
+          <Button
+            v-if="secretDialogMode === 'create'"
+            variant="outline"
+            :disabled="isBusy"
+            @click="handleDraftCheck"
+          >
+            {{ $t("providerEditPage.credentials.checkDraft") }}
+          </Button>
+          <Button :disabled="isBusy" @click="handleSecretSubmit">
+            <Loader2 v-if="isBusy" class="mr-1.5 h-4 w-4 animate-spin" />
+            {{
+              $t(
+                secretDialogMode === "create"
+                  ? "providerEditPage.credentials.create"
+                  : "common.save",
+              )
+            }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog :open="metadataDialogOpen" @update:open="handleMetadataDialogOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{{ $t("providerEditPage.credentials.editTitle") }}</DialogTitle>
+        </DialogHeader>
+        <div class="space-y-4">
+          <div class="space-y-1.5">
+            <Label>{{ $t("providerEditPage.tableHeaderDescription") }}</Label>
+            <Input v-model="metadataDescription" :placeholder="$t('providerEditPage.placeholderDescription')" />
+          </div>
+          <label class="flex items-center justify-between rounded-lg border border-gray-200 p-3 text-sm text-gray-700">
+            {{ $t("providerEditPage.credentials.enabled") }}
+            <Checkbox v-model="metadataEnabled" />
+          </label>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" @click="closeMetadataDialog">{{ $t("common.cancel") }}</Button>
+          <Button :disabled="isBusy" @click="handleMetadataSubmit">{{ $t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog
+      :open="revealTargetKey !== null || revealedSecret !== null"
+      @update:open="handleRevealDialogOpen"
+    >
+      <DialogContent class="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{{ $t("providerEditPage.credentials.revealTitle") }}</DialogTitle>
+          <DialogDescription>
+            {{
+              revealedSecret
+                ? $t("providerEditPage.credentials.secretLocalOnly")
+                : $t("providerEditPage.credentials.revealConfirm")
+            }}
+          </DialogDescription>
+        </DialogHeader>
+        <textarea
+          v-if="revealedSecret"
+          readonly
+          rows="7"
+          class="flex w-full resize-none rounded-md border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-sm text-gray-900 outline-none"
+          :value="revealedSecret.api_key"
+        />
+        <DialogFooter>
+          <template v-if="revealTargetKey && !revealedSecret">
+            <Button
+              variant="ghost"
+              :disabled="isRevealBusy"
+              @click="clearReveal"
+            >
+              {{ $t("common.cancel") }}
+            </Button>
+            <Button
+              :disabled="isRevealBusy"
+              @click="handleReveal"
+            >
+              <Loader2 v-if="isRevealBusy" class="mr-1.5 h-4 w-4 animate-spin" />
+              {{ $t("providerEditPage.credentials.reveal") }}
+            </Button>
+          </template>
+          <Button v-else @click="clearReveal">{{ $t("common.close") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </section>
 </template>
 
 <script setup lang="ts">
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import * as providerService from "@/services/providers";
-import { toastController } from "@/services/uiFeedback";
-import type { EditingProviderData } from "../types";
-import MobileCrudCard from "@/components/MobileCrudCard.vue";
+
 import SectionHeader from "@/components/SectionHeader.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Check, Key, Loader2, AlertCircle, Edit2, X, Trash2, Plus } from "lucide-vue-next";
+import * as providerService from "@/services/providers";
+import {
+  isManagerReauthCancelled,
+  runWithSecretGovernanceReauth,
+} from "@/services/managerReauth";
+import { toastController } from "@/services/uiFeedback";
+import { useAuthStore } from "@/store/authStore";
+import {
+  Check,
+  Eye,
+  KeyRound,
+  Loader2,
+  Pencil,
+  Plus,
+  Power,
+  RefreshCw,
+  Trash2,
+} from "lucide-vue-next";
+
+import { mapProviderApiKeySummary } from "../composables/providerEditState";
+import { useProviderCredentialSecretState } from "../composables/useProviderCredentialSecretState";
+import type { EditingProviderData, LocalProviderApiKeyItem } from "../types";
 
 const { t: $t } = useI18n();
-
+const authStore = useAuthStore();
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
-
 const emit = defineEmits<{
-  (e: "checkSingle", index: number): void;
-  (e: "checkBatch"): void;
+  (event: "checkSingle", index: number): void;
+  (event: "checkBatch"): void;
 }>();
 
-const addApiKey = () => {
-  editingData.value.provider_keys.push({
-    id: null,
-    api_key: "",
-    description: null,
-    isEditing: false,
-    checkStatus: "unchecked",
-  });
+const secretDialogOpen = ref(false);
+const secretDialogMode = ref<"create" | "replace">("create");
+const secretState = useProviderCredentialSecretState();
+const secretInput = secretState.draftSecret;
+const replacementKeyId = secretState.replacementKeyId;
+const revealedSecret = secretState.revealedSecret;
+const createDescription = ref("");
+const metadataDialogOpen = ref(false);
+const metadataKeyId = ref<number | null>(null);
+const metadataDescription = ref("");
+const metadataEnabled = ref(true);
+const isBusy = ref(false);
+const busyKeyId = ref<number | null>(null);
+const revealTargetKey = ref<LocalProviderApiKeyItem | null>(null);
+const isRevealBusy = ref(false);
+
+const isVertex = computed(() =>
+  ["VERTEX", "VERTEX_OPENAI"].includes(editingData.value.provider_type),
+);
+
+const keyMask = (key: LocalProviderApiKeyItem) =>
+  `${key.key_prefix}••••${key.key_last4}`;
+
+const clearSecretState = () => {
+  secretState.clearDialog();
+  createDescription.value = "";
+  secretDialogOpen.value = false;
 };
 
-const keyPreview = (value: string) => {
-  if (!value) return "-";
-  if (value.length <= 16) return value;
-  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+const openCreateDialog = () => {
+  clearSecretState();
+  secretState.openCreate();
+  secretDialogMode.value = "create";
+  secretDialogOpen.value = true;
 };
 
-const handleSaveSingleApiKey = async (index: number) => {
-  const data = editingData.value;
-  if (!data.id) {
-    toastController.warn(
-      $t("providerEditPage.alert.providerNotSavedForApiKey"),
-    );
-    return;
-  }
+const openReplaceDialog = (key: LocalProviderApiKeyItem) => {
+  clearSecretState();
+  secretState.openReplace(key.id);
+  secretDialogMode.value = "replace";
+  secretDialogOpen.value = true;
+};
 
-  const keyItem = data.provider_keys[index];
-  if (!keyItem.api_key.trim()) {
-    toastController.warn(
-      $t("providerEditPage.alert.apiKeyRequiredWithIndex", {
-        index: index + 1,
-      }),
-    );
-    return;
-  }
+const closeSecretDialog = () => clearSecretState();
+const handleSecretDialogOpen = (open: boolean) => {
+  if (!open) closeSecretDialog();
+};
 
-  if (data.provider_type === "VERTEX") {
-    try {
-      const parsedKey = JSON.parse(keyItem.api_key);
-      const requiredFields = [
-        "client_email",
-        "private_key",
-        "private_key_id",
-        "token_uri",
-      ];
-      const missingFields = requiredFields.filter(
-        (field) => !(field in parsedKey) || !parsedKey[field],
-      );
-      if (missingFields.length > 0) {
-        toastController.warn(
-          $t("providerEditPage.alert.vertexApiKeyMissingFields", {
-            index: index + 1,
-            fields: missingFields.join(", "),
-          }),
-        );
-        return;
-      }
-    } catch {
-      toastController.warn(
-        $t("providerEditPage.alert.vertexApiKeyInvalidJson", {
-          index: index + 1,
+const clearReveal = () => {
+  revealTargetKey.value = null;
+  secretState.setRevealed(null);
+};
+const handleRevealDialogOpen = (open: boolean) => {
+  if (!open && !isRevealBusy.value) clearReveal();
+};
+
+const validateSecret = (): boolean => {
+  if (!secretInput.value.trim()) {
+    toastController.warn($t("providerEditPage.alert.apiKeyRequired"));
+    return false;
+  }
+  if (!isVertex.value) return true;
+  try {
+    const parsed = JSON.parse(secretInput.value) as Record<string, unknown>;
+    const required = ["client_email", "private_key", "private_key_id", "token_uri"];
+    if (required.some((field) => !parsed[field])) throw new Error("missing field");
+  } catch {
+    toastController.warn($t("providerEditPage.credentials.vertexInvalid"));
+    return false;
+  }
+  return true;
+};
+
+const replaceLocalSummary = (summary: Awaited<ReturnType<typeof providerService.updateProviderKey>>) => {
+  const next = mapProviderApiKeySummary(summary);
+  if (!next) return;
+  const index = editingData.value.provider_keys.findIndex((key) => key.id === next.id);
+  const previous = editingData.value.provider_keys[index];
+  if (index >= 0) {
+    next.checkStatus = previous.checkStatus;
+    next.checkMessage = previous.checkMessage;
+    editingData.value.provider_keys.splice(index, 1, next);
+  } else {
+    editingData.value.provider_keys.push(next);
+  }
+};
+
+const refreshProviderKeys = async () => {
+  if (!editingData.value.id) return;
+  const summaries = await providerService.getProviderKeys(editingData.value.id);
+  editingData.value.provider_keys = summaries
+    .map(mapProviderApiKeySummary)
+    .filter((key): key is LocalProviderApiKeyItem => key !== null);
+};
+
+const recoverAfterMutationFailure = async (error: unknown) => {
+  await refreshProviderKeys().catch(() => undefined);
+  toastController.error(
+    $t("providerEditPage.credentials.mutationFailed", {
+      error: (error as Error).message || $t("common.unknownError"),
+    }),
+  );
+};
+
+const handleSecretSubmit = async () => {
+  const providerId = editingData.value.id;
+  if (!providerId || !validateSecret() || isBusy.value) return;
+  isBusy.value = true;
+  try {
+    if (secretDialogMode.value === "create") {
+      replaceLocalSummary(
+        await providerService.createProviderKey(providerId, {
+          api_key: secretInput.value,
+          description: createDescription.value.trim() || null,
         }),
       );
-      return;
+    } else if (replacementKeyId.value !== null) {
+      replaceLocalSummary(
+        await providerService.replaceProviderKey(providerId, replacementKeyId.value, {
+          api_key: secretInput.value,
+        }),
+      );
     }
-  }
-
-  try {
-    const savedKey = await providerService.createProviderKey(data.id, {
-      api_key: keyItem.api_key,
-      description: keyItem.description,
-    });
-    keyItem.id = savedKey.id;
-    keyItem.api_key = savedKey.api_key;
-    keyItem.description = savedKey.description ?? null;
-    keyItem.isEditing = false;
-    toastController.success($t("providerEditPage.alert.apiKeySaveSuccess"));
+    toastController.success($t("providerEditPage.credentials.mutationSuccess"));
+    closeSecretDialog();
   } catch (error) {
-    console.error("Failed to save API key:", error);
+    await recoverAfterMutationFailure(error);
+  } finally {
+    secretInput.value = "";
+    isBusy.value = false;
+  }
+};
+
+const handleDraftCheck = async () => {
+  const providerId = editingData.value.id;
+  const model = editingData.value.models.find((item) => item.id !== null);
+  if (!providerId || !model || !validateSecret() || isBusy.value) {
+    if (!model) toastController.warn($t("providerEditPage.alert.noModelForCheck"));
+    return;
+  }
+  isBusy.value = true;
+  try {
+    await providerService.checkProviderConnection(providerId, {
+      model_id: model.id ?? undefined,
+      provider_api_key: secretInput.value,
+    });
+    toastController.success($t("providerEditPage.alert.checkSuccess"));
+  } catch (error) {
     toastController.error(
-      $t("providerEditPage.alert.saveApiKeyFailed", {
+      $t("providerEditPage.alert.checkFailed", {
         error: (error as Error).message || $t("common.unknownError"),
       }),
     );
+  } finally {
+    isBusy.value = false;
   }
 };
 
-const handleDeleteApiKey = async (index: number) => {
-  const data = editingData.value;
-  const keyItem = data.provider_keys[index];
-  
-  if (keyItem.id && data.id) {
-    try {
-      await providerService.deleteProviderKey(data.id, keyItem.id);
-      data.provider_keys.splice(index, 1);
-      toastController.success($t("providerEditPage.alert.apiKeyDeleteSuccess"));
-    } catch (error) {
-      console.error("Failed to delete API key:", error);
-      toastController.error(
-        $t("providerEditPage.alert.deleteApiKeyFailed", {
-          error: (error as Error).message || $t("common.unknownError"),
-        }),
-      );
-    }
-  } else {
-    data.provider_keys.splice(index, 1);
+const performReveal = async (key: LocalProviderApiKeyItem) => {
+  if (!editingData.value.id || !key || isRevealBusy.value) return;
+  isRevealBusy.value = true;
+  busyKeyId.value = key.id;
+  try {
+    secretState.setRevealed(
+      await runWithSecretGovernanceReauth(() =>
+        providerService.revealProviderKey(
+          editingData.value.id as number,
+          key.id,
+        ),
+      ),
+    );
+    revealTargetKey.value = null;
+  } catch (error) {
+    if (isManagerReauthCancelled(error)) return;
+    const fallback = $t("providerEditPage.credentials.revealFailed", {
+      error: (error as Error).message || $t("common.unknownError"),
+    });
+    toastController.error(fallback);
+  } finally {
+    isRevealBusy.value = false;
+    busyKeyId.value = null;
   }
 };
+
+const openRevealDialog = (key: LocalProviderApiKeyItem) => {
+  clearReveal();
+  revealTargetKey.value = key;
+};
+
+const handleReveal = async () => {
+  const key = revealTargetKey.value;
+  if (key) await performReveal(key);
+};
+
+const openMetadataDialog = (key: LocalProviderApiKeyItem) => {
+  metadataKeyId.value = key.id;
+  metadataDescription.value = key.description ?? "";
+  metadataEnabled.value = key.is_enabled;
+  metadataDialogOpen.value = true;
+};
+
+const closeMetadataDialog = () => {
+  metadataDialogOpen.value = false;
+  metadataDescription.value = "";
+  metadataKeyId.value = null;
+};
+const handleMetadataDialogOpen = (open: boolean) => {
+  if (!open) closeMetadataDialog();
+};
+
+const updateMetadata = async (keyId: number, description: string | null, enabled: boolean) => {
+  const providerId = editingData.value.id;
+  if (!providerId) return;
+  busyKeyId.value = keyId;
+  try {
+    replaceLocalSummary(
+      await providerService.updateProviderKey(providerId, keyId, {
+        description,
+        is_enabled: enabled,
+      }),
+    );
+    toastController.success($t("providerEditPage.credentials.mutationSuccess"));
+  } catch (error) {
+    await recoverAfterMutationFailure(error);
+  } finally {
+    busyKeyId.value = null;
+  }
+};
+
+const handleMetadataSubmit = async () => {
+  if (metadataKeyId.value === null || isBusy.value) return;
+  isBusy.value = true;
+  await updateMetadata(
+    metadataKeyId.value,
+    metadataDescription.value.trim() || null,
+    metadataEnabled.value,
+  );
+  isBusy.value = false;
+  closeMetadataDialog();
+};
+
+const handleToggle = async (key: LocalProviderApiKeyItem) => {
+  await updateMetadata(key.id, key.description, !key.is_enabled);
+};
+
+const handleDelete = async (key: LocalProviderApiKeyItem) => {
+  const providerId = editingData.value.id;
+  if (!providerId) return;
+  busyKeyId.value = key.id;
+  try {
+    await providerService.deleteProviderKey(providerId, key.id);
+    editingData.value.provider_keys = editingData.value.provider_keys.filter(
+      (item) => item.id !== key.id,
+    );
+    toastController.success($t("providerEditPage.alert.apiKeyDeleteSuccess"));
+  } catch (error) {
+    await recoverAfterMutationFailure(error);
+  } finally {
+    busyKeyId.value = null;
+  }
+};
+
+watch(
+  () => editingData.value.id,
+  () => {
+    clearReveal();
+    secretState.providerChanged();
+    clearSecretState();
+  },
+);
+watch(
+  () => authStore.lifecycle,
+  (lifecycle) => {
+    if (lifecycle === "anonymous") {
+      clearReveal();
+      secretState.logout();
+      clearSecretState();
+    }
+  },
+);
+onBeforeUnmount(() => {
+  clearReveal();
+  secretState.leaveRoute();
+  clearSecretState();
+});
 </script>

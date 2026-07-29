@@ -132,7 +132,7 @@ const { t: $t } = useI18n();
                 <p class="mt-1 text-sm font-medium text-gray-900">
                   {{ props.runtimeBackendHeadline }}
                 </p>
-                <p class="mt-1 text-xs text-gray-500">
+                <p v-if="props.runtimeBackendDetail" class="mt-1 text-xs text-gray-500">
                   {{ props.runtimeBackendDetail }}
                 </p>
                 <dl class="mt-3 grid grid-cols-1 gap-x-4 gap-y-2 text-xs sm:grid-cols-2">

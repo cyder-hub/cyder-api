@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use crate::service::catalog::CatalogService;
+use crate::service::secret_encryption::SecretEncryptionService;
 
 use self::api_key::ApiKeyAdminService;
 use self::auth::ManagerAuthService;
 use self::cost::CostAdminService;
 use self::model::ModelAdminService;
-use self::model_route::ModelRouteAdminService;
 use self::mutation::AdminMutationRunner;
-use self::portable_config::PortableConfigAdminService;
 use self::provider::ProviderAdminService;
 use self::reasoning_config::ReasoningConfigAdminService;
 use self::request_patch::RequestPatchAdminService;
@@ -19,9 +18,7 @@ pub mod audit;
 pub mod auth;
 pub mod cost;
 pub mod model;
-pub mod model_route;
 pub mod mutation;
-pub mod portable_config;
 pub mod provider;
 pub mod reasoning_config;
 pub mod request_patch;
@@ -35,24 +32,31 @@ pub struct AdminServices {
     pub provider: Arc<ProviderAdminService>,
     pub api_key: Arc<ApiKeyAdminService>,
     pub model: Arc<ModelAdminService>,
-    pub model_route: Arc<ModelRouteAdminService>,
     pub request_patch: Arc<RequestPatchAdminService>,
     pub cost: Arc<CostAdminService>,
     pub reasoning_config: Arc<ReasoningConfigAdminService>,
     pub runtime_feature_config: Arc<RuntimeFeatureConfigAdminService>,
-    pub portable_config: Arc<PortableConfigAdminService>,
+    pub secret_encryption: Arc<SecretEncryptionService>,
 }
 
 impl AdminServices {
-    pub fn new(catalog: Arc<CatalogService>) -> Self {
+    pub fn new(
+        catalog: Arc<CatalogService>,
+        secret_encryption: Arc<SecretEncryptionService>,
+    ) -> Self {
         let mutation_runner = Arc::new(AdminMutationRunner::new(catalog));
 
         Self {
-            auth: Arc::new(ManagerAuthService::new()),
-            provider: Arc::new(ProviderAdminService::new(Arc::clone(&mutation_runner))),
-            api_key: Arc::new(ApiKeyAdminService::new(Arc::clone(&mutation_runner))),
+            auth: Arc::new(ManagerAuthService::new(Arc::clone(&secret_encryption))),
+            provider: Arc::new(ProviderAdminService::new(
+                Arc::clone(&mutation_runner),
+                Arc::clone(&secret_encryption),
+            )),
+            api_key: Arc::new(ApiKeyAdminService::new(
+                Arc::clone(&mutation_runner),
+                Arc::clone(&secret_encryption),
+            )),
             model: Arc::new(ModelAdminService::new(Arc::clone(&mutation_runner))),
-            model_route: Arc::new(ModelRouteAdminService::new(Arc::clone(&mutation_runner))),
             request_patch: Arc::new(RequestPatchAdminService::new(Arc::clone(&mutation_runner))),
             cost: Arc::new(CostAdminService::new(Arc::clone(&mutation_runner))),
             reasoning_config: Arc::new(ReasoningConfigAdminService::new(Arc::clone(
@@ -61,9 +65,7 @@ impl AdminServices {
             runtime_feature_config: Arc::new(RuntimeFeatureConfigAdminService::new(Arc::clone(
                 &mutation_runner,
             ))),
-            portable_config: Arc::new(PortableConfigAdminService::new(Arc::clone(
-                &mutation_runner,
-            ))),
+            secret_encryption,
         }
     }
 }
@@ -72,14 +74,19 @@ impl AdminServices {
 mod tests {
     use std::sync::Arc;
 
+    use crate::config::SecretEncryptionConfig;
     use crate::service::catalog::CatalogService;
+    use crate::service::secret_encryption::SecretEncryptionService;
 
     use super::AdminServices;
 
     #[tokio::test]
     async fn admin_services_share_one_mutation_runner() {
         let catalog = Arc::new(CatalogService::new(true).await);
-        let services = AdminServices::new(Arc::clone(&catalog));
+        let secret_encryption = Arc::new(SecretEncryptionService::from_config(
+            &SecretEncryptionConfig::default(),
+        ));
+        let services = AdminServices::new(Arc::clone(&catalog), Arc::clone(&secret_encryption));
 
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
@@ -88,10 +95,6 @@ mod tests {
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
             services.model.mutation_runner(),
-        ));
-        assert!(Arc::ptr_eq(
-            services.provider.mutation_runner(),
-            services.model_route.mutation_runner(),
         ));
         assert!(Arc::ptr_eq(
             services.provider.mutation_runner(),
@@ -109,9 +112,14 @@ mod tests {
             services.provider.mutation_runner(),
             services.runtime_feature_config.mutation_runner(),
         ));
+        assert!(Arc::ptr_eq(&services.secret_encryption, &secret_encryption,));
         assert!(Arc::ptr_eq(
-            services.provider.mutation_runner(),
-            services.portable_config.mutation_runner(),
+            services.api_key.secret_encryption(),
+            &secret_encryption,
+        ));
+        assert!(Arc::ptr_eq(
+            services.auth.secret_encryption(),
+            &secret_encryption,
         ));
         assert_eq!(Arc::strong_count(&catalog), 2);
     }

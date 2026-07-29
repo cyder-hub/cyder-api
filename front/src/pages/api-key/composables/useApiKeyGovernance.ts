@@ -1,7 +1,11 @@
 import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 
 import * as apiKeyService from "@/services/apiKeys";
-import { confirm, toastController } from "@/services/uiFeedback";
+import {
+  isManagerReauthCancelled,
+  runWithSecretGovernanceReauth,
+} from "@/services/managerReauth";
+import { toastController } from "@/services/uiFeedback";
 import { normalizeError } from "@/utils/error";
 import { formatPriceInputFromNanos } from "@/utils/money";
 import type {
@@ -12,11 +16,8 @@ import type {
   ApiKeyCreatePayload,
   ApiKeyDetail,
   ApiKeyItem,
-  ApiKeyModelOverrideItem,
-  ApiKeyModelOverridePayload,
   ApiKeyReveal,
   ApiKeyUpdatePayload,
-  ModelRouteListItem,
   ModelSummaryItem,
   ProviderSummaryItem,
 } from "@/services/types";
@@ -36,14 +37,6 @@ interface EditableRule {
   description: string;
 }
 
-interface EditableOverride {
-  local_id: number;
-  source_name: string;
-  target_route_id: number | null;
-  description: string;
-  is_enabled: boolean;
-}
-
 export interface EditingApiKeyData {
   id: number | null;
   name: string;
@@ -60,14 +53,12 @@ export interface EditingApiKeyData {
   budget_daily_currency: string;
   budget_monthly_nanos: string;
   budget_monthly_currency: string;
-  model_overrides: EditableOverride[];
   acl_rules: EditableRule[];
 }
 
 interface UseApiKeyEditDialogOptions {
   isOpen: Readonly<Ref<boolean>>;
   initialData: Readonly<Ref<ApiKeyDetail | null>>;
-  modelRoutes: Readonly<Ref<ModelRouteListItem[]>>;
   providers: Readonly<Ref<ProviderSummaryItem[]>>;
   models: Readonly<Ref<ModelSummaryItem[]>>;
   t: TranslateFn;
@@ -80,14 +71,13 @@ interface UseApiKeyGovernanceOptions {
   apiKeys: ComputedRef<ApiKeyItem[]>;
   selectedKeyId: Ref<number | null>;
   selectedDetail: Ref<ApiKeyDetail | null>;
-  setSecretReveal: (reveal: ApiKeyReveal | null) => void;
+  setIssuedSecret: (reveal: ApiKeyReveal | null) => void;
+  clearRevealedSecret: () => void;
   refreshList: (preferredSelectedId: number | null) => Promise<number | null>;
   refreshDetail: (id: number | null) => Promise<void>;
 }
 
 const COMMON_BUDGET_CURRENCIES = ["CNY", "USD"] as const;
-
-let nextOverrideDraftId = 1;
 
 function getEmptyRule(): EditableRule {
   return {
@@ -98,16 +88,6 @@ function getEmptyRule(): EditableRule {
     model_id: null,
     is_enabled: true,
     description: "",
-  };
-}
-
-function getEmptyOverride(): EditableOverride {
-  return {
-    local_id: nextOverrideDraftId++,
-    source_name: "",
-    target_route_id: null,
-    description: "",
-    is_enabled: true,
   };
 }
 
@@ -128,7 +108,6 @@ export function getEmptyEditingData(): EditingApiKeyData {
     budget_daily_currency: "",
     budget_monthly_nanos: "",
     budget_monthly_currency: "",
-    model_overrides: [],
     acl_rules: [],
   };
 }
@@ -273,13 +252,6 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
     }));
   });
 
-  const routeOptions = computed(() =>
-    options.modelRoutes.value.map((item) => ({
-      value: item.route.id,
-      label: item.route.route_name,
-    })),
-  );
-
   function updateBudgetCurrency(target: "daily" | "monthly", value: string) {
     const normalizedValue = value === "none" ? "" : value;
     if (target === "daily") {
@@ -318,16 +290,6 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
     };
   }
 
-  function normalizeEditableOverride(item: ApiKeyModelOverrideItem): EditableOverride {
-    return {
-      local_id: nextOverrideDraftId++,
-      source_name: item.source_name,
-      target_route_id: item.target_route_id,
-      description: item.description ?? "",
-      is_enabled: item.is_enabled,
-    };
-  }
-
   function resetEditingData() {
     if (!options.initialData.value) {
       editingData.value = getEmptyEditingData();
@@ -358,9 +320,6 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
         options.initialData.value.budget_monthly_currency,
       ),
       budget_monthly_currency: options.initialData.value.budget_monthly_currency ?? "",
-      model_overrides: options.initialData.value.model_overrides.map(
-        normalizeEditableOverride,
-      ),
       acl_rules: options.initialData.value.acl_rules.map(normalizeEditableRule),
     };
   }
@@ -371,14 +330,6 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
 
   function removeRule(index: number) {
     editingData.value.acl_rules.splice(index, 1);
-  }
-
-  function addOverride() {
-    editingData.value.model_overrides.push(getEmptyOverride());
-  }
-
-  function removeOverride(index: number) {
-    editingData.value.model_overrides.splice(index, 1);
   }
 
   function updateRuleScope(index: number, scope: string) {
@@ -409,11 +360,6 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
     }
     const provider = providerOptions.value.find((item) => item.value === rule.provider_id);
     return provider?.models ?? [];
-  }
-
-  function updateOverrideTargetRoute(index: number, routeId: string) {
-    editingData.value.model_overrides[index].target_route_id =
-      routeId === "none" ? null : Number(routeId);
   }
 
   function buildRulePayloads(): ApiKeyAclRulePayload[] {
@@ -455,46 +401,6 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
         model_id: rule.scope === "MODEL" ? rule.model_id : null,
         is_enabled: rule.is_enabled,
         description: textOrNull(rule.description),
-      };
-    });
-  }
-
-  function buildModelOverridePayloads(): ApiKeyModelOverridePayload[] {
-    const seenNames = new Set<string>();
-
-    return editingData.value.model_overrides.map((item, index) => {
-      const sourceName = item.source_name.trim();
-      if (!sourceName) {
-        throw new Error(
-          options.t("apiKeyEditModal.alert.overrideSourceNameRequired", {
-            index: index + 1,
-          }),
-        );
-      }
-
-      const duplicateKey = sourceName.toLowerCase();
-      if (seenNames.has(duplicateKey)) {
-        throw new Error(
-          options.t("apiKeyEditModal.alert.duplicateOverrideSourceName", {
-            name: sourceName,
-          }),
-        );
-      }
-      seenNames.add(duplicateKey);
-
-      if (item.target_route_id == null) {
-        throw new Error(
-          options.t("apiKeyEditModal.alert.overrideTargetRouteRequired", {
-            index: index + 1,
-          }),
-        );
-      }
-
-      return {
-        source_name: sourceName,
-        target_route_id: item.target_route_id,
-        description: textOrNull(item.description),
-        is_enabled: item.is_enabled,
       };
     });
   }
@@ -549,7 +455,6 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
         budget_daily_currency: dailyBudget.currency,
         budget_monthly_nanos: monthlyBudget.nanos,
         budget_monthly_currency: monthlyBudget.currency,
-        model_overrides: buildModelOverridePayloads(),
         acl_rules: buildRulePayloads(),
       };
 
@@ -560,8 +465,8 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
         );
         options.emitSaveSuccess({ detail: response });
       } else {
-        const response = await apiKeyService.createApiKey(
-          payloadBase as ApiKeyCreatePayload,
+        const response = await runWithSecretGovernanceReauth(() =>
+          apiKeyService.createApiKey(payloadBase as ApiKeyCreatePayload),
         );
         options.emitSaveSuccess(response);
       }
@@ -569,11 +474,11 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
       toastController.success(options.t("apiKeyEditModal.alert.saveSuccess"));
       options.close();
     } catch (error: unknown) {
-      toastController.error(
-        options.t("apiKeyEditModal.alert.saveFailed", {
-          error: normalizeError(error, options.t("common.unknownError")).message,
-        }),
-      );
+      if (isManagerReauthCancelled(error)) return;
+      const fallback = options.t("apiKeyEditModal.alert.saveFailed", {
+        error: normalizeError(error, options.t("common.unknownError")).message,
+      });
+      toastController.error(fallback);
     } finally {
       isSubmitting.value = false;
     }
@@ -595,17 +500,13 @@ export function useApiKeyEditDialog(options: UseApiKeyEditDialogOptions) {
     scopeOptions,
     providerOptions,
     budgetCurrencyOptions,
-    routeOptions,
     updateBudgetCurrency,
     clearQuotaLimits,
     clearBudgetLimits,
     addRule,
     removeRule,
-    addOverride,
-    removeOverride,
     updateRuleScope,
     updateRuleProvider,
-    updateOverrideTargetRoute,
     modelOptionsForRule,
     handleCommit,
   };
@@ -643,66 +544,50 @@ export function useApiKeyGovernance(options: UseApiKeyGovernanceOptions) {
     editingDetail.value = null;
     showEditDialog.value = false;
     if (payload.reveal) {
-      options.setSecretReveal(payload.reveal);
+      options.setIssuedSecret(payload.reveal);
     }
     await options.refreshList(payload.detail.id);
   }
 
-  async function handleRotateKey(id: number) {
-    const target = options.apiKeys.value.find((item) => item.id === id);
-    if (
-      !(await confirm({
-        title: options.t("apiKeyPage.confirmRotate", {
-          name: target?.name ?? String(id),
-        }),
-        confirmText: options.t("apiKeyPage.actions.rotate"),
-      }))
-    ) {
-      return;
-    }
-
+  async function handleRotateKey(id: number): Promise<boolean> {
     try {
-      options.setSecretReveal(await apiKeyService.rotateApiKey(id));
+      options.setIssuedSecret(
+        await runWithSecretGovernanceReauth(() =>
+          apiKeyService.rotateApiKey(id),
+        ),
+      );
       await options.refreshList(id);
       await options.refreshDetail(id);
+      return true;
     } catch (err: unknown) {
-      toastController.error(
-        options.t("apiKeyPage.rotateFailed", {
-          error: normalizeError(err, options.t("common.unknownError")).message,
-        }),
-      );
+      if (isManagerReauthCancelled(err)) return false;
+      const fallback = options.t("apiKeyPage.rotateFailed", {
+        error: normalizeError(err, options.t("common.unknownError")).message,
+      });
+      toastController.error(fallback);
+      return false;
     }
   }
 
   async function handleDeleteKey(id: number): Promise<boolean> {
-    const target = options.apiKeys.value.find((item) => item.id === id);
-    if (
-      !(await confirm({
-        title: options.t("apiKeyPage.confirmDelete", {
-          name: target?.name ?? String(id),
-        }),
-        confirmText: options.t("common.delete"),
-      }))
-    ) {
-      return false;
-    }
-
     try {
-      await apiKeyService.deleteApiKey(id);
+      await runWithSecretGovernanceReauth(() =>
+        apiKeyService.deleteApiKey(id),
+      );
       if (options.selectedKeyId.value === id) {
         options.selectedKeyId.value = null;
         options.selectedDetail.value = null;
-        options.setSecretReveal(null);
+        options.clearRevealedSecret();
       }
       const nextSelectedId = await options.refreshList(null);
       await options.refreshDetail(nextSelectedId);
       return true;
     } catch (err: unknown) {
-      toastController.error(
-        options.t("apiKeyPage.deleteFailed", {
-          error: normalizeError(err, options.t("common.unknownError")).message,
-        }),
-      );
+      if (isManagerReauthCancelled(err)) return false;
+      const fallback = options.t("apiKeyPage.deleteFailed", {
+        error: normalizeError(err, options.t("common.unknownError")).message,
+      });
+      toastController.error(fallback);
       return false;
     }
   }

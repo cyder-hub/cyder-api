@@ -1,71 +1,78 @@
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::{Client, Proxy, Url};
-use tokio::sync::RwLock;
+use reqwest::{Client, Proxy, Url, redirect};
 
 use crate::config::ProxyRequestConfig;
 #[cfg(test)]
 use crate::database::TestDbContext;
 use crate::proxy::logging::LogManager;
+use crate::service::provider_http::parse_proxy_url;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderHttpClientError {
+    ProxyNotConfigured,
+}
+
+impl fmt::Display for ProviderHttpClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ProxyNotConfigured => formatter
+                .write_str("provider requires the global proxy, but no proxy is configured"),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct HttpClientBundle {
-    pub version: u64,
     pub client: Arc<Client>,
-    pub proxy_client: Arc<Client>,
+    proxy_client: Option<Arc<Client>>,
     pub proxy_request: ProxyRequestConfig,
-    pub proxy: Option<String>,
 }
 
-pub struct HttpClientManager {
-    current: RwLock<Arc<HttpClientBundle>>,
-}
-
-impl HttpClientManager {
-    pub fn new(
-        version: u64,
-        proxy_request: ProxyRequestConfig,
-        proxy: Option<String>,
-    ) -> Result<Self, String> {
-        let bundle = Self::build_bundle(version, proxy_request, proxy)?;
-        Ok(Self {
-            current: RwLock::new(Arc::new(bundle)),
-        })
-    }
-
-    pub fn build_bundle(
-        version: u64,
+impl HttpClientBundle {
+    pub fn build(
         proxy_request: ProxyRequestConfig,
         proxy: Option<String>,
     ) -> Result<HttpClientBundle, String> {
-        let client = Arc::new(build_http_client(false, &proxy_request, proxy.as_deref())?);
-        let proxy_client = Arc::new(build_http_client(true, &proxy_request, proxy.as_deref())?);
+        let proxy_url = proxy
+            .as_deref()
+            .map(parse_proxy_url)
+            .transpose()
+            .map_err(|error| format!("invalid proxy URL in configuration: {error}"))?;
+        let client = Arc::new(build_http_client("default", &proxy_request, None)?);
+        let proxy_client = proxy_url
+            .as_ref()
+            .map(|proxy_url| build_http_client("proxy", &proxy_request, Some(proxy_url)))
+            .transpose()?
+            .map(Arc::new);
 
         Ok(HttpClientBundle {
-            version,
             client,
             proxy_client,
             proxy_request,
-            proxy,
         })
     }
 
-    pub async fn current(&self) -> Arc<HttpClientBundle> {
-        let current = self.current.read().await;
-        Arc::clone(&current)
-    }
+    pub(crate) fn provider_client(
+        &self,
+        use_proxy: bool,
+    ) -> Result<Arc<Client>, ProviderHttpClientError> {
+        if !use_proxy {
+            return Ok(Arc::clone(&self.client));
+        }
 
-    pub async fn replace_bundle(&self, bundle: HttpClientBundle) -> Arc<HttpClientBundle> {
-        let bundle = Arc::new(bundle);
-        *self.current.write().await = Arc::clone(&bundle);
-        bundle
+        self.proxy_client
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or(ProviderHttpClientError::ProxyNotConfigured)
     }
 }
 
 pub struct AppInfra {
-    http_clients: Arc<HttpClientManager>,
+    http_clients: Arc<HttpClientBundle>,
     log_manager: Arc<LogManager>,
     #[cfg(test)]
     test_db_context: Option<TestDbContext>,
@@ -73,13 +80,12 @@ pub struct AppInfra {
 
 impl AppInfra {
     pub(crate) async fn new_with_config(
-        version: u64,
         proxy_request: ProxyRequestConfig,
         proxy: Option<String>,
         #[cfg(test)] test_db_context: Option<TestDbContext>,
     ) -> Self {
         let http_clients = Arc::new(
-            HttpClientManager::new(version, proxy_request, proxy)
+            HttpClientBundle::build(proxy_request, proxy)
                 .expect("failed to build initial HTTP client bundle"),
         );
         let log_manager = Arc::new({
@@ -105,20 +111,15 @@ impl AppInfra {
         }
     }
 
-    pub(crate) fn http_clients(&self) -> Arc<HttpClientManager> {
+    pub(crate) async fn client_bundle(&self) -> Arc<HttpClientBundle> {
         Arc::clone(&self.http_clients)
     }
 
-    pub(crate) async fn client_bundle(&self) -> Arc<HttpClientBundle> {
-        self.http_clients.current().await
-    }
-
-    pub(crate) async fn client(&self) -> Arc<Client> {
-        Arc::clone(&self.http_clients.current().await.client)
-    }
-
-    pub(crate) async fn proxy_client(&self) -> Arc<Client> {
-        Arc::clone(&self.http_clients.current().await.proxy_client)
+    pub(crate) async fn provider_client(
+        &self,
+        use_proxy: bool,
+    ) -> Result<Arc<Client>, ProviderHttpClientError> {
+        self.http_clients.provider_client(use_proxy)
     }
 
     pub(crate) fn log_manager(&self) -> &LogManager {
@@ -152,64 +153,65 @@ fn optional_duration_to_millis(duration: Option<Duration>) -> Option<u64> {
 }
 
 fn build_http_client(
-    use_proxy: bool,
+    client_kind: &'static str,
     proxy_request_config: &ProxyRequestConfig,
-    proxy_url: Option<&str>,
+    proxy_url: Option<&Url>,
 ) -> Result<Client, String> {
     let connect_timeout = proxy_request_config.connect_timeout();
     let total_timeout = proxy_request_config.total_timeout();
 
-    let mut builder = Client::builder().connect_timeout(connect_timeout);
+    let mut builder = Client::builder()
+        .connect_timeout(connect_timeout)
+        .redirect(redirect::Policy::none());
 
     if let Some(timeout) = total_timeout {
         builder = builder.timeout(timeout);
     }
 
-    if use_proxy {
-        if let Some(proxy_url) = proxy_url {
-            let parsed = Url::parse(proxy_url)
-                .map_err(|err| format!("invalid proxy URL in configuration: {err}"))?;
-            match parsed.scheme() {
-                "http" | "https" => {}
-                scheme => {
-                    return Err(format!(
-                        "invalid proxy URL in configuration: only http and https are supported, got {scheme}"
-                    ));
-                }
-            }
-            let proxy = Proxy::all(proxy_url)
-                .map_err(|err| format!("invalid proxy URL in configuration: {err}"))?;
-            builder = builder.proxy(proxy);
-        }
+    if let Some(proxy_url) = proxy_url {
+        let proxy = Proxy::all(proxy_url.clone())
+            .map_err(|_| "invalid proxy URL in configuration".to_string())?;
+        builder = builder.proxy(proxy);
     }
 
     crate::info_event!(
         "startup.http_client_built",
-        client_kind = if use_proxy { "proxy" } else { "default" },
-        use_proxy = use_proxy,
+        client_kind = client_kind,
+        use_proxy = proxy_url.is_some(),
         connect_timeout_ms = duration_to_millis(connect_timeout),
         first_byte_timeout_ms =
             optional_duration_to_millis(proxy_request_config.first_byte_timeout()),
         total_timeout_ms = optional_duration_to_millis(total_timeout),
     );
 
-    builder.build().map_err(|err| {
-        format!(
-            "failed to build {} reqwest client: {}",
-            if use_proxy { "proxy" } else { "default" },
-            err
-        )
+    builder.build().map_err(|error| {
+        if proxy_url.is_some() {
+            "failed to build proxy reqwest client".to_string()
+        } else {
+            format!("failed to build default reqwest client: {error}")
+        }
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{
+        Router,
+        body::Body,
+        extract::{Path, State},
+        http::{StatusCode, header::LOCATION},
+        response::Response,
+        routing::any,
+    };
+    use tokio::net::TcpListener;
+
     use super::*;
 
     #[test]
     fn http_client_bundle_rejects_invalid_proxy_url() {
-        let err = match HttpClientManager::build_bundle(
-            1,
+        let err = match HttpClientBundle::build(
             ProxyRequestConfig::default(),
             Some("socks5://127.0.0.1:1080".to_string()),
         ) {
@@ -218,23 +220,157 @@ mod tests {
         };
 
         assert!(err.contains("invalid proxy URL"));
+        assert!(!err.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn http_client_bundle_rejects_proxy_paths_queries_and_fragments_without_echoing_credentials() {
+        for proxy in [
+            "http://user:secret@proxy.example/gateway",
+            "http://user:secret@proxy.example?region=cn",
+            "http://user:secret@proxy.example#internal",
+        ] {
+            let err = match HttpClientBundle::build(
+                ProxyRequestConfig::default(),
+                Some(proxy.to_string()),
+            ) {
+                Ok(_) => panic!("ambiguous proxy URL should fail"),
+                Err(error) => error,
+            };
+            assert!(err.contains("invalid proxy URL"));
+            assert!(!err.contains("user"));
+            assert!(!err.contains("secret"));
+            assert!(!err.contains("proxy.example"));
+        }
+    }
+
+    #[test]
+    fn provider_client_fails_closed_when_proxy_is_required_but_unconfigured() {
+        let bundle = HttpClientBundle::build(ProxyRequestConfig::default(), None)
+            .expect("default client bundle should build");
+
+        assert!(bundle.provider_client(false).is_ok());
+        assert_eq!(
+            bundle
+                .provider_client(true)
+                .expect_err("proxy requirement must not fall back to direct"),
+            ProviderHttpClientError::ProxyNotConfigured
+        );
+    }
+
+    async fn redirect_response(
+        Path(status): Path<u16>,
+        State(target): State<String>,
+    ) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::from_u16(status).expect("test redirect status"))
+            .header(LOCATION, target)
+            .body(Body::from("redirect"))
+            .expect("redirect response should build")
+    }
+
+    async fn target_response(State(hits): State<Arc<AtomicUsize>>) -> StatusCode {
+        hits.fetch_add(1, Ordering::SeqCst);
+        StatusCode::NO_CONTENT
     }
 
     #[tokio::test]
-    async fn http_client_manager_replace_keeps_old_bundle_alive() {
-        let manager =
-            HttpClientManager::new(1, ProxyRequestConfig::default(), None).expect("manager");
-        let old = manager.current().await;
-        let mut config = ProxyRequestConfig::default();
-        config.first_byte_timeout_seconds = Some(120);
-        let replacement =
-            HttpClientManager::build_bundle(2, config.clone(), None).expect("replacement bundle");
+    async fn shared_http_client_never_follows_any_redirect_status() {
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        let target_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("target listener should bind");
+        let target_addr = target_listener.local_addr().expect("target address");
+        let target_hits_server = Arc::clone(&target_hits);
+        let target_task = tokio::spawn(async move {
+            axum::serve(
+                target_listener,
+                Router::new()
+                    .fallback(any(target_response))
+                    .with_state(target_hits_server),
+            )
+            .await
+            .expect("target server should run");
+        });
 
-        manager.replace_bundle(replacement).await;
+        let redirect_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("redirect listener should bind");
+        let redirect_addr = redirect_listener.local_addr().expect("redirect address");
+        let redirect_task = tokio::spawn(async move {
+            axum::serve(
+                redirect_listener,
+                Router::new()
+                    .route("/{status}", any(redirect_response))
+                    .with_state(format!("http://{target_addr}/credential-capture")),
+            )
+            .await
+            .expect("redirect server should run");
+        });
 
-        let current = manager.current().await;
-        assert_eq!(old.version, 1);
-        assert_eq!(current.version, 2);
-        assert_eq!(current.proxy_request.first_byte_timeout_seconds, Some(120));
+        let bundle = HttpClientBundle::build(ProxyRequestConfig::default(), None)
+            .expect("client bundle should build");
+        for status in [301, 302, 303, 307, 308] {
+            let response = bundle
+                .client
+                .post(format!("http://{redirect_addr}/{status}"))
+                .header("authorization", "Bearer provider-secret")
+                .header("x-api-key", "provider-secret")
+                .header("x-goog-api-key", "provider-secret")
+                .body("provider-request-body")
+                .send()
+                .await
+                .expect("redirect response should be returned without following");
+            assert_eq!(response.status().as_u16(), status);
+        }
+
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+        redirect_task.abort();
+        target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn unavailable_configured_proxy_never_falls_back_to_direct_access() {
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        let target_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("target listener should bind");
+        let target_addr = target_listener.local_addr().expect("target address");
+        let target_hits_server = Arc::clone(&target_hits);
+        let target_task = tokio::spawn(async move {
+            axum::serve(
+                target_listener,
+                Router::new()
+                    .fallback(any(target_response))
+                    .with_state(target_hits_server),
+            )
+            .await
+            .expect("target server should run");
+        });
+
+        let unavailable_proxy_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("temporary proxy listener should bind");
+        let unavailable_proxy_addr = unavailable_proxy_listener
+            .local_addr()
+            .expect("temporary proxy address");
+        drop(unavailable_proxy_listener);
+
+        let bundle = HttpClientBundle::build(
+            ProxyRequestConfig::default(),
+            Some(format!("http://{unavailable_proxy_addr}")),
+        )
+        .expect("proxy client bundle should build");
+        let error = bundle
+            .provider_client(true)
+            .expect("configured proxy client should resolve")
+            .get(format!("http://{target_addr}/must-not-be-reached"))
+            .send()
+            .await
+            .expect_err("unavailable proxy should fail the request");
+
+        assert!(error.is_connect());
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+        target_task.abort();
     }
 }

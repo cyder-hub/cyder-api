@@ -37,7 +37,6 @@ import CostEditorSheet from "@/pages/cost/CostEditorSheet.vue";
 import CostTemplateDrawer from "@/pages/cost/CostTemplateDrawer.vue";
 import CostVersionDrawer from "@/pages/cost/CostVersionDrawer.vue";
 import ModelBaseInfoForm from "./ModelBaseInfoForm.vue";
-import ModelRoutePreviewPanel from "./ModelRoutePreviewPanel.vue";
 import ModelRequestPatchPanel from "./ModelRequestPatchPanel.vue";
 import ReasoningConfigPanel from "@/components/reasoning/ReasoningConfigPanel.vue";
 import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatureConfigPanel.vue";
@@ -77,7 +76,6 @@ const {
   handleSaveModel,
   handleReasoningConfigSaved,
   handleRuntimeFeatureConfigSaved,
-  handleNavigateToRoutes,
   handleOpenSelectedCostCatalog,
   handleCreateCostCatalog,
   handleDuplicateSelectedCostCatalog,
@@ -149,11 +147,6 @@ const onSaveAndClose = async () => {
               </Badge>
             </div>
           </section>
-
-          <ModelRoutePreviewPanel
-            :route-references="modelDetail.route_references"
-            @open-routes="() => { isOpen = false; handleNavigateToRoutes(); }"
-          />
 
           <ModelBaseInfoForm v-model:editingData="editingData" :capability-items="capabilityItems" />
 

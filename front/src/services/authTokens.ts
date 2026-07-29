@@ -1,39 +1,25 @@
-import type { AuthTokenPair } from "./types";
+export const LEGACY_AUTH_STORAGE_KEY = "auth_token";
 
-export const REFRESH_TOKEN_STORAGE_KEY = "auth_token";
-
-type ReadableTokenStorage = Pick<Storage, "getItem">;
-type WritableTokenStorage = Pick<Storage, "setItem">;
 type RemovableTokenStorage = Pick<Storage, "removeItem">;
-type RefreshTokenStorage = Pick<Storage, "getItem" | "removeItem">;
 
-export function readStoredRefreshToken(
-  storage: ReadableTokenStorage = localStorage,
-): string | null {
-  return storage.getItem(REFRESH_TOKEN_STORAGE_KEY);
+let accessToken: string | null = null;
+
+export function getAccessToken(): string | null {
+  return accessToken;
 }
 
-export function persistAuthTokenPair(
-  tokenPair: AuthTokenPair,
-  storage: WritableTokenStorage = localStorage,
-): string {
-  storage.setItem(REFRESH_TOKEN_STORAGE_KEY, tokenPair.refresh_token);
-  return tokenPair.access_token;
+export function setAccessToken(token: string): void {
+  accessToken = token;
 }
 
-export function clearStoredRefreshToken(
-  storage: RemovableTokenStorage = localStorage,
+export function clearAccessToken(): void {
+  accessToken = null;
+}
+
+export function clearLegacyAuthStorage(
+  local: RemovableTokenStorage = localStorage,
+  session: RemovableTokenStorage = sessionStorage,
 ): void {
-  storage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-}
-
-export function clearStoredRefreshTokenIfCurrent(
-  refreshToken: string,
-  storage: RefreshTokenStorage = localStorage,
-): boolean {
-  if (storage.getItem(REFRESH_TOKEN_STORAGE_KEY) !== refreshToken) {
-    return false;
-  }
-  storage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-  return true;
+  local.removeItem(LEGACY_AUTH_STORAGE_KEY);
+  session.removeItem(LEGACY_AUTH_STORAGE_KEY);
 }

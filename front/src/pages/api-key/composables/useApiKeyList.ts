@@ -1,11 +1,10 @@
 import { computed, ref } from "vue";
 
-import * as modelRouteService from "@/services/modelRoutes";
 import { normalizeError } from "@/utils/error";
 import { useApiKeyStore } from "@/store/apiKeyStore";
 import { useModelStore } from "@/store/modelStore";
 import { useProviderStore } from "@/store/providerStore";
-import type { ApiKeyRuntimeSnapshot, ModelRouteListItem } from "@/services/types";
+import type { ApiKeyRuntimeSnapshot } from "@/services/types";
 import { buildApiKeySummaryCards } from "./apiKeyViewModel";
 
 type TranslateFn = (key: string, named?: Record<string, unknown>) => string;
@@ -17,7 +16,6 @@ export function useApiKeyList(t: TranslateFn) {
 
   const loading = ref(true);
   const error = ref<string | null>(null);
-  const modelRoutes = ref<ModelRouteListItem[]>([]);
 
   const apiKeys = computed(() => apiKeyStore.apiKeys);
   const runtimeSnapshots = computed(() => apiKeyStore.runtimeSnapshots);
@@ -26,14 +24,6 @@ export function useApiKeyList(t: TranslateFn) {
     const map = new Map<number, ApiKeyRuntimeSnapshot>();
     for (const snapshot of runtimeSnapshots.value) {
       map.set(snapshot.api_key_id, snapshot);
-    }
-    return map;
-  });
-
-  const routeNameById = computed(() => {
-    const map = new Map<number, string>();
-    for (const item of modelRoutes.value) {
-      map.set(item.route.id, item.route.route_name);
     }
     return map;
   });
@@ -51,9 +41,6 @@ export function useApiKeyList(t: TranslateFn) {
         apiKeyStore.fetchRuntimeSnapshots(),
         providerStore.fetchProviders(),
         modelStore.fetchModels(),
-        modelRouteService.getModelRouteList().then((items) => {
-          modelRoutes.value = items;
-        }),
       ]);
 
       if (!apiKeys.value.length) {
@@ -79,8 +66,6 @@ export function useApiKeyList(t: TranslateFn) {
     apiKeys,
     runtimeSnapshots,
     runtimeById,
-    routeNameById,
-    modelRoutes,
     loading,
     error,
     summaryCards,

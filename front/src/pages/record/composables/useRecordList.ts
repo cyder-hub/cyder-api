@@ -10,7 +10,6 @@ import {
   emptyValue,
   formatDate,
   formatDuration,
-  formatLossLevel,
   formatPrice,
 } from "./recordFormat.ts";
 import { DEFAULT_RECORD_FILTERS, RECORD_ADVANCED_FILTER_KEYS } from "./useRecordQuery.ts";
@@ -21,7 +20,7 @@ export interface RecordTpsInput {
   total_output_tokens?: number | null;
   output_text_tokens?: number | null;
   reasoning_tokens?: number | null;
-  first_attempt_started_at?: number | null;
+  upstream_request_sent_at?: number | null;
   response_started_to_client_at?: number | null;
   completed_at?: number | null;
   is_stream?: boolean | null;
@@ -67,7 +66,7 @@ export const calculateRecordTps = (
   record: RecordTpsInput,
 ): RecordTpsCalculation | null => {
   const tokens = resolveVisibleOutputTokens(record);
-  const startedAt = finiteTimestamp(record.first_attempt_started_at);
+  const startedAt = finiteTimestamp(record.upstream_request_sent_at);
   const completedAt = finiteTimestamp(record.completed_at);
 
   if (tokens == null || tokens <= 0 || startedAt == null || completedAt == null) {
@@ -157,12 +156,6 @@ export function useRecordList(options: UseRecordListOptions) {
     Math.ceil(totalRecords.value / options.pageSize.value),
   );
 
-  const booleanOptions = computed<FilterOption[]>(() => [
-    allOption(options.t("recordPage.filter.all")),
-    { value: "true", label: options.t("common.yes") },
-    { value: "false", label: options.t("common.no") },
-  ]);
-
   const apiKeyOptions = computed<FilterOption[]>(() => [
     { value: "0", label: options.t("recordPage.filter.allApiKeys") },
     ...(options.apiKeyStore.apiKeys || []).map((key) => ({
@@ -203,22 +196,6 @@ export function useRecordList(options: UseRecordListOptions) {
     { value: "GEMINI", label: "Gemini" },
     { value: "OLLAMA", label: "Ollama" },
     { value: "GEMINI_OPENAI", label: "Gemini OpenAI" },
-  ]);
-
-  const resolvedScopeOptions = computed<FilterOption[]>(() => [
-    allOption(options.t("recordPage.filter.allScopes")),
-    {
-      value: "direct",
-      label: options.t("recordPage.filter.resolvedScopes.direct"),
-    },
-    {
-      value: "global_route",
-      label: options.t("recordPage.filter.resolvedScopes.globalRoute"),
-    },
-    {
-      value: "api_key_override",
-      label: options.t("recordPage.filter.resolvedScopes.apiKeyOverride"),
-    },
   ]);
 
   const hasActiveFilters = computed(() =>
@@ -268,35 +245,23 @@ export function useRecordList(options: UseRecordListOptions) {
 
   const enrichRecord = (record: RecordListItem): EnrichedRecordListItem => {
     const providerName =
-      record.final_provider_name_snapshot || getProviderName(record.final_provider_id);
+      record.provider_name || getProviderName(record.provider_id);
     const apiKeyName = getApiKeyName(record.api_key_id);
     const firstRespTimeDisplay = formatDuration(
-      record.first_attempt_started_at,
+      record.upstream_request_sent_at,
       record.response_started_to_client_at,
     );
     const totalRespTimeDisplay = formatDuration(
-      record.first_attempt_started_at,
+      record.upstream_request_sent_at,
       record.completed_at,
     );
-    const attemptsDisplay = `${record.attempt_count ?? 0} / ${
-      record.retry_count ?? 0
-    } / ${record.fallback_count ?? 0}`;
-    const diagnosticsDisplay = record.has_transform_diagnostics
-      ? `${record.transform_diagnostic_count}${
-          record.transform_diagnostic_max_loss_level
-            ? ` / ${formatLossLevel(record.transform_diagnostic_max_loss_level)}`
-            : ""
-        }`
-      : "0";
-
     return {
       ...record,
       providerName,
       apiKeyName,
       displayRequestedModelName:
-        record.final_model_name_snapshot || record.requested_model_name || emptyValue,
-      attemptsDisplay,
-      diagnosticsDisplay,
+        record.model_name || record.requested_model_name || emptyValue,
+      httpStatusDisplay: record.upstream_http_status?.toString() ?? emptyValue,
       firstRespTimeDisplay,
       totalRespTimeDisplay,
       tpsDisplay: formatTps(record),
@@ -339,13 +304,11 @@ export function useRecordList(options: UseRecordListOptions) {
     totalPages,
     isLoading,
     errorMsg,
-    booleanOptions,
     apiKeyOptions,
     providerOptions,
     modelOptions,
     statusOptions,
     userApiTypeOptions,
-    resolvedScopeOptions,
     hasActiveFilters,
     activeFilterCount,
     advancedActiveFilterCount,

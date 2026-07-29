@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     body::Body,
@@ -20,13 +20,12 @@ use super::{
     models::execute_models_listing,
     request::parse_json_request,
     runtime::route_resolver::build_execution_plan,
-    util::build_request_snapshot,
     utility::{UtilityExecutionInput, UtilityOperation, execute_utility_proxy},
 };
 use crate::{
+    ingress::client_identity::ClientIdentity,
     schema::enum_def::LlmApiType,
     service::{app_state::AppState, cache::types::CacheApiKey},
-    utils::storage::RequestLogBundleRequestSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +78,6 @@ pub(super) struct ProxyPipelineContext {
     pub api_key: Arc<CacheApiKey>,
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
-    pub request_snapshot: RequestLogBundleRequestSnapshot,
     pub client_ip_addr: Option<String>,
     pub start_time: i64,
 }
@@ -155,26 +153,23 @@ impl OperationAdapter {
     pub(super) async fn execute(
         self,
         app_state: Arc<AppState>,
-        addr: Option<SocketAddr>,
         query_params: HashMap<String, String>,
         request: Request<Body>,
     ) -> Result<Response<Body>, ProxyError> {
         let start_time = Utc::now().timestamp_millis();
+        let client_ip_addr = request
+            .extensions()
+            .get::<ClientIdentity>()
+            .map(|identity| identity.client_ip.to_string())
+            .ok_or_else(|| ProxyError::InternalError("client identity unavailable".to_string()))?;
         let request_uri = request
             .extensions()
             .get::<OriginalUri>()
             .map(|uri| &uri.0)
             .unwrap_or_else(|| request.uri());
         let request_uri_path = request_uri.path().to_string();
-        let request_uri_query = request_uri.query().map(str::to_string);
         let original_headers = request.headers().clone();
         let operation_kind = derive_request_operation_kind(&request_uri_path);
-        let request_snapshot = build_request_snapshot(
-            &request_uri_path,
-            &operation_kind,
-            request_uri_query.as_deref(),
-            &original_headers,
-        );
         crate::debug_event!(
             "proxy.request_received",
             request_path = &request_uri_path,
@@ -190,8 +185,7 @@ impl OperationAdapter {
             api_key,
             query_params,
             original_headers,
-            request_snapshot,
-            client_ip_addr: addr.map(|addr| addr.ip().to_string()),
+            client_ip_addr: Some(client_ip_addr),
             start_time,
         };
         let cancellation = ProxyCancellationContext::new();
@@ -253,30 +247,24 @@ async fn execute_generation_operation(
     operation: GenerationOperation,
     request: Request<Body>,
 ) -> Result<Response<Body>, ProxyError> {
-    let max_body_size = context
-        .app_state
-        .system_config
-        .runtime_snapshot()
-        .await
-        .max_body_size;
+    let max_body_size = context.app_state.max_body_size;
     let parsed_request = parse_json_request(request, max_body_size).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
     let is_stream = resolve_stream_mode(operation.stream_mode, &parsed_request.data);
-    let execution_plan =
-        build_execution_plan(&context.app_state, context.api_key.id, &requested_model)
-            .await
-            .map_err(|e| {
-                crate::debug_event!(
-                    "proxy.execution_plan_build_failed",
-                    requested_model = &requested_model,
-                    error = &e,
-                );
-                ProxyError::BadRequest(e)
-            })?;
+    let execution_plan = build_execution_plan(&context.app_state, &requested_model)
+        .await
+        .map_err(|e| {
+            crate::debug_event!(
+                "proxy.execution_plan_build_failed",
+                requested_model = &requested_model,
+                error = &e,
+            );
+            ProxyError::BadRequest(e)
+        })?;
     debug!(
         "Built execution plan for '{}': {}",
         requested_model,
-        execution_plan.candidate_summary_for_log()
+        execution_plan.target_summary_for_log()
     );
 
     execute_generation_proxy(
@@ -289,7 +277,6 @@ async fn execute_generation_operation(
             is_stream,
             query_params: context.query_params,
             original_headers: context.original_headers,
-            request_snapshot: context.request_snapshot,
             client_ip_addr: context.client_ip_addr,
             start_time: context.start_time,
             parsed_request,
@@ -304,29 +291,23 @@ async fn execute_utility_operation(
     operation: UtilityPipelineOperation,
     request: Request<Body>,
 ) -> Result<Response<Body>, ProxyError> {
-    let max_body_size = context
-        .app_state
-        .system_config
-        .runtime_snapshot()
-        .await
-        .max_body_size;
+    let max_body_size = context.app_state.max_body_size;
     let parsed_request = parse_json_request(request, max_body_size).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
-    let execution_plan =
-        build_execution_plan(&context.app_state, context.api_key.id, &requested_model)
-            .await
-            .map_err(|e| {
-                crate::debug_event!(
-                    "proxy.execution_plan_build_failed",
-                    requested_model = &requested_model,
-                    error = &e,
-                );
-                ProxyError::BadRequest(e)
-            })?;
+    let execution_plan = build_execution_plan(&context.app_state, &requested_model)
+        .await
+        .map_err(|e| {
+            crate::debug_event!(
+                "proxy.execution_plan_build_failed",
+                requested_model = &requested_model,
+                error = &e,
+            );
+            ProxyError::BadRequest(e)
+        })?;
     debug!(
         "Built utility execution plan for '{}': {}",
         requested_model,
-        execution_plan.candidate_summary_for_log()
+        execution_plan.target_summary_for_log()
     );
 
     execute_utility_proxy(
@@ -338,7 +319,6 @@ async fn execute_utility_operation(
             execution_plan,
             query_params: context.query_params,
             original_headers: context.original_headers,
-            request_snapshot: context.request_snapshot,
             client_ip_addr: context.client_ip_addr,
             start_time: context.start_time,
             parsed_request,

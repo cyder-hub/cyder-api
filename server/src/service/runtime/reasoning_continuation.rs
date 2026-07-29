@@ -22,9 +22,6 @@ pub struct ReasoningContinuationScope {
     pub api_key_id: i64,
     pub provider_id: i64,
     pub model_id: i64,
-    pub route_id: Option<i64>,
-    pub route_name: Option<String>,
-    pub candidate_position: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -300,21 +297,14 @@ impl RedisReasoningContinuationStore {
     }
 
     fn cache_key(&self, key: &ReasoningContinuationCacheKey) -> String {
-        let route_scope = match (key.scope.route_id, key.scope.route_name.as_deref()) {
-            (Some(route_id), _) => format!("route:{route_id}"),
-            (None, Some(route_name)) => format!("direct_name:{}", sha256_hex(route_name)),
-            (None, None) => "direct".to_string(),
-        };
         let tool_call_ids_hash =
             sha256_hex(serde_json::to_string(&key.tool_call_ids).unwrap_or_default());
         format!(
-            "{}reasoning_continuation:{}:{}:{}:{}:{}:{}:{}",
+            "{}reasoning_continuation:{}:{}:{}:{}:{}",
             self.key_prefix,
             key.scope.api_key_id,
             key.scope.provider_id,
             key.scope.model_id,
-            route_scope,
-            key.scope.candidate_position,
             tool_call_ids_hash,
             key.tool_calls_hash
         )
@@ -575,20 +565,17 @@ mod tests {
     use bb8_redis::RedisConnectionManager;
     use serde_json::json;
 
-    fn scope(candidate_position: usize) -> ReasoningContinuationScope {
+    fn scope() -> ReasoningContinuationScope {
         ReasoningContinuationScope {
             api_key_id: 10,
             provider_id: 20,
             model_id: 30,
-            route_id: Some(40),
-            route_name: Some("primary-route".to_string()),
-            candidate_position,
         }
     }
 
     fn cache_key(hash: &str) -> ReasoningContinuationCacheKey {
         ReasoningContinuationCacheKey::new(
-            scope(0),
+            scope(),
             vec!["call-b".to_string(), "call-a".to_string()],
             hash,
         )
@@ -621,7 +608,7 @@ mod tests {
         let result = store
             .lookup(
                 &ReasoningContinuationCacheKey::new(
-                    scope(0),
+                    scope(),
                     vec!["call-a".to_string(), "call-b".to_string()],
                     "hash-1",
                 ),
@@ -655,7 +642,7 @@ mod tests {
             store
                 .lookup(
                     &ReasoningContinuationCacheKey::new(
-                        scope(1),
+                        scope(),
                         vec!["call-a".to_string()],
                         "hash-1"
                     ),
@@ -787,7 +774,7 @@ mod tests {
         assert!(
             store
                 .cache_key(&cache_key("hash-1"))
-                .contains("reasoning_continuation:10:20:30:route:40:0:")
+                .contains("reasoning_continuation:10:20:30:")
         );
     }
 }

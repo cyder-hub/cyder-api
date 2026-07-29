@@ -1,6 +1,6 @@
 use cyder_tools::log::{info, warn};
 
-use super::{ProxyError, retry_policy::ProviderGovernanceRejection};
+use super::ProxyError;
 use crate::service::{
     app_state::AppState,
     runtime::{
@@ -15,23 +15,34 @@ pub(super) enum ProviderGovernanceCheckError {
     Backend(ProxyError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProviderGovernanceRejection {
+    Open,
+    HalfOpenProbeInFlight,
+}
+
+impl ProviderGovernanceRejection {
+    pub(super) fn to_proxy_error(self, provider_label: &str) -> ProxyError {
+        match self {
+            Self::Open => ProxyError::ProviderOpenSkipped(format!(
+                "Provider '{provider_label}' is temporarily unavailable due to recent upstream failures."
+            )),
+            Self::HalfOpenProbeInFlight => ProxyError::ProviderHalfOpenProbeInFlight(format!(
+                "Provider '{provider_label}' is temporarily unavailable because another half-open probe is already in flight."
+            )),
+        }
+    }
+}
+
 pub(super) async fn ensure_provider_request_allowed(
     app_state: &AppState,
     provider_id: i64,
     provider_label: &str,
-    next_candidate_available: bool,
 ) -> Result<Option<ProviderCircuitProbePermit>, ProviderGovernanceCheckError> {
-    let decision = if next_candidate_available {
-        app_state
-            .provider_circuit
-            .allow_provider_request(provider_id)
-            .await
-    } else {
-        app_state
-            .provider_circuit
-            .allow_last_candidate_request(provider_id)
-            .await
-    };
+    let decision = app_state
+        .provider_circuit
+        .allow_provider_request(provider_id)
+        .await;
 
     match decision {
         Ok(decision) => {
@@ -48,17 +59,10 @@ pub(super) async fn ensure_provider_request_allowed(
             }
 
             if decision.snapshot.status == ProviderHealthStatus::HalfOpen {
-                if next_candidate_available {
-                    info!(
-                        "Provider governance entering half-open probe: provider_id={}, provider={}",
-                        provider_id, provider_label
-                    );
-                } else {
-                    info!(
-                        "Provider governance entering last-candidate probe: provider_id={}, provider={}",
-                        provider_id, provider_label
-                    );
-                }
+                info!(
+                    "Provider governance entering half-open probe: provider_id={}, provider={}",
+                    provider_id, provider_label
+                );
             }
             Ok(decision.probe_permit)
         }
@@ -67,50 +71,6 @@ pub(super) async fn ensure_provider_request_allowed(
             Err(ProviderGovernanceCheckError::Backend(
                 provider_circuit_error_to_proxy_error(err),
             ))
-        }
-    }
-}
-
-pub(super) async fn preview_provider_request_allowed(
-    app_state: &AppState,
-    provider_id: i64,
-) -> Result<(), ProviderGovernanceCheckError> {
-    let snapshot = app_state
-        .provider_circuit
-        .get_provider_health_snapshot(provider_id)
-        .await
-        .map_err(|err| {
-            log_provider_circuit_error("snapshot", provider_id, &err);
-            ProviderGovernanceCheckError::Backend(provider_circuit_error_to_proxy_error(err))
-        })?;
-    match snapshot.status {
-        ProviderHealthStatus::Healthy => Ok(()),
-        ProviderHealthStatus::Open => {
-            let Some(opened_at) = snapshot.opened_at else {
-                return Err(ProviderGovernanceCheckError::Rejected(
-                    ProviderGovernanceRejection::Open,
-                ));
-            };
-            let now = chrono::Utc::now().timestamp_millis();
-            let elapsed_ms = now.saturating_sub(opened_at);
-            let config = app_state.provider_circuit.current_config().await;
-            let cooldown_ms = i64::try_from(config.open_cooldown().as_millis()).unwrap_or(i64::MAX);
-            if elapsed_ms < cooldown_ms {
-                Err(ProviderGovernanceCheckError::Rejected(
-                    ProviderGovernanceRejection::Open,
-                ))
-            } else {
-                Ok(())
-            }
-        }
-        ProviderHealthStatus::HalfOpen => {
-            if snapshot.half_open_probe_in_flight {
-                Err(ProviderGovernanceCheckError::Rejected(
-                    ProviderGovernanceRejection::HalfOpenProbeInFlight,
-                ))
-            } else {
-                Ok(())
-            }
         }
     }
 }
@@ -209,15 +169,8 @@ fn log_provider_circuit_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderGovernanceCheckError, counts_against_provider_governance};
-    use crate::config::ProviderGovernanceConfig;
-    use crate::database::TestDbContext;
+    use super::counts_against_provider_governance;
     use crate::proxy::ProxyError;
-    use crate::proxy::retry_policy::ProviderGovernanceRejection;
-    use crate::service::app_state::AppState;
-    use crate::service::runtime::ProviderCircuitService;
-    use crate::service::runtime::provider_circuit::MemoryProviderCircuitStore;
-    use std::sync::Arc;
 
     #[test]
     fn provider_governance_counts_only_upstream_availability_failures() {
@@ -242,47 +195,5 @@ mod tests {
         assert!(!counts_against_provider_governance(
             &ProxyError::ProviderHalfOpenProbeInFlight("probe".to_string())
         ));
-    }
-
-    #[tokio::test]
-    async fn preview_provider_request_allowed_uses_current_cooldown_config() {
-        let provider_id = 41;
-        let service = Arc::new(ProviderCircuitService::new_with_config(
-            Arc::new(MemoryProviderCircuitStore::default()),
-            ProviderGovernanceConfig {
-                enabled: true,
-                consecutive_failure_threshold: 1,
-                open_cooldown_seconds: 60,
-            },
-        ));
-        service
-            .record_provider_failure(provider_id, "timeout".to_string(), None)
-            .await
-            .expect("failure should open circuit");
-        let mut app_state = AppState::new_for_test(TestDbContext::new_sqlite(
-            "provider-governance-preview-cooldown.sqlite",
-        ))
-        .await;
-        app_state.provider_circuit = Arc::clone(&service);
-
-        let rejected = super::preview_provider_request_allowed(&app_state, provider_id)
-            .await
-            .expect_err("open circuit should reject during initial cooldown");
-        assert!(matches!(
-            rejected,
-            ProviderGovernanceCheckError::Rejected(ProviderGovernanceRejection::Open)
-        ));
-
-        service
-            .update_config(ProviderGovernanceConfig {
-                enabled: true,
-                consecutive_failure_threshold: 1,
-                open_cooldown_seconds: 0,
-            })
-            .await;
-
-        super::preview_provider_request_allowed(&app_state, provider_id)
-            .await
-            .expect("updated cooldown should allow preview without static CONFIG");
     }
 }

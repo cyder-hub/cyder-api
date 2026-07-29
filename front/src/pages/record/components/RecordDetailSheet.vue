@@ -1,5 +1,5 @@
 <template>
-  <Drawer direction="right" v-model:open="isOpen">
+  <Drawer v-model:open="isOpen" direction="right">
     <DrawerContent class="flex flex-col p-0 outline-none">
       <DrawerHeader class="border-b border-gray-100 px-4 py-4 sm:px-6">
         <DrawerTitle class="pr-8 text-base font-semibold text-gray-900 sm:text-lg">
@@ -7,145 +7,46 @@
         </DrawerTitle>
       </DrawerHeader>
 
-      <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-        <div v-if="loading" class="py-10 text-center text-gray-500">
-          <div class="mb-2 inline-block h-8 w-8 animate-spin rounded-full border-b-2 border-gray-900"></div>
-          <div>{{ $t("recordPage.detailDialog.loading") }}</div>
+      <div class="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+        <div v-if="loading" class="py-10 text-center text-sm text-gray-500">
+          {{ $t("recordPage.detailDialog.loading") }}
         </div>
 
-        <div v-else-if="record" class="space-y-4">
-          <section class="border-b border-gray-100 pb-1">
-            <dl class="grid grid-cols-1 divide-y divide-gray-100 sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-5">
-              <div class="flex items-center justify-between gap-3 px-4 py-3">
-                <dt class="text-xs uppercase tracking-wide text-gray-500">
-                  {{ $t("recordPage.detailDialog.summary.status") }}
-                </dt>
-                <dd>
-                  <Badge :variant="getStatusBadgeVariant(record.overall_status)">
-                    {{ record.overall_status || "/" }}
-                  </Badge>
-                </dd>
-              </div>
-              <div class="flex items-center justify-between gap-3 px-4 py-3">
-                <dt class="text-xs uppercase tracking-wide text-gray-500">
-                  {{ $t("recordPage.detailDialog.summary.attempts") }}
-                </dt>
-                <dd class="font-mono text-sm font-semibold text-gray-900">
-                  {{ record.attempt_count }} / {{ record.retry_count }} / {{ record.fallback_count }}
-                </dd>
-              </div>
-              <div class="flex items-center justify-between gap-3 px-4 py-3">
-                <dt class="text-xs uppercase tracking-wide text-gray-500">
-                  {{ $t("recordPage.detailDialog.summary.provider") }}
-                </dt>
-                <dd class="truncate text-right text-sm font-medium text-gray-900">
-                  {{ providerName }}
-                </dd>
-              </div>
-              <div class="flex items-center justify-between gap-3 px-4 py-3">
-                <dt class="text-xs uppercase tracking-wide text-gray-500">
-                  {{ $t("recordPage.detailDialog.summary.model") }}
-                </dt>
-                <dd class="truncate text-right font-mono text-xs text-gray-900">
-                  {{ record.requested_model_name || record.final_model_name_snapshot || "/" }}
-                </dd>
-              </div>
-              <div class="flex items-center justify-between gap-3 px-4 py-3">
-                <dt class="text-xs uppercase tracking-wide text-gray-500">
-                  {{ $t("recordPage.detailDialog.summary.diagnostics") }}
-                </dt>
-                <dd>
-                  <Badge
-                    :variant="record.has_transform_diagnostics ? 'outline' : 'secondary'"
-                    class="font-mono text-xs"
-                  >
-                    {{ record.transform_diagnostic_count }}
-                  </Badge>
+        <div v-else-if="record" class="space-y-6">
+          <div class="flex flex-wrap items-center gap-3 border-b border-gray-100 pb-4">
+            <Badge :variant="getStatusBadgeVariant(record.overall_status)">
+              {{ record.overall_status }}
+            </Badge>
+            <span class="font-mono text-xs text-gray-500">#{{ record.id }}</span>
+            <span v-if="record.upstream_http_status" class="font-mono text-xs text-gray-500">
+              HTTP {{ record.upstream_http_status }}
+            </span>
+          </div>
+
+          <section>
+            <h3 class="mb-3 text-sm font-semibold text-gray-900">
+              {{ $t("recordPage.detailDialog.tabs.overview") }}
+            </h3>
+            <dl class="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
+              <div v-for="item in overviewItems" :key="item.label" class="min-w-0">
+                <dt class="text-xs uppercase tracking-wide text-gray-500">{{ item.label }}</dt>
+                <dd class="mt-1 break-words text-sm text-gray-900" :class="item.mono && 'font-mono text-xs'">
+                  {{ item.value }}
                 </dd>
               </div>
             </dl>
           </section>
 
-          <div class="app-scroll-x border-b border-gray-100">
-            <div class="flex min-w-max gap-1">
-              <button
-                v-for="tab in tabs"
-                :key="tab.value"
-                type="button"
-                class="border-b-2 px-3 py-2 text-sm font-medium transition-colors"
-                :class="
-                  activeTab === tab.value
-                    ? 'border-gray-900 text-gray-900'
-                    : 'border-transparent text-gray-500 hover:text-gray-900'
-                "
-                @click="activeTab = tab.value"
-              >
-                {{ $t(tab.labelKey) }}
-              </button>
-            </div>
-          </div>
-
-          <RecordOverviewTab
-            v-if="activeTab === 'overview'"
-            :record="record"
-            :api-key-name="apiKeyName"
-            :provider-name="providerName"
-          />
-          <RecordAttemptsTab
-            v-else-if="activeTab === 'attempts'"
-            :attempts="attempts"
-          />
-          <RecordDiagnosticsPanel
-            v-else-if="activeTab === 'diagnostics'"
-            :artifacts="artifacts"
-            :loading="artifactsLoading"
-            :error="artifactsError"
-            @reload="$emit('reloadArtifacts')"
-          />
-          <section v-else-if="activeTab === 'payloads'" class="space-y-4">
-            <div class="border-b border-gray-100 pb-2">
-              <h3 class="text-base font-semibold text-gray-900">
-                {{ $t("recordPage.detailDialog.payloads.title") }}
-              </h3>
-              <p class="mt-1 text-xs leading-5 text-gray-500">
-                {{ $t("recordPage.detailDialog.payloads.description") }}
-              </p>
-            </div>
-            <template v-if="record.bundle_storage_type">
-              <RecordBodyViewer
-                v-if="shouldRenderPayloadViewer(activeTab, record.bundle_storage_type)"
-                :record-id="record.id"
-                :storage-type="record.bundle_storage_type"
-                :status="record.overall_status"
-                :attempts="attempts"
-              />
-            </template>
-            <div
-              v-else
-              class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
-            >
-              {{ $t("recordPage.detailDialog.payloads.empty") }}
+          <section v-if="record.final_error_code || record.final_error_message" class="border-t border-gray-100 pt-5">
+            <h3 class="mb-3 text-sm font-semibold text-gray-900">Error</h3>
+            <div class="rounded-lg border border-red-100 bg-red-50 p-3 text-sm text-red-800">
+              <p v-if="record.final_error_code" class="font-mono text-xs">{{ record.final_error_code }}</p>
+              <p v-if="record.final_error_message" class="mt-1 whitespace-pre-wrap break-words">{{ record.final_error_message }}</p>
             </div>
           </section>
-          <RecordReplayPanel
-            v-else
-            :record-id="record.id"
-            :attempts="attempts"
-            :artifacts="artifacts"
-            :loading="artifactsLoading"
-            :error="artifactsError"
-            :selected-attempt-id="selectedAttemptId"
-            :selected-replay-run-id="selectedReplayRunId"
-            @reload="$emit('reloadArtifacts')"
-            @update:selected-attempt-id="$emit('update:selectedAttemptId', $event)"
-            @update:selected-replay-run-id="$emit('update:selectedReplayRunId', $event)"
-          />
         </div>
 
-        <div
-          v-else
-          class="rounded-lg border border-dashed border-gray-200 bg-gray-50/60 px-4 py-6 text-sm text-gray-500"
-        >
+        <div v-else class="rounded-lg border border-dashed border-gray-200 px-4 py-6 text-sm text-gray-500">
           {{ $t("recordPage.detailDialog.noRecord") }}
         </div>
       </div>
@@ -162,11 +63,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import RecordBodyViewer from "./RecordBodyViewer.vue";
-import RecordAttemptsTab from "./RecordAttemptsTab.vue";
-import RecordDiagnosticsPanel from "./RecordDiagnosticsPanel.vue";
-import RecordOverviewTab from "./RecordOverviewTab.vue";
-import RecordReplayPanel from "./RecordReplayPanel.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -176,25 +72,15 @@ import {
   DrawerHeader,
   DrawerTitle,
 } from "@/components/ui/drawer";
-import type { RecordArtifactResponse, RecordAttempt, RecordRequest } from "@/services/types";
-import {
-  RECORD_DETAIL_TABS,
-  shouldRenderPayloadViewer,
-  type RecordDetailTab,
-} from "../composables/useRecordDetail";
-import { getStatusBadgeVariant } from "../composables/recordFormat";
+import type { RecordRequest } from "@/services/types";
+import type { RecordDetailTab } from "../composables/useRecordDetail";
+import { emptyValue, formatDate, formatDuration, formatPrice, getStatusBadgeVariant } from "../composables/recordFormat";
 
 const props = defineProps<{
   open: boolean;
   loading: boolean;
   record: RecordRequest | null;
-  attempts: RecordAttempt[];
   activeTab: RecordDetailTab;
-  artifacts: RecordArtifactResponse | null;
-  artifactsLoading: boolean;
-  artifactsError: string | null;
-  selectedAttemptId: number | null;
-  selectedReplayRunId: number | null;
   apiKeyName: string;
   providerName: string;
 }>();
@@ -202,22 +88,35 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:open": [value: boolean];
   "update:activeTab": [value: RecordDetailTab];
-  "reloadArtifacts": [];
-  "update:selectedAttemptId": [value: number | null];
-  "update:selectedReplayRunId": [value: number | null];
 }>();
 
 const { t: $t } = useI18n();
-
 const isOpen = computed({
   get: () => props.open,
   set: (value: boolean) => emit("update:open", value),
 });
 
-const tabs = RECORD_DETAIL_TABS;
+const value = (input: string | number | null | undefined) =>
+  input == null || input === "" ? emptyValue : String(input);
 
-const activeTab = computed({
-  get: () => props.activeTab,
-  set: (value: RecordDetailTab) => emit("update:activeTab", value),
+const overviewItems = computed(() => {
+  const record = props.record;
+  if (!record) return [];
+  return [
+    { label: "API key", value: props.apiKeyName },
+    { label: $t("recordPage.detailDialog.summary.provider"), value: props.providerName },
+    { label: $t("recordPage.detailDialog.summary.model"), value: value(record.model_name || record.requested_model_name), mono: true },
+    { label: "Real model", value: value(record.real_model_name), mono: true },
+    { label: "Client API", value: value(record.user_api_type), mono: true },
+    { label: "Upstream API", value: value(record.llm_api_type), mono: true },
+    { label: "Client IP", value: value(record.client_ip), mono: true },
+    { label: "Stream", value: record.is_stream ? $t("common.yes") : $t("common.no") },
+    { label: "First byte", value: formatDuration(record.upstream_request_sent_at, record.response_started_to_client_at), mono: true },
+    { label: "Total latency", value: formatDuration(record.upstream_request_sent_at, record.completed_at), mono: true },
+    { label: "Tokens", value: value(record.total_tokens), mono: true },
+    { label: "Cost", value: formatPrice(record.estimated_cost_nanos, record.estimated_cost_currency), mono: true },
+    { label: "Received", value: formatDate(record.request_received_at) },
+    { label: "Completed", value: record.completed_at ? formatDate(record.completed_at) : emptyValue },
+  ];
 });
 </script>

@@ -68,6 +68,8 @@ impl From<RequestLogQueryParams> for DbRequestLogQueryPayload {
 #[derive(Serialize, Debug)]
 struct RequestLogListItemResponse {
     id: i64,
+    request_id: String,
+    client_request_id: Option<String>,
     api_key_id: i64,
     requested_model_name: Option<String>,
     base_requested_model_name: Option<String>,
@@ -98,6 +100,8 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
     fn from(value: RequestLogListItem) -> Self {
         Self {
             id: value.id,
+            request_id: value.request_id,
+            client_request_id: value.client_request_id,
             api_key_id: value.api_key_id,
             requested_model_name: value.requested_model_name,
             base_requested_model_name: value.base_requested_model_name,
@@ -129,6 +133,8 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
 #[derive(Serialize, Debug)]
 struct RequestLogResponse {
     id: i64,
+    request_id: String,
+    client_request_id: Option<String>,
     api_key_id: i64,
     requested_model_name: Option<String>,
     base_requested_model_name: Option<String>,
@@ -176,6 +182,8 @@ impl From<RequestLogRecord> for RequestLogResponse {
     fn from(value: RequestLogRecord) -> Self {
         Self {
             id: value.id,
+            request_id: value.request_id,
+            client_request_id: value.client_request_id,
             api_key_id: value.api_key_id,
             requested_model_name: value.requested_model_name,
             base_requested_model_name: value.base_requested_model_name,
@@ -259,6 +267,8 @@ mod tests {
     fn request_log_record() -> RequestLogRecord {
         RequestLogRecord {
             id: 1,
+            request_id: "018fa7d8-6a00-4c9a-8f7e-111111111111".to_string(),
+            client_request_id: Some("controller-test".to_string()),
             api_key_id: 2,
             requested_model_name: Some("provider/model".to_string()),
             base_requested_model_name: Some("provider/model".to_string()),
@@ -334,6 +344,8 @@ mod tests {
 
         assert_eq!(value["downstream_protocol"], "OPENAI");
         assert!(value["upstream_protocol"].is_null());
+        assert_eq!(value["request_id"], "018fa7d8-6a00-4c9a-8f7e-111111111111");
+        assert_eq!(value["client_request_id"], "controller-test");
         assert!(value.get("user_api_type").is_none());
         assert!(value.get("llm_api_type").is_none());
     }

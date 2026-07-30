@@ -31,7 +31,11 @@ use tokio::{
 };
 use tower::ServiceExt;
 
-use super::create_proxy_router;
+use super::{
+    create_proxy_router,
+    logging::{RequestLogPersistedContext, RequestLogPersistedSink},
+    request_context::{X_CLIENT_REQUEST_ID, X_REQUEST_ID},
+};
 use crate::{
     config::{ClientIdentityConfig, ProxyRequestConfig},
     database::{
@@ -59,6 +63,7 @@ use crate::{
 const DOWNSTREAM_SECRET_MARKER: &str = "cyder-";
 const PROVIDER_SECRET: &str = "provider-baseline-secret";
 const UPSTREAM_MODEL: &str = "baseline-upstream-model";
+const DIRECT_CLIENT_REQUEST_ID: &str = "direct-execution.client-1";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const FIXTURE_SOURCES: [(&str, &str); 4] = [
@@ -309,6 +314,9 @@ enum ScriptedReply {
         first_event: GoldenEvent,
         dropped: Arc<DropSignal>,
     },
+    InterruptedSse {
+        first_event: GoldenEvent,
+    },
     Redirect {
         status: StatusCode,
         location: String,
@@ -347,6 +355,8 @@ impl TestUpstream {
                         ScriptedReply::Json { status, body } => Response::builder()
                             .status(status)
                             .header(CONTENT_TYPE, "application/json")
+                            .header(&X_REQUEST_ID, "upstream-forged-request-id")
+                            .header(&X_CLIENT_REQUEST_ID, "upstream-forged-client-id")
                             .body(Body::from(serde_json::to_vec(&body).unwrap()))
                             .unwrap(),
                         ScriptedReply::Sse { events } => Response::builder()
@@ -359,6 +369,21 @@ impl TestUpstream {
                                 let _guard = ResponseBodyDropGuard(dropped);
                                 yield Ok::<Bytes, std::io::Error>(Bytes::from(events_to_sse_bytes(&[first_event])));
                                 std::future::pending::<()>().await;
+                            };
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(CONTENT_TYPE, "text/event-stream")
+                                .body(Body::from_stream(stream))
+                                .unwrap()
+                        }
+                        ScriptedReply::InterruptedSse { first_event } => {
+                            let stream = async_stream::stream! {
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from(events_to_sse_bytes(&[first_event])));
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                                yield Err(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "scripted upstream stream interruption",
+                                ));
                             };
                             Response::builder()
                                 .status(StatusCode::OK)
@@ -429,6 +454,18 @@ struct RouterFixture {
     provider_api_key_id: i64,
     model_id: i64,
     model_name: String,
+}
+
+#[derive(Default)]
+struct RecordingPersistedSink {
+    contexts: AsyncMutex<Vec<RequestLogPersistedContext>>,
+}
+
+#[async_trait::async_trait]
+impl RequestLogPersistedSink for RecordingPersistedSink {
+    async fn on_request_log_persisted(&self, context: RequestLogPersistedContext) {
+        self.contexts.lock().await.push(context);
+    }
 }
 
 impl RouterFixture {
@@ -536,7 +573,9 @@ impl RouterFixture {
         let mut uri = path_template.replace("$REQUESTED_MODEL", &self.requested_model());
         let mut builder = Request::builder()
             .method(Method::POST)
-            .header(CONTENT_TYPE, "application/json");
+            .header(CONTENT_TYPE, "application/json")
+            .header(&X_REQUEST_ID, "downstream-forged-request-id")
+            .header(&X_CLIENT_REQUEST_ID, DIRECT_CLIENT_REQUEST_ID);
         match fixture.downstream_auth {
             DownstreamAuth::Bearer => {
                 builder = builder.header("authorization", format!("Bearer {}", self.downstream_key))
@@ -759,6 +798,7 @@ fn assert_upstream(
     expected_query: Option<&str>,
     expected_body: &Value,
     requested_model: &str,
+    expected_request_id: &str,
 ) {
     assert_eq!(captured.len(), 1, "{name}: exactly one upstream request");
     let request = &captured[0];
@@ -785,6 +825,18 @@ fn assert_upstream(
             "{name}: upstream header {header}"
         );
     }
+    assert_eq!(
+        request
+            .headers
+            .get(&X_REQUEST_ID)
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_request_id),
+        "{name}: upstream canonical request id"
+    );
+    assert!(
+        request.headers.get(&X_CLIENT_REQUEST_ID).is_none(),
+        "{name}: client request id must not be sent upstream"
+    );
     for value in request.headers.values() {
         let value = value.to_str().unwrap_or_default();
         assert!(
@@ -801,12 +853,38 @@ fn assert_upstream(
     );
 }
 
+fn assert_downstream_request_identity(response: &Response<Body>) -> String {
+    let request_id = response
+        .headers()
+        .get(&X_REQUEST_ID)
+        .and_then(|value| value.to_str().ok())
+        .expect("proxy response should include canonical request id");
+    uuid::Uuid::parse_str(request_id).expect("canonical request id should be a UUID");
+    assert_ne!(request_id, "downstream-forged-request-id");
+    assert_ne!(request_id, "upstream-forged-request-id");
+    assert_eq!(
+        response
+            .headers()
+            .get(&X_CLIENT_REQUEST_ID)
+            .and_then(|value| value.to_str().ok()),
+        Some(DIRECT_CLIENT_REQUEST_ID),
+        "proxy response should echo only the validated downstream client id"
+    );
+    request_id.to_string()
+}
+
 fn assert_log_common(
     router: &RouterFixture,
     fixture: &DirectExecutionFixture,
     log: &RequestLogRecord,
 ) {
     let upstream_protocol = provider_runtime_profile(&fixture.provider_type).upstream_protocol;
+    uuid::Uuid::parse_str(&log.request_id).expect("persisted request id should be a UUID");
+    assert_eq!(
+        log.client_request_id.as_deref(),
+        Some(DIRECT_CLIENT_REQUEST_ID),
+        "validated client request id should persist"
+    );
     assert_eq!(log.downstream_protocol, fixture.protocol);
     assert_eq!(log.upstream_protocol, Some(upstream_protocol));
     assert_eq!(log.provider_id, Some(router.provider_id));
@@ -1109,6 +1187,7 @@ fn direct_execution_regression_non_stream_request_response_usage_and_log_golden(
                     ),
                 "{name}: downstream content type"
             );
+            let request_id = assert_downstream_request_identity(&response);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
@@ -1132,14 +1211,59 @@ fn direct_execution_regression_non_stream_request_response_usage_and_log_golden(
                 fixture.request.upstream_query.as_deref(),
                 &fixture.request.upstream,
                 &router.requested_model(),
+                &request_id,
             );
             let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(
+                log.request_id, request_id,
+                "{name}: response and persisted canonical request id"
+            );
             assert_log_common(&router, &fixture, &log);
             assert_eq!(log.upstream_http_status, Some(200));
             assert_usage(&log, &fixture.usage);
             upstream.shutdown().await;
         });
     }
+}
+
+#[test]
+fn persisted_log_sink_receives_the_canonical_request_id() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let sink = Arc::new(RecordingPersistedSink::default());
+        let persisted_sink: Arc<dyn RequestLogPersistedSink> = sink.clone();
+        router
+            .app_state
+            .infra
+            .log_manager()
+            .set_request_log_persisted_sink(persisted_sink);
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = assert_downstream_request_identity(&response);
+        let log = router.wait_for_log(RequestStatus::Success).await;
+        let contexts = sink.contexts.lock().await;
+
+        assert_eq!(
+            contexts.as_slice(),
+            &[RequestLogPersistedContext {
+                request_log_id: log.id,
+                request_id,
+            }]
+        );
+        upstream.shutdown().await;
+    });
 }
 
 #[test]
@@ -1216,6 +1340,7 @@ fn direct_execution_regression_stream_events_usage_and_single_call_golden() {
                 .await;
             assert_eq!(response.status(), StatusCode::OK, "{name}: stream status");
             assert!(response.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|value| value.starts_with(&fixture.stream.downstream_content_type)), "{name}: stream content type");
+            let request_id = assert_downstream_request_identity(&response);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
@@ -1240,8 +1365,13 @@ fn direct_execution_regression_stream_events_usage_and_single_call_golden() {
                 fixture.stream.upstream_query.as_deref(),
                 &fixture.stream.upstream_request,
                 &router.requested_model(),
+                &request_id,
             );
             let log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(
+                log.request_id, request_id,
+                "{name}: stream response and persisted canonical request id"
+            );
             assert_log_common(&router, &fixture, &log);
             assert!(log.is_stream, "{name}: log should be streaming");
             assert_usage(&log, &fixture.usage);
@@ -1268,6 +1398,7 @@ fn direct_execution_regression_upstream_429_is_safe_logged_and_never_retried() {
                 fixture.error.downstream_status,
                 "{name}: error status"
             );
+            let request_id = assert_downstream_request_identity(&response);
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
@@ -1286,8 +1417,13 @@ fn direct_execution_regression_upstream_429_is_safe_logged_and_never_retried() {
                 fixture.request.upstream_query.as_deref(),
                 &fixture.request.upstream,
                 &router.requested_model(),
+                &request_id,
             );
             let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.request_id, request_id,
+                "{name}: error response and persisted canonical request id"
+            );
             assert_log_common(&router, &fixture, &log);
             assert_eq!(log.upstream_http_status, Some(429));
             assert_eq!(
@@ -1598,6 +1734,7 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
                 StatusCode::OK,
                 "{name}: cancellation stream status"
             );
+            let request_id = assert_downstream_request_identity(&response);
             let mut body = response.into_body().into_data_stream();
             let first = timeout(WAIT_TIMEOUT, body.next())
                 .await
@@ -1616,14 +1753,65 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
                 fixture.cancellation.upstream_query.as_deref(),
                 &fixture.cancellation.upstream_request,
                 &router.requested_model(),
+                &request_id,
             );
             let log = router
                 .wait_for_log(fixture.cancellation.expected_status.clone())
                 .await;
+            assert_eq!(
+                log.request_id, request_id,
+                "{name}: cancelled stream response and persisted canonical request id"
+            );
             assert_log_common(&router, &fixture, &log);
             assert_eq!(log.overall_status, RequestStatus::Cancelled);
             assert_eq!(captured.len(), 1, "{name}: cancellation must not retry");
             upstream.shutdown().await;
         });
     }
+}
+
+#[test]
+fn direct_execution_regression_interrupted_stream_logs_same_request_id() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::InterruptedSse {
+            first_event: fixture.cancellation.first_upstream_event.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let response = router
+            .send(&fixture, true, &fixture.cancellation.downstream_request)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = assert_downstream_request_identity(&response);
+        let mut body = response.into_body().into_data_stream();
+        let first = timeout(WAIT_TIMEOUT, body.next())
+            .await
+            .expect("first downstream frame deadline")
+            .expect("first downstream frame")
+            .expect("first downstream frame should be readable");
+        assert!(!first.is_empty());
+        let interrupted = timeout(WAIT_TIMEOUT, body.next())
+            .await
+            .expect("stream interruption deadline")
+            .expect("stream should yield an interruption");
+        assert!(
+            interrupted.is_err(),
+            "downstream body should surface interruption"
+        );
+
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(
+            log.request_id, request_id,
+            "interrupted stream response and persisted canonical request id"
+        );
+        assert_log_common(&router, &fixture, &log);
+        assert_eq!(log.overall_status, RequestStatus::Error);
+        assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+        assert_eq!(upstream.requests().await.len(), 1);
+        upstream.shutdown().await;
+    });
 }

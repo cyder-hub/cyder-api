@@ -8,7 +8,10 @@ use super::{
     route_resolver::ExecutionPlan,
 };
 use crate::{
-    proxy::{ProxyError, cancellation::ProxyCancellationContext, utility::UtilityOperation},
+    proxy::{
+        ProxyError, cancellation::ProxyCancellationContext, request_context::ProxyRequestContext,
+        utility::UtilityOperation,
+    },
     schema::enum_def::DownstreamProtocol,
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
@@ -22,7 +25,7 @@ pub(in crate::proxy) struct GenerationOrchestrationInput {
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
-    pub start_time: i64,
+    pub request_context: Arc<ProxyRequestContext>,
     pub data: Value,
 }
 
@@ -34,7 +37,7 @@ pub(in crate::proxy) struct UtilityOrchestrationInput {
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
-    pub start_time: i64,
+    pub request_context: Arc<ProxyRequestContext>,
     pub data: Value,
 }
 
@@ -51,7 +54,7 @@ pub(in crate::proxy) async fn execute_generation(
             query_params: input.query_params,
             original_headers: input.original_headers,
             client_ip_addr: input.client_ip_addr,
-            start_time: input.start_time,
+            request_context: input.request_context,
             kind: RequestExecutionKind::Generation {
                 downstream_protocol: input.downstream_protocol,
                 is_stream: input.is_stream,
@@ -75,7 +78,7 @@ pub(in crate::proxy) async fn execute_utility(
             query_params: input.query_params,
             original_headers: input.original_headers,
             client_ip_addr: input.client_ip_addr,
-            start_time: input.start_time,
+            request_context: input.request_context,
             kind: RequestExecutionKind::Utility {
                 operation: input.operation,
                 data: input.data,

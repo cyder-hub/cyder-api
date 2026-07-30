@@ -6,6 +6,7 @@ use super::{
     ProxyError,
     cancellation::ProxyCancellationContext,
     request::ParsedProxyRequest,
+    request_context::ProxyRequestContext,
     runtime::{
         facade::{UtilityOrchestrationInput, execute_utility},
         route_resolver::ExecutionPlan,
@@ -38,7 +39,7 @@ pub(super) struct UtilityExecutionInput {
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
-    pub start_time: i64,
+    pub request_context: Arc<ProxyRequestContext>,
     pub parsed_request: ParsedProxyRequest,
 }
 
@@ -72,7 +73,7 @@ pub(super) async fn execute_utility_proxy(
         query_params,
         original_headers,
         client_ip_addr,
-        start_time,
+        request_context,
         parsed_request,
     } = input;
     let ParsedProxyRequest { data } = parsed_request;
@@ -87,7 +88,7 @@ pub(super) async fn execute_utility_proxy(
             query_params,
             original_headers,
             client_ip_addr,
-            start_time,
+            request_context,
             data,
         },
     )

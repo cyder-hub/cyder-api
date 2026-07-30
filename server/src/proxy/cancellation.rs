@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use super::ProxyError;
+use super::{ProxyError, request_context::RequestId};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ProxyCancellationContext {
@@ -50,14 +50,23 @@ impl ProxyCancellationContext {
 
 pub(super) struct CancellationDropGuard {
     cancellation: ProxyCancellationContext,
+    request_id: RequestId,
+    log_id: i64,
     reason: String,
     armed: bool,
 }
 
 impl CancellationDropGuard {
-    pub(super) fn new(cancellation: ProxyCancellationContext, reason: impl Into<String>) -> Self {
+    pub(super) fn new(
+        cancellation: ProxyCancellationContext,
+        request_id: RequestId,
+        log_id: i64,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             cancellation,
+            request_id,
+            log_id,
             reason: reason.into(),
             armed: true,
         }
@@ -71,6 +80,12 @@ impl CancellationDropGuard {
 impl Drop for CancellationDropGuard {
     fn drop(&mut self) {
         if self.armed {
+            crate::debug_event!(
+                "proxy.client_disconnect_detected",
+                request_id = &self.request_id,
+                log_id = self.log_id,
+                phase = "upstream_request",
+            );
             self.cancellation.cancel_now(self.reason.clone());
         }
     }
@@ -96,7 +111,12 @@ mod tests {
     async fn cancellation_drop_guard_cancels_when_armed() {
         let cancellation = ProxyCancellationContext::new();
         {
-            let _guard = CancellationDropGuard::new(cancellation.clone(), "request future dropped");
+            let _guard = CancellationDropGuard::new(
+                cancellation.clone(),
+                crate::proxy::request_context::RequestId::new(),
+                42,
+                "request future dropped",
+            );
         }
 
         cancellation.cancelled().await;

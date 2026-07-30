@@ -2,9 +2,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
     body::Body,
-    extract::{Path, Query, Request, State},
+    extract::{OriginalUri, Path, Query, Request, State},
     http::{HeaderName, HeaderValue, Method, header::CACHE_CONTROL},
-    middleware,
+    middleware::{self, Next},
+    response::Response,
     routing::{MethodRouter, get, post},
 };
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
@@ -18,6 +19,9 @@ use crate::{
 
 use super::gemini::handle_gemini_request;
 use super::handlers::{list_models_handler, openai_utility_handler};
+use super::request_context::{
+    ProxyRequestContext, X_CLIENT_REQUEST_ID, X_REQUEST_ID, derive_request_operation_kind,
+};
 use super::unified::unified_proxy_handler;
 
 type QueryParams = HashMap<String, String>;
@@ -140,6 +144,65 @@ fn create_gemini_router() -> StateRouter {
     nest_router_variants(router, true, &["/v1beta", "/v1"])
 }
 
+async fn request_identity_middleware(mut request: Request<Body>, next: Next) -> Response {
+    let request_context = Arc::new(ProxyRequestContext::from_headers(request.headers()));
+    let request_uri = request
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|uri| &uri.0)
+        .unwrap_or_else(|| request.uri());
+    let request_path = request_uri.path().to_string();
+    let operation_kind = derive_request_operation_kind(&request_path);
+    let query_param_count = request_uri
+        .query()
+        .map(|query| {
+            query
+                .split('&')
+                .filter(|parameter| !parameter.is_empty())
+                .count()
+        })
+        .unwrap_or_default();
+    let request_id = request_context.request_id.to_string();
+    request
+        .extensions_mut()
+        .insert(Arc::clone(&request_context));
+
+    crate::logging::with_request_id_scope(request_id, async move {
+        crate::debug_event!(
+            "proxy.request_received",
+            request_path = &request_path,
+            operation_kind = &operation_kind,
+            query_param_count = query_param_count,
+            client_request_id = &request_context.client_request_id,
+        );
+
+        let mut response = next.run(request).await;
+        response.headers_mut().insert(
+            &X_REQUEST_ID,
+            HeaderValue::from_str(request_context.request_id.as_str())
+                .expect("generated request id must be a valid header value"),
+        );
+        response.headers_mut().remove(&X_CLIENT_REQUEST_ID);
+        if let Some(client_request_id) = &request_context.client_request_id {
+            response.headers_mut().insert(
+                &X_CLIENT_REQUEST_ID,
+                HeaderValue::from_str(client_request_id.as_str())
+                    .expect("validated client request id must be a valid header value"),
+            );
+        }
+
+        crate::debug_event!(
+            "proxy.response_ready",
+            status_code = response.status().as_u16(),
+            duration_ms = chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(request_context.received_at_ms),
+        );
+        response
+    })
+    .await
+}
+
 pub fn create_proxy_router(client_identity_resolver: Arc<ClientIdentityResolver>) -> StateRouter {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -166,6 +229,7 @@ pub fn create_proxy_router(client_identity_resolver: Arc<ClientIdentityResolver>
             HeaderName::from_static("x-content-type-options"),
             HeaderValue::from_static("nosniff"),
         ))
+        .layer(middleware::from_fn(request_identity_middleware))
 }
 
 #[cfg(test)]
@@ -179,8 +243,10 @@ mod tests {
         body::{Body, to_bytes},
         extract::ConnectInfo,
         http::{HeaderValue, Method, Request, StatusCode, header},
+        routing::get,
     };
     use tower::ServiceExt;
+    use uuid::Version;
 
     use crate::config::ClientIdentityConfig;
     use crate::controller::handle_404;
@@ -193,7 +259,7 @@ mod tests {
     use crate::service::app_state::{create_state_router, create_test_app_state};
     use diesel::RunQueryDsl;
 
-    use super::create_proxy_router;
+    use super::{X_CLIENT_REQUEST_ID, X_REQUEST_ID, create_proxy_router};
 
     fn payload() -> CreateApiKeyPayload {
         CreateApiKeyPayload {
@@ -348,6 +414,20 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("nosniff")
         );
+        assert_request_identity(response);
+    }
+
+    fn assert_request_identity(response: &axum::response::Response) -> String {
+        let value = response
+            .headers()
+            .get(&X_REQUEST_ID)
+            .and_then(|value| value.to_str().ok())
+            .expect("proxy response should include a request id");
+        let parsed = uuid::Uuid::parse_str(value).expect("request id should be a valid UUID");
+        assert_eq!(value.len(), 36);
+        assert_eq!(value, value.to_ascii_lowercase());
+        assert_eq!(parsed.get_version(), Some(Version::Random));
+        value.to_string()
     }
 
     fn assert_public_cors_response(response: &axum::response::Response) {
@@ -476,6 +556,7 @@ mod tests {
                         StatusCode::METHOD_NOT_ALLOWED,
                         "{path}"
                     );
+                    assert_request_identity(&wrong_method);
 
                     let routed = create_proxy_router(client_identity_resolver())
                         .with_state(Arc::clone(&app_state))
@@ -501,6 +582,7 @@ mod tests {
                         StatusCode::METHOD_NOT_ALLOWED,
                         "{path}"
                     );
+                    assert_request_identity(&wrong_method);
                 }
 
                 for path in [
@@ -519,6 +601,7 @@ mod tests {
                         StatusCode::METHOD_NOT_ALLOWED,
                         "{path}"
                     );
+                    assert_request_identity(&wrong_method);
                 }
 
                 app_state.flush_proxy_logs().await;
@@ -613,6 +696,10 @@ mod tests {
                         response.headers().get(header::CACHE_CONTROL).is_none(),
                         "{path}: unknown Ollama path must not receive proxy security layers"
                     );
+                    assert!(
+                        response.headers().get(&X_REQUEST_ID).is_none(),
+                        "{path}: unknown Ollama path must not receive proxy request identity"
+                    );
                 }
 
                 app_state.flush_proxy_logs().await;
@@ -628,6 +715,98 @@ mod tests {
                     0,
                     "unknown Ollama paths must not resolve provider credentials"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn proxy_request_identity_is_gateway_owned_and_client_id_is_bounded() {
+        let database = TestDbContext::new_sqlite("proxy-request-identity.sqlite");
+        database
+            .run_async(async {
+                let app_state = create_test_app_state(database.clone()).await;
+
+                let mut valid = request("/openai/v1/models", header::AUTHORIZATION.as_str(), None);
+                valid
+                    .headers_mut()
+                    .insert(&X_REQUEST_ID, HeaderValue::from_static("forged-request-id"));
+                valid.headers_mut().insert(
+                    &X_CLIENT_REQUEST_ID,
+                    HeaderValue::from_static("caller.trace_1:part-2"),
+                );
+                let valid = create_proxy_router(client_identity_resolver())
+                    .with_state(Arc::clone(&app_state))
+                    .oneshot(valid)
+                    .await
+                    .expect("proxy auth error should respond");
+                assert_eq!(valid.status(), StatusCode::UNAUTHORIZED);
+                let generated = assert_request_identity(&valid);
+                assert_ne!(generated, "forged-request-id");
+                assert_eq!(
+                    valid
+                        .headers()
+                        .get(&X_CLIENT_REQUEST_ID)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("caller.trace_1:part-2")
+                );
+
+                let mut invalid = request("/anthropic/v1/models", "x-api-key", None);
+                invalid.headers_mut().insert(
+                    &X_CLIENT_REQUEST_ID,
+                    HeaderValue::from_static("contains space"),
+                );
+                let invalid = create_proxy_router(client_identity_resolver())
+                    .with_state(Arc::clone(&app_state))
+                    .oneshot(invalid)
+                    .await
+                    .expect("proxy auth error should respond");
+                assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+                assert_request_identity(&invalid);
+                assert!(invalid.headers().get(&X_CLIENT_REQUEST_ID).is_none());
+
+                let mut duplicate = request("/gemini/v1/models", "x-goog-api-key", None);
+                duplicate
+                    .headers_mut()
+                    .append(&X_CLIENT_REQUEST_ID, HeaderValue::from_static("caller-one"));
+                duplicate
+                    .headers_mut()
+                    .append(&X_CLIENT_REQUEST_ID, HeaderValue::from_static("caller-two"));
+                let duplicate = create_proxy_router(client_identity_resolver())
+                    .with_state(app_state)
+                    .oneshot(duplicate)
+                    .await
+                    .expect("proxy auth error should respond");
+                assert_eq!(duplicate.status(), StatusCode::UNAUTHORIZED);
+                assert_request_identity(&duplicate);
+                assert!(duplicate.headers().get(&X_CLIENT_REQUEST_ID).is_none());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn request_identity_layer_does_not_leak_to_non_proxy_routes() {
+        let database = TestDbContext::new_sqlite("request-identity-router-boundary.sqlite");
+        database
+            .run_async(async {
+                let app_state = create_test_app_state(database.clone()).await;
+                let router = create_state_router()
+                    .route("/system", get(|| async { StatusCode::OK }))
+                    .route("/manager", get(|| async { StatusCode::OK }))
+                    .merge(create_proxy_router(client_identity_resolver()))
+                    .with_state(app_state);
+
+                for path in ["/system", "/manager"] {
+                    let response = router
+                        .clone()
+                        .oneshot(method_request(Method::GET, path))
+                        .await
+                        .expect("non-proxy route should respond");
+                    assert_eq!(response.status(), StatusCode::OK, "{path}");
+                    assert!(
+                        response.headers().get(&X_REQUEST_ID).is_none(),
+                        "{path}: non-proxy route must not receive proxy request identity"
+                    );
+                }
             })
             .await;
     }

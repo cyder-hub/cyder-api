@@ -349,7 +349,7 @@
       "modelLabel": "Model",
       "statusLabel": "Status",
       "searchLabel": "Search",
-      "searchPlaceholder": "Model, provider, error...",
+      "searchPlaceholder": "Request ID, model, provider, error...",
       "clearSearch": "Clear search",
       "advancedFilters": "Advanced filters",
       "downstreamProtocolLabel": "Downstream Protocol",
@@ -391,6 +391,7 @@
     },
     "table": {
       "model": "Model",
+      "requestId": "Gateway Request ID",
       "provider": "Provider",
       "apiKey": "API Key",
       "status": "Status",
@@ -409,6 +410,12 @@
     },
     "detailDialog": {
       "title": "Request Details",
+      "recordId": "Record ID",
+      "gatewayRequestId": "Gateway Request ID",
+      "copy": "Copy",
+      "copyRequestId": "Copy gateway request ID",
+      "copySuccess": "Gateway request ID copied.",
+      "copyFailed": "Failed to copy gateway request ID.",
       "loading": "Loading request detail...",
       "noRecord": "No record is selected.",
       "tabs": {
@@ -422,6 +429,7 @@
         "downstreamProtocol": "Downstream Protocol",
         "upstreamProtocol": "Upstream Protocol",
         "clientIp": "Client IP",
+        "clientRequestId": "Client Request ID (caller-provided)",
         "stream": "Stream",
         "firstByte": "First Byte",
         "totalLatency": "Total Latency",

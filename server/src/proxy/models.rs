@@ -6,6 +6,7 @@ use serde::Serialize;
 use super::{
     ProxyError,
     auth::admit_api_key_request,
+    request_context::ProxyRequestContext,
     runtime::{
         api_key_lease::ApiKeyRequestLeaseFinalizer,
         route_resolver::{
@@ -53,9 +54,14 @@ pub(super) async fn execute_models_listing(
     app_state: Arc<AppState>,
     api_key: Arc<CacheApiKey>,
     downstream_protocol: DownstreamProtocol,
+    request_context: Arc<ProxyRequestContext>,
 ) -> Result<Response<Body>, ProxyError> {
     let request_lease = admit_api_key_request(&app_state, &api_key).await?;
-    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
+    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(
+        &app_state,
+        request_lease,
+        request_context.request_id.clone(),
+    );
     let result = async {
         let models = get_accessible_models(&app_state, &api_key).await?;
         let response_body = render_models_response(downstream_protocol, &models)?;

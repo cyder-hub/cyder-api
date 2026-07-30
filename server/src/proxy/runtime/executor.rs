@@ -10,6 +10,7 @@ use crate::{
         auth::{admit_api_key_request, check_access_control},
         cancellation::ProxyCancellationContext,
         provider_governance::{ProviderGovernanceCheckError, ensure_provider_request_allowed},
+        request_context::ProxyRequestContext,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             capability::{validate_generation_capabilities, validate_utility_capabilities},
@@ -17,7 +18,10 @@ use crate::{
                 RequestLogContextInput, finalize_request_failure_context, new_request_log_context,
                 record_completion,
             },
-            materializer::{materialize_generation_request, materialize_utility_request},
+            materializer::{
+                apply_gateway_request_identity, materialize_generation_request,
+                materialize_utility_request,
+            },
             request_patch::load_runtime_request_patch_trace,
             route_resolver::{ExecutionPlan, ExecutionTarget},
             transport::{ReasoningContinuationCaptureContext, send_materialized_request},
@@ -55,7 +59,7 @@ pub(in crate::proxy) struct RequestExecutionInput {
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
-    pub start_time: i64,
+    pub request_context: Arc<ProxyRequestContext>,
     pub kind: RequestExecutionKind,
 }
 
@@ -94,7 +98,7 @@ pub(in crate::proxy) async fn execute_request(
         query_params,
         original_headers,
         client_ip_addr,
-        start_time,
+        request_context,
         kind,
     } = input;
     let mut target = execution_plan.target.clone();
@@ -115,7 +119,7 @@ pub(in crate::proxy) async fn execute_request(
             .resolved_reasoning_preset
             .map(|preset| preset.as_key()),
         client_ip_addr: &client_ip_addr,
-        start_time,
+        request_context: &request_context,
         downstream_protocol,
     });
 
@@ -198,7 +202,11 @@ pub(in crate::proxy) async fn execute_request(
         Ok(lease) => lease,
         Err(error) => return fail_before_send(&app_state, log_context, error).await,
     };
-    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
+    let mut request_lease = ApiKeyRequestLeaseFinalizer::new(
+        &app_state,
+        request_lease,
+        request_context.request_id.clone(),
+    );
 
     let provider_credential =
         match resolve_selected_provider_credential(&target.provider, &app_state).await {
@@ -215,7 +223,7 @@ pub(in crate::proxy) async fn execute_request(
         };
     log_context.provider_api_key_id = Some(provider_credential.key_id());
 
-    let materialized = match kind {
+    let mut materialized = match kind {
         RequestExecutionKind::Generation {
             downstream_protocol,
             is_stream,
@@ -260,6 +268,7 @@ pub(in crate::proxy) async fn execute_request(
             }
         },
     };
+    apply_gateway_request_identity(&mut materialized.final_headers, &request_context);
 
     log_context.request_url = Some(materialized.final_url.clone());
     log_context.llm_request_sent_at = Some(Utc::now().timestamp_millis());

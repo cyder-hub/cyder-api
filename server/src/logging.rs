@@ -1,4 +1,5 @@
 use std::fmt::{self, Write};
+use std::future::Future;
 
 use chrono::{DateTime, Local, SecondsFormat};
 use log::{Level, LevelFilter, Log, Metadata, Record};
@@ -7,13 +8,29 @@ pub const THIRD_PARTY_DEBUG_ENV: &str = "CYDER_LOG_THIRD_PARTY_DEBUG";
 
 static LOGGER: LocalLogger = LocalLogger;
 
+tokio::task_local! {
+    static REQUEST_ID_SCOPE: String;
+}
+
 fn event_message(event: &str) -> EventMessage {
     EventMessage::new(event)
+}
+
+pub(crate) async fn with_request_id_scope<F>(request_id: String, future: F) -> F::Output
+where
+    F: Future,
+{
+    REQUEST_ID_SCOPE.scope(request_id, future).await
 }
 
 #[doc(hidden)]
 pub fn event_message_with_fields(event: &str, fields: &[(&str, Option<String>)]) -> EventMessage {
     let mut message = event_message(event);
+    if !fields.iter().any(|(key, _)| *key == "request_id") {
+        let _ = REQUEST_ID_SCOPE.try_with(|request_id| {
+            message.push_field("request_id", request_id);
+        });
+    }
     for (key, value) in fields {
         if let Some(value) = value {
             message.push_field(key, value);
@@ -267,7 +284,7 @@ mod tests {
 
     use super::{
         THIRD_PARTY_DEBUG_ENV, format_log_line, is_app_target, parse_level, set_level,
-        third_party_debug_enabled,
+        third_party_debug_enabled, with_request_id_scope,
     };
 
     static LOG_LEVEL_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -383,5 +400,80 @@ mod tests {
     fn structured_event_macro_supports_zero_fields() {
         let message = crate::__event_message!("logging.flush_waiter_dropped").to_string();
         assert_eq!(message, "event=logging.flush_waiter_dropped");
+    }
+
+    #[tokio::test]
+    async fn request_id_scope_enriches_events_without_overriding_explicit_fields() {
+        let (implicit, explicit) = with_request_id_scope("gateway-request".to_string(), async {
+            (
+                crate::__event_message!("proxy.request_received").to_string(),
+                crate::__event_message!(
+                    "proxy.request_completed",
+                    request_id = "late-request",
+                    status = 200,
+                )
+                .to_string(),
+            )
+        })
+        .await;
+
+        assert_eq!(
+            implicit,
+            "event=proxy.request_received request_id=gateway-request"
+        );
+        assert_eq!(
+            explicit,
+            "event=proxy.request_completed request_id=late-request status=200"
+        );
+        assert_eq!(
+            crate::__event_message!("outside.request_scope").to_string(),
+            "event=outside.request_scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_request_id_scopes_do_not_leak_between_tasks() {
+        let (first, second) = tokio::join!(
+            with_request_id_scope("request-a".to_string(), async {
+                tokio::task::yield_now().await;
+                crate::__event_message!("proxy.concurrent").to_string()
+            }),
+            with_request_id_scope("request-b".to_string(), async {
+                tokio::task::yield_now().await;
+                crate::__event_message!("proxy.concurrent").to_string()
+            }),
+        );
+
+        assert_eq!(
+            first, "event=proxy.concurrent request_id=request-a",
+            "first scope must retain its own request id"
+        );
+        assert_eq!(
+            second, "event=proxy.concurrent request_id=request-b",
+            "second scope must retain its own request id"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_request_id_survives_after_request_scope_ends() {
+        with_request_id_scope("gateway-request".to_string(), async {
+            assert_eq!(
+                crate::__event_message!("proxy.handler_finished").to_string(),
+                "event=proxy.handler_finished request_id=gateway-request"
+            );
+        })
+        .await;
+
+        let late_event = crate::__event_message!(
+            "logging.request_log_inserted",
+            request_id = "gateway-request",
+            log_id = 42,
+        )
+        .to_string();
+
+        assert_eq!(
+            late_event,
+            "event=logging.request_log_inserted request_id=gateway-request log_id=42"
+        );
     }
 }

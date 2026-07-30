@@ -300,6 +300,8 @@ diesel::table! {
 
     request_log (id) {
         id -> Int8,
+        request_id -> Text,
+        client_request_id -> Nullable<Text>,
         api_key_id -> Int8,
         requested_model_name -> Nullable<Text>,
         base_requested_model_name -> Nullable<Text>,

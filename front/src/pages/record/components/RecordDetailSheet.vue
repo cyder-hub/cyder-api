@@ -17,10 +17,33 @@
             <Badge :variant="getStatusBadgeVariant(record.overall_status)">
               {{ record.overall_status }}
             </Badge>
-            <span class="font-mono text-xs text-gray-500">#{{ record.id }}</span>
+            <span class="font-mono text-xs text-gray-500">
+              {{ $t("recordPage.detailDialog.recordId") }} #{{ record.id }}
+            </span>
             <span v-if="record.upstream_http_status" class="font-mono text-xs text-gray-500">
               HTTP {{ record.upstream_http_status }}
             </span>
+          </div>
+
+          <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <div class="flex items-center justify-between gap-3">
+              <p class="text-xs font-medium uppercase tracking-wide text-gray-500">
+                {{ $t("recordPage.detailDialog.gatewayRequestId") }}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                class="h-8 flex-none gap-1.5"
+                :aria-label="$t('recordPage.detailDialog.copyRequestId')"
+                @click="copyRequestId"
+              >
+                <Copy class="h-3.5 w-3.5" />
+                {{ $t("recordPage.detailDialog.copy") }}
+              </Button>
+            </div>
+            <p class="mt-2 break-all font-mono text-xs leading-5 text-gray-900">
+              {{ record.request_id }}
+            </p>
           </div>
 
           <section>
@@ -65,6 +88,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
+import { Copy } from "lucide-vue-next";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -74,7 +98,9 @@ import {
   DrawerHeader,
   DrawerTitle,
 } from "@/components/ui/drawer";
+import { toastController } from "@/services/uiFeedback";
 import type { RecordRequest } from "@/services/types";
+import { copyText } from "@/utils/clipboard";
 import type { RecordDetailTab } from "../composables/useRecordDetail";
 import { emptyValue, formatDate, formatDuration, formatPrice, getStatusBadgeVariant } from "../composables/recordFormat";
 
@@ -101,6 +127,15 @@ const isOpen = computed({
 const value = (input: string | number | null | undefined) =>
   input == null || input === "" ? emptyValue : String(input);
 
+const copyRequestId = async () => {
+  const requestId = props.record?.request_id;
+  if (!requestId || !(await copyText(requestId))) {
+    toastController.error($t("recordPage.detailDialog.copyFailed"));
+    return;
+  }
+  toastController.success($t("recordPage.detailDialog.copySuccess"));
+};
+
 const overviewItems = computed(() => {
   const record = props.record;
   if (!record) return [];
@@ -112,6 +147,9 @@ const overviewItems = computed(() => {
     { label: $t("recordPage.detailDialog.summary.downstreamProtocol"), value: value(record.downstream_protocol), mono: true },
     { label: $t("recordPage.detailDialog.summary.upstreamProtocol"), value: value(record.upstream_protocol), mono: true },
     { label: $t("recordPage.detailDialog.summary.clientIp"), value: value(record.client_ip), mono: true },
+    ...(record.client_request_id
+      ? [{ label: $t("recordPage.detailDialog.summary.clientRequestId"), value: record.client_request_id, mono: true }]
+      : []),
     { label: $t("recordPage.detailDialog.summary.stream"), value: record.is_stream ? $t("common.yes") : $t("common.no") },
     { label: $t("recordPage.detailDialog.summary.firstByte"), value: formatDuration(record.upstream_request_sent_at, record.response_started_to_client_at), mono: true },
     { label: $t("recordPage.detailDialog.summary.totalLatency"), value: formatDuration(record.upstream_request_sent_at, record.completed_at), mono: true },

@@ -10,6 +10,8 @@ export type UpstreamProtocol =
 
 export interface RecordListItem {
   id: number;
+  request_id: string;
+  client_request_id: string | null;
   api_key_id: number;
   requested_model_name?: string | null;
   base_requested_model_name?: string | null;

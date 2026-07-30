@@ -137,12 +137,15 @@ pub(in crate::proxy) async fn send_materialized_request(
         }
     };
 
+    let (request_id, log_id) = {
+        let context = log_context.lock().await;
+        (context.request_id.clone(), context.id)
+    };
     let mut drop_cancellation_guard = CancellationDropGuard::new(
         cancellation.clone(),
-        format!(
-            "Client disconnected during proxy request for log_id {}.",
-            log_context.lock().await.id
-        ),
+        request_id,
+        log_id,
+        format!("Client disconnected during proxy request for log_id {log_id}."),
     );
 
     log_context.lock().await.llm_request_sent_at = Some(Utc::now().timestamp_millis());

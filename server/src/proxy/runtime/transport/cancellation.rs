@@ -6,7 +6,7 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::{
     proxy::{
         cancellation::ProxyCancellationContext, logging::RequestLogContext,
-        runtime::log_writer::finalize_cancelled_log_context,
+        request_context::RequestId, runtime::log_writer::finalize_cancelled_log_context,
     },
     service::{app_state::AppState, cache::types::CacheCostCatalogVersion},
 };
@@ -15,6 +15,8 @@ pub(super) struct ResponseStreamCancellationGuard {
     app_state: Arc<AppState>,
     cancellation: ProxyCancellationContext,
     context: Arc<TokioMutex<RequestLogContext>>,
+    request_id: RequestId,
+    log_id: i64,
     url: String,
     status_code: StatusCode,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
@@ -27,6 +29,8 @@ impl ResponseStreamCancellationGuard {
         app_state: Arc<AppState>,
         cancellation: ProxyCancellationContext,
         context: Arc<TokioMutex<RequestLogContext>>,
+        request_id: RequestId,
+        log_id: i64,
         url: impl Into<String>,
         status_code: StatusCode,
         cost_catalog_version: Option<CacheCostCatalogVersion>,
@@ -36,6 +40,8 @@ impl ResponseStreamCancellationGuard {
             app_state,
             cancellation,
             context,
+            request_id,
+            log_id,
             url: url.into(),
             status_code,
             cost_catalog_version,
@@ -52,6 +58,12 @@ impl ResponseStreamCancellationGuard {
 impl Drop for ResponseStreamCancellationGuard {
     fn drop(&mut self) {
         if self.armed {
+            crate::debug_event!(
+                "proxy.client_disconnect_detected",
+                request_id = &self.request_id,
+                log_id = self.log_id,
+                phase = "response_stream",
+            );
             self.cancellation.cancel_now(self.reason.clone());
             let app_state = Arc::clone(&self.app_state);
             let context = Arc::clone(&self.context);

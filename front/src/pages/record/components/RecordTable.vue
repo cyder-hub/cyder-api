@@ -26,6 +26,15 @@
         :title="record.displayRequestedModelName"
         :description="record.request_at_formatted"
       >
+        <div class="min-w-0 rounded-lg bg-gray-50 px-3 py-2">
+          <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+            {{ $t("recordPage.table.requestId") }}
+          </p>
+          <p class="mt-1 break-all font-mono text-[11px] leading-4 text-gray-700">
+            {{ record.request_id }}
+          </p>
+        </div>
+
         <div class="grid grid-cols-1 gap-3 text-sm min-[360px]:grid-cols-2">
           <MobileField :label="$t('recordPage.table.provider')" :value="record.providerName" />
           <MobileField :label="$t('recordPage.table.apiKey')" :value="record.apiKeyName" />
@@ -96,7 +105,14 @@
             :key="record.id"
             class="hover:bg-gray-50"
           >
-            <TableCell class="font-medium">{{ record.displayRequestedModelName }}</TableCell>
+            <TableCell>
+              <div class="max-w-[18rem]">
+                <div class="font-medium">{{ record.displayRequestedModelName }}</div>
+                <div class="mt-1 truncate font-mono text-[11px] text-gray-500">
+                  {{ record.request_id }}
+                </div>
+              </div>
+            </TableCell>
             <TableCell>{{ record.providerName }}</TableCell>
             <TableCell>{{ record.apiKeyName }}</TableCell>
             <TableCell class="w-14 text-center">

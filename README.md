@@ -152,6 +152,21 @@ Current built-in database backends are SQLite and PostgreSQL; other database URL
 
 Default `base_path` is `/ai`.
 
+### Proxy Request Identity
+
+Every request under the four public proxy prefixes—`/ai/openai/*`, `/ai/responses/*`, `/ai/anthropic/*`, and `/ai/gemini/*`—receives a gateway-owned canonical request identity:
+
+- Cyder always generates `X-Request-ID` as a lowercase, hyphenated UUID v4 at the outer proxy boundary.
+- A caller-provided `X-Request-ID` is ignored. It cannot become the canonical identity or override the response, upstream request, logs, or Request Record.
+- A caller may instead send one `X-Client-Request-ID`. It is accepted only when it is 1–64 ASCII characters from `[A-Za-z0-9._:-]`. Empty, unsafe, overlong, non-UTF-8, or repeated values are ignored without logging the rejected value.
+- A valid client ID is echoed in `X-Client-Request-ID` and stored as an optional, non-unique troubleshooting field. It is caller-provided and must never be treated as identity, authentication, authorization, or trusted evidence.
+
+The canonical ID is returned on success, authentication and client-identity errors, proxy-prefix 404/405 responses, and CORS preflight responses. It is sent to the selected upstream as `X-Request-ID`, included in structured request logs, and persisted in the existing Request Record paths. `X-Client-Request-ID` is never sent upstream. Manager, System, the base `/ai` fallback, and unknown `/ai/ollama/*` routes are outside this identity layer.
+
+Request Patch Create and Update reject both `x-request-id` and `x-client-request-id`; upstream response headers with those names also cannot override the gateway response. The Record page displays and copies the gateway ID, shows the optional caller ID separately, and searches both values by exact match. Request IDs are evidence keys, not metric labels, protocol-body fields, or W3C Trace IDs.
+
+The paired R3.2 SQLite/PostgreSQL development migration is intentionally destructive for Request Records: upgrading clears historical `request_log` rows and their metrics-ingestion cursor before adding the constrained identity fields. It does not backfill legacy IDs, modify Request Patch rows, or delete already aggregated minute rollups. Back up the database first if historical pre-1.0 Request Records are needed outside Cyder.
+
 The only environment variables that can override final config fields are:
 
 - `CYDER_HOST`

@@ -1514,7 +1514,7 @@ mod tests {
             );
 
             INSERT INTO request_log (
-                id, api_key_id, requested_model_name,
+                id, request_id, client_request_id, api_key_id, requested_model_name,
                 downstream_protocol, overall_status, final_error_code, final_error_message,
                 request_received_at,
                 upstream_request_sent_at, response_started_to_client_at, completed_at,
@@ -1526,7 +1526,7 @@ mod tests {
                 created_at, updated_at
             ) VALUES
             (
-                100, 1, 'gpt-test',
+                100, '018fa7d8-6a00-4c9a-8f7e-100000000000', 'stat-client', 1, 'gpt-test',
                 'OPENAI', 'SUCCESS', NULL, NULL,
                 1000,
                 1100, 1200, 1500,
@@ -1538,7 +1538,7 @@ mod tests {
                 1000, 1500
             ),
             (
-                101, 1, 'gpt-test',
+                101, '018fa7d8-6a00-4c9a-8f7e-101000000000', 'stat-client', 1, 'gpt-test',
                 'OPENAI', 'ERROR', 'upstream_service_error', 'failed',
                 2000,
                 2250, 2300, 2550,
@@ -1550,7 +1550,7 @@ mod tests {
                 2000, 2550
             ),
             (
-                102, 1, 'gpt-empty',
+                102, '018fa7d8-6a00-4c9a-8f7e-102000000000', NULL, 1, 'gpt-empty',
                 'OPENAI', 'SUCCESS', NULL, NULL,
                 3000,
                 NULL, NULL, 3100,

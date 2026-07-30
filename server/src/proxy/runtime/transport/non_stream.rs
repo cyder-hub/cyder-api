@@ -55,8 +55,14 @@ pub(super) async fn handle_non_streaming_response(
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
+    let (request_id, log_id) = {
+        let context = log_context.lock().await;
+        (context.request_id.clone(), context.id)
+    };
     crate::debug_event!(
         "proxy.response_headers_received",
+        request_id = &request_id,
+        log_id = log_id,
         status_code = status_code.as_u16(),
         response_header_count = response_headers.len(),
         content_type = response_content_type(&response_headers),
@@ -117,6 +123,7 @@ pub(super) async fn handle_non_streaming_response(
             response_mode,
             &decompressed_body,
             llm_response_completed_at,
+            &request_id,
         )
         .await;
         let (final_body, parsed_usage_info, parsed_usage_normalization, _) = match response_mode {
@@ -162,6 +169,7 @@ pub(super) async fn handle_non_streaming_response(
         .await;
         crate::debug_event!(
             "proxy.request_succeeded_debug",
+            request_id = &context.request_id,
             log_id = context.id,
             model = &model_str,
             status_code = status_code.as_u16(),
@@ -179,6 +187,7 @@ pub(super) async fn handle_non_streaming_response(
         let mut context = log_context.lock().await;
         crate::error_event!(
             "proxy.upstream_error_body",
+            request_id = &context.request_id,
             status_code = status_code.as_u16(),
             log_id = context.id,
             response_body_bytes = decompressed_body.len(),
@@ -220,6 +229,7 @@ pub(super) async fn capture_non_stream_reasoning_continuation(
     response_mode: ProxyResponseMode,
     body: &Bytes,
     observed_at_ms: i64,
+    request_id: &crate::proxy::request_context::RequestId,
 ) {
     let Some(reasoning_capture) = reasoning_capture else {
         return;
@@ -246,7 +256,11 @@ pub(super) async fn capture_non_stream_reasoning_continuation(
             .insert(snapshot, observed_at_ms)
             .await
         {
-            cyder_tools::log::debug!("Failed to cache reasoning continuation: {err}");
+            crate::debug_event!(
+                "proxy.reasoning_continuation_cache_failed",
+                request_id = request_id,
+                error = err,
+            );
         }
     }
 }

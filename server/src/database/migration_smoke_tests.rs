@@ -360,6 +360,51 @@ fn assert_postgres_request_log_protocol_schema(connection: &mut PgConnection) {
     assert_eq!(legacy_type, 0);
 }
 
+fn assert_postgres_request_identity_schema(connection: &mut PgConnection) {
+    let canonical_column = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name = 'request_id'
+           AND is_nullable = 'NO'
+           AND data_type = 'text'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL request_id column should query")
+    .count;
+    assert_eq!(canonical_column, 1);
+
+    let client_column = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name = 'client_request_id'
+           AND is_nullable = 'YES'
+           AND data_type = 'text'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL client_request_id column should query")
+    .count;
+    assert_eq!(client_column, 1);
+
+    let identity_indexes = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_indexes
+         WHERE schemaname = 'public'
+           AND tablename = 'request_log'
+           AND indexname IN (
+               'idx_request_log_request_id',
+               'idx_request_log_client_request_id'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL request identity indexes should query")
+    .count;
+    assert_eq!(identity_indexes, 2);
+}
+
 #[test]
 fn sqlite_clean_upgrade_chain_from_empty() {
     let (_temp_dir, mut connection) = open_test_sqlite_connection("r1-migration-smoke.sqlite");
@@ -519,6 +564,159 @@ fn sqlite_request_log_protocol_boundary_upgrade_clears_history_and_enforces_doma
             .expect("foreign key check should run")
             .count;
     assert_eq!(foreign_key_violations, 0);
+}
+
+#[test]
+fn sqlite_request_identity_upgrade_is_destructive_constrained_and_preserves_rollups() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("request-log-identity-upgrade.sqlite");
+    run_sqlite_migrations(&mut connection).expect("sqlite migrations should run");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-30-090000_request_log_request_identity/down.sql"
+        ))
+        .expect("request identity down migration should run");
+    connection
+        .batch_execute(
+            "INSERT INTO api_key (
+                id, api_key_hash, key_prefix, key_last4, name, description,
+                default_action, is_enabled, expires_at, rate_limit_rpm,
+                max_concurrent_requests, quota_daily_requests, quota_daily_tokens,
+                quota_monthly_tokens, budget_daily_nanos, budget_daily_currency,
+                budget_monthly_nanos, budget_monthly_currency, deleted_at,
+                created_at, updated_at
+            ) VALUES (
+                9101, 'request-identity-hash', 'ck-test', '9101',
+                'Request identity migration key', NULL, 'ALLOW', 1, NULL, NULL,
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 1
+            );
+            INSERT INTO request_log (
+                id, api_key_id, downstream_protocol, overall_status,
+                request_received_at, is_stream, created_at, updated_at
+            ) VALUES (
+                9102, 9101, 'OPENAI', 'SUCCESS', 1, 0, 1, 1
+            );
+            INSERT INTO metric_ingested_request_log (
+                request_log_id, request_received_at, completed_at, ingested_at
+            ) VALUES (9102, 1, 1, 1);
+            INSERT INTO metric_request_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, scope_label,
+                request_count, success_count, error_count, cancelled_count,
+                first_byte_latency_sum_ms, first_byte_latency_count,
+                total_latency_sum_ms, total_latency_count,
+                input_tokens, output_tokens, reasoning_tokens, total_tokens,
+                created_at, updated_at
+            ) VALUES (
+                0, 'global', 'global', NULL,
+                1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 2, 1, 1
+            );",
+        )
+        .expect("pre-identity request data should insert");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-30-090000_request_log_request_identity/up.sql"
+        ))
+        .expect("request identity up migration should run");
+
+    assert_eq!(
+        sqlite_table_column_count(&mut connection, "request_log", "request_id"),
+        1
+    );
+    assert_eq!(
+        sqlite_table_column_count(&mut connection, "request_log", "client_request_id"),
+        1
+    );
+    for table in ["request_log", "metric_ingested_request_log"] {
+        let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+            .get_result::<CountRow>(&mut connection)
+            .expect("destructive migration table count should query")
+            .count;
+        assert_eq!(count, 0, "{table} must be cleared");
+    }
+    let rollup_count =
+        diesel::sql_query("SELECT COUNT(*) AS count FROM metric_request_rollup_minute")
+            .get_result::<CountRow>(&mut connection)
+            .expect("rollup count should query")
+            .count;
+    assert_eq!(rollup_count, 1, "minute rollups must be preserved");
+
+    connection
+        .batch_execute(
+            "INSERT INTO request_log (
+                id, request_id, client_request_id, api_key_id,
+                downstream_protocol, overall_status, request_received_at,
+                is_stream, created_at, updated_at
+            ) VALUES
+                (9103, '018fa7d8-6a00-4c9a-8f7e-111111111111', 'caller.same-1',
+                 9101, 'OPENAI', 'SUCCESS', 2, 0, 2, 2),
+                (9104, '018fa7d8-6a00-4c9a-9f7e-222222222222', 'caller.same-1',
+                 9101, 'RESPONSES', 'SUCCESS', 3, 0, 3, 3);",
+        )
+        .expect("valid request identities and duplicate client ids should insert");
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, request_id, api_key_id, downstream_protocol, overall_status,
+                    request_received_at, is_stream, created_at, updated_at
+                ) VALUES (
+                    9105, '018fa7d8-6a00-4c9a-8f7e-111111111111',
+                    9101, 'OPENAI', 'SUCCESS', 4, 0, 4, 4
+                );"
+            )
+            .is_err(),
+        "duplicate canonical id must be rejected"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, request_id, api_key_id, downstream_protocol, overall_status,
+                    request_received_at, is_stream, created_at, updated_at
+                ) VALUES (
+                    9106, '018fa7d8-6a00-7c9a-8f7e-333333333333',
+                    9101, 'OPENAI', 'SUCCESS', 5, 0, 5, 5
+                );"
+            )
+            .is_err(),
+        "non-v4 canonical id must be rejected"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, request_id, client_request_id, api_key_id,
+                    downstream_protocol, overall_status, request_received_at,
+                    is_stream, created_at, updated_at
+                ) VALUES (
+                    9107, '018fa7d8-6a00-4c9a-af7e-444444444444', 'unsafe value',
+                    9101, 'OPENAI', 'SUCCESS', 6, 0, 6, 6
+                );"
+            )
+            .is_err(),
+        "unsafe client request id must be rejected"
+    );
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-30-090000_request_log_request_identity/down.sql"
+        ))
+        .expect("request identity down migration should clear and revert");
+    assert_eq!(
+        sqlite_table_column_count(&mut connection, "request_log", "request_id"),
+        0
+    );
+    let rollup_count =
+        diesel::sql_query("SELECT COUNT(*) AS count FROM metric_request_rollup_minute")
+            .get_result::<CountRow>(&mut connection)
+            .expect("down migration rollup count should query")
+            .count;
+    assert_eq!(
+        rollup_count, 1,
+        "down migration must preserve minute rollups"
+    );
 }
 
 #[test]
@@ -1122,6 +1320,7 @@ fn postgres_clean_upgrade_chain_from_empty() {
         run_postgres_migrations(&mut connection)
             .expect("postgres clean + upgrade migrations should run");
         assert_postgres_request_log_protocol_schema(&mut connection);
+        assert_postgres_request_identity_schema(&mut connection);
 
         let applied_versions = connection
             .applied_migrations()
@@ -1233,6 +1432,176 @@ fn postgres_request_log_protocol_boundary_upgrade_clears_history() {
                     (9004, 9001, 'RESPONSES', 'OLLAMA', 'SUCCESS', 3, FALSE, 3, 3);",
             )
             .expect("PostgreSQL directional request logs should insert");
+    }));
+
+    rebuild_postgres_public_schema(&mut connection);
+    if let Err(panic_payload) = test_result {
+        resume_unwind(panic_payload);
+    }
+}
+
+#[test]
+#[ignore = "requires a dedicated PostgreSQL 17 database"]
+fn postgres_request_identity_upgrade_is_destructive_constrained_and_preserves_rollups() {
+    let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
+        panic!("{POSTGRES_SMOKE_URL_ENV} must point to the dedicated PostgreSQL smoke database")
+    });
+    let mut connection = PgConnection::establish(&database_url)
+        .expect("dedicated postgres smoke database should be reachable");
+    assert_eq!(
+        postgres_database_name(&mut connection),
+        POSTGRES_SMOKE_DATABASE,
+        "refusing to rebuild a non-dedicated PostgreSQL database"
+    );
+
+    rebuild_postgres_public_schema(&mut connection);
+    let test_result = catch_unwind(AssertUnwindSafe(|| {
+        run_postgres_migrations(&mut connection).expect("postgres migrations should run");
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-30-090000_request_log_request_identity/down.sql"
+            ))
+            .expect("request identity down migration should run");
+        connection
+            .batch_execute(
+                "INSERT INTO api_key (
+                    id, api_key_hash, key_prefix, key_last4, name, description,
+                    default_action, is_enabled, expires_at, rate_limit_rpm,
+                    max_concurrent_requests, quota_daily_requests, quota_daily_tokens,
+                    quota_monthly_tokens, budget_daily_nanos, budget_daily_currency,
+                    budget_monthly_nanos, budget_monthly_currency, deleted_at,
+                    created_at, updated_at
+                ) VALUES (
+                    9101, 'request-identity-hash', 'ck-test', '9101',
+                    'Request identity migration key', NULL, 'ALLOW', TRUE, NULL, NULL,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 1
+                );
+                INSERT INTO request_log (
+                    id, api_key_id, downstream_protocol, overall_status,
+                    request_received_at, is_stream, created_at, updated_at
+                ) VALUES (
+                    9102, 9101, 'OPENAI', 'SUCCESS', 1, FALSE, 1, 1
+                );
+                INSERT INTO metric_ingested_request_log (
+                    request_log_id, request_received_at, completed_at, ingested_at
+                ) VALUES (9102, 1, 1, 1);
+                INSERT INTO metric_request_rollup_minute (
+                    bucket_start_ms, scope_type, scope_id, scope_label,
+                    request_count, success_count, error_count, cancelled_count,
+                    first_byte_latency_sum_ms, first_byte_latency_count,
+                    total_latency_sum_ms, total_latency_count,
+                    input_tokens, output_tokens, reasoning_tokens, total_tokens,
+                    created_at, updated_at
+                ) VALUES (
+                    0, 'global', 'global', NULL,
+                    1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 2, 1, 1
+                );",
+            )
+            .expect("pre-identity PostgreSQL request data should insert");
+
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-30-090000_request_log_request_identity/up.sql"
+            ))
+            .expect("request identity up migration should run");
+        assert_postgres_request_identity_schema(&mut connection);
+
+        for table in ["request_log", "metric_ingested_request_log"] {
+            let count = diesel::sql_query(format!("SELECT COUNT(*) AS count FROM {table}"))
+                .get_result::<CountRow>(&mut connection)
+                .expect("PostgreSQL destructive migration table count should query")
+                .count;
+            assert_eq!(count, 0, "{table} must be cleared");
+        }
+        let rollup_count =
+            diesel::sql_query("SELECT COUNT(*) AS count FROM metric_request_rollup_minute")
+                .get_result::<CountRow>(&mut connection)
+                .expect("PostgreSQL rollup count should query")
+                .count;
+        assert_eq!(rollup_count, 1, "minute rollups must be preserved");
+
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, request_id, client_request_id, api_key_id,
+                    downstream_protocol, overall_status, request_received_at,
+                    is_stream, created_at, updated_at
+                ) VALUES
+                    (9103, '018fa7d8-6a00-4c9a-8f7e-111111111111', 'caller.same-1',
+                     9101, 'OPENAI', 'SUCCESS', 2, FALSE, 2, 2),
+                    (9104, '018fa7d8-6a00-4c9a-9f7e-222222222222', 'caller.same-1',
+                     9101, 'RESPONSES', 'SUCCESS', 3, FALSE, 3, 3);",
+            )
+            .expect("valid PostgreSQL request identities should insert");
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_log (
+                        id, request_id, api_key_id, downstream_protocol, overall_status,
+                        request_received_at, is_stream, created_at, updated_at
+                    ) VALUES (
+                        9105, '018fa7d8-6a00-4c9a-8f7e-111111111111',
+                        9101, 'OPENAI', 'SUCCESS', 4, FALSE, 4, 4
+                    );"
+                )
+                .is_err(),
+            "duplicate PostgreSQL canonical id must be rejected"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_log (
+                        id, request_id, api_key_id, downstream_protocol, overall_status,
+                        request_received_at, is_stream, created_at, updated_at
+                    ) VALUES (
+                        9106, '018fa7d8-6a00-7c9a-8f7e-333333333333',
+                        9101, 'OPENAI', 'SUCCESS', 5, FALSE, 5, 5
+                    );"
+                )
+                .is_err(),
+            "non-v4 PostgreSQL canonical id must be rejected"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO request_log (
+                        id, request_id, client_request_id, api_key_id,
+                        downstream_protocol, overall_status, request_received_at,
+                        is_stream, created_at, updated_at
+                    ) VALUES (
+                        9107, '018fa7d8-6a00-4c9a-af7e-444444444444', 'unsafe value',
+                        9101, 'OPENAI', 'SUCCESS', 6, FALSE, 6, 6
+                    );"
+                )
+                .is_err(),
+            "unsafe PostgreSQL client request id must be rejected"
+        );
+
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-30-090000_request_log_request_identity/down.sql"
+            ))
+            .expect("request identity down migration should clear and revert");
+        let canonical_column = diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'request_log'
+               AND column_name = 'request_id'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("down-migrated PostgreSQL request_id column should query")
+        .count;
+        assert_eq!(canonical_column, 0);
+        let rollup_count =
+            diesel::sql_query("SELECT COUNT(*) AS count FROM metric_request_rollup_minute")
+                .get_result::<CountRow>(&mut connection)
+                .expect("PostgreSQL down migration rollup count should query")
+                .count;
+        assert_eq!(
+            rollup_count, 1,
+            "down migration must preserve minute rollups"
+        );
     }));
 
     rebuild_postgres_public_schema(&mut connection);

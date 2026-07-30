@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use axum::{body::Bytes, http::HeaderMap};
+use axum::{
+    body::Bytes,
+    http::{HeaderMap, HeaderValue},
+};
 use reqwest::{
     Url,
     header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, HOST},
@@ -10,6 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     proxy::{
         ProxyError, protocol_transform_error,
+        request_context::{ProxyRequestContext, X_CLIENT_REQUEST_ID, X_REQUEST_ID},
         runtime::{
             reasoning_content_repair::{
                 ReasoningContentRepairRequest, repair_openai_reasoning_content,
@@ -82,6 +86,8 @@ fn build_gemini_headers(
             && name != "x-api-key"
             && name != "x-goog-api-key"
             && name != AUTHORIZATION
+            && name != X_REQUEST_ID
+            && name != X_CLIENT_REQUEST_ID
         {
             headers.insert(name.clone(), value.clone());
         }
@@ -130,7 +136,12 @@ fn build_new_headers(
 ) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
     for (name, value) in pre_headers.iter() {
-        if name != HOST && name != CONTENT_LENGTH && name != ACCEPT_ENCODING && name != "x-api-key"
+        if name != HOST
+            && name != CONTENT_LENGTH
+            && name != ACCEPT_ENCODING
+            && name != "x-api-key"
+            && name != X_REQUEST_ID
+            && name != X_CLIENT_REQUEST_ID
         {
             headers.insert(name.clone(), value.clone());
         }
@@ -138,6 +149,19 @@ fn build_new_headers(
     apply_provider_request_auth_header(&mut headers, provider, upstream_protocol, credential)
         .map_err(|error| ProxyError::BadRequest(error.to_string()))?;
     Ok(headers)
+}
+
+pub(in crate::proxy) fn apply_gateway_request_identity(
+    headers: &mut HeaderMap,
+    request_context: &ProxyRequestContext,
+) {
+    headers.remove(&X_REQUEST_ID);
+    headers.remove(&X_CLIENT_REQUEST_ID);
+    headers.insert(
+        &X_REQUEST_ID,
+        HeaderValue::from_str(request_context.request_id.as_str())
+            .expect("generated request id must be a valid header value"),
+    );
 }
 
 fn resolve_real_model_name(model: &CacheModel) -> &str {

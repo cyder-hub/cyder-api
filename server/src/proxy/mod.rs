@@ -10,6 +10,7 @@ mod pipeline;
 mod provider_governance;
 pub(crate) mod reasoning_suffix;
 mod request;
+mod request_context;
 mod requested_model;
 mod router;
 pub(crate) mod runtime;

@@ -9,6 +9,7 @@ use crate::{
     proxy::{
         ProxyError,
         logging::{RequestLogContext, record_request_completion_and_log},
+        request_context::ProxyRequestContext,
         runtime::route_resolver::ExecutionTarget,
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus},
@@ -27,7 +28,7 @@ pub(in crate::proxy) struct RequestLogContextInput<'a> {
     pub resolved_reasoning_suffix: Option<&'a str>,
     pub resolved_reasoning_preset: Option<&'a str>,
     pub client_ip_addr: &'a Option<String>,
-    pub start_time: i64,
+    pub request_context: &'a ProxyRequestContext,
     pub downstream_protocol: DownstreamProtocol,
 }
 
@@ -40,7 +41,7 @@ pub(in crate::proxy) fn new_request_log_context(
         &input.target.model,
         None,
         input.requested_model_name,
-        input.start_time,
+        input.request_context,
         input.client_ip_addr,
         input.downstream_protocol,
         input.target.upstream_protocol,

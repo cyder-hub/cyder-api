@@ -14,6 +14,7 @@ use tokio::{
 use crate::{
     cost::{CostLedger, CostRatingContext, CostSnapshot, UsageNormalization, rate_cost},
     database::request_log::{RequestLog, RequestLogRecord},
+    proxy::request_context::{ClientRequestId, ProxyRequestContext, RequestId},
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState,
@@ -29,6 +30,8 @@ use crate::database::TestDbContext;
 #[derive(Debug, Clone)]
 pub struct RequestLogContext {
     pub id: i64,
+    pub request_id: RequestId,
+    pub client_request_id: Option<ClientRequestId>,
     pub api_key_id: i64,
     pub provider_id: i64,
     pub provider_key: String,
@@ -69,7 +72,7 @@ impl RequestLogContext {
         model: &CacheModel,
         provider_api_key_id: Option<i64>,
         requested_model_name: &str,
-        start_time: i64,
+        request_context: &ProxyRequestContext,
         client_ip_addr: &Option<String>,
         downstream_protocol: DownstreamProtocol,
         upstream_protocol: UpstreamProtocol,
@@ -81,6 +84,8 @@ impl RequestLogContext {
             .unwrap_or(&model.model_name);
         Self {
             id: ID_GENERATOR.generate_id(),
+            request_id: request_context.request_id.clone(),
+            client_request_id: request_context.client_request_id.clone(),
             api_key_id: api_key.id,
             provider_id: provider.id,
             provider_key: provider.provider_key.clone(),
@@ -95,7 +100,7 @@ impl RequestLogContext {
             real_model_name: real_model_name.to_string(),
             downstream_protocol,
             upstream_protocol,
-            request_received_at: start_time,
+            request_received_at: request_context.received_at_ms,
             client_ip: client_ip_addr.clone(),
             llm_request_sent_at: None,
             request_url: None,
@@ -164,6 +169,7 @@ pub(super) async fn record_request_completion_and_log(
     {
         crate::error_event!(
             "logging.api_key_completion_record_failed",
+            request_id = &context.request_id,
             log_id = context.id,
             api_key_id = context.api_key_id,
             error = err,
@@ -174,7 +180,13 @@ pub(super) async fn record_request_completion_and_log(
 
 #[async_trait::async_trait]
 pub trait RequestLogPersistedSink: Send + Sync {
-    async fn on_request_log_persisted(&self, request_log_id: i64);
+    async fn on_request_log_persisted(&self, context: RequestLogPersistedContext);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestLogPersistedContext {
+    pub request_log_id: i64,
+    pub request_id: String,
 }
 
 pub struct LogManager {
@@ -287,6 +299,8 @@ impl LogManager {
     }
 
     pub async fn log(&self, context: RequestLogContext) {
+        let request_id = context.request_id.clone();
+        let log_id = context.id;
         self.metrics.enqueued.fetch_add(1, Ordering::Relaxed);
         self.metrics.pending.fetch_add(1, Ordering::Relaxed);
         if self.sender.send(LogCommand::Record(context)).await.is_err() {
@@ -294,6 +308,11 @@ impl LogManager {
             self.metrics
                 .enqueue_failures
                 .fetch_add(1, Ordering::Relaxed);
+            crate::error_event!(
+                "logging.request_log_enqueue_failed",
+                request_id = &request_id,
+                log_id = log_id,
+            );
         }
     }
 
@@ -322,6 +341,7 @@ async fn process_log(
                 metrics.retries.fetch_add(1, Ordering::Relaxed);
                 crate::warn_event!(
                     "logging.request_log_insert_retry",
+                    request_id = &context.request_id,
                     log_id = context.id,
                     retry = retry + 1,
                     error = format!("{err:?}"),
@@ -332,6 +352,7 @@ async fn process_log(
                 metrics.db_failures.fetch_add(1, Ordering::Relaxed);
                 crate::error_event!(
                     "logging.request_log_insert_failed",
+                    request_id = &context.request_id,
                     log_id = context.id,
                     error = format!("{err:?}"),
                 );
@@ -340,9 +361,19 @@ async fn process_log(
     }
 
     if let Some(row) = inserted {
+        crate::debug_event!(
+            "logging.request_log_inserted",
+            request_id = &context.request_id,
+            log_id = row.id,
+        );
         let persisted_sink = sink.read().ok().and_then(|guard| guard.clone());
         if let Some(persisted_sink) = persisted_sink {
-            persisted_sink.on_request_log_persisted(row.id).await;
+            persisted_sink
+                .on_request_log_persisted(RequestLogPersistedContext {
+                    request_log_id: row.id,
+                    request_id: context.request_id.to_string(),
+                })
+                .await;
         }
     }
 }
@@ -351,6 +382,8 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
     let cost = build_cost_outcome(context);
     RequestLog {
         id: context.id,
+        request_id: context.request_id.to_string(),
+        client_request_id: context.client_request_id.as_ref().map(ToString::to_string),
         api_key_id: context.api_key_id,
         requested_model_name: Some(context.requested_model_name.clone()),
         base_requested_model_name: Some(context.base_requested_model_name.clone()),

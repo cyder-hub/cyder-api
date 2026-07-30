@@ -11,7 +11,7 @@ use crate::{
         },
         request_log::RequestLog,
     },
-    proxy::logging::RequestLogPersistedSink,
+    proxy::logging::{RequestLogPersistedContext, RequestLogPersistedSink},
 };
 
 use super::{
@@ -330,12 +330,13 @@ fn align_bucket_end(timestamp_ms: i64, bucket_seconds: u64) -> i64 {
 
 #[async_trait::async_trait]
 impl RequestLogPersistedSink for MetricsService {
-    async fn on_request_log_persisted(&self, request_log_id: i64) {
-        match self.ingest_request_log_id(request_log_id) {
+    async fn on_request_log_persisted(&self, context: RequestLogPersistedContext) {
+        match self.ingest_request_log_id(context.request_log_id) {
             Ok(outcome) => {
                 crate::debug_event!(
                     "metrics.request_log_ingest_completed",
-                    request_log_id = request_log_id,
+                    request_id = &context.request_id,
+                    request_log_id = context.request_log_id,
                     ingested = outcome.ingested,
                     skipped_existing = outcome.skipped_existing,
                     request_rollup_deltas = outcome.request_rollup_deltas,
@@ -346,7 +347,8 @@ impl RequestLogPersistedSink for MetricsService {
             Err(err) => {
                 crate::warn_event!(
                     "metrics.request_log_ingest_failed",
-                    request_log_id = request_log_id,
+                    request_id = &context.request_id,
+                    request_log_id = context.request_log_id,
                     error = format!("{err:?}")
                 );
             }

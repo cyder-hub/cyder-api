@@ -7,6 +7,7 @@ use super::{
     ProxyError,
     cancellation::ProxyCancellationContext,
     request::ParsedProxyRequest,
+    request_context::ProxyRequestContext,
     runtime::{
         facade::{GenerationOrchestrationInput, execute_generation},
         route_resolver::ExecutionPlan,
@@ -26,7 +27,7 @@ pub(super) struct GenerationExecutionInput {
     pub query_params: std::collections::HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
-    pub start_time: i64,
+    pub request_context: Arc<ProxyRequestContext>,
     pub parsed_request: ParsedProxyRequest,
 }
 
@@ -49,7 +50,7 @@ pub(super) async fn execute_generation_proxy(
         query_params,
         original_headers,
         client_ip_addr,
-        start_time,
+        request_context,
         parsed_request,
     } = input;
     let ParsedProxyRequest { data } = parsed_request;
@@ -65,7 +66,7 @@ pub(super) async fn execute_generation_proxy(
             query_params,
             original_headers,
             client_ip_addr,
-            start_time,
+            request_context,
             data,
         },
     )

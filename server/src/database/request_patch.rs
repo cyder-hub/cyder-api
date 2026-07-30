@@ -18,6 +18,8 @@ const HARD_FORBIDDEN_HEADERS: &[&str] = &[
     "content-length",
     "transfer-encoding",
     "accept-encoding",
+    "x-request-id",
+    "x-client-request-id",
 ];
 const DANGEROUS_HEADERS: &[&str] = &["authorization", "x-api-key", "x-goog-api-key"];
 const HARD_FORBIDDEN_BODY_PREFIXES: &[&str] = &["/messages", "/tools", "/contents", "/input"];
@@ -1103,8 +1105,50 @@ mod tests {
     #[test]
     fn hard_forbidden_targets_are_rejected() {
         assert!(validate_reserved_target(RequestPatchPlacement::Header, "host").is_err());
+        assert!(validate_reserved_target(RequestPatchPlacement::Header, "x-request-id").is_err());
+        assert!(
+            validate_reserved_target(RequestPatchPlacement::Header, "x-client-request-id").is_err()
+        );
         assert!(validate_reserved_target(RequestPatchPlacement::Body, "/messages").is_err());
         assert!(validate_reserved_target(RequestPatchPlacement::Body, "/messages/0").is_err());
+    }
+
+    #[test]
+    fn create_and_update_reject_gateway_request_identity_headers() {
+        for target in ["X-Request-ID", "x-client-request-id"] {
+            let create = CreateRequestPatchPayload {
+                placement: RequestPatchPlacement::Header,
+                target: target.to_string(),
+                operation: RequestPatchOperation::Set,
+                value_json: Some(Some(json!("forged"))),
+                description: None,
+                is_enabled: Some(true),
+                confirm_dangerous_target: Some(true),
+            };
+            let candidate =
+                resolve_create_payload(&create).expect("payload shape should normalize");
+            assert!(
+                requires_confirmation(None, &candidate).is_err(),
+                "create must reject {target}"
+            );
+
+            let existing = sample_rule(
+                RequestPatchPlacement::Header,
+                "x-ordinary-header",
+                RequestPatchOperation::Set,
+                Some("\"old\""),
+            );
+            let update = UpdateRequestPatchPayload {
+                target: Some(target.to_string()),
+                ..UpdateRequestPatchPayload::default()
+            };
+            let candidate =
+                resolve_update_payload(&existing, &update).expect("update should normalize");
+            assert!(
+                requires_confirmation(Some(&existing), &candidate).is_err(),
+                "update must reject {target}"
+            );
+        }
     }
 
     #[test]

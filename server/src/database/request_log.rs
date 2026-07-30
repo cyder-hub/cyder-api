@@ -11,6 +11,8 @@ db_object! {
     #[diesel(table_name = request_log)]
     pub struct RequestLog {
         pub id: i64,
+        pub request_id: String,
+        pub client_request_id: Option<String>,
         pub api_key_id: i64,
         pub requested_model_name: Option<String>,
         pub base_requested_model_name: Option<String>,
@@ -61,6 +63,8 @@ db_object! {
     #[diesel(table_name = request_log)]
     pub struct RequestLogListItem {
         pub id: i64,
+        pub request_id: String,
+        pub client_request_id: Option<String>,
         pub api_key_id: i64,
         pub requested_model_name: Option<String>,
         pub base_requested_model_name: Option<String>,
@@ -314,7 +318,9 @@ impl RequestLog {
                             request_log::dsl::final_error_code
                                 .assume_not_null()
                                 .like(pattern.clone()),
-                        ));
+                        ))
+                        .or(request_log::dsl::request_id.eq(search_term))
+                        .or(request_log::dsl::client_request_id.eq(Some(search_term)));
 
                     if let Ok(id_search) = search_term.parse::<i64>() {
                         let search_filter = request_log::dsl::id.eq(id_search).or(text_filter);
@@ -498,7 +504,9 @@ impl RequestLog {
                             request_log::dsl::final_error_code
                                 .assume_not_null()
                                 .like(pattern.clone()),
-                        ));
+                        ))
+                        .or(request_log::dsl::request_id.eq(search_term))
+                        .or(request_log::dsl::client_request_id.eq(Some(search_term)));
 
                     if let Ok(id_search) = search_term.parse::<i64>() {
                         let search_filter = request_log::dsl::id.eq(id_search).or(text_filter);
@@ -590,6 +598,8 @@ mod tests {
     ) -> RequestLog {
         RequestLog {
             id,
+            request_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            client_request_id: Some("repository-test".to_string()),
             api_key_id,
             requested_model_name: Some("provider/model".to_string()),
             base_requested_model_name: Some("provider/model".to_string()),
@@ -696,9 +706,9 @@ mod tests {
 
             let invalid_downstream = diesel::sql_query(format!(
                 "INSERT INTO request_log (
-                    id, api_key_id, downstream_protocol, overall_status,
+                    id, request_id, api_key_id, downstream_protocol, overall_status,
                     request_received_at, is_stream, created_at, updated_at
-                ) VALUES ({}, {}, 'OLLAMA', 'SUCCESS', 1000, 0, 1000, 1000)",
+                ) VALUES ({}, '018fa7d8-6a00-4c9a-8f7e-111111111111', {}, 'OLLAMA', 'SUCCESS', 1000, 0, 1000, 1000)",
                 ID_GENERATOR.generate_id(),
                 api_key.detail.id
             ))
@@ -707,14 +717,132 @@ mod tests {
 
             let invalid_upstream = diesel::sql_query(format!(
                 "INSERT INTO request_log (
-                    id, api_key_id, downstream_protocol, upstream_protocol,
+                    id, request_id, api_key_id, downstream_protocol, upstream_protocol,
                     overall_status, request_received_at, is_stream, created_at, updated_at
-                ) VALUES ({}, {}, 'OPENAI', 'GEMINI_OPENAI', 'SUCCESS', 1000, 0, 1000, 1000)",
+                ) VALUES ({}, '018fa7d8-6a00-4c9a-9f7e-222222222222', {}, 'OPENAI', 'GEMINI_OPENAI', 'SUCCESS', 1000, 0, 1000, 1000)",
                 ID_GENERATOR.generate_id(),
                 api_key.detail.id
             ))
             .execute(connection);
             assert!(invalid_upstream.is_err());
+        });
+    }
+
+    #[test]
+    fn sqlite_request_log_searches_request_identity_exactly_and_preserves_existing_searches() {
+        let database = TestDbContext::new_sqlite("request-log-identity-search.sqlite");
+        database.run_sync(|| {
+            let api_key = ApiKey::create(&api_key_payload()).expect("api key should create");
+            let first_id = ID_GENERATOR.generate_id();
+            let second_id = ID_GENERATOR.generate_id();
+            let third_id = ID_GENERATOR.generate_id();
+            let first_request_id = "018fa7d8-6a00-4c9a-8f7e-111111111111";
+            let second_request_id = "018fa7d8-6a00-4c9a-8f7e-222222222222";
+            let third_request_id = "018fa7d8-6a00-4c9a-8f7e-333333333333";
+
+            let mut first = request_log(
+                first_id,
+                api_key.detail.id,
+                DownstreamProtocol::Openai,
+                Some(UpstreamProtocol::Openai),
+            );
+            first.request_id = first_request_id.to_string();
+            first.client_request_id = Some("shared-client-request".to_string());
+            first.model_name_snapshot = Some("searchable-model".to_string());
+
+            let mut second = request_log(
+                second_id,
+                api_key.detail.id,
+                DownstreamProtocol::Responses,
+                Some(UpstreamProtocol::Responses),
+            );
+            second.request_id = second_request_id.to_string();
+            second.client_request_id = Some("shared-client-request".to_string());
+
+            let mut third = request_log(
+                third_id,
+                api_key.detail.id,
+                DownstreamProtocol::Anthropic,
+                Some(UpstreamProtocol::Anthropic),
+            );
+            third.request_id = third_request_id.to_string();
+            third.client_request_id = Some("different-client-request".to_string());
+
+            for log in [&first, &second, &third] {
+                RequestLog::insert(log).expect("request log should insert");
+            }
+
+            let canonical = RequestLog::list(RequestLogQueryPayload {
+                search: Some(first_request_id.to_string()),
+                ..Default::default()
+            })
+            .expect("canonical request id search should succeed");
+            assert_eq!(canonical.total, 1);
+            assert_eq!(canonical.list[0].id, first_id);
+            assert_eq!(canonical.list[0].request_id, first_request_id);
+            assert_eq!(
+                canonical.list[0].client_request_id.as_deref(),
+                Some("shared-client-request")
+            );
+
+            let partial_canonical = RequestLog::list(RequestLogQueryPayload {
+                search: Some("018fa7d8-6a00-4c9a".to_string()),
+                ..Default::default()
+            })
+            .expect("partial canonical request id search should succeed");
+            assert_eq!(partial_canonical.total, 0);
+
+            let duplicate_client = RequestLog::list(RequestLogQueryPayload {
+                search: Some("shared-client-request".to_string()),
+                ..Default::default()
+            })
+            .expect("client request id search should succeed");
+            assert_eq!(duplicate_client.total, 2);
+            assert!(
+                duplicate_client
+                    .list
+                    .iter()
+                    .all(|log| log.client_request_id.as_deref() == Some("shared-client-request"))
+            );
+
+            let duplicate_client_full = RequestLog::list_full(RequestLogQueryPayload {
+                search: Some("shared-client-request".to_string()),
+                ..Default::default()
+            })
+            .expect("full client request id search should succeed");
+            assert_eq!(duplicate_client_full.total, 2);
+
+            let partial_client = RequestLog::list(RequestLogQueryPayload {
+                search: Some("shared-client".to_string()),
+                ..Default::default()
+            })
+            .expect("partial client request id search should succeed");
+            assert_eq!(partial_client.total, 0);
+
+            let text_search = RequestLog::list(RequestLogQueryPayload {
+                search: Some("searchable".to_string()),
+                ..Default::default()
+            })
+            .expect("existing text search should succeed");
+            assert_eq!(text_search.total, 1);
+            assert_eq!(text_search.list[0].id, first_id);
+
+            let numeric_search = RequestLog::list(RequestLogQueryPayload {
+                search: Some(first_id.to_string()),
+                ..Default::default()
+            })
+            .expect("existing numeric record id search should succeed");
+            assert_eq!(numeric_search.total, 1);
+            assert_eq!(numeric_search.list[0].id, first_id);
+
+            let filtered_client = RequestLog::list(RequestLogQueryPayload {
+                downstream_protocol: Some(DownstreamProtocol::Openai),
+                search: Some("shared-client-request".to_string()),
+                ..Default::default()
+            })
+            .expect("identity search should compose with existing filters");
+            assert_eq!(filtered_client.total, 1);
+            assert_eq!(filtered_client.list[0].id, first_id);
         });
     }
 }

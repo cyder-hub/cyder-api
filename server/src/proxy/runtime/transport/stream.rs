@@ -7,7 +7,6 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
-use cyder_tools::log::{debug, error};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::{
@@ -27,6 +26,7 @@ use crate::{
         logging::RequestLogContext,
         protocol_transform_error,
         provider_governance::{record_provider_failure, record_provider_success},
+        request_context::RequestId,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{
@@ -48,6 +48,7 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub(super) struct OpenAiReasoningStreamCapture {
+    request_id: RequestId,
     scope: Option<ReasoningContinuationScope>,
     feature_enabled: bool,
     target_is_openai_compatible_generation: bool,
@@ -74,12 +75,14 @@ impl OpenAiReasoningStreamCapture {
     pub(super) fn new(
         capture_context: Option<ReasoningContinuationCaptureContext>,
         upstream_protocol: UpstreamProtocol,
+        request_id: RequestId,
     ) -> Self {
         let (scope, feature_enabled) = match capture_context {
             Some(context) => (Some(context.scope), context.feature_enabled),
             None => (None, false),
         };
         Self {
+            request_id,
             scope,
             feature_enabled,
             target_is_openai_compatible_generation: upstream_protocol == UpstreamProtocol::Openai,
@@ -117,6 +120,7 @@ impl OpenAiReasoningStreamCapture {
         let Some(scope) = self.scope.clone() else {
             return;
         };
+        let request_id = self.request_id.clone();
         let snapshots = self.snapshots(scope, observed_at_ms);
         for snapshot in snapshots {
             if let Err(err) = app_state
@@ -124,7 +128,11 @@ impl OpenAiReasoningStreamCapture {
                 .insert(snapshot, observed_at_ms)
                 .await
             {
-                debug!("Failed to cache reasoning continuation: {err}");
+                crate::debug_event!(
+                    "proxy.reasoning_continuation_cache_failed",
+                    request_id = &request_id,
+                    error = err,
+                );
             }
         }
     }
@@ -349,6 +357,7 @@ async fn finalize_openai_done_stream(
 
     crate::debug_event!(
         "proxy.request_succeeded_debug",
+        request_id = &context.request_id,
         log_id = context.id,
         model = model_str,
         status_code = status_code.as_u16(),
@@ -413,7 +422,10 @@ pub(super) async fn handle_streaming_response(
 ) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
-    let log_id = log_context.lock().await.id;
+    let (request_id, log_id) = {
+        let context = log_context.lock().await;
+        (context.request_id.clone(), context.id)
+    };
     let response_builder = build_response_builder(status_code, &response_headers);
 
     let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
@@ -443,6 +455,7 @@ pub(super) async fn handle_streaming_response(
     let mut transformer = StreamTransformer::new(upstream_protocol, downstream_protocol);
     let mut parser = SseParser::new();
     let log_context_clone = log_context.clone();
+    let stream_request_id = request_id.clone();
 
     let monitored_stream = async_stream::stream! {
         let mut api_key_request_lease = api_key_request_lease;
@@ -451,6 +464,8 @@ pub(super) async fn handle_streaming_response(
             Arc::clone(&app_state_clone),
             cancellation.clone(),
             log_context_clone.clone(),
+            stream_request_id.clone(),
+            log_id,
             url_owned.clone(),
             status_code,
             cost_catalog_version_clone.clone(),
@@ -458,7 +473,11 @@ pub(super) async fn handle_streaming_response(
         );
         let mut first_chunk_received_at_proxy: i64 = 0;
         let mut reasoning_stream_capture =
-            OpenAiReasoningStreamCapture::new(reasoning_capture, upstream_protocol);
+            OpenAiReasoningStreamCapture::new(
+                reasoning_capture,
+                upstream_protocol,
+                stream_request_id.clone(),
+            );
 
         loop {
             let chunk_result = match next_stream_chunk_timeout_duration(first_chunk_received_at_proxy, first_byte_timeout) {
@@ -487,7 +506,12 @@ pub(super) async fn handle_streaming_response(
                                 "LLM stream timed out waiting for the first chunk after {:?}",
                                 timeout_duration
                             );
-                            error!("{}", stream_error_message);
+                            crate::error_event!(
+                                "proxy.stream_first_chunk_timeout",
+                                request_id = &stream_request_id,
+                                log_id = log_id,
+                                error = &stream_error_message,
+                            );
                             let proxy_error = ProxyError::UpstreamTimeout(stream_error_message.clone());
                             finalize_streaming_error(
                                 &app_state_clone,
@@ -624,7 +648,12 @@ pub(super) async fn handle_streaming_response(
                 Err(e) => {
                     response_drop_guard.disarm();
                     let stream_error_message = format!("LLM stream error: {}", e);
-                    error!("{}", stream_error_message);
+                    crate::error_event!(
+                        "proxy.stream_read_failed",
+                        request_id = &stream_request_id,
+                        log_id = log_id,
+                        error = &stream_error_message,
+                    );
                     let proxy_error = ProxyError::BadGateway(stream_error_message.clone());
                     finalize_streaming_error(
                         &app_state_clone,
@@ -655,7 +684,13 @@ pub(super) async fn handle_streaming_response(
             && downstream_protocol == DownstreamProtocol::Openai
             && upstream_protocol == UpstreamProtocol::Gemini
         {
-            debug!("[handle_streaming_response] Appending [DONE] chunk for OpenAI client.");
+            crate::debug_event!(
+                "proxy.stream_done_synthesized",
+                request_id = &stream_request_id,
+                log_id = log_id,
+                downstream_protocol = format!("{downstream_protocol:?}"),
+                upstream_protocol = format!("{upstream_protocol:?}"),
+            );
             let done_chunk = Bytes::from("data: [DONE]\n\n");
             mark_stream_response_started_to_client(&log_context_clone, &done_chunk).await;
             yield Ok::<_, std::io::Error>(done_chunk);
@@ -690,6 +725,7 @@ pub(super) async fn handle_streaming_response(
             if context.usage.is_none() {
                 crate::debug_event!(
                     "proxy.stream_usage_missing_debug",
+                    request_id = &context.request_id,
                     log_id = context.id,
                     model = &model_str,
                     status_code = status_code.as_u16(),
@@ -697,6 +733,7 @@ pub(super) async fn handle_streaming_response(
             }
             crate::debug_event!(
                 "proxy.request_succeeded_debug",
+                request_id = &context.request_id,
                 log_id = context.id,
                 model = &model_str,
                 status_code = status_code.as_u16(),
@@ -737,7 +774,12 @@ pub(super) async fn handle_streaming_response(
                 &format!("Failed to build client response for log_id {log_id}"),
                 e,
             );
-            error!("{}", proxy_error);
+            crate::error_event!(
+                "proxy.response_build_failed",
+                request_id = &request_id,
+                log_id = log_id,
+                error = proxy_error.to_string(),
+            );
             Err(proxy_error)
         }
     }

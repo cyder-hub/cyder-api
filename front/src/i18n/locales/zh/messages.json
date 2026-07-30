@@ -349,7 +349,7 @@
       "modelLabel": "模型",
       "statusLabel": "状态",
       "searchLabel": "搜索",
-      "searchPlaceholder": "模型、渠道、错误...",
+      "searchPlaceholder": "请求 ID、模型、渠道、错误...",
       "clearSearch": "清空搜索",
       "advancedFilters": "高级筛选",
       "downstreamProtocolLabel": "下游协议",
@@ -391,6 +391,7 @@
     },
     "table": {
       "model": "模型",
+      "requestId": "网关请求 ID",
       "provider": "渠道",
       "apiKey": "API Key",
       "status": "状态",
@@ -409,6 +410,12 @@
     },
     "detailDialog": {
       "title": "请求详情",
+      "recordId": "记录 ID",
+      "gatewayRequestId": "网关请求 ID",
+      "copy": "复制",
+      "copyRequestId": "复制网关请求 ID",
+      "copySuccess": "已复制网关请求 ID。",
+      "copyFailed": "复制网关请求 ID 失败。",
       "loading": "正在加载请求详情...",
       "noRecord": "未选择请求记录。",
       "tabs": {
@@ -422,6 +429,7 @@
         "downstreamProtocol": "下游协议",
         "upstreamProtocol": "上游协议",
         "clientIp": "客户端 IP",
+        "clientRequestId": "客户端请求 ID（调用方提供）",
         "stream": "流式",
         "firstByte": "首字节",
         "totalLatency": "总延迟",

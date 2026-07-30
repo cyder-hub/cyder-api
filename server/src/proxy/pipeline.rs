@@ -1,12 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{
-    body::Body,
-    extract::{OriginalUri, Request},
-    http::HeaderMap,
-    response::Response,
-};
-use chrono::Utc;
+use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 use cyder_tools::log::debug;
 
 use super::{
@@ -18,6 +12,7 @@ use super::{
     generation::{GenerationExecutionInput, execute_generation_proxy, extract_model_from_request},
     models::execute_models_listing,
     request::parse_json_request,
+    request_context::ProxyRequestContext,
     runtime::route_resolver::build_execution_plan,
     utility::{UtilityExecutionInput, UtilityOperation, execute_utility_proxy},
 };
@@ -77,7 +72,7 @@ pub(super) struct ProxyPipelineContext {
     pub query_params: HashMap<String, String>,
     pub original_headers: HeaderMap,
     pub client_ip_addr: Option<String>,
-    pub start_time: i64,
+    pub request_context: Arc<ProxyRequestContext>,
 }
 
 pub(super) struct OperationAdapter {
@@ -156,26 +151,19 @@ impl OperationAdapter {
         query_params: HashMap<String, String>,
         request: Request<Body>,
     ) -> Result<Response<Body>, ProxyError> {
-        let start_time = Utc::now().timestamp_millis();
+        let request_context = request
+            .extensions()
+            .get::<Arc<ProxyRequestContext>>()
+            .cloned()
+            .ok_or_else(|| {
+                ProxyError::InternalError("proxy request context unavailable".to_string())
+            })?;
         let client_ip_addr = request
             .extensions()
             .get::<ClientIdentity>()
             .map(|identity| identity.client_ip.to_string())
             .ok_or_else(|| ProxyError::InternalError("client identity unavailable".to_string()))?;
-        let request_uri = request
-            .extensions()
-            .get::<OriginalUri>()
-            .map(|uri| &uri.0)
-            .unwrap_or_else(|| request.uri());
-        let request_uri_path = request_uri.path().to_string();
         let original_headers = request.headers().clone();
-        let operation_kind = derive_request_operation_kind(&request_uri_path);
-        crate::debug_event!(
-            "proxy.request_received",
-            request_path = &request_uri_path,
-            operation_kind = &operation_kind,
-            query_param_count = query_params.len(),
-        );
 
         let api_key = self
             .authenticate(&app_state, &original_headers, &query_params)
@@ -186,7 +174,7 @@ impl OperationAdapter {
             query_params,
             original_headers,
             client_ip_addr: Some(client_ip_addr),
-            start_time,
+            request_context,
         };
         let cancellation = ProxyCancellationContext::new();
 
@@ -202,6 +190,7 @@ impl OperationAdapter {
                     context.app_state,
                     context.api_key,
                     operation.downstream_protocol,
+                    context.request_context,
                 )
                 .await
             }
@@ -277,7 +266,7 @@ async fn execute_generation_operation(
             query_params: context.query_params,
             original_headers: context.original_headers,
             client_ip_addr: context.client_ip_addr,
-            start_time: context.start_time,
+            request_context: context.request_context,
             parsed_request,
         },
     )
@@ -319,7 +308,7 @@ async fn execute_utility_operation(
             query_params: context.query_params,
             original_headers: context.original_headers,
             client_ip_addr: context.client_ip_addr,
-            start_time: context.start_time,
+            request_context: context.request_context,
             parsed_request,
         },
     )
@@ -346,74 +335,9 @@ fn resolve_stream_mode(stream_mode: StreamMode, request_data: &serde_json::Value
     }
 }
 
-fn derive_request_operation_kind(request_path: &str) -> String {
-    let normalized_path = request_path.trim_end_matches('/');
-    if normalized_path.ends_with("/chat/completions") {
-        "chat_completions_create".to_string()
-    } else if normalized_path.ends_with("/responses") {
-        "responses_create".to_string()
-    } else if normalized_path.ends_with("/messages") {
-        "messages_create".to_string()
-    } else if normalized_path.ends_with("/embeddings") {
-        "embeddings".to_string()
-    } else if normalized_path.ends_with("/rerank") {
-        "rerank".to_string()
-    } else if normalized_path.ends_with("/models") || normalized_path.ends_with("/api/tags") {
-        "models_list".to_string()
-    } else if normalized_path.ends_with("/api/chat") {
-        "chat".to_string()
-    } else if normalized_path.ends_with("/api/generate") {
-        "generate".to_string()
-    } else {
-        normalized_path
-            .rsplit('/')
-            .next()
-            .filter(|segment| !segment.is_empty())
-            .map(path_segment_to_operation_kind)
-            .unwrap_or_else(|| "request".to_string())
-    }
-}
-
-fn path_segment_to_operation_kind(segment: &str) -> String {
-    if let Some((_, action)) = segment.split_once(':') {
-        camel_case_to_snake_case(action)
-    } else {
-        segment
-            .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-            .collect()
-    }
-}
-
-fn camel_case_to_snake_case(value: &str) -> String {
-    let mut normalized = String::with_capacity(value.len());
-    let mut prev_is_lower_or_digit = false;
-
-    for ch in value.chars() {
-        if ch.is_ascii_uppercase() {
-            if prev_is_lower_or_digit && !normalized.ends_with('_') {
-                normalized.push('_');
-            }
-            normalized.push(ch.to_ascii_lowercase());
-            prev_is_lower_or_digit = false;
-        } else if ch.is_ascii_alphanumeric() {
-            normalized.push(ch.to_ascii_lowercase());
-            prev_is_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
-        } else if !normalized.ends_with('_') {
-            normalized.push('_');
-            prev_is_lower_or_digit = false;
-        }
-    }
-
-    normalized.trim_matches('_').to_string()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        ModelSource, StreamMode, derive_request_operation_kind, resolve_model_source,
-        resolve_stream_mode,
-    };
+    use super::{ModelSource, StreamMode, resolve_model_source, resolve_stream_mode};
     use crate::proxy::ProxyError;
     use serde_json::json;
 
@@ -459,21 +383,5 @@ mod tests {
         ));
         assert!(resolve_stream_mode(StreamMode::Fixed(true), &non_streaming));
         assert!(!resolve_stream_mode(StreamMode::Fixed(false), &streaming));
-    }
-
-    #[test]
-    fn derive_request_operation_kind_covers_common_routes() {
-        assert_eq!(
-            derive_request_operation_kind("/openai/v1/chat/completions"),
-            "chat_completions_create"
-        );
-        assert_eq!(
-            derive_request_operation_kind("/responses/v1/responses"),
-            "responses_create"
-        );
-        assert_eq!(
-            derive_request_operation_kind("/gemini/v1beta/models/foo:streamGenerateContent"),
-            "stream_generate_content"
-        );
     }
 }

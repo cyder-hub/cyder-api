@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::payload::*;
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::{
@@ -19,7 +19,7 @@ fn build_openai_stream_diagnostic(
     build_stream_diagnostic_sse(
         stream_context,
         TransformProtocol::Unified,
-        TransformProtocol::Api(LlmApiType::Openai),
+        TransformProtocol::Downstream(DownstreamProtocol::Openai),
         kind,
         "openai_stream_encoding",
         context_message,
@@ -55,7 +55,7 @@ impl From<UnifiedChunkResponse> for OpenAiChunkResponse {
                         UnifiedContentPartDelta::ImageDelta { .. } => {
                             apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Openai),
+                                TransformProtocol::Downstream(DownstreamProtocol::Openai),
                                 TransformValueKind::ImageDelta,
                                 "Dropping unsupported image delta from OpenAI stream conversion.",
                             );
@@ -219,7 +219,7 @@ pub(crate) fn openai_chunk_to_unified_stream_events_with_state(
             if !reasoning_text.is_empty() {
                 if text_block_index.is_some() {
                     apply_transform_policy(
-                        TransformProtocol::Api(LlmApiType::Openai),
+                        TransformProtocol::Upstream(UpstreamProtocol::Openai),
                         TransformProtocol::Unified,
                         TransformValueKind::ReasoningDelta,
                         "Dropping OpenAI reasoning delta that arrived after the text block started.",

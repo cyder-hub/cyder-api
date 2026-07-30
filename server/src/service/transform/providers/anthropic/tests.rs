@@ -1,5 +1,5 @@
 use super::*;
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::{AnthropicSessionState, StreamTransformer, unified::*};
 use crate::utils::sse::SseEvent;
 use serde_json::{Value, json};
@@ -531,7 +531,7 @@ fn test_anthropic_event_to_unified_stream_events_preserves_thinking_lifecycle() 
 
 #[test]
 fn test_transform_unified_chunk_to_anthropic_events() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     // Role chunk
     let unified_chunk_role = UnifiedChunkResponse {
@@ -676,7 +676,8 @@ fn test_transform_unified_chunk_to_anthropic_events() {
 #[test]
 fn test_transform_unified_stream_events_to_anthropic_events_preserves_tool_and_thinking_native_lifecycle()
  {
-    let mut state = StreamTransformer::new(LlmApiType::Responses, LlmApiType::Anthropic);
+    let mut state =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Anthropic);
     state.session.set_stream_id("msg_native".to_string());
     state
         .session
@@ -746,7 +747,7 @@ fn test_transform_unified_stream_events_to_anthropic_events_preserves_tool_and_t
 #[test]
 fn test_transform_unified_stream_events_to_anthropic_events_delays_usage_until_terminal_message_delta()
  {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
     let events = transform_unified_stream_events_to_anthropic_events(
         vec![
             UnifiedStreamEvent::MessageStart {
@@ -811,7 +812,8 @@ fn test_transform_unified_stream_events_to_anthropic_events_delays_usage_until_t
 
 #[test]
 fn test_openai_reasoning_stream_transforms_to_anthropic_thinking_then_text_blocks() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     let frames = vec![
         SseEvent {
@@ -959,7 +961,7 @@ fn test_openai_reasoning_stream_transforms_to_anthropic_thinking_then_text_block
 
 #[test]
 fn test_transform_unified_chunk_to_anthropic_events_emits_diagnostic_for_image_delta() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
     let unified_chunk = UnifiedChunkResponse {
         id: "cmpl-123".to_string(),
         model: Some("claude-3-7-sonnet".to_string()),
@@ -992,7 +994,7 @@ fn test_transform_unified_chunk_to_anthropic_events_emits_diagnostic_for_image_d
 
 #[test]
 fn test_transform_unified_chunk_to_anthropic_events_preserves_usage_in_start_and_finish() {
-    let mut state = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut state = StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     let start_chunk = UnifiedChunkResponse {
         id: "cmpl-usage".to_string(),

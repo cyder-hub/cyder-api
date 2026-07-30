@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::payload::*;
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::{
@@ -19,7 +19,7 @@ fn build_anthropic_stream_diagnostic(
     build_stream_diagnostic_sse(
         context,
         TransformProtocol::Unified,
-        TransformProtocol::Api(LlmApiType::Anthropic),
+        TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
         kind,
         "anthropic_stream_encoding",
         context_message,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::utils::usage::UsageInfo;
 use serde_json::json;
 
@@ -11,8 +12,8 @@ fn test_transform_request_data_no_op_returns_original_payload() {
 
     let transformed = transform_request_data(
         openai_request.clone(),
-        LlmApiType::Openai,
-        LlmApiType::Openai,
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Openai,
         false,
     );
 
@@ -35,8 +36,8 @@ fn test_transform_request_data_openai_to_gemini_facade_smoke() {
 
     let transformed = transform_request_data(
         openai_request,
-        LlmApiType::Openai,
-        LlmApiType::Gemini,
+        DownstreamProtocol::Openai,
+        UpstreamProtocol::Gemini,
         false,
     );
 
@@ -86,8 +87,8 @@ fn test_transform_request_data_responses_to_openai_with_function_call_output() {
 
     let transformed = transform_request_data(
         responses_request,
-        LlmApiType::Responses,
-        LlmApiType::Openai,
+        DownstreamProtocol::Responses,
+        UpstreamProtocol::Openai,
         true,
     );
 
@@ -130,7 +131,7 @@ fn test_finalize_request_data_for_vertex_openai_applies_gemini_variant_policy() 
 
     let finalized = finalize_request_data(
         data,
-        LlmApiType::Openai,
+        UpstreamProtocol::Openai,
         &ProviderType::VertexOpenai,
         "chat/completions",
     );
@@ -168,8 +169,11 @@ fn test_transform_result_openai_to_gemini_facade_smoke() {
       }
     });
 
-    let (transformed, usage_info) =
-        transform_result(openai_result, LlmApiType::Openai, LlmApiType::Gemini);
+    let (transformed, usage_info) = transform_result(
+        openai_result,
+        UpstreamProtocol::Openai,
+        DownstreamProtocol::Gemini,
+    );
 
     assert_eq!(
         transformed,
@@ -213,8 +217,8 @@ fn test_transform_result_on_deserialization_error_returns_original_payload() {
 
     let (transformed, usage_info) = transform_result(
         malformed_openai_result.clone(),
-        LlmApiType::Openai,
-        LlmApiType::Gemini,
+        UpstreamProtocol::Openai,
+        DownstreamProtocol::Gemini,
     );
 
     assert_eq!(transformed, malformed_openai_result);

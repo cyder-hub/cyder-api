@@ -1,5 +1,13 @@
 // Request-level gateway log types. The 1.0 cleanup baseline only retains summary
 // fields needed for operations and cost visibility.
+export type DownstreamProtocol = "OPENAI" | "RESPONSES" | "ANTHROPIC" | "GEMINI";
+export type UpstreamProtocol =
+  | "OPENAI"
+  | "RESPONSES"
+  | "ANTHROPIC"
+  | "GEMINI"
+  | "OLLAMA";
+
 export interface RecordListItem {
   id: number;
   api_key_id: number;
@@ -29,13 +37,13 @@ export interface RecordListItem {
 }
 
 export interface RecordRequest extends RecordListItem {
-  user_api_type: string;
+  downstream_protocol: DownstreamProtocol;
   final_error_code: string | null;
   final_error_message: string | null;
   client_ip: string | null;
   provider_api_key_id: number | null;
   provider_key: string | null;
-  llm_api_type: string | null;
+  upstream_protocol: UpstreamProtocol | null;
   cost_catalog_id: number | null;
   cost_catalog_version_id: number | null;
   cost_snapshot_json: string | null;
@@ -57,7 +65,7 @@ export interface RecordListParams {
   provider_id?: number;
   model_id?: number;
   status?: string;
-  user_api_type?: string;
+  downstream_protocol?: DownstreamProtocol;
   final_error_code?: string;
   latency_ms_min?: number;
   latency_ms_max?: number;

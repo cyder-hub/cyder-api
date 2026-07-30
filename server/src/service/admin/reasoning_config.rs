@@ -13,10 +13,10 @@ use crate::database::reasoning_config::{
 use crate::proxy::reasoning_suffix::{
     ReasoningGeneratedPatchPreview as ProxyReasoningGeneratedPatchPreview, ReasoningPatchContext,
     ReasoningPresetPatchPreview as ProxyReasoningPresetPatchPreview, ReasoningPresetPreviewInput,
-    preview_reasoning_patches, target_api_type_for_provider_type,
-    target_api_types_for_reasoning_family,
+    preview_reasoning_patches, upstream_protocol_for_provider_type,
+    upstream_protocols_for_reasoning_family,
 };
-use crate::schema::enum_def::{LlmApiType, ProviderType};
+use crate::schema::enum_def::{ProviderType, UpstreamProtocol};
 use crate::service::cache::types::CacheModel;
 
 use super::audit::{AdminAuditEvent, AdminAuditField};
@@ -34,7 +34,7 @@ pub struct ReasoningPresetCatalogItem {
 pub struct ReasoningFamilyCatalogItem {
     pub family_key: String,
     pub supported_presets: Vec<String>,
-    pub target_api_types: Vec<LlmApiType>,
+    pub upstream_protocols: Vec<UpstreamProtocol>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,7 +146,7 @@ pub struct ReasoningConfigAdminResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReasoningConfigPreviewResponse {
     pub config: ReasoningConfigAdminResponse,
-    pub target_api_type: LlmApiType,
+    pub upstream_protocol: UpstreamProtocol,
     pub presets: Vec<ReasoningConfigPresetPreview>,
 }
 
@@ -198,7 +198,7 @@ impl ReasoningConfigAdminService {
                         .into_iter()
                         .map(|preset| preset.as_key().to_string())
                         .collect(),
-                    target_api_types: target_api_types_for_reasoning_family(family).to_vec(),
+                    upstream_protocols: upstream_protocols_for_reasoning_family(family).to_vec(),
                 })
                 .collect(),
             presets: ReasoningPreset::ALL
@@ -279,13 +279,13 @@ impl ReasoningConfigAdminService {
         provider_id: i64,
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let provider = ensure_provider(provider_id)?;
-        let target_api_type = target_api_type_for_provider_type(&provider.provider_type);
+        let upstream_protocol = upstream_protocol_for_provider_type(&provider.provider_type);
         let config = provider_config_response(provider_id)?;
         Ok(build_preview_response(
             config,
-            target_api_type,
+            upstream_protocol,
             ReasoningPatchContext {
-                target_api_type,
+                upstream_protocol,
                 model_id: None,
                 model_name: None,
                 supports_reasoning: true,
@@ -299,7 +299,7 @@ impl ReasoningConfigAdminService {
         input: PreviewProviderReasoningConfigInput,
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let provider = ensure_provider(provider_id)?;
-        let target_api_type = target_api_type_for_provider_type(
+        let upstream_protocol = upstream_protocol_for_provider_type(
             input
                 .provider_type
                 .as_ref()
@@ -308,9 +308,9 @@ impl ReasoningConfigAdminService {
         let config = provider_draft_config_response(provider_id, input)?;
         Ok(build_preview_response(
             config,
-            target_api_type,
+            upstream_protocol,
             ReasoningPatchContext {
-                target_api_type,
+                upstream_protocol,
                 model_id: None,
                 model_name: None,
                 supports_reasoning: true,
@@ -415,13 +415,13 @@ impl ReasoningConfigAdminService {
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let model = ensure_model(model_id)?;
         let provider = ensure_provider(model.provider_id)?;
-        let target_api_type = target_api_type_for_provider_type(&provider.provider_type);
+        let upstream_protocol = upstream_protocol_for_provider_type(&provider.provider_type);
         let cache_model = CacheModel::from(model);
         let config = model_config_response(model_id)?;
         Ok(build_preview_response(
             config,
-            target_api_type,
-            ReasoningPatchContext::for_model(target_api_type, &cache_model),
+            upstream_protocol,
+            ReasoningPatchContext::for_model(upstream_protocol, &cache_model),
         ))
     }
 
@@ -432,13 +432,13 @@ impl ReasoningConfigAdminService {
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let model = ensure_model(model_id)?;
         let provider = ensure_provider(model.provider_id)?;
-        let target_api_type = target_api_type_for_provider_type(&provider.provider_type);
+        let upstream_protocol = upstream_protocol_for_provider_type(&provider.provider_type);
         let cache_model = CacheModel::from(model);
         let config = model_draft_config_response(&cache_model, input)?;
         Ok(build_preview_response(
             config,
-            target_api_type,
-            ReasoningPatchContext::for_model(target_api_type, &cache_model),
+            upstream_protocol,
+            ReasoningPatchContext::for_model(upstream_protocol, &cache_model),
         ))
     }
 
@@ -805,7 +805,7 @@ fn config_view(config: ReasoningConfigWithPresets) -> ReasoningConfigAdminView {
 
 fn build_preview_response(
     config: ReasoningConfigAdminResponse,
-    target_api_type: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     context: ReasoningPatchContext<'_>,
 ) -> ReasoningConfigPreviewResponse {
     let presets = match &config.effective_config {
@@ -818,7 +818,7 @@ fn build_preview_response(
 
     ReasoningConfigPreviewResponse {
         config,
-        target_api_type,
+        upstream_protocol,
         presets,
     }
 }

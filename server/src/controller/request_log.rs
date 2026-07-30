@@ -12,7 +12,7 @@ use crate::{
             RequestLogRecord,
         },
     },
-    schema::enum_def::{LlmApiType, RequestStatus},
+    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::app_state::StateRouter,
     utils::HttpResult,
 };
@@ -20,12 +20,13 @@ use crate::{
 use super::error::BaseError;
 
 #[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
 struct RequestLogQueryParams {
     api_key_id: Option<i64>,
     provider_id: Option<i64>,
     model_id: Option<i64>,
     status: Option<RequestStatus>,
-    user_api_type: Option<LlmApiType>,
+    downstream_protocol: Option<DownstreamProtocol>,
     final_error_code: Option<String>,
     latency_ms_min: Option<i64>,
     latency_ms_max: Option<i64>,
@@ -47,7 +48,7 @@ impl From<RequestLogQueryParams> for DbRequestLogQueryPayload {
             provider_id: value.provider_id,
             model_id: value.model_id,
             status: value.status,
-            user_api_type: value.user_api_type,
+            downstream_protocol: value.downstream_protocol,
             final_error_code: value.final_error_code,
             latency_ms_min: value.latency_ms_min,
             latency_ms_max: value.latency_ms_max,
@@ -133,7 +134,7 @@ struct RequestLogResponse {
     base_requested_model_name: Option<String>,
     resolved_reasoning_suffix: Option<String>,
     resolved_reasoning_preset: Option<String>,
-    user_api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
     overall_status: RequestStatus,
     final_error_code: Option<String>,
     final_error_message: Option<String>,
@@ -150,7 +151,7 @@ struct RequestLogResponse {
     provider_name: Option<String>,
     model_name: Option<String>,
     real_model_name: Option<String>,
-    llm_api_type: Option<LlmApiType>,
+    upstream_protocol: Option<UpstreamProtocol>,
     upstream_http_status: Option<i32>,
     estimated_cost_nanos: Option<i64>,
     estimated_cost_currency: Option<String>,
@@ -180,7 +181,7 @@ impl From<RequestLogRecord> for RequestLogResponse {
             base_requested_model_name: value.base_requested_model_name,
             resolved_reasoning_suffix: value.resolved_reasoning_suffix,
             resolved_reasoning_preset: value.resolved_reasoning_preset,
-            user_api_type: value.user_api_type,
+            downstream_protocol: value.downstream_protocol,
             overall_status: value.overall_status,
             final_error_code: value.final_error_code,
             final_error_message: value.final_error_message,
@@ -197,7 +198,7 @@ impl From<RequestLogRecord> for RequestLogResponse {
             provider_name: value.provider_name_snapshot,
             model_name: value.model_name_snapshot,
             real_model_name: value.real_model_name_snapshot,
-            llm_api_type: value.llm_api_type,
+            upstream_protocol: value.upstream_protocol,
             upstream_http_status: value.upstream_http_status,
             estimated_cost_nanos: value.estimated_cost_nanos,
             estimated_cost_currency: value.estimated_cost_currency,
@@ -243,4 +244,97 @@ pub fn create_record_router() -> StateRouter {
             .route("/list", get(list_request_log))
             .route("/{id}", get(get_request_log)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{DbRequestLogQueryPayload, RequestLogQueryParams, RequestLogResponse};
+    use crate::{
+        database::request_log::RequestLogRecord,
+        schema::enum_def::{DownstreamProtocol, RequestStatus},
+    };
+
+    fn request_log_record() -> RequestLogRecord {
+        RequestLogRecord {
+            id: 1,
+            api_key_id: 2,
+            requested_model_name: Some("provider/model".to_string()),
+            base_requested_model_name: Some("provider/model".to_string()),
+            resolved_reasoning_suffix: None,
+            resolved_reasoning_preset: None,
+            downstream_protocol: DownstreamProtocol::Openai,
+            overall_status: RequestStatus::Success,
+            final_error_code: None,
+            final_error_message: None,
+            request_received_at: 100,
+            upstream_request_sent_at: None,
+            response_started_to_client_at: None,
+            completed_at: Some(110),
+            is_stream: false,
+            client_ip: None,
+            provider_id: None,
+            provider_api_key_id: None,
+            model_id: None,
+            provider_key_snapshot: None,
+            provider_name_snapshot: None,
+            model_name_snapshot: None,
+            real_model_name_snapshot: None,
+            upstream_protocol: None,
+            upstream_http_status: None,
+            estimated_cost_nanos: None,
+            estimated_cost_currency: None,
+            cost_catalog_id: None,
+            cost_catalog_version_id: None,
+            cost_snapshot_json: None,
+            total_input_tokens: None,
+            total_output_tokens: None,
+            input_text_tokens: None,
+            output_text_tokens: None,
+            input_image_tokens: None,
+            output_image_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            created_at: 100,
+            updated_at: 110,
+        }
+    }
+
+    #[test]
+    fn request_log_query_accepts_only_new_four_value_downstream_filter() {
+        let parsed: RequestLogQueryParams =
+            serde_json::from_value(json!({"downstream_protocol": "RESPONSES"}))
+                .expect("new downstream filter should parse");
+        let database_query = DbRequestLogQueryPayload::from(parsed);
+        assert_eq!(
+            database_query.downstream_protocol,
+            Some(DownstreamProtocol::Responses)
+        );
+
+        assert!(
+            serde_json::from_value::<RequestLogQueryParams>(
+                json!({"downstream_protocol": "OLLAMA"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RequestLogQueryParams>(json!({"user_api_type": "OPENAI"}))
+                .is_err(),
+            "legacy query aliases must not be accepted"
+        );
+    }
+
+    #[test]
+    fn request_log_detail_serializes_directional_fields_without_legacy_aliases() {
+        let response = RequestLogResponse::from(request_log_record());
+        let value = serde_json::to_value(response).expect("response should serialize");
+
+        assert_eq!(value["downstream_protocol"], "OPENAI");
+        assert!(value["upstream_protocol"].is_null());
+        assert!(value.get("user_api_type").is_none());
+        assert!(value.get("llm_api_type").is_none());
+    }
 }

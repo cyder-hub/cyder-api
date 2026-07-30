@@ -31,7 +31,7 @@ use crate::{
             json_top_level_field_count_from_bytes, parse_utility_usage_normalization, sha256_hex,
         },
     },
-    schema::enum_def::{LlmApiType, RequestStatus},
+    schema::enum_def::{RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState, cache::types::CacheCostCatalogVersion,
         runtime::ProviderCircuitProbePermit,
@@ -121,9 +121,13 @@ pub(super) async fn handle_non_streaming_response(
         .await;
         let (final_body, parsed_usage_info, parsed_usage_normalization, _) = match response_mode {
             ProxyResponseMode::Generation {
-                api_type,
-                target_api_type,
-            } => process_success_response_body(&decompressed_body, api_type, target_api_type),
+                downstream_protocol,
+                upstream_protocol,
+            } => process_success_response_body(
+                &decompressed_body,
+                downstream_protocol,
+                upstream_protocol,
+            ),
             ProxyResponseMode::Utility { .. } => {
                 let usage_normalization =
                     serde_json::from_slice::<serde_json::Value>(&decompressed_body)
@@ -251,7 +255,7 @@ fn target_is_openai_compatible_generation(response_mode: ProxyResponseMode) -> b
     matches!(
         response_mode,
         ProxyResponseMode::Generation {
-            target_api_type: LlmApiType::Openai | LlmApiType::GeminiOpenai,
+            upstream_protocol: UpstreamProtocol::Openai,
             ..
         }
     )

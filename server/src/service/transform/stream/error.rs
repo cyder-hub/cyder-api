@@ -12,8 +12,8 @@ pub(in crate::service::transform) fn controlled_error_sse(
     raw_data: &str,
 ) -> Vec<SseEvent> {
     let payload = build_fatal_stream_error_payload(
-        transformer.api_type,
-        transformer.target_api_type,
+        transformer.upstream_protocol,
+        transformer.downstream_protocol,
         transformer.session.stream_id_clone(),
         stage,
         message,

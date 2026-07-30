@@ -1,4 +1,5 @@
 import type { JsonValue } from "./shared";
+import type { UpstreamProtocol } from "./records";
 
 // ========== Request Patch Types ==========
 export type RequestPatchPlacement = "HEADER" | "QUERY" | "BODY";
@@ -40,7 +41,7 @@ export interface ReasoningPresetMetadata {
 export interface ReasoningFamilyMetadata {
   family_key: ReasoningPatchFamilyKey;
   supported_presets: ReasoningPresetKey[];
-  target_api_types: string[];
+  upstream_protocols: UpstreamProtocol[];
 }
 
 export type ReasoningConfigMode = "custom" | "disabled" | string;
@@ -117,7 +118,7 @@ export interface ReasoningConfigPreviewPreset {
 
 export interface ReasoningConfigPreview {
   config: ReasoningConfigResponse;
-  target_api_type: string;
+  upstream_protocol: UpstreamProtocol;
   presets: ReasoningConfigPreviewPreset[];
 }
 

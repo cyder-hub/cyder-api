@@ -3,8 +3,8 @@
     <SectionHeader :title="title">
       <template #actions>
       <div class="flex flex-wrap gap-2">
-        <Badge v-if="currentTargetApiType" variant="outline" class="font-mono text-[11px]">
-          {{ currentTargetApiType }}
+        <Badge v-if="currentUpstreamProtocol" variant="outline" class="font-mono text-[11px]">
+          {{ currentUpstreamProtocol }}
         </Badge>
         <Badge v-if="config" variant="secondary" class="font-mono text-[11px]">
           {{ formatSource(config.effective_source) }}
@@ -285,6 +285,7 @@ import type {
   ReasoningConfigResponse,
   ReasoningPatchFamilyKey,
   ReasoningPresetKey,
+  UpstreamProtocol,
 } from "@/services/types";
 import type {
   ReasoningConfigActions,
@@ -339,7 +340,7 @@ interface PreviewPreset {
 
 interface PreviewResponse {
   config: ReasoningConfigResponse;
-  target_api_type: string;
+  upstream_protocol: UpstreamProtocol;
   presets: PreviewPreset[];
 }
 
@@ -431,22 +432,22 @@ const activePreview = computed(() => {
   return draftPreview.value ?? savedPreview.value;
 });
 
-const currentTargetApiType = computed(
+const currentUpstreamProtocol = computed(
   () =>
-    targetApiTypeFromProviderType(props.providerType) ||
-    activePreview.value?.target_api_type ||
+    upstreamProtocolFromProviderType(props.providerType) ||
+    activePreview.value?.upstream_protocol ||
     null,
 );
 
 const selectedFamilyCompatible = computed(() => {
-  if (!selectedFamily.value || !currentTargetApiType.value) return true;
-  return selectedFamily.value.target_api_types.includes(currentTargetApiType.value);
+  if (!selectedFamily.value || !currentUpstreamProtocol.value) return true;
+  return selectedFamily.value.upstream_protocols.includes(currentUpstreamProtocol.value);
 });
 
 const selectedFamilyCompatibilityMessage = computed(() => {
   if (!selectedFamily.value) return "";
-  const targets = formatTargetApiTypes(selectedFamily.value.target_api_types);
-  const current = currentTargetApiType.value;
+  const targets = formatUpstreamProtocols(selectedFamily.value.upstream_protocols);
+  const current = currentUpstreamProtocol.value;
   if (!current) return t("reasoningConfigPanel.messages.familyTargets", { targets });
   if (selectedFamilyCompatible.value) return "";
   return t("reasoningConfigPanel.messages.familyIncompatible", {
@@ -580,18 +581,17 @@ function normalizeEnumValue(value: string | null | undefined): string | null {
   return normalized || null;
 }
 
-function targetApiTypeFromProviderType(
+function upstreamProtocolFromProviderType(
   providerType: string | null | undefined,
-): string | null {
+): UpstreamProtocol | null {
   switch (normalizeEnumValue(providerType)) {
     case "OPENAI":
     case "VERTEX_OPENAI":
+    case "GEMINI_OPENAI":
       return "OPENAI";
     case "GEMINI":
     case "VERTEX":
       return "GEMINI";
-    case "GEMINI_OPENAI":
-      return "GEMINI_OPENAI";
     case "ANTHROPIC":
       return "ANTHROPIC";
     case "RESPONSES":
@@ -603,28 +603,28 @@ function targetApiTypeFromProviderType(
   }
 }
 
-function formatTargetApiTypes(targets: string[]): string {
+function formatUpstreamProtocols(targets: string[]): string {
   return targets.length
     ? targets.join(", ")
     : t("reasoningConfigPanel.messages.none");
 }
 
 function familyCompatibilityLabel(family: ReasoningFamilyMetadata): string {
-  const current = currentTargetApiType.value;
-  const targets = formatTargetApiTypes(family.target_api_types);
+  const current = currentUpstreamProtocol.value;
+  const targets = formatUpstreamProtocols(family.upstream_protocols);
   if (!current) {
     return t("reasoningConfigPanel.messages.familyTargetsShort", { targets });
   }
-  if (family.target_api_types.includes(current)) {
+  if (family.upstream_protocols.includes(current)) {
     return t("reasoningConfigPanel.messages.familyCompatibleShort", { current });
   }
   return t("reasoningConfigPanel.messages.familyTargetsShort", { targets });
 }
 
 function familyCompatibilityClass(family: ReasoningFamilyMetadata): string {
-  const current = currentTargetApiType.value;
+  const current = currentUpstreamProtocol.value;
   if (!current) return "text-gray-500";
-  return family.target_api_types.includes(current) ? "text-gray-500" : "text-red-600";
+  return family.upstream_protocols.includes(current) ? "text-gray-500" : "text-red-600";
 }
 
 function familySupportsPreset(presetKey: ReasoningPresetKey): boolean {

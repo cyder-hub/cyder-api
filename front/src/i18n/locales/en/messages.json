@@ -352,7 +352,7 @@
       "searchPlaceholder": "Model, provider, error...",
       "clearSearch": "Clear search",
       "advancedFilters": "Advanced filters",
-      "userApiLabel": "User API",
+      "downstreamProtocolLabel": "Downstream Protocol",
       "errorCodeLabel": "Error Code",
       "latencyMinLabel": "Latency Min",
       "latencyMaxLabel": "Latency Max",
@@ -375,7 +375,7 @@
       "allProviders": "All Providers",
       "allModels": "All Models",
       "allStatuses": "All Statuses",
-      "allApis": "All APIs",
+      "allDownstreamProtocols": "All Downstream Protocols",
       "summaryActive": "{count} filters active.",
       "summaryAll": "All request records, no filters applied.",
       "status": {
@@ -415,8 +415,21 @@
         "overview": "Overview"
       },
       "summary": {
+        "apiKey": "API Key",
         "provider": "Provider",
-        "model": "Model"
+        "model": "Model",
+        "realModel": "Real Model",
+        "downstreamProtocol": "Downstream Protocol",
+        "upstreamProtocol": "Upstream Protocol",
+        "clientIp": "Client IP",
+        "stream": "Stream",
+        "firstByte": "First Byte",
+        "totalLatency": "Total Latency",
+        "tokens": "Tokens",
+        "cost": "Cost",
+        "received": "Received",
+        "completed": "Completed",
+        "error": "Error"
       }
     }
   },

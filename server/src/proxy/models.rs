@@ -13,11 +13,11 @@ use super::{
             resolve_effective_reasoning_config, target_supports_reasoning_preset,
         },
     },
-    util::determine_target_api_type,
+    util::determine_upstream_protocol,
 };
 use crate::{
     database::reasoning_config::{ReasoningConfigMode, ReasoningPreset},
-    schema::enum_def::LlmApiType,
+    schema::enum_def::DownstreamProtocol,
     service::{
         app_state::AppState,
         cache::types::{
@@ -52,13 +52,13 @@ pub(super) async fn get_accessible_models(
 pub(super) async fn execute_models_listing(
     app_state: Arc<AppState>,
     api_key: Arc<CacheApiKey>,
-    api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
 ) -> Result<Response<Body>, ProxyError> {
     let request_lease = admit_api_key_request(&app_state, &api_key).await?;
     let mut request_lease = ApiKeyRequestLeaseFinalizer::new(&app_state, request_lease);
     let result = async {
         let models = get_accessible_models(&app_state, &api_key).await?;
-        let response_body = render_models_response(api_type, &models)?;
+        let response_body = render_models_response(downstream_protocol, &models)?;
         Ok(Response::builder()
             .status(200)
             .header("content-type", "application/json")
@@ -94,11 +94,11 @@ pub(super) struct GeminiModelInfo {
 }
 
 fn render_models_response(
-    api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
     accessible_models: &[AccessibleModel],
 ) -> Result<String, ProxyError> {
-    match api_type {
-        LlmApiType::Gemini => serde_json::to_string(&GeminiModelListResponse {
+    match downstream_protocol {
+        DownstreamProtocol::Gemini => serde_json::to_string(&GeminiModelListResponse {
             models: accessible_models
                 .iter()
                 .map(|model| GeminiModelInfo {
@@ -106,22 +106,6 @@ fn render_models_response(
                 })
                 .collect(),
         }),
-        LlmApiType::Ollama => serde_json::to_string(&serde_json::json!({
-            "models": accessible_models.iter().map(|model| serde_json::json!({
-                "name": model.id,
-                "model": model.id,
-                "modified_at": "",
-                "size": 0,
-                "digest": "",
-                "details": {
-                    "format": "",
-                    "family": "",
-                    "families": null,
-                    "parameter_size": "",
-                    "quantization_level": ""
-                }
-            })).collect::<Vec<_>>()
-        })),
         _ => serde_json::to_string(&ModelListResponse {
             object: "list".to_string(),
             data: accessible_models
@@ -218,7 +202,7 @@ fn build_direct_reasoning_target(provider: &CacheProvider, model: &CacheModel) -
     ExecutionTarget {
         provider: Arc::new(provider.clone()),
         model: Arc::new(model.clone()),
-        llm_api_type: determine_target_api_type(provider),
+        upstream_protocol: determine_upstream_protocol(provider),
         reasoning_config_id: None,
         reasoning_config_scope: None,
         reasoning_config_source: None,

@@ -634,7 +634,7 @@ fn generate_target_reasoning_request_patches(
     generate_reasoning_patches(
         family,
         preset,
-        ReasoningPatchContext::for_model(target.llm_api_type, &target.model),
+        ReasoningPatchContext::for_model(target.upstream_protocol, &target.model),
     )
     .map_err(|err| ProxyError::BadRequest(err.to_string()))?
     .into_iter()

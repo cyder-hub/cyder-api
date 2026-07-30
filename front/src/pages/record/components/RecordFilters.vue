@@ -134,10 +134,10 @@
         >
           <FilterSelect
             class="xl:col-span-3"
-            :label="$t('recordPage.filter.userApiLabel')"
-            :model-value="filters.user_api_type"
-            :options="userApiTypeOptions"
-            @update:model-value="$emit('updateFilter', 'user_api_type', $event)"
+            :label="$t('recordPage.filter.downstreamProtocolLabel')"
+            :model-value="filters.downstream_protocol"
+            :options="downstreamProtocolOptions"
+            @update:model-value="$emit('updateFilter', 'downstream_protocol', $event)"
           />
           <FilterInput
             class="xl:col-span-2"
@@ -257,7 +257,7 @@ defineProps<{
   providerOptions: FilterOption[];
   modelOptions: FilterOption[];
   statusOptions: FilterOption[];
-  userApiTypeOptions: FilterOption[];
+  downstreamProtocolOptions: FilterOption[];
 }>();
 
 defineEmits<{

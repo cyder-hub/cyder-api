@@ -1,11 +1,24 @@
 use serde_json::Value;
 
-use super::adapter::{adapter_for, noop_finalize_request};
+use super::adapter::{downstream_adapter_for, noop_finalize_request, upstream_adapter_for};
 use super::capability::TransformValueKind;
 use super::diagnostics::{capture_transform_diagnostics, json_value_log_summary};
 use super::unified::{UnifiedRequest, UnifiedTransformDiagnostic};
 use super::{TransformProtocol, apply_transform_policy};
-use crate::schema::enum_def::{LlmApiType, ProviderType};
+use crate::schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol};
+
+fn protocols_share_wire_format(
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
+) -> bool {
+    matches!(
+        (downstream_protocol, upstream_protocol),
+        (DownstreamProtocol::Openai, UpstreamProtocol::Openai)
+            | (DownstreamProtocol::Responses, UpstreamProtocol::Responses)
+            | (DownstreamProtocol::Anthropic, UpstreamProtocol::Anthropic)
+            | (DownstreamProtocol::Gemini, UpstreamProtocol::Gemini)
+    )
+}
 
 pub(in crate::service::transform) fn apply_stream_options(data: &mut Value) {
     let is_stream = data.get("stream").and_then(Value::as_bool).unwrap_or(false);
@@ -26,22 +39,23 @@ pub(in crate::service::transform) fn apply_stream_options(data: &mut Value) {
 
 pub(in crate::service::transform) fn finalize_request_data(
     data: Value,
-    target_api_type: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     provider_type: &ProviderType,
     downstream_path: &str,
 ) -> Value {
-    let adapter = adapter_for(target_api_type);
+    let adapter = upstream_adapter_for(upstream_protocol);
     let finalize = adapter.request.finalize.unwrap_or(noop_finalize_request);
     finalize(data, provider_type, downstream_path)
 }
 
 pub(in crate::service::transform) fn transform_request_data(
     data: Value,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
     is_stream: bool,
 ) -> Value {
-    transform_request_data_with_diagnostics(data, api_type, target_api_type, is_stream).value
+    transform_request_data_with_diagnostics(data, downstream_protocol, upstream_protocol, is_stream)
+        .value
 }
 
 #[derive(Debug, Clone)]
@@ -52,23 +66,23 @@ pub struct RequestTransformOutput {
 
 pub(in crate::service::transform) fn transform_request_data_with_diagnostics(
     data: Value,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
     is_stream: bool,
 ) -> RequestTransformOutput {
     let (value, diagnostics) = capture_transform_diagnostics(|| {
-        transform_request_data_inner(data, api_type, target_api_type, is_stream)
+        transform_request_data_inner(data, downstream_protocol, upstream_protocol, is_stream)
     });
     RequestTransformOutput { value, diagnostics }
 }
 
 fn transform_request_data_inner(
     data: Value,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
     is_stream: bool,
 ) -> Value {
-    if api_type == target_api_type {
+    if protocols_share_wire_format(downstream_protocol, upstream_protocol) {
         return data;
     }
 
@@ -76,15 +90,15 @@ fn transform_request_data_inner(
         json_value_log_summary(&data);
     crate::debug_event!(
         "transform.request_reencode_started",
-        source_api = format!("{api_type:?}"),
-        target_api = format!("{target_api_type:?}"),
+        source_api = format!("{downstream_protocol:?}"),
+        target_api = format!("{upstream_protocol:?}"),
         request_body_bytes = request_body_bytes,
         request_body_sha256 = request_body_sha256,
         json_top_level_fields = json_top_level_fields,
     );
 
-    let source_adapter = adapter_for(api_type);
-    let target_adapter = adapter_for(target_api_type);
+    let source_adapter = downstream_adapter_for(downstream_protocol);
+    let target_adapter = upstream_adapter_for(upstream_protocol);
 
     let mut unified_request: UnifiedRequest = match (source_adapter.request.decode)(data.clone()) {
         Ok(payload) => payload,
@@ -103,20 +117,20 @@ fn transform_request_data_inner(
     unified_request.stream = is_stream;
 
     // Warn if top_k is used with non-Anthropic targets
-    if unified_request.top_k().is_some() && target_api_type != LlmApiType::Anthropic {
+    if unified_request.top_k().is_some() && upstream_protocol != UpstreamProtocol::Anthropic {
         apply_transform_policy(
-            TransformProtocol::Api(api_type),
-            TransformProtocol::Api(target_api_type),
+            TransformProtocol::Downstream(downstream_protocol),
+            TransformProtocol::Upstream(upstream_protocol),
             TransformValueKind::TopKParameter,
             "Dropping unsupported request field during UnifiedRequest serialization.",
         );
     }
 
     // Warn if tools are used with Ollama
-    if unified_request.tools.is_some() && target_api_type == LlmApiType::Ollama {
+    if unified_request.tools.is_some() && upstream_protocol == UpstreamProtocol::Ollama {
         apply_transform_policy(
-            TransformProtocol::Api(api_type),
-            TransformProtocol::Api(target_api_type),
+            TransformProtocol::Downstream(downstream_protocol),
+            TransformProtocol::Upstream(upstream_protocol),
             TransformValueKind::ToolDefinitions,
             "Dropping unsupported tool definitions during UnifiedRequest serialization.",
         );

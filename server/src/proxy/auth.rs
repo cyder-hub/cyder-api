@@ -146,26 +146,6 @@ pub async fn authenticate_anthropic_request(
     result
 }
 
-// Authenticates an Ollama-style request (Bearer token or query param, same as OpenAI).
-pub async fn authenticate_ollama_request(
-    headers: &HeaderMap,
-    params: &HashMap<String, String>,
-    app_state: &Arc<AppState>,
-) -> Result<ApiKeyCheckResult, ProxyError> {
-    let (system_api_key_str, position) =
-        parse_token_from_request(headers, params).map_err(|err_msg| {
-            let proxy_error = ProxyError::Unauthorized(err_msg);
-            log_auth_request_rejected("ollama", None, &proxy_error);
-            proxy_error
-        })?;
-    let result = check_system_api_key(app_state, &system_api_key_str, position).await;
-    match &result {
-        Ok(auth) => log_auth_request_accepted("ollama", auth),
-        Err(proxy_error) => log_auth_request_rejected("ollama", None, proxy_error),
-    }
-    result
-}
-
 // Checks if the request is allowed by the API key's embedded ACL snapshot.
 pub async fn check_access_control(
     api_key: &CacheApiKey,

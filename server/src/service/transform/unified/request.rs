@@ -589,20 +589,6 @@ impl UnifiedAnthropicRequestExtension {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct UnifiedOllamaRequestExtension {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<String>,
-}
-
-impl UnifiedOllamaRequestExtension {
-    pub fn is_empty(&self) -> bool {
-        self.format.is_none() && self.keep_alive.is_none()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UnifiedResponsesRequestExtension {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -632,8 +618,6 @@ pub struct UnifiedRequestExtensions {
     pub openai: Option<UnifiedOpenAiRequestExtension>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic: Option<UnifiedAnthropicRequestExtension>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ollama: Option<UnifiedOllamaRequestExtension>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub responses: Option<UnifiedResponsesRequestExtension>,
 }
@@ -707,10 +691,6 @@ impl UnifiedRequest {
         self.extensions
             .as_ref()
             .and_then(|ext| ext.anthropic.as_ref())
-    }
-
-    pub fn ollama_extension(&self) -> Option<&UnifiedOllamaRequestExtension> {
-        self.extensions.as_ref().and_then(|ext| ext.ollama.as_ref())
     }
 
     pub fn responses_extension(&self) -> Option<&UnifiedResponsesRequestExtension> {

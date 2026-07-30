@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     cost::UsageNormalization,
-    schema::enum_def::LlmApiType,
-    schema::enum_def::ProviderType,
+    schema::enum_def::UpstreamProtocol,
     service::app_state::AppState,
     service::cache::types::{CacheCostCatalogVersion, CacheModel, CacheProvider},
+    service::provider_profile::provider_runtime_profile,
 };
 
 fn serialize_headers_for_log(
@@ -110,15 +110,8 @@ pub(super) fn parse_utility_usage_normalization(
     })
 }
 
-pub(crate) fn determine_target_api_type(provider: &CacheProvider) -> LlmApiType {
-    match provider.provider_type {
-        ProviderType::Vertex | ProviderType::Gemini => LlmApiType::Gemini,
-        ProviderType::Ollama => LlmApiType::Ollama,
-        ProviderType::Anthropic => LlmApiType::Anthropic,
-        ProviderType::Responses => LlmApiType::Responses,
-        ProviderType::GeminiOpenai => LlmApiType::GeminiOpenai,
-        ProviderType::Openai | ProviderType::VertexOpenai => LlmApiType::Openai,
-    }
+pub(crate) fn determine_upstream_protocol(provider: &CacheProvider) -> UpstreamProtocol {
+    provider_runtime_profile(&provider.provider_type).upstream_protocol
 }
 
 // Formats a model string for logging purposes.
@@ -143,7 +136,7 @@ pub(super) fn format_model_str(provider: &CacheProvider, model: &CacheModel) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        determine_target_api_type, json_top_level_field_count_from_bytes,
+        determine_upstream_protocol, json_top_level_field_count_from_bytes,
         parse_utility_usage_normalization, serialize_upstream_response_headers_for_log, sha256_hex,
         top_level_json_field_count,
     };
@@ -153,7 +146,7 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn determine_target_api_type_maps_gemini_openai_separately() {
+    fn determine_upstream_protocol_maps_gemini_openai_to_openai_wire_protocol() {
         let provider = CacheProvider {
             id: 1,
             provider_key: "provider".to_string(),
@@ -166,8 +159,8 @@ mod tests {
         };
 
         assert_eq!(
-            determine_target_api_type(&provider),
-            crate::schema::enum_def::LlmApiType::GeminiOpenai
+            determine_upstream_protocol(&provider),
+            crate::schema::enum_def::UpstreamProtocol::Openai
         );
     }
 

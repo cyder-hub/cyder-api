@@ -1,5 +1,5 @@
 use super::*;
-use crate::schema::enum_def::{LlmApiType, ProviderType};
+use crate::schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol};
 use crate::service::transform::{StreamTransformer, unified::*};
 use serde_json::{Value, json};
 
@@ -418,7 +418,8 @@ fn test_openai_chunk_to_unified() {
 
 #[test]
 fn test_openai_chunk_to_unified_stream_events_with_reasoning_and_text() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     let reasoning_events = openai_chunk_to_unified_stream_events_with_state(
         OpenAiChunkResponse {
@@ -547,7 +548,8 @@ fn test_openai_chunk_to_unified_stream_events_with_reasoning_and_text() {
 
 #[test]
 fn test_openai_chunk_to_unified_stream_events_drops_late_reasoning_after_text_started() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Anthropic);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
     transformer.session.set_current_content_block_index(Some(0));
 
     let events = openai_chunk_to_unified_stream_events_with_state(
@@ -580,7 +582,8 @@ fn test_openai_chunk_to_unified_stream_events_drops_late_reasoning_after_text_st
 
 #[test]
 fn test_openai_chunk_to_unified_stream_events_emits_tool_call_stop_on_tool_calls_finish() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Responses);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Responses);
 
     let start_events = openai_chunk_to_unified_stream_events_with_state(
         OpenAiChunkResponse {
@@ -737,7 +740,8 @@ fn test_transform_unified_chunk_to_openai_events_emits_diagnostic_for_image_delt
         ..Default::default()
     };
 
-    let mut transformer = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::Openai);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
     let events =
         transform_unified_chunk_to_openai_events(unified_chunk, &mut transformer.stream_context())
             .expect("openai chunk events");

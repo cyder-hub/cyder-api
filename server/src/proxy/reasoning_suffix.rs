@@ -3,8 +3,10 @@ use serde_json::{Value, json};
 
 use crate::{
     database::reasoning_config::{ReasoningPatchFamily, ReasoningPreset},
-    schema::enum_def::{LlmApiType, ProviderType, RequestPatchOperation, RequestPatchPlacement},
-    service::cache::types::CacheModel,
+    schema::enum_def::{
+        ProviderType, RequestPatchOperation, RequestPatchPlacement, UpstreamProtocol,
+    },
+    service::{cache::types::CacheModel, provider_profile::provider_runtime_profile},
 };
 
 const OPENAI_DEFAULT_REASONING_EFFORT: &str = "medium";
@@ -18,16 +20,16 @@ const GEMINI_THINKING_BUDGET_AUTO: i64 = -1;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReasoningPatchContext<'a> {
-    pub target_api_type: LlmApiType,
+    pub upstream_protocol: UpstreamProtocol,
     pub model_id: Option<i64>,
     pub model_name: Option<&'a str>,
     pub supports_reasoning: bool,
 }
 
 impl<'a> ReasoningPatchContext<'a> {
-    pub(crate) fn for_model(target_api_type: LlmApiType, model: &'a CacheModel) -> Self {
+    pub(crate) fn for_model(upstream_protocol: UpstreamProtocol, model: &'a CacheModel) -> Self {
         Self {
-            target_api_type,
+            upstream_protocol,
             model_id: Some(model.id),
             model_name: Some(&model.model_name),
             supports_reasoning: model.supports_reasoning,
@@ -35,9 +37,9 @@ impl<'a> ReasoningPatchContext<'a> {
     }
 
     #[cfg(test)]
-    fn test(target_api_type: LlmApiType) -> Self {
+    fn test(upstream_protocol: UpstreamProtocol) -> Self {
         Self {
-            target_api_type,
+            upstream_protocol,
             model_id: Some(1),
             model_name: Some("test-model"),
             supports_reasoning: true,
@@ -124,7 +126,7 @@ impl GeneratedReasoningPatch {
 pub(crate) struct ReasoningPresetUnsupported {
     pub family: ReasoningPatchFamily,
     pub preset: ReasoningPreset,
-    pub target_api_type: LlmApiType,
+    pub upstream_protocol: UpstreamProtocol,
     pub model_id: Option<i64>,
     pub model_name: Option<String>,
     pub reason: String,
@@ -140,7 +142,7 @@ impl ReasoningPresetUnsupported {
         Self {
             family,
             preset,
-            target_api_type: context.target_api_type,
+            upstream_protocol: context.upstream_protocol,
             model_id: context.model_id,
             model_name: context.model_name.map(str::to_string),
             reason: reason.into(),
@@ -154,12 +156,12 @@ impl std::fmt::Display for ReasoningPresetUnsupported {
             Some(model_name) => write!(
                 f,
                 "reasoning preset '{}' is unsupported for family '{}' on {:?} model '{}': {}",
-                self.preset, self.family, self.target_api_type, model_name, self.reason
+                self.preset, self.family, self.upstream_protocol, model_name, self.reason
             ),
             None => write!(
                 f,
                 "reasoning preset '{}' is unsupported for family '{}' on {:?}: {}",
-                self.preset, self.family, self.target_api_type, self.reason
+                self.preset, self.family, self.upstream_protocol, self.reason
             ),
         }
     }
@@ -206,30 +208,23 @@ pub(crate) fn generate_reasoning_patches(
     }
 }
 
-pub(crate) fn target_api_type_for_provider_type(provider_type: &ProviderType) -> LlmApiType {
-    match provider_type {
-        ProviderType::Vertex | ProviderType::Gemini => LlmApiType::Gemini,
-        ProviderType::Ollama => LlmApiType::Ollama,
-        ProviderType::Anthropic => LlmApiType::Anthropic,
-        ProviderType::Responses => LlmApiType::Responses,
-        ProviderType::GeminiOpenai => LlmApiType::GeminiOpenai,
-        ProviderType::Openai | ProviderType::VertexOpenai => LlmApiType::Openai,
-    }
+pub(crate) fn upstream_protocol_for_provider_type(
+    provider_type: &ProviderType,
+) -> UpstreamProtocol {
+    provider_runtime_profile(provider_type).upstream_protocol
 }
 
-pub(crate) fn target_api_types_for_reasoning_family(
+pub(crate) fn upstream_protocols_for_reasoning_family(
     family: ReasoningPatchFamily,
-) -> &'static [LlmApiType] {
+) -> &'static [UpstreamProtocol] {
     match family {
-        ReasoningPatchFamily::OpenAiChatReasoningEffort => {
-            &[LlmApiType::Openai, LlmApiType::GeminiOpenai]
-        }
-        ReasoningPatchFamily::OpenAiResponsesReasoning => &[LlmApiType::Responses],
-        ReasoningPatchFamily::DeepSeekOpenAiReasoning => &[LlmApiType::Openai],
-        ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking => &[LlmApiType::Openai],
-        ReasoningPatchFamily::AnthropicThinkingBudget => &[LlmApiType::Anthropic],
+        ReasoningPatchFamily::OpenAiChatReasoningEffort => &[UpstreamProtocol::Openai],
+        ReasoningPatchFamily::OpenAiResponsesReasoning => &[UpstreamProtocol::Responses],
+        ReasoningPatchFamily::DeepSeekOpenAiReasoning => &[UpstreamProtocol::Openai],
+        ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking => &[UpstreamProtocol::Openai],
+        ReasoningPatchFamily::AnthropicThinkingBudget => &[UpstreamProtocol::Anthropic],
         ReasoningPatchFamily::Gemini25ThinkingBudget
-        | ReasoningPatchFamily::Gemini3ThinkingLevel => &[LlmApiType::Gemini],
+        | ReasoningPatchFamily::Gemini3ThinkingLevel => &[UpstreamProtocol::Gemini],
     }
 }
 
@@ -330,9 +325,9 @@ fn ensure_protocol(
     family: ReasoningPatchFamily,
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
-    allowed: &[LlmApiType],
+    allowed: &[UpstreamProtocol],
 ) -> Result<(), ReasoningPresetUnsupported> {
-    if allowed.contains(&context.target_api_type) {
+    if allowed.contains(&context.upstream_protocol) {
         Ok(())
     } else {
         Err(ReasoningPresetUnsupported::new(
@@ -341,7 +336,7 @@ fn ensure_protocol(
             context,
             format!(
                 "family targets {:?}, got {:?}",
-                allowed, context.target_api_type
+                allowed, context.upstream_protocol
             ),
         ))
     }
@@ -394,12 +389,7 @@ fn generate_openai_chat_reasoning_effort_patch(
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
 ) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
-    ensure_protocol(
-        family,
-        preset,
-        context,
-        &[LlmApiType::Openai, LlmApiType::GeminiOpenai],
-    )?;
+    ensure_protocol(family, preset, context, &[UpstreamProtocol::Openai])?;
     let effort = openai_reasoning_effort(family, preset, context)?;
     body_set_patch(
         family,
@@ -416,7 +406,7 @@ fn generate_openai_responses_reasoning_patch(
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
 ) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
-    ensure_protocol(family, preset, context, &[LlmApiType::Responses])?;
+    ensure_protocol(family, preset, context, &[UpstreamProtocol::Responses])?;
     let effort = openai_reasoning_effort(family, preset, context)?;
     body_set_patch(
         family,
@@ -433,7 +423,7 @@ fn generate_deepseek_openai_reasoning_patch(
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
 ) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
-    ensure_protocol(family, preset, context, &[LlmApiType::Openai])?;
+    ensure_protocol(family, preset, context, &[UpstreamProtocol::Openai])?;
 
     let thinking_type = match preset {
         ReasoningPreset::Disabled => "disabled",
@@ -511,7 +501,7 @@ fn generate_siliconflow_openai_enable_thinking_patch(
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
 ) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
-    ensure_protocol(family, preset, context, &[LlmApiType::Openai])?;
+    ensure_protocol(family, preset, context, &[UpstreamProtocol::Openai])?;
 
     let enable_thinking = match preset {
         ReasoningPreset::Disabled => false,
@@ -586,7 +576,7 @@ fn generate_anthropic_thinking_budget_patch(
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
 ) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
-    ensure_protocol(family, preset, context, &[LlmApiType::Anthropic])?;
+    ensure_protocol(family, preset, context, &[UpstreamProtocol::Anthropic])?;
     let value = anthropic_thinking_value(family, preset, context)?;
     body_set_patch(
         family,
@@ -623,7 +613,7 @@ fn generate_gemini25_thinking_budget_patch(
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
 ) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
-    ensure_protocol(family, preset, context, &[LlmApiType::Gemini])?;
+    ensure_protocol(family, preset, context, &[UpstreamProtocol::Gemini])?;
     let budget = gemini25_thinking_budget(family, preset, context)?;
     body_set_patch(
         family,
@@ -675,7 +665,7 @@ fn generate_gemini3_thinking_level_patch(
     preset: ReasoningPreset,
     context: ReasoningPatchContext<'_>,
 ) -> Result<Vec<GeneratedReasoningPatch>, ReasoningPresetUnsupported> {
-    ensure_protocol(family, preset, context, &[LlmApiType::Gemini])?;
+    ensure_protocol(family, preset, context, &[UpstreamProtocol::Gemini])?;
     let level = gemini3_thinking_level(family, preset, context)?;
     body_set_patch(
         family,
@@ -695,7 +685,7 @@ mod tests {
     fn only_patch(
         family: ReasoningPatchFamily,
         preset: ReasoningPreset,
-        api_type: LlmApiType,
+        api_type: UpstreamProtocol,
     ) -> GeneratedReasoningPatch {
         let patches =
             generate_reasoning_patches(family, preset, ReasoningPatchContext::test(api_type))
@@ -717,7 +707,7 @@ mod tests {
     fn preview_entry(
         family: ReasoningPatchFamily,
         preset: ReasoningPreset,
-        api_type: LlmApiType,
+        api_type: UpstreamProtocol,
     ) -> ReasoningPresetPatchPreview {
         preview_reasoning_patches(
             family,
@@ -736,7 +726,7 @@ mod tests {
     fn only_preview_patch(
         family: ReasoningPatchFamily,
         preset: ReasoningPreset,
-        api_type: LlmApiType,
+        api_type: UpstreamProtocol,
     ) -> ReasoningGeneratedPatchPreview {
         let entry = preview_entry(family, preset, api_type);
         assert!(
@@ -752,7 +742,7 @@ mod tests {
         let patch = only_patch(
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
             ReasoningPreset::High,
-            LlmApiType::Openai,
+            UpstreamProtocol::Openai,
         );
         assert_eq!(patch.target, "/reasoning_effort");
         assert_eq!(patch.operation, RequestPatchOperation::Set);
@@ -764,7 +754,7 @@ mod tests {
         let patch = only_patch(
             ReasoningPatchFamily::OpenAiResponsesReasoning,
             ReasoningPreset::High,
-            LlmApiType::Responses,
+            UpstreamProtocol::Responses,
         );
         assert_eq!(patch.target, "/reasoning/effort");
         assert_eq!(patch_value(&patch), json!("high"));
@@ -775,7 +765,7 @@ mod tests {
         let patch = only_patch(
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
             ReasoningPreset::Enabled,
-            LlmApiType::Openai,
+            UpstreamProtocol::Openai,
         );
         assert_eq!(patch.target, "/reasoning_effort");
         assert_eq!(patch_value(&patch), json!("medium"));
@@ -786,7 +776,7 @@ mod tests {
         let disabled = generate_reasoning_patches(
             ReasoningPatchFamily::DeepSeekOpenAiReasoning,
             ReasoningPreset::Disabled,
-            ReasoningPatchContext::test(LlmApiType::Openai),
+            ReasoningPatchContext::test(UpstreamProtocol::Openai),
         )
         .expect("DeepSeek disabled patch should generate");
         assert_eq!(disabled.len(), 2);
@@ -800,7 +790,7 @@ mod tests {
         let enabled = only_patch(
             ReasoningPatchFamily::DeepSeekOpenAiReasoning,
             ReasoningPreset::Enabled,
-            LlmApiType::Openai,
+            UpstreamProtocol::Openai,
         );
         assert_eq!(enabled.target, "/thinking/type");
         assert_eq!(patch_value(&enabled), json!("enabled"));
@@ -815,7 +805,7 @@ mod tests {
             let patches = generate_reasoning_patches(
                 ReasoningPatchFamily::DeepSeekOpenAiReasoning,
                 preset,
-                ReasoningPatchContext::test(LlmApiType::Openai),
+                ReasoningPatchContext::test(UpstreamProtocol::Openai),
             )
             .expect("DeepSeek high strength patch should generate");
             assert_eq!(patches.len(), 2);
@@ -845,7 +835,7 @@ mod tests {
         let disabled = only_patch(
             ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
             ReasoningPreset::Disabled,
-            LlmApiType::Openai,
+            UpstreamProtocol::Openai,
         );
         assert_eq!(disabled.target, "/enable_thinking");
         assert_eq!(patch_value(&disabled), json!(false));
@@ -853,7 +843,7 @@ mod tests {
         let enabled = only_patch(
             ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
             ReasoningPreset::Enabled,
-            LlmApiType::Openai,
+            UpstreamProtocol::Openai,
         );
         assert_eq!(enabled.target, "/enable_thinking");
         assert_eq!(patch_value(&enabled), json!(true));
@@ -880,7 +870,7 @@ mod tests {
         let patch = only_patch(
             ReasoningPatchFamily::AnthropicThinkingBudget,
             ReasoningPreset::High,
-            LlmApiType::Anthropic,
+            UpstreamProtocol::Anthropic,
         );
         assert_eq!(patch.target, "/thinking");
         assert_eq!(
@@ -897,7 +887,7 @@ mod tests {
         let patch = only_patch(
             ReasoningPatchFamily::AnthropicThinkingBudget,
             ReasoningPreset::Enabled,
-            LlmApiType::Anthropic,
+            UpstreamProtocol::Anthropic,
         );
         assert_eq!(
             patch_value(&patch),
@@ -913,7 +903,7 @@ mod tests {
         let patch = only_patch(
             ReasoningPatchFamily::Gemini25ThinkingBudget,
             ReasoningPreset::High,
-            LlmApiType::Gemini,
+            UpstreamProtocol::Gemini,
         );
         assert_eq!(
             patch.target,
@@ -927,7 +917,7 @@ mod tests {
         let patch = only_patch(
             ReasoningPatchFamily::Gemini25ThinkingBudget,
             ReasoningPreset::Auto,
-            LlmApiType::Gemini,
+            UpstreamProtocol::Gemini,
         );
         assert_eq!(patch_value(&patch), json!(GEMINI_THINKING_BUDGET_AUTO));
     }
@@ -937,7 +927,7 @@ mod tests {
         let err = generate_reasoning_patches(
             ReasoningPatchFamily::Gemini25ThinkingBudget,
             ReasoningPreset::XHigh,
-            ReasoningPatchContext::test(LlmApiType::Gemini),
+            ReasoningPatchContext::test(UpstreamProtocol::Gemini),
         )
         .expect_err("Gemini 2.5 budget family does not define xhigh");
 
@@ -949,7 +939,7 @@ mod tests {
         let patch = only_patch(
             ReasoningPatchFamily::Gemini3ThinkingLevel,
             ReasoningPreset::Low,
-            LlmApiType::Gemini,
+            UpstreamProtocol::Gemini,
         );
         assert_eq!(
             patch.target,
@@ -963,28 +953,28 @@ mod tests {
         let openai = only_patch(
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
             ReasoningPreset::Disabled,
-            LlmApiType::Openai,
+            UpstreamProtocol::Openai,
         );
         assert_eq!(patch_value(&openai), json!("none"));
 
         let anthropic = only_patch(
             ReasoningPatchFamily::AnthropicThinkingBudget,
             ReasoningPreset::Disabled,
-            LlmApiType::Anthropic,
+            UpstreamProtocol::Anthropic,
         );
         assert_eq!(patch_value(&anthropic), json!({ "type": "disabled" }));
 
         let gemini = only_patch(
             ReasoningPatchFamily::Gemini25ThinkingBudget,
             ReasoningPreset::Disabled,
-            LlmApiType::Gemini,
+            UpstreamProtocol::Gemini,
         );
         assert_eq!(patch_value(&gemini), json!(0));
 
         let err = generate_reasoning_patches(
             ReasoningPatchFamily::Gemini3ThinkingLevel,
             ReasoningPreset::Disabled,
-            ReasoningPatchContext::test(LlmApiType::Gemini),
+            ReasoningPatchContext::test(UpstreamProtocol::Gemini),
         )
         .expect_err("Gemini 3 cannot disable thinking");
         assert!(err.reason.contains("does not support disabling"));
@@ -995,23 +985,23 @@ mod tests {
         for (family, api_type) in [
             (
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                LlmApiType::Openai,
+                UpstreamProtocol::Openai,
             ),
             (
                 ReasoningPatchFamily::OpenAiResponsesReasoning,
-                LlmApiType::Responses,
+                UpstreamProtocol::Responses,
             ),
             (
                 ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
-                LlmApiType::Openai,
+                UpstreamProtocol::Openai,
             ),
             (
                 ReasoningPatchFamily::AnthropicThinkingBudget,
-                LlmApiType::Anthropic,
+                UpstreamProtocol::Anthropic,
             ),
             (
                 ReasoningPatchFamily::Gemini3ThinkingLevel,
-                LlmApiType::Gemini,
+                UpstreamProtocol::Gemini,
             ),
         ] {
             let err = generate_reasoning_patches(
@@ -1033,11 +1023,11 @@ mod tests {
         let err = generate_reasoning_patches(
             ReasoningPatchFamily::OpenAiResponsesReasoning,
             ReasoningPreset::High,
-            ReasoningPatchContext::test(LlmApiType::Openai),
+            ReasoningPatchContext::test(UpstreamProtocol::Openai),
         )
         .expect_err("wrong protocol should be unsupported");
 
-        assert_eq!(err.target_api_type, LlmApiType::Openai);
+        assert_eq!(err.upstream_protocol, UpstreamProtocol::Openai);
         assert!(err.reason.contains("family targets"));
     }
 
@@ -1057,7 +1047,7 @@ mod tests {
             supports_rerank: false,
             is_enabled: true,
         };
-        let context = ReasoningPatchContext::for_model(LlmApiType::Openai, &model);
+        let context = ReasoningPatchContext::for_model(UpstreamProtocol::Openai, &model);
 
         let err = generate_reasoning_patches(
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
@@ -1076,32 +1066,32 @@ mod tests {
         let valid = [
             (
                 ReasoningPatchFamily::OpenAiChatReasoningEffort,
-                LlmApiType::Openai,
+                UpstreamProtocol::Openai,
                 ReasoningPreset::High,
             ),
             (
                 ReasoningPatchFamily::OpenAiResponsesReasoning,
-                LlmApiType::Responses,
+                UpstreamProtocol::Responses,
                 ReasoningPreset::High,
             ),
             (
                 ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
-                LlmApiType::Openai,
+                UpstreamProtocol::Openai,
                 ReasoningPreset::Enabled,
             ),
             (
                 ReasoningPatchFamily::AnthropicThinkingBudget,
-                LlmApiType::Anthropic,
+                UpstreamProtocol::Anthropic,
                 ReasoningPreset::High,
             ),
             (
                 ReasoningPatchFamily::Gemini25ThinkingBudget,
-                LlmApiType::Gemini,
+                UpstreamProtocol::Gemini,
                 ReasoningPreset::Auto,
             ),
             (
                 ReasoningPatchFamily::Gemini3ThinkingLevel,
-                LlmApiType::Gemini,
+                UpstreamProtocol::Gemini,
                 ReasoningPreset::High,
             ),
         ];
@@ -1119,7 +1109,7 @@ mod tests {
         let patch = only_preview_patch(
             ReasoningPatchFamily::OpenAiChatReasoningEffort,
             ReasoningPreset::High,
-            LlmApiType::Openai,
+            UpstreamProtocol::Openai,
         );
         assert_eq!(patch.placement, "BODY");
         assert_eq!(patch.operation, "SET");
@@ -1132,7 +1122,7 @@ mod tests {
         let patch = only_preview_patch(
             ReasoningPatchFamily::OpenAiResponsesReasoning,
             ReasoningPreset::High,
-            LlmApiType::Responses,
+            UpstreamProtocol::Responses,
         );
         assert_eq!(patch.target, "/reasoning/effort");
         assert_eq!(patch.value_json, Some(json!("high")));
@@ -1143,7 +1133,7 @@ mod tests {
         let patch = only_preview_patch(
             ReasoningPatchFamily::SiliconFlowOpenAiEnableThinking,
             ReasoningPreset::Enabled,
-            LlmApiType::Openai,
+            UpstreamProtocol::Openai,
         );
         assert_eq!(patch.target, "/enable_thinking");
         assert_eq!(patch.value_json, Some(json!(true)));
@@ -1154,7 +1144,7 @@ mod tests {
         let patch = only_preview_patch(
             ReasoningPatchFamily::AnthropicThinkingBudget,
             ReasoningPreset::High,
-            LlmApiType::Anthropic,
+            UpstreamProtocol::Anthropic,
         );
         assert_eq!(patch.target, "/thinking");
         assert_eq!(
@@ -1171,7 +1161,7 @@ mod tests {
         let patch = only_preview_patch(
             ReasoningPatchFamily::Gemini25ThinkingBudget,
             ReasoningPreset::Auto,
-            LlmApiType::Gemini,
+            UpstreamProtocol::Gemini,
         );
         assert_eq!(
             patch.target,
@@ -1185,7 +1175,7 @@ mod tests {
         let patch = only_preview_patch(
             ReasoningPatchFamily::Gemini3ThinkingLevel,
             ReasoningPreset::High,
-            LlmApiType::Gemini,
+            UpstreamProtocol::Gemini,
         );
         assert_eq!(
             patch.target,
@@ -1197,7 +1187,7 @@ mod tests {
     #[test]
     fn preview_marks_model_capability_unsupported_for_reasoning_required_preset() {
         let context = ReasoningPatchContext {
-            target_api_type: LlmApiType::Openai,
+            upstream_protocol: UpstreamProtocol::Openai,
             model_id: Some(99),
             model_name: Some("plain-model"),
             supports_reasoning: false,
@@ -1235,7 +1225,7 @@ mod tests {
                 enabled: false,
                 expose_in_models: false,
             }],
-            ReasoningPatchContext::test(LlmApiType::Openai),
+            ReasoningPatchContext::test(UpstreamProtocol::Openai),
         )
         .into_iter()
         .find(|entry| entry.preset_key == "high")

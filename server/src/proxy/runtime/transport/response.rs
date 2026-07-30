@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::{
     cost::UsageNormalization,
     proxy::util::{json_top_level_field_count_from_bytes, sha256_hex},
-    schema::enum_def::LlmApiType,
+    schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
     service::transform::{
         transform_result_with_cost_and_diagnostics, unified::UnifiedTransformDiagnostic,
     },
@@ -68,8 +68,8 @@ pub(crate) fn decode_response_body(body_bytes: Bytes, is_gzip: bool) -> Bytes {
 
 pub(crate) fn process_success_response_body(
     decompressed_body: &Bytes,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
 ) -> (
     Bytes,
     Option<UsageInfo>,
@@ -80,11 +80,17 @@ pub(crate) fn process_success_response_body(
         Ok(original_value) => {
             let output = transform_result_with_cost_and_diagnostics(
                 original_value,
-                target_api_type,
-                api_type,
+                upstream_protocol,
+                downstream_protocol,
             );
 
-            let body_bytes = if api_type == target_api_type {
+            let body_bytes = if matches!(
+                (upstream_protocol, downstream_protocol),
+                (UpstreamProtocol::Openai, DownstreamProtocol::Openai)
+                    | (UpstreamProtocol::Responses, DownstreamProtocol::Responses)
+                    | (UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic)
+                    | (UpstreamProtocol::Gemini, DownstreamProtocol::Gemini)
+            ) {
                 decompressed_body.clone()
             } else {
                 match serde_json::to_vec(&output.value) {

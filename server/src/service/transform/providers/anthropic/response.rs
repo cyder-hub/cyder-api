@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use super::payload::*;
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::{TransformProtocol, apply_transform_policy, unified::*};
 
@@ -136,7 +136,7 @@ impl From<UnifiedResponse> for AnthropicResponse {
                     | UnifiedContentPart::ExecutableCode { .. } => {
                         apply_transform_policy(
                             TransformProtocol::Unified,
-                            TransformProtocol::Api(LlmApiType::Anthropic),
+                            TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
                             TransformValueKind::from(&part),
                             "Dropping unsupported response content from Anthropic conversion.",
                         );
@@ -150,7 +150,7 @@ impl From<UnifiedResponse> for AnthropicResponse {
                     UnifiedContentPart::ToolResult(_) => {
                         apply_transform_policy(
                             TransformProtocol::Unified,
-                            TransformProtocol::Api(LlmApiType::Anthropic),
+                            TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
                             TransformValueKind::ToolResult,
                             "Dropping tool result from Anthropic assistant response conversion.",
                         );
@@ -169,7 +169,7 @@ impl From<UnifiedResponse> for AnthropicResponse {
                     other => {
                         apply_transform_policy(
                             TransformProtocol::Unified,
-                            TransformProtocol::Api(LlmApiType::Anthropic),
+                            TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
                             TransformValueKind::from(&other),
                             "Dropping unsupported reasoning content from Anthropic conversion.",
                         );
@@ -184,7 +184,7 @@ impl From<UnifiedResponse> for AnthropicResponse {
                 UnifiedItem::FunctionCallOutput(_) => {
                     apply_transform_policy(
                         TransformProtocol::Unified,
-                        TransformProtocol::Api(LlmApiType::Anthropic),
+                        TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
                         TransformValueKind::ToolResult,
                         "Dropping tool result from Anthropic assistant response conversion.",
                     );
@@ -193,7 +193,7 @@ impl From<UnifiedResponse> for AnthropicResponse {
                 UnifiedItem::FileReference(_) => {
                     apply_transform_policy(
                         TransformProtocol::Unified,
-                        TransformProtocol::Api(LlmApiType::Anthropic),
+                        TransformProtocol::Downstream(DownstreamProtocol::Anthropic),
                         TransformValueKind::FileUrl,
                         "Dropping file reference from Anthropic assistant response conversion.",
                     );

@@ -1,0 +1,127 @@
+<!-- GENERATED FILE. DO NOT EDIT. Canonical source: `docs/protocol-compatibility.yaml`. -->
+# Protocol Compatibility
+
+This document reports current, evidence-backed runtime behavior. It is generated deterministically by `cargo run -p cyder-api --bin compatibility_matrix -- --write` from `docs/protocol-compatibility.yaml`.
+
+Unversioned downstream routes are compatibility aliases for the current `/v1` semantics. They are not a protocol-version claim; a future `/v2` may become the alias target without removing the unversioned route.
+
+## Protocol boundaries
+
+- Downstream: OpenAI, Responses, Anthropic, Gemini
+- Upstream: OpenAI, Responses, Anthropic, Gemini, Ollama
+- Ollama is an upstream-only protocol and has no public downstream router.
+
+## Provider runtime profiles
+
+| Provider type | Upstream protocol | Dialect | Auth | Endpoint |
+| --- | --- | --- | --- | --- |
+| OpenAI | OpenAI | `standard` | `bearer_api_key` | `base_url` |
+| Gemini | Gemini | `standard` | `gemini_api_key` | `base_url` |
+| Vertex | Gemini | `standard` | `vertex_oauth` | `vertex_gemini` |
+| VertexOpenAI | OpenAI | `gemini_openai_compatibility` | `vertex_oauth` | `vertex_openai` |
+| Ollama | Ollama | `standard` | `bearer_api_key` | `base_url` |
+| Anthropic | Anthropic | `standard` | `anthropic_api_key` | `base_url` |
+| Responses | Responses | `standard` | `bearer_api_key` | `base_url` |
+| GeminiOpenAI | OpenAI | `gemini_openai_compatibility` | `bearer_api_key` | `base_url` |
+
+## Public downstream routes
+
+| Protocol | Prefix | Versions | Endpoint | Method | Kind |
+| --- | --- | --- | --- | --- | --- |
+| OpenAI | `/ai/openai` | unversioned, v1 | `/chat/completions` | POST | generation |
+| OpenAI | `/ai/openai` | unversioned, v1 | `/embeddings` | POST | utility |
+| OpenAI | `/ai/openai` | unversioned, v1 | `/rerank` | POST | utility |
+| OpenAI | `/ai/openai` | unversioned, v1 | `/models` | GET | local |
+| Responses | `/ai/responses` | unversioned, v1 | `/responses` | POST | generation |
+| Responses | `/ai/responses` | unversioned, v1 | `/models` | GET | local |
+| Anthropic | `/ai/anthropic` | unversioned, v1 | `/messages` | POST | generation |
+| Anthropic | `/ai/anthropic` | unversioned, v1 | `/models` | GET | local |
+| Gemini | `/ai/gemini` | unversioned, v1, v1beta | `/models/{model}:generateContent` | POST | generation |
+| Gemini | `/ai/gemini` | unversioned, v1, v1beta | `/models/{model}:streamGenerateContent` | POST | generation |
+| Gemini | `/ai/gemini` | unversioned, v1, v1beta | `/models/{model}:countTokens` | POST | utility |
+| Gemini | `/ai/gemini` | unversioned, v1, v1beta | `/models` | GET | local |
+
+## Generation base dimensions
+
+| Downstream | Upstream | Non-stream text | Stream text | Usage | Normal termination | Upstream error | Cancellation | Owner | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenAI | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
+| OpenAI | Responses | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | R3.13 | native-materializer-unavailable |
+| OpenAI | Anthropic | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | R3.14 | native-materializer-unavailable |
+| OpenAI | Gemini | not_verified | not_verified | not_verified | not_verified | not_verified | not_verified | R3.15 | reachable-materializers-without-cell-regression |
+| OpenAI | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.16 | ollama-stream-incomplete, ollama-upstream-incomplete |
+| Responses | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
+| Responses | Responses | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | R3.13 | native-materializer-unavailable |
+| Responses | Anthropic | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | R3.14 | native-materializer-unavailable |
+| Responses | Gemini | not_verified | not_verified | not_verified | not_verified | not_verified | not_verified | R3.15 | reachable-materializers-without-cell-regression |
+| Responses | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.16 | ollama-stream-incomplete, ollama-upstream-incomplete |
+| Anthropic | OpenAI | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
+| Anthropic | Responses | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | R3.13 | native-materializer-unavailable |
+| Anthropic | Anthropic | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | R3.14 | native-materializer-unavailable |
+| Anthropic | Gemini | not_verified | not_verified | not_verified | not_verified | not_verified | not_verified | R3.15 | reachable-materializers-without-cell-regression |
+| Anthropic | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.16 | ollama-stream-incomplete, ollama-upstream-incomplete |
+| Gemini | OpenAI | not_verified | not_verified | not_verified | not_verified | not_verified | not_verified | R3.12 | reachable-materializers-without-cell-regression |
+| Gemini | Responses | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | R3.13 | native-materializer-unavailable |
+| Gemini | Anthropic | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | R3.14 | native-materializer-unavailable |
+| Gemini | Gemini | verified | verified | verified | verified | verified | verified | — | direct-call-count, direct-cancellation, direct-non-stream, direct-stream, direct-upstream-error |
+| Gemini | Ollama | not_verified | partial | partial | partial | not_verified | not_verified | R3.16 | ollama-stream-incomplete, ollama-upstream-incomplete |
+
+## Generation advanced dimensions
+
+| Downstream | Upstream | Tools | Reasoning | Multimodal | Structured output | Owner | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenAI | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.12 | advanced-transform-only |
+| OpenAI | Responses | not_verified | not_verified | not_verified | not_verified | R3.13 | advanced-transform-only |
+| OpenAI | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.14 | advanced-transform-only |
+| OpenAI | Gemini | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
+| OpenAI | Ollama | not_verified | not_verified | not_verified | not_verified | R3.16 | advanced-transform-only |
+| Responses | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.12 | advanced-transform-only |
+| Responses | Responses | not_verified | not_verified | not_verified | not_verified | R3.13 | advanced-transform-only |
+| Responses | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.14 | advanced-transform-only |
+| Responses | Gemini | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
+| Responses | Ollama | not_verified | not_verified | not_verified | not_verified | R3.16 | advanced-transform-only |
+| Anthropic | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.12 | advanced-transform-only |
+| Anthropic | Responses | not_verified | not_verified | not_verified | not_verified | R3.13 | advanced-transform-only |
+| Anthropic | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.14 | advanced-transform-only |
+| Anthropic | Gemini | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
+| Anthropic | Ollama | not_verified | not_verified | not_verified | not_verified | R3.16 | advanced-transform-only |
+| Gemini | OpenAI | not_verified | not_verified | not_verified | not_verified | R3.12 | advanced-transform-only |
+| Gemini | Responses | not_verified | not_verified | not_verified | not_verified | R3.13 | advanced-transform-only |
+| Gemini | Anthropic | not_verified | not_verified | not_verified | not_verified | R3.14 | advanced-transform-only |
+| Gemini | Gemini | not_verified | not_verified | not_verified | not_verified | R3.15 | advanced-transform-only |
+| Gemini | Ollama | not_verified | not_verified | not_verified | not_verified | R3.16 | advanced-transform-only |
+
+## Utility contracts
+
+| Utility | Route suffix | Method | Exposed on | Not exposed on | Execution | Allowed upstreams | Incompatible upstream | Verification | Owner | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| models | `/models` | GET | OpenAI, Responses, Anthropic, Gemini | — | local | — | not_applicable | verified | — | router-contract, router-method-contract |
+| embeddings | `/embeddings` | POST | OpenAI | Responses, Anthropic, Gemini | upstream | OpenAI | pre_send_reject | partial | R3.17 | router-contract, router-method-contract, utility-pre-send-reject |
+| rerank | `/rerank` | POST | OpenAI | Responses, Anthropic, Gemini | upstream | OpenAI | pre_send_reject | partial | R3.17 | router-contract, router-method-contract, utility-pre-send-reject |
+| countTokens | `/models/{model}:countTokens` | POST | Gemini | OpenAI, Responses, Anthropic | upstream | Gemini | pre_send_reject | partial | R3.17 | gemini-utility-exposure, router-method-contract, utility-pre-send-reject |
+
+## Evidence registry
+
+| ID | Kind | Reference | Summary |
+| --- | --- | --- | --- |
+| `direct-non-stream` | test | `proxy::direct_execution_regression::direct_execution_regression_non_stream_request_response_usage_and_log_golden` | Exercises routing, request materialization, non-stream response conversion, usage, logging, and one upstream call for the four representative cells. |
+| `direct-stream` | test | `proxy::direct_execution_regression::direct_execution_regression_stream_events_usage_and_single_call_golden` | Exercises streaming request materialization, ordered downstream events, text, usage, and one upstream call for the four representative cells. |
+| `direct-upstream-error` | test | `proxy::direct_execution_regression::direct_execution_regression_upstream_429_is_safe_logged_and_never_retried` | Exercises upstream error conversion, safe logging, and the no-retry contract for the four representative cells. |
+| `direct-cancellation` | test | `proxy::direct_execution_regression::direct_execution_regression_client_cancellation_closes_upstream_and_logs_cancelled` | Exercises client cancellation, upstream connection closure, cancelled logging, and the no-retry contract for the four representative cells. |
+| `direct-call-count` | test | `proxy::direct_execution_regression::four_public_downstream_generation_paths_call_upstream_at_most_once` | Pins each representative public generation path to exactly one real upstream request. |
+| `representative-fixture-scope` | test | `proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols` | Proves that the direct-execution suite contains exactly the four representative cells and no downstream Ollama fixture. |
+| `reachable-materializers-without-cell-regression` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | OpenAI and Gemini upstream materializers exist, but cells outside the representative suite lack complete direct-execution evidence. |
+| `native-materializer-unavailable` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | Responses and Anthropic upstream generation protocols are rejected before HTTP materialization. |
+| `ollama-upstream-incomplete` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | An Ollama /api/chat materialization path exists, but no complete direct-execution cell proves native behavior. |
+| `ollama-stream-incomplete` | code | `server/src/proxy/runtime/transport/stream.rs` | The transport does not provide a complete native Ollama NDJSON streaming contract. |
+| `advanced-transform-only` | test | `cargo run -p cyder-api --bin transform_quality_gate -- --quick` | Transform quality evidence exists, but it does not satisfy the router-to-upstream direct-execution bar for advanced dimensions. |
+| `router-contract` | test | `proxy::router::tests::four_protocol_version_aliases_are_direct_and_equivalent` | Pins four public protocol prefixes, direct unversioned aliases, version variants, and local model routes. |
+| `router-method-contract` | test | `proxy::router::tests::route_methods_fail_with_405_before_authentication` | Pins strict route methods before authentication or upstream work. |
+| `gemini-utility-exposure` | test | `proxy::router::tests::gemini_exposes_only_count_tokens_utility_action` | Pins countTokens as the only exposed Gemini utility action. |
+| `utility-pre-send-reject` | test | `proxy::direct_execution_regression::incompatible_utility_targets_are_rejected_before_any_upstream_call` | Proves incompatible embeddings, rerank, and countTokens targets fail before any HTTP upstream request. |
+
+## Status semantics
+
+- Base: `verified`, `partial`, `unavailable`, `not_verified`.
+- Advanced: `full`, `controlled_loss`, `explicit_reject`, `not_verified`.
+- `verified` requires direct execution through routing, materialization, transport, downstream output, and call-count assertions. Transform-only evidence is insufficient.

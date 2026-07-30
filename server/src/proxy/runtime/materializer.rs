@@ -18,10 +18,10 @@ use crate::{
             route_resolver::{ExecutionTarget, ReasoningConfigSource},
             transport::ProxyResponseMode,
         },
-        util::{determine_target_api_type, format_model_str},
+        util::{determine_upstream_protocol, format_model_str},
         utility::{UtilityOperation, UtilityProtocol},
     },
-    schema::enum_def::LlmApiType,
+    schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
     service::{
         cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch},
         provider_credential::{ProviderCredential, apply_provider_request_auth_header},
@@ -53,18 +53,18 @@ enum GenerationPrepareKind {
 }
 
 fn select_generation_prepare_kind(
-    target_api_type: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     is_stream: bool,
 ) -> Result<GenerationPrepareKind, ProxyError> {
-    match target_api_type {
-        LlmApiType::Openai | LlmApiType::GeminiOpenai => Ok(GenerationPrepareKind::Llm {
+    match upstream_protocol {
+        UpstreamProtocol::Openai => Ok(GenerationPrepareKind::Llm {
             path: "chat/completions",
         }),
-        LlmApiType::Ollama => Ok(GenerationPrepareKind::Llm { path: "api/chat" }),
-        LlmApiType::Gemini => Ok(GenerationPrepareKind::Gemini { is_stream }),
+        UpstreamProtocol::Ollama => Ok(GenerationPrepareKind::Llm { path: "api/chat" }),
+        UpstreamProtocol::Gemini => Ok(GenerationPrepareKind::Gemini { is_stream }),
         _ => Err(ProxyError::InternalError(format!(
-            "unsupported generation target api type: {:?}",
-            target_api_type
+            "unsupported generation upstream protocol: {:?}",
+            upstream_protocol
         ))),
     }
 }
@@ -87,8 +87,13 @@ fn build_gemini_headers(
         }
     }
 
-    apply_provider_request_auth_header(&mut headers, provider, LlmApiType::Gemini, credential)
-        .map_err(|error| ProxyError::BadRequest(error.to_string()))?;
+    apply_provider_request_auth_header(
+        &mut headers,
+        provider,
+        UpstreamProtocol::Gemini,
+        credential,
+    )
+    .map_err(|error| ProxyError::BadRequest(error.to_string()))?;
 
     Ok(headers)
 }
@@ -120,7 +125,7 @@ fn build_gemini_url(
 fn build_new_headers(
     pre_headers: &HeaderMap,
     provider: &CacheProvider,
-    target_api_type: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     credential: &ProviderCredential,
 ) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -130,7 +135,7 @@ fn build_new_headers(
             headers.insert(name.clone(), value.clone());
         }
     }
-    apply_provider_request_auth_header(&mut headers, provider, target_api_type, credential)
+    apply_provider_request_auth_header(&mut headers, provider, upstream_protocol, credential)
         .map_err(|error| ProxyError::BadRequest(error.to_string()))?;
     Ok(headers)
 }
@@ -166,11 +171,11 @@ async fn prepare_llm_request(
     let target_url = format!("{}/{}", provider.endpoint, path);
     let mut url = Url::parse(&target_url)
         .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
-    let target_api_type = determine_target_api_type(provider);
+    let upstream_protocol = determine_upstream_protocol(provider);
     let mut headers = build_new_headers(
         original_headers,
         provider,
-        target_api_type,
+        upstream_protocol,
         provider_credential,
     )?;
 
@@ -179,7 +184,12 @@ async fn prepare_llm_request(
         obj.insert("model".to_string(), json!(resolve_real_model_name(model)));
     }
 
-    data = finalize_request_data(data, LlmApiType::Openai, &provider.provider_type, path);
+    data = finalize_request_data(
+        data,
+        UpstreamProtocol::Openai,
+        &provider.provider_type,
+        path,
+    );
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
 
     Ok((url.to_string(), headers, data, provider_credential.key_id()))
@@ -192,11 +202,11 @@ async fn prepare_generation_request(
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
     provider_credential: &ProviderCredential,
-    target_api_type: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     is_stream: bool,
     params: &HashMap<String, String>,
 ) -> Result<PreparedGenerationRequest, ProxyError> {
-    match select_generation_prepare_kind(target_api_type, is_stream)? {
+    match select_generation_prepare_kind(upstream_protocol, is_stream)? {
         GenerationPrepareKind::Llm { path } => {
             let (final_url, final_headers, final_body_value, provider_api_key_id) =
                 prepare_llm_request(
@@ -291,11 +301,8 @@ async fn prepare_gemini_llm_request(
     Ok((url.to_string(), headers, data, provider_credential.key_id()))
 }
 
-fn is_openai_compatible_generation_target(target_api_type: LlmApiType) -> bool {
-    matches!(
-        target_api_type,
-        LlmApiType::Openai | LlmApiType::GeminiOpenai
-    )
+fn is_openai_compatible_generation_target(upstream_protocol: UpstreamProtocol) -> bool {
+    upstream_protocol == UpstreamProtocol::Openai
 }
 
 fn target_has_explicit_reasoning_disabled(target: &ExecutionTarget) -> bool {
@@ -323,7 +330,7 @@ async fn repair_generation_request_body(
     target: &ExecutionTarget,
     final_body_value: &mut Value,
     downstream_api_key_id: i64,
-    target_api_type: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     reasoning_continuation_store: &dyn ReasoningContinuationStore,
 ) -> Result<(), ProxyError> {
     repair_openai_reasoning_content(ReasoningContentRepairRequest {
@@ -334,7 +341,7 @@ async fn repair_generation_request_body(
             .runtime_features
             .openai_reasoning_content_repair_enabled,
         target_is_openai_compatible_generation: is_openai_compatible_generation_target(
-            target_api_type,
+            upstream_protocol,
         ),
         explicit_reasoning_disabled: target_has_explicit_reasoning_disabled(target),
         now_ms: chrono::Utc::now().timestamp_millis(),
@@ -347,7 +354,7 @@ async fn repair_generation_request_body(
 pub(in crate::proxy) async fn materialize_generation_request(
     target: &ExecutionTarget,
     mut data: Value,
-    user_api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
     is_stream: bool,
     original_headers: &HeaderMap,
     query_params: &HashMap<String, String>,
@@ -356,8 +363,8 @@ pub(in crate::proxy) async fn materialize_generation_request(
     downstream_api_key_id: i64,
     reasoning_continuation_store: &dyn ReasoningContinuationStore,
 ) -> Result<MaterializedRequest, ProxyError> {
-    let target_api_type = target.llm_api_type;
-    data = transform_request_data(data, user_api_type, target_api_type, is_stream);
+    let upstream_protocol = target.upstream_protocol;
+    data = transform_request_data(data, downstream_protocol, upstream_protocol, is_stream);
     let prepared_request = prepare_generation_request(
         &target.provider,
         &target.model,
@@ -365,7 +372,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
         original_headers,
         request_patches,
         provider_credential,
-        target_api_type,
+        upstream_protocol,
         is_stream,
         query_params,
     )
@@ -380,7 +387,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
         target,
         &mut final_body_value,
         downstream_api_key_id,
-        target_api_type,
+        upstream_protocol,
         reasoning_continuation_store,
     )
     .await?;
@@ -394,8 +401,8 @@ pub(in crate::proxy) async fn materialize_generation_request(
         final_body,
         model_str: format_model_str(&target.provider, &target.model),
         response_mode: ProxyResponseMode::Generation {
-            api_type: user_api_type,
-            target_api_type,
+            downstream_protocol,
+            upstream_protocol,
         },
     })
 }
@@ -449,7 +456,8 @@ pub(in crate::proxy) async fn materialize_utility_request(
         final_body,
         model_str: format_model_str(&target.provider, &target.model),
         response_mode: ProxyResponseMode::Utility {
-            api_type: operation.api_type,
+            downstream_protocol: operation.downstream_protocol,
+            upstream_protocol: target.upstream_protocol,
         },
     })
 }

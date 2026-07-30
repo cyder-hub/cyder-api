@@ -16,7 +16,7 @@
           :provider-options="providerOptions"
           :model-options="modelOptions"
           :status-options="statusOptions"
-          :user-api-type-options="userApiTypeOptions"
+          :downstream-protocol-options="downstreamProtocolOptions"
           @toggle-filter-panel="toggleFilterPanel"
           @toggle-advanced-filters="toggleAdvancedFilters"
           @update-filter="handleFilterChange"
@@ -134,7 +134,7 @@ const {
   providerOptions,
   modelOptions,
   statusOptions,
-  userApiTypeOptions,
+  downstreamProtocolOptions,
   hasActiveFilters,
   advancedActiveFilterCount,
   filterSummary,

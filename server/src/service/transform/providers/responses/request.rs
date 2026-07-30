@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::unified::*;
 use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 
@@ -38,7 +38,7 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
 
                                 let keep = apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Responses),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Responses),
                                     TransformValueKind::from(&part),
                                     "Downgrading rich system content to recoverable instruction text during Responses request conversion.",
                                 );
@@ -120,7 +120,7 @@ impl From<UnifiedRequest> for ResponsesRequestPayload {
 
                             let keep = apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Responses),
+                                TransformProtocol::Upstream(UpstreamProtocol::Responses),
                                 TransformValueKind::from(&part),
                                 "Downgrading rich system content to recoverable instruction text during Responses request conversion.",
                             );

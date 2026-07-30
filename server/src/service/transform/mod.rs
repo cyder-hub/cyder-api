@@ -1,4 +1,4 @@
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 
 pub(crate) mod adapter;
 pub(crate) mod capability;
@@ -31,7 +31,8 @@ pub use stream::{
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TransformProtocol {
     Unified,
-    Api(LlmApiType),
+    Downstream(DownstreamProtocol),
+    Upstream(UpstreamProtocol),
 }
 
 pub(crate) fn apply_transform_policy(

@@ -54,6 +54,22 @@ test("shared request patch and reasoning components do not call services directl
   assert.match(reasoningPanelSource, /actions\.updateConfig/);
 });
 
+test("reasoning manager contracts use upstream protocol identity", async () => {
+  const [typesSource, reasoningPanelSource] = await Promise.all([
+    readSource("src/services/types/requestPatch.ts"),
+    readSource("src/components/reasoning/ReasoningConfigPanel.vue"),
+  ]);
+
+  assert.match(typesSource, /upstream_protocols: UpstreamProtocol\[\]/);
+  assert.match(typesSource, /upstream_protocol: UpstreamProtocol/);
+  assert.equal(typesSource.includes("target_api_type"), false);
+  assert.equal(reasoningPanelSource.includes("target_api_type"), false);
+  assert.match(
+    reasoningPanelSource,
+    /case "GEMINI_OPENAI":\s+return "OPENAI";/,
+  );
+});
+
 test("legacy custom field i18n sections are removed after request patch migration", async () => {
   const [enMessages, zhMessages] = await Promise.all([
     readMessages("en"),

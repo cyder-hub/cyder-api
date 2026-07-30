@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::payload::*;
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::{TransformProtocol, apply_transform_policy, unified::*};
 
@@ -261,7 +261,7 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                             UnifiedContentPart::ImageUrl { url, detail } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Anthropic),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
                                     TransformValueKind::ImageUrl,
                                     "Downgrading remote image URL to recoverable text during Anthropic request conversion.",
                                 ) {
@@ -284,7 +284,7 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                             } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Anthropic),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
                                     TransformValueKind::FileUrl,
                                     "Downgrading file reference to recoverable text during Anthropic request conversion.",
                                 ) {
@@ -301,7 +301,7 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                             } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Anthropic),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
                                     TransformValueKind::FileData,
                                     "Downgrading inline file data to recoverable text during Anthropic request conversion.",
                                 ) {
@@ -314,7 +314,7 @@ impl From<UnifiedRequest> for AnthropicRequestPayload {
                             UnifiedContentPart::ExecutableCode { language, code } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Anthropic),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Anthropic),
                                     TransformValueKind::ExecutableCode,
                                     "Downgrading executable code to fenced text during Anthropic request conversion.",
                                 ) {

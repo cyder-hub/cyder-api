@@ -12,7 +12,7 @@ use super::{
     },
 };
 use crate::{
-    schema::enum_def::LlmApiType,
+    schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
@@ -25,7 +25,7 @@ pub(crate) enum UtilityProtocol {
 #[derive(Clone, Debug)]
 pub(crate) struct UtilityOperation {
     pub name: String,
-    pub api_type: LlmApiType,
+    pub downstream_protocol: DownstreamProtocol,
     pub protocol: UtilityProtocol,
     pub downstream_path: String,
 }
@@ -44,11 +44,11 @@ pub(super) struct UtilityExecutionInput {
 
 pub(super) fn validate_utility_target(
     operation: &UtilityOperation,
-    target_api_type: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
 ) -> Result<(), ProxyError> {
-    match (operation.protocol, target_api_type) {
-        (UtilityProtocol::OpenaiCompatible, LlmApiType::Openai) => Ok(()),
-        (UtilityProtocol::GeminiCompatible, LlmApiType::Gemini) => Ok(()),
+    match (operation.protocol, upstream_protocol) {
+        (UtilityProtocol::OpenaiCompatible, UpstreamProtocol::Openai) => Ok(()),
+        (UtilityProtocol::GeminiCompatible, UpstreamProtocol::Gemini) => Ok(()),
         (UtilityProtocol::OpenaiCompatible, _) => Err(ProxyError::BadRequest(format!(
             "'{}' is only supported for OpenAI-compatible providers.",
             operation.name
@@ -97,20 +97,23 @@ pub(super) async fn execute_utility_proxy(
 #[cfg(test)]
 mod tests {
     use super::{UtilityOperation, UtilityProtocol, validate_utility_target};
-    use crate::{proxy::ProxyError, schema::enum_def::LlmApiType};
+    use crate::{
+        proxy::ProxyError,
+        schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
+    };
 
     #[test]
     fn validate_utility_target_enforces_openai_compatibility() {
         let operation = UtilityOperation {
             name: "embeddings".to_string(),
-            api_type: LlmApiType::Openai,
+            downstream_protocol: DownstreamProtocol::Openai,
             protocol: UtilityProtocol::OpenaiCompatible,
             downstream_path: "embeddings".to_string(),
         };
 
-        assert!(validate_utility_target(&operation, LlmApiType::Openai).is_ok());
+        assert!(validate_utility_target(&operation, UpstreamProtocol::Openai).is_ok());
         assert!(matches!(
-            validate_utility_target(&operation, LlmApiType::Gemini),
+            validate_utility_target(&operation, UpstreamProtocol::Gemini),
             Err(ProxyError::BadRequest(_))
         ));
     }
@@ -119,14 +122,14 @@ mod tests {
     fn validate_utility_target_enforces_gemini_compatibility() {
         let operation = UtilityOperation {
             name: "countTokens".to_string(),
-            api_type: LlmApiType::Gemini,
+            downstream_protocol: DownstreamProtocol::Gemini,
             protocol: UtilityProtocol::GeminiCompatible,
             downstream_path: "countTokens".to_string(),
         };
 
-        assert!(validate_utility_target(&operation, LlmApiType::Gemini).is_ok());
+        assert!(validate_utility_target(&operation, UpstreamProtocol::Gemini).is_ok());
         assert!(matches!(
-            validate_utility_target(&operation, LlmApiType::Openai),
+            validate_utility_target(&operation, UpstreamProtocol::Openai),
             Err(ProxyError::BadRequest(_))
         ));
     }

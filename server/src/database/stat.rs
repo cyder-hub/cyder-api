@@ -1515,12 +1515,12 @@ mod tests {
 
             INSERT INTO request_log (
                 id, api_key_id, requested_model_name,
-                user_api_type, overall_status, final_error_code, final_error_message,
+                downstream_protocol, overall_status, final_error_code, final_error_message,
                 request_received_at,
                 upstream_request_sent_at, response_started_to_client_at, completed_at,
                 provider_id, provider_api_key_id, model_id,
                 provider_key_snapshot, provider_name_snapshot,
-                model_name_snapshot, real_model_name_snapshot, llm_api_type,
+                model_name_snapshot, real_model_name_snapshot, upstream_protocol,
                 estimated_cost_nanos, estimated_cost_currency,
                 total_input_tokens, total_output_tokens, reasoning_tokens, total_tokens,
                 created_at, updated_at

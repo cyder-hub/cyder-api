@@ -352,7 +352,7 @@
       "searchPlaceholder": "模型、渠道、错误...",
       "clearSearch": "清空搜索",
       "advancedFilters": "高级筛选",
-      "userApiLabel": "用户 API",
+      "downstreamProtocolLabel": "下游协议",
       "errorCodeLabel": "错误码",
       "latencyMinLabel": "最小延迟",
       "latencyMaxLabel": "最大延迟",
@@ -375,7 +375,7 @@
       "allProviders": "所有渠道",
       "allModels": "所有模型",
       "allStatuses": "所有状态",
-      "allApis": "所有 API",
+      "allDownstreamProtocols": "所有下游协议",
       "summaryActive": "已启用 {count} 个筛选条件。",
       "summaryAll": "当前显示全部请求记录，未应用筛选。",
       "status": {
@@ -415,8 +415,21 @@
         "overview": "概览"
       },
       "summary": {
+        "apiKey": "API Key",
         "provider": "渠道",
-        "model": "模型"
+        "model": "模型",
+        "realModel": "真实模型",
+        "downstreamProtocol": "下游协议",
+        "upstreamProtocol": "上游协议",
+        "clientIp": "客户端 IP",
+        "stream": "流式",
+        "firstByte": "首字节",
+        "totalLatency": "总延迟",
+        "tokens": "Tokens",
+        "cost": "费用",
+        "received": "接收时间",
+        "completed": "完成时间",
+        "error": "错误"
       }
     }
   },

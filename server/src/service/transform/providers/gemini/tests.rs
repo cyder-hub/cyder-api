@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::{StreamTransformer, unified::*};
 
 use super::*;
@@ -1031,7 +1031,8 @@ fn test_transform_unified_chunk_to_gemini_events_emits_diagnostic_for_image_delt
         ..Default::default()
     };
 
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Gemini);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
     let events =
         transform_unified_chunk_to_gemini_events(unified_chunk, &mut transformer.stream_context())
             .expect("gemini chunk events");

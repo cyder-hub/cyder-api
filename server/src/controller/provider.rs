@@ -31,8 +31,8 @@ use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
 use crate::service::cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch};
 use crate::service::provider_credential::{
     ProviderCredential, ProviderCredentialError, apply_provider_request_auth_header,
-    provider_target_api_type, resolve_draft_provider_credential, resolve_saved_provider_credential,
-    resolve_selected_provider_credential,
+    provider_upstream_protocol, resolve_draft_provider_credential,
+    resolve_saved_provider_credential, resolve_selected_provider_credential,
 };
 use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::SensitiveSecret;
@@ -251,7 +251,7 @@ async fn build_provider_check_request(
     apply_provider_request_auth_header(
         &mut headers,
         &cache_provider,
-        provider_target_api_type(&cache_provider.provider_type),
+        provider_upstream_protocol(&cache_provider.provider_type),
         credential,
     )
     .map_err(provider_credential_error)?;
@@ -787,7 +787,7 @@ fn build_remote_models_request(
     apply_provider_request_auth_header(
         &mut headers,
         &cache_provider,
-        provider_target_api_type(&cache_provider.provider_type),
+        provider_upstream_protocol(&cache_provider.provider_type),
         &credential,
     )
     .map_err(provider_credential_error)?;

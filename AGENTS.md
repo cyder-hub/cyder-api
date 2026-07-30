@@ -13,7 +13,8 @@ Use that assumption when making product and engineering decisions:
 
 The codebase already has:
 
-- multi-protocol proxying for OpenAI, Responses, Anthropic, Gemini, and Ollama
+- four public downstream protocol families: OpenAI, Responses, Anthropic, and Gemini
+- five upstream wire families: OpenAI, Responses, Anthropic, Gemini, and Ollama
 - deep protocol transformation, including streaming/tool/reasoning/multimodal paths
 - provider/model/api-key management
 - API key governance with expiry, RPM, concurrency, quota, and budget
@@ -180,7 +181,12 @@ Proxy routes are under:
 - `/ai/responses/*`
 - `/ai/anthropic/*`
 - `/ai/gemini/*`
-- `/ai/ollama/*`
+
+Unversioned routes are direct compatibility aliases for current `/v1`
+semantics; Gemini also exposes `/v1beta`. Ollama is upstream-only. The
+generated [Protocol Compatibility Matrix](docs/protocol-compatibility.md)
+defines the exact routes, provider profiles, current generation cells,
+utilities, evidence, and follow-up owners.
 
 ## Command Entry Points
 

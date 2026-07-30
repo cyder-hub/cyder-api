@@ -1,4 +1,4 @@
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::unified::*;
 use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 use crate::utils::ID_GENERATOR;
@@ -261,7 +261,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::Refusal { text } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Gemini),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                     TransformValueKind::Refusal,
                                     "Downgrading refusal content to plain text during Gemini request conversion.",
                                 ) {
@@ -271,7 +271,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::ImageUrl { url, detail } => {
                                 let keep = apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Gemini),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                     TransformValueKind::ImageUrl,
                                     "Downgrading remote image URL to recoverable text during Gemini request conversion.",
                                 );
@@ -319,7 +319,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::ToolCall(call) => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Gemini),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                     TransformValueKind::ToolCall,
                                     "Downgrading user tool call to recoverable text during Gemini request conversion.",
                                 ) {
@@ -364,7 +364,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::Refusal { text } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Gemini),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                     TransformValueKind::Refusal,
                                     "Downgrading refusal content to plain text during Gemini assistant conversion.",
                                 ) {
@@ -418,7 +418,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::ImageUrl { url, detail } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Gemini),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                     TransformValueKind::ImageUrl,
                                     "Downgrading assistant image URL to recoverable text during Gemini request conversion.",
                                 ) {
@@ -433,7 +433,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::ToolResult(result) => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Gemini),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                     TransformValueKind::ToolResult,
                                     "Downgrading assistant tool result to recoverable text during Gemini request conversion.",
                                 ) {
@@ -462,7 +462,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                                     .unwrap_or_else(|| {
                                         apply_transform_policy(
                                             TransformProtocol::Unified,
-                                            TransformProtocol::Api(LlmApiType::Gemini),
+                                            TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                             TransformValueKind::ToolResult,
                                             "Gemini tool result is missing tool name; using explicit synthetic fallback name derived from tool_call_id.",
                                         );
@@ -484,7 +484,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::Refusal { text } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Gemini),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                     TransformValueKind::Refusal,
                                     "Downgrading refusal content to plain text during Gemini tool conversion.",
                                 ) {
@@ -502,7 +502,7 @@ impl From<UnifiedRequest> for GeminiRequestPayload {
                             UnifiedContentPart::ImageUrl { url, detail } => {
                                 if apply_transform_policy(
                                     TransformProtocol::Unified,
-                                    TransformProtocol::Api(LlmApiType::Gemini),
+                                    TransformProtocol::Upstream(UpstreamProtocol::Gemini),
                                     TransformValueKind::ImageUrl,
                                     "Downgrading tool message image URL to recoverable text during Gemini request conversion.",
                                 ) {

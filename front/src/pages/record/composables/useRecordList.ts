@@ -188,14 +188,12 @@ export function useRecordList(options: UseRecordListOptions) {
     { value: "CANCELLED", label: options.t("recordPage.filter.status.CANCELLED") },
   ]);
 
-  const userApiTypeOptions = computed<FilterOption[]>(() => [
-    allOption(options.t("recordPage.filter.allApis")),
+  const downstreamProtocolOptions = computed<FilterOption[]>(() => [
+    allOption(options.t("recordPage.filter.allDownstreamProtocols")),
     { value: "OPENAI", label: "OpenAI" },
     { value: "RESPONSES", label: "Responses" },
     { value: "ANTHROPIC", label: "Anthropic" },
     { value: "GEMINI", label: "Gemini" },
-    { value: "OLLAMA", label: "Ollama" },
-    { value: "GEMINI_OPENAI", label: "Gemini OpenAI" },
   ]);
 
   const hasActiveFilters = computed(() =>
@@ -308,7 +306,7 @@ export function useRecordList(options: UseRecordListOptions) {
     providerOptions,
     modelOptions,
     statusOptions,
-    userApiTypeOptions,
+    downstreamProtocolOptions,
     hasActiveFilters,
     activeFilterCount,
     advancedActiveFilterCount,

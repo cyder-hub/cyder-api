@@ -36,7 +36,7 @@ use crate::{
             reasoning_content_repair::continuation_snapshot_from_parts,
         },
     },
-    schema::enum_def::{LlmApiType, RequestStatus},
+    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
@@ -73,7 +73,7 @@ struct PartialToolCall {
 impl OpenAiReasoningStreamCapture {
     pub(super) fn new(
         capture_context: Option<ReasoningContinuationCaptureContext>,
-        target_api_type: LlmApiType,
+        upstream_protocol: UpstreamProtocol,
     ) -> Self {
         let (scope, feature_enabled) = match capture_context {
             Some(context) => (Some(context.scope), context.feature_enabled),
@@ -82,10 +82,7 @@ impl OpenAiReasoningStreamCapture {
         Self {
             scope,
             feature_enabled,
-            target_is_openai_compatible_generation: matches!(
-                target_api_type,
-                LlmApiType::Openai | LlmApiType::GeminiOpenai
-            ),
+            target_is_openai_compatible_generation: upstream_protocol == UpstreamProtocol::Openai,
             choices: BTreeMap::new(),
             parse_failed_count: 0,
         }
@@ -308,21 +305,15 @@ pub(super) fn next_stream_chunk_timeout_duration(
     }
 }
 
-fn is_downstream_openai_done_event(api_type: LlmApiType, event: &SseEvent) -> bool {
-    api_type == LlmApiType::Openai && event.data.trim() == "[DONE]"
+fn is_downstream_openai_done_event(
+    downstream_protocol: DownstreamProtocol,
+    event: &SseEvent,
+) -> bool {
+    downstream_protocol == DownstreamProtocol::Openai && event.data.trim() == "[DONE]"
 }
 
-fn append_transformed_event_bytes(
-    target_api_type: LlmApiType,
-    event: &SseEvent,
-    output: &mut Vec<u8>,
-) {
-    if target_api_type == LlmApiType::Ollama {
-        output.extend_from_slice(event.data.as_bytes());
-        output.push(b'\n');
-    } else {
-        output.extend_from_slice(&event.to_bytes());
-    }
+fn append_transformed_event_bytes(event: &SseEvent, output: &mut Vec<u8>) {
+    output.extend_from_slice(&event.to_bytes());
 }
 
 async fn finalize_openai_done_stream(
@@ -415,8 +406,8 @@ pub(super) async fn handle_streaming_response(
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     provider_circuit_permit: Option<ProviderCircuitProbePermit>,
-    api_type: LlmApiType,
-    target_api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
+    upstream_protocol: UpstreamProtocol,
     reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     first_byte_timeout: Option<Duration>,
 ) -> Result<Response<Body>, ProxyError> {
@@ -449,7 +440,7 @@ pub(super) async fn handle_streaming_response(
         }
     });
 
-    let mut transformer = StreamTransformer::new(target_api_type, api_type);
+    let mut transformer = StreamTransformer::new(upstream_protocol, downstream_protocol);
     let mut parser = SseParser::new();
     let log_context_clone = log_context.clone();
 
@@ -467,7 +458,7 @@ pub(super) async fn handle_streaming_response(
         );
         let mut first_chunk_received_at_proxy: i64 = 0;
         let mut reasoning_stream_capture =
-            OpenAiReasoningStreamCapture::new(reasoning_capture, target_api_type);
+            OpenAiReasoningStreamCapture::new(reasoning_capture, upstream_protocol);
 
         loop {
             let chunk_result = match next_stream_chunk_timeout_duration(first_chunk_received_at_proxy, first_byte_timeout) {
@@ -566,11 +557,13 @@ pub(super) async fn handle_streaming_response(
                             transformer.transform_event(event).unwrap_or_default();
                         for transformed_event in transformed_events {
                             append_transformed_event_bytes(
-                                api_type,
                                 &transformed_event,
                                 &mut transformed_chunk_bytes,
                             );
-                            if is_downstream_openai_done_event(api_type, &transformed_event) {
+                            if is_downstream_openai_done_event(
+                                downstream_protocol,
+                                &transformed_event,
+                            ) {
                                 downstream_openai_done = true;
                                 break;
                             }
@@ -658,7 +651,10 @@ pub(super) async fn handle_streaming_response(
             }
         }
 
-        if status_code.is_success() && api_type == LlmApiType::Openai && target_api_type == LlmApiType::Gemini {
+        if status_code.is_success()
+            && downstream_protocol == DownstreamProtocol::Openai
+            && upstream_protocol == UpstreamProtocol::Gemini
+        {
             debug!("[handle_streaming_response] Appending [DONE] chunk for OpenAI client.");
             let done_chunk = Bytes::from("data: [DONE]\n\n");
             mark_stream_response_started_to_client(&log_context_clone, &done_chunk).await;

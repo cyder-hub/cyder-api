@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use cyder_api::schema::enum_def::LlmApiType;
+use cyder_api::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use cyder_api::service::transform::quality::{
     BenchmarkScenarioMetrics, BenchmarkSummary, TransformQualityReport,
     build_transform_quality_report, load_benchmark_thresholds, write_transform_quality_report,
@@ -497,8 +497,8 @@ fn build_scenarios() -> Vec<Scenario> {
                 for _ in 0..48 {
                     let output = transform_request_data(
                         black_box(request_large_text.clone()),
-                        LlmApiType::Openai,
-                        LlmApiType::Gemini,
+                        DownstreamProtocol::Openai,
+                        UpstreamProtocol::Gemini,
                         false,
                     );
                     black_box(output);
@@ -514,8 +514,8 @@ fn build_scenarios() -> Vec<Scenario> {
                 for _ in 0..32 {
                     let output = transform_request_data(
                         black_box(request_multi_tool.clone()),
-                        LlmApiType::Gemini,
-                        LlmApiType::Openai,
+                        DownstreamProtocol::Gemini,
+                        UpstreamProtocol::Openai,
                         true,
                     );
                     black_box(output);
@@ -531,8 +531,8 @@ fn build_scenarios() -> Vec<Scenario> {
                 for _ in 0..48 {
                     let output = transform_result(
                         black_box(response_openai_large.clone()),
-                        LlmApiType::Openai,
-                        LlmApiType::Gemini,
+                        UpstreamProtocol::Openai,
+                        DownstreamProtocol::Gemini,
                     );
                     black_box(output);
                 }
@@ -547,8 +547,8 @@ fn build_scenarios() -> Vec<Scenario> {
                 for _ in 0..40 {
                     let output = transform_result(
                         black_box(response_responses_reasoning.clone()),
-                        LlmApiType::Responses,
-                        LlmApiType::Openai,
+                        UpstreamProtocol::Responses,
+                        DownstreamProtocol::Openai,
                     );
                     black_box(output);
                 }
@@ -561,8 +561,10 @@ fn build_scenarios() -> Vec<Scenario> {
             input_bytes: anthropic_stream_bytes,
             run: Box::new(move || {
                 for _ in 0..12 {
-                    let mut transformer =
-                        StreamTransformer::new(LlmApiType::Anthropic, LlmApiType::Responses);
+                    let mut transformer = StreamTransformer::new(
+                        UpstreamProtocol::Anthropic,
+                        DownstreamProtocol::Responses,
+                    );
                     let output: Vec<SseEvent> = anthropic_stream
                         .iter()
                         .flat_map(|event| {
@@ -582,8 +584,10 @@ fn build_scenarios() -> Vec<Scenario> {
             input_bytes: responses_stream_bytes,
             run: Box::new(move || {
                 for _ in 0..10 {
-                    let mut transformer =
-                        StreamTransformer::new(LlmApiType::Responses, LlmApiType::Openai);
+                    let mut transformer = StreamTransformer::new(
+                        UpstreamProtocol::Responses,
+                        DownstreamProtocol::Openai,
+                    );
                     let output: Vec<SseEvent> = responses_stream
                         .iter()
                         .flat_map(|event| {
@@ -603,8 +607,10 @@ fn build_scenarios() -> Vec<Scenario> {
             input_bytes: openai_stream_bytes,
             run: Box::new(move || {
                 for _ in 0..8 {
-                    let mut transformer =
-                        StreamTransformer::new(LlmApiType::Openai, LlmApiType::Gemini);
+                    let mut transformer = StreamTransformer::new(
+                        UpstreamProtocol::Openai,
+                        DownstreamProtocol::Gemini,
+                    );
                     let output: Vec<SseEvent> = openai_stream
                         .iter()
                         .flat_map(|event| {

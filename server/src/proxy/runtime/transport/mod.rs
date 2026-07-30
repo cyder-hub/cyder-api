@@ -27,7 +27,7 @@ use crate::{
         runtime::api_key_lease::ApiKeyRequestLeaseFinalizer,
         util::serialize_upstream_response_headers_for_log,
     },
-    schema::enum_def::{LlmApiType, RequestStatus},
+    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
     service::{app_state::AppState, cache::types::CacheCostCatalogVersion},
 };
@@ -35,22 +35,26 @@ use crate::{
 #[derive(Clone, Copy, Debug)]
 pub(in crate::proxy) enum ProxyResponseMode {
     Generation {
-        api_type: LlmApiType,
-        target_api_type: LlmApiType,
+        downstream_protocol: DownstreamProtocol,
+        upstream_protocol: UpstreamProtocol,
     },
     Utility {
-        api_type: LlmApiType,
+        downstream_protocol: DownstreamProtocol,
+        upstream_protocol: UpstreamProtocol,
     },
 }
 
 impl ProxyResponseMode {
-    fn api_types(self) -> (LlmApiType, LlmApiType) {
+    fn protocols(self) -> (DownstreamProtocol, UpstreamProtocol) {
         match self {
             Self::Generation {
-                api_type,
-                target_api_type,
-            } => (api_type, target_api_type),
-            Self::Utility { api_type } => (api_type, api_type),
+                downstream_protocol,
+                upstream_protocol,
+            }
+            | Self::Utility {
+                downstream_protocol,
+                upstream_protocol,
+            } => (downstream_protocol, upstream_protocol),
         }
     }
 }
@@ -201,7 +205,7 @@ pub(in crate::proxy) async fn send_materialized_request(
     }
 
     let result = if is_sse {
-        let (api_type, target_api_type) = response_mode.api_types();
+        let (downstream_protocol, upstream_protocol) = response_mode.protocols();
         match handle_streaming_response(
             &app_state,
             cancellation.clone(),
@@ -213,8 +217,8 @@ pub(in crate::proxy) async fn send_materialized_request(
             cost_catalog_version,
             api_key_request_lease,
             provider_circuit_permit,
-            api_type,
-            target_api_type,
+            downstream_protocol,
+            upstream_protocol,
             reasoning_capture.clone(),
             first_byte_timeout,
         )

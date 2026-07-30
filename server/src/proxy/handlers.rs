@@ -7,7 +7,7 @@ use super::{
     pipeline::{AuthenticationStrategy, OperationAdapter},
     utility::{UtilityOperation, UtilityProtocol},
 };
-use crate::{schema::enum_def::LlmApiType, service::app_state::AppState};
+use crate::{schema::enum_def::DownstreamProtocol, service::app_state::AppState};
 
 pub async fn openai_utility_handler(
     app_state: Arc<AppState>,
@@ -19,7 +19,7 @@ pub async fn openai_utility_handler(
         AuthenticationStrategy::OpenaiCompatible,
         UtilityOperation {
             name: downstream_path.to_string(),
-            api_type: LlmApiType::Openai,
+            downstream_protocol: DownstreamProtocol::Openai,
             protocol: UtilityProtocol::OpenaiCompatible,
             downstream_path: downstream_path.to_string(),
         },
@@ -32,9 +32,9 @@ pub async fn list_models_handler(
     app_state: Arc<AppState>,
     params: HashMap<String, String>,
     request: Request<Body>,
-    api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
 ) -> Result<Response<Body>, ProxyError> {
-    OperationAdapter::list_models(api_type)
+    OperationAdapter::list_models(downstream_protocol)
         .execute(app_state, params, request)
         .await
 }

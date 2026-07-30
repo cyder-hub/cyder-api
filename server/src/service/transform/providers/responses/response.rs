@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::unified::*;
 use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
 
@@ -73,7 +73,7 @@ impl From<ResponsesResponse> for UnifiedResponse {
                 }
                 ItemField::Unknown(_) => {
                     apply_transform_policy(
-                        TransformProtocol::Api(LlmApiType::Responses),
+                        TransformProtocol::Upstream(UpstreamProtocol::Responses),
                         TransformProtocol::Unified,
                         TransformValueKind::ResponsesUnknownItem,
                         "Dropping unknown Responses item from Responses response conversion.",

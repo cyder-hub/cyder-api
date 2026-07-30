@@ -264,6 +264,102 @@ fn sqlite_table_column_count(
     .count
 }
 
+fn assert_postgres_request_log_protocol_schema(connection: &mut PgConnection) {
+    let downstream_column = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name = 'downstream_protocol'
+           AND is_nullable = 'NO'
+           AND udt_name = 'downstream_protocol_enum'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL downstream protocol column should query")
+    .count;
+    assert_eq!(downstream_column, 1);
+
+    let upstream_column = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name = 'upstream_protocol'
+           AND is_nullable = 'YES'
+           AND udt_name = 'upstream_protocol_enum'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL upstream protocol column should query")
+    .count;
+    assert_eq!(upstream_column, 1);
+
+    let legacy_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name IN ('user_api_type', 'llm_api_type')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL legacy request-log columns should query")
+    .count;
+    assert_eq!(legacy_columns, 0);
+
+    let downstream_values = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'downstream_protocol_enum'
+           AND e.enumlabel IN ('OPENAI', 'RESPONSES', 'ANTHROPIC', 'GEMINI')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL downstream enum should query")
+    .count;
+    assert_eq!(downstream_values, 4);
+    let downstream_extra = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'downstream_protocol_enum'
+           AND e.enumlabel NOT IN ('OPENAI', 'RESPONSES', 'ANTHROPIC', 'GEMINI')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL downstream enum extras should query")
+    .count;
+    assert_eq!(downstream_extra, 0);
+
+    let upstream_values = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'upstream_protocol_enum'
+           AND e.enumlabel IN ('OPENAI', 'RESPONSES', 'ANTHROPIC', 'GEMINI', 'OLLAMA')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL upstream enum should query")
+    .count;
+    assert_eq!(upstream_values, 5);
+    let upstream_extra = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_type t
+         JOIN pg_enum e ON e.enumtypid = t.oid
+         WHERE t.typname = 'upstream_protocol_enum'
+           AND e.enumlabel NOT IN ('OPENAI', 'RESPONSES', 'ANTHROPIC', 'GEMINI', 'OLLAMA')",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL upstream enum extras should query")
+    .count;
+    assert_eq!(upstream_extra, 0);
+
+    let legacy_type = diesel::sql_query(
+        "SELECT COUNT(*) AS count FROM pg_type WHERE typname = 'llm_api_type_enum'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL legacy protocol enum should query")
+    .count;
+    assert_eq!(legacy_type, 0);
+}
+
 #[test]
 fn sqlite_clean_upgrade_chain_from_empty() {
     let (_temp_dir, mut connection) = open_test_sqlite_connection("r1-migration-smoke.sqlite");
@@ -306,6 +402,123 @@ fn sqlite_clean_upgrade_chain_from_empty() {
             .expect("sqlite pending migrations should remain queryable"),
         "sqlite second migration run should remain fully applied"
     );
+}
+
+#[test]
+fn sqlite_request_log_protocol_boundary_upgrade_clears_history_and_enforces_domains() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("request-log-protocol-upgrade.sqlite");
+    run_sqlite_migrations(&mut connection).expect("sqlite migrations should run");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-29-090000_request_log_protocol_boundaries/down.sql"
+        ))
+        .expect("request log protocol down migration should run");
+    connection
+        .batch_execute(
+            "INSERT INTO api_key (
+                id, api_key_hash, key_prefix, key_last4, name, description,
+                default_action, is_enabled, expires_at, rate_limit_rpm,
+                max_concurrent_requests, quota_daily_requests, quota_daily_tokens,
+                quota_monthly_tokens, budget_daily_nanos, budget_daily_currency,
+                budget_monthly_nanos, budget_monthly_currency, deleted_at,
+                created_at, updated_at
+            ) VALUES (
+                9001, 'protocol-boundary-hash', 'ck-test', '9001',
+                'Protocol migration key', NULL, 'ALLOW', 1, NULL, NULL,
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 1
+            );
+            INSERT INTO request_log (
+                id, api_key_id, user_api_type, llm_api_type, overall_status,
+                request_received_at, is_stream, created_at, updated_at
+            ) VALUES (
+                9002, 9001, 'OLLAMA', 'GEMINI_OPENAI', 'SUCCESS',
+                1, 0, 1, 1
+            );",
+        )
+        .expect("legacy mixed-direction log should insert");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-07-29-090000_request_log_protocol_boundaries/up.sql"
+        ))
+        .expect("request log protocol up migration should run");
+
+    assert_eq!(
+        sqlite_table_column_count(&mut connection, "request_log", "user_api_type"),
+        0
+    );
+    assert_eq!(
+        sqlite_table_column_count(&mut connection, "request_log", "llm_api_type"),
+        0
+    );
+    assert_eq!(
+        sqlite_table_column_count(&mut connection, "request_log", "downstream_protocol"),
+        1
+    );
+    assert_eq!(
+        sqlite_table_column_count(&mut connection, "request_log", "upstream_protocol"),
+        1
+    );
+    let rows = diesel::sql_query("SELECT COUNT(*) AS count FROM request_log")
+        .get_result::<CountRow>(&mut connection)
+        .expect("request log count should query")
+        .count;
+    assert_eq!(
+        rows, 0,
+        "protocol migration must discard request-log history"
+    );
+
+    connection
+        .batch_execute(
+            "INSERT INTO request_log (
+                id, api_key_id, downstream_protocol, upstream_protocol,
+                overall_status, request_received_at, is_stream, created_at, updated_at
+            ) VALUES (
+                9003, 9001, 'RESPONSES', 'OLLAMA', 'SUCCESS', 2, 0, 2, 2
+            );
+            INSERT INTO request_log (
+                id, api_key_id, downstream_protocol, upstream_protocol,
+                overall_status, request_received_at, is_stream, created_at, updated_at
+            ) VALUES (
+                9004, 9001, 'GEMINI', NULL, 'SUCCESS', 3, 0, 3, 3
+            );",
+        )
+        .expect("valid directional protocol values should insert");
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, api_key_id, downstream_protocol, overall_status,
+                    request_received_at, is_stream, created_at, updated_at
+                ) VALUES (
+                    9005, 9001, 'OLLAMA', 'SUCCESS', 4, 0, 4, 4
+                );"
+            )
+            .is_err(),
+        "Ollama must be rejected as a downstream protocol"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, api_key_id, downstream_protocol, upstream_protocol,
+                    overall_status, request_received_at, is_stream, created_at, updated_at
+                ) VALUES (
+                    9006, 9001, 'OPENAI', 'GEMINI_OPENAI',
+                    'SUCCESS', 5, 0, 5, 5
+                );"
+            )
+            .is_err(),
+        "provider dialects must be rejected as upstream protocols"
+    );
+    let foreign_key_violations =
+        diesel::sql_query("SELECT COUNT(*) AS count FROM pragma_foreign_key_check")
+            .get_result::<CountRow>(&mut connection)
+            .expect("foreign key check should run")
+            .count;
+    assert_eq!(foreign_key_violations, 0);
 }
 
 #[test]
@@ -908,6 +1121,7 @@ fn postgres_clean_upgrade_chain_from_empty() {
 
         run_postgres_migrations(&mut connection)
             .expect("postgres clean + upgrade migrations should run");
+        assert_postgres_request_log_protocol_schema(&mut connection);
 
         let applied_versions = connection
             .applied_migrations()
@@ -941,6 +1155,84 @@ fn postgres_clean_upgrade_chain_from_empty() {
                 .expect("postgres pending migrations should remain queryable"),
             "postgres second migration run should remain fully applied"
         );
+    }));
+
+    rebuild_postgres_public_schema(&mut connection);
+    if let Err(panic_payload) = test_result {
+        resume_unwind(panic_payload);
+    }
+}
+
+#[test]
+#[ignore = "requires a dedicated PostgreSQL 17 database"]
+fn postgres_request_log_protocol_boundary_upgrade_clears_history() {
+    let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
+        panic!("{POSTGRES_SMOKE_URL_ENV} must point to the dedicated PostgreSQL smoke database")
+    });
+    let mut connection = PgConnection::establish(&database_url)
+        .expect("dedicated postgres smoke database should be reachable");
+    assert_eq!(
+        postgres_database_name(&mut connection),
+        POSTGRES_SMOKE_DATABASE,
+        "refusing to rebuild a non-dedicated PostgreSQL database"
+    );
+
+    rebuild_postgres_public_schema(&mut connection);
+    let test_result = catch_unwind(AssertUnwindSafe(|| {
+        run_postgres_migrations(&mut connection).expect("postgres migrations should run");
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-29-090000_request_log_protocol_boundaries/down.sql"
+            ))
+            .expect("request log protocol down migration should run");
+        connection
+            .batch_execute(
+                "INSERT INTO api_key (
+                    id, api_key_hash, key_prefix, key_last4, name, description,
+                    default_action, is_enabled, expires_at, rate_limit_rpm,
+                    max_concurrent_requests, quota_daily_requests, quota_daily_tokens,
+                    quota_monthly_tokens, budget_daily_nanos, budget_daily_currency,
+                    budget_monthly_nanos, budget_monthly_currency, deleted_at,
+                    created_at, updated_at
+                ) VALUES (
+                    9001, 'protocol-boundary-hash', 'ck-test', '9001',
+                    'Protocol migration key', NULL, 'ALLOW', TRUE, NULL, NULL,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 1
+                );
+                INSERT INTO request_log (
+                    id, api_key_id, user_api_type, llm_api_type, overall_status,
+                    request_received_at, is_stream, created_at, updated_at
+                ) VALUES (
+                    9002, 9001, 'OLLAMA', 'GEMINI_OPENAI', 'SUCCESS',
+                    1, FALSE, 1, 1
+                );",
+            )
+            .expect("legacy PostgreSQL request log should insert");
+        connection
+            .batch_execute(include_str!(
+                "../../migrations/postgres/2026-07-29-090000_request_log_protocol_boundaries/up.sql"
+            ))
+            .expect("request log protocol up migration should run");
+
+        assert_postgres_request_log_protocol_schema(&mut connection);
+        let rows = diesel::sql_query("SELECT COUNT(*) AS count FROM request_log")
+            .get_result::<CountRow>(&mut connection)
+            .expect("PostgreSQL request log count should query")
+            .count;
+        assert_eq!(
+            rows, 0,
+            "protocol migration must discard request-log history"
+        );
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, api_key_id, downstream_protocol, upstream_protocol,
+                    overall_status, request_received_at, is_stream, created_at, updated_at
+                ) VALUES
+                    (9003, 9001, 'OPENAI', NULL, 'SUCCESS', 2, FALSE, 2, 2),
+                    (9004, 9001, 'RESPONSES', 'OLLAMA', 'SUCCESS', 3, FALSE, 3, 3);",
+            )
+            .expect("PostgreSQL directional request logs should insert");
     }));
 
     rebuild_postgres_public_schema(&mut connection);

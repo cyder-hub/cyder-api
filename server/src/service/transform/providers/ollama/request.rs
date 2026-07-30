@@ -1,6 +1,6 @@
 use super::payload::{OllamaMessage, OllamaOptions, OllamaRequestPayload};
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::{TransformProtocol, apply_transform_policy, unified::*};
 
@@ -47,71 +47,8 @@ fn append_ollama_text_segment(buffer: &mut String, segment: String) {
     }
 }
 
-impl From<OllamaRequestPayload> for UnifiedRequest {
-    fn from(ollama_req: OllamaRequestPayload) -> Self {
-        let messages = ollama_req
-            .messages
-            .into_iter()
-            .map(|msg| {
-                let role = match msg.role.as_str() {
-                    "system" => UnifiedRole::System,
-                    "user" => UnifiedRole::User,
-                    "assistant" => UnifiedRole::Assistant,
-                    _ => UnifiedRole::User, // Default to user
-                };
-                // NOTE: Ollama's `images` field is ignored for now.
-                // UnifiedRequest would need to be updated to handle multimodal content.
-                let content = vec![UnifiedContentPart::Text { text: msg.content }];
-                UnifiedMessage { role, content }
-            })
-            .collect();
-
-        let (temperature, max_tokens, top_p, stop, seed, presence_penalty, frequency_penalty) =
-            if let Some(options) = ollama_req.options {
-                (
-                    options.temperature,
-                    options.max_tokens,
-                    options.top_p,
-                    options.stop,
-                    options.seed,
-                    options.presence_penalty,
-                    options.frequency_penalty,
-                )
-            } else {
-                (None, None, None, None, None, None, None)
-            };
-
-        let ollama_extension = UnifiedOllamaRequestExtension {
-            format: ollama_req.format,
-            keep_alive: ollama_req.keep_alive,
-        };
-
-        UnifiedRequest {
-            model: Some(ollama_req.model),
-            messages,
-            // Ollama doesn't support tools/function calling - always set to None
-            tools: None,
-            stream: ollama_req.stream.unwrap_or(false),
-            temperature,
-            max_tokens,
-            top_p,
-            stop,
-            seed,
-            presence_penalty,
-            frequency_penalty,
-            extensions: (!ollama_extension.is_empty()).then_some(UnifiedRequestExtensions {
-                ollama: Some(ollama_extension),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-        .filter_empty() // Filter out empty content and messages
-    }
-}
-
 impl From<UnifiedRequest> for OllamaRequestPayload {
     fn from(unified_req: UnifiedRequest) -> Self {
-        let ollama_extension = unified_req.ollama_extension().cloned().unwrap_or_default();
         let messages = unified_req
             .messages
             .into_iter()
@@ -123,7 +60,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                     UnifiedRole::Tool => {
                         apply_transform_policy(
                             TransformProtocol::Unified,
-                            TransformProtocol::Api(LlmApiType::Ollama),
+                            TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                             TransformValueKind::ToolRoleMessage,
                             "Downgrading tool-role message to user text during Ollama request conversion.",
                         );
@@ -143,7 +80,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         UnifiedContentPart::Refusal { text } => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Ollama),
+                                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                                 TransformValueKind::Refusal,
                                 "Downgrading refusal content to plain text during Ollama request conversion.",
                             ) {
@@ -153,7 +90,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         UnifiedContentPart::Reasoning { text } => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Ollama),
+                                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                                 TransformValueKind::ReasoningContent,
                                 "Downgrading reasoning content to plain text during Ollama request conversion.",
                             ) {
@@ -166,7 +103,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         UnifiedContentPart::ImageUrl { url, detail } => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Ollama),
+                                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                                 TransformValueKind::ImageUrl,
                                 "Downgrading image URL to recoverable text during Ollama request conversion.",
                             ) {
@@ -188,7 +125,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         } => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Ollama),
+                                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                                 TransformValueKind::FileUrl,
                                 "Downgrading file reference to recoverable text during Ollama request conversion.",
                             ) {
@@ -209,7 +146,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         } => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Ollama),
+                                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                                 TransformValueKind::FileData,
                                 "Downgrading inline file data to recoverable text during Ollama request conversion.",
                             ) {
@@ -226,7 +163,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         UnifiedContentPart::ExecutableCode { language, code } => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Ollama),
+                                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                                 TransformValueKind::ExecutableCode,
                                 "Downgrading executable code to fenced text during Ollama request conversion.",
                             ) {
@@ -239,7 +176,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         UnifiedContentPart::ToolCall(call) => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Ollama),
+                                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                                 TransformValueKind::ToolCall,
                                 "Downgrading tool call to recoverable text during Ollama request conversion.",
                             ) {
@@ -256,7 +193,7 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
                         UnifiedContentPart::ToolResult(result) => {
                             if apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Ollama),
+                                TransformProtocol::Upstream(UpstreamProtocol::Ollama),
                                 TransformValueKind::ToolResult,
                                 "Downgrading tool result to recoverable text during Ollama request conversion.",
                             ) {
@@ -319,8 +256,8 @@ impl From<UnifiedRequest> for OllamaRequestPayload {
             messages,
             stream: Some(unified_req.stream),
             options,
-            format: ollama_extension.format,
-            keep_alive: ollama_extension.keep_alive,
+            format: None,
+            keep_alive: None,
         }
     }
 }

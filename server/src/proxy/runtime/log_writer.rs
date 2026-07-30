@@ -11,7 +11,7 @@ use crate::{
         logging::{RequestLogContext, record_request_completion_and_log},
         runtime::route_resolver::ExecutionTarget,
     },
-    schema::enum_def::{LlmApiType, RequestStatus},
+    schema::enum_def::{DownstreamProtocol, RequestStatus},
     service::{
         app_state::AppState,
         cache::types::{CacheApiKey, CacheCostCatalogVersion},
@@ -28,7 +28,7 @@ pub(in crate::proxy) struct RequestLogContextInput<'a> {
     pub resolved_reasoning_preset: Option<&'a str>,
     pub client_ip_addr: &'a Option<String>,
     pub start_time: i64,
-    pub user_api_type: LlmApiType,
+    pub downstream_protocol: DownstreamProtocol,
 }
 
 pub(in crate::proxy) fn new_request_log_context(
@@ -42,8 +42,8 @@ pub(in crate::proxy) fn new_request_log_context(
         input.requested_model_name,
         input.start_time,
         input.client_ip_addr,
-        input.user_api_type,
-        input.target.llm_api_type,
+        input.downstream_protocol,
+        input.target.upstream_protocol,
     );
     context.set_model_resolution_trace(
         input.base_requested_model_name,

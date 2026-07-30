@@ -13,14 +13,14 @@ use super::{
     },
 };
 use crate::{
-    schema::enum_def::LlmApiType,
+    schema::enum_def::DownstreamProtocol,
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
 pub(super) struct GenerationExecutionInput {
     pub cancellation: ProxyCancellationContext,
     pub api_key: Arc<CacheApiKey>,
-    pub api_type: LlmApiType,
+    pub downstream_protocol: DownstreamProtocol,
     pub execution_plan: ExecutionPlan,
     pub is_stream: bool,
     pub query_params: std::collections::HashMap<String, String>,
@@ -43,7 +43,7 @@ pub(super) async fn execute_generation_proxy(
     let GenerationExecutionInput {
         cancellation,
         api_key,
-        api_type,
+        downstream_protocol,
         execution_plan,
         is_stream,
         query_params,
@@ -59,7 +59,7 @@ pub(super) async fn execute_generation_proxy(
         GenerationOrchestrationInput {
             cancellation,
             api_key,
-            api_type,
+            downstream_protocol,
             execution_plan,
             is_stream,
             query_params,

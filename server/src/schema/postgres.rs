@@ -293,8 +293,9 @@ diesel::table! {
 }
 
 diesel::table! {
+    use crate::schema::enum_def::DownstreamProtocolMapping;
     use crate::schema::enum_def::RequestStatusMapping;
-    use crate::schema::enum_def::LlmApiTypeMapping;
+    use crate::schema::enum_def::UpstreamProtocolMapping;
     use diesel::sql_types::{Bool, Int4, Int8, Nullable, Text};
 
     request_log (id) {
@@ -319,7 +320,7 @@ diesel::table! {
         provider_name_snapshot -> Nullable<Text>,
         model_name_snapshot -> Nullable<Text>,
         real_model_name_snapshot -> Nullable<Text>,
-        llm_api_type -> Nullable<LlmApiTypeMapping>,
+        upstream_protocol -> Nullable<UpstreamProtocolMapping>,
         upstream_http_status -> Nullable<Int4>,
         #[sql_name = "overall_status"]
         status -> RequestStatusMapping,
@@ -342,7 +343,7 @@ diesel::table! {
         cache_write_tokens -> Nullable<Int4>,
         reasoning_tokens -> Nullable<Int4>,
         total_tokens -> Nullable<Int4>,
-        user_api_type -> LlmApiTypeMapping,
+        downstream_protocol -> DownstreamProtocolMapping,
     }
 }
 

@@ -13,7 +13,7 @@ use super::unified::{
     UnifiedTransformDiagnostic, UnifiedTransformDiagnosticAction, UnifiedTransformDiagnosticKind,
     UnifiedTransformDiagnosticLossLevel,
 };
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::utils::sse::SseEvent;
 
 fn diagnostic_action(action: TransformAction) -> UnifiedTransformDiagnosticAction {
@@ -48,7 +48,8 @@ fn diagnostic_kind(kind: TransformDiagnosticKind) -> UnifiedTransformDiagnosticK
 fn protocol_name(protocol: TransformProtocol) -> String {
     match protocol {
         TransformProtocol::Unified => "unified".to_string(),
-        TransformProtocol::Api(api) => format!("{api:?}"),
+        TransformProtocol::Downstream(protocol) => format!("downstream:{protocol:?}"),
+        TransformProtocol::Upstream(protocol) => format!("upstream:{protocol:?}"),
     }
 }
 
@@ -236,8 +237,8 @@ pub(in crate::service::transform) fn build_stream_diagnostic_sse(
 }
 
 pub(in crate::service::transform) fn build_fatal_stream_error_payload(
-    source_api: LlmApiType,
-    target_api: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
+    downstream_protocol: DownstreamProtocol,
     stream_id: Option<String>,
     stage: &'static str,
     message: String,
@@ -253,8 +254,8 @@ pub(in crate::service::transform) fn build_fatal_stream_error_payload(
 
     serde_json::to_value(build_transform_diagnostic(
         TransformDiagnosticKind::FatalTransformError,
-        TransformProtocol::Api(source_api),
-        TransformProtocol::Api(target_api),
+        TransformProtocol::Upstream(upstream_protocol),
+        TransformProtocol::Downstream(downstream_protocol),
         TransformValueKind::StreamError,
         decision,
         stream_id.clone(),
@@ -269,8 +270,8 @@ pub(in crate::service::transform) fn build_fatal_stream_error_payload(
         serde_json::json!({
             "type": "transform_error",
             "stage": stage,
-            "provider": format!("{:?}", source_api),
-            "target": format!("{:?}", target_api),
+            "provider": format!("{:?}", upstream_protocol),
+            "target": format!("{:?}", downstream_protocol),
             "stream_id": stream_id,
             "message": message,
             "raw_data_summary": raw_summary

@@ -1,5 +1,5 @@
 use super::*;
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::providers::{anthropic, openai, responses};
 use crate::service::transform::unified::*;
 use crate::utils::sse::SseEvent;
@@ -20,11 +20,11 @@ fn load_sse_fixture(raw: &str) -> Vec<SseEvent> {
 }
 
 fn replay_fixture_through_transformer(
-    source_api: LlmApiType,
-    target_api: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
+    downstream_protocol: DownstreamProtocol,
     fixture: &[SseEvent],
 ) -> Vec<SseEvent> {
-    let mut transformer = StreamTransformer::new(source_api, target_api);
+    let mut transformer = StreamTransformer::new(upstream_protocol, downstream_protocol);
     fixture
         .iter()
         .flat_map(|event| {
@@ -37,7 +37,8 @@ fn replay_fixture_through_transformer(
 
 #[test]
 fn test_openai_chunk_to_gemini_streamer_preserves_supported_events() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Gemini);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
 
     let transformed = transformer
         .transform_event(sse(
@@ -102,7 +103,8 @@ fn test_openai_chunk_to_gemini_streamer_preserves_supported_events() {
 
 #[test]
 fn test_gemini_streamer_keeps_tool_ids_stable_and_advances_after_finish() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::Openai);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
     let gemini_tool = "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"location\":\"Boston\"}}}]},\"index\":0}]}";
     let gemini_finish = "{\"candidates\":[{\"index\":0,\"finishReason\":\"STOP\"}]}";
 
@@ -128,7 +130,8 @@ fn test_gemini_streamer_keeps_tool_ids_stable_and_advances_after_finish() {
 
 #[test]
 fn test_gemini_openai_done_to_anthropic_emits_terminal_lifecycle() {
-    let mut transformer = StreamTransformer::new(LlmApiType::GeminiOpenai, LlmApiType::Anthropic);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Anthropic);
 
     let transformed_content = transformer
         .transform_event(sse(
@@ -161,7 +164,8 @@ fn test_gemini_openai_done_to_anthropic_emits_terminal_lifecycle() {
 
 #[test]
 fn test_stream_session_records_usage_finish_and_bounded_windows() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Gemini);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
 
     for index in 0..40 {
         let _ = transformer.transform_event(sse(format!(
@@ -187,7 +191,8 @@ fn test_stream_session_records_usage_finish_and_bounded_windows() {
             .contains("\"8\"")
     );
 
-    let mut usage_transformer = StreamTransformer::new(LlmApiType::Anthropic, LlmApiType::Openai);
+    let mut usage_transformer =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
     let transformed = usage_transformer
         .transform_event(sse(json!({
             "type": "message_delta",
@@ -235,7 +240,8 @@ fn test_anthropic_stream_event_bridge_matches_legacy_text_delta_output() {
     let legacy_openai =
         serde_json::to_value(openai::OpenAiChunkResponse::from(legacy_chunk)).unwrap();
 
-    let mut transformer = StreamTransformer::new(LlmApiType::Anthropic, LlmApiType::Openai);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
     let transformed = transformer
         .transform_event(sse(json!({
             "type": "content_block_delta",
@@ -291,7 +297,8 @@ fn test_openai_native_stream_encoder_matches_legacy_bridge_for_supported_events(
         },
     ];
 
-    let mut native_transformer = StreamTransformer::new(LlmApiType::Anthropic, LlmApiType::Openai);
+    let mut native_transformer =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
     native_transformer.update_session_from_stream_events(&events);
     let native = openai::transform_unified_stream_events_to_openai_events(
         events.clone(),
@@ -299,7 +306,8 @@ fn test_openai_native_stream_encoder_matches_legacy_bridge_for_supported_events(
     )
     .unwrap();
 
-    let mut legacy_transformer = StreamTransformer::new(LlmApiType::Anthropic, LlmApiType::Openai);
+    let mut legacy_transformer =
+        StreamTransformer::new(UpstreamProtocol::Anthropic, DownstreamProtocol::Openai);
     legacy_transformer.update_session_from_stream_events(&events);
     let legacy = legacy_transformer
         .bridge_stream_events_to_legacy_chunks(events)
@@ -336,12 +344,14 @@ fn test_responses_source_stream_fast_path_matches_unified_openai_path() {
 
     let event = sse(raw.to_string());
 
-    let mut optimized = StreamTransformer::new(LlmApiType::Responses, LlmApiType::Openai);
+    let mut optimized =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
     let optimized_events = optimized.transform_event(event).unwrap();
 
     let parsed: responses::ResponsesChunkResponse = serde_json::from_value(raw).unwrap();
     let stream_events = responses::responses_chunk_to_unified_stream_events(parsed);
-    let mut legacy = StreamTransformer::new(LlmApiType::Responses, LlmApiType::Openai);
+    let mut legacy =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
     legacy.update_session_from_stream_events(&stream_events);
     let legacy_events = openai::transform_unified_stream_events_to_openai_events(
         stream_events,
@@ -363,7 +373,8 @@ fn test_responses_source_stream_fast_path_matches_unified_openai_path() {
 
 #[test]
 fn test_stream_transformer_deserialize_failure_returns_controlled_error_event() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Openai, LlmApiType::Gemini);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Gemini);
 
     let transformed = transformer.transform_event(sse("{not-json}")).unwrap();
 
@@ -373,8 +384,8 @@ fn test_stream_transformer_deserialize_failure_returns_controlled_error_event() 
     assert_eq!(payload["type"], "transform_error");
     assert_eq!(payload["diagnostic_kind"], "fatal_transform_error");
     assert_eq!(payload["stage"], "deserialize_source_chunk");
-    assert_eq!(payload["provider"], "Openai");
-    assert_eq!(payload["target_provider"], "Gemini");
+    assert_eq!(payload["provider"], "upstream:Openai");
+    assert_eq!(payload["target_provider"], "downstream:Gemini");
     assert_eq!(payload["loss_level"], "reject");
     assert_eq!(payload["semantic_unit"], "StreamError");
     assert!(
@@ -389,7 +400,8 @@ fn test_stream_transformer_deserialize_failure_returns_controlled_error_event() 
 
 #[test]
 fn test_parse_usage_info_fallback_and_cache_miss_diagnostics() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::Openai);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
     transformer.session.push_original_event(sse(json!({
         "candidates": [],
         "usageMetadata": {
@@ -410,7 +422,8 @@ fn test_parse_usage_info_fallback_and_cache_miss_diagnostics() {
         })
     );
 
-    let mut cache_miss = StreamTransformer::new(LlmApiType::Gemini, LlmApiType::Openai);
+    let mut cache_miss =
+        StreamTransformer::new(UpstreamProtocol::Gemini, DownstreamProtocol::Openai);
     assert!(cache_miss.parse_usage_info().is_none());
     assert_eq!(cache_miss.session.diagnostics_len(), 1);
     let diagnostic = cache_miss.session.latest_diagnostic().unwrap();
@@ -428,7 +441,8 @@ fn test_parse_usage_info_fallback_and_cache_miss_diagnostics() {
 
 #[test]
 fn test_update_session_from_item_lifecycle_events_tracks_item_and_part_indices() {
-    let mut transformer = StreamTransformer::new(LlmApiType::Responses, LlmApiType::Openai);
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Responses, DownstreamProtocol::Openai);
     transformer.update_session_from_stream_events(&[
         UnifiedStreamEvent::ItemAdded {
             item_index: Some(3),
@@ -468,8 +482,11 @@ fn test_openai_compatible_deepseek_tool_stream_to_responses_emits_arguments_done
         "../testdata/openai_compatible_deepseek_tool_stream.json"
     ));
 
-    let transformed =
-        replay_fixture_through_transformer(LlmApiType::Openai, LlmApiType::Responses, &fixture);
+    let transformed = replay_fixture_through_transformer(
+        UpstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        &fixture,
+    );
 
     let arguments_done = transformed.iter().find_map(|event| {
         let value: Value = serde_json::from_str(&event.data).expect("valid responses event");
@@ -491,8 +508,8 @@ fn test_gemini_openai_text_fixture_to_anthropic_emits_terminal_lifecycle() {
     ));
 
     let transformed = replay_fixture_through_transformer(
-        LlmApiType::GeminiOpenai,
-        LlmApiType::Anthropic,
+        UpstreamProtocol::Openai,
+        DownstreamProtocol::Anthropic,
         &fixture,
     );
 
@@ -542,8 +559,11 @@ fn test_anthropic_unsupported_thinking_fixture_yields_controlled_error() {
         "../testdata/anthropic_unsupported_thinking_stream.json"
     ));
 
-    let transformed =
-        replay_fixture_through_transformer(LlmApiType::Anthropic, LlmApiType::Responses, &fixture);
+    let transformed = replay_fixture_through_transformer(
+        UpstreamProtocol::Anthropic,
+        DownstreamProtocol::Responses,
+        &fixture,
+    );
 
     assert_eq!(transformed.len(), 1);
     assert_eq!(transformed[0].event.as_deref(), Some("error"));

@@ -5,14 +5,14 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{HeaderName, HeaderValue, Method, header::CACHE_CONTROL},
     middleware,
-    routing::{MethodRouter, any, get},
+    routing::{MethodRouter, get, post},
 };
 use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::{
     ingress::client_identity::{ClientIdentityResolver, proxy_client_identity_middleware},
-    schema::enum_def::LlmApiType,
+    schema::enum_def::DownstreamProtocol,
     service::app_state::{AppState, StateRouter, create_state_router},
 };
 
@@ -22,37 +22,37 @@ use super::unified::unified_proxy_handler;
 
 type QueryParams = HashMap<String, String>;
 
-fn generation_route(api_type: LlmApiType) -> MethodRouter<Arc<AppState>> {
-    any(
+fn generation_route(downstream_protocol: DownstreamProtocol) -> MethodRouter<Arc<AppState>> {
+    post(
         move |State(app_state), Query(query_params): Query<QueryParams>, request: Request<Body>| async move {
-            unified_proxy_handler(app_state, query_params, api_type, request).await
+            unified_proxy_handler(app_state, query_params, downstream_protocol, request).await
         },
     )
 }
 
 fn openai_utility_route(downstream_path: &'static str) -> MethodRouter<Arc<AppState>> {
-    any(
+    post(
         move |State(app_state), Query(params): Query<QueryParams>, request: Request<Body>| async move {
             openai_utility_handler(app_state, params, request, downstream_path).await
         },
     )
 }
 
-fn models_route(api_type: LlmApiType) -> MethodRouter<Arc<AppState>> {
+fn models_route(downstream_protocol: DownstreamProtocol) -> MethodRouter<Arc<AppState>> {
     get(
         move |State(app_state), Query(params): Query<QueryParams>, request: Request<Body>| async move {
-            list_models_handler(app_state, params, request, api_type).await
+            list_models_handler(app_state, params, request, downstream_protocol).await
         },
     )
 }
 
 fn add_generation_routes(
     router: StateRouter,
-    api_type: LlmApiType,
+    downstream_protocol: DownstreamProtocol,
     paths: &[&'static str],
 ) -> StateRouter {
     paths.iter().fold(router, |router, path| {
-        router.route(path, generation_route(api_type))
+        router.route(path, generation_route(downstream_protocol))
     })
 }
 
@@ -88,52 +88,46 @@ fn nest_router_variants(
 fn create_openai_router() -> StateRouter {
     let router = add_generation_routes(
         create_state_router(),
-        LlmApiType::Openai,
+        DownstreamProtocol::Openai,
         &["/chat/completions"],
     );
     let router = add_openai_utility_routes(
         router,
         &[("/embeddings", "embeddings"), ("/rerank", "rerank")],
     )
-    .route("/models", models_route(LlmApiType::Openai));
+    .route("/models", models_route(DownstreamProtocol::Openai));
 
     nest_router_variants(router, true, &["/v1"])
 }
 
 fn create_anthropic_router() -> StateRouter {
-    let router =
-        add_generation_routes(create_state_router(), LlmApiType::Anthropic, &["/messages"])
-            .route("/models", models_route(LlmApiType::Anthropic));
+    let router = add_generation_routes(
+        create_state_router(),
+        DownstreamProtocol::Anthropic,
+        &["/messages"],
+    )
+    .route("/models", models_route(DownstreamProtocol::Anthropic));
 
     nest_router_variants(router, true, &["/v1"])
-}
-
-fn create_ollama_router() -> StateRouter {
-    add_generation_routes(
-        create_state_router(),
-        LlmApiType::Ollama,
-        &["/api/chat", "/api/generate", "/api/embeddings"],
-    )
-    .route("/api/tags", models_route(LlmApiType::Ollama))
 }
 
 fn create_responses_router() -> StateRouter {
     let router = add_generation_routes(
         create_state_router(),
-        LlmApiType::Responses,
+        DownstreamProtocol::Responses,
         &["/responses"],
     )
-    .route("/models", models_route(LlmApiType::Responses));
+    .route("/models", models_route(DownstreamProtocol::Responses));
 
     nest_router_variants(router, true, &["/v1"])
 }
 
 fn create_gemini_router() -> StateRouter {
     let router = create_state_router()
-        .route("/models", models_route(LlmApiType::Gemini))
+        .route("/models", models_route(DownstreamProtocol::Gemini))
         .route(
             "/models/{*model_action_segment}",
-            any(
+            post(
                 |Path(path_segment): Path<String>,
                  Query(query_params): Query<QueryParams>,
                  State(app_state),
@@ -143,7 +137,7 @@ fn create_gemini_router() -> StateRouter {
             ),
         );
 
-    nest_router_variants(router, false, &["/v1beta", "/v1"])
+    nest_router_variants(router, true, &["/v1beta", "/v1"])
 }
 
 pub fn create_proxy_router(client_identity_resolver: Arc<ClientIdentityResolver>) -> StateRouter {
@@ -157,7 +151,6 @@ pub fn create_proxy_router(client_identity_resolver: Arc<ClientIdentityResolver>
     create_state_router()
         .nest("/openai", create_openai_router())
         .nest("/anthropic", create_anthropic_router())
-        .nest("/ollama", create_ollama_router())
         .nest("/responses", create_responses_router())
         .nest("/gemini", create_gemini_router())
         .layer(cors)
@@ -190,12 +183,14 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::config::ClientIdentityConfig;
+    use crate::controller::handle_404;
     use crate::database::api_key::{ApiKey, CreateApiKeyPayload};
+    use crate::database::request_log::{RequestLog, RequestLogQueryPayload};
     use crate::database::{DbConnection, TestDbContext, get_connection};
     use crate::ingress::client_identity::ClientIdentityResolver;
     use crate::schema::enum_def::Action;
     use crate::service::admin::auth::LoginError;
-    use crate::service::app_state::create_test_app_state;
+    use crate::service::app_state::{create_state_router, create_test_app_state};
     use diesel::RunQueryDsl;
 
     use super::create_proxy_router;
@@ -236,6 +231,19 @@ mod tests {
         request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 31_300))));
+        request
+    }
+
+    fn method_request(method: Method, path: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("proxy request should build");
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 31_304))));
         request
     }
 
@@ -382,7 +390,250 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_proxy_protocols_override_cache_control_on_success_and_auth_error() {
+    async fn four_protocol_version_aliases_are_direct_and_equivalent() {
+        let database = TestDbContext::new_sqlite("proxy-four-protocol-aliases.sqlite");
+        database
+            .run_async(async {
+                let created = ApiKey::create(&payload()).expect("proxy key should create");
+                let api_key = created.reveal.api_key;
+                let app_state = create_test_app_state(database.clone()).await;
+                let cases: [(&str, &[&str], &str); 4] = [
+                    (
+                        "openai",
+                        &["/openai/models", "/openai/v1/models"],
+                        header::AUTHORIZATION.as_str(),
+                    ),
+                    (
+                        "responses",
+                        &["/responses/models", "/responses/v1/models"],
+                        header::AUTHORIZATION.as_str(),
+                    ),
+                    (
+                        "anthropic",
+                        &["/anthropic/models", "/anthropic/v1/models"],
+                        "x-api-key",
+                    ),
+                    (
+                        "gemini",
+                        &[
+                            "/gemini/models",
+                            "/gemini/v1/models",
+                            "/gemini/v1beta/models",
+                        ],
+                        "x-goog-api-key",
+                    ),
+                ];
+
+                for (protocol, paths, header_name) in cases {
+                    let mut bodies = Vec::new();
+                    for path in paths {
+                        let response = create_proxy_router(client_identity_resolver())
+                            .with_state(Arc::clone(&app_state))
+                            .oneshot(request(path, header_name, Some(&api_key)))
+                            .await
+                            .expect("proxy alias should respond");
+                        assert_eq!(response.status(), StatusCode::OK, "{protocol}: {path}");
+                        bodies.push(
+                            to_bytes(response.into_body(), usize::MAX)
+                                .await
+                                .expect("models body should read"),
+                        );
+                    }
+                    assert!(
+                        bodies.windows(2).all(|pair| pair[0] == pair[1]),
+                        "{protocol}: aliases must render the same response without redirect"
+                    );
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn route_methods_fail_with_405_before_authentication() {
+        let database = TestDbContext::new_sqlite("proxy-strict-methods.sqlite");
+        database
+            .run_async(async {
+                let app_state = create_test_app_state(database.clone()).await;
+                let generation_paths = [
+                    "/openai/chat/completions",
+                    "/openai/v1/chat/completions",
+                    "/responses/responses",
+                    "/responses/v1/responses",
+                    "/anthropic/messages",
+                    "/anthropic/v1/messages",
+                    "/gemini/models/test:generateContent",
+                    "/gemini/v1/models/test:generateContent",
+                    "/gemini/v1beta/models/test:generateContent",
+                ];
+                for path in generation_paths {
+                    let wrong_method = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(method_request(Method::GET, path))
+                        .await
+                        .expect("wrong method should respond");
+                    assert_eq!(
+                        wrong_method.status(),
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "{path}"
+                    );
+
+                    let routed = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(method_request(Method::POST, path))
+                        .await
+                        .expect("generation route should respond");
+                    assert_eq!(routed.status(), StatusCode::UNAUTHORIZED, "{path}");
+                }
+
+                for path in [
+                    "/openai/embeddings",
+                    "/openai/v1/embeddings",
+                    "/openai/rerank",
+                    "/openai/v1/rerank",
+                ] {
+                    let wrong_method = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(method_request(Method::GET, path))
+                        .await
+                        .expect("wrong utility method should respond");
+                    assert_eq!(
+                        wrong_method.status(),
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "{path}"
+                    );
+                }
+
+                for path in [
+                    "/openai/models",
+                    "/responses/models",
+                    "/anthropic/models",
+                    "/gemini/models",
+                ] {
+                    let wrong_method = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(method_request(Method::POST, path))
+                        .await
+                        .expect("wrong models method should respond");
+                    assert_eq!(
+                        wrong_method.status(),
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "{path}"
+                    );
+                }
+
+                app_state.flush_proxy_logs().await;
+                assert!(
+                    RequestLog::list_full(RequestLogQueryPayload::default())
+                        .expect("request logs should be queryable")
+                        .list
+                        .is_empty(),
+                    "method and authentication rejection must happen before request logging"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn gemini_exposes_only_count_tokens_utility_action() {
+        let database = TestDbContext::new_sqlite("proxy-gemini-count-tokens-only.sqlite");
+        database
+            .run_async(async {
+                let app_state = create_test_app_state(database.clone()).await;
+                for path in [
+                    "/gemini/models/test:countMessageTokens",
+                    "/gemini/v1/models/test:countTextTokens",
+                    "/gemini/v1beta/models/test:countMessageTokens",
+                ] {
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(method_request(Method::POST, path))
+                        .await
+                        .expect("unsupported Gemini action should respond");
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+                }
+
+                for path in [
+                    "/gemini/models/test:countTokens",
+                    "/gemini/v1/models/test:countTokens",
+                    "/gemini/v1beta/models/test:countTokens",
+                ] {
+                    let response = create_proxy_router(client_identity_resolver())
+                        .with_state(Arc::clone(&app_state))
+                        .oneshot(method_request(Method::POST, path))
+                        .await
+                        .expect("countTokens route should respond");
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ollama_paths_are_base_app_404_without_proxy_side_effects() {
+        let database = TestDbContext::new_sqlite("proxy-ollama-base-404.sqlite");
+        database
+            .run_async(async {
+                let app_state = create_test_app_state(database.clone()).await;
+                app_state.secret_encryption.reset_decrypt_call_count();
+                let router = create_state_router()
+                    .nest(
+                        "/ai",
+                        create_state_router()
+                            .merge(create_proxy_router(client_identity_resolver()))
+                            .fallback(handle_404),
+                    )
+                    .with_state(Arc::clone(&app_state));
+
+                for path in [
+                    "/ai/ollama/api/chat",
+                    "/ai/ollama/api/generate",
+                    "/ai/ollama/api/embeddings",
+                    "/ai/ollama/api/tags",
+                    "/ai/ollama/arbitrary/nested/path",
+                ] {
+                    let mut request = method_request(Method::POST, path);
+                    request.headers_mut().insert(
+                        header::ORIGIN,
+                        HeaderValue::from_static("https://client.example"),
+                    );
+                    let response = router
+                        .clone()
+                        .oneshot(request)
+                        .await
+                        .expect("base app should respond");
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+                    assert!(
+                        response
+                            .headers()
+                            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                            .is_none(),
+                        "{path}: unknown Ollama path must not receive proxy CORS"
+                    );
+                    assert!(
+                        response.headers().get(header::CACHE_CONTROL).is_none(),
+                        "{path}: unknown Ollama path must not receive proxy security layers"
+                    );
+                }
+
+                app_state.flush_proxy_logs().await;
+                assert!(
+                    RequestLog::list_full(RequestLogQueryPayload::default())
+                        .expect("request logs should be queryable")
+                        .list
+                        .is_empty(),
+                    "unknown Ollama paths must not enter proxy logging"
+                );
+                assert_eq!(
+                    app_state.secret_encryption.decrypt_call_count(),
+                    0,
+                    "unknown Ollama paths must not resolve provider credentials"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn all_four_proxy_protocols_override_cache_control_on_success_and_auth_error() {
         let database = TestDbContext::new_sqlite("proxy-api-no-store.sqlite");
         database
             .run_async(async {
@@ -394,7 +645,6 @@ mod tests {
                     ("/responses/v1/models", header::AUTHORIZATION.as_str()),
                     ("/anthropic/v1/models", "x-api-key"),
                     ("/gemini/v1/models", "x-goog-api-key"),
-                    ("/ollama/api/tags", header::AUTHORIZATION.as_str()),
                 ];
 
                 for (path, header_name) in cases {
@@ -459,7 +709,6 @@ mod tests {
                     ("/responses/v1/models", header::AUTHORIZATION.as_str()),
                     ("/anthropic/v1/models", "x-api-key"),
                     ("/gemini/v1/models", "x-goog-api-key"),
-                    ("/ollama/api/tags", header::AUTHORIZATION.as_str()),
                 ] {
                     let response = create_proxy_router(client_identity_resolver())
                         .with_state(Arc::clone(&app_state))
@@ -478,7 +727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_public_cors_covers_five_protocols_errors_404_and_preflight() {
+    async fn proxy_public_cors_covers_four_protocols_errors_404_and_preflight() {
         let database = TestDbContext::new_sqlite("proxy-public-cors.sqlite");
         database
             .run_async(async {
@@ -515,12 +764,6 @@ mod tests {
                         "/gemini/missing",
                         "/gemini/v1/models/test:generateContent",
                         "x-goog-api-key",
-                    ),
-                    (
-                        "/ollama/api/tags",
-                        "/ollama/missing",
-                        "/ollama/api/chat",
-                        header::AUTHORIZATION.as_str(),
                     ),
                 ];
 

@@ -38,7 +38,9 @@
           </section>
 
           <section v-if="record.final_error_code || record.final_error_message" class="border-t border-gray-100 pt-5">
-            <h3 class="mb-3 text-sm font-semibold text-gray-900">Error</h3>
+            <h3 class="mb-3 text-sm font-semibold text-gray-900">
+              {{ $t("recordPage.detailDialog.summary.error") }}
+            </h3>
             <div class="rounded-lg border border-red-100 bg-red-50 p-3 text-sm text-red-800">
               <p v-if="record.final_error_code" class="font-mono text-xs">{{ record.final_error_code }}</p>
               <p v-if="record.final_error_message" class="mt-1 whitespace-pre-wrap break-words">{{ record.final_error_message }}</p>
@@ -103,20 +105,20 @@ const overviewItems = computed(() => {
   const record = props.record;
   if (!record) return [];
   return [
-    { label: "API key", value: props.apiKeyName },
+    { label: $t("recordPage.detailDialog.summary.apiKey"), value: props.apiKeyName },
     { label: $t("recordPage.detailDialog.summary.provider"), value: props.providerName },
     { label: $t("recordPage.detailDialog.summary.model"), value: value(record.model_name || record.requested_model_name), mono: true },
-    { label: "Real model", value: value(record.real_model_name), mono: true },
-    { label: "Client API", value: value(record.user_api_type), mono: true },
-    { label: "Upstream API", value: value(record.llm_api_type), mono: true },
-    { label: "Client IP", value: value(record.client_ip), mono: true },
-    { label: "Stream", value: record.is_stream ? $t("common.yes") : $t("common.no") },
-    { label: "First byte", value: formatDuration(record.upstream_request_sent_at, record.response_started_to_client_at), mono: true },
-    { label: "Total latency", value: formatDuration(record.upstream_request_sent_at, record.completed_at), mono: true },
-    { label: "Tokens", value: value(record.total_tokens), mono: true },
-    { label: "Cost", value: formatPrice(record.estimated_cost_nanos, record.estimated_cost_currency), mono: true },
-    { label: "Received", value: formatDate(record.request_received_at) },
-    { label: "Completed", value: record.completed_at ? formatDate(record.completed_at) : emptyValue },
+    { label: $t("recordPage.detailDialog.summary.realModel"), value: value(record.real_model_name), mono: true },
+    { label: $t("recordPage.detailDialog.summary.downstreamProtocol"), value: value(record.downstream_protocol), mono: true },
+    { label: $t("recordPage.detailDialog.summary.upstreamProtocol"), value: value(record.upstream_protocol), mono: true },
+    { label: $t("recordPage.detailDialog.summary.clientIp"), value: value(record.client_ip), mono: true },
+    { label: $t("recordPage.detailDialog.summary.stream"), value: record.is_stream ? $t("common.yes") : $t("common.no") },
+    { label: $t("recordPage.detailDialog.summary.firstByte"), value: formatDuration(record.upstream_request_sent_at, record.response_started_to_client_at), mono: true },
+    { label: $t("recordPage.detailDialog.summary.totalLatency"), value: formatDuration(record.upstream_request_sent_at, record.completed_at), mono: true },
+    { label: $t("recordPage.detailDialog.summary.tokens"), value: value(record.total_tokens), mono: true },
+    { label: $t("recordPage.detailDialog.summary.cost"), value: formatPrice(record.estimated_cost_nanos, record.estimated_cost_currency), mono: true },
+    { label: $t("recordPage.detailDialog.summary.received"), value: formatDate(record.request_received_at) },
+    { label: $t("recordPage.detailDialog.summary.completed"), value: record.completed_at ? formatDate(record.completed_at) : emptyValue },
   ];
 });
 </script>

@@ -11,6 +11,7 @@ use crate::database::provider::{
 };
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
 use crate::service::provider_http::normalize_provider_endpoint;
+use crate::service::provider_profile::{ProviderAuthProfile, provider_runtime_profile};
 use crate::service::secret_encryption::{SecretDomain, SecretEncryptionService, SensitiveSecret};
 use crate::service::vertex::{invalidate_vertex_token, validate_vertex_service_account};
 use crate::utils::ID_GENERATOR;
@@ -541,10 +542,7 @@ fn validate_provider_secret_for_type(
     provider_type: &ProviderType,
     secret: &SensitiveSecret,
 ) -> Result<(), BaseError> {
-    if matches!(
-        provider_type,
-        ProviderType::Vertex | ProviderType::VertexOpenai
-    ) {
+    if provider_runtime_profile(provider_type).auth == ProviderAuthProfile::VertexOAuth {
         validate_vertex_service_account(secret.expose())
             .map_err(|message| BaseError::ParamInvalid(Some(message)))?;
     }

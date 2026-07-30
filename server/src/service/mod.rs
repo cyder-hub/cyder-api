@@ -6,6 +6,7 @@ pub mod infra;
 pub mod metrics;
 pub mod provider_credential;
 pub(crate) mod provider_http;
+pub mod provider_profile;
 pub mod redis;
 pub mod request_patch;
 pub mod runtime;

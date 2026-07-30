@@ -1,5 +1,5 @@
 use super::unified::{UnifiedContentPart, UnifiedContentPartDelta};
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransformValueKind {
@@ -72,10 +72,50 @@ pub(crate) struct StructuredContentCapabilityMatrix {
     pub json_schema_strict: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityProtocol {
+    Openai,
+    Gemini,
+    Ollama,
+    Anthropic,
+    Responses,
+}
+
+impl From<DownstreamProtocol> for CapabilityProtocol {
+    fn from(protocol: DownstreamProtocol) -> Self {
+        match protocol {
+            DownstreamProtocol::Openai => Self::Openai,
+            DownstreamProtocol::Gemini => Self::Gemini,
+            DownstreamProtocol::Anthropic => Self::Anthropic,
+            DownstreamProtocol::Responses => Self::Responses,
+        }
+    }
+}
+
+impl From<UpstreamProtocol> for CapabilityProtocol {
+    fn from(protocol: UpstreamProtocol) -> Self {
+        match protocol {
+            UpstreamProtocol::Openai => Self::Openai,
+            UpstreamProtocol::Gemini => Self::Gemini,
+            UpstreamProtocol::Ollama => Self::Ollama,
+            UpstreamProtocol::Anthropic => Self::Anthropic,
+            UpstreamProtocol::Responses => Self::Responses,
+        }
+    }
+}
+
 impl ProtocolCapabilityMatrix {
-    pub(crate) const fn for_api(api: LlmApiType) -> Self {
-        match api {
-            LlmApiType::Openai | LlmApiType::GeminiOpenai => Self {
+    pub(crate) fn for_downstream(protocol: DownstreamProtocol) -> Self {
+        Self::for_protocol(protocol.into())
+    }
+
+    pub(crate) fn for_upstream(protocol: UpstreamProtocol) -> Self {
+        Self::for_protocol(protocol.into())
+    }
+
+    fn for_protocol(protocol: CapabilityProtocol) -> Self {
+        match protocol {
+            CapabilityProtocol::Openai => Self {
                 request: RequestCapabilityMatrix {
                     tool_definitions: true,
                     tool_role_messages: true,
@@ -109,7 +149,7 @@ impl ProtocolCapabilityMatrix {
                     json_schema_strict: true,
                 },
             },
-            LlmApiType::Gemini => Self {
+            CapabilityProtocol::Gemini => Self {
                 request: RequestCapabilityMatrix {
                     tool_definitions: true,
                     tool_role_messages: true,
@@ -143,7 +183,7 @@ impl ProtocolCapabilityMatrix {
                     json_schema_strict: true,
                 },
             },
-            LlmApiType::Anthropic => Self {
+            CapabilityProtocol::Anthropic => Self {
                 request: RequestCapabilityMatrix {
                     tool_definitions: true,
                     tool_role_messages: true,
@@ -177,7 +217,7 @@ impl ProtocolCapabilityMatrix {
                     json_schema_strict: true,
                 },
             },
-            LlmApiType::Responses => Self {
+            CapabilityProtocol::Responses => Self {
                 request: RequestCapabilityMatrix {
                     tool_definitions: true,
                     tool_role_messages: true,
@@ -211,7 +251,7 @@ impl ProtocolCapabilityMatrix {
                     json_schema_strict: true,
                 },
             },
-            LlmApiType::Ollama => Self {
+            CapabilityProtocol::Ollama => Self {
                 request: RequestCapabilityMatrix {
                     tool_definitions: false,
                     tool_role_messages: false,
@@ -282,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_capability_matrix_reports_expected_responses_capabilities() {
-        let caps = ProtocolCapabilityMatrix::for_api(LlmApiType::Responses);
+        let caps = ProtocolCapabilityMatrix::for_downstream(DownstreamProtocol::Responses);
 
         assert!(caps.request.tool_definitions);
         assert!(caps.request.image_inline_input);
@@ -306,8 +346,8 @@ mod tests {
 
     #[test]
     fn test_capability_matrix_reports_expected_gemini_and_ollama_boundaries() {
-        let gemini = ProtocolCapabilityMatrix::for_api(LlmApiType::Gemini);
-        let ollama = ProtocolCapabilityMatrix::for_api(LlmApiType::Ollama);
+        let gemini = ProtocolCapabilityMatrix::for_downstream(DownstreamProtocol::Gemini);
+        let ollama = ProtocolCapabilityMatrix::for_upstream(UpstreamProtocol::Ollama);
 
         assert!(gemini.request.image_url_input);
         assert!(gemini.request.image_inline_input);
@@ -326,28 +366,31 @@ mod tests {
     }
 
     #[test]
-    fn test_capability_matrix_declared_for_every_transform_api() {
-        let cases = [
-            LlmApiType::Openai,
-            LlmApiType::GeminiOpenai,
-            LlmApiType::Gemini,
-            LlmApiType::Ollama,
-            LlmApiType::Anthropic,
-            LlmApiType::Responses,
-        ];
+    fn capability_matrix_is_declared_for_every_directional_protocol() {
+        for protocol in [
+            DownstreamProtocol::Openai,
+            DownstreamProtocol::Gemini,
+            DownstreamProtocol::Anthropic,
+            DownstreamProtocol::Responses,
+        ] {
+            let caps = ProtocolCapabilityMatrix::for_downstream(protocol);
+            assert!(caps.structured_content.json_schema_strict);
+        }
 
-        for api_type in cases {
-            let caps = ProtocolCapabilityMatrix::for_api(api_type);
-            assert!(
-                caps.structured_content.json_schema_strict
-                    || !caps.request.tool_definitions
-                    || api_type == LlmApiType::GeminiOpenai
-            );
+        for protocol in [
+            UpstreamProtocol::Openai,
+            UpstreamProtocol::Gemini,
+            UpstreamProtocol::Ollama,
+            UpstreamProtocol::Anthropic,
+            UpstreamProtocol::Responses,
+        ] {
+            let caps = ProtocolCapabilityMatrix::for_upstream(protocol);
+            assert!(caps.structured_content.json_schema_strict || !caps.request.tool_definitions);
         }
 
         assert_eq!(
-            ProtocolCapabilityMatrix::for_api(LlmApiType::GeminiOpenai),
-            ProtocolCapabilityMatrix::for_api(LlmApiType::Openai)
+            ProtocolCapabilityMatrix::for_downstream(DownstreamProtocol::Openai),
+            ProtocolCapabilityMatrix::for_upstream(UpstreamProtocol::Openai)
         );
     }
 }

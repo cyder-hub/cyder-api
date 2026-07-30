@@ -5,9 +5,12 @@ use super::error;
 use super::session::{SessionContext, StreamTransformContext};
 use super::usage::UsageMergeStrategy;
 use crate::cost::UsageNormalization;
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::service::transform::TransformProtocol;
-use crate::service::transform::adapter::{DecodedSourceStreamFrame, TransformAdapter, adapter_for};
+use crate::service::transform::adapter::{
+    DecodedSourceStreamFrame, DownstreamAdapter, UpstreamAdapter, downstream_adapter_for,
+    upstream_adapter_for,
+};
 use crate::service::transform::capability::TransformValueKind;
 use crate::service::transform::diagnostics::build_transform_diagnostic;
 use crate::service::transform::policy::{
@@ -19,16 +22,19 @@ use crate::utils::sse::SseEvent;
 use crate::utils::usage::{self, UsageInfo};
 
 pub struct StreamTransformer {
-    pub(in crate::service::transform) api_type: LlmApiType,
-    pub(in crate::service::transform) target_api_type: LlmApiType,
+    pub(in crate::service::transform) upstream_protocol: UpstreamProtocol,
+    pub(in crate::service::transform) downstream_protocol: DownstreamProtocol,
     pub(in crate::service::transform) session: SessionContext,
 }
 
 impl StreamTransformer {
-    pub fn new(api_type: LlmApiType, target_api_type: LlmApiType) -> Self {
+    pub fn new(
+        upstream_protocol: UpstreamProtocol,
+        downstream_protocol: DownstreamProtocol,
+    ) -> Self {
         Self {
-            api_type,
-            target_api_type,
+            upstream_protocol,
+            downstream_protocol,
             session: SessionContext::default(),
         }
     }
@@ -40,16 +46,16 @@ impl StreamTransformer {
             .collect()
     }
 
-    fn source_adapter(&self) -> &'static TransformAdapter {
-        adapter_for(self.api_type)
+    fn source_adapter(&self) -> &'static UpstreamAdapter {
+        upstream_adapter_for(self.upstream_protocol)
     }
 
-    fn target_adapter(&self) -> &'static TransformAdapter {
-        adapter_for(self.target_api_type)
+    fn target_adapter(&self) -> &'static DownstreamAdapter {
+        downstream_adapter_for(self.downstream_protocol)
     }
 
     pub(in crate::service::transform) fn stream_context(&mut self) -> StreamTransformContext<'_> {
-        StreamTransformContext::new(self.api_type, self.target_api_type, &mut self.session)
+        StreamTransformContext::new(self.upstream_protocol, &mut self.session)
     }
 
     fn record_transformed_events(&mut self, events: &[SseEvent]) {
@@ -59,12 +65,11 @@ impl StreamTransformer {
     }
 
     pub(in crate::service::transform) fn usage_merge_strategy(&self) -> UsageMergeStrategy {
-        match self.api_type {
-            LlmApiType::Gemini | LlmApiType::Responses => UsageMergeStrategy::Replace,
-            LlmApiType::Openai
-            | LlmApiType::Anthropic
-            | LlmApiType::Ollama
-            | LlmApiType::GeminiOpenai => UsageMergeStrategy::FinalOnly,
+        match self.upstream_protocol {
+            UpstreamProtocol::Gemini | UpstreamProtocol::Responses => UsageMergeStrategy::Replace,
+            UpstreamProtocol::Openai | UpstreamProtocol::Anthropic | UpstreamProtocol::Ollama => {
+                UsageMergeStrategy::FinalOnly
+            }
         }
     }
 
@@ -82,8 +87,8 @@ impl StreamTransformer {
             };
             self.session.record_diagnostic(build_transform_diagnostic(
                 TransformDiagnosticKind::CapabilityDowngrade,
-                TransformProtocol::Api(self.api_type),
-                TransformProtocol::Api(self.target_api_type),
+                TransformProtocol::Upstream(self.upstream_protocol),
+                TransformProtocol::Downstream(self.downstream_protocol),
                 TransformValueKind::StreamError,
                 decision,
                 self.session.stream_id_clone(),
@@ -95,30 +100,28 @@ impl StreamTransformer {
             debug!(
                 "[transform][usage] stream_id={:?} provider={:?} no cached usage and no diagnostic events available",
                 self.session.stream_id_clone(),
-                self.api_type
+                self.upstream_protocol
             );
             return None;
         }
 
-        let parsed = match self.api_type {
-            LlmApiType::Openai | LlmApiType::GeminiOpenai => {
-                self.session.original_events().iter().rev().find_map(|e| {
-                    if e.data == "[DONE]" || e.data.is_empty() {
-                        return None;
-                    }
-                    serde_json::from_str::<Value>(&e.data)
-                        .ok()
-                        .and_then(|v| usage::parse_usage_info(&v, self.api_type))
-                })
-            }
-            LlmApiType::Gemini | LlmApiType::Ollama | LlmApiType::Responses => {
+        let parsed = match self.upstream_protocol {
+            UpstreamProtocol::Openai => self.session.original_events().iter().rev().find_map(|e| {
+                if e.data == "[DONE]" || e.data.is_empty() {
+                    return None;
+                }
+                serde_json::from_str::<Value>(&e.data)
+                    .ok()
+                    .and_then(|v| usage::parse_usage_info(&v, self.upstream_protocol))
+            }),
+            UpstreamProtocol::Gemini | UpstreamProtocol::Ollama | UpstreamProtocol::Responses => {
                 self.session.original_events().iter().rev().find_map(|e| {
                     serde_json::from_str::<Value>(&e.data)
                         .ok()
-                        .and_then(|v| usage::parse_usage_info(&v, self.api_type))
+                        .and_then(|v| usage::parse_usage_info(&v, self.upstream_protocol))
                 })
             }
-            LlmApiType::Anthropic => self
+            UpstreamProtocol::Anthropic => self
                 .session
                 .original_events()
                 .iter()
@@ -133,7 +136,7 @@ impl StreamTransformer {
                 .and_then(|e| {
                     serde_json::from_str::<Value>(&e.data)
                         .ok()
-                        .and_then(|v| usage::parse_usage_info(&v, self.api_type))
+                        .and_then(|v| usage::parse_usage_info(&v, self.upstream_protocol))
                 }),
         };
 
@@ -146,8 +149,8 @@ impl StreamTransformer {
             };
             self.session.record_diagnostic(build_transform_diagnostic(
                 TransformDiagnosticKind::CapabilityDowngrade,
-                TransformProtocol::Api(self.api_type),
-                TransformProtocol::Api(self.target_api_type),
+                TransformProtocol::Upstream(self.upstream_protocol),
+                TransformProtocol::Downstream(self.downstream_protocol),
                 TransformValueKind::StreamError,
                 decision,
                 self.session.stream_id_clone(),
@@ -162,7 +165,7 @@ impl StreamTransformer {
             warn!(
                 "[transform][usage] stream_id={:?} provider={:?} usage cache miss and diagnostic fallback failed; recent_original_events={}",
                 self.session.stream_id_clone(),
-                self.api_type,
+                self.upstream_protocol,
                 self.session.original_events_len()
             );
         }
@@ -187,11 +190,13 @@ impl StreamTransformer {
     }
 
     pub(crate) fn get_or_generate_stream_id(&mut self) -> String {
-        self.session.get_or_generate_stream_id(self.api_type)
+        self.session
+            .get_or_generate_stream_id(self.upstream_protocol)
     }
 
     pub(crate) fn get_or_default_stream_model(&self) -> String {
-        self.session.get_or_default_stream_model(self.api_type)
+        self.session
+            .get_or_default_stream_model(self.upstream_protocol)
     }
 
     pub(in crate::service::transform) fn normalize_unified_chunk_session_state(
@@ -200,7 +205,7 @@ impl StreamTransformer {
     ) {
         let chunk_core = unified_chunk.core();
         self.session.set_stream_model_if_present(chunk_core.model);
-        if self.api_type == LlmApiType::Gemini {
+        if self.upstream_protocol == UpstreamProtocol::Gemini {
             for choice in &mut unified_chunk.choices {
                 for part in &mut choice.delta.content {
                     if let UnifiedContentPartDelta::ToolCallDelta(tool_call) = part {
@@ -315,7 +320,13 @@ impl StreamTransformer {
 
         self.session.push_original_event(event.clone());
 
-        if self.api_type == self.target_api_type {
+        if matches!(
+            (self.upstream_protocol, self.downstream_protocol),
+            (UpstreamProtocol::Openai, DownstreamProtocol::Openai)
+                | (UpstreamProtocol::Responses, DownstreamProtocol::Responses)
+                | (UpstreamProtocol::Anthropic, DownstreamProtocol::Anthropic)
+                | (UpstreamProtocol::Gemini, DownstreamProtocol::Gemini)
+        ) {
             // Best effort to update session state from passthrough events (e.g. usage info)
             let source_adapter = self.source_adapter();
             let decoded_frame = {
@@ -336,11 +347,9 @@ impl StreamTransformer {
         }
 
         // Handle OpenAI-compatible stream termination marker.
-        if (self.api_type == LlmApiType::Openai || self.api_type == LlmApiType::GeminiOpenai)
-            && event.data == "[DONE]"
-        {
-            return match self.target_api_type {
-                LlmApiType::Anthropic => {
+        if self.upstream_protocol == UpstreamProtocol::Openai && event.data == "[DONE]" {
+            return match self.downstream_protocol {
+                DownstreamProtocol::Anthropic => {
                     let transformed =
                         self.stream_events_to_target_events(vec![UnifiedStreamEvent::MessageStop]);
                     if let Some(events) = &transformed {
@@ -348,12 +357,14 @@ impl StreamTransformer {
                     }
                     transformed
                 }
-                LlmApiType::Gemini | LlmApiType::Ollama => None,
+                DownstreamProtocol::Gemini => None,
                 _ => Some(vec![event]),
             };
         }
 
-        if self.api_type == LlmApiType::Responses && self.target_api_type == LlmApiType::Openai {
+        if self.upstream_protocol == UpstreamProtocol::Responses
+            && self.downstream_protocol == DownstreamProtocol::Openai
+        {
             let transformed =
                 match serde_json::from_str::<responses::ResponsesChunkResponse>(&event.data) {
                     Ok(chunk) => {
@@ -365,7 +376,7 @@ impl StreamTransformer {
                             "deserialize_source_chunk",
                             format!(
                                 "failed to deserialize {:?} chunk: {}",
-                                LlmApiType::Responses,
+                                UpstreamProtocol::Responses,
                                 e
                             ),
                             &event.data,
@@ -407,7 +418,7 @@ impl StreamTransformer {
                     "deserialize_source_chunk",
                     format!(
                         "failed to deserialize {:?} chunk: {}",
-                        source_adapter.api_type, e
+                        source_adapter.protocol, e
                     ),
                     &event.data,
                 );

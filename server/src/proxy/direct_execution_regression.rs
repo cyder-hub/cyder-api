@@ -43,7 +43,7 @@ use crate::{
     },
     ingress::client_identity::ClientIdentityResolver,
     schema::enum_def::{
-        Action, LlmApiType, ProviderApiKeyMode, ProviderType, RequestPatchOperation,
+        Action, DownstreamProtocol, ProviderApiKeyMode, ProviderType, RequestPatchOperation,
         RequestPatchPlacement, RequestStatus,
     },
     service::{
@@ -51,6 +51,7 @@ use crate::{
         admin::provider::BootstrapProviderCommand,
         app_state::{AppState, create_test_app_state},
         infra::AppInfra,
+        provider_profile::provider_runtime_profile,
     },
     utils::{ID_GENERATOR, sse::SseParser},
 };
@@ -60,7 +61,7 @@ const PROVIDER_SECRET: &str = "provider-baseline-secret";
 const UPSTREAM_MODEL: &str = "baseline-upstream-model";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-const FIXTURE_SOURCES: [(&str, &str); 5] = [
+const FIXTURE_SOURCES: [(&str, &str); 4] = [
     (
         "openai",
         include_str!("../service/transform/testdata/direct_execution/openai.json"),
@@ -76,10 +77,6 @@ const FIXTURE_SOURCES: [(&str, &str); 5] = [
     (
         "gemini",
         include_str!("../service/transform/testdata/direct_execution/gemini.json"),
-    ),
-    (
-        "ollama",
-        include_str!("../service/transform/testdata/direct_execution/ollama.json"),
     ),
 ];
 
@@ -158,7 +155,7 @@ struct CancellationGolden {
 
 #[derive(Clone, Debug, Deserialize)]
 struct DirectExecutionFixture {
-    protocol: LlmApiType,
+    protocol: DownstreamProtocol,
     provider_type: ProviderType,
     downstream_path: String,
     downstream_stream_path: String,
@@ -576,6 +573,43 @@ impl RouterFixture {
             .expect("proxy router should respond")
     }
 
+    async fn send_raw_post(
+        &self,
+        uri: String,
+        body: Value,
+        auth: DownstreamAuth,
+    ) -> Response<Body> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json");
+        match auth {
+            DownstreamAuth::Bearer => {
+                builder = builder.header("authorization", format!("Bearer {}", self.downstream_key))
+            }
+            DownstreamAuth::XApiKey => builder = builder.header("x-api-key", &self.downstream_key),
+            DownstreamAuth::GeminiQuery => {
+                panic!("Gemini query authentication must be included in the supplied URI")
+            }
+        }
+        let mut request = builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("downstream utility request should build");
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                3001,
+            ))));
+        create_proxy_router(Arc::new(ClientIdentityResolver::new(
+            &ClientIdentityConfig::default(),
+        )))
+        .with_state(Arc::clone(&self.app_state))
+        .oneshot(request)
+        .await
+        .expect("proxy router should respond")
+    }
+
     async fn wait_for_log(&self, expected: RequestStatus) -> RequestLogRecord {
         let deadline = Instant::now() + WAIT_TIMEOUT;
         loop {
@@ -642,17 +676,10 @@ fn events_to_sse_bytes(events: &[GoldenEvent]) -> Vec<u8> {
     bytes
 }
 
-fn parse_downstream_events(api_type: LlmApiType, body: &[u8]) -> Vec<GoldenEvent> {
-    if api_type == LlmApiType::Ollama {
-        return String::from_utf8_lossy(body)
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| GoldenEvent {
-                event: None,
-                data: serde_json::from_str(line).expect("Ollama line should be JSON"),
-            })
-            .collect();
-    }
+fn parse_downstream_events(
+    _downstream_protocol: DownstreamProtocol,
+    body: &[u8],
+) -> Vec<GoldenEvent> {
     let mut parser = SseParser::new();
     parser
         .process(body)
@@ -701,28 +728,25 @@ fn normalized_events(events: Vec<GoldenEvent>) -> Vec<GoldenEvent> {
         .collect()
 }
 
-fn stream_text(api_type: LlmApiType, events: &[GoldenEvent]) -> String {
+fn stream_text(downstream_protocol: DownstreamProtocol, events: &[GoldenEvent]) -> String {
     events
         .iter()
-        .filter_map(|event| match api_type {
-            LlmApiType::Openai => event
+        .filter_map(|event| match downstream_protocol {
+            DownstreamProtocol::Openai => event
                 .data
                 .pointer("/choices/0/delta/content")
                 .and_then(Value::as_str),
-            LlmApiType::Responses => (event.data.get("type").and_then(Value::as_str)
+            DownstreamProtocol::Responses => (event.data.get("type").and_then(Value::as_str)
                 == Some("response.output_text.delta"))
             .then(|| event.data.get("delta").and_then(Value::as_str))
             .flatten(),
-            LlmApiType::Anthropic => event.data.pointer("/delta/text").and_then(Value::as_str),
-            LlmApiType::Gemini => event
+            DownstreamProtocol::Anthropic => {
+                event.data.pointer("/delta/text").and_then(Value::as_str)
+            }
+            DownstreamProtocol::Gemini => event
                 .data
                 .pointer("/candidates/0/content/parts/0/text")
                 .and_then(Value::as_str),
-            LlmApiType::Ollama => event
-                .data
-                .pointer("/message/content")
-                .and_then(Value::as_str),
-            LlmApiType::GeminiOpenai => None,
         })
         .collect()
 }
@@ -782,16 +806,9 @@ fn assert_log_common(
     fixture: &DirectExecutionFixture,
     log: &RequestLogRecord,
 ) {
-    let target_api_type = match fixture.provider_type {
-        ProviderType::Openai | ProviderType::VertexOpenai => LlmApiType::Openai,
-        ProviderType::Gemini | ProviderType::Vertex => LlmApiType::Gemini,
-        ProviderType::Ollama => LlmApiType::Ollama,
-        ProviderType::Anthropic => LlmApiType::Anthropic,
-        ProviderType::Responses => LlmApiType::Responses,
-        ProviderType::GeminiOpenai => LlmApiType::GeminiOpenai,
-    };
-    assert_eq!(log.user_api_type, fixture.protocol);
-    assert_eq!(log.llm_api_type, Some(target_api_type));
+    let upstream_protocol = provider_runtime_profile(&fixture.provider_type).upstream_protocol;
+    assert_eq!(log.downstream_protocol, fixture.protocol);
+    assert_eq!(log.upstream_protocol, Some(upstream_protocol));
     assert_eq!(log.provider_id, Some(router.provider_id));
     assert_eq!(log.provider_api_key_id, Some(router.provider_api_key_id));
     assert_eq!(log.model_id, Some(router.model_id));
@@ -821,9 +838,9 @@ fn assert_usage(log: &RequestLogRecord, usage: &UsageGolden) {
 }
 
 #[test]
-fn direct_execution_regression_fixtures_define_five_complete_protocols() {
+fn direct_execution_regression_fixtures_define_four_complete_protocols() {
     let fixtures = fixtures();
-    assert_eq!(fixtures.len(), 5);
+    assert_eq!(fixtures.len(), 4);
     for (name, fixture) in fixtures {
         validate_fixture(name, &fixture);
     }
@@ -1126,6 +1143,31 @@ fn direct_execution_regression_non_stream_request_response_usage_and_log_golden(
 }
 
 #[test]
+fn four_public_downstream_generation_paths_call_upstream_at_most_once() {
+    for (name, fixture) in fixtures() {
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: fixture.non_stream.upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            assert_eq!(
+                upstream.requests().await.len(),
+                1,
+                "{name}: direct execution must issue exactly one upstream request"
+            );
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
 fn direct_execution_client_identity_http_persists_normalized_forwarded_ip() {
     let (name, fixture) = fixtures()
         .into_iter()
@@ -1303,6 +1345,71 @@ fn direct_execution_regression_credential_requests_never_follow_redirects() {
             redirect_target.shutdown().await;
         });
     }
+}
+
+#[test]
+fn incompatible_utility_targets_are_rejected_before_any_upstream_call() {
+    let openai_fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+    let gemini_fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "gemini")
+        .map(|(_, fixture)| fixture)
+        .expect("gemini fixture");
+
+    run_case("utility-zero-upstream", move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: json!({"unexpected": true}),
+        })
+        .await;
+
+        let gemini_target =
+            RouterFixture::new(context.clone(), &gemini_fixture, &upstream.base_url).await;
+        for (path, body) in [
+            (
+                "/openai/v1/embeddings",
+                json!({"model": gemini_target.requested_model(), "input": "hello"}),
+            ),
+            (
+                "/openai/v1/rerank",
+                json!({
+                    "model": gemini_target.requested_model(),
+                    "query": "hello",
+                    "documents": ["world"]
+                }),
+            ),
+        ] {
+            let response = gemini_target
+                .send_raw_post(path.to_string(), body, DownstreamAuth::Bearer)
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
+
+        let openai_target = RouterFixture::new(context, &openai_fixture, &upstream.base_url).await;
+        let count_tokens_uri = format!(
+            "/gemini/v1/models/{}:countTokens?key={}",
+            openai_target.requested_model(),
+            openai_target.downstream_key
+        );
+        let response = openai_target
+            .send_raw_post(
+                count_tokens_uri,
+                json!({"contents": [{"parts": [{"text": "hello"}]}]}),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        assert!(
+            upstream.requests().await.is_empty(),
+            "incompatible utilities must fail before HTTP send"
+        );
+        upstream.shutdown().await;
+    });
 }
 
 #[test]

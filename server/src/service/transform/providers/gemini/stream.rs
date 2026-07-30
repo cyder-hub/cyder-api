@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde_json::{Value, json};
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::unified::*;
 use crate::service::transform::{TransformProtocol, TransformValueKind, apply_transform_policy};
@@ -51,7 +51,7 @@ impl From<UnifiedChunkResponse> for GeminiChunkResponse {
                         UnifiedContentPartDelta::ImageDelta { .. } => {
                             apply_transform_policy(
                                 TransformProtocol::Unified,
-                                TransformProtocol::Api(LlmApiType::Gemini),
+                                TransformProtocol::Downstream(DownstreamProtocol::Gemini),
                                 TransformValueKind::ImageDelta,
                                 "Dropping unsupported image delta from Gemini stream conversion.",
                             );

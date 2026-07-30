@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{DbResult, ListResult, get_connection};
 use crate::controller::BaseError;
-use crate::schema::enum_def::{LlmApiType, RequestStatus};
+use crate::schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol};
 use crate::{db_execute, db_object};
 
 db_object! {
@@ -16,7 +16,7 @@ db_object! {
         pub base_requested_model_name: Option<String>,
         pub resolved_reasoning_suffix: Option<String>,
         pub resolved_reasoning_preset: Option<String>,
-        pub user_api_type: LlmApiType,
+        pub downstream_protocol: DownstreamProtocol,
         #[diesel(column_name = status)]
         pub overall_status: RequestStatus,
         pub final_error_code: Option<String>,
@@ -36,7 +36,7 @@ db_object! {
         pub provider_name_snapshot: Option<String>,
         pub model_name_snapshot: Option<String>,
         pub real_model_name_snapshot: Option<String>,
-        pub llm_api_type: Option<LlmApiType>,
+        pub upstream_protocol: Option<UpstreamProtocol>,
         pub upstream_http_status: Option<i32>,
         pub estimated_cost_nanos: Option<i64>,
         pub estimated_cost_currency: Option<String>,
@@ -99,7 +99,7 @@ pub struct RequestLogQueryPayload {
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
     pub status: Option<RequestStatus>,
-    pub user_api_type: Option<LlmApiType>,
+    pub downstream_protocol: Option<DownstreamProtocol>,
     pub final_error_code: Option<String>,
     pub latency_ms_min: Option<i64>,
     pub latency_ms_max: Option<i64>,
@@ -204,9 +204,9 @@ impl RequestLog {
                 query = query.filter(request_log::dsl::status.eq(val.clone()));
                 count_query = count_query.filter(request_log::dsl::status.eq(val));
             }
-            if let Some(val) = payload.user_api_type {
-                query = query.filter(request_log::dsl::user_api_type.eq(val));
-                count_query = count_query.filter(request_log::dsl::user_api_type.eq(val));
+            if let Some(val) = payload.downstream_protocol {
+                query = query.filter(request_log::dsl::downstream_protocol.eq(val));
+                count_query = count_query.filter(request_log::dsl::downstream_protocol.eq(val));
             }
             if let Some(val) = payload.final_error_code.as_ref() {
                 if !val.is_empty() {
@@ -388,9 +388,9 @@ impl RequestLog {
                 query = query.filter(request_log::dsl::status.eq(val.clone()));
                 count_query = count_query.filter(request_log::dsl::status.eq(val));
             }
-            if let Some(val) = payload.user_api_type {
-                query = query.filter(request_log::dsl::user_api_type.eq(val));
-                count_query = count_query.filter(request_log::dsl::user_api_type.eq(val));
+            if let Some(val) = payload.downstream_protocol {
+                query = query.filter(request_log::dsl::downstream_protocol.eq(val));
+                count_query = count_query.filter(request_log::dsl::downstream_protocol.eq(val));
             }
             if let Some(val) = payload.final_error_code.as_ref() {
                 if !val.is_empty() {
@@ -544,5 +544,177 @@ impl RequestLog {
                 list,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use diesel::RunQueryDsl;
+
+    use super::{RequestLog, RequestLogQueryPayload};
+    use crate::{
+        database::{
+            DbConnection, TestDbContext,
+            api_key::{ApiKey, CreateApiKeyPayload},
+            get_connection,
+        },
+        schema::enum_def::{Action, DownstreamProtocol, RequestStatus, UpstreamProtocol},
+        utils::ID_GENERATOR,
+    };
+
+    fn api_key_payload() -> CreateApiKeyPayload {
+        CreateApiKeyPayload {
+            name: format!("request-log-protocol-{}", ID_GENERATOR.generate_id()),
+            description: None,
+            default_action: Some(Action::Allow),
+            is_enabled: Some(true),
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: None,
+        }
+    }
+
+    fn request_log(
+        id: i64,
+        api_key_id: i64,
+        downstream_protocol: DownstreamProtocol,
+        upstream_protocol: Option<UpstreamProtocol>,
+    ) -> RequestLog {
+        RequestLog {
+            id,
+            api_key_id,
+            requested_model_name: Some("provider/model".to_string()),
+            base_requested_model_name: Some("provider/model".to_string()),
+            resolved_reasoning_suffix: None,
+            resolved_reasoning_preset: None,
+            downstream_protocol,
+            overall_status: RequestStatus::Success,
+            final_error_code: None,
+            final_error_message: None,
+            request_received_at: 1_000,
+            upstream_request_sent_at: None,
+            response_started_to_client_at: None,
+            completed_at: Some(1_001),
+            is_stream: false,
+            client_ip: None,
+            provider_id: None,
+            provider_api_key_id: None,
+            model_id: None,
+            provider_key_snapshot: None,
+            provider_name_snapshot: None,
+            model_name_snapshot: None,
+            real_model_name_snapshot: None,
+            upstream_protocol,
+            upstream_http_status: None,
+            estimated_cost_nanos: None,
+            estimated_cost_currency: None,
+            cost_catalog_id: None,
+            cost_catalog_version_id: None,
+            cost_snapshot_json: None,
+            total_input_tokens: None,
+            total_output_tokens: None,
+            input_text_tokens: None,
+            output_text_tokens: None,
+            input_image_tokens: None,
+            output_image_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            created_at: 1_000,
+            updated_at: 1_001,
+        }
+    }
+
+    #[test]
+    fn sqlite_request_log_accepts_directional_protocol_domains_and_null_upstream() {
+        let database = TestDbContext::new_sqlite("request-log-directional-protocols.sqlite");
+        database.run_sync(|| {
+            let api_key = ApiKey::create(&api_key_payload()).expect("api key should create");
+            let cases = [
+                (DownstreamProtocol::Openai, None),
+                (
+                    DownstreamProtocol::Responses,
+                    Some(UpstreamProtocol::Openai),
+                ),
+                (
+                    DownstreamProtocol::Anthropic,
+                    Some(UpstreamProtocol::Responses),
+                ),
+                (
+                    DownstreamProtocol::Gemini,
+                    Some(UpstreamProtocol::Anthropic),
+                ),
+                (DownstreamProtocol::Openai, Some(UpstreamProtocol::Gemini)),
+                (
+                    DownstreamProtocol::Responses,
+                    Some(UpstreamProtocol::Ollama),
+                ),
+            ];
+            for (index, (downstream, upstream)) in cases.into_iter().enumerate() {
+                RequestLog::insert(&request_log(
+                    ID_GENERATOR.generate_id() + index as i64,
+                    api_key.detail.id,
+                    downstream,
+                    upstream,
+                ))
+                .expect("directional request log should insert");
+            }
+
+            let logs = RequestLog::list_full(RequestLogQueryPayload {
+                page_size: Some(20),
+                ..Default::default()
+            })
+            .expect("request logs should list")
+            .list;
+            assert_eq!(logs.len(), cases.len());
+            assert!(logs.iter().any(|log| log.upstream_protocol.is_none()));
+            assert!(
+                logs.iter()
+                    .any(|log| { log.upstream_protocol == Some(UpstreamProtocol::Ollama) })
+            );
+        });
+    }
+
+    #[test]
+    fn sqlite_request_log_rejects_invalid_directional_protocol_values() {
+        let database = TestDbContext::new_sqlite("request-log-invalid-protocols.sqlite");
+        database.run_sync(|| {
+            let api_key = ApiKey::create(&api_key_payload()).expect("api key should create");
+            let mut connection = get_connection().expect("database connection should load");
+            let DbConnection::Sqlite(connection) = &mut connection else {
+                panic!("test must use SQLite");
+            };
+
+            let invalid_downstream = diesel::sql_query(format!(
+                "INSERT INTO request_log (
+                    id, api_key_id, downstream_protocol, overall_status,
+                    request_received_at, is_stream, created_at, updated_at
+                ) VALUES ({}, {}, 'OLLAMA', 'SUCCESS', 1000, 0, 1000, 1000)",
+                ID_GENERATOR.generate_id(),
+                api_key.detail.id
+            ))
+            .execute(connection);
+            assert!(invalid_downstream.is_err());
+
+            let invalid_upstream = diesel::sql_query(format!(
+                "INSERT INTO request_log (
+                    id, api_key_id, downstream_protocol, upstream_protocol,
+                    overall_status, request_received_at, is_stream, created_at, updated_at
+                ) VALUES ({}, {}, 'OPENAI', 'GEMINI_OPENAI', 'SUCCESS', 1000, 0, 1000, 1000)",
+                ID_GENERATOR.generate_id(),
+                api_key.detail.id
+            ))
+            .execute(connection);
+            assert!(invalid_upstream.is_err());
+        });
     }
 }

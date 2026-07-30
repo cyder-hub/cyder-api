@@ -25,7 +25,7 @@ use crate::{
         util::get_cost_catalog_version,
         utility::{UtilityOperation, validate_utility_target},
     },
-    schema::enum_def::LlmApiType,
+    schema::enum_def::DownstreamProtocol,
     service::{
         app_state::AppState,
         cache::types::CacheApiKey,
@@ -38,7 +38,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub(in crate::proxy) enum RequestExecutionKind {
     Generation {
-        user_api_type: LlmApiType,
+        downstream_protocol: DownstreamProtocol,
         is_stream: bool,
         data: Value,
     },
@@ -98,9 +98,12 @@ pub(in crate::proxy) async fn execute_request(
         kind,
     } = input;
     let mut target = execution_plan.target.clone();
-    let user_api_type = match &kind {
-        RequestExecutionKind::Generation { user_api_type, .. } => *user_api_type,
-        RequestExecutionKind::Utility { operation, .. } => operation.api_type,
+    let downstream_protocol = match &kind {
+        RequestExecutionKind::Generation {
+            downstream_protocol,
+            ..
+        } => *downstream_protocol,
+        RequestExecutionKind::Utility { operation, .. } => operation.downstream_protocol,
     };
     let mut log_context = new_request_log_context(RequestLogContextInput {
         api_key: &api_key,
@@ -113,7 +116,7 @@ pub(in crate::proxy) async fn execute_request(
             .map(|preset| preset.as_key()),
         client_ip_addr: &client_ip_addr,
         start_time,
-        user_api_type,
+        downstream_protocol,
     });
 
     let capability_result = match &kind {
@@ -132,7 +135,7 @@ pub(in crate::proxy) async fn execute_request(
                     operation.name
                 )))
             } else {
-                validate_utility_target(operation, target.llm_api_type)
+                validate_utility_target(operation, target.upstream_protocol)
                     .and_then(|()| validate_utility_capabilities(&target, &operation.name, data))
             }
         }
@@ -214,14 +217,14 @@ pub(in crate::proxy) async fn execute_request(
 
     let materialized = match kind {
         RequestExecutionKind::Generation {
-            user_api_type,
+            downstream_protocol,
             is_stream,
             data,
         } => {
             match materialize_generation_request(
                 &target,
                 data,
-                user_api_type,
+                downstream_protocol,
                 is_stream,
                 &original_headers,
                 &query_params,

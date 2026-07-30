@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::DownstreamProtocol;
 use crate::service::transform::stream::StreamTransformContext;
 use crate::service::transform::unified::*;
 use crate::service::transform::{
@@ -68,7 +68,7 @@ pub(crate) fn build_gemini_stream_diagnostic(
     build_stream_diagnostic_sse(
         context,
         TransformProtocol::Unified,
-        TransformProtocol::Api(LlmApiType::Gemini),
+        TransformProtocol::Downstream(DownstreamProtocol::Gemini),
         kind,
         "gemini_stream_encoding",
         context_message,

@@ -9,14 +9,14 @@ use super::{
 };
 use crate::{
     proxy::{ProxyError, cancellation::ProxyCancellationContext, utility::UtilityOperation},
-    schema::enum_def::LlmApiType,
+    schema::enum_def::DownstreamProtocol,
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
 pub(in crate::proxy) struct GenerationOrchestrationInput {
     pub cancellation: ProxyCancellationContext,
     pub api_key: Arc<CacheApiKey>,
-    pub api_type: LlmApiType,
+    pub downstream_protocol: DownstreamProtocol,
     pub execution_plan: ExecutionPlan,
     pub is_stream: bool,
     pub query_params: HashMap<String, String>,
@@ -53,7 +53,7 @@ pub(in crate::proxy) async fn execute_generation(
             client_ip_addr: input.client_ip_addr,
             start_time: input.start_time,
             kind: RequestExecutionKind::Generation {
-                user_api_type: input.api_type,
+                downstream_protocol: input.downstream_protocol,
                 is_stream: input.is_stream,
                 data: input.data,
             },

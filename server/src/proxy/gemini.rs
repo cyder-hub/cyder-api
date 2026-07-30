@@ -7,10 +7,10 @@ use super::{
     pipeline::{AuthenticationStrategy, OperationAdapter},
     utility::{UtilityOperation, UtilityProtocol},
 };
-use crate::{schema::enum_def::LlmApiType, service::app_state::AppState};
+use crate::{schema::enum_def::DownstreamProtocol, service::app_state::AppState};
 
 const GEMINI_GENERATION_ACTIONS: [&str; 2] = ["generateContent", "streamGenerateContent"];
-const GEMINI_UTILITY_ACTIONS: [&str; 3] = ["countMessageTokens", "countTextTokens", "countTokens"];
+const GEMINI_UTILITY_ACTIONS: [&str; 1] = ["countTokens"];
 
 pub async fn handle_gemini_request(
     app_state: Arc<AppState>,
@@ -25,7 +25,7 @@ pub async fn handle_gemini_request(
             AuthenticationStrategy::Gemini,
             UtilityOperation {
                 name: action.to_string(),
-                api_type: LlmApiType::Gemini,
+                downstream_protocol: DownstreamProtocol::Gemini,
                 protocol: UtilityProtocol::GeminiCompatible,
                 downstream_path: action.to_string(),
             },
@@ -34,13 +34,13 @@ pub async fn handle_gemini_request(
     } else if GEMINI_GENERATION_ACTIONS.contains(&action) {
         OperationAdapter::fixed_generation(
             AuthenticationStrategy::Gemini,
-            LlmApiType::Gemini,
+            DownstreamProtocol::Gemini,
             model_name.to_string(),
             action == "streamGenerateContent",
         )
     } else {
         let err_msg = format!(
-            "Invalid action: '{}'. Must be one of 'generateContent', 'streamGenerateContent', 'countMessageTokens', 'countTextTokens', or 'countTokens'.",
+            "Invalid action: '{}'. Must be one of 'generateContent', 'streamGenerateContent', or 'countTokens'.",
             action
         );
         crate::debug_event!(

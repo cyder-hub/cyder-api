@@ -12,8 +12,7 @@ use cyder_tools::log::debug;
 use super::{
     ProxyError,
     auth::{
-        authenticate_anthropic_request, authenticate_gemini_request, authenticate_ollama_request,
-        authenticate_openai_request,
+        authenticate_anthropic_request, authenticate_gemini_request, authenticate_openai_request,
     },
     cancellation::ProxyCancellationContext,
     generation::{GenerationExecutionInput, execute_generation_proxy, extract_model_from_request},
@@ -24,7 +23,7 @@ use super::{
 };
 use crate::{
     ingress::client_identity::ClientIdentity,
-    schema::enum_def::LlmApiType,
+    schema::enum_def::DownstreamProtocol,
     service::{app_state::AppState, cache::types::CacheApiKey},
 };
 
@@ -33,7 +32,6 @@ pub(super) enum AuthenticationStrategy {
     OpenaiCompatible,
     Anthropic,
     Gemini,
-    Ollama,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +48,7 @@ pub(super) enum StreamMode {
 
 #[derive(Clone, Debug)]
 pub(super) struct GenerationOperation {
-    pub api_type: LlmApiType,
+    pub downstream_protocol: DownstreamProtocol,
     pub model_source: ModelSource,
     pub stream_mode: StreamMode,
 }
@@ -63,7 +61,7 @@ pub(super) struct UtilityPipelineOperation {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ModelsOperation {
-    pub api_type: LlmApiType,
+    pub downstream_protocol: DownstreamProtocol,
 }
 
 #[derive(Clone, Debug)]
@@ -92,11 +90,11 @@ impl OperationAdapter {
         Self { auth, operation }
     }
 
-    pub(super) fn openai_generation(api_type: LlmApiType) -> Self {
+    pub(super) fn openai_generation(downstream_protocol: DownstreamProtocol) -> Self {
         Self::new(
-            AuthenticationStrategy::for_api_type(api_type),
+            AuthenticationStrategy::for_downstream_protocol(downstream_protocol),
             ProxyOperation::Generation(GenerationOperation {
-                api_type,
+                downstream_protocol,
                 model_source: ModelSource::RequestBodyField,
                 stream_mode: StreamMode::RequestBodyField,
             }),
@@ -105,14 +103,14 @@ impl OperationAdapter {
 
     pub(super) fn fixed_generation(
         auth: AuthenticationStrategy,
-        api_type: LlmApiType,
+        downstream_protocol: DownstreamProtocol,
         model_name: String,
         is_stream: bool,
     ) -> Self {
         Self::new(
             auth,
             ProxyOperation::Generation(GenerationOperation {
-                api_type,
+                downstream_protocol,
                 model_source: ModelSource::Fixed(model_name),
                 stream_mode: StreamMode::Fixed(is_stream),
             }),
@@ -143,10 +141,12 @@ impl OperationAdapter {
         )
     }
 
-    pub(super) fn list_models(api_type: LlmApiType) -> Self {
+    pub(super) fn list_models(downstream_protocol: DownstreamProtocol) -> Self {
         Self::new(
-            AuthenticationStrategy::for_api_type(api_type),
-            ProxyOperation::Models(ModelsOperation { api_type }),
+            AuthenticationStrategy::for_downstream_protocol(downstream_protocol),
+            ProxyOperation::Models(ModelsOperation {
+                downstream_protocol,
+            }),
         )
     }
 
@@ -198,7 +198,12 @@ impl OperationAdapter {
                 execute_utility_operation(context, cancellation, operation, request).await
             }
             ProxyOperation::Models(operation) => {
-                execute_models_listing(context.app_state, context.api_key, operation.api_type).await
+                execute_models_listing(
+                    context.app_state,
+                    context.api_key,
+                    operation.downstream_protocol,
+                )
+                .await
             }
         }
     }
@@ -219,9 +224,6 @@ impl OperationAdapter {
             AuthenticationStrategy::Gemini => {
                 authenticate_gemini_request(headers, query_params, app_state).await
             }
-            AuthenticationStrategy::Ollama => {
-                authenticate_ollama_request(headers, query_params, app_state).await
-            }
         }?;
 
         Ok(result.api_key)
@@ -229,14 +231,11 @@ impl OperationAdapter {
 }
 
 impl AuthenticationStrategy {
-    fn for_api_type(api_type: LlmApiType) -> Self {
-        match api_type {
-            LlmApiType::Openai | LlmApiType::Responses | LlmApiType::GeminiOpenai => {
-                Self::OpenaiCompatible
-            }
-            LlmApiType::Anthropic => Self::Anthropic,
-            LlmApiType::Gemini => Self::Gemini,
-            LlmApiType::Ollama => Self::Ollama,
+    fn for_downstream_protocol(downstream_protocol: DownstreamProtocol) -> Self {
+        match downstream_protocol {
+            DownstreamProtocol::Openai | DownstreamProtocol::Responses => Self::OpenaiCompatible,
+            DownstreamProtocol::Anthropic => Self::Anthropic,
+            DownstreamProtocol::Gemini => Self::Gemini,
         }
     }
 }
@@ -272,7 +271,7 @@ async fn execute_generation_operation(
         GenerationExecutionInput {
             cancellation,
             api_key: context.api_key,
-            api_type: operation.api_type,
+            downstream_protocol: operation.downstream_protocol,
             execution_plan,
             is_stream,
             query_params: context.query_params,
@@ -475,10 +474,6 @@ mod tests {
         assert_eq!(
             derive_request_operation_kind("/gemini/v1beta/models/foo:streamGenerateContent"),
             "stream_generate_content"
-        );
-        assert_eq!(
-            derive_request_operation_kind("/ollama/api/tags"),
-            "models_list"
         );
     }
 }

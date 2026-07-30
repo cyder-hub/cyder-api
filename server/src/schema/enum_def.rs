@@ -2,7 +2,9 @@ use bincode::{Decode, Encode};
 use diesel_derive_enum::DbEnum;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Default, Encode, Decode,
+)]
 #[db_enum(pg_type = "provider_type_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -18,18 +20,64 @@ pub enum ProviderType {
     GeminiOpenai,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default)]
-#[db_enum(pg_type = "llm_api_type_enum")]
+impl ProviderType {
+    pub const ALL: [Self; 8] = [
+        Self::Openai,
+        Self::Gemini,
+        Self::Vertex,
+        Self::VertexOpenai,
+        Self::Ollama,
+        Self::Anthropic,
+        Self::Responses,
+        Self::GeminiOpenai,
+    ];
+}
+
+/// Public wire protocol accepted by the gateway.
+///
+/// This type intentionally excludes provider identities and upstream-only
+/// protocols so invalid downstream states cannot be represented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "downstream_protocol_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum LlmApiType {
+pub enum DownstreamProtocol {
     #[default]
     Openai,
+    Responses,
+    Anthropic,
+    Gemini,
+}
+
+impl DownstreamProtocol {
+    pub const ALL: [Self; 4] = [Self::Openai, Self::Responses, Self::Anthropic, Self::Gemini];
+}
+
+/// Wire protocol used for the selected upstream provider.
+///
+/// Provider-specific dialects and authentication behavior belong to
+/// `ProviderRuntimeProfile`, not this protocol identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Default)]
+#[db_enum(pg_type = "upstream_protocol_enum")]
+#[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum UpstreamProtocol {
+    #[default]
+    Openai,
+    Responses,
+    Anthropic,
     Gemini,
     Ollama,
-    Anthropic,
-    Responses,
-    GeminiOpenai,
+}
+
+impl UpstreamProtocol {
+    pub const ALL: [Self; 5] = [
+        Self::Openai,
+        Self::Responses,
+        Self::Anthropic,
+        Self::Gemini,
+        Self::Ollama,
+    ];
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, DbEnum, Default, Encode, Decode)]

@@ -130,7 +130,7 @@ pub(in crate::service::transform) fn bridge_stream_events_to_legacy_chunks(
             | UnifiedStreamEvent::ReasoningStop { .. } => {
                 apply_transform_policy(
                     TransformProtocol::Unified,
-                    TransformProtocol::Api(transformer.target_api_type),
+                    TransformProtocol::Downstream(transformer.downstream_protocol),
                     TransformValueKind::ReasoningDelta,
                     "Dropping reasoning stream event while bridging to legacy chunk model.",
                 );
@@ -139,7 +139,7 @@ pub(in crate::service::transform) fn bridge_stream_events_to_legacy_chunks(
             UnifiedStreamEvent::BlobDelta { .. } => {
                 apply_transform_policy(
                     TransformProtocol::Unified,
-                    TransformProtocol::Api(transformer.target_api_type),
+                    TransformProtocol::Downstream(transformer.downstream_protocol),
                     TransformValueKind::BlobDelta,
                     "Dropping blob stream event while bridging to legacy chunk model.",
                 );
@@ -148,7 +148,7 @@ pub(in crate::service::transform) fn bridge_stream_events_to_legacy_chunks(
             UnifiedStreamEvent::Error { .. } => {
                 apply_transform_policy(
                     TransformProtocol::Unified,
-                    TransformProtocol::Api(transformer.target_api_type),
+                    TransformProtocol::Downstream(transformer.downstream_protocol),
                     TransformValueKind::StreamError,
                     "Dropping structured error event while bridging to legacy chunk model.",
                 );

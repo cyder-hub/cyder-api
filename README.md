@@ -34,7 +34,8 @@ Do not prioritize multi-tenant account systems unless explicitly required.
 
 Current code already provides:
 
-- multi-protocol proxying for OpenAI, Responses, Anthropic, Gemini, and Ollama
+- four public downstream protocol families: OpenAI, Responses, Anthropic, and Gemini
+- five upstream wire families: OpenAI, Responses, Anthropic, Gemini, and Ollama
 - deep request/response transformation, including streaming, tool calls, reasoning, and multimodal content
 - provider, model, and downstream API key management
 - API key governance: expiry, RPM, concurrency, daily/monthly quota, daily/monthly budget
@@ -264,11 +265,17 @@ Assuming `base_path: /ai`:
 
 ### Gateway Endpoints
 
-- OpenAI-compatible: `/ai/openai/v1/*`
-- Responses-compatible: `/ai/responses/v1/*`
-- Anthropic-compatible: `/ai/anthropic/v1/*`
-- Gemini-compatible: `/ai/gemini/v1/*`
-- Ollama-compatible: `/ai/ollama/api/*`
+- OpenAI-compatible: `/ai/openai/*` and `/ai/openai/v1/*`
+- Responses-compatible: `/ai/responses/*` and `/ai/responses/v1/*`
+- Anthropic-compatible: `/ai/anthropic/*` and `/ai/anthropic/v1/*`
+- Gemini-compatible: `/ai/gemini/*`, `/ai/gemini/v1/*`, and `/ai/gemini/v1beta/*`
+
+The unversioned routes are direct compatibility aliases for the current `/v1`
+semantics, not redirects or a permanent protocol-version claim. Ollama is
+upstream-only and has no public downstream route. See the generated
+[Protocol Compatibility Matrix](docs/protocol-compatibility.md) for exact
+routes, provider profiles, current generation cells, utility boundaries, and
+evidence.
 
 ### System Endpoints
 
@@ -279,7 +286,7 @@ Assuming `base_path: /ai`:
 
 The Manager UI/API is same-origin and does not expose CORS. Its responses carry a strict script CSP, anti-embedding and content-type protections, a minimal permissions policy, and status-aware cache rules.
 
-The five public AI protocol prefixes allow browser calls from any Origin with GET/POST, mirrored request headers, exposed response headers, no credentials, and a 600-second preflight cache. Manager, System, and base fallback routes do not inherit this public CORS policy.
+The four public AI protocol prefixes allow browser calls from any Origin with GET/POST, mirrored request headers, exposed response headers, no credentials, and a 600-second preflight cache. Manager, System, and base fallback routes do not inherit this public CORS policy.
 
 Client IP defaults to the TCP peer. To trust a reverse proxy, add only its canonical CIDR to `client_identity.trusted_proxy_cidrs`; the proxy must clear untrusted forwarding headers before generating `Forwarded` or `X-Forwarded-For`. Invalid metadata from a trusted peer is rejected rather than silently falling back.
 

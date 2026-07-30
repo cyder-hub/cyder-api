@@ -5,7 +5,7 @@ use crate::{
         ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
     },
     database::runtime_feature_config::{RuntimeFeatureConfigScope, RuntimeFeatureKey},
-    schema::enum_def::LlmApiType,
+    schema::enum_def::UpstreamProtocol,
     service::{
         app_state::AppState,
         cache::types::{CacheModel, CacheModelsCatalog, CacheProvider, CacheReasoningConfig},
@@ -19,14 +19,14 @@ use super::super::{
         RequestedModelParseStatus, ResolvedRequestedModelName, enabled_reasoning_suffixes,
         parse_reasoning_suffix,
     },
-    util::determine_target_api_type,
+    util::determine_upstream_protocol,
 };
 
 #[derive(Debug, Clone)]
 pub struct ExecutionTarget {
     pub provider: Arc<CacheProvider>,
     pub model: Arc<CacheModel>,
-    pub llm_api_type: LlmApiType,
+    pub upstream_protocol: UpstreamProtocol,
     pub reasoning_config_id: Option<i64>,
     pub reasoning_config_scope: Option<ReasoningConfigScope>,
     pub reasoning_config_source: Option<ReasoningConfigSource>,
@@ -117,7 +117,7 @@ impl ExecutionPlan {
             target.provider.provider_key,
             target.model.id,
             target.model.model_name,
-            target.llm_api_type,
+            target.upstream_protocol,
             self.resolved_reasoning_suffix,
             target
                 .runtime_features
@@ -169,7 +169,7 @@ fn build_direct_execution_plan(
         })
         .cloned()
         .ok_or_else(|| format!("Enabled model '{}' was not found.", requested_name))?;
-    let llm_api_type = determine_target_api_type(&provider);
+    let upstream_protocol = determine_upstream_protocol(&provider);
     let runtime_features = resolve_target_runtime_features(catalog, &provider, &model);
     Ok(ExecutionPlan {
         requested_name: requested_name.to_string(),
@@ -180,7 +180,7 @@ fn build_direct_execution_plan(
         target: ExecutionTarget {
             provider: Arc::new(provider),
             model: Arc::new(model),
-            llm_api_type,
+            upstream_protocol,
             reasoning_config_id: None,
             reasoning_config_scope: None,
             reasoning_config_source: None,
@@ -237,7 +237,7 @@ pub(crate) fn target_supports_reasoning_preset(
     generate_reasoning_patches(
         family,
         preset,
-        ReasoningPatchContext::for_model(target.llm_api_type, &target.model),
+        ReasoningPatchContext::for_model(target.upstream_protocol, &target.model),
     )
     .map_err(|err| err.to_string())?;
 

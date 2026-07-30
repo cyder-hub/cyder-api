@@ -1,5 +1,5 @@
 import type { Component } from "vue";
-import type { RecordListItem } from "../../services/types";
+import type { DownstreamProtocol, RecordListItem } from "../../services/types";
 import type { RecordDetailTab } from "./composables/useRecordDetail";
 
 export type RecordFilters = {
@@ -7,7 +7,7 @@ export type RecordFilters = {
   provider_id: number;
   model_id: number;
   status: string;
-  user_api_type: string;
+  downstream_protocol: "ALL" | DownstreamProtocol;
   final_error_code: string;
   latency_ms_min: string;
   latency_ms_max: string;

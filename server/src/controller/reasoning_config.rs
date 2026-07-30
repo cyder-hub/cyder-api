@@ -365,14 +365,22 @@ mod tests {
                     body["data"]["families"][0]["family_key"],
                     "openai_chat_reasoning_effort"
                 );
-                assert_eq!(body["data"]["families"][0]["target_api_types"][0], "OPENAI");
+                assert_eq!(
+                    body["data"]["families"][0]["upstream_protocols"][0],
+                    "OPENAI"
+                );
+                assert!(
+                    body["data"]["families"][0]
+                        .get("target_api_types")
+                        .is_none()
+                );
                 let siliconflow_family = body["data"]["families"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .find(|family| family["family_key"] == "siliconflow_openai_enable_thinking")
                     .expect("SiliconFlow family should be exposed");
-                assert_eq!(siliconflow_family["target_api_types"], json!(["OPENAI"]));
+                assert_eq!(siliconflow_family["upstream_protocols"], json!(["OPENAI"]));
                 assert_eq!(
                     siliconflow_family["supported_presets"],
                     json!(["disabled", "enabled"])
@@ -414,7 +422,8 @@ mod tests {
                 .await;
                 assert_eq!(draft_preview_response.status(), StatusCode::OK);
                 let draft_preview_body = response_json(draft_preview_response).await;
-                assert_eq!(draft_preview_body["data"]["target_api_type"], "RESPONSES");
+                assert_eq!(draft_preview_body["data"]["upstream_protocol"], "RESPONSES");
+                assert!(draft_preview_body["data"].get("target_api_type").is_none());
                 let draft_low = draft_preview_body["data"]["presets"]
                     .as_array()
                     .unwrap()
@@ -471,7 +480,8 @@ mod tests {
                 .await;
                 assert_eq!(preview_response.status(), StatusCode::OK);
                 let preview_body = response_json(preview_response).await;
-                assert_eq!(preview_body["data"]["target_api_type"], "OPENAI");
+                assert_eq!(preview_body["data"]["upstream_protocol"], "OPENAI");
+                assert!(preview_body["data"].get("target_api_type").is_none());
                 assert_eq!(preview_body["data"]["presets"].as_array().unwrap().len(), 7);
                 let high = preview_body["data"]["presets"]
                     .as_array()
@@ -711,7 +721,8 @@ mod tests {
                     .find(|item| item["preset_key"] == "high")
                     .expect("high preset should be present");
 
-                assert_eq!(preview_body["data"]["target_api_type"], "OPENAI");
+                assert_eq!(preview_body["data"]["upstream_protocol"], "OPENAI");
+                assert!(preview_body["data"].get("target_api_type").is_none());
                 assert_eq!(high["enabled"], true);
                 assert_eq!(high["runtime_supported"], false);
                 assert!(high["generated_patches"].as_array().unwrap().is_empty());

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageInfo {
@@ -13,9 +13,12 @@ pub struct UsageInfo {
     pub total_tokens: i32,
 }
 
-pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<UsageInfo> {
-    match api_type {
-        LlmApiType::Openai | LlmApiType::GeminiOpenai => {
+pub fn parse_usage_info(
+    response_body: &Value,
+    upstream_protocol: UpstreamProtocol,
+) -> Option<UsageInfo> {
+    match upstream_protocol {
+        UpstreamProtocol::Openai => {
             let usage_val = response_body.get("usage");
             if let Some(usage) = usage_val {
                 if usage.is_null() {
@@ -62,7 +65,7 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 None
             }
         }
-        LlmApiType::Gemini => {
+        UpstreamProtocol::Gemini => {
             let usage_val = response_body.get("usageMetadata");
             if let Some(usage) = usage_val {
                 if usage.is_null() {
@@ -102,7 +105,7 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 None
             }
         }
-        LlmApiType::Anthropic => {
+        UpstreamProtocol::Anthropic => {
             let usage_val = response_body.get("usage");
             if let Some(usage) = usage_val {
                 if usage.is_null() {
@@ -131,7 +134,7 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 None
             }
         }
-        LlmApiType::Responses => {
+        UpstreamProtocol::Responses => {
             let usage_val = response_body
                 .get("usage")
                 .or_else(|| response_body.get("response").and_then(|r| r.get("usage")));
@@ -177,7 +180,7 @@ pub fn parse_usage_info(response_body: &Value, api_type: LlmApiType) -> Option<U
                 None
             }
         }
-        LlmApiType::Ollama => {
+        UpstreamProtocol::Ollama => {
             let prompt_tokens = response_body
                 .get("prompt_eval_count")
                 .and_then(Value::as_i64)
@@ -211,7 +214,7 @@ mod tests {
     use serde_json::json;
 
     use super::{UsageInfo, parse_usage_info};
-    use crate::schema::enum_def::LlmApiType;
+    use crate::schema::enum_def::UpstreamProtocol;
 
     #[test]
     fn parses_openai_usage_with_fallback_reasoning() {
@@ -223,7 +226,7 @@ mod tests {
             }
         });
 
-        let usage = parse_usage_info(&response, LlmApiType::GeminiOpenai).expect("usage");
+        let usage = parse_usage_info(&response, UpstreamProtocol::Openai).expect("usage");
         assert_eq!(
             usage,
             UsageInfo {

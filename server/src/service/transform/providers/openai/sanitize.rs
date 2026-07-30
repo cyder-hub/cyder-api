@@ -1,6 +1,9 @@
 use serde_json::Value;
 
-use crate::schema::enum_def::ProviderType;
+use crate::{
+    schema::enum_def::ProviderType,
+    service::provider_profile::{ProviderDialect, provider_runtime_profile},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenAiVariant {
@@ -147,13 +150,12 @@ pub(crate) fn determine_openai_variant(
     provider_type: &ProviderType,
     downstream_path: &str,
 ) -> OpenAiVariant {
-    match provider_type {
-        ProviderType::VertexOpenai | ProviderType::GeminiOpenai
-            if downstream_path == "chat/completions" =>
-        {
-            OpenAiVariant::GeminiCompat
-        }
-        _ => OpenAiVariant::Standard,
+    if provider_runtime_profile(provider_type).dialect == ProviderDialect::GeminiOpenAiCompatibility
+        && downstream_path == "chat/completions"
+    {
+        OpenAiVariant::GeminiCompat
+    } else {
+        OpenAiVariant::Standard
     }
 }
 

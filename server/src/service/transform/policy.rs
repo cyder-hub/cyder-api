@@ -1,6 +1,42 @@
 use super::TransformProtocol;
 use super::capability::{ProtocolCapabilityMatrix, TransformValueKind};
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
+
+impl TransformProtocol {
+    fn is_openai(self) -> bool {
+        matches!(
+            self,
+            Self::Downstream(DownstreamProtocol::Openai) | Self::Upstream(UpstreamProtocol::Openai)
+        )
+    }
+
+    fn is_gemini(self) -> bool {
+        matches!(
+            self,
+            Self::Downstream(DownstreamProtocol::Gemini) | Self::Upstream(UpstreamProtocol::Gemini)
+        )
+    }
+
+    fn is_anthropic(self) -> bool {
+        matches!(
+            self,
+            Self::Downstream(DownstreamProtocol::Anthropic)
+                | Self::Upstream(UpstreamProtocol::Anthropic)
+        )
+    }
+
+    fn is_responses(self) -> bool {
+        matches!(
+            self,
+            Self::Downstream(DownstreamProtocol::Responses)
+                | Self::Upstream(UpstreamProtocol::Responses)
+        )
+    }
+
+    fn is_ollama(self) -> bool {
+        matches!(self, Self::Upstream(UpstreamProtocol::Ollama))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransformAction {
@@ -37,7 +73,12 @@ pub(crate) struct PolicyEngine;
 impl PolicyEngine {
     fn target_capabilities(target: TransformProtocol) -> Option<ProtocolCapabilityMatrix> {
         match target {
-            TransformProtocol::Api(api) => Some(ProtocolCapabilityMatrix::for_api(api)),
+            TransformProtocol::Downstream(protocol) => {
+                Some(ProtocolCapabilityMatrix::for_downstream(protocol))
+            }
+            TransformProtocol::Upstream(protocol) => {
+                Some(ProtocolCapabilityMatrix::for_upstream(protocol))
+            }
             TransformProtocol::Unified => None,
         }
     }
@@ -137,62 +178,60 @@ impl PolicyEngine {
         }
 
         match (source, target, kind) {
-            (_, TransformProtocol::Api(LlmApiType::Anthropic), TransformValueKind::ImageUrl)
-            | (_, TransformProtocol::Api(LlmApiType::Anthropic), TransformValueKind::FileUrl)
-            | (_, TransformProtocol::Api(LlmApiType::Anthropic), TransformValueKind::FileData)
-            | (
-                _,
-                TransformProtocol::Api(LlmApiType::Anthropic),
-                TransformValueKind::ExecutableCode,
-            ) => PolicyDecision {
-                diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                level: TransformLossLevel::LossyMajor,
-                action: TransformAction::Send,
-                reason: "Anthropic adapter preserves this request content with native image blocks or recoverable text downgrade.",
-            },
-            (_, TransformProtocol::Api(LlmApiType::Anthropic), TransformValueKind::ImageData) => {
-                PolicyDecision {
-                    diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                    level: TransformLossLevel::Lossless,
-                    action: TransformAction::Send,
-                    reason: "Anthropic adapter can preserve inline image data natively in request blocks.",
-                }
-            }
-            (_, TransformProtocol::Api(LlmApiType::Gemini), TransformValueKind::ImageUrl) => {
+            (_, target, TransformValueKind::ImageUrl)
+            | (_, target, TransformValueKind::FileUrl)
+            | (_, target, TransformValueKind::FileData)
+            | (_, target, TransformValueKind::ExecutableCode)
+                if target.is_anthropic() =>
+            {
                 PolicyDecision {
                     diagnostic_kind: TransformDiagnosticKind::LossyTransform,
                     level: TransformLossLevel::LossyMajor,
                     action: TransformAction::Send,
-                    reason: "Gemini adapter preserves remote image URLs as recoverable text when inline bytes are unavailable.",
+                    reason: "Anthropic adapter preserves this request content with native image blocks or recoverable text downgrade.",
                 }
             }
-            (_, TransformProtocol::Api(LlmApiType::Responses), TransformValueKind::ImageData)
-            | (_, TransformProtocol::Api(LlmApiType::Responses), TransformValueKind::FileUrl)
-            | (_, TransformProtocol::Api(LlmApiType::Responses), TransformValueKind::FileData)
-            | (
-                _,
-                TransformProtocol::Api(LlmApiType::Responses),
-                TransformValueKind::ExecutableCode,
-            ) => PolicyDecision {
+            (_, target, TransformValueKind::ImageData) if target.is_anthropic() => PolicyDecision {
+                diagnostic_kind: TransformDiagnosticKind::LossyTransform,
+                level: TransformLossLevel::Lossless,
+                action: TransformAction::Send,
+                reason: "Anthropic adapter can preserve inline image data natively in request blocks.",
+            },
+            (_, target, TransformValueKind::ImageUrl) if target.is_gemini() => PolicyDecision {
                 diagnostic_kind: TransformDiagnosticKind::LossyTransform,
                 level: TransformLossLevel::LossyMajor,
                 action: TransformAction::Send,
-                reason: "Responses adapter preserves this content in item inputs or recoverable instruction text.",
+                reason: "Gemini adapter preserves remote image URLs as recoverable text when inline bytes are unavailable.",
             },
-            (
-                TransformProtocol::Api(LlmApiType::Responses),
-                TransformProtocol::Unified,
-                TransformValueKind::ResponsesUnknownItem,
-            ) => PolicyDecision {
-                diagnostic_kind: TransformDiagnosticKind::LossyTransform,
-                level: TransformLossLevel::LossyMajor,
-                action: TransformAction::Drop,
-                reason: "Responses item is structured and not formally supported by the current unified response adapter.",
-            },
-            (_, TransformProtocol::Api(LlmApiType::Openai), TransformValueKind::ImageData)
-            | (_, TransformProtocol::Api(LlmApiType::Openai), TransformValueKind::FileUrl)
-            | (_, TransformProtocol::Api(LlmApiType::Openai), TransformValueKind::FileData)
-            | (_, TransformProtocol::Api(LlmApiType::Openai), TransformValueKind::ExecutableCode) => {
+            (_, target, TransformValueKind::ImageData)
+            | (_, target, TransformValueKind::FileUrl)
+            | (_, target, TransformValueKind::FileData)
+            | (_, target, TransformValueKind::ExecutableCode)
+                if target.is_responses() =>
+            {
+                PolicyDecision {
+                    diagnostic_kind: TransformDiagnosticKind::LossyTransform,
+                    level: TransformLossLevel::LossyMajor,
+                    action: TransformAction::Send,
+                    reason: "Responses adapter preserves this content in item inputs or recoverable instruction text.",
+                }
+            }
+            (source, TransformProtocol::Unified, TransformValueKind::ResponsesUnknownItem)
+                if source.is_responses() =>
+            {
+                PolicyDecision {
+                    diagnostic_kind: TransformDiagnosticKind::LossyTransform,
+                    level: TransformLossLevel::LossyMajor,
+                    action: TransformAction::Drop,
+                    reason: "Responses item is structured and not formally supported by the current unified response adapter.",
+                }
+            }
+            (_, target, TransformValueKind::ImageData)
+            | (_, target, TransformValueKind::FileUrl)
+            | (_, target, TransformValueKind::FileData)
+            | (_, target, TransformValueKind::ExecutableCode)
+                if target.is_openai() =>
+            {
                 PolicyDecision {
                     diagnostic_kind: TransformDiagnosticKind::LossyTransform,
                     level: TransformLossLevel::LossyMajor,
@@ -200,18 +239,16 @@ impl PolicyEngine {
                     reason: "OpenAI chat adapter cannot encode this unified content type in this path.",
                 }
             }
-            (
-                _,
-                TransformProtocol::Api(LlmApiType::Ollama),
-                TransformValueKind::ToolRoleMessage,
-            )
-            | (_, TransformProtocol::Api(LlmApiType::Ollama), TransformValueKind::ToolCall)
-            | (_, TransformProtocol::Api(LlmApiType::Ollama), TransformValueKind::ToolResult)
-            | (_, TransformProtocol::Api(LlmApiType::Ollama), TransformValueKind::ImageUrl)
-            | (_, TransformProtocol::Api(LlmApiType::Ollama), TransformValueKind::ImageData)
-            | (_, TransformProtocol::Api(LlmApiType::Ollama), TransformValueKind::FileUrl)
-            | (_, TransformProtocol::Api(LlmApiType::Ollama), TransformValueKind::FileData)
-            | (_, TransformProtocol::Api(LlmApiType::Ollama), TransformValueKind::ExecutableCode) => {
+            (_, target, TransformValueKind::ToolRoleMessage)
+            | (_, target, TransformValueKind::ToolCall)
+            | (_, target, TransformValueKind::ToolResult)
+            | (_, target, TransformValueKind::ImageUrl)
+            | (_, target, TransformValueKind::ImageData)
+            | (_, target, TransformValueKind::FileUrl)
+            | (_, target, TransformValueKind::FileData)
+            | (_, target, TransformValueKind::ExecutableCode)
+                if target.is_ollama() =>
+            {
                 PolicyDecision {
                     diagnostic_kind: TransformDiagnosticKind::LossyTransform,
                     level: TransformLossLevel::LossyMajor,
@@ -219,9 +256,9 @@ impl PolicyEngine {
                     reason: "Ollama adapter preserves structured request content as base64 images plus recoverable plain text.",
                 }
             }
-            (_, TransformProtocol::Api(LlmApiType::Openai), TransformValueKind::ImageDelta)
-            | (_, TransformProtocol::Api(LlmApiType::Gemini), TransformValueKind::ImageDelta)
-            | (_, TransformProtocol::Api(LlmApiType::Anthropic), TransformValueKind::ImageDelta) => {
+            (_, target, TransformValueKind::ImageDelta)
+                if target.is_openai() || target.is_gemini() || target.is_anthropic() =>
+            {
                 PolicyDecision {
                     diagnostic_kind: TransformDiagnosticKind::CapabilityDowngrade,
                     level: TransformLossLevel::LossyMajor,
@@ -244,16 +281,12 @@ mod tests {
     use super::*;
 
     fn assert_drop(
-        target_api: LlmApiType,
+        target: TransformProtocol,
         kind: TransformValueKind,
         expected_level: TransformLossLevel,
         expected_reason: &'static str,
     ) {
-        let decision = PolicyEngine::evaluate(
-            TransformProtocol::Unified,
-            TransformProtocol::Api(target_api),
-            kind,
-        );
+        let decision = PolicyEngine::evaluate(TransformProtocol::Unified, target, kind);
 
         assert_eq!(
             decision.diagnostic_kind,
@@ -267,7 +300,7 @@ mod tests {
     #[test]
     fn test_policy_engine_marks_top_k_as_lossy_minor_for_non_anthropic_targets() {
         assert_drop(
-            LlmApiType::Openai,
+            TransformProtocol::Upstream(UpstreamProtocol::Openai),
             TransformValueKind::TopKParameter,
             TransformLossLevel::LossyMinor,
             "The target request capability matrix marks top_k as unsupported.",
@@ -275,18 +308,12 @@ mod tests {
     }
 
     #[test]
-    fn test_policy_engine_uses_capability_matrix_for_tool_definitions_and_tool_streaming() {
+    fn test_policy_engine_uses_upstream_capability_matrix_for_tool_definitions() {
         assert_drop(
-            LlmApiType::Ollama,
+            TransformProtocol::Upstream(UpstreamProtocol::Ollama),
             TransformValueKind::ToolDefinitions,
             TransformLossLevel::LossyMajor,
             "The target request capability matrix marks tool definitions as unsupported.",
-        );
-        assert_drop(
-            LlmApiType::Ollama,
-            TransformValueKind::ToolCallDelta,
-            TransformLossLevel::LossyMajor,
-            "The target stream capability matrix marks tool call deltas as unsupported.",
         );
     }
 
@@ -294,7 +321,7 @@ mod tests {
     fn test_policy_engine_uses_capability_matrix_for_responses_reasoning_stream() {
         let decision = PolicyEngine::evaluate(
             TransformProtocol::Unified,
-            TransformProtocol::Api(LlmApiType::Responses),
+            TransformProtocol::Downstream(DownstreamProtocol::Responses),
             TransformValueKind::ReasoningDelta,
         );
 
@@ -305,13 +332,13 @@ mod tests {
     #[test]
     fn test_policy_engine_uses_capability_matrix_for_response_refusal_and_reasoning() {
         assert_drop(
-            LlmApiType::Gemini,
+            TransformProtocol::Downstream(DownstreamProtocol::Gemini),
             TransformValueKind::Refusal,
             TransformLossLevel::LossyMajor,
             "The target capability matrix marks refusal content as unsupported.",
         );
         assert_drop(
-            LlmApiType::Openai,
+            TransformProtocol::Downstream(DownstreamProtocol::Openai),
             TransformValueKind::ReasoningContent,
             TransformLossLevel::LossyMajor,
             "The target response capability matrix marks reasoning content as unsupported.",
@@ -321,13 +348,13 @@ mod tests {
     #[test]
     fn test_policy_engine_uses_capability_matrix_for_blob_delta_and_structured_stream_errors() {
         assert_drop(
-            LlmApiType::Openai,
+            TransformProtocol::Downstream(DownstreamProtocol::Openai),
             TransformValueKind::BlobDelta,
             TransformLossLevel::LossyMajor,
             "The target stream capability matrix marks blob deltas as unsupported.",
         );
         assert_drop(
-            LlmApiType::Gemini,
+            TransformProtocol::Downstream(DownstreamProtocol::Gemini),
             TransformValueKind::StreamError,
             TransformLossLevel::LossyMajor,
             "The target stream capability matrix marks structured stream errors as unsupported.",
@@ -338,7 +365,7 @@ mod tests {
     fn test_policy_engine_tracks_image_file_and_executable_code_boundaries() {
         let image_delta = PolicyEngine::evaluate(
             TransformProtocol::Unified,
-            TransformProtocol::Api(LlmApiType::Openai),
+            TransformProtocol::Downstream(DownstreamProtocol::Openai),
             TransformValueKind::ImageDelta,
         );
         assert_eq!(
@@ -350,7 +377,7 @@ mod tests {
 
         let file_data = PolicyEngine::evaluate(
             TransformProtocol::Unified,
-            TransformProtocol::Api(LlmApiType::Openai),
+            TransformProtocol::Upstream(UpstreamProtocol::Openai),
             TransformValueKind::FileData,
         );
         assert_eq!(
@@ -362,7 +389,7 @@ mod tests {
 
         let executable_code = PolicyEngine::evaluate(
             TransformProtocol::Unified,
-            TransformProtocol::Api(LlmApiType::Responses),
+            TransformProtocol::Upstream(UpstreamProtocol::Responses),
             TransformValueKind::ExecutableCode,
         );
         assert_eq!(

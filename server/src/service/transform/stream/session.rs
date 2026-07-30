@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::usage::UsageMergeStrategy;
 use crate::cost::UsageNormalization;
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::UpstreamProtocol;
 use crate::service::transform::providers::{gemini, responses};
 use crate::service::transform::unified::{
     UnifiedBlockKind, UnifiedRole, UnifiedStreamEvent, UnifiedTransformDiagnostic, UnifiedUsage,
@@ -121,14 +121,14 @@ impl SessionContext {
 
     pub(in crate::service::transform) fn get_or_generate_stream_id(
         &mut self,
-        source_api: LlmApiType,
+        upstream_protocol: UpstreamProtocol,
     ) -> String {
         if let Some(id) = &self.stream_id {
             return id.clone();
         }
 
         use crate::utils::ID_GENERATOR;
-        let new_id = if source_api == LlmApiType::Gemini {
+        let new_id = if upstream_protocol == UpstreamProtocol::Gemini {
             format!("gemini-stream-{}", ID_GENERATOR.generate_id())
         } else {
             format!("chatcmpl-{}", ID_GENERATOR.generate_id())
@@ -139,10 +139,10 @@ impl SessionContext {
 
     pub(in crate::service::transform) fn get_or_default_stream_model(
         &self,
-        source_api: LlmApiType,
+        upstream_protocol: UpstreamProtocol,
     ) -> String {
         self.stream_model.clone().unwrap_or_else(|| {
-            if source_api == LlmApiType::Gemini {
+            if upstream_protocol == UpstreamProtocol::Gemini {
                 "".to_string()
             } else {
                 "unified-stream-model".to_string()
@@ -502,28 +502,29 @@ impl SessionContext {
 }
 
 pub(crate) struct StreamTransformContext<'a> {
-    source_api: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     session: &'a mut SessionContext,
 }
 
 impl<'a> StreamTransformContext<'a> {
     pub(in crate::service::transform) fn new(
-        source_api: LlmApiType,
-        _target_api: LlmApiType,
+        upstream_protocol: UpstreamProtocol,
         session: &'a mut SessionContext,
     ) -> Self {
         Self {
-            source_api,
+            upstream_protocol,
             session,
         }
     }
 
     pub(in crate::service::transform) fn get_or_generate_stream_id(&mut self) -> String {
-        self.session.get_or_generate_stream_id(self.source_api)
+        self.session
+            .get_or_generate_stream_id(self.upstream_protocol)
     }
 
     pub(in crate::service::transform) fn get_or_default_stream_model(&self) -> String {
-        self.session.get_or_default_stream_model(self.source_api)
+        self.session
+            .get_or_default_stream_model(self.upstream_protocol)
     }
 
     pub(in crate::service::transform) fn stream_id_clone(&self) -> Option<String> {
@@ -577,12 +578,11 @@ impl<'a> StreamTransformContext<'a> {
     }
 
     pub(in crate::service::transform) fn usage_merge_strategy(&self) -> UsageMergeStrategy {
-        match self.source_api {
-            LlmApiType::Gemini | LlmApiType::Responses => UsageMergeStrategy::Replace,
-            LlmApiType::Openai
-            | LlmApiType::Anthropic
-            | LlmApiType::Ollama
-            | LlmApiType::GeminiOpenai => UsageMergeStrategy::FinalOnly,
+        match self.upstream_protocol {
+            UpstreamProtocol::Gemini | UpstreamProtocol::Responses => UsageMergeStrategy::Replace,
+            UpstreamProtocol::Openai | UpstreamProtocol::Anthropic | UpstreamProtocol::Ollama => {
+                UsageMergeStrategy::FinalOnly
+            }
         }
     }
 

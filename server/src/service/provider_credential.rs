@@ -5,10 +5,11 @@ use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use crate::{
     database::provider::{Provider, ProviderApiKeyRepository},
-    schema::enum_def::{LlmApiType, ProviderType},
+    schema::enum_def::{ProviderType, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::CacheProvider,
+        provider_profile::{ProviderAuthProfile, provider_runtime_profile},
         runtime::GroupItemSelectionStrategy,
         secret_encryption::{SecretDomain, SensitiveSecret},
         vertex::get_vertex_token,
@@ -87,8 +88,8 @@ async fn materialize_provider_credential(
     key_id: i64,
     secret: SensitiveSecret,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let request_secret = match provider_type {
-        ProviderType::Vertex | ProviderType::VertexOpenai => SensitiveSecret::new(
+    let request_secret = match provider_runtime_profile(provider_type).auth {
+        ProviderAuthProfile::VertexOAuth => SensitiveSecret::new(
             get_vertex_token(client, key_id, secret.expose())
                 .await
                 .map_err(|_| ProviderCredentialError::VertexTokenUnavailable)?,
@@ -178,19 +179,18 @@ pub async fn resolve_draft_provider_credential(
 pub fn apply_provider_request_auth_header(
     headers: &mut HeaderMap,
     provider: &CacheProvider,
-    target_api_type: LlmApiType,
+    upstream_protocol: UpstreamProtocol,
     credential: &ProviderCredential,
 ) -> Result<(), ProviderCredentialError> {
-    let header_name = match (&provider.provider_type, target_api_type) {
-        (ProviderType::Openai, LlmApiType::Openai)
-        | (ProviderType::Responses, LlmApiType::Responses)
-        | (ProviderType::Vertex, LlmApiType::Gemini)
-        | (ProviderType::VertexOpenai, LlmApiType::Openai)
-        | (ProviderType::Ollama, LlmApiType::Ollama)
-        | (ProviderType::GeminiOpenai, LlmApiType::GeminiOpenai) => AUTHORIZATION,
-        (ProviderType::Gemini, LlmApiType::Gemini) => HeaderName::from_static("x-goog-api-key"),
-        (ProviderType::Anthropic, LlmApiType::Anthropic) => HeaderName::from_static("x-api-key"),
-        _ => return Err(ProviderCredentialError::UnsupportedProtocol),
+    let profile = provider_runtime_profile(&provider.provider_type);
+    if profile.upstream_protocol != upstream_protocol {
+        return Err(ProviderCredentialError::UnsupportedProtocol);
+    }
+
+    let header_name = match profile.auth {
+        ProviderAuthProfile::BearerApiKey | ProviderAuthProfile::VertexOAuth => AUTHORIZATION,
+        ProviderAuthProfile::GeminiApiKey => HeaderName::from_static("x-goog-api-key"),
+        ProviderAuthProfile::AnthropicApiKey => HeaderName::from_static("x-api-key"),
     };
 
     let secret = credential.expose_for_request();
@@ -208,15 +208,8 @@ pub fn apply_provider_request_auth_header(
     Ok(())
 }
 
-pub fn provider_target_api_type(provider_type: &ProviderType) -> LlmApiType {
-    match provider_type {
-        ProviderType::Vertex | ProviderType::Gemini => LlmApiType::Gemini,
-        ProviderType::Ollama => LlmApiType::Ollama,
-        ProviderType::Anthropic => LlmApiType::Anthropic,
-        ProviderType::Responses => LlmApiType::Responses,
-        ProviderType::GeminiOpenai => LlmApiType::GeminiOpenai,
-        ProviderType::Openai | ProviderType::VertexOpenai => LlmApiType::Openai,
-    }
+pub fn provider_upstream_protocol(provider_type: &ProviderType) -> UpstreamProtocol {
+    provider_runtime_profile(provider_type).upstream_protocol
 }
 
 #[cfg(test)]
@@ -257,7 +250,7 @@ mod tests {
         apply_provider_request_auth_header(
             &mut headers,
             &provider,
-            LlmApiType::Gemini,
+            UpstreamProtocol::Gemini,
             &credential(),
         )
         .expect("gemini auth should apply");
@@ -272,31 +265,49 @@ mod tests {
         for (provider_type, api_type, name, expected) in [
             (
                 ProviderType::Openai,
-                LlmApiType::Openai,
+                UpstreamProtocol::Openai,
+                "authorization",
+                "Bearer provider-secret",
+            ),
+            (
+                ProviderType::VertexOpenai,
+                UpstreamProtocol::Openai,
+                "authorization",
+                "Bearer provider-secret",
+            ),
+            (
+                ProviderType::GeminiOpenai,
+                UpstreamProtocol::Openai,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
                 ProviderType::Responses,
-                LlmApiType::Responses,
+                UpstreamProtocol::Responses,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
                 ProviderType::Ollama,
-                LlmApiType::Ollama,
+                UpstreamProtocol::Ollama,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
                 ProviderType::Gemini,
-                LlmApiType::Gemini,
+                UpstreamProtocol::Gemini,
                 "x-goog-api-key",
                 "provider-secret",
             ),
             (
+                ProviderType::Vertex,
+                UpstreamProtocol::Gemini,
+                "authorization",
+                "Bearer provider-secret",
+            ),
+            (
                 ProviderType::Anthropic,
-                LlmApiType::Anthropic,
+                UpstreamProtocol::Anthropic,
                 "x-api-key",
                 "provider-secret",
             ),

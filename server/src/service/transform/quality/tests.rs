@@ -1,4 +1,4 @@
-use crate::schema::enum_def::LlmApiType;
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProtocol};
 use crate::utils::sse::SseEvent;
 
 use super::replay::{
@@ -53,8 +53,8 @@ fn test_stage2_replay_regression_summary_matches_expected_counts() {
 fn test_replay_report_emitted_all_frames_rejects_partial_output() {
     let report = ReplayRegressionReport {
         fixture_name: "partial".to_string(),
-        source_api: LlmApiType::Openai,
-        target_api: LlmApiType::Responses,
+        upstream_protocol: UpstreamProtocol::Openai,
+        downstream_protocol: DownstreamProtocol::Responses,
         source: SemanticReplaySnapshot::default(),
         target: SemanticReplaySnapshot::default(),
         source_frame_count: 4,
@@ -135,7 +135,7 @@ fn test_replay_report_openai_compatible_fixture_preserves_model_and_schema() {
 #[test]
 fn test_provider_native_schema_validation_rejects_legacy_wrapped_responses_frame() {
     let failures = validate_provider_native_schema(
-        LlmApiType::Responses,
+        DownstreamProtocol::Responses,
         &[SseEvent {
             data: serde_json::to_string(&serde_json::json!({
                 "id": "resp_legacy",

@@ -5,7 +5,7 @@ use super::providers::{anthropic, gemini, ollama, openai, responses};
 use super::request::apply_stream_options;
 use super::stream::StreamTransformContext;
 use super::unified::{UnifiedChunkResponse, UnifiedRequest, UnifiedResponse, UnifiedStreamEvent};
-use crate::schema::enum_def::{LlmApiType, ProviderType};
+use crate::schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol};
 use crate::utils::sse::SseEvent;
 
 pub(in crate::service::transform) type RequestDecodeFn =
@@ -28,33 +28,54 @@ pub(in crate::service::transform) type TargetLegacyChunkEncodeFn =
 pub(in crate::service::transform) type RequestFinalizeFn = fn(Value, &ProviderType, &str) -> Value;
 
 #[derive(Clone, Copy)]
-pub(in crate::service::transform) struct RequestCodec {
+pub(in crate::service::transform) struct DownstreamRequestCodec {
     pub(in crate::service::transform) decode: RequestDecodeFn,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::service::transform) struct UpstreamRequestCodec {
     pub(in crate::service::transform) encode: RequestEncodeFn,
     pub(in crate::service::transform) finalize: Option<RequestFinalizeFn>,
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::service::transform) struct ResponseCodec {
-    pub(in crate::service::transform) decode: ResponseDecodeFn,
+pub(in crate::service::transform) struct DownstreamResponseCodec {
     pub(in crate::service::transform) encode: ResponseEncodeFn,
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::service::transform) struct StreamCodec {
-    pub(in crate::service::transform) decode_source: SourceStreamDecodeFn,
+pub(in crate::service::transform) struct UpstreamResponseCodec {
+    pub(in crate::service::transform) decode: ResponseDecodeFn,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::service::transform) struct DownstreamStreamCodec {
     pub(in crate::service::transform) encode_events: TargetStreamEventsEncodeFn,
     pub(in crate::service::transform) encode_legacy_chunk: TargetLegacyChunkEncodeFn,
     pub(in crate::service::transform) requires_legacy_bridge_for_events: bool,
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::service::transform) struct TransformAdapter {
-    pub(in crate::service::transform) api_type: LlmApiType,
+pub(in crate::service::transform) struct UpstreamStreamCodec {
+    pub(in crate::service::transform) decode_source: SourceStreamDecodeFn,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::service::transform) struct DownstreamAdapter {
+    pub(in crate::service::transform) protocol: DownstreamProtocol,
     pub(in crate::service::transform) name: &'static str,
-    pub(in crate::service::transform) request: RequestCodec,
-    pub(in crate::service::transform) response: ResponseCodec,
-    pub(in crate::service::transform) stream: StreamCodec,
+    pub(in crate::service::transform) request: DownstreamRequestCodec,
+    pub(in crate::service::transform) response: DownstreamResponseCodec,
+    pub(in crate::service::transform) stream: DownstreamStreamCodec,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::service::transform) struct UpstreamAdapter {
+    pub(in crate::service::transform) protocol: UpstreamProtocol,
+    pub(in crate::service::transform) name: &'static str,
+    pub(in crate::service::transform) request: UpstreamRequestCodec,
+    pub(in crate::service::transform) response: UpstreamResponseCodec,
+    pub(in crate::service::transform) stream: UpstreamStreamCodec,
 }
 
 pub(in crate::service::transform) enum DecodedSourceStreamFrame {
@@ -108,10 +129,6 @@ fn encode_gemini_request(unified: UnifiedRequest) -> Result<Value, serde_json::E
     serde_json::to_value(gemini::GeminiRequestPayload::from(unified))
 }
 
-fn decode_ollama_request(data: Value) -> Result<UnifiedRequest, serde_json::Error> {
-    serde_json::from_value::<ollama::OllamaRequestPayload>(data).map(Into::into)
-}
-
 fn encode_ollama_request(unified: UnifiedRequest) -> Result<Value, serde_json::Error> {
     serde_json::to_value(ollama::OllamaRequestPayload::from(unified))
 }
@@ -150,10 +167,6 @@ fn encode_gemini_response(unified: UnifiedResponse) -> Result<Value, serde_json:
 
 fn decode_ollama_response(data: Value) -> Result<UnifiedResponse, serde_json::Error> {
     serde_json::from_value::<ollama::OllamaResponse>(data).map(Into::into)
-}
-
-fn encode_ollama_response(unified: UnifiedResponse) -> Result<Value, serde_json::Error> {
-    serde_json::to_value(ollama::OllamaResponse::from(unified))
 }
 
 fn decode_anthropic_response(data: Value) -> Result<UnifiedResponse, serde_json::Error> {
@@ -236,116 +249,165 @@ fn encode_anthropic_legacy_chunk(
     anthropic::transform_unified_chunk_to_anthropic_events(unified_chunk, context)
 }
 
-const OPENAI_ADAPTER: TransformAdapter = TransformAdapter {
-    api_type: LlmApiType::Openai,
+const OPENAI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
+    protocol: DownstreamProtocol::Openai,
     name: "openai",
-    request: RequestCodec {
+    request: DownstreamRequestCodec {
         decode: decode_openai_request,
-        encode: encode_openai_request,
-        finalize: Some(finalize_openai_request),
     },
-    response: ResponseCodec {
-        decode: decode_openai_response,
+    response: DownstreamResponseCodec {
         encode: encode_openai_response,
     },
-    stream: StreamCodec {
-        decode_source: decode_openai_stream_frame,
+    stream: DownstreamStreamCodec {
         encode_events: openai::transform_unified_stream_events_to_openai_events,
         encode_legacy_chunk: openai::transform_unified_chunk_to_openai_events,
         requires_legacy_bridge_for_events: false,
     },
 };
 
-const GEMINI_ADAPTER: TransformAdapter = TransformAdapter {
-    api_type: LlmApiType::Gemini,
+const GEMINI_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
+    protocol: DownstreamProtocol::Gemini,
     name: "gemini",
-    request: RequestCodec {
+    request: DownstreamRequestCodec {
         decode: decode_gemini_request,
-        encode: encode_gemini_request,
-        finalize: Some(noop_finalize_request),
     },
-    response: ResponseCodec {
-        decode: decode_gemini_response,
+    response: DownstreamResponseCodec {
         encode: encode_gemini_response,
     },
-    stream: StreamCodec {
-        decode_source: decode_gemini_stream_frame,
+    stream: DownstreamStreamCodec {
         encode_events: gemini::transform_unified_stream_events_to_gemini_events,
         encode_legacy_chunk: gemini::transform_unified_chunk_to_gemini_events,
         requires_legacy_bridge_for_events: false,
     },
 };
 
-const OLLAMA_ADAPTER: TransformAdapter = TransformAdapter {
-    api_type: LlmApiType::Ollama,
-    name: "ollama",
-    request: RequestCodec {
-        decode: decode_ollama_request,
-        encode: encode_ollama_request,
-        finalize: Some(noop_finalize_request),
-    },
-    response: ResponseCodec {
-        decode: decode_ollama_response,
-        encode: encode_ollama_response,
-    },
-    stream: StreamCodec {
-        decode_source: decode_ollama_stream_frame,
-        encode_events: ollama::transform_unified_stream_events_to_ollama_events,
-        encode_legacy_chunk: ollama::transform_unified_chunk_to_ollama_events,
-        requires_legacy_bridge_for_events: false,
-    },
-};
-
-const ANTHROPIC_ADAPTER: TransformAdapter = TransformAdapter {
-    api_type: LlmApiType::Anthropic,
+const ANTHROPIC_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
+    protocol: DownstreamProtocol::Anthropic,
     name: "anthropic",
-    request: RequestCodec {
+    request: DownstreamRequestCodec {
         decode: decode_anthropic_request,
-        encode: encode_anthropic_request,
-        finalize: Some(noop_finalize_request),
     },
-    response: ResponseCodec {
-        decode: decode_anthropic_response,
+    response: DownstreamResponseCodec {
         encode: encode_anthropic_response,
     },
-    stream: StreamCodec {
-        decode_source: decode_anthropic_stream_frame,
+    stream: DownstreamStreamCodec {
         encode_events: encode_anthropic_stream_events,
         encode_legacy_chunk: encode_anthropic_legacy_chunk,
         requires_legacy_bridge_for_events: false,
     },
 };
 
-const RESPONSES_ADAPTER: TransformAdapter = TransformAdapter {
-    api_type: LlmApiType::Responses,
+const RESPONSES_DOWNSTREAM_ADAPTER: DownstreamAdapter = DownstreamAdapter {
+    protocol: DownstreamProtocol::Responses,
     name: "responses",
-    request: RequestCodec {
+    request: DownstreamRequestCodec {
         decode: decode_responses_request,
-        encode: encode_responses_request,
-        finalize: Some(noop_finalize_request),
     },
-    response: ResponseCodec {
-        decode: decode_responses_response,
+    response: DownstreamResponseCodec {
         encode: encode_responses_response,
     },
-    stream: StreamCodec {
-        decode_source: decode_responses_stream_frame,
+    stream: DownstreamStreamCodec {
         encode_events: responses::transform_unified_stream_events_to_responses_events,
         encode_legacy_chunk: responses::transform_unified_chunk_to_responses_events,
         requires_legacy_bridge_for_events: false,
     },
 };
 
-pub(in crate::service::transform) fn adapter_for(
-    api_type: LlmApiType,
-) -> &'static TransformAdapter {
-    match api_type {
-        LlmApiType::Openai => &OPENAI_ADAPTER,
-        LlmApiType::Gemini => &GEMINI_ADAPTER,
-        LlmApiType::Ollama => &OLLAMA_ADAPTER,
-        LlmApiType::Anthropic => &ANTHROPIC_ADAPTER,
-        LlmApiType::Responses => &RESPONSES_ADAPTER,
-        LlmApiType::GeminiOpenai => &OPENAI_ADAPTER,
+const OPENAI_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    protocol: UpstreamProtocol::Openai,
+    name: "openai",
+    request: UpstreamRequestCodec {
+        encode: encode_openai_request,
+        finalize: Some(finalize_openai_request),
+    },
+    response: UpstreamResponseCodec {
+        decode: decode_openai_response,
+    },
+    stream: UpstreamStreamCodec {
+        decode_source: decode_openai_stream_frame,
+    },
+};
+
+const GEMINI_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    protocol: UpstreamProtocol::Gemini,
+    name: "gemini",
+    request: UpstreamRequestCodec {
+        encode: encode_gemini_request,
+        finalize: Some(noop_finalize_request),
+    },
+    response: UpstreamResponseCodec {
+        decode: decode_gemini_response,
+    },
+    stream: UpstreamStreamCodec {
+        decode_source: decode_gemini_stream_frame,
+    },
+};
+
+const OLLAMA_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    protocol: UpstreamProtocol::Ollama,
+    name: "ollama",
+    request: UpstreamRequestCodec {
+        encode: encode_ollama_request,
+        finalize: Some(noop_finalize_request),
+    },
+    response: UpstreamResponseCodec {
+        decode: decode_ollama_response,
+    },
+    stream: UpstreamStreamCodec {
+        decode_source: decode_ollama_stream_frame,
+    },
+};
+
+const ANTHROPIC_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    protocol: UpstreamProtocol::Anthropic,
+    name: "anthropic",
+    request: UpstreamRequestCodec {
+        encode: encode_anthropic_request,
+        finalize: Some(noop_finalize_request),
+    },
+    response: UpstreamResponseCodec {
+        decode: decode_anthropic_response,
+    },
+    stream: UpstreamStreamCodec {
+        decode_source: decode_anthropic_stream_frame,
+    },
+};
+
+const RESPONSES_UPSTREAM_ADAPTER: UpstreamAdapter = UpstreamAdapter {
+    protocol: UpstreamProtocol::Responses,
+    name: "responses",
+    request: UpstreamRequestCodec {
+        encode: encode_responses_request,
+        finalize: Some(noop_finalize_request),
+    },
+    response: UpstreamResponseCodec {
+        decode: decode_responses_response,
+    },
+    stream: UpstreamStreamCodec {
+        decode_source: decode_responses_stream_frame,
+    },
+};
+
+pub(in crate::service::transform) fn downstream_adapter_for(
+    protocol: DownstreamProtocol,
+) -> &'static DownstreamAdapter {
+    match protocol {
+        DownstreamProtocol::Openai => &OPENAI_DOWNSTREAM_ADAPTER,
+        DownstreamProtocol::Gemini => &GEMINI_DOWNSTREAM_ADAPTER,
+        DownstreamProtocol::Anthropic => &ANTHROPIC_DOWNSTREAM_ADAPTER,
+        DownstreamProtocol::Responses => &RESPONSES_DOWNSTREAM_ADAPTER,
+    }
+}
+
+pub(in crate::service::transform) fn upstream_adapter_for(
+    protocol: UpstreamProtocol,
+) -> &'static UpstreamAdapter {
+    match protocol {
+        UpstreamProtocol::Openai => &OPENAI_UPSTREAM_ADAPTER,
+        UpstreamProtocol::Gemini => &GEMINI_UPSTREAM_ADAPTER,
+        UpstreamProtocol::Ollama => &OLLAMA_UPSTREAM_ADAPTER,
+        UpstreamProtocol::Anthropic => &ANTHROPIC_UPSTREAM_ADAPTER,
+        UpstreamProtocol::Responses => &RESPONSES_UPSTREAM_ADAPTER,
     }
 }
 
@@ -355,61 +417,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_adapter_contract_registry_covers_all_transform_providers() {
-        let cases = [
-            (LlmApiType::Openai, "openai"),
-            (LlmApiType::Gemini, "gemini"),
-            (LlmApiType::Ollama, "ollama"),
-            (LlmApiType::Anthropic, "anthropic"),
-            (LlmApiType::Responses, "responses"),
-        ];
-
-        for (api_type, expected_name) in cases {
-            let adapter = adapter_for(api_type);
-            assert_eq!(adapter.api_type, api_type);
+    fn downstream_registry_contains_exactly_the_four_public_protocols() {
+        for (protocol, expected_name) in [
+            (DownstreamProtocol::Openai, "openai"),
+            (DownstreamProtocol::Gemini, "gemini"),
+            (DownstreamProtocol::Anthropic, "anthropic"),
+            (DownstreamProtocol::Responses, "responses"),
+        ] {
+            let adapter = downstream_adapter_for(protocol);
+            assert_eq!(adapter.protocol, protocol);
             assert_eq!(adapter.name, expected_name);
         }
     }
 
     #[test]
-    fn test_adapter_contract_gemini_openai_alias_uses_openai_adapter() {
-        let openai = adapter_for(LlmApiType::Openai);
-        let gemini_openai = adapter_for(LlmApiType::GeminiOpenai);
-
-        assert_eq!(gemini_openai.name, "openai");
-        assert_eq!(gemini_openai.api_type, LlmApiType::Openai);
-        assert_eq!(
-            ProtocolCapabilityMatrix::for_api(LlmApiType::GeminiOpenai),
-            ProtocolCapabilityMatrix::for_api(openai.api_type)
-        );
+    fn upstream_registry_contains_exactly_the_five_wire_protocols() {
+        for (protocol, expected_name) in [
+            (UpstreamProtocol::Openai, "openai"),
+            (UpstreamProtocol::Gemini, "gemini"),
+            (UpstreamProtocol::Ollama, "ollama"),
+            (UpstreamProtocol::Anthropic, "anthropic"),
+            (UpstreamProtocol::Responses, "responses"),
+        ] {
+            let adapter = upstream_adapter_for(protocol);
+            assert_eq!(adapter.protocol, protocol);
+            assert_eq!(adapter.name, expected_name);
+        }
     }
 
     #[test]
-    fn test_adapter_contract_all_stream_encoders_are_event_native() {
+    fn all_downstream_stream_encoders_are_event_native() {
+        for protocol in [
+            DownstreamProtocol::Openai,
+            DownstreamProtocol::Gemini,
+            DownstreamProtocol::Anthropic,
+            DownstreamProtocol::Responses,
+        ] {
+            assert!(
+                !downstream_adapter_for(protocol)
+                    .stream
+                    .requires_legacy_bridge_for_events
+            );
+        }
+    }
+
+    #[test]
+    fn capability_registry_keeps_upstream_ollama_without_downstream_ollama() {
         assert!(
-            !adapter_for(LlmApiType::Openai)
-                .stream
-                .requires_legacy_bridge_for_events
+            !ProtocolCapabilityMatrix::for_upstream(UpstreamProtocol::Ollama)
+                .request
+                .tool_definitions
         );
-        assert!(
-            !adapter_for(LlmApiType::Gemini)
-                .stream
-                .requires_legacy_bridge_for_events
-        );
-        assert!(
-            !adapter_for(LlmApiType::Ollama)
-                .stream
-                .requires_legacy_bridge_for_events
-        );
-        assert!(
-            !adapter_for(LlmApiType::Anthropic)
-                .stream
-                .requires_legacy_bridge_for_events
-        );
-        assert!(
-            !adapter_for(LlmApiType::Responses)
-                .stream
-                .requires_legacy_bridge_for_events
+        assert_eq!(
+            downstream_adapter_for(DownstreamProtocol::Openai).name,
+            "openai"
         );
     }
 }

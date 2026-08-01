@@ -67,6 +67,8 @@ id:
 # proxy: http://127.0.0.1:1080
 proxy_request:
   connect_timeout_seconds: 10
+  # Provider error bodies exposed to the current caller are capped and marked as truncated.
+  upstream_error_body_limit_bytes: 65536
   # LLM 流式/长生成请求可能持续很久，因此默认建议留空关闭整体超时。
   # total_timeout_seconds: 1800
 # cache:

@@ -4,7 +4,7 @@ use axum::{body::Body, http::HeaderMap, response::Response};
 use serde_json::Value;
 
 use super::{
-    ProxyError,
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
     cancellation::ProxyCancellationContext,
     request::ParsedProxyRequest,
     request_context::ProxyRequestContext,
@@ -32,9 +32,15 @@ pub(super) struct GenerationExecutionInput {
 }
 
 pub(super) fn extract_model_from_request(data: &Value) -> Result<&str, ProxyError> {
-    data.get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ProxyError::BadRequest("'model' field must be a string".to_string()))
+    data.get("model").and_then(Value::as_str).ok_or_else(|| {
+        ProxyError::gateway(
+            ProxyErrorCode::InvalidRequestError,
+            ExecutionStage::Parse,
+            ResponseVisibility::NotVisible,
+            Some("'model' field must be a string".to_string()),
+            "'model' field must be a string",
+        )
+    })
 }
 
 pub(super) async fn execute_generation_proxy(
@@ -76,7 +82,7 @@ pub(super) async fn execute_generation_proxy(
 #[cfg(test)]
 mod tests {
     use super::extract_model_from_request;
-    use crate::proxy::ProxyError;
+    use crate::proxy::ProxyErrorCode;
     use serde_json::json;
 
     #[test]
@@ -95,6 +101,6 @@ mod tests {
 
         let err = extract_model_from_request(&data).unwrap_err();
 
-        assert!(matches!(err, ProxyError::BadRequest(_)));
+        assert_eq!(err.code(), ProxyErrorCode::InvalidRequestError);
     }
 }

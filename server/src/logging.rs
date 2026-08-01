@@ -4,6 +4,8 @@ use std::future::Future;
 use chrono::{DateTime, Local, SecondsFormat};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 
+use crate::proxy::{ProxyError, ProxyLogLevel};
+
 pub const THIRD_PARTY_DEBUG_ENV: &str = "CYDER_LOG_THIRD_PARTY_DEBUG";
 
 static LOGGER: LocalLogger = LocalLogger;
@@ -37,6 +39,71 @@ pub fn event_message_with_fields(event: &str, fields: &[(&str, Option<String>)])
         }
     }
     message
+}
+
+fn proxy_error_event_message(
+    event: &'static str,
+    request_id: Option<&str>,
+    log_id: Option<i64>,
+    error: &ProxyError,
+) -> EventMessage {
+    let upstream_error = error.upstream_error();
+    let mut fields = Vec::with_capacity(12);
+    if let Some(request_id) = request_id {
+        fields.push(("request_id", Some(request_id.to_string())));
+    }
+    fields.extend([
+        ("log_id", log_id.map(|value| value.to_string())),
+        ("error_code", Some(error.code().as_str().to_string())),
+        ("stage", Some(error.stage().as_str().to_string())),
+        (
+            "response_visibility",
+            Some(error.response_visibility().as_str().to_string()),
+        ),
+        (
+            "error_http_status",
+            Some(error.status_code().as_u16().to_string()),
+        ),
+        (
+            "upstream_status",
+            upstream_error.map(|payload| payload.status().to_string()),
+        ),
+        (
+            "upstream_payload_kind",
+            upstream_error.map(|payload| payload.payload_kind().as_str().to_string()),
+        ),
+        (
+            "upstream_captured_bytes",
+            upstream_error.map(|payload| payload.captured_bytes().to_string()),
+        ),
+        (
+            "upstream_limit_bytes",
+            upstream_error.map(|payload| payload.limit_bytes().to_string()),
+        ),
+        (
+            "upstream_truncated",
+            upstream_error.map(|payload| payload.truncated().to_string()),
+        ),
+        (
+            "operator_message",
+            Some(error.operator_message().chars().take(2_000).collect()),
+        ),
+    ]);
+    event_message_with_fields(event, &fields)
+}
+
+pub(crate) fn log_proxy_error_event(
+    event: &'static str,
+    request_id: Option<&str>,
+    log_id: Option<i64>,
+    error: &ProxyError,
+) {
+    let message = proxy_error_event_message(event, request_id, log_id, error);
+    match error.operator_log_level() {
+        ProxyLogLevel::Debug => log::debug!(target: "cyder_api::proxy", "{message}"),
+        ProxyLogLevel::Warn => log::warn!(target: "cyder_api::proxy", "{message}"),
+        ProxyLogLevel::Error => log::error!(target: "cyder_api::proxy", "{message}"),
+    }
 }
 
 pub fn init(level: &str) {
@@ -283,9 +350,11 @@ mod tests {
     use log::{Level, LevelFilter, Record};
 
     use super::{
-        THIRD_PARTY_DEBUG_ENV, format_log_line, is_app_target, parse_level, set_level,
-        third_party_debug_enabled, with_request_id_scope,
+        THIRD_PARTY_DEBUG_ENV, format_log_line, is_app_target, parse_level,
+        proxy_error_event_message, set_level, third_party_debug_enabled, with_request_id_scope,
     };
+    use crate::proxy::{ResponseVisibility, classify_upstream_status};
+    use axum::http::{HeaderValue, StatusCode};
 
     static LOG_LEVEL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -429,6 +498,44 @@ mod tests {
             crate::__event_message!("outside.request_scope").to_string(),
             "event=outside.request_scope"
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_error_event_contains_stable_facts_without_upstream_body() {
+        let content_type = HeaderValue::from_static("application/json");
+        let upstream_body =
+            br#"{"error":{"message":"quota exceeded","details":["provider-secret-detail"]}}"#;
+        let error = classify_upstream_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(&content_type),
+            upstream_body,
+            65_536,
+            ResponseVisibility::NotVisible,
+        );
+
+        let message = with_request_id_scope("gateway-request".to_string(), async {
+            proxy_error_event_message("proxy.error_response", None, Some(42), &error).to_string()
+        })
+        .await;
+
+        for expected in [
+            "event=proxy.error_response",
+            "request_id=gateway-request",
+            "log_id=42",
+            "error_code=upstream_rate_limit_error",
+            "stage=upstream_response",
+            "response_visibility=not_visible",
+            "error_http_status=429",
+            "upstream_status=429",
+            "upstream_payload_kind=json",
+            "upstream_limit_bytes=65536",
+            "upstream_truncated=false",
+            "operator_message=\"Upstream returned 429: quota exceeded\"",
+        ] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+        assert!(message.contains(&format!("upstream_captured_bytes={}", upstream_body.len())));
+        assert!(!message.contains("provider-secret-detail"));
     }
 
     #[tokio::test]

@@ -1,7 +1,10 @@
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use super::{ProxyError, request_context::RequestId};
+use super::{
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
+    request_context::RequestId,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ProxyCancellationContext {
@@ -29,14 +32,24 @@ impl ProxyCancellationContext {
         self.token.cancel();
     }
 
-    pub(super) async fn cancellation_error(&self) -> ProxyError {
+    pub(super) async fn cancellation_error(
+        &self,
+        stage: ExecutionStage,
+        response_visibility: ResponseVisibility,
+    ) -> ProxyError {
         let reason = self
             .reason
             .lock()
             .expect("cancellation reason lock poisoned")
             .clone()
             .unwrap_or_else(|| "Client disconnected before proxy request completed.".to_string());
-        ProxyError::ClientCancelled(reason)
+        ProxyError::gateway(
+            ProxyErrorCode::ClientCancelledError,
+            stage,
+            response_visibility,
+            None,
+            reason,
+        )
     }
 
     pub(super) async fn cancelled(&self) {
@@ -52,6 +65,8 @@ pub(super) struct CancellationDropGuard {
     cancellation: ProxyCancellationContext,
     request_id: RequestId,
     log_id: i64,
+    response_visibility: ResponseVisibilityTracker,
+    stage: ExecutionStage,
     reason: String,
     armed: bool,
 }
@@ -61,12 +76,16 @@ impl CancellationDropGuard {
         cancellation: ProxyCancellationContext,
         request_id: RequestId,
         log_id: i64,
+        response_visibility: ResponseVisibilityTracker,
+        stage: ExecutionStage,
         reason: impl Into<String>,
     ) -> Self {
         Self {
             cancellation,
             request_id,
             log_id,
+            response_visibility,
+            stage,
             reason: reason.into(),
             armed: true,
         }
@@ -75,16 +94,42 @@ impl CancellationDropGuard {
     pub(super) fn disarm(&mut self) {
         self.armed = false;
     }
+
+    pub(super) fn set_stage(&mut self, stage: ExecutionStage) {
+        self.stage = stage;
+    }
+
+    fn phase(&self) -> &'static str {
+        match self.stage {
+            ExecutionStage::Connect => "upstream_request",
+            ExecutionStage::UpstreamResponse => "upstream_response",
+            stage => stage.as_str(),
+        }
+    }
+
+    fn error_fact(&self) -> ProxyError {
+        ProxyError::gateway(
+            ProxyErrorCode::ClientCancelledError,
+            self.stage,
+            self.response_visibility.current(),
+            None,
+            self.reason.clone(),
+        )
+    }
 }
 
 impl Drop for CancellationDropGuard {
     fn drop(&mut self) {
         if self.armed {
+            let error = self.error_fact();
             crate::debug_event!(
                 "proxy.client_disconnect_detected",
                 request_id = &self.request_id,
                 log_id = self.log_id,
-                phase = "upstream_request",
+                phase = self.phase(),
+                error_code = error.code().as_str(),
+                stage = error.stage().as_str(),
+                response_visibility = error.response_visibility().as_str(),
             );
             self.cancellation.cancel_now(self.reason.clone());
         }
@@ -94,35 +139,65 @@ impl Drop for CancellationDropGuard {
 #[cfg(test)]
 mod tests {
     use super::{CancellationDropGuard, ProxyCancellationContext};
-    use crate::proxy::ProxyError;
+    use crate::proxy::{
+        ExecutionStage, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
+    };
 
     #[tokio::test]
     async fn cancellation_context_returns_client_cancelled_error() {
         let cancellation = ProxyCancellationContext::new();
         cancellation.cancel_now("client closed socket");
 
-        assert!(matches!(
-            cancellation.cancellation_error().await,
-            ProxyError::ClientCancelled(message) if message == "client closed socket"
-        ));
+        let error = cancellation
+            .cancellation_error(ExecutionStage::Connect, ResponseVisibility::NotVisible)
+            .await;
+        assert_eq!(error.code(), ProxyErrorCode::ClientCancelledError);
+        assert_eq!(error.stage(), ExecutionStage::Connect);
+        assert_eq!(error.operator_message(), "client closed socket");
     }
 
     #[tokio::test]
     async fn cancellation_drop_guard_cancels_when_armed() {
         let cancellation = ProxyCancellationContext::new();
-        {
-            let _guard = CancellationDropGuard::new(
-                cancellation.clone(),
-                crate::proxy::request_context::RequestId::new(),
-                42,
-                "request future dropped",
-            );
-        }
+        let guard = CancellationDropGuard::new(
+            cancellation.clone(),
+            crate::proxy::request_context::RequestId::new(),
+            42,
+            ResponseVisibilityTracker::new(),
+            ExecutionStage::Connect,
+            "request future dropped",
+        );
+        let fact = guard.error_fact();
+        assert_eq!(fact.code(), ProxyErrorCode::ClientCancelledError);
+        assert_eq!(fact.stage(), ExecutionStage::Connect);
+        assert_eq!(fact.response_visibility(), ResponseVisibility::NotVisible);
+        drop(guard);
 
         cancellation.cancelled().await;
-        assert!(matches!(
-            cancellation.cancellation_error().await,
-            ProxyError::ClientCancelled(message) if message == "request future dropped"
-        ));
+        let error = cancellation
+            .cancellation_error(ExecutionStage::Connect, ResponseVisibility::NotVisible)
+            .await;
+        assert_eq!(error.code(), ProxyErrorCode::ClientCancelledError);
+        assert_eq!(error.operator_message(), "request future dropped");
+    }
+
+    #[test]
+    fn cancellation_drop_guard_tracks_the_current_upstream_phase() {
+        let cancellation = ProxyCancellationContext::new();
+        let mut guard = CancellationDropGuard::new(
+            cancellation,
+            crate::proxy::request_context::RequestId::new(),
+            43,
+            ResponseVisibilityTracker::new(),
+            ExecutionStage::Connect,
+            "request future dropped",
+        );
+
+        assert_eq!(guard.error_fact().stage(), ExecutionStage::Connect);
+        assert_eq!(guard.phase(), "upstream_request");
+        guard.set_stage(ExecutionStage::UpstreamResponse);
+        assert_eq!(guard.error_fact().stage(), ExecutionStage::UpstreamResponse);
+        assert_eq!(guard.phase(), "upstream_response");
+        guard.disarm();
     }
 }

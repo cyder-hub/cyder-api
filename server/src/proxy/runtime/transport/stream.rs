@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     body::{Body, Bytes},
-    http::StatusCode,
+    http::{StatusCode, header::CONTENT_TYPE},
     response::Response,
 };
 use chrono::Utc;
@@ -20,11 +20,10 @@ use super::{
 };
 use crate::{
     proxy::{
-        ProxyError,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
         cancellation::ProxyCancellationContext,
         classify_upstream_status,
         logging::RequestLogContext,
-        protocol_transform_error,
         provider_governance::{record_provider_failure, record_provider_success},
         request_context::RequestId,
         runtime::{
@@ -69,6 +68,11 @@ struct PartialToolCall {
     type_: Option<String>,
     name: Option<String>,
     arguments: String,
+}
+
+struct StreamReadFailure {
+    operator_message: String,
+    response_visibility: ResponseVisibilityTracker,
 }
 
 impl OpenAiReasoningStreamCapture {
@@ -291,8 +295,9 @@ pub(super) async fn sync_stream_usage_to_log_context(
 pub(super) async fn mark_stream_response_started_to_client(
     log_context: &Arc<TokioMutex<RequestLogContext>>,
     transformed_chunk: &Bytes,
+    response_visibility: &ResponseVisibilityTracker,
 ) {
-    if transformed_chunk.is_empty() {
+    if !mark_body_started_if_nonempty(transformed_chunk, response_visibility) {
         return;
     }
 
@@ -300,6 +305,44 @@ pub(super) async fn mark_stream_response_started_to_client(
     if context.first_chunk_ts.is_none() {
         context.first_chunk_ts = Some(Utc::now().timestamp_millis());
     }
+}
+
+fn mark_body_started_if_nonempty(
+    transformed_chunk: &Bytes,
+    response_visibility: &ResponseVisibilityTracker,
+) -> bool {
+    if transformed_chunk.is_empty() {
+        return false;
+    }
+    response_visibility.advance_to(ResponseVisibility::BodyStarted);
+    true
+}
+
+fn upstream_stream_error(
+    code: ProxyErrorCode,
+    response_visibility: &ResponseVisibilityTracker,
+    operator_message: impl Into<String>,
+) -> ProxyError {
+    ProxyError::gateway(
+        code,
+        ExecutionStage::UpstreamResponse,
+        response_visibility.current(),
+        None,
+        operator_message,
+    )
+}
+
+fn downstream_response_build_error(
+    response_visibility: &ResponseVisibilityTracker,
+    operator_message: impl Into<String>,
+) -> ProxyError {
+    ProxyError::gateway(
+        ProxyErrorCode::DownstreamSendError,
+        ExecutionStage::DownstreamSend,
+        response_visibility.current(),
+        None,
+        operator_message,
+    )
 }
 
 pub(super) fn next_stream_chunk_timeout_duration(
@@ -384,24 +427,40 @@ async fn finalize_streaming_error(
         RequestStatus::Error,
         Some(proxy_error),
     );
+    crate::logging::log_proxy_error_event(
+        "proxy.stream_terminal_error",
+        Some(context.request_id.as_str()),
+        Some(context.id),
+        proxy_error,
+    );
     record_streaming_completion(app_state, &context).await;
 }
 
 async fn abort_and_finalize_cancelled_stream(
     app_state: &Arc<AppState>,
+    cancellation: &ProxyCancellationContext,
     log_context: &Arc<TokioMutex<RequestLogContext>>,
     url: &str,
     status_code: StatusCode,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
-) {
+    response_visibility: &ResponseVisibilityTracker,
+) -> ProxyError {
+    let proxy_error = cancellation
+        .cancellation_error(
+            ExecutionStage::DownstreamSend,
+            response_visibility.current(),
+        )
+        .await;
     finalize_cancelled_log_context(
         app_state,
         log_context,
         url,
         Some(status_code),
         cost_catalog_version,
+        &proxy_error,
     )
     .await;
+    proxy_error
 }
 
 pub(super) async fn handle_streaming_response(
@@ -419,6 +478,8 @@ pub(super) async fn handle_streaming_response(
     upstream_protocol: UpstreamProtocol,
     reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     first_byte_timeout: Option<Duration>,
+    upstream_error_body_limit_bytes: usize,
+    response_visibility: ResponseVisibilityTracker,
 ) -> Result<Response<Body>, ProxyError> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -428,22 +489,28 @@ pub(super) async fn handle_streaming_response(
     };
     let response_builder = build_response_builder(status_code, &response_headers);
 
-    let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, reqwest::Error>>(10);
+    let (tx, mut rx) = mpsc::channel::<Result<bytes::Bytes, StreamReadFailure>>(10);
 
     let url_owned = url.to_string();
     let cost_catalog_version_clone = cost_catalog_version.clone();
     let app_state_clone = Arc::clone(app_state);
 
     let cancellation_for_reader = cancellation.clone();
+    let response_visibility_for_reader = response_visibility.clone();
     tokio::spawn(async move {
         let mut stream = response.bytes_stream();
         loop {
             tokio::select! {
+                biased;
                 _ = cancellation_for_reader.cancelled() => break,
                 maybe_chunk = stream.next() => {
                     let Some(chunk_result) = maybe_chunk else {
                         break;
                     };
+                    let chunk_result = chunk_result.map_err(|error| StreamReadFailure {
+                        operator_message: format!("LLM stream error: {error}"),
+                        response_visibility: response_visibility_for_reader.clone(),
+                    });
                     if tx.send(chunk_result).await.is_err() {
                         break;
                     }
@@ -456,6 +523,7 @@ pub(super) async fn handle_streaming_response(
     let mut parser = SseParser::new();
     let log_context_clone = log_context.clone();
     let stream_request_id = request_id.clone();
+    let stream_response_visibility = response_visibility.clone();
 
     let monitored_stream = async_stream::stream! {
         let mut api_key_request_lease = api_key_request_lease;
@@ -469,6 +537,7 @@ pub(super) async fn handle_streaming_response(
             url_owned.clone(),
             status_code,
             cost_catalog_version_clone.clone(),
+            stream_response_visibility.clone(),
             format!("Client disconnected while receiving streaming response for log_id {}.", log_id),
         );
         let mut first_chunk_received_at_proxy: i64 = 0;
@@ -482,17 +551,20 @@ pub(super) async fn handle_streaming_response(
         loop {
             let chunk_result = match next_stream_chunk_timeout_duration(first_chunk_received_at_proxy, first_byte_timeout) {
                 Some(timeout_duration) => match tokio::select! {
-                    _ = cancellation.cancelled() => Err(cancellation.cancellation_error().await),
+                    biased;
+                    _ = cancellation.cancelled() => Err(()),
                     result = timeout(timeout_duration, rx.recv()) => Ok(result),
                 } {
-                    Err(proxy_error) => {
+                    Err(()) => {
                         response_drop_guard.disarm();
-                        abort_and_finalize_cancelled_stream(
+                        let proxy_error = abort_and_finalize_cancelled_stream(
                             &app_state_clone,
+                            &cancellation,
                             &log_context_clone,
                             &url_owned,
                             status_code,
                             cost_catalog_version_clone.as_ref(),
+                            &stream_response_visibility,
                         ).await;
                         api_key_request_lease.release().await;
                         yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, proxy_error.to_string()));
@@ -512,7 +584,11 @@ pub(super) async fn handle_streaming_response(
                                 log_id = log_id,
                                 error = &stream_error_message,
                             );
-                            let proxy_error = ProxyError::UpstreamTimeout(stream_error_message.clone());
+                            let proxy_error = upstream_stream_error(
+                                ProxyErrorCode::UpstreamTimeoutError,
+                                &stream_response_visibility,
+                                stream_error_message.clone(),
+                            );
                             finalize_streaming_error(
                                 &app_state_clone,
                                 &log_context_clone,
@@ -539,17 +615,23 @@ pub(super) async fn handle_streaming_response(
                 },
                 None => {
                     tokio::select! {
+                        biased;
                         _ = cancellation.cancelled() => {
                             response_drop_guard.disarm();
-                            abort_and_finalize_cancelled_stream(
+                            let proxy_error = abort_and_finalize_cancelled_stream(
                                 &app_state_clone,
+                                &cancellation,
                                 &log_context_clone,
                                 &url_owned,
                                 status_code,
                                 cost_catalog_version_clone.as_ref(),
+                                &stream_response_visibility,
                             ).await;
                             api_key_request_lease.release().await;
-                            yield Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, cancellation.cancellation_error().await.to_string()));
+                            yield Err(std::io::Error::new(
+                                std::io::ErrorKind::ConnectionAborted,
+                                proxy_error.to_string(),
+                            ));
                             return;
                         }
                         result = rx.recv() => result,
@@ -603,6 +685,7 @@ pub(super) async fn handle_streaming_response(
                         mark_stream_response_started_to_client(
                             &log_context_clone,
                             &transformed_chunk,
+                            &stream_response_visibility,
                         )
                         .await;
                         if downstream_openai_done {
@@ -645,16 +728,19 @@ pub(super) async fn handle_streaming_response(
                         yield Ok::<_, std::io::Error>(transformed_chunk);
                     }
                 }
-                Err(e) => {
+                Err(stream_read_failure) => {
                     response_drop_guard.disarm();
-                    let stream_error_message = format!("LLM stream error: {}", e);
+                    let proxy_error = upstream_stream_error(
+                        ProxyErrorCode::UpstreamResponseError,
+                        &stream_read_failure.response_visibility,
+                        stream_read_failure.operator_message,
+                    );
                     crate::error_event!(
                         "proxy.stream_read_failed",
                         request_id = &stream_request_id,
                         log_id = log_id,
-                        error = &stream_error_message,
+                        error = proxy_error.operator_message(),
                     );
-                    let proxy_error = ProxyError::BadGateway(stream_error_message.clone());
                     finalize_streaming_error(
                         &app_state_clone,
                         &log_context_clone,
@@ -674,7 +760,7 @@ pub(super) async fn handle_streaming_response(
                     .await;
 
                     api_key_request_lease.release().await;
-                    yield Err(std::io::Error::other(stream_error_message));
+                    yield Err(std::io::Error::other(proxy_error.to_string()));
                     return;
                 }
             }
@@ -692,7 +778,12 @@ pub(super) async fn handle_streaming_response(
                 upstream_protocol = format!("{upstream_protocol:?}"),
             );
             let done_chunk = Bytes::from("data: [DONE]\n\n");
-            mark_stream_response_started_to_client(&log_context_clone, &done_chunk).await;
+            mark_stream_response_started_to_client(
+                &log_context_clone,
+                &done_chunk,
+                &stream_response_visibility,
+            )
+            .await;
             yield Ok::<_, std::io::Error>(done_chunk);
         }
 
@@ -743,7 +834,13 @@ pub(super) async fn handle_streaming_response(
             api_key_request_lease.release().await;
             response_drop_guard.disarm();
         } else {
-            let proxy_error = classify_upstream_status(status_code, &[]);
+            let proxy_error = classify_upstream_status(
+                status_code,
+                response_headers.get(CONTENT_TYPE),
+                &[],
+                upstream_error_body_limit_bytes,
+                stream_response_visibility.current(),
+            );
             finalize_streaming_error(
                 &app_state_clone,
                 &log_context_clone,
@@ -767,12 +864,15 @@ pub(super) async fn handle_streaming_response(
     };
 
     match response_builder.body(Body::from_stream(monitored_stream)) {
-        Ok(final_response) => Ok(final_response),
+        Ok(final_response) => {
+            response_visibility.advance_to(ResponseVisibility::HeadersCommitted);
+            Ok(final_response)
+        }
         Err(e) => {
             let log_id = log_context.lock().await.id;
-            let proxy_error = protocol_transform_error(
-                &format!("Failed to build client response for log_id {log_id}"),
-                e,
+            let proxy_error = downstream_response_build_error(
+                &response_visibility,
+                format!("Failed to build client response for log_id {log_id}: {e}"),
             );
             crate::error_event!(
                 "proxy.response_build_failed",
@@ -782,5 +882,78 @@ pub(super) async fn handle_streaming_response(
             );
             Err(proxy_error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Bytes;
+
+    use super::{
+        downstream_response_build_error, mark_body_started_if_nonempty, upstream_stream_error,
+    };
+    use crate::proxy::{
+        ExecutionStage, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
+    };
+
+    #[test]
+    fn downstream_body_visibility_advances_only_for_non_empty_chunks() {
+        let tracker = ResponseVisibilityTracker::new();
+        tracker.advance_to(ResponseVisibility::HeadersCommitted);
+
+        assert!(!mark_body_started_if_nonempty(&Bytes::new(), &tracker));
+        assert_eq!(tracker.current(), ResponseVisibility::HeadersCommitted);
+
+        assert!(mark_body_started_if_nonempty(
+            &Bytes::from_static(b"data: chunk\n\n"),
+            &tracker,
+        ));
+        assert_eq!(tracker.current(), ResponseVisibility::BodyStarted);
+    }
+
+    #[test]
+    fn upstream_stream_facts_capture_visibility_before_and_after_first_body_chunk() {
+        let tracker = ResponseVisibilityTracker::new();
+        tracker.advance_to(ResponseVisibility::HeadersCommitted);
+
+        let before_first_chunk = upstream_stream_error(
+            ProxyErrorCode::UpstreamTimeoutError,
+            &tracker,
+            "first chunk timeout",
+        );
+        assert_eq!(before_first_chunk.stage(), ExecutionStage::UpstreamResponse);
+        assert_eq!(
+            before_first_chunk.response_visibility(),
+            ResponseVisibility::HeadersCommitted
+        );
+
+        tracker.advance_to(ResponseVisibility::BodyStarted);
+        let after_first_chunk = upstream_stream_error(
+            ProxyErrorCode::UpstreamResponseError,
+            &tracker,
+            "stream interrupted",
+        );
+        assert_eq!(after_first_chunk.stage(), ExecutionStage::UpstreamResponse);
+        assert_eq!(
+            after_first_chunk.response_visibility(),
+            ResponseVisibility::BodyStarted
+        );
+    }
+
+    #[test]
+    fn response_builder_failure_remains_not_visible() {
+        let tracker = ResponseVisibilityTracker::new();
+        let error = downstream_response_build_error(&tracker, "response builder failed");
+
+        assert_eq!(error.code(), ProxyErrorCode::DownstreamSendError);
+        assert_eq!(error.stage(), ExecutionStage::DownstreamSend);
+        assert_eq!(error.response_visibility(), ResponseVisibility::NotVisible);
+        assert!(error.upstream_error().is_none());
+        assert!(
+            error
+                .response_body()
+                .as_object()
+                .is_some_and(|body| !body.contains_key("upstream_error"))
+        );
     }
 }

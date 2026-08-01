@@ -4,7 +4,9 @@ use crate::database::{
     provider::{BootstrapProviderResult, Provider, ProviderApiKeySummary, ProviderSummaryItem},
     request_patch::RequestPatchRuleResponse,
 };
-use crate::proxy::{ProxyError, apply_request_patches, load_runtime_request_patch_trace};
+use crate::proxy::{
+    ProxyError, ProxyErrorCode, apply_request_patches, load_runtime_request_patch_trace,
+};
 use crate::service::admin::provider::{
     BootstrapProviderCommand, CreateProviderApiKeyInput, ProviderApiKeyReveal, ProviderUpsertInput,
     ReplaceProviderApiKeyInput, UpdateProviderApiKeyInput,
@@ -190,32 +192,11 @@ struct ProviderCheckRequest {
 
 fn provider_check_patch_error(err: ProxyError) -> BaseError {
     let formatted_error = err.to_string();
-    match err {
-        ProxyError::BadRequest(message) | ProxyError::UpstreamBadRequest(message) => {
-            BaseError::ParamInvalid(Some(message))
+    match err.code() {
+        ProxyErrorCode::InvalidRequestError | ProxyErrorCode::UpstreamInvalidRequestError => {
+            BaseError::ParamInvalid(Some(err.operator_message().to_string()))
         }
-        ProxyError::RequestPatchConflict(_) => {
-            BaseError::InternalServerError(Some(formatted_error))
-        }
-        ProxyError::Unauthorized(message)
-        | ProxyError::KeyDisabled(message)
-        | ProxyError::KeyExpired(message)
-        | ProxyError::Forbidden(message)
-        | ProxyError::RateLimited(message)
-        | ProxyError::ConcurrencyLimited(message)
-        | ProxyError::QuotaExhausted(message)
-        | ProxyError::BudgetExhausted(message)
-        | ProxyError::ProviderOpenSkipped(message)
-        | ProxyError::ProviderHalfOpenProbeInFlight(message)
-        | ProxyError::PayloadTooLarge(message)
-        | ProxyError::ClientCancelled(message)
-        | ProxyError::InternalError(message)
-        | ProxyError::ProtocolTransformError(message)
-        | ProxyError::UpstreamRateLimited(message)
-        | ProxyError::UpstreamAuthentication(message)
-        | ProxyError::BadGateway(message)
-        | ProxyError::UpstreamService(message)
-        | ProxyError::UpstreamTimeout(message) => BaseError::InternalServerError(Some(message)),
+        _ => BaseError::InternalServerError(Some(formatted_error)),
     }
 }
 
@@ -1295,10 +1276,13 @@ mod tests {
 
     #[test]
     fn provider_check_request_patch_conflict_preserves_proxy_error_code() {
-        let error =
-            super::provider_check_patch_error(crate::proxy::ProxyError::RequestPatchConflict(
-                "conflicting request patch rules".to_string(),
-            ));
+        let error = super::provider_check_patch_error(crate::proxy::ProxyError::gateway(
+            crate::proxy::ProxyErrorCode::RequestPatchConflictError,
+            crate::proxy::ExecutionStage::Patch,
+            crate::proxy::ResponseVisibility::NotVisible,
+            None,
+            "conflicting request patch rules",
+        ));
 
         let message = super::base_error_message(&error);
         assert!(message.contains("request_patch_conflict_error"));

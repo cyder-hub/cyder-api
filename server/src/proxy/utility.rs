@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use axum::{body::Body, http::HeaderMap, response::Response};
 
 use super::{
-    ProxyError,
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
     cancellation::ProxyCancellationContext,
     request::ParsedProxyRequest,
     request_context::ProxyRequestContext,
@@ -50,14 +50,32 @@ pub(super) fn validate_utility_target(
     match (operation.protocol, upstream_protocol) {
         (UtilityProtocol::OpenaiCompatible, UpstreamProtocol::Openai) => Ok(()),
         (UtilityProtocol::GeminiCompatible, UpstreamProtocol::Gemini) => Ok(()),
-        (UtilityProtocol::OpenaiCompatible, _) => Err(ProxyError::BadRequest(format!(
-            "'{}' is only supported for OpenAI-compatible providers.",
-            operation.name
-        ))),
-        (UtilityProtocol::GeminiCompatible, _) => Err(ProxyError::BadRequest(format!(
-            "Action '{}' is only supported for Gemini-compatible providers.",
-            operation.name
-        ))),
+        (UtilityProtocol::OpenaiCompatible, _) => {
+            let message = format!(
+                "'{}' is only supported for OpenAI-compatible providers.",
+                operation.name
+            );
+            Err(ProxyError::gateway(
+                ProxyErrorCode::UnsupportedCapabilityError,
+                ExecutionStage::Capability,
+                ResponseVisibility::NotVisible,
+                Some(message.clone()),
+                message,
+            ))
+        }
+        (UtilityProtocol::GeminiCompatible, _) => {
+            let message = format!(
+                "Action '{}' is only supported for Gemini-compatible providers.",
+                operation.name
+            );
+            Err(ProxyError::gateway(
+                ProxyErrorCode::UnsupportedCapabilityError,
+                ExecutionStage::Capability,
+                ResponseVisibility::NotVisible,
+                Some(message.clone()),
+                message,
+            ))
+        }
     }
 }
 
@@ -99,7 +117,7 @@ pub(super) async fn execute_utility_proxy(
 mod tests {
     use super::{UtilityOperation, UtilityProtocol, validate_utility_target};
     use crate::{
-        proxy::ProxyError,
+        proxy::ProxyErrorCode,
         schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
     };
 
@@ -113,10 +131,8 @@ mod tests {
         };
 
         assert!(validate_utility_target(&operation, UpstreamProtocol::Openai).is_ok());
-        assert!(matches!(
-            validate_utility_target(&operation, UpstreamProtocol::Gemini),
-            Err(ProxyError::BadRequest(_))
-        ));
+        let error = validate_utility_target(&operation, UpstreamProtocol::Gemini).unwrap_err();
+        assert_eq!(error.code(), ProxyErrorCode::UnsupportedCapabilityError);
     }
 
     #[test]
@@ -129,9 +145,7 @@ mod tests {
         };
 
         assert!(validate_utility_target(&operation, UpstreamProtocol::Gemini).is_ok());
-        assert!(matches!(
-            validate_utility_target(&operation, UpstreamProtocol::Openai),
-            Err(ProxyError::BadRequest(_))
-        ));
+        let error = validate_utility_target(&operation, UpstreamProtocol::Openai).unwrap_err();
+        assert_eq!(error.code(), ProxyErrorCode::UnsupportedCapabilityError);
     }
 }

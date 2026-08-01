@@ -4,7 +4,7 @@ use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 use cyder_tools::log::debug;
 
 use super::{
-    ProxyError,
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
     auth::{
         authenticate_anthropic_request, authenticate_gemini_request, authenticate_openai_request,
     },
@@ -13,7 +13,7 @@ use super::{
     models::execute_models_listing,
     request::parse_json_request,
     request_context::ProxyRequestContext,
-    runtime::route_resolver::build_execution_plan,
+    runtime::route_resolver::{ExecutionPlanBuildError, build_execution_plan},
     utility::{UtilityExecutionInput, UtilityOperation, execute_utility_proxy},
 };
 use crate::{
@@ -156,13 +156,27 @@ impl OperationAdapter {
             .get::<Arc<ProxyRequestContext>>()
             .cloned()
             .ok_or_else(|| {
-                ProxyError::InternalError("proxy request context unavailable".to_string())
+                ProxyError::gateway(
+                    ProxyErrorCode::ServerError,
+                    ExecutionStage::Receive,
+                    ResponseVisibility::NotVisible,
+                    None,
+                    "proxy request context unavailable",
+                )
             })?;
         let client_ip_addr = request
             .extensions()
             .get::<ClientIdentity>()
             .map(|identity| identity.client_ip.to_string())
-            .ok_or_else(|| ProxyError::InternalError("client identity unavailable".to_string()))?;
+            .ok_or_else(|| {
+                ProxyError::gateway(
+                    ProxyErrorCode::ServerError,
+                    ExecutionStage::Receive,
+                    ResponseVisibility::NotVisible,
+                    None,
+                    "client identity unavailable",
+                )
+            })?;
         let original_headers = request.headers().clone();
 
         let api_key = self
@@ -241,13 +255,13 @@ async fn execute_generation_operation(
     let is_stream = resolve_stream_mode(operation.stream_mode, &parsed_request.data);
     let execution_plan = build_execution_plan(&context.app_state, &requested_model)
         .await
-        .map_err(|e| {
+        .map_err(|error| {
             crate::debug_event!(
                 "proxy.execution_plan_build_failed",
                 requested_model = &requested_model,
-                error = &e,
+                error = &error,
             );
-            ProxyError::BadRequest(e)
+            execution_plan_build_error(error)
         })?;
     debug!(
         "Built execution plan for '{}': {}",
@@ -284,13 +298,13 @@ async fn execute_utility_operation(
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
     let execution_plan = build_execution_plan(&context.app_state, &requested_model)
         .await
-        .map_err(|e| {
+        .map_err(|error| {
             crate::debug_event!(
                 "proxy.execution_plan_build_failed",
                 requested_model = &requested_model,
-                error = &e,
+                error = &error,
             );
-            ProxyError::BadRequest(e)
+            execution_plan_build_error(error)
         })?;
     debug!(
         "Built utility execution plan for '{}': {}",
@@ -325,6 +339,35 @@ fn resolve_model_source(
     }
 }
 
+fn execution_plan_build_error(error: ExecutionPlanBuildError) -> ProxyError {
+    let message = error.to_string();
+    let (code, stage, client_diagnostic) = match error {
+        ExecutionPlanBuildError::InvalidModelFormat(_) => (
+            ProxyErrorCode::InvalidRequestError,
+            ExecutionStage::Parse,
+            Some(message.clone()),
+        ),
+        ExecutionPlanBuildError::TargetNotFound(_)
+        | ExecutionPlanBuildError::UnsupportedCapability(_) => (
+            ProxyErrorCode::UnsupportedCapabilityError,
+            ExecutionStage::Capability,
+            Some(message.clone()),
+        ),
+        ExecutionPlanBuildError::CatalogUnavailable(_) => (
+            ProxyErrorCode::ServerError,
+            ExecutionStage::Capability,
+            None,
+        ),
+    };
+    ProxyError::gateway(
+        code,
+        stage,
+        ResponseVisibility::NotVisible,
+        client_diagnostic,
+        message,
+    )
+}
+
 fn resolve_stream_mode(stream_mode: StreamMode, request_data: &serde_json::Value) -> bool {
     match stream_mode {
         StreamMode::RequestBodyField => request_data
@@ -337,8 +380,11 @@ fn resolve_stream_mode(stream_mode: StreamMode, request_data: &serde_json::Value
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelSource, StreamMode, resolve_model_source, resolve_stream_mode};
-    use crate::proxy::ProxyError;
+    use super::{
+        ExecutionPlanBuildError, ModelSource, StreamMode, execution_plan_build_error,
+        resolve_model_source, resolve_stream_mode,
+    };
+    use crate::proxy::{ExecutionStage, ProxyErrorCode};
     use serde_json::json;
 
     #[test]
@@ -362,10 +408,8 @@ mod tests {
     #[test]
     fn resolve_model_source_rejects_missing_model_field() {
         let data = json!({});
-        assert!(matches!(
-            resolve_model_source(&ModelSource::RequestBodyField, &data),
-            Err(ProxyError::BadRequest(_))
-        ));
+        let error = resolve_model_source(&ModelSource::RequestBodyField, &data).unwrap_err();
+        assert_eq!(error.code(), ProxyErrorCode::InvalidRequestError);
     }
 
     #[test]
@@ -383,5 +427,35 @@ mod tests {
         ));
         assert!(resolve_stream_mode(StreamMode::Fixed(true), &non_streaming));
         assert!(!resolve_stream_mode(StreamMode::Fixed(false), &streaming));
+    }
+
+    #[test]
+    fn execution_plan_errors_preserve_stable_error_classification() {
+        for (resolver_error, expected_code, expected_stage) in [
+            (
+                ExecutionPlanBuildError::InvalidModelFormat("invalid model".to_string()),
+                ProxyErrorCode::InvalidRequestError,
+                ExecutionStage::Parse,
+            ),
+            (
+                ExecutionPlanBuildError::TargetNotFound("missing target".to_string()),
+                ProxyErrorCode::UnsupportedCapabilityError,
+                ExecutionStage::Capability,
+            ),
+            (
+                ExecutionPlanBuildError::UnsupportedCapability("unsupported reasoning".to_string()),
+                ProxyErrorCode::UnsupportedCapabilityError,
+                ExecutionStage::Capability,
+            ),
+            (
+                ExecutionPlanBuildError::CatalogUnavailable("catalog offline".to_string()),
+                ProxyErrorCode::ServerError,
+                ExecutionStage::Capability,
+            ),
+        ] {
+            let error = execution_plan_build_error(resolver_error);
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(error.stage(), expected_stage);
+        }
     }
 }

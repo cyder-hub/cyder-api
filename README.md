@@ -167,6 +167,57 @@ Request Patch Create and Update reject both `x-request-id` and `x-client-request
 
 The paired R3.2 SQLite/PostgreSQL development migration is intentionally destructive for Request Records: upgrading clears historical `request_log` rows and their metrics-ingestion cursor before adding the constrained identity fields. It does not backfill legacy IDs, modify Request Patch rows, or delete already aggregated minute rollups. Back up the database first if historical pre-1.0 Request Records are needed outside Cyder.
 
+### Proxy Errors and Upstream Provider Errors
+
+Proxy failures use a stable error fact model with 29 enumerated `code` values, 11 execution stages, and four monotonic response-visibility states: `not_visible`, `headers_committed`, `body_started`, and `unknown`. The public response contains the stable `code` and a client-safe `message`. Stage and visibility are operator facts emitted in structured events; they are not added to the current Request Record schema.
+
+When an upstream Provider explicitly returns a non-2xx HTTP response, Cyder preserves that Provider response for the current downstream caller inside the long-lived top-level `upstream_error` extension. For example, an upstream JSON 429 currently produces:
+
+```json
+{
+  "code": "upstream_rate_limit_error",
+  "message": "Upstream provider rate limited the request.",
+  "upstream_error": {
+    "status": 429,
+    "content_type": "application/json",
+    "body": {
+      "error": {
+        "message": "quota exceeded",
+        "type": "provider_quota"
+      }
+    },
+    "truncated": false,
+    "captured_bytes": 62,
+    "limit_bytes": 65536
+  }
+}
+```
+
+The Provider body has one reversible representation:
+
+- valid complete JSON uses `body`
+- other complete UTF-8 uses `body_text`
+- non-UTF-8 uses `body_base64` plus `"body_encoding": "base64"`
+- an empty body uses an empty `body_text`
+- an over-limit body uses `body_text` or `body_base64` for the captured prefix, sets `truncated: true`, and adds `"notice": "Upstream error body was truncated by the gateway."`
+
+`captured_bytes` is the number of exposed prefix bytes; Cyder does not claim to know the Provider's original total body length. Missing or invalid Provider `Content-Type` is represented as `null`. Other upstream headers, request URLs, queries, credentials, and gateway configuration are never attached to this extension.
+
+This is intentional pass-through diagnostics, not a claim that arbitrary Provider error bodies are safe. A gateway cannot reliably infer which Provider-owned fields are sensitive without destroying useful error evidence. Provider owners remain responsible for their error payloads, and downstream callers authorized to make the request receive the captured payload. Cyder wraps it, selects a reversible representation, and applies a configured disclosure limit; it does not silently rewrite or redact an explicit Provider error.
+
+Gateway-owned failures—such as invalid Provider configuration, connect/request failures without an HTTP response, response-read failures, and downstream response construction failures—do not carry `upstream_error`. Their public message remains fixed while bounded operator diagnostics stay in structured logs and the existing Request Record summary fields.
+
+Configure the disclosure limit in the generated or base YAML and restart:
+
+```yaml
+proxy_request:
+  upstream_error_body_limit_bytes: 65536
+```
+
+The default is 65536 bytes and the accepted startup range is 1024 through 1048576. Invalid recognized values fail startup. There is no environment-variable override or runtime write API for this field. This R3.3 limit controls what is disclosed after the current body read/decompression path; it is not yet the raw/decompressed memory hard limit or compression-bomb protection planned for R3.6.
+
+The current four downstream families share this common error JSON. R3.4 will add each protocol's final compatible envelope and required headers while preserving `upstream_error` as a top-level extension for explicit Provider responses.
+
 The only environment variables that can override final config fields are:
 
 - `CYDER_HOST`

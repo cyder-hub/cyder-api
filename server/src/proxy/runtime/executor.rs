@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::{
     proxy::{
-        ProxyError,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
         auth::{admit_api_key_request, check_access_control},
         cancellation::ProxyCancellationContext,
         provider_governance::{ProviderGovernanceCheckError, ensure_provider_request_allowed},
@@ -33,7 +33,7 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::CacheApiKey,
-        provider_credential::resolve_selected_provider_credential,
+        provider_credential::{ProviderCredentialError, resolve_selected_provider_credential},
         provider_http::normalize_provider_endpoint,
         runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
     },
@@ -71,6 +71,25 @@ async fn fail_before_send(
     finalize_request_failure_context(&mut context, &error);
     record_completion(app_state, context).await;
     Err(error)
+}
+
+fn provider_credential_proxy_error(error: ProviderCredentialError) -> ProxyError {
+    let code = match error {
+        ProviderCredentialError::RuntimeStateUnavailable => ProxyErrorCode::ServerError,
+        ProviderCredentialError::NoEnabledCredential
+        | ProviderCredentialError::CredentialUnavailable
+        | ProviderCredentialError::VertexTokenUnavailable
+        | ProviderCredentialError::ProxyRequiredButNotConfigured
+        | ProviderCredentialError::UnsupportedProtocol
+        | ProviderCredentialError::InvalidAuthHeader => ProxyErrorCode::ProviderConfigurationError,
+    };
+    ProxyError::gateway(
+        code,
+        ExecutionStage::Governance,
+        ResponseVisibility::NotVisible,
+        None,
+        error.to_string(),
+    )
 }
 
 async fn allow_provider(
@@ -134,10 +153,17 @@ pub(in crate::proxy) async fn execute_request(
         ),
         RequestExecutionKind::Utility { operation, data } => {
             if execution_plan.resolved_reasoning_preset.is_some() {
-                Err(ProxyError::BadRequest(format!(
+                let message = format!(
                     "Reasoning suffixes are only supported for generation requests; '{}' is a utility operation.",
                     operation.name
-                )))
+                );
+                Err(ProxyError::gateway(
+                    ProxyErrorCode::UnsupportedCapabilityError,
+                    ExecutionStage::Capability,
+                    ResponseVisibility::NotVisible,
+                    Some(message.clone()),
+                    message,
+                ))
             } else {
                 validate_utility_target(operation, target.upstream_protocol)
                     .and_then(|()| validate_utility_capabilities(&target, &operation.name, data))
@@ -161,9 +187,15 @@ pub(in crate::proxy) async fn execute_request(
             return fail_before_send(
                 &app_state,
                 log_context,
-                ProxyError::BadGateway(format!(
-                    "Provider endpoint is invalid and must be repaired before use: {error}"
-                )),
+                ProxyError::gateway(
+                    ProxyErrorCode::ProviderConfigurationError,
+                    ExecutionStage::Materialize,
+                    ResponseVisibility::NotVisible,
+                    None,
+                    format!(
+                        "Provider endpoint is invalid and must be repaired before use: {error}"
+                    ),
+                ),
             )
             .await;
         }
@@ -177,7 +209,13 @@ pub(in crate::proxy) async fn execute_request(
         return fail_before_send(
             &app_state,
             log_context,
-            ProxyError::BadGateway(error.to_string()),
+            ProxyError::gateway(
+                ProxyErrorCode::ProviderConfigurationError,
+                ExecutionStage::Materialize,
+                ResponseVisibility::NotVisible,
+                None,
+                error.to_string(),
+            ),
         )
         .await;
     }
@@ -216,7 +254,7 @@ pub(in crate::proxy) async fn execute_request(
                 return fail_before_send(
                     &app_state,
                     log_context,
-                    ProxyError::InternalError(error.to_string()),
+                    provider_credential_proxy_error(error),
                 )
                 .await;
             }
@@ -305,6 +343,7 @@ pub(in crate::proxy) async fn execute_request(
         provider_permit,
         materialized.response_mode,
         reasoning_capture,
+        request_context.response_visibility.clone(),
     )
     .await
     {
@@ -318,6 +357,40 @@ pub(in crate::proxy) async fn execute_request(
             finalize_request_failure_context(&mut failure.log_context, &failure.error);
             record_completion(&app_state, failure.log_context).await;
             Err(failure.error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_credential_proxy_error;
+    use crate::{
+        proxy::{ExecutionStage, ProxyErrorCode},
+        service::provider_credential::ProviderCredentialError,
+    };
+
+    #[test]
+    fn credential_runtime_state_outage_is_a_server_error() {
+        let error =
+            provider_credential_proxy_error(ProviderCredentialError::RuntimeStateUnavailable);
+
+        assert_eq!(error.code(), ProxyErrorCode::ServerError);
+        assert_eq!(error.stage(), ExecutionStage::Governance);
+    }
+
+    #[test]
+    fn unusable_provider_credentials_remain_configuration_errors() {
+        for credential_error in [
+            ProviderCredentialError::NoEnabledCredential,
+            ProviderCredentialError::CredentialUnavailable,
+            ProviderCredentialError::VertexTokenUnavailable,
+            ProviderCredentialError::ProxyRequiredButNotConfigured,
+            ProviderCredentialError::UnsupportedProtocol,
+            ProviderCredentialError::InvalidAuthHeader,
+        ] {
+            let error = provider_credential_proxy_error(credential_error);
+            assert_eq!(error.code(), ProxyErrorCode::ProviderConfigurationError);
+            assert_eq!(error.stage(), ExecutionStage::Governance);
         }
     }
 }

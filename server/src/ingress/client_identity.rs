@@ -13,7 +13,10 @@ use axum::{
 };
 use ipnet::IpNet;
 
-use crate::config::ClientIdentityConfig;
+use crate::{
+    config::ClientIdentityConfig,
+    proxy::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility},
+};
 
 const FORWARDED: &str = "forwarded";
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
@@ -276,14 +279,22 @@ pub async fn proxy_client_identity_middleware(
             request.extensions_mut().insert(identity);
             next.run(request).await
         }
-        Err(HttpClientIdentityError::MissingConnectInfo) => {
-            crate::proxy::ProxyError::InternalError("client identity unavailable".to_string())
-                .into_response()
-        }
-        Err(HttpClientIdentityError::InvalidForwardingMetadata) => {
-            crate::proxy::ProxyError::BadRequest("invalid client forwarding metadata".to_string())
-                .into_response()
-        }
+        Err(HttpClientIdentityError::MissingConnectInfo) => ProxyError::gateway(
+            ProxyErrorCode::ServerError,
+            ExecutionStage::Receive,
+            ResponseVisibility::NotVisible,
+            None,
+            "client identity unavailable",
+        )
+        .into_response(),
+        Err(HttpClientIdentityError::InvalidForwardingMetadata) => ProxyError::gateway(
+            ProxyErrorCode::InvalidRequestError,
+            ExecutionStage::Receive,
+            ResponseVisibility::NotVisible,
+            Some("invalid client forwarding metadata".to_string()),
+            "invalid client forwarding metadata",
+        )
+        .into_response(),
     }
 }
 

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use crate::{
     database::reasoning_config::{
@@ -107,6 +107,42 @@ pub struct ExecutionPlan {
     pub target: ExecutionTarget,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExecutionPlanBuildError {
+    InvalidModelFormat(String),
+    TargetNotFound(String),
+    UnsupportedCapability(String),
+    CatalogUnavailable(String),
+}
+
+impl ExecutionPlanBuildError {
+    fn with_message(self, message: String) -> Self {
+        match self {
+            Self::InvalidModelFormat(_) => Self::InvalidModelFormat(message),
+            Self::TargetNotFound(_) => Self::TargetNotFound(message),
+            Self::UnsupportedCapability(_) => Self::UnsupportedCapability(message),
+            Self::CatalogUnavailable(_) => Self::CatalogUnavailable(message),
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidModelFormat(message)
+            | Self::TargetNotFound(message)
+            | Self::UnsupportedCapability(message)
+            | Self::CatalogUnavailable(message) => message,
+        }
+    }
+}
+
+impl fmt::Display for ExecutionPlanBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for ExecutionPlanBuildError {}
+
 impl ExecutionPlan {
     pub fn target_summary_for_log(&self) -> String {
         let target = &self.target;
@@ -146,13 +182,13 @@ fn parse_provider_model(value: &str) -> (&str, &str) {
 fn build_direct_execution_plan(
     catalog: &CacheModelsCatalog,
     requested_name: &str,
-) -> Result<ExecutionPlan, String> {
+) -> Result<ExecutionPlan, ExecutionPlanBuildError> {
     let (provider_key, model_name) = parse_provider_model(requested_name);
     if provider_key.is_empty() || model_name.is_empty() {
-        return Err(format!(
+        return Err(ExecutionPlanBuildError::InvalidModelFormat(format!(
             "Invalid model format: '{}'. Expected 'provider/model'.",
             requested_name
-        ));
+        )));
     }
 
     let provider = catalog
@@ -160,7 +196,12 @@ fn build_direct_execution_plan(
         .iter()
         .find(|provider| provider.provider_key == provider_key && provider.is_enabled)
         .cloned()
-        .ok_or_else(|| format!("Enabled provider '{}' was not found.", provider_key))?;
+        .ok_or_else(|| {
+            ExecutionPlanBuildError::TargetNotFound(format!(
+                "Enabled provider '{}' was not found.",
+                provider_key
+            ))
+        })?;
     let model = catalog
         .models
         .iter()
@@ -168,7 +209,12 @@ fn build_direct_execution_plan(
             model.provider_id == provider.id && model.model_name == model_name && model.is_enabled
         })
         .cloned()
-        .ok_or_else(|| format!("Enabled model '{}' was not found.", requested_name))?;
+        .ok_or_else(|| {
+            ExecutionPlanBuildError::TargetNotFound(format!(
+                "Enabled model '{}' was not found.",
+                requested_name
+            ))
+        })?;
     let upstream_protocol = determine_upstream_protocol(&provider);
     let runtime_features = resolve_target_runtime_features(catalog, &provider, &model);
     Ok(ExecutionPlan {
@@ -330,7 +376,7 @@ fn resolve_effective_runtime_feature(
 fn build_execution_plan_from_catalog(
     catalog: &CacheModelsCatalog,
     requested_name: &str,
-) -> Result<ExecutionPlan, String> {
+) -> Result<ExecutionPlan, ExecutionPlanBuildError> {
     match build_direct_execution_plan(catalog, requested_name) {
         Ok(plan) => Ok(plan),
         Err(exact_error) => {
@@ -340,24 +386,25 @@ fn build_execution_plan_from_catalog(
             };
             let mut plan = build_direct_execution_plan(catalog, &resolved_name.base_requested_name)
                 .map_err(|base_error| {
-                    format!(
+                    let message = format!(
                         "Model '{}' uses a known reasoning suffix, but base model '{}' could not be resolved: {}",
                         resolved_name.original_requested_name,
                         resolved_name.base_requested_name,
                         base_error
-                    )
+                    );
+                    base_error.with_message(message)
                 })?;
             let preset = resolved_name
                 .requested_preset
                 .expect("reasoning suffix parse includes a preset");
             let binding = target_supports_reasoning_preset(catalog, &plan.target, preset).map_err(
                 |reason| {
-                    format!(
+                    ExecutionPlanBuildError::UnsupportedCapability(format!(
                         "Reasoning suffix '{}' is not supported by '{}': {}",
                         resolved_name.requested_suffix.as_deref().unwrap_or(""),
                         resolved_name.base_requested_name,
                         reason
-                    )
+                    ))
                 },
             )?;
             plan.target.apply_reasoning_binding(binding);
@@ -367,10 +414,10 @@ fn build_execution_plan_from_catalog(
     }
 }
 
-pub async fn build_execution_plan(
+pub(crate) async fn build_execution_plan(
     app_state: &Arc<AppState>,
     requested_name: &str,
-) -> Result<ExecutionPlan, String> {
+) -> Result<ExecutionPlan, ExecutionPlanBuildError> {
     let catalog = app_state
         .catalog
         .get_models_catalog()
@@ -380,10 +427,44 @@ pub async fn build_execution_plan(
                 "Error loading models catalog while resolving '{}': {:?}",
                 requested_name, err
             );
-            format!(
+            ExecutionPlanBuildError::CatalogUnavailable(format!(
                 "Internal server error while loading model catalog for '{}'.",
                 requested_name
-            )
+            ))
         })?;
     build_execution_plan_from_catalog(catalog.as_ref(), requested_name)
+}
+
+#[cfg(test)]
+mod execution_plan_error_tests {
+    use super::{ExecutionPlanBuildError, build_execution_plan_from_catalog};
+    use crate::service::cache::types::CacheModelsCatalog;
+
+    fn empty_catalog() -> CacheModelsCatalog {
+        CacheModelsCatalog {
+            providers: vec![],
+            models: vec![],
+            reasoning_configs: vec![],
+            runtime_feature_configs: vec![],
+        }
+    }
+
+    #[test]
+    fn malformed_model_name_is_a_parse_error() {
+        let error = build_execution_plan_from_catalog(&empty_catalog(), "gpt-4o")
+            .expect_err("provider prefix is required");
+
+        assert!(matches!(
+            error,
+            ExecutionPlanBuildError::InvalidModelFormat(_)
+        ));
+    }
+
+    #[test]
+    fn missing_direct_target_is_not_a_parse_error() {
+        let error = build_execution_plan_from_catalog(&empty_catalog(), "openai/gpt-4o")
+            .expect_err("missing provider should fail resolution");
+
+        assert!(matches!(error, ExecutionPlanBuildError::TargetNotFound(_)));
+    }
 }

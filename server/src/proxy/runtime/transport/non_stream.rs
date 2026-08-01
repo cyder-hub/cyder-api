@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    http::header::CONTENT_ENCODING,
+    http::header::{CONTENT_ENCODING, CONTENT_TYPE},
 };
 use chrono::Utc;
 
@@ -17,14 +17,14 @@ use super::{
 };
 use crate::{
     proxy::{
-        ProxyError,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
         cancellation::ProxyCancellationContext,
         classify_upstream_status,
         logging::RequestLogContext,
         provider_governance::{record_provider_failure, record_provider_success},
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
-            log_writer::finalize_non_streaming_log_context,
+            log_writer::{apply_final_error_fact, finalize_non_streaming_log_context},
             reasoning_content_repair::continuation_snapshots_from_openai_response_body,
         },
         util::{
@@ -52,6 +52,8 @@ pub(super) async fn handle_non_streaming_response(
     provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
+    upstream_error_body_limit_bytes: usize,
+    response_visibility: ResponseVisibilityTracker,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let status_code = response.status();
     let response_headers = response.headers().clone();
@@ -82,7 +84,7 @@ pub(super) async fn handle_non_streaming_response(
     {
         Ok(b) => b,
         Err(proxy_error) => {
-            if !matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+            if proxy_error.code() != ProxyErrorCode::ClientCancelledError {
                 record_provider_failure(
                     app_state,
                     provider_id,
@@ -99,7 +101,7 @@ pub(super) async fn handle_non_streaming_response(
             context.llm_status = Some(status_code);
             context.completion_ts = Some(completed_at);
             context.cost_catalog_version = cost_catalog_version.cloned();
-            context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+            context.overall_status = if proxy_error.code() == ProxyErrorCode::ClientCancelledError {
                 RequestStatus::Cancelled
             } else {
                 RequestStatus::Error
@@ -177,7 +179,26 @@ pub(super) async fn handle_non_streaming_response(
             latency_ms = llm_response_completed_at.saturating_sub(context.request_received_at),
         );
 
-        let response = response_builder.body(Body::from(final_body)).unwrap();
+        let response = match response_builder.body(Body::from(final_body)) {
+            Ok(response) => response,
+            Err(error) => {
+                let proxy_error = ProxyError::gateway(
+                    ProxyErrorCode::DownstreamSendError,
+                    ExecutionStage::DownstreamSend,
+                    response_visibility.current(),
+                    None,
+                    format!("Failed to build non-streaming downstream response: {error}"),
+                );
+                context.overall_status = RequestStatus::Error;
+                apply_final_error_fact(&mut context, &proxy_error);
+                api_key_request_lease.release().await;
+                return Err(ProxyRequestFailure {
+                    error: proxy_error,
+                    log_context: context.clone(),
+                });
+            }
+        };
+        response_visibility.advance_to(ResponseVisibility::HeadersCommitted);
         api_key_request_lease.release().await;
         Ok(ProxyRequestOutcome {
             response,
@@ -206,7 +227,13 @@ pub(super) async fn handle_non_streaming_response(
             None,
             None,
         );
-        let proxy_error = classify_upstream_status(status_code, &decompressed_body);
+        let proxy_error = classify_upstream_status(
+            status_code,
+            response_headers.get(CONTENT_TYPE),
+            &decompressed_body,
+            upstream_error_body_limit_bytes,
+            ResponseVisibility::NotVisible,
+        );
         record_provider_failure(
             app_state,
             provider_id,

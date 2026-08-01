@@ -321,6 +321,10 @@ mod tests {
             ),
             ("LOG_LEVEL", "error"),
             ("CYDER_DB_URL", "postgres://ignored"),
+            (
+                "CYDER_PROXY_REQUEST_UPSTREAM_ERROR_BODY_LIMIT_BYTES",
+                "1024",
+            ),
         ])
         .expect("environment should parse");
 
@@ -333,6 +337,7 @@ mod tests {
         assert!(values.contains_key("manager_auth.browser_origin"));
         assert!(!values.contains_key("db_url"));
         assert!(!values.contains_key("cyder_db_url"));
+        assert!(!values.contains_key("proxy_request.upstream_error_body_limit_bytes"));
     }
 
     #[test]
@@ -373,12 +378,24 @@ mod tests {
             ("LOG_LEVEL", "debug"),
             ("DB_URL", "postgres://ignored"),
             ("CYDER_DB_URL", "postgres://ignored"),
+            (
+                "CYDER_PROXY_REQUEST_UPSTREAM_ERROR_BODY_LIMIT_BYTES",
+                "1024",
+            ),
             (CYDER_LOG_LEVEL_ENV, "info"),
             (CYDER_DATA_DIR_ENV, "/data/cyder"),
         ]);
         let ignored = ignored_environment_variables(&environment);
         let names: Vec<_> = ignored.iter().map(|item| item.name.as_str()).collect();
 
-        assert_eq!(names, vec!["LOG_LEVEL", "DB_URL", "CYDER_DB_URL"]);
+        assert_eq!(
+            names,
+            vec![
+                "LOG_LEVEL",
+                "DB_URL",
+                "CYDER_DB_URL",
+                "CYDER_PROXY_REQUEST_UPSTREAM_ERROR_BODY_LIMIT_BYTES"
+            ]
+        );
     }
 }

@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use axum::{body::Body, extract::Request, response::Response};
 
 use super::{
-    ProxyError,
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
     pipeline::{AuthenticationStrategy, OperationAdapter},
     utility::{UtilityOperation, UtilityProtocol},
 };
@@ -48,7 +48,13 @@ pub async fn handle_gemini_request(
             reason = "invalid_action",
             path_segment = &path_segment,
         );
-        return Err(ProxyError::BadRequest(err_msg));
+        return Err(ProxyError::gateway(
+            ProxyErrorCode::InvalidRequestError,
+            ExecutionStage::Parse,
+            ResponseVisibility::NotVisible,
+            Some(err_msg.clone()),
+            err_msg,
+        ));
     };
 
     adapter.execute(app_state, query_params, request).await
@@ -66,7 +72,13 @@ fn parse_gemini_model_action(path_segment: &str) -> Result<(&str, &str), ProxyEr
             reason = "invalid_model_action_segment",
             path_segment = path_segment,
         );
-        return Err(ProxyError::BadRequest(err_msg));
+        return Err(ProxyError::gateway(
+            ProxyErrorCode::InvalidRequestError,
+            ExecutionStage::Parse,
+            ResponseVisibility::NotVisible,
+            Some(err_msg.clone()),
+            err_msg,
+        ));
     }
 
     Ok((parts[1], parts[0]))
@@ -75,7 +87,7 @@ fn parse_gemini_model_action(path_segment: &str) -> Result<(&str, &str), ProxyEr
 #[cfg(test)]
 mod tests {
     use super::parse_gemini_model_action;
-    use crate::proxy::ProxyError;
+    use crate::proxy::ProxyErrorCode;
 
     #[test]
     fn parses_gemini_model_action_segment() {
@@ -87,9 +99,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_gemini_model_action_segment() {
-        assert!(matches!(
-            parse_gemini_model_action("models/gemini-2.5-pro"),
-            Err(ProxyError::BadRequest(_))
-        ));
+        let error = parse_gemini_model_action("models/gemini-2.5-pro").unwrap_err();
+        assert_eq!(error.code(), ProxyErrorCode::InvalidRequestError);
     }
 }

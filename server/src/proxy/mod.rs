@@ -25,7 +25,9 @@ mod log_regression;
 
 use error::classify_request_body_error;
 pub(crate) use error::{
-    ProxyError, classify_reqwest_error, classify_upstream_status, protocol_transform_error,
+    ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel, ResponseVisibility,
+    ResponseVisibilityTracker, classify_reqwest_error, classify_upstream_status,
+    protocol_transform_error,
 };
 pub use router::create_proxy_router;
 pub(crate) use runtime::request_patch::{apply_request_patches, load_runtime_request_patch_trace};

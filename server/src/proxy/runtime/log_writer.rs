@@ -7,7 +7,7 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::{
     cost::UsageNormalization,
     proxy::{
-        ProxyError,
+        ProxyError, ProxyErrorCode,
         logging::{RequestLogContext, record_request_completion_and_log},
         request_context::ProxyRequestContext,
         runtime::route_resolver::ExecutionTarget,
@@ -59,13 +59,22 @@ pub(in crate::proxy) fn finalize_request_failure_context(
     proxy_error: &ProxyError,
 ) {
     context.completion_ts = Some(Utc::now().timestamp_millis());
-    context.overall_status = if matches!(proxy_error, ProxyError::ClientCancelled(_)) {
+    context.overall_status = if proxy_error.code() == ProxyErrorCode::ClientCancelledError {
         RequestStatus::Cancelled
     } else {
         RequestStatus::Error
     };
-    context.final_error_code = Some(proxy_error.error_code().to_string());
-    context.final_error_message = Some(truncate(proxy_error.message(), 2_000));
+    apply_final_error_fact(context, proxy_error);
+}
+
+pub(in crate::proxy) fn apply_final_error_fact(
+    context: &mut RequestLogContext,
+    proxy_error: &ProxyError,
+) {
+    context.final_error_code = Some(proxy_error.code().as_str().to_string());
+    context.final_error_message = Some(truncate(proxy_error.operator_message(), 2_000));
+    context.final_error_stage = Some(proxy_error.stage());
+    context.response_visibility = proxy_error.response_visibility();
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -121,8 +130,7 @@ pub(in crate::proxy) fn finalize_streaming_log_context(
     context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = overall_status;
     if let Some(error) = final_error {
-        context.final_error_code = Some(error.error_code().to_string());
-        context.final_error_message = Some(truncate(error.message(), 2_000));
+        apply_final_error_fact(context, error);
     }
 }
 
@@ -132,6 +140,7 @@ pub(in crate::proxy) async fn finalize_cancelled_log_context(
     url: &str,
     status_code: Option<StatusCode>,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
+    proxy_error: &ProxyError,
 ) -> bool {
     let mut context = log_context.lock().await;
     context.request_url = Some(url.to_string());
@@ -139,5 +148,12 @@ pub(in crate::proxy) async fn finalize_cancelled_log_context(
     context.completion_ts = Some(Utc::now().timestamp_millis());
     context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = RequestStatus::Cancelled;
+    apply_final_error_fact(&mut context, proxy_error);
+    crate::logging::log_proxy_error_event(
+        "proxy.stream_terminal_error",
+        Some(context.request_id.as_str()),
+        Some(context.id),
+        proxy_error,
+    );
     record_completion(app_state, context.clone()).await
 }

@@ -44,7 +44,7 @@
     "upstream_response":{"error":{"message":"baseline throttled"}},
     "downstream_status":429,
     "downstream_code":"upstream_rate_limit_error",
-    "downstream_message":"Upstream returned 429: baseline throttled"
+    "downstream_message":"Upstream provider rate limited the request."
   },
   "cancellation": {
     "downstream_request":{"model":"$REQUESTED_MODEL","messages":[{"role":"user","content":"baseline ping"}],"stream":true},

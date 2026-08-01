@@ -2,6 +2,8 @@ use axum::http::{HeaderMap, HeaderName};
 use chrono::Utc;
 use uuid::Uuid;
 
+use super::ResponseVisibilityTracker;
+
 pub(crate) const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 pub(crate) const X_CLIENT_REQUEST_ID: HeaderName = HeaderName::from_static("x-client-request-id");
 
@@ -69,6 +71,7 @@ pub(crate) struct ProxyRequestContext {
     pub(crate) request_id: RequestId,
     pub(crate) client_request_id: Option<ClientRequestId>,
     pub(crate) received_at_ms: i64,
+    pub(crate) response_visibility: ResponseVisibilityTracker,
 }
 
 impl ProxyRequestContext {
@@ -77,6 +80,7 @@ impl ProxyRequestContext {
             request_id: RequestId::new(),
             client_request_id: ClientRequestId::from_headers(headers),
             received_at_ms: Utc::now().timestamp_millis(),
+            response_visibility: ResponseVisibilityTracker::new(),
         }
     }
 }
@@ -148,6 +152,7 @@ mod tests {
         ClientRequestId, MAX_CLIENT_REQUEST_ID_LEN, ProxyRequestContext, RequestId,
         X_CLIENT_REQUEST_ID, derive_request_operation_kind,
     };
+    use crate::proxy::ResponseVisibility;
 
     #[test]
     fn request_id_is_lowercase_hyphenated_uuid_v4() {
@@ -179,6 +184,10 @@ mod tests {
             Some("caller.trace_1:part-2")
         );
         assert!(context.received_at_ms > 0);
+        assert_eq!(
+            context.response_visibility.current(),
+            ResponseVisibility::NotVisible
+        );
     }
 
     #[test]

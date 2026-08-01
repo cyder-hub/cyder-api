@@ -4,7 +4,7 @@ use axum::{body::Body, response::Response};
 use serde::Serialize;
 
 use super::{
-    ProxyError,
+    ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
     auth::admit_api_key_request,
     request_context::ProxyRequestContext,
     runtime::{
@@ -45,7 +45,13 @@ pub(super) async fn get_accessible_models(
         .await
         .map_err(|store_err| {
             error!("Failed to fetch models catalog from cache: {:?}", store_err);
-            ProxyError::InternalError("Failed to retrieve models catalog".to_string())
+            ProxyError::gateway(
+                ProxyErrorCode::ServerError,
+                ExecutionStage::Capability,
+                ResponseVisibility::NotVisible,
+                None,
+                format!("Failed to retrieve models catalog: {store_err:?}"),
+            )
         })?;
     Ok(collect_accessible_models(catalog.as_ref(), api_key))
 }
@@ -124,7 +130,15 @@ fn render_models_response(
                 .collect(),
         }),
     }
-    .map_err(|err| ProxyError::InternalError(format!("Failed to serialize models list: {err}")))
+    .map_err(|err| {
+        ProxyError::gateway(
+            ProxyErrorCode::DownstreamSendError,
+            ExecutionStage::DownstreamSend,
+            ResponseVisibility::NotVisible,
+            None,
+            format!("Failed to serialize models list: {err}"),
+        )
+    })
 }
 
 fn collect_accessible_models(

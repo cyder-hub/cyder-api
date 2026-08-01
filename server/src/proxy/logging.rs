@@ -14,7 +14,10 @@ use tokio::{
 use crate::{
     cost::{CostLedger, CostRatingContext, CostSnapshot, UsageNormalization, rate_cost},
     database::request_log::{RequestLog, RequestLogRecord},
-    proxy::request_context::{ClientRequestId, ProxyRequestContext, RequestId},
+    proxy::{
+        ExecutionStage, ResponseVisibility,
+        request_context::{ClientRequestId, ProxyRequestContext, RequestId},
+    },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState,
@@ -62,6 +65,8 @@ pub struct RequestLogContext {
     pub overall_status: RequestStatus,
     pub final_error_code: Option<String>,
     pub final_error_message: Option<String>,
+    pub final_error_stage: Option<ExecutionStage>,
+    pub response_visibility: ResponseVisibility,
 }
 
 impl RequestLogContext {
@@ -116,6 +121,8 @@ impl RequestLogContext {
             overall_status: RequestStatus::Pending,
             final_error_code: None,
             final_error_message: None,
+            final_error_stage: None,
+            response_visibility: request_context.response_visibility.current(),
         }
     }
 
@@ -187,6 +194,10 @@ pub trait RequestLogPersistedSink: Send + Sync {
 pub struct RequestLogPersistedContext {
     pub request_log_id: i64,
     pub request_id: String,
+    #[cfg(test)]
+    pub final_error_stage: Option<ExecutionStage>,
+    #[cfg(test)]
+    pub response_visibility: ResponseVisibility,
 }
 
 pub struct LogManager {
@@ -372,6 +383,10 @@ async fn process_log(
                 .on_request_log_persisted(RequestLogPersistedContext {
                     request_log_id: row.id,
                     request_id: context.request_id.to_string(),
+                    #[cfg(test)]
+                    final_error_stage: context.final_error_stage,
+                    #[cfg(test)]
+                    response_visibility: context.response_visibility,
                 })
                 .await;
         }

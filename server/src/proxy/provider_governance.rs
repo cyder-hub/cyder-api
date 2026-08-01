@@ -1,6 +1,6 @@
 use cyder_tools::log::{info, warn};
 
-use super::ProxyError;
+use super::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility};
 use crate::service::{
     app_state::AppState,
     runtime::{
@@ -23,14 +23,27 @@ pub(super) enum ProviderGovernanceRejection {
 
 impl ProviderGovernanceRejection {
     pub(super) fn to_proxy_error(self, provider_label: &str) -> ProxyError {
-        match self {
-            Self::Open => ProxyError::ProviderOpenSkipped(format!(
-                "Provider '{provider_label}' is temporarily unavailable due to recent upstream failures."
-            )),
-            Self::HalfOpenProbeInFlight => ProxyError::ProviderHalfOpenProbeInFlight(format!(
-                "Provider '{provider_label}' is temporarily unavailable because another half-open probe is already in flight."
-            )),
-        }
+        let (code, operator_message) = match self {
+            Self::Open => (
+                ProxyErrorCode::ProviderCircuitOpenError,
+                format!(
+                    "Provider '{provider_label}' is temporarily unavailable due to recent upstream failures."
+                ),
+            ),
+            Self::HalfOpenProbeInFlight => (
+                ProxyErrorCode::ProviderHalfOpenProbeInFlightError,
+                format!(
+                    "Provider '{provider_label}' is temporarily unavailable because another half-open probe is already in flight."
+                ),
+            ),
+        };
+        ProxyError::gateway(
+            code,
+            ExecutionStage::Governance,
+            ResponseVisibility::NotVisible,
+            None,
+            operator_message,
+        )
     }
 }
 
@@ -48,11 +61,13 @@ pub(super) async fn ensure_provider_request_allowed(
         Ok(decision) => {
             if !decision.allowed {
                 let Some(rejection) = decision.rejection else {
-                    return Err(ProviderGovernanceCheckError::Backend(
-                        ProxyError::InternalError(
-                            "Provider circuit rejected without a domain reason".to_string(),
-                        ),
-                    ));
+                    return Err(ProviderGovernanceCheckError::Backend(ProxyError::gateway(
+                        ProxyErrorCode::ServerError,
+                        ExecutionStage::Governance,
+                        ResponseVisibility::NotVisible,
+                        None,
+                        "Provider circuit rejected without a domain reason",
+                    )));
                 };
                 let rejection = provider_circuit_rejection_to_governance_rejection(rejection);
                 return Err(ProviderGovernanceCheckError::Rejected(rejection));
@@ -132,12 +147,15 @@ pub(super) async fn record_provider_failure(
 
 fn counts_against_provider_governance(error: &ProxyError) -> bool {
     matches!(
-        error,
-        ProxyError::BadGateway(_)
-            | ProxyError::UpstreamAuthentication(_)
-            | ProxyError::UpstreamRateLimited(_)
-            | ProxyError::UpstreamService(_)
-            | ProxyError::UpstreamTimeout(_)
+        error.code(),
+        ProxyErrorCode::UpstreamConnectError
+            | ProxyErrorCode::UpstreamRequestError
+            | ProxyErrorCode::UpstreamResponseError
+            | ProxyErrorCode::UpstreamAuthenticationError
+            | ProxyErrorCode::UpstreamRateLimitError
+            | ProxyErrorCode::UpstreamServiceError
+            | ProxyErrorCode::UpstreamTimeoutError
+            | ProxyErrorCode::UpstreamUnexpectedStatusError
     )
 }
 
@@ -153,7 +171,13 @@ fn provider_circuit_rejection_to_governance_rejection(
 }
 
 fn provider_circuit_error_to_proxy_error(error: ProviderCircuitError) -> ProxyError {
-    ProxyError::InternalError(format!("Provider circuit state backend error: {error}"))
+    ProxyError::gateway(
+        ProxyErrorCode::ServerError,
+        ExecutionStage::Governance,
+        ResponseVisibility::NotVisible,
+        None,
+        format!("Provider circuit state backend error: {error}"),
+    )
 }
 
 fn log_provider_circuit_error(
@@ -170,30 +194,53 @@ fn log_provider_circuit_error(
 #[cfg(test)]
 mod tests {
     use super::counts_against_provider_governance;
-    use crate::proxy::ProxyError;
+    use crate::proxy::{
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, error::UpstreamErrorPayload,
+    };
 
     #[test]
     fn provider_governance_counts_only_upstream_availability_failures() {
-        assert!(counts_against_provider_governance(
-            &ProxyError::UpstreamTimeout("timeout".to_string())
-        ));
-        assert!(counts_against_provider_governance(
-            &ProxyError::UpstreamService("service".to_string())
-        ));
-        assert!(counts_against_provider_governance(
-            &ProxyError::UpstreamRateLimited("limited".to_string())
-        ));
-        assert!(!counts_against_provider_governance(
-            &ProxyError::BadRequest("client error".to_string())
-        ));
-        assert!(!counts_against_provider_governance(&ProxyError::Forbidden(
-            "forbidden".to_string()
-        )));
-        assert!(!counts_against_provider_governance(
-            &ProxyError::ProviderOpenSkipped("open".to_string())
-        ));
-        assert!(!counts_against_provider_governance(
-            &ProxyError::ProviderHalfOpenProbeInFlight("probe".to_string())
-        ));
+        let error = |code: ProxyErrorCode| {
+            if code.accepts_upstream_payload() {
+                ProxyError::upstream(
+                    code,
+                    ExecutionStage::UpstreamResponse,
+                    ResponseVisibility::NotVisible,
+                    UpstreamErrorPayload::capture(code.status_code(), None, b"test", 65_536),
+                    "test",
+                )
+            } else {
+                ProxyError::gateway(
+                    code,
+                    ExecutionStage::Governance,
+                    ResponseVisibility::NotVisible,
+                    None,
+                    "test",
+                )
+            }
+        };
+
+        for code in [
+            ProxyErrorCode::UpstreamConnectError,
+            ProxyErrorCode::UpstreamRequestError,
+            ProxyErrorCode::UpstreamResponseError,
+            ProxyErrorCode::UpstreamAuthenticationError,
+            ProxyErrorCode::UpstreamRateLimitError,
+            ProxyErrorCode::UpstreamServiceError,
+            ProxyErrorCode::UpstreamTimeoutError,
+            ProxyErrorCode::UpstreamUnexpectedStatusError,
+        ] {
+            assert!(counts_against_provider_governance(&error(code)));
+        }
+        for code in [
+            ProxyErrorCode::InvalidRequestError,
+            ProxyErrorCode::PermissionError,
+            ProxyErrorCode::ProviderCircuitOpenError,
+            ProxyErrorCode::ProviderHalfOpenProbeInFlightError,
+            ProxyErrorCode::ProviderConfigurationError,
+            ProxyErrorCode::ClientCancelledError,
+        ] {
+            assert!(!counts_against_provider_governance(&error(code)));
+        }
     }
 }

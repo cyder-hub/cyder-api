@@ -159,6 +159,10 @@ fn load_effective_config_inner(
     final_config
         .validate_manager_auth()
         .map_err(ConfigLoadError::DeserializeEffective)?;
+    final_config
+        .proxy_request
+        .validate()
+        .map_err(ConfigLoadError::DeserializeEffective)?;
     let final_config = finalize_loaded_config(final_config);
 
     Ok(final_config)
@@ -358,6 +362,85 @@ mod tests {
             load_user_yaml("").expect("omitted client identity config should use defaults");
         assert!(config.client_identity.trusted_proxy_cidrs.is_empty());
         assert_eq!(config.client_identity.max_forwarded_hops, 8);
+    }
+
+    #[test]
+    fn proxy_request_upstream_error_body_limit_uses_generated_and_runtime_default() {
+        let programmatic = crate::config::programmatic_default_config();
+        assert_eq!(
+            programmatic.proxy_request.upstream_error_body_limit_bytes,
+            65_536
+        );
+
+        let temp_dir = tempfile::tempdir().expect("config test directory should be created");
+        let paths = ConfigPaths::new(
+            temp_dir.path().join("config.default.yaml"),
+            temp_dir.path().join("config.yaml"),
+        );
+        let generated = load_default_config(&paths).expect("default snapshot should serialize");
+        assert!(
+            generated
+                .merged_yaml
+                .contains("upstream_error_body_limit_bytes: 65536")
+        );
+
+        let config = load_user_yaml("").expect("omitted proxy request limit should use default");
+        assert_eq!(config.proxy_request.upstream_error_body_limit_bytes, 65_536);
+    }
+
+    #[test]
+    fn proxy_request_upstream_error_body_limit_accepts_fixed_boundaries() {
+        for limit in [1_024, 65_536, 1_048_576] {
+            let config = load_user_yaml(&format!(
+                "proxy_request:\n  upstream_error_body_limit_bytes: {limit}\n"
+            ))
+            .expect("in-range upstream error body limit should load");
+
+            assert_eq!(config.proxy_request.upstream_error_body_limit_bytes, limit);
+        }
+    }
+
+    #[test]
+    fn proxy_request_upstream_error_body_limit_rejects_values_outside_fixed_range() {
+        for limit in [1_023, 1_048_577] {
+            let error = load_user_yaml(&format!(
+                "proxy_request:\n  upstream_error_body_limit_bytes: {limit}\n"
+            ))
+            .expect_err("out-of-range upstream error body limit must fail startup");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("upstream_error_body_limit_bytes must be in 1024..=1048576"),
+                "unexpected error for {limit}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_request_upstream_error_body_limit_rejects_wrong_yaml_type() {
+        let error =
+            load_user_yaml("proxy_request:\n  upstream_error_body_limit_bytes: sixty-four-kib\n")
+                .expect_err("non-integer upstream error body limit must fail startup");
+
+        assert!(
+            error
+                .to_string()
+                .contains("upstream_error_body_limit_bytes"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn tracked_config_sample_contains_the_upstream_error_disclosure_limit() {
+        let sample = include_str!("../../../config.sample.yaml");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(sample).expect("tracked config sample should parse");
+
+        assert_eq!(
+            document["proxy_request"]["upstream_error_body_limit_bytes"],
+            65_536
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     proxy::{
-        ProxyError, protocol_transform_error,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, protocol_transform_error,
         request_context::{ProxyRequestContext, X_CLIENT_REQUEST_ID, X_REQUEST_ID},
         runtime::{
             reasoning_content_repair::{
@@ -66,10 +66,17 @@ fn select_generation_prepare_kind(
         }),
         UpstreamProtocol::Ollama => Ok(GenerationPrepareKind::Llm { path: "api/chat" }),
         UpstreamProtocol::Gemini => Ok(GenerationPrepareKind::Gemini { is_stream }),
-        _ => Err(ProxyError::InternalError(format!(
-            "unsupported generation upstream protocol: {:?}",
-            upstream_protocol
-        ))),
+        _ => {
+            let message =
+                format!("unsupported generation upstream protocol: {upstream_protocol:?}");
+            Err(ProxyError::gateway(
+                ProxyErrorCode::UnsupportedCapabilityError,
+                ExecutionStage::Capability,
+                ResponseVisibility::NotVisible,
+                Some(message.clone()),
+                message,
+            ))
+        }
     }
 }
 
@@ -99,7 +106,15 @@ fn build_gemini_headers(
         UpstreamProtocol::Gemini,
         credential,
     )
-    .map_err(|error| ProxyError::BadRequest(error.to_string()))?;
+    .map_err(|error| {
+        ProxyError::gateway(
+            ProxyErrorCode::ProviderConfigurationError,
+            ExecutionStage::Materialize,
+            ResponseVisibility::NotVisible,
+            None,
+            error.to_string(),
+        )
+    })?;
 
     Ok(headers)
 }
@@ -112,8 +127,15 @@ fn build_gemini_url(
     is_stream: bool,
 ) -> Result<Url, ProxyError> {
     let target_url_str = format!("{}/{}:{}", provider.endpoint, real_model_name, action);
-    let mut url = Url::parse(&target_url_str)
-        .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
+    let mut url = Url::parse(&target_url_str).map_err(|error| {
+        ProxyError::gateway(
+            ProxyErrorCode::ProviderConfigurationError,
+            ExecutionStage::Materialize,
+            ResponseVisibility::NotVisible,
+            None,
+            format!("failed to parse target url: {error}"),
+        )
+    })?;
 
     for (k, v) in params {
         if k != "key" {
@@ -147,7 +169,15 @@ fn build_new_headers(
         }
     }
     apply_provider_request_auth_header(&mut headers, provider, upstream_protocol, credential)
-        .map_err(|error| ProxyError::BadRequest(error.to_string()))?;
+        .map_err(|error| {
+            ProxyError::gateway(
+                ProxyErrorCode::ProviderConfigurationError,
+                ExecutionStage::Materialize,
+                ResponseVisibility::NotVisible,
+                None,
+                error.to_string(),
+            )
+        })?;
     Ok(headers)
 }
 
@@ -193,8 +223,15 @@ async fn prepare_llm_request(
     );
 
     let target_url = format!("{}/{}", provider.endpoint, path);
-    let mut url = Url::parse(&target_url)
-        .map_err(|_| ProxyError::BadRequest("failed to parse target url".to_string()))?;
+    let mut url = Url::parse(&target_url).map_err(|error| {
+        ProxyError::gateway(
+            ProxyErrorCode::ProviderConfigurationError,
+            ExecutionStage::Materialize,
+            ResponseVisibility::NotVisible,
+            None,
+            format!("failed to parse target url: {error}"),
+        )
+    })?;
     let upstream_protocol = determine_upstream_protocol(provider);
     let mut headers = build_new_headers(
         original_headers,
@@ -371,7 +408,14 @@ async fn repair_generation_request_body(
         now_ms: chrono::Utc::now().timestamp_millis(),
     })
     .await
-    .map_err(|err| ProxyError::InternalError(format!("reasoning content repair failed: {err}")))?;
+    .map_err(|err| {
+        protocol_transform_error(
+            ExecutionStage::Transform,
+            ResponseVisibility::NotVisible,
+            "reasoning content repair failed",
+            err,
+        )
+    })?;
     Ok(())
 }
 
@@ -415,10 +459,14 @@ pub(in crate::proxy) async fn materialize_generation_request(
         reasoning_continuation_store,
     )
     .await?;
-    let final_body =
-        Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
-            protocol_transform_error("Failed to serialize final request body", err)
-        })?);
+    let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
+        protocol_transform_error(
+            ExecutionStage::Materialize,
+            ResponseVisibility::NotVisible,
+            "Failed to serialize final request body",
+            err,
+        )
+    })?);
     Ok(MaterializedRequest {
         final_url,
         final_headers: prepared_request.final_headers,
@@ -469,10 +517,14 @@ pub(in crate::proxy) async fn materialize_utility_request(
         }
     };
     debug_assert_eq!(provider_api_key_id, provider_credential.key_id());
-    let final_body =
-        Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
-            protocol_transform_error("Failed to serialize final request body", err)
-        })?);
+    let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
+        protocol_transform_error(
+            ExecutionStage::Materialize,
+            ResponseVisibility::NotVisible,
+            "Failed to serialize final request body",
+            err,
+        )
+    })?);
 
     Ok(MaterializedRequest {
         final_url,

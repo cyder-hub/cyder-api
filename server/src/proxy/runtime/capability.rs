@@ -2,7 +2,10 @@ use serde_json::Value;
 
 use crate::{
     database::reasoning_config::ReasoningPreset,
-    proxy::{ProxyError, runtime::route_resolver::ExecutionTarget},
+    proxy::{
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
+        runtime::route_resolver::ExecutionTarget,
+    },
 };
 
 pub(in crate::proxy) fn validate_generation_capabilities(
@@ -69,11 +72,18 @@ fn validate_missing_capabilities(
         return Ok(());
     }
 
-    Err(ProxyError::BadRequest(format!(
+    let message = format!(
         "Model '{}' does not support the required capabilities: {}",
         target.model.model_name,
         missing.join(", ")
-    )))
+    );
+    Err(ProxyError::gateway(
+        ProxyErrorCode::UnsupportedCapabilityError,
+        ExecutionStage::Capability,
+        ResponseVisibility::NotVisible,
+        Some(message.clone()),
+        message,
+    ))
 }
 
 fn request_uses_tools(value: &Value) -> bool {

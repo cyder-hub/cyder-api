@@ -32,7 +32,7 @@ use tokio::{
 use tower::ServiceExt;
 
 use super::{
-    create_proxy_router,
+    ExecutionStage, ResponseVisibility, create_proxy_router,
     logging::{RequestLogPersistedContext, RequestLogPersistedSink},
     request_context::{X_CLIENT_REQUEST_ID, X_REQUEST_ID},
 };
@@ -307,6 +307,11 @@ enum ScriptedReply {
         status: StatusCode,
         body: Value,
     },
+    Raw {
+        status: StatusCode,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    },
     Sse {
         events: Vec<GoldenEvent>,
     },
@@ -316,6 +321,11 @@ enum ScriptedReply {
     },
     InterruptedSse {
         first_event: GoldenEvent,
+    },
+    InterruptedSseBeforeFirstEvent,
+    InterruptedBody {
+        content_type: String,
+        first_chunk: Vec<u8>,
     },
     Redirect {
         status: StatusCode,
@@ -359,6 +369,17 @@ impl TestUpstream {
                             .header(&X_CLIENT_REQUEST_ID, "upstream-forged-client-id")
                             .body(Body::from(serde_json::to_vec(&body).unwrap()))
                             .unwrap(),
+                        ScriptedReply::Raw {
+                            status,
+                            content_type,
+                            body,
+                        } => {
+                            let mut builder = Response::builder().status(status);
+                            if let Some(content_type) = content_type {
+                                builder = builder.header(CONTENT_TYPE, content_type);
+                            }
+                            builder.body(Body::from(body)).unwrap()
+                        }
                         ScriptedReply::Sse { events } => Response::builder()
                             .status(StatusCode::OK)
                             .header(CONTENT_TYPE, "text/event-stream")
@@ -388,6 +409,38 @@ impl TestUpstream {
                             Response::builder()
                                 .status(StatusCode::OK)
                                 .header(CONTENT_TYPE, "text/event-stream")
+                                .body(Body::from_stream(stream))
+                                .unwrap()
+                        }
+                        ScriptedReply::InterruptedSseBeforeFirstEvent => {
+                            let stream = async_stream::stream! {
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                                yield Err::<Bytes, std::io::Error>(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "scripted upstream interruption before first event",
+                                ));
+                            };
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(CONTENT_TYPE, "text/event-stream")
+                                .body(Body::from_stream(stream))
+                                .unwrap()
+                        }
+                        ScriptedReply::InterruptedBody {
+                            content_type,
+                            first_chunk,
+                        } => {
+                            let stream = async_stream::stream! {
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from(first_chunk));
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                                yield Err(std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "scripted upstream body interruption",
+                                ));
+                            };
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(CONTENT_TYPE, content_type)
                                 .body(Body::from_stream(stream))
                                 .unwrap()
                         }
@@ -448,6 +501,7 @@ impl Drop for TestUpstream {
 struct RouterFixture {
     app_state: Arc<AppState>,
     downstream_key: String,
+    downstream_api_key_id: i64,
     provider_id: i64,
     provider_key: String,
     provider_name: String,
@@ -523,9 +577,12 @@ impl RouterFixture {
             acl_rules: None,
         })
         .expect("downstream key fixture should create");
+        let downstream_api_key_id = created_key.reveal.id;
+        let downstream_key = created_key.reveal.api_key;
         Self {
             app_state,
-            downstream_key: created_key.reveal.api_key,
+            downstream_key,
+            downstream_api_key_id,
             provider_id: bootstrapped.provider.id,
             provider_key,
             provider_name,
@@ -537,6 +594,16 @@ impl RouterFixture {
 
     fn requested_model(&self) -> String {
         format!("{}/{}", self.provider_key, self.model_name)
+    }
+
+    fn install_recording_persisted_sink(&self) -> Arc<RecordingPersistedSink> {
+        let sink = Arc::new(RecordingPersistedSink::default());
+        let persisted_sink: Arc<dyn RequestLogPersistedSink> = sink.clone();
+        self.app_state
+            .infra
+            .log_manager()
+            .set_request_log_persisted_sink(persisted_sink);
+        sink
     }
 
     async fn send(
@@ -649,6 +716,48 @@ impl RouterFixture {
         .expect("proxy router should respond")
     }
 
+    async fn send_malformed_generation_body(
+        &self,
+        fixture: &DirectExecutionFixture,
+    ) -> Response<Body> {
+        let mut uri = fixture
+            .downstream_path
+            .replace("$REQUESTED_MODEL", &self.requested_model());
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .header(CONTENT_TYPE, "application/json")
+            .header(&X_CLIENT_REQUEST_ID, DIRECT_CLIENT_REQUEST_ID);
+        match fixture.downstream_auth {
+            DownstreamAuth::Bearer => {
+                builder = builder.header("authorization", format!("Bearer {}", self.downstream_key))
+            }
+            DownstreamAuth::XApiKey => builder = builder.header("x-api-key", &self.downstream_key),
+            DownstreamAuth::GeminiQuery => {
+                let separator = if uri.contains('?') { '&' } else { '?' };
+                uri.push(separator);
+                uri.push_str("key=");
+                uri.push_str(&self.downstream_key);
+            }
+        }
+        let mut request = builder
+            .uri(uri)
+            .body(Body::from("{not-json"))
+            .expect("malformed downstream request should build");
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                [127, 0, 0, 1],
+                3002,
+            ))));
+        create_proxy_router(Arc::new(ClientIdentityResolver::new(
+            &ClientIdentityConfig::default(),
+        )))
+        .with_state(Arc::clone(&self.app_state))
+        .oneshot(request)
+        .await
+        .expect("proxy router should respond")
+    }
+
     async fn wait_for_log(&self, expected: RequestStatus) -> RequestLogRecord {
         let deadline = Instant::now() + WAIT_TIMEOUT;
         loop {
@@ -672,6 +781,54 @@ impl RouterFixture {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
+
+    async fn request_logs(&self) -> Vec<RequestLogRecord> {
+        self.app_state.flush_proxy_logs().await;
+        RequestLog::list_full(RequestLogQueryPayload {
+            provider_id: Some(self.provider_id),
+            model_id: Some(self.model_id),
+            page: Some(1),
+            page_size: Some(10),
+            ..Default::default()
+        })
+        .expect("request logs should be queryable")
+        .list
+    }
+
+    async fn wait_for_api_key_lease_release(&self) {
+        let deadline = Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let snapshot = self
+                .app_state
+                .api_key_governance
+                .get_api_key_governance_snapshot(self.downstream_api_key_id)
+                .await
+                .expect("API key governance snapshot should load");
+            if snapshot.current_concurrency == 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "API key request lease should release before deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+async fn assert_single_persisted_terminal_fact(
+    sink: &RecordingPersistedSink,
+    expected_stage: ExecutionStage,
+    expected_visibility: ResponseVisibility,
+) {
+    let contexts = sink.contexts.lock().await;
+    assert_eq!(
+        contexts.len(),
+        1,
+        "exactly one terminal fact should persist"
+    );
+    assert_eq!(contexts[0].final_error_stage, Some(expected_stage));
+    assert_eq!(contexts[0].response_visibility, expected_visibility);
 }
 
 fn render_value(value: &Value, requested_model: &str) -> Value {
@@ -922,6 +1079,76 @@ fn direct_execution_regression_fixtures_define_four_complete_protocols() {
     for (name, fixture) in fixtures {
         validate_fixture(name, &fixture);
     }
+}
+
+#[test]
+fn malformed_request_is_rejected_before_request_record_or_upstream_call() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        let response = router.send_malformed_generation_body(&fixture).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("parse error response body should read");
+        let body: Value =
+            serde_json::from_slice(&body).expect("parse error response should be JSON");
+        assert_eq!(body["code"], "invalid_request_error");
+        assert!(router.request_logs().await.is_empty());
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn model_resolution_preserves_parse_and_capability_error_codes() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        for (requested_model, expected_code) in [
+            ("gpt-4o", "invalid_request_error"),
+            ("missing-provider/gpt-4o", "unsupported_capability_error"),
+        ] {
+            let mut request_body = fixture.request.downstream.clone();
+            request_body
+                .as_object_mut()
+                .expect("OpenAI request fixture should be an object")
+                .insert("model".to_string(), json!(requested_model));
+
+            let response = router.send(&fixture, false, &request_body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("model resolution response body should read");
+            let body: Value =
+                serde_json::from_slice(&body).expect("model resolution response should be JSON");
+            assert_eq!(body["code"], expected_code, "{requested_model}");
+        }
+
+        assert!(router.request_logs().await.is_empty());
+        assert!(upstream.requests().await.is_empty());
+        upstream.shutdown().await;
+    });
 }
 
 #[test]
@@ -1260,6 +1487,8 @@ fn persisted_log_sink_receives_the_canonical_request_id() {
             &[RequestLogPersistedContext {
                 request_log_id: log.id,
                 request_id,
+                final_error_stage: None,
+                response_visibility: ResponseVisibility::NotVisible,
             }]
         );
         upstream.shutdown().await;
@@ -1381,7 +1610,7 @@ fn direct_execution_regression_stream_events_usage_and_single_call_golden() {
 }
 
 #[test]
-fn direct_execution_regression_upstream_429_is_safe_logged_and_never_retried() {
+fn direct_execution_regression_upstream_429_is_authentic_logged_and_never_retried() {
     for (name, fixture) in fixtures() {
         run_case(name, move |context| async move {
             let upstream = TestUpstream::spawn(ScriptedReply::Json {
@@ -1403,11 +1632,33 @@ fn direct_execution_regression_upstream_429_is_safe_logged_and_never_retried() {
                 .await
                 .unwrap();
             let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], fixture.error.downstream_code, "{name}: code");
             assert_eq!(
-                body,
-                json!({"code": fixture.error.downstream_code, "message": fixture.error.downstream_message}),
-                "{name}: safe error body"
+                body["message"], fixture.error.downstream_message,
+                "{name}: fixed gateway summary"
             );
+            assert_eq!(
+                body["upstream_error"]["status"], fixture.error.upstream_status,
+                "{name}: authentic upstream status"
+            );
+            assert_eq!(
+                body["upstream_error"]["content_type"], "application/json",
+                "{name}: upstream content type"
+            );
+            assert_eq!(
+                body["upstream_error"]["body"], fixture.error.upstream_response,
+                "{name}: complete provider JSON"
+            );
+            assert_eq!(body["upstream_error"]["truncated"], false, "{name}");
+            assert_eq!(body["upstream_error"]["limit_bytes"], 65_536, "{name}");
+            assert_eq!(
+                body["upstream_error"]["captured_bytes"],
+                serde_json::to_vec(&fixture.error.upstream_response)
+                    .expect("fixture error should serialize")
+                    .len(),
+                "{name}"
+            );
+            assert!(body["upstream_error"].get("notice").is_none(), "{name}");
             let captured = upstream.requests().await;
             assert_upstream(
                 name,
@@ -1440,6 +1691,296 @@ fn direct_execution_regression_upstream_429_is_safe_logged_and_never_retried() {
 }
 
 #[test]
+fn explicit_upstream_statuses_preserve_json_text_binary_empty_and_truncated_bodies() {
+    #[derive(Clone)]
+    enum ExpectedBody {
+        Json(Value),
+        Text(String),
+        Base64(Vec<u8>),
+    }
+
+    #[derive(Clone)]
+    struct ErrorCase {
+        name: &'static str,
+        upstream_status: StatusCode,
+        content_type: Option<&'static str>,
+        upstream_body: Vec<u8>,
+        downstream_status: StatusCode,
+        downstream_code: &'static str,
+        downstream_message: &'static str,
+        expected_body: ExpectedBody,
+        truncated: bool,
+    }
+
+    let long_body = "x".repeat(65_537);
+    let cases = [
+        ErrorCase {
+            name: "upstream-401-json",
+            upstream_status: StatusCode::UNAUTHORIZED,
+            content_type: Some("application/json"),
+            upstream_body: br#"{"detail":"invalid provider credential"}"#.to_vec(),
+            downstream_status: StatusCode::BAD_GATEWAY,
+            downstream_code: "upstream_authentication_error",
+            downstream_message: "Upstream provider rejected its credentials.",
+            expected_body: ExpectedBody::Json(json!({"detail":"invalid provider credential"})),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-403-text",
+            upstream_status: StatusCode::FORBIDDEN,
+            content_type: Some("text/plain; charset=utf-8"),
+            upstream_body: b"provider credential lacks scope".to_vec(),
+            downstream_status: StatusCode::BAD_GATEWAY,
+            downstream_code: "upstream_authentication_error",
+            downstream_message: "Upstream provider rejected its credentials.",
+            expected_body: ExpectedBody::Text("provider credential lacks scope".to_string()),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-413-text",
+            upstream_status: StatusCode::PAYLOAD_TOO_LARGE,
+            content_type: Some("text/plain"),
+            upstream_body: b"provider payload limit".to_vec(),
+            downstream_status: StatusCode::PAYLOAD_TOO_LARGE,
+            downstream_code: "upstream_payload_too_large_error",
+            downstream_message: "Upstream provider rejected the request payload as too large.",
+            expected_body: ExpectedBody::Text("provider payload limit".to_string()),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-500-binary",
+            upstream_status: StatusCode::INTERNAL_SERVER_ERROR,
+            content_type: Some("application/octet-stream"),
+            upstream_body: vec![0xff, 0x00, 0x01, 0xfe],
+            downstream_status: StatusCode::SERVICE_UNAVAILABLE,
+            downstream_code: "upstream_service_error",
+            downstream_message: "Upstream provider service failed.",
+            expected_body: ExpectedBody::Base64(vec![0xff, 0x00, 0x01, 0xfe]),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-302-empty",
+            upstream_status: StatusCode::FOUND,
+            content_type: None,
+            upstream_body: Vec::new(),
+            downstream_status: StatusCode::BAD_GATEWAY,
+            downstream_code: "upstream_unexpected_status_error",
+            downstream_message: "Upstream provider returned an unexpected HTTP status.",
+            expected_body: ExpectedBody::Text(String::new()),
+            truncated: false,
+        },
+        ErrorCase {
+            name: "upstream-400-truncated",
+            upstream_status: StatusCode::BAD_REQUEST,
+            content_type: Some("application/json"),
+            upstream_body: long_body.as_bytes().to_vec(),
+            downstream_status: StatusCode::BAD_REQUEST,
+            downstream_code: "upstream_invalid_request_error",
+            downstream_message: "Upstream provider rejected the request.",
+            expected_body: ExpectedBody::Text("x".repeat(65_536)),
+            truncated: true,
+        },
+    ];
+
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .map(|(_, fixture)| fixture)
+        .expect("openai fixture");
+
+    for case in cases {
+        let fixture = fixture.clone();
+        run_case(case.name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Raw {
+                status: case.upstream_status,
+                content_type: case.content_type.map(str::to_string),
+                body: case.upstream_body.clone(),
+            })
+            .await;
+            let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+            let response = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+            assert_eq!(response.status(), case.downstream_status, "{}", case.name);
+            assert_downstream_request_identity(&response);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("error response should read");
+            let body: Value = serde_json::from_slice(&body).expect("error response should be json");
+            assert_eq!(body["code"], case.downstream_code, "{}", case.name);
+            assert_eq!(body["message"], case.downstream_message, "{}", case.name);
+            let upstream_error = &body["upstream_error"];
+            assert_eq!(
+                upstream_error["status"],
+                case.upstream_status.as_u16(),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                upstream_error["content_type"],
+                case.content_type
+                    .map_or(Value::Null, |value| Value::String(value.to_string())),
+                "{}",
+                case.name
+            );
+            assert_eq!(upstream_error["truncated"], case.truncated, "{}", case.name);
+            assert_eq!(
+                upstream_error["captured_bytes"],
+                case.upstream_body.len().min(65_536),
+                "{}",
+                case.name
+            );
+            assert_eq!(upstream_error["limit_bytes"], 65_536, "{}", case.name);
+
+            match &case.expected_body {
+                ExpectedBody::Json(expected) => {
+                    assert_eq!(&upstream_error["body"], expected, "{}", case.name);
+                }
+                ExpectedBody::Text(expected) => {
+                    assert_eq!(&upstream_error["body_text"], expected, "{}", case.name);
+                }
+                ExpectedBody::Base64(expected) => {
+                    use base64::{Engine as _, engine::general_purpose::STANDARD};
+                    let encoded = upstream_error["body_base64"]
+                        .as_str()
+                        .expect("binary error body should be base64");
+                    assert_eq!(
+                        STANDARD.decode(encoded).expect("base64 should decode"),
+                        *expected,
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(upstream_error["body_encoding"], "base64", "{}", case.name);
+                }
+            }
+            if case.truncated {
+                assert_eq!(
+                    upstream_error["notice"], "Upstream error body was truncated by the gateway.",
+                    "{}",
+                    case.name
+                );
+                assert!(upstream_error.get("body").is_none(), "{}", case.name);
+            } else {
+                assert!(upstream_error.get("notice").is_none(), "{}", case.name);
+            }
+
+            assert_eq!(upstream.requests().await.len(), 1, "{}", case.name);
+            let log = router.wait_for_log(RequestStatus::Error).await;
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some(case.downstream_code),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                log.upstream_http_status,
+                Some(i32::from(case.upstream_status.as_u16())),
+                "{}",
+                case.name
+            );
+            if let Ok(upstream_text) = std::str::from_utf8(&case.upstream_body)
+                && !upstream_text.is_empty()
+            {
+                assert!(
+                    !log.final_error_message
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains(upstream_text),
+                    "{}: Request Log must not persist the complete upstream body",
+                    case.name
+                );
+            }
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn direct_execution_connect_failure_has_fixed_gateway_payload_without_upstream_extension() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let unused_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("unused local endpoint should bind");
+        let unused_addr = unused_listener
+            .local_addr()
+            .expect("unused local endpoint address");
+        drop(unused_listener);
+        let endpoint = format!("http://{unused_addr}");
+        let router = RouterFixture::new(context, &fixture, &endpoint).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("connect error response should read");
+        let body: Value =
+            serde_json::from_slice(&body).expect("connect error response should be json");
+        assert_eq!(body["code"], "upstream_connect_error");
+        assert_eq!(
+            body["message"],
+            "The gateway could not connect to the upstream provider."
+        );
+        assert!(body.get("upstream_error").is_none());
+
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("upstream_connect_error")
+        );
+        assert!(log.upstream_http_status.is_none());
+    });
+}
+
+#[test]
+fn direct_execution_non_stream_body_interruption_is_an_upstream_response_error() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::InterruptedBody {
+            content_type: "application/json".to_string(),
+            first_chunk: br#"{"partial":"#.to_vec(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_downstream_request_identity(&response);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response error body should read");
+        let body: Value =
+            serde_json::from_slice(&body).expect("response error should be gateway json");
+        assert_eq!(body["code"], "upstream_response_error");
+        assert_eq!(
+            body["message"],
+            "The gateway could not read a valid response from the upstream provider."
+        );
+        assert!(body.get("upstream_error").is_none());
+        assert_eq!(upstream.requests().await.len(), 1);
+
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("upstream_response_error")
+        );
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
 fn direct_execution_regression_credential_requests_never_follow_redirects() {
     for (name, fixture) in fixtures() {
         run_case(name, move |context| async move {
@@ -1463,6 +2004,15 @@ fn direct_execution_regression_credential_requests_never_follow_redirects() {
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
             assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("redirect error response should read");
+            let body: Value =
+                serde_json::from_slice(&body).expect("redirect error response should be json");
+            assert_eq!(body["code"], "upstream_unexpected_status_error");
+            assert_eq!(body["upstream_error"]["status"], 307);
+            assert_eq!(body["upstream_error"]["body_text"], "redirect");
+            assert_eq!(body["upstream_error"]["content_type"], Value::Null);
             assert_eq!(upstream.requests().await.len(), 1, "{name}");
             assert!(
                 redirect_target.requests().await.is_empty(),
@@ -1473,7 +2023,7 @@ fn direct_execution_regression_credential_requests_never_follow_redirects() {
             assert_eq!(log.upstream_http_status, Some(307), "{name}");
             assert_eq!(
                 log.final_error_code.as_deref(),
-                Some("upstream_error"),
+                Some("upstream_unexpected_status_error"),
                 "{name}"
             );
 
@@ -1588,11 +2138,25 @@ fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
         let response = router
             .send(&fixture, false, &fixture.request.downstream)
             .await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("provider configuration response should read");
+        let body: Value =
+            serde_json::from_slice(&body).expect("provider configuration response should be json");
+        assert_eq!(body["code"], "provider_configuration_error");
+        assert_eq!(
+            body["message"],
+            "The gateway provider configuration is invalid."
+        );
+        assert!(body.get("upstream_error").is_none());
         assert!(upstream.requests().await.is_empty());
         assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
         let log = router.wait_for_log(RequestStatus::Error).await;
-        assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("provider_configuration_error")
+        );
         assert!(
             log.final_error_message
                 .as_deref()
@@ -1702,11 +2266,25 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
         let response = router
             .send(&fixture, false, &fixture.request.downstream)
             .await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("proxy configuration response should read");
+        let body: Value =
+            serde_json::from_slice(&body).expect("proxy configuration response should be json");
+        assert_eq!(body["code"], "provider_configuration_error");
+        assert_eq!(
+            body["message"],
+            "The gateway provider configuration is invalid."
+        );
+        assert!(body.get("upstream_error").is_none());
         assert!(upstream.requests().await.is_empty());
         assert_eq!(router.app_state.secret_encryption.decrypt_call_count(), 0);
         let log = router.wait_for_log(RequestStatus::Error).await;
-        assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("provider_configuration_error")
+        );
         assert_eq!(
             log.final_error_message.as_deref(),
             Some("provider requires the global proxy, but no proxy is configured")
@@ -1726,6 +2304,7 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
             })
             .await;
             let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+            let persisted_sink = router.install_recording_persisted_sink();
             let response = router
                 .send(&fixture, true, &fixture.cancellation.downstream_request)
                 .await;
@@ -1764,6 +2343,36 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
             );
             assert_log_common(&router, &fixture, &log);
             assert_eq!(log.overall_status, RequestStatus::Cancelled);
+            assert_eq!(
+                log.final_error_code.as_deref(),
+                Some("client_cancelled_error")
+            );
+            assert!(
+                log.final_error_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("Client disconnected")),
+                "{name}: cancelled stream must persist a bounded operator diagnostic"
+            );
+            router.wait_for_api_key_lease_release().await;
+            assert_eq!(
+                router.request_logs().await.len(),
+                1,
+                "{name}: cancelled stream must persist exactly one terminal request log"
+            );
+            let provider_health = router
+                .app_state
+                .provider_circuit
+                .get_provider_health_snapshot(router.provider_id)
+                .await
+                .expect("provider circuit snapshot should load");
+            assert_eq!(provider_health.consecutive_failures, 0);
+            assert!(!provider_health.half_open_probe_in_flight);
+            assert_single_persisted_terminal_fact(
+                &persisted_sink,
+                ExecutionStage::DownstreamSend,
+                ResponseVisibility::BodyStarted,
+            )
+            .await;
             assert_eq!(captured.len(), 1, "{name}: cancellation must not retry");
             upstream.shutdown().await;
         });
@@ -1782,6 +2391,7 @@ fn direct_execution_regression_interrupted_stream_logs_same_request_id() {
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let persisted_sink = router.install_recording_persisted_sink();
         let response = router
             .send(&fixture, true, &fixture.cancellation.downstream_request)
             .await;
@@ -1810,7 +2420,59 @@ fn direct_execution_regression_interrupted_stream_logs_same_request_id() {
         );
         assert_log_common(&router, &fixture, &log);
         assert_eq!(log.overall_status, RequestStatus::Error);
-        assert_eq!(log.final_error_code.as_deref(), Some("upstream_error"));
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("upstream_response_error")
+        );
+        assert_single_persisted_terminal_fact(
+            &persisted_sink,
+            ExecutionStage::UpstreamResponse,
+            ResponseVisibility::BodyStarted,
+        )
+        .await;
+        assert_eq!(upstream.requests().await.len(), 1);
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn direct_execution_stream_interruption_before_first_chunk_is_headers_committed() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::InterruptedSseBeforeFirstEvent).await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let persisted_sink = router.install_recording_persisted_sink();
+
+        let response = router
+            .send(&fixture, true, &fixture.cancellation.downstream_request)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let request_id = assert_downstream_request_identity(&response);
+        let first = timeout(WAIT_TIMEOUT, response.into_body().into_data_stream().next())
+            .await
+            .expect("pre-first-chunk interruption deadline")
+            .expect("stream should yield an interruption");
+        assert!(
+            first.is_err(),
+            "downstream body should fail before its first non-empty chunk"
+        );
+
+        let log = router.wait_for_log(RequestStatus::Error).await;
+        assert_eq!(log.request_id, request_id);
+        assert_eq!(
+            log.final_error_code.as_deref(),
+            Some("upstream_response_error")
+        );
+        assert!(log.response_started_to_client_at.is_none());
+        assert_single_persisted_terminal_fact(
+            &persisted_sink,
+            ExecutionStage::UpstreamResponse,
+            ResponseVisibility::HeadersCommitted,
+        )
+        .await;
         assert_eq!(upstream.requests().await.len(), 1);
         upstream.shutdown().await;
     });

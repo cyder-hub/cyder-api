@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use axum::http::HeaderMap;
 use reqwest::header::AUTHORIZATION;
 
-use super::{ProxyError, error::ProxyLogLevel};
+use super::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, error::ProxyLogLevel};
 use crate::{
     database::api_key::{ApiKey, hash_api_key},
     service::app_state::{AppState, AppStoreError},
@@ -54,22 +54,60 @@ fn log_auth_request_rejected(
         ProxyLogLevel::Debug => crate::debug_event!(
             "auth.request_rejected",
             protocol = protocol,
-            error_code = proxy_error.error_code(),
+            error_code = proxy_error.code().as_str(),
+            stage = proxy_error.stage().as_str(),
+            response_visibility = proxy_error.response_visibility().as_str(),
             source = source,
         ),
         ProxyLogLevel::Warn => crate::warn_event!(
             "auth.request_rejected",
             protocol = protocol,
-            error_code = proxy_error.error_code(),
+            error_code = proxy_error.code().as_str(),
+            stage = proxy_error.stage().as_str(),
+            response_visibility = proxy_error.response_visibility().as_str(),
             source = source,
         ),
         ProxyLogLevel::Error => crate::error_event!(
             "auth.request_rejected",
             protocol = protocol,
-            error_code = proxy_error.error_code(),
+            error_code = proxy_error.code().as_str(),
+            stage = proxy_error.stage().as_str(),
+            response_visibility = proxy_error.response_visibility().as_str(),
             source = source,
         ),
     }
+}
+
+fn authentication_error(code: ProxyErrorCode, message: impl Into<String>) -> ProxyError {
+    let message = message.into();
+    ProxyError::gateway(
+        code,
+        ExecutionStage::Authentication,
+        ResponseVisibility::NotVisible,
+        Some(message.clone()),
+        message,
+    )
+}
+
+fn governance_error(code: ProxyErrorCode, message: impl Into<String>) -> ProxyError {
+    let message = message.into();
+    ProxyError::gateway(
+        code,
+        ExecutionStage::Governance,
+        ResponseVisibility::NotVisible,
+        Some(message.clone()),
+        message,
+    )
+}
+
+fn internal_error(stage: ExecutionStage, message: impl Into<String>) -> ProxyError {
+    ProxyError::gateway(
+        ProxyErrorCode::ServerError,
+        stage,
+        ResponseVisibility::NotVisible,
+        None,
+        message,
+    )
 }
 
 // Authenticates an OpenAI-style request (Bearer token or query param).
@@ -80,7 +118,7 @@ pub async fn authenticate_openai_request(
 ) -> Result<ApiKeyCheckResult, ProxyError> {
     let (system_api_key_str, position) =
         parse_token_from_request(headers, params).map_err(|err_msg| {
-            let proxy_error = ProxyError::Unauthorized(err_msg);
+            let proxy_error = authentication_error(ProxyErrorCode::AuthenticationError, err_msg);
             log_auth_request_rejected("openai", None, &proxy_error);
             proxy_error
         })?;
@@ -102,8 +140,9 @@ pub async fn authenticate_gemini_request(
         Some(header_value) => match header_value.to_str() {
             Ok(key) => (key.to_string(), ApiKeyPosition::XGoogApiKeyHeader),
             Err(_) => {
-                let proxy_error = ProxyError::BadRequest(
-                    "Invalid characters in X-Goog-Api-Key header".to_string(),
+                let proxy_error = authentication_error(
+                    ProxyErrorCode::AuthenticationError,
+                    "Invalid characters in X-Goog-Api-Key header",
                 );
                 log_auth_request_rejected("gemini", Some("x-goog-api-key"), &proxy_error);
                 return Err(proxy_error);
@@ -112,8 +151,9 @@ pub async fn authenticate_gemini_request(
         None => match params.get("key") {
             Some(key) => (key.clone(), ApiKeyPosition::KeyQuery),
             None => {
-                let proxy_error = ProxyError::Unauthorized(
-                    "Missing API key. Provide it in 'X-Goog-Api-Key' header or 'key' query parameter.".to_string()
+                let proxy_error = authentication_error(
+                    ProxyErrorCode::AuthenticationError,
+                    "Missing API key. Provide it in 'X-Goog-Api-Key' header or 'key' query parameter.",
                 );
                 log_auth_request_rejected("gemini", Some("key_or_x-goog-api-key"), &proxy_error);
                 return Err(proxy_error);
@@ -160,10 +200,10 @@ pub async fn check_access_control(
         provider.id,
         model.id,
     ) {
-        return Err(ProxyError::Forbidden(format!(
-            "Access denied by api key access control: {}",
-            reason,
-        )));
+        return Err(governance_error(
+            ProxyErrorCode::PermissionError,
+            format!("Access denied by api key access control: {}", reason,),
+        ));
     }
 
     Ok(())
@@ -185,56 +225,78 @@ pub async fn admit_api_key_request(
                 api_key_id = api_key.id,
                 error = message,
             );
-            Err(ProxyError::InternalError(
-                "Internal server error while evaluating API key governance".to_string(),
+            Err(internal_error(
+                ExecutionStage::Governance,
+                format!("Internal server error while evaluating API key governance: {message}"),
             ))
         }
         Err(ApiKeyGovernanceAdmissionError::RateLimited { limit, current }) => {
-            Err(ProxyError::RateLimited(format!(
-                "API key '{}' exceeded rate_limit_rpm={} (current_window_requests={})",
-                api_key.name, limit, current
-            )))
+            Err(governance_error(
+                ProxyErrorCode::RateLimitError,
+                format!(
+                    "API key '{}' exceeded rate_limit_rpm={} (current_window_requests={})",
+                    api_key.name, limit, current
+                ),
+            ))
         }
         Err(ApiKeyGovernanceAdmissionError::ConcurrencyLimited { limit, current }) => {
-            Err(ProxyError::ConcurrencyLimited(format!(
-                "API key '{}' exceeded max_concurrent_requests={} (current={})",
-                api_key.name, limit, current
-            )))
+            Err(governance_error(
+                ProxyErrorCode::ConcurrencyLimitError,
+                format!(
+                    "API key '{}' exceeded max_concurrent_requests={} (current={})",
+                    api_key.name, limit, current
+                ),
+            ))
         }
         Err(ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded { limit, current }) => {
-            Err(ProxyError::QuotaExhausted(format!(
-                "API key '{}' exhausted daily request quota {} (current={})",
-                api_key.name, limit, current
-            )))
+            Err(governance_error(
+                ProxyErrorCode::QuotaExhaustedError,
+                format!(
+                    "API key '{}' exhausted daily request quota {} (current={})",
+                    api_key.name, limit, current
+                ),
+            ))
         }
         Err(ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded { limit, current }) => {
-            Err(ProxyError::QuotaExhausted(format!(
-                "API key '{}' exhausted daily token quota {} (current={})",
-                api_key.name, limit, current
-            )))
+            Err(governance_error(
+                ProxyErrorCode::QuotaExhaustedError,
+                format!(
+                    "API key '{}' exhausted daily token quota {} (current={})",
+                    api_key.name, limit, current
+                ),
+            ))
         }
         Err(ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded { limit, current }) => {
-            Err(ProxyError::QuotaExhausted(format!(
-                "API key '{}' exhausted monthly token quota {} (current={})",
-                api_key.name, limit, current
-            )))
+            Err(governance_error(
+                ProxyErrorCode::QuotaExhaustedError,
+                format!(
+                    "API key '{}' exhausted monthly token quota {} (current={})",
+                    api_key.name, limit, current
+                ),
+            ))
         }
         Err(ApiKeyGovernanceAdmissionError::DailyBudgetExceeded {
             currency,
             limit_nanos,
             current_nanos,
-        }) => Err(ProxyError::BudgetExhausted(format!(
-            "API key '{}' exhausted daily budget {} {} (current={})",
-            api_key.name, currency, limit_nanos, current_nanos
-        ))),
+        }) => Err(governance_error(
+            ProxyErrorCode::BudgetExhaustedError,
+            format!(
+                "API key '{}' exhausted daily budget {} {} (current={})",
+                api_key.name, currency, limit_nanos, current_nanos
+            ),
+        )),
         Err(ApiKeyGovernanceAdmissionError::MonthlyBudgetExceeded {
             currency,
             limit_nanos,
             current_nanos,
-        }) => Err(ProxyError::BudgetExhausted(format!(
-            "API key '{}' exhausted monthly budget {} {} (current={})",
-            api_key.name, currency, limit_nanos, current_nanos
-        ))),
+        }) => Err(governance_error(
+            ProxyErrorCode::BudgetExhaustedError,
+            format!(
+                "API key '{}' exhausted monthly budget {} {} (current={})",
+                api_key.name, currency, limit_nanos, current_nanos
+            ),
+        )),
     }
 }
 
@@ -246,8 +308,9 @@ fn parse_anthropic_api_key_from_headers(
     if let Some(header_value) = headers.get("x-api-key") {
         return match header_value.to_str() {
             Ok(key) => Ok((key.to_string(), ApiKeyPosition::XApiKeyHeader)),
-            Err(_) => Err(ProxyError::BadRequest(
-                "Invalid characters in x-api-key header".to_string(),
+            Err(_) => Err(authentication_error(
+                ProxyErrorCode::AuthenticationError,
+                "Invalid characters in x-api-key header",
             )),
         };
     }
@@ -258,16 +321,19 @@ fn parse_anthropic_api_key_from_headers(
                 Some(token) if !token.is_empty() => {
                     Ok((token.to_string(), ApiKeyPosition::AuthorizationHeader))
                 }
-                _ => Err(ProxyError::Unauthorized(
-                    "Invalid Authorization header. Expected 'Bearer <api-key>'.".to_string(),
+                _ => Err(authentication_error(
+                    ProxyErrorCode::AuthenticationError,
+                    "Invalid Authorization header. Expected 'Bearer <api-key>'.",
                 )),
             },
-            Err(_) => Err(ProxyError::BadRequest(
-                "Invalid characters in Authorization header".to_string(),
+            Err(_) => Err(authentication_error(
+                ProxyErrorCode::AuthenticationError,
+                "Invalid characters in Authorization header",
             )),
         },
-        None => Err(ProxyError::Unauthorized(
-            "Missing API key. Provide it in 'x-api-key' header or 'Authorization: Bearer <api-key>' header.".to_string(),
+        None => Err(authentication_error(
+            ProxyErrorCode::AuthenticationError,
+            "Missing API key. Provide it in 'x-api-key' header or 'Authorization: Bearer <api-key>' header.",
         )),
     }
 }
@@ -309,20 +375,23 @@ pub async fn check_system_api_key(
             Ok(None) => classify_missing_active_api_key(key_str),
             Err(AppStoreError::LockError(e)) => {
                 crate::error_event!("auth.app_state_lock_error", error = e);
-                Err(ProxyError::InternalError(
-                    "Internal server error while checking API key".to_string(),
+                Err(internal_error(
+                    ExecutionStage::Authentication,
+                    format!("Internal server error while checking API key: {e}"),
                 ))
             }
             Err(e) => {
                 crate::error_event!("auth.app_state_error", error = format!("{e:?}"));
-                Err(ProxyError::InternalError(
-                    "Internal server error while checking API key".to_string(),
+                Err(internal_error(
+                    ExecutionStage::Authentication,
+                    format!("Internal server error while checking API key: {e:?}"),
                 ))
             }
         }
     } else {
-        Err(ProxyError::Unauthorized(
-            "Invalid api key format. Must start with 'cyder-'".to_string(),
+        Err(authentication_error(
+            ProxyErrorCode::AuthenticationError,
+            "Invalid api key format. Must start with 'cyder-'",
         ))
     }
 }
@@ -332,8 +401,9 @@ fn classify_missing_active_api_key(key_str: &str) -> Result<ApiKeyCheckResult, P
     let row = match ApiKey::get_by_hash(&key_hash) {
         Ok(row) => row,
         Err(crate::controller::BaseError::NotFound(_)) => {
-            return Err(ProxyError::Unauthorized(
-                "api key invalid or not found".to_string(),
+            return Err(authentication_error(
+                ProxyErrorCode::AuthenticationError,
+                "api key invalid or not found",
             ));
         }
         Err(err) => {
@@ -341,33 +411,35 @@ fn classify_missing_active_api_key(key_str: &str) -> Result<ApiKeyCheckResult, P
                 "auth.database_classification_error",
                 error = format!("{err:?}")
             );
-            return Err(ProxyError::InternalError(
-                "Internal server error while checking API key".to_string(),
+            return Err(internal_error(
+                ExecutionStage::Authentication,
+                format!("Internal server error while checking API key: {err:?}"),
             ));
         }
     };
 
     classify_inactive_api_key_row(&row)?;
 
-    Err(ProxyError::Unauthorized(
-        "api key invalid or not found".to_string(),
+    Err(authentication_error(
+        ProxyErrorCode::AuthenticationError,
+        "api key invalid or not found",
     ))
 }
 
 fn classify_inactive_api_key_row(row: &ApiKey) -> Result<(), ProxyError> {
     if !row.is_enabled {
-        return Err(ProxyError::KeyDisabled(format!(
-            "API key '{}' is disabled",
-            row.name
-        )));
+        return Err(authentication_error(
+            ProxyErrorCode::ApiKeyDisabledError,
+            format!("API key '{}' is disabled", row.name),
+        ));
     }
 
     if let Some(expires_at) = row.expires_at {
         if expires_at <= chrono::Utc::now().timestamp_millis() {
-            return Err(ProxyError::KeyExpired(format!(
-                "API key '{}' expired at {}",
-                row.name, expires_at
-            )));
+            return Err(authentication_error(
+                ProxyErrorCode::ApiKeyExpiredError,
+                format!("API key '{}' expired at {}", row.name, expires_at),
+            ));
         }
     }
 
@@ -377,7 +449,7 @@ fn classify_inactive_api_key_row(row: &ApiKey) -> Result<(), ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeyPosition, ProxyError, check_system_api_key, classify_inactive_api_key_row,
+        ApiKeyPosition, ProxyErrorCode, check_system_api_key, classify_inactive_api_key_row,
         parse_anthropic_api_key_from_headers,
     };
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
@@ -431,7 +503,7 @@ mod tests {
 
         let err = parse_anthropic_api_key_from_headers(&headers).unwrap_err();
 
-        assert!(matches!(err, ProxyError::Unauthorized(_)));
+        assert_eq!(err.code(), ProxyErrorCode::AuthenticationError);
     }
 
     #[test]
@@ -440,7 +512,7 @@ mod tests {
 
         let err = parse_anthropic_api_key_from_headers(&headers).unwrap_err();
 
-        assert!(matches!(err, ProxyError::Unauthorized(_)));
+        assert_eq!(err.code(), ProxyErrorCode::AuthenticationError);
     }
 
     #[test]
@@ -453,7 +525,7 @@ mod tests {
 
         let err = classify_inactive_api_key_row(&row).expect_err("disabled key should fail");
 
-        assert!(matches!(err, ProxyError::KeyDisabled(_)));
+        assert_eq!(err.code(), ProxyErrorCode::ApiKeyDisabledError);
     }
 
     #[test]
@@ -467,7 +539,7 @@ mod tests {
 
         let err = classify_inactive_api_key_row(&row).expect_err("expired key should fail");
 
-        assert!(matches!(err, ProxyError::KeyExpired(_)));
+        assert_eq!(err.code(), ProxyErrorCode::ApiKeyExpiredError);
     }
 
     #[tokio::test]
@@ -529,15 +601,17 @@ mod tests {
                     .rotate_api_key(created.detail.id)
                     .await
                     .expect("proxy key should rotate");
-                assert!(matches!(
-                    check_system_api_key(
-                        &app_state,
-                        &old_secret,
-                        ApiKeyPosition::AuthorizationHeader,
-                    )
-                    .await,
-                    Err(ProxyError::Unauthorized(_))
-                ));
+                let error = match check_system_api_key(
+                    &app_state,
+                    &old_secret,
+                    ApiKeyPosition::AuthorizationHeader,
+                )
+                .await
+                {
+                    Err(error) => error,
+                    Ok(_) => panic!("rotated API key must stop authenticating"),
+                };
+                assert_eq!(error.code(), ProxyErrorCode::AuthenticationError);
                 assert!(
                     check_system_api_key(
                         &app_state,

@@ -673,6 +673,8 @@ pub struct ProxyRequestConfig {
     pub first_byte_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub total_timeout_seconds: Option<u64>,
+    #[serde(default = "default_upstream_error_body_limit_bytes")]
+    pub upstream_error_body_limit_bytes: usize,
 }
 
 impl Default for ProxyRequestConfig {
@@ -681,11 +683,15 @@ impl Default for ProxyRequestConfig {
             connect_timeout_seconds: default_proxy_connect_timeout_seconds(),
             first_byte_timeout_seconds: default_proxy_first_byte_timeout_seconds(),
             total_timeout_seconds: None,
+            upstream_error_body_limit_bytes: default_upstream_error_body_limit_bytes(),
         }
     }
 }
 
 impl ProxyRequestConfig {
+    pub const MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES: usize = 1_024;
+    pub const MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES: usize = 1_048_576;
+
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_secs(self.connect_timeout_seconds)
     }
@@ -696,6 +702,19 @@ impl ProxyRequestConfig {
 
     pub fn total_timeout(&self) -> Option<Duration> {
         self.total_timeout_seconds.map(Duration::from_secs)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !(Self::MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES..=Self::MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES)
+            .contains(&self.upstream_error_body_limit_bytes)
+        {
+            return Err(format!(
+                "proxy_request.upstream_error_body_limit_bytes must be in {}..={}",
+                Self::MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES,
+                Self::MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -745,6 +764,10 @@ fn default_proxy_connect_timeout_seconds() -> u64 {
 
 fn default_proxy_first_byte_timeout_seconds() -> Option<u64> {
     Some(60)
+}
+
+fn default_upstream_error_body_limit_bytes() -> usize {
+    65_536
 }
 
 fn default_provider_governance_enabled() -> bool {

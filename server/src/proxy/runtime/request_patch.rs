@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     proxy::{
-        ProxyError,
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
         reasoning_suffix::{
             GeneratedReasoningPatch, ReasoningPatchContext, generate_reasoning_patches,
         },
@@ -26,6 +26,16 @@ use crate::{
     },
 };
 use cyder_tools::log::{debug, error};
+
+fn patch_error(message: impl Into<String>) -> ProxyError {
+    ProxyError::gateway(
+        ProxyErrorCode::ServerError,
+        ExecutionStage::Patch,
+        ResponseVisibility::NotVisible,
+        None,
+        message,
+    )
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeRequestPatchTrace {
@@ -47,10 +57,16 @@ impl RuntimeRequestPatchTrace {
             .collect::<Vec<_>>()
             .join("; ");
 
-        Some(ProxyError::RequestPatchConflict(format!(
-            "Request patch conflicts prevent model '{}' from being used: {}",
-            model_name, reasons
-        )))
+        Some(ProxyError::gateway(
+            ProxyErrorCode::RequestPatchConflictError,
+            ExecutionStage::Patch,
+            ResponseVisibility::NotVisible,
+            None,
+            format!(
+                "Request patch conflicts prevent model '{}' from being used: {}",
+                model_name, reasons
+            ),
+        ))
     }
 }
 
@@ -67,14 +83,14 @@ fn describe_json_kind(value: &Value) -> &'static str {
 
 fn parse_request_patch_value(rule: &RuntimeResolvedRequestPatch) -> Result<Value, ProxyError> {
     let raw = rule.value_json.as_ref().ok_or_else(|| {
-        ProxyError::InternalError(format!(
+        patch_error(format!(
             "{} is missing value_json for SET",
             rule.source_label()
         ))
     })?;
 
     serde_json::from_str(raw).map_err(|err| {
-        ProxyError::InternalError(format!(
+        patch_error(format!(
             "{} has invalid value_json: {}",
             rule.source_label(),
             err
@@ -84,7 +100,7 @@ fn parse_request_patch_value(rule: &RuntimeResolvedRequestPatch) -> Result<Value
 
 fn parse_json_pointer_segments(pointer: &str) -> Result<Vec<String>, ProxyError> {
     if pointer.is_empty() || !pointer.starts_with('/') {
-        return Err(ProxyError::InternalError(format!(
+        return Err(patch_error(format!(
             "BODY request patch target '{}' is not a valid JSON Pointer",
             pointer
         )));
@@ -102,7 +118,7 @@ fn parse_json_pointer_segments(pointer: &str) -> Result<Vec<String>, ProxyError>
                         Some('0') => decoded.push('~'),
                         Some('1') => decoded.push('/'),
                         _ => {
-                            return Err(ProxyError::InternalError(format!(
+                            return Err(patch_error(format!(
                                 "BODY request patch target '{}' contains an invalid JSON Pointer escape",
                                 pointer
                             )));
@@ -119,7 +135,7 @@ fn parse_json_pointer_segments(pointer: &str) -> Result<Vec<String>, ProxyError>
 
 fn parse_array_index(token: &str, pointer: &str) -> Result<usize, ProxyError> {
     token.parse::<usize>().map_err(|_| {
-        ProxyError::InternalError(format!(
+        patch_error(format!(
             "BODY request patch target '{}' references invalid array index '{}'",
             pointer, token
         ))
@@ -147,7 +163,7 @@ fn set_body_pointer_value(
                 let index = parse_array_index(segment, pointer)?;
                 let len = items.len();
                 let slot = items.get_mut(index).ok_or_else(|| {
-                    ProxyError::InternalError(format!(
+                    patch_error(format!(
                         "BODY request patch target '{}' is out of bounds for an array of length {}",
                         pointer, len
                     ))
@@ -162,7 +178,7 @@ fn set_body_pointer_value(
                 }
                 Ok(())
             }
-            other => Err(ProxyError::InternalError(format!(
+            other => Err(patch_error(format!(
                 "BODY request patch target '{}' cannot write through existing {}",
                 pointer,
                 describe_json_kind(other)
@@ -178,7 +194,7 @@ fn set_body_pointer_value(
                 let index = parse_array_index(segment, pointer)?;
                 let len = items.len();
                 let child = items.get_mut(index).ok_or_else(|| {
-                    ProxyError::InternalError(format!(
+                    patch_error(format!(
                         "BODY request patch target '{}' is out of bounds for an array of length {}",
                         pointer, len
                     ))
@@ -193,7 +209,7 @@ fn set_body_pointer_value(
                 }
                 unreachable!("BODY request patch SET should have promoted null to object");
             }
-            other => Err(ProxyError::InternalError(format!(
+            other => Err(patch_error(format!(
                 "BODY request patch target '{}' cannot create children under existing {}",
                 pointer,
                 describe_json_kind(other)
@@ -220,7 +236,7 @@ fn remove_body_pointer_value(
                 if index >= items.len() {
                     return Ok(());
                 }
-                Err(ProxyError::InternalError(format!(
+                Err(patch_error(format!(
                     "BODY request patch target '{}' cannot remove array elements because that rewrites message structure",
                     pointer
                 )))
@@ -252,7 +268,7 @@ fn scalar_request_patch_value(rule: &RuntimeResolvedRequestPatch) -> Result<Stri
         Value::Number(number) => Ok(number.to_string()),
         Value::Bool(boolean) => Ok(boolean.to_string()),
         Value::Null => Ok("null".to_string()),
-        other => Err(ProxyError::InternalError(format!(
+        other => Err(patch_error(format!(
             "{:?} request patch target '{}' requires a scalar JSON value, got {}",
             rule.placement,
             rule.target,
@@ -289,7 +305,7 @@ fn apply_header_request_patch(
     rule: &RuntimeResolvedRequestPatch,
 ) -> Result<(), ProxyError> {
     let header_name = HeaderName::from_bytes(rule.target.as_bytes()).map_err(|err| {
-        ProxyError::InternalError(format!(
+        patch_error(format!(
             "{} has invalid header target '{}': {}",
             rule.source_label(),
             rule.target,
@@ -305,7 +321,7 @@ fn apply_header_request_patch(
         RequestPatchOperation::Set => {
             let header_value = ReqwestHeaderValue::from_str(&scalar_request_patch_value(rule)?)
                 .map_err(|err| {
-                    ProxyError::InternalError(format!(
+                    patch_error(format!(
                         "{} has invalid header value for '{}': {}",
                         rule.source_label(),
                         rule.target,
@@ -575,19 +591,19 @@ fn generated_reasoning_patch_to_runtime(
     patch: GeneratedReasoningPatch,
 ) -> Result<RuntimeResolvedRequestPatch, ProxyError> {
     let config_id = target.reasoning_config_id.ok_or_else(|| {
-        ProxyError::InternalError(format!(
+        patch_error(format!(
             "target provider '{}' model '{}' is missing reasoning_config_id for generated patch",
             target.provider.provider_key, target.model.model_name
         ))
     })?;
     let config_preset_id = target.reasoning_config_preset_id.ok_or_else(|| {
-        ProxyError::InternalError(format!(
+        patch_error(format!(
             "target provider '{}' model '{}' is missing reasoning_config_preset_id for generated patch",
             target.provider.provider_key, target.model.model_name
         ))
     })?;
     let config_scope = target.reasoning_config_scope.ok_or_else(|| {
-        ProxyError::InternalError(format!(
+        patch_error(format!(
             "target provider '{}' model '{}' is missing reasoning_config_scope for generated patch",
             target.provider.provider_key, target.model.model_name
         ))
@@ -625,7 +641,7 @@ fn generate_target_reasoning_request_patches(
         return Ok(Vec::new());
     };
     let preset = target.reasoning_preset.ok_or_else(|| {
-        ProxyError::InternalError(format!(
+        patch_error(format!(
             "target provider '{}' model '{}' has reasoning family but no preset",
             target.provider.provider_key, target.model.model_name
         ))
@@ -636,7 +652,7 @@ fn generate_target_reasoning_request_patches(
         preset,
         ReasoningPatchContext::for_model(target.upstream_protocol, &target.model),
     )
-    .map_err(|err| ProxyError::BadRequest(err.to_string()))?
+    .map_err(|err| patch_error(err.to_string()))?
     .into_iter()
     .map(|patch| generated_reasoning_patch_to_runtime(target, patch))
     .collect()
@@ -660,13 +676,13 @@ pub(crate) async fn load_runtime_request_patch_trace(
                     "Failed to get effective request patches for model_id {}: {:?}",
                     model.id, err
                 );
-                ProxyError::InternalError(format!(
+                patch_error(format!(
                     "Failed to retrieve effective request patches for model '{}'",
                     model.model_name
                 ))
             })?
             .ok_or_else(|| {
-                ProxyError::InternalError(format!(
+                patch_error(format!(
                     "Effective request patch snapshot is missing for model '{}'",
                     model.model_name
                 ))
@@ -689,7 +705,7 @@ pub(crate) async fn load_runtime_request_patch_trace(
                 "Failed to get provider request patches for provider_id {}: {:?}",
                 provider.id, err
             );
-            ProxyError::InternalError(format!(
+            patch_error(format!(
                 "Failed to retrieve request patches for provider '{}'",
                 provider.name
             ))

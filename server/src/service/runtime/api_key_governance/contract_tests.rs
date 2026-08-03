@@ -15,7 +15,8 @@ use super::memory_store::MemoryApiKeyRuntimeStore;
 use super::redis_store::RedisApiKeyRuntimeStore;
 use super::types::{
     ApiKeyCompletionDelta, ApiKeyGovernanceAdmissionError, ApiKeyRollupBaseline,
-    ApiKeyRuntimeStore, day_bucket_start, month_bucket_start,
+    ApiKeyRuntimeStore, day_bucket_start, month_bucket_start, retry_after_to_next_day,
+    retry_after_to_next_minute, retry_after_to_next_month,
 };
 
 const TEST_REDIS_STATE_TTL: Duration = Duration::from_secs(60);
@@ -184,6 +185,7 @@ async fn assert_rpm_and_daily_request_contract(store: Arc<dyn ApiKeyRuntimeStore
         ApiKeyGovernanceAdmissionError::RateLimited {
             limit: 1,
             current: 1,
+            retry_after: retry_after_to_next_minute(now_ms + 1),
         }
     );
 
@@ -204,6 +206,7 @@ async fn assert_rpm_and_daily_request_contract(store: Arc<dyn ApiKeyRuntimeStore
         ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded {
             limit: 1,
             current: 1,
+            retry_after: retry_after_to_next_day(now_ms + 60_000),
         }
     );
 }
@@ -280,6 +283,7 @@ async fn assert_token_budget_and_completion_contract(store: Arc<dyn ApiKeyRuntim
         ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded {
             limit: 10,
             current: 10,
+            retry_after: retry_after_to_next_day(now_ms),
         }
     );
 
@@ -308,6 +312,7 @@ async fn assert_token_budget_and_completion_contract(store: Arc<dyn ApiKeyRuntim
         ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded {
             limit: 10,
             current: 10,
+            retry_after: retry_after_to_next_month(now_ms),
         }
     );
 
@@ -339,6 +344,7 @@ async fn assert_token_budget_and_completion_contract(store: Arc<dyn ApiKeyRuntim
             currency: "USD".to_string(),
             limit_nanos: 25,
             current_nanos: 25,
+            retry_after: retry_after_to_next_day(now_ms),
         }
     );
 
@@ -370,6 +376,7 @@ async fn assert_token_budget_and_completion_contract(store: Arc<dyn ApiKeyRuntim
             currency: "USD".to_string(),
             limit_nanos: 30,
             current_nanos: 30,
+            retry_after: retry_after_to_next_month(now_ms),
         }
     );
 }

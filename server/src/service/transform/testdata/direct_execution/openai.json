@@ -43,8 +43,10 @@
     "upstream_status":429,
     "upstream_response":{"error":{"message":"baseline throttled"}},
     "downstream_status":429,
-    "downstream_code":"upstream_rate_limit_error",
-    "downstream_message":"Upstream provider rate limited the request."
+    "downstream_response":{
+      "error":{"message":"Upstream provider rate limited the request.","type":"rate_limit_error","param":null,"code":"upstream_rate_limit_error"},
+      "upstream_error":{"status":429,"content_type":"application/json","body":{"error":{"message":"baseline throttled"}},"truncated":false,"captured_bytes":42,"limit_bytes":65536}
+    }
   },
   "cancellation": {
     "downstream_request":{"model":"$REQUESTED_MODEL","messages":[{"role":"user","content":"baseline ping"}],"stream":true},

@@ -11,6 +11,30 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 - Upstream: OpenAI, Responses, Anthropic, Gemini, Ollama
 - Ollama is an upstream-only protocol and has no public downstream router.
 
+## Downstream error contracts
+
+- Scope: HTTP error envelopes apply before response headers are committed: `true`.
+- After headers are committed, stream/error ownership remains with R3.11, R3.12-R3.17.
+- Ollama downstream contract: `absent`; Provider error extension location: `top_level`.
+- Every pre-commit error is JSON with `X-Request-ID`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`; Anthropic also returns `request-id`.
+- OpenAI, Responses, and Anthropic 401 responses use `WWW-Authenticate: Bearer`; Gemini does not. `Retry-After` appears only when an exact producer fact exists.
+
+### Protocol envelopes
+
+| Protocol | Envelope | Stable code path | Request ID body path | Request ID headers | Upstream error path | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| OpenAI | `openai_error` | `error.code` | `absent` | `x-request-id` | `upstream_error` | error-contract-unit, error-contract-golden, error-contract-router |
+| Responses | `openai_error` | `error.code` | `absent` | `x-request-id` | `upstream_error` | error-contract-unit, error-contract-golden, error-contract-router |
+| Anthropic | `anthropic_error` | `error.code` | `request_id` | `x-request-id`, `request-id` | `upstream_error` | error-contract-unit, error-contract-golden, error-contract-router |
+| Gemini | `google_rpc_error` | `error.details.google_rpc_error_info.metadata.cyder_code` | `error.details.google_rpc_error_info.metadata.request_id` | `x-request-id` | `upstream_error` | error-contract-unit, error-contract-golden, error-contract-router |
+
+### Router rejections
+
+| Stable code | HTTP status | Required header |
+| --- | --- | --- |
+| `route_not_found_error` | 404 | — |
+| `method_not_allowed_error` | 405 | Allow |
+
 ## Provider runtime profiles
 
 | Provider type | Upstream protocol | Dialect | Auth | Endpoint |
@@ -104,9 +128,12 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 | ID | Kind | Reference | Summary |
 | --- | --- | --- | --- |
+| `error-contract-unit` | test | `proxy::error::response::tests::protocol_error_contracts_cover_all_116_proxy_and_8_router_combinations` | Exhaustively pins all 116 ProxyError and 8 Router Rejection protocol envelopes, code paths, headers, and upstream extensions. |
+| `error-contract-golden` | test | `proxy::error_contract_regression::four_downstream_error_contracts_match_golden_fixtures` | Exercises authentic Provider 429 responses through all four real downstream routers with complete protocol bodies and one upstream call. |
+| `error-contract-router` | test | `proxy::error_contract_regression::router_and_ingress_rejections_use_protocol_contracts` | Exercises four-protocol ingress, extractor, utility, 404, 405, CORS, and Ollama boundaries through the real router. |
 | `direct-non-stream` | test | `proxy::direct_execution_regression::direct_execution_regression_non_stream_request_response_usage_and_log_golden` | Exercises routing, request materialization, non-stream response conversion, usage, logging, and one upstream call for the four representative cells. |
 | `direct-stream` | test | `proxy::direct_execution_regression::direct_execution_regression_stream_events_usage_and_single_call_golden` | Exercises streaming request materialization, ordered downstream events, text, usage, and one upstream call for the four representative cells. |
-| `direct-upstream-error` | test | `proxy::direct_execution_regression::direct_execution_regression_upstream_429_is_safe_logged_and_never_retried` | Exercises upstream error conversion, safe logging, and the no-retry contract for the four representative cells. |
+| `direct-upstream-error` | test | `proxy::direct_execution_regression::direct_execution_regression_upstream_429_is_authentic_logged_and_never_retried` | Exercises authentic upstream error conversion, complete protocol bodies, safe logging, and the no-retry contract for the four representative cells. |
 | `direct-cancellation` | test | `proxy::direct_execution_regression::direct_execution_regression_client_cancellation_closes_upstream_and_logs_cancelled` | Exercises client cancellation, upstream connection closure, cancelled logging, and the no-retry contract for the four representative cells. |
 | `direct-call-count` | test | `proxy::direct_execution_regression::four_public_downstream_generation_paths_call_upstream_at_most_once` | Pins each representative public generation path to exactly one real upstream request. |
 | `representative-fixture-scope` | test | `proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols` | Proves that the direct-execution suite contains exactly the four representative cells and no downstream Ollama fixture. |

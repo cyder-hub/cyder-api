@@ -21,13 +21,16 @@ mod utility;
 #[cfg(test)]
 mod direct_execution_regression;
 #[cfg(test)]
+mod error_contract_regression;
+#[cfg(test)]
 mod log_regression;
 
 use error::classify_request_body_error;
 pub(crate) use error::{
-    ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel, ResponseVisibility,
-    ResponseVisibilityTracker, classify_reqwest_error, classify_upstream_status,
-    protocol_transform_error,
+    ExecutionStage, ProtocolErrorResponseAdapter, ProxyError, ProxyErrorCode, ProxyLogLevel,
+    ResponseVisibility, ResponseVisibilityTracker, RouterRejection, classify_reqwest_error,
+    classify_upstream_status, protocol_transform_error,
 };
+pub(crate) use request_context::ProxyRequestContext;
 pub use router::create_proxy_router;
 pub(crate) use runtime::request_patch::{apply_request_patches, load_runtime_request_patch_trace};

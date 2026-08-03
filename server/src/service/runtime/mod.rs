@@ -4,6 +4,8 @@ pub mod provider_circuit;
 pub mod provider_key_selection;
 pub mod reasoning_continuation;
 
+#[cfg(test)]
+pub(crate) use api_key_governance::FixedApiKeyGovernanceClock;
 pub use api_key_governance::{
     ApiKeyBilledAmountSnapshot, ApiKeyCompletionDelta, ApiKeyGovernanceAdmissionError,
     ApiKeyGovernanceService, ApiKeyGovernanceSnapshot, ApiKeyRequestLease,

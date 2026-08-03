@@ -163,20 +163,33 @@ Every request under the four public proxy prefixes—`/ai/openai/*`, `/ai/respon
 
 The canonical ID is returned on success, authentication and client-identity errors, proxy-prefix 404/405 responses, and CORS preflight responses. It is sent to the selected upstream as `X-Request-ID`, included in structured request logs, and persisted in the existing Request Record paths. `X-Client-Request-ID` is never sent upstream. Manager, System, the base `/ai` fallback, and unknown `/ai/ollama/*` routes are outside this identity layer.
 
-Request Patch Create and Update reject both `x-request-id` and `x-client-request-id`; upstream response headers with those names also cannot override the gateway response. The Record page displays and copies the gateway ID, shows the optional caller ID separately, and searches both values by exact match. Request IDs are evidence keys, not metric labels, protocol-body fields, or W3C Trace IDs.
+Request Patch Create and Update reject both `x-request-id` and `x-client-request-id`; upstream response headers with those names also cannot override the gateway response. The Record page displays and copies the gateway ID, shows the optional caller ID separately, and searches both values by exact match. Request IDs are evidence keys, not metric labels or W3C Trace IDs. Protocol error bodies include the same canonical ID only where the downstream contract requires it: Anthropic at `request_id`, and Gemini in `google.rpc.ErrorInfo.metadata.request_id`.
 
 The paired R3.2 SQLite/PostgreSQL development migration is intentionally destructive for Request Records: upgrading clears historical `request_log` rows and their metrics-ingestion cursor before adding the constrained identity fields. It does not backfill legacy IDs, modify Request Patch rows, or delete already aggregated minute rollups. Back up the database first if historical pre-1.0 Request Records are needed outside Cyder.
 
 ### Proxy Errors and Upstream Provider Errors
 
-Proxy failures use a stable error fact model with 29 enumerated `code` values, 11 execution stages, and four monotonic response-visibility states: `not_visible`, `headers_committed`, `body_started`, and `unknown`. The public response contains the stable `code` and a client-safe `message`. Stage and visibility are operator facts emitted in structured events; they are not added to the current Request Record schema.
+Proxy failures use a stable error fact model with 29 enumerated `code` values, 11 execution stages, and four monotonic response-visibility states: `not_visible`, `headers_committed`, `body_started`, and `unknown`. Before response headers are committed, each public downstream protocol renders that fact in its own final envelope. Stage and visibility are operator facts emitted in structured events; they are not added to the current Request Record schema.
+
+| Downstream protocol | Envelope | Stable Cyder code | Canonical request ID |
+| --- | --- | --- | --- |
+| OpenAI | `{ "error": { "message", "type", "param": null, "code" } }` | `error.code` | `X-Request-ID` Header |
+| Responses | OpenAI-compatible error envelope | `error.code` | `X-Request-ID` Header |
+| Anthropic | `{ "type": "error", "error": { "type", "message", "code" }, "request_id" }` | `error.code` | Body `request_id`, `request-id`, and `X-Request-ID` use the same UUID |
+| Gemini | Google RPC-style `{ "error": { "code", "message", "status", "details" } }` | `error.details[0].metadata.cyder_code` | `error.details[0].metadata.request_id` and `X-Request-ID` use the same UUID |
+
+All four forms omit the old top-level `code` and `message`. The Gemini `details` array contains one `google.rpc.ErrorInfo` with domain `cyder.gateway`: its `reason` is the AIP-193-compatible uppercase form (for example, `RATE_LIMIT_ERROR`), while `metadata.cyder_code` preserves the exact lowercase Cyder stable code. Protocol-prefix 404 and 405 responses use `route_not_found_error` and `method_not_allowed_error`; 405 preserves the route's `Allow` Header. Anthropic HTTP 413 responses use the official `request_too_large` error type.
 
 When an upstream Provider explicitly returns a non-2xx HTTP response, Cyder preserves that Provider response for the current downstream caller inside the long-lived top-level `upstream_error` extension. For example, an upstream JSON 429 currently produces:
 
 ```json
 {
-  "code": "upstream_rate_limit_error",
-  "message": "Upstream provider rate limited the request.",
+  "error": {
+    "message": "Upstream provider rate limited the request.",
+    "type": "rate_limit_error",
+    "param": null,
+    "code": "upstream_rate_limit_error"
+  },
   "upstream_error": {
     "status": 429,
     "content_type": "application/json",
@@ -207,6 +220,10 @@ This is intentional pass-through diagnostics, not a claim that arbitrary Provide
 
 Gateway-owned failures—such as invalid Provider configuration, connect/request failures without an HTTP response, response-read failures, and downstream response construction failures—do not carry `upstream_error`. Their public message remains fixed while bounded operator diagnostics stay in structured logs and the existing Request Record summary fields.
 
+Every protocol error returns JSON, `X-Request-ID`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. OpenAI, Responses, and Anthropic 401 responses also return `WWW-Authenticate: Bearer`; Gemini does not. Anthropic additionally returns `request-id`. `Retry-After` is emitted only from an exact local producer fact: resettable API Key limits use their next UTC bucket, and Provider Circuit uses its supplied remaining cooldown. Concurrency, ACL, half-open probe, and Provider HTTP errors without a local recovery fact omit it. Provider response Headers are not passed through by this contract.
+
+These envelopes apply only before response Headers are committed. Errors after a streaming response is committed remain owned by the stream and protocol work tracked under R3.11 and R3.12–R3.17; Cyder does not replace an in-progress stream with a new HTTP envelope. Ollama remains upstream-only, so unknown `/ai/ollama/*` paths use the ordinary application 404 without Proxy Request ID, CORS, security Headers, authentication, or Request Records.
+
 Configure the disclosure limit in the generated or base YAML and restart:
 
 ```yaml
@@ -215,8 +232,6 @@ proxy_request:
 ```
 
 The default is 65536 bytes and the accepted startup range is 1024 through 1048576. Invalid recognized values fail startup. There is no environment-variable override or runtime write API for this field. This R3.3 limit controls what is disclosed after the current body read/decompression path; it is not yet the raw/decompressed memory hard limit or compression-bomb protection planned for R3.6.
-
-The current four downstream families share this common error JSON. R3.4 will add each protocol's final compatible envelope and required headers while preserving `upstream_error` as a top-level extension for explicit Provider responses.
 
 The only environment variables that can override final config fields are:
 

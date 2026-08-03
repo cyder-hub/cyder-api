@@ -13,7 +13,58 @@ upstream_protocols:
   - GEMINI
   - OLLAMA
 
+downstream_error_contracts:
+  scope:
+    before_headers_committed: true
+    after_headers_committed_owners: [R3.11, R3.12-R3.17]
+    ollama_downstream_contract: absent
+    upstream_error_location: top_level
+  router_rejections:
+    - { code: route_not_found_error, http_status: 404 }
+    - { code: method_not_allowed_error, http_status: 405, required_header: Allow }
+  protocols:
+    - downstream_protocol: OPENAI
+      envelope: openai_error
+      stable_code_path: error.code
+      request_id_body_path: absent
+      request_id_headers: [x-request-id]
+      upstream_error_path: upstream_error
+      evidence: [error-contract-unit, error-contract-golden, error-contract-router]
+    - downstream_protocol: RESPONSES
+      envelope: openai_error
+      stable_code_path: error.code
+      request_id_body_path: absent
+      request_id_headers: [x-request-id]
+      upstream_error_path: upstream_error
+      evidence: [error-contract-unit, error-contract-golden, error-contract-router]
+    - downstream_protocol: ANTHROPIC
+      envelope: anthropic_error
+      stable_code_path: error.code
+      request_id_body_path: request_id
+      request_id_headers: [x-request-id, request-id]
+      upstream_error_path: upstream_error
+      evidence: [error-contract-unit, error-contract-golden, error-contract-router]
+    - downstream_protocol: GEMINI
+      envelope: google_rpc_error
+      stable_code_path: error.details.google_rpc_error_info.metadata.cyder_code
+      request_id_body_path: error.details.google_rpc_error_info.metadata.request_id
+      request_id_headers: [x-request-id]
+      upstream_error_path: upstream_error
+      evidence: [error-contract-unit, error-contract-golden, error-contract-router]
+
 evidence:
+  - id: error-contract-unit
+    kind: test
+    reference: "proxy::error::response::tests::protocol_error_contracts_cover_all_116_proxy_and_8_router_combinations"
+    summary: "Exhaustively pins all 116 ProxyError and 8 Router Rejection protocol envelopes, code paths, headers, and upstream extensions."
+  - id: error-contract-golden
+    kind: test
+    reference: "proxy::error_contract_regression::four_downstream_error_contracts_match_golden_fixtures"
+    summary: "Exercises authentic Provider 429 responses through all four real downstream routers with complete protocol bodies and one upstream call."
+  - id: error-contract-router
+    kind: test
+    reference: "proxy::error_contract_regression::router_and_ingress_rejections_use_protocol_contracts"
+    summary: "Exercises four-protocol ingress, extractor, utility, 404, 405, CORS, and Ollama boundaries through the real router."
   - id: direct-non-stream
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_non_stream_request_response_usage_and_log_golden"
@@ -24,8 +75,8 @@ evidence:
     summary: "Exercises streaming request materialization, ordered downstream events, text, usage, and one upstream call for the four representative cells."
   - id: direct-upstream-error
     kind: test
-    reference: "proxy::direct_execution_regression::direct_execution_regression_upstream_429_is_safe_logged_and_never_retried"
-    summary: "Exercises upstream error conversion, safe logging, and the no-retry contract for the four representative cells."
+    reference: "proxy::direct_execution_regression::direct_execution_regression_upstream_429_is_authentic_logged_and_never_retried"
+    summary: "Exercises authentic upstream error conversion, complete protocol bodies, safe logging, and the no-retry contract for the four representative cells."
   - id: direct-cancellation
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_client_cancellation_closes_upstream_and_logs_cancelled"

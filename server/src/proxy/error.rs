@@ -3,10 +3,16 @@ use reqwest::{Error as ReqwestError, StatusCode};
 use std::fmt;
 
 pub(crate) mod fact;
+pub(crate) mod response;
 pub(crate) mod upstream;
 pub(crate) mod visibility;
 
-pub(crate) use fact::{ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel};
+#[allow(unused_imports)] // C1 exports consumed by the retry producer and HTTP adapter tasks.
+pub(crate) use fact::{
+    ErrorResponseHints, ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel,
+    RetryAfterSeconds,
+};
+pub(crate) use response::{ProtocolErrorResponseAdapter, RouterRejection};
 pub(crate) use upstream::UpstreamErrorPayload;
 pub(crate) use visibility::{ResponseVisibility, ResponseVisibilityTracker};
 
@@ -174,10 +180,12 @@ fn is_body_too_large_message(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel, ResponseVisibility,
-        classify_request_body_error, classify_upstream_status, protocol_transform_error,
+        ExecutionStage, ProtocolErrorResponseAdapter, ProxyError, ProxyErrorCode, ProxyLogLevel,
+        ResponseVisibility, classify_request_body_error, classify_upstream_status,
+        protocol_transform_error,
     };
-    use axum::{body::to_bytes, http::HeaderValue, response::IntoResponse};
+    use crate::{proxy::request_context::RequestId, schema::enum_def::DownstreamProtocol};
+    use axum::{body::to_bytes, http::HeaderValue};
     use reqwest::StatusCode;
 
     #[test]
@@ -202,8 +210,15 @@ mod tests {
         assert_eq!(error.code(), ProxyErrorCode::UpstreamRateLimitError);
         assert_eq!(error.stage(), ExecutionStage::UpstreamResponse);
         assert!(error.operator_message().contains("quota exceeded"));
+        assert_eq!(
+            error.response_hints().retry_after(),
+            None,
+            "provider Retry-After is not a local R3.4 producer fact"
+        );
 
-        let response = error.into_response();
+        let response =
+            ProtocolErrorResponseAdapter::new(DownstreamProtocol::Openai, RequestId::new())
+                .proxy_error_response(error);
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -211,7 +226,7 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be json");
         assert_eq!(
-            body["message"],
+            body["error"]["message"],
             "Upstream provider rate limited the request."
         );
         assert_eq!(body["upstream_error"]["status"], 429);

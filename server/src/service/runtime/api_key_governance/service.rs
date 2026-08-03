@@ -13,13 +13,54 @@ use super::types::{
     month_bucket_start, normalize_currency_code,
 };
 
+pub(crate) trait ApiKeyGovernanceClock: Send + Sync {
+    fn now_ms(&self) -> i64;
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct UtcApiKeyGovernanceClock;
+
+impl ApiKeyGovernanceClock for UtcApiKeyGovernanceClock {
+    fn now_ms(&self) -> i64 {
+        Utc::now().timestamp_millis()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct FixedApiKeyGovernanceClock {
+    now_ms: i64,
+}
+
+#[cfg(test)]
+impl FixedApiKeyGovernanceClock {
+    pub(crate) const fn new(now_ms: i64) -> Self {
+        Self { now_ms }
+    }
+}
+
+#[cfg(test)]
+impl ApiKeyGovernanceClock for FixedApiKeyGovernanceClock {
+    fn now_ms(&self) -> i64 {
+        self.now_ms
+    }
+}
+
 pub struct ApiKeyGovernanceService {
     store: Arc<dyn ApiKeyRuntimeStore>,
+    clock: Arc<dyn ApiKeyGovernanceClock>,
 }
 
 impl ApiKeyGovernanceService {
     pub(crate) fn new(store: Arc<dyn ApiKeyRuntimeStore>) -> Self {
-        Self { store }
+        Self::new_with_clock(store, Arc::new(UtcApiKeyGovernanceClock))
+    }
+
+    pub(crate) fn new_with_clock(
+        store: Arc<dyn ApiKeyRuntimeStore>,
+        clock: Arc<dyn ApiKeyGovernanceClock>,
+    ) -> Self {
+        Self { store, clock }
     }
 
     pub fn new_memory() -> Self {
@@ -115,7 +156,7 @@ impl ApiKeyGovernanceService {
         &self,
         api_key: &CacheApiKey,
     ) -> Result<(), ApiKeyGovernanceAdmissionError> {
-        let now_ms = Utc::now().timestamp_millis();
+        let now_ms = self.clock.now_ms();
         let baseline = self
             .rollup_baseline_for_store(api_key.id, now_ms)
             .await
@@ -134,7 +175,7 @@ impl ApiKeyGovernanceService {
         &self,
         api_key: &CacheApiKey,
     ) -> Result<Option<ApiKeyRequestLease>, ApiKeyGovernanceAdmissionError> {
-        let now_ms = Utc::now().timestamp_millis();
+        let now_ms = self.clock.now_ms();
         let baseline = self
             .rollup_baseline_for_store(api_key.id, now_ms)
             .await
@@ -170,13 +211,20 @@ impl Default for ApiKeyGovernanceService {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{ApiKeyCompletionDelta, day_bucket_start, month_bucket_start};
-    use super::ApiKeyGovernanceService;
+    use super::super::{
+        memory_store::MemoryApiKeyRuntimeStore,
+        types::{
+            ApiKeyCompletionDelta, ApiKeyGovernanceAdmissionError, day_bucket_start,
+            month_bucket_start,
+        },
+    };
+    use super::{ApiKeyGovernanceService, FixedApiKeyGovernanceClock};
     use crate::database::TestDbContext;
     use crate::database::api_key::{ApiKey, CreateApiKeyPayload};
     use crate::database::api_key_rollup::{NewApiKeyRollupDaily, NewApiKeyRollupMonthly};
     use crate::schema::enum_def::Action;
     use crate::service::cache::types::CacheApiKey;
+    use std::{sync::Arc, time::Duration};
 
     fn cache_api_key(id: i64) -> CacheApiKey {
         CacheApiKey {
@@ -223,6 +271,50 @@ mod tests {
                 assert_eq!(snapshot.current_concurrency, 0);
                 assert_eq!(snapshot.current_minute_request_count, 1);
                 assert_eq!(snapshot.daily_request_count, 1);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn fixed_clock_produces_exact_admission_reset_fact() {
+        const NOW_MS: i64 = 1_785_760_499_999;
+        let test_db_context = TestDbContext::new_sqlite("api-key-governance-fixed-clock.sqlite");
+        let service = ApiKeyGovernanceService::new_with_clock(
+            Arc::new(MemoryApiKeyRuntimeStore::default()),
+            Arc::new(FixedApiKeyGovernanceClock::new(NOW_MS)),
+        );
+
+        test_db_context
+            .run_async(async {
+                let api_key = CacheApiKey {
+                    rate_limit_rpm: Some(1),
+                    max_concurrent_requests: None,
+                    quota_daily_requests: None,
+                    quota_daily_tokens: None,
+                    quota_monthly_tokens: None,
+                    budget_daily_nanos: None,
+                    budget_daily_currency: None,
+                    budget_monthly_nanos: None,
+                    budget_monthly_currency: None,
+                    ..cache_api_key(43)
+                };
+
+                service
+                    .try_begin_api_key_request(&api_key)
+                    .await
+                    .expect("first request should be admitted");
+                let error = service
+                    .try_begin_api_key_request(&api_key)
+                    .await
+                    .expect_err("second request should be rate limited");
+                assert_eq!(
+                    error,
+                    ApiKeyGovernanceAdmissionError::RateLimited {
+                        limit: 1,
+                        current: 1,
+                        retry_after: Duration::from_millis(1),
+                    }
+                );
             })
             .await;
     }

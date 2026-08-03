@@ -1,11 +1,34 @@
-use axum::{
-    Json,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use axum::http::StatusCode;
 use serde::Serialize;
-use serde_json::{Map, Value};
-use std::fmt;
+use std::{fmt, num::NonZeroU64, time::Duration};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ErrorResponseHints {
+    retry_after: Option<RetryAfterSeconds>,
+}
+
+impl ErrorResponseHints {
+    pub(crate) const fn retry_after(self) -> Option<RetryAfterSeconds> {
+        self.retry_after
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RetryAfterSeconds(NonZeroU64);
+
+impl RetryAfterSeconds {
+    pub(crate) fn from_duration_ceil(duration: Duration) -> Self {
+        let seconds = duration
+            .as_secs()
+            .saturating_add(u64::from(duration.subsec_nanos() != 0))
+            .max(1);
+        Self(NonZeroU64::new(seconds).expect("retry-after seconds must be non-zero"))
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProxyLogLevel {
@@ -339,16 +362,6 @@ impl ClientErrorPayload {
             Self::Upstream { message, .. } => message,
         }
     }
-
-    fn insert_extension(&self, body: &mut Map<String, Value>) {
-        if let Self::Upstream { upstream_error, .. } = self {
-            body.insert(
-                "upstream_error".to_string(),
-                serde_json::to_value(upstream_error)
-                    .expect("upstream error payload serialization should be infallible"),
-            );
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -358,6 +371,7 @@ pub(crate) struct ProxyError {
     response_visibility: super::visibility::ResponseVisibility,
     client_payload: ClientErrorPayload,
     operator_message: String,
+    response_hints: ErrorResponseHints,
 }
 
 impl ProxyError {
@@ -383,6 +397,7 @@ impl ProxyError {
             response_visibility,
             client_payload: ClientErrorPayload::Gateway { message },
             operator_message: operator_message.into(),
+            response_hints: ErrorResponseHints::default(),
         }
     }
 
@@ -406,7 +421,13 @@ impl ProxyError {
                 upstream_error,
             },
             operator_message: operator_message.into(),
+            response_hints: ErrorResponseHints::default(),
         }
+    }
+
+    pub(crate) fn with_retry_after(mut self, duration: Duration) -> Self {
+        self.response_hints.retry_after = Some(RetryAfterSeconds::from_duration_ceil(duration));
+        self
     }
 
     pub(crate) const fn code(&self) -> ProxyErrorCode {
@@ -436,6 +457,14 @@ impl ProxyError {
         }
     }
 
+    pub(crate) fn public_message(&self) -> &str {
+        self.client_payload.public_message()
+    }
+
+    pub(crate) const fn response_hints(&self) -> ErrorResponseHints {
+        self.response_hints
+    }
+
     #[cfg(test)]
     pub(crate) fn client_payload(&self) -> &ClientErrorPayload {
         &self.client_payload
@@ -443,20 +472,6 @@ impl ProxyError {
 
     pub(crate) fn operator_message(&self) -> &str {
         &self.operator_message
-    }
-
-    pub(crate) fn response_body(&self) -> Value {
-        let mut body = Map::new();
-        body.insert(
-            "code".to_string(),
-            Value::String(self.code.as_str().to_string()),
-        );
-        body.insert(
-            "message".to_string(),
-            Value::String(self.client_payload.public_message().to_string()),
-        );
-        self.client_payload.insert_extension(&mut body);
-        Value::Object(body)
     }
 }
 
@@ -475,19 +490,60 @@ impl fmt::Display for ProxyError {
 
 impl std::error::Error for ProxyError {}
 
-impl IntoResponse for ProxyError {
-    fn into_response(self) -> Response {
-        crate::logging::log_proxy_error_event("proxy.error_response", None, None, &self);
-        (self.status_code(), Json(self.response_body())).into_response()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ClientErrorPayload, ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel};
+    use super::{
+        ClientErrorPayload, ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel,
+        RetryAfterSeconds,
+    };
     use crate::proxy::error::visibility::ResponseVisibility;
     use axum::http::StatusCode;
-    use std::collections::HashSet;
+    use std::{collections::HashSet, time::Duration};
+
+    #[test]
+    fn retry_after_seconds_rounds_up_and_never_represents_zero() {
+        assert_eq!(
+            RetryAfterSeconds::from_duration_ceil(Duration::ZERO).get(),
+            1
+        );
+        assert_eq!(
+            RetryAfterSeconds::from_duration_ceil(Duration::from_millis(1)).get(),
+            1
+        );
+        assert_eq!(
+            RetryAfterSeconds::from_duration_ceil(Duration::from_secs(2)).get(),
+            2
+        );
+        assert_eq!(
+            RetryAfterSeconds::from_duration_ceil(Duration::from_millis(2_001)).get(),
+            3
+        );
+    }
+
+    #[test]
+    fn proxy_error_response_hints_are_immutable_builder_facts() {
+        let error = ProxyError::gateway(
+            ProxyErrorCode::RateLimitError,
+            ExecutionStage::Governance,
+            ResponseVisibility::NotVisible,
+            None,
+            "rate limit exceeded",
+        );
+        assert_eq!(error.response_hints().retry_after(), None);
+
+        let error = error.with_retry_after(Duration::from_millis(1_001));
+        assert_eq!(
+            error
+                .response_hints()
+                .retry_after()
+                .map(|value| value.get()),
+            Some(2)
+        );
+        assert_eq!(
+            error.public_message(),
+            "The API key rate limit was exceeded."
+        );
+    }
 
     #[test]
     fn stable_error_metadata_is_exhaustive_and_unique() {
@@ -661,7 +717,7 @@ mod tests {
             "The gateway encountered an internal error."
         );
         assert_eq!(error.operator_message(), "database URL and stack detail");
-        assert!(!error.response_body().to_string().contains("database URL"));
+        assert!(!error.public_message().contains("database URL"));
     }
 
     #[test]
@@ -699,13 +755,17 @@ mod tests {
             "upstream returned HTTP 429",
         );
 
-        let body = error.response_body();
-        assert_eq!(body["code"], "upstream_rate_limit_error");
+        let upstream_error = serde_json::to_value(
+            error
+                .upstream_error()
+                .expect("explicit upstream status should retain payload"),
+        )
+        .expect("upstream payload should serialize");
         assert_eq!(
-            body["message"],
+            error.public_message(),
             "Upstream provider rate limited the request."
         );
-        assert_eq!(body["upstream_error"]["status"], 429);
+        assert_eq!(upstream_error["status"], 429);
         assert_eq!(error.code(), ProxyErrorCode::UpstreamRateLimitError);
         assert_eq!(error.stage(), ExecutionStage::UpstreamResponse);
         assert_eq!(error.response_visibility(), ResponseVisibility::NotVisible);

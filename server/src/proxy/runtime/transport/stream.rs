@@ -949,11 +949,5 @@ mod tests {
         assert_eq!(error.stage(), ExecutionStage::DownstreamSend);
         assert_eq!(error.response_visibility(), ResponseVisibility::NotVisible);
         assert!(error.upstream_error().is_none());
-        assert!(
-            error
-                .response_body()
-                .as_object()
-                .is_some_and(|body| !body.contains_key("upstream_error"))
-        );
     }
 }

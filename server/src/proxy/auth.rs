@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
 use reqwest::header::AUTHORIZATION;
@@ -98,6 +98,14 @@ fn governance_error(code: ProxyErrorCode, message: impl Into<String>) -> ProxyEr
         Some(message.clone()),
         message,
     )
+}
+
+fn governance_error_with_retry_after(
+    code: ProxyErrorCode,
+    message: impl Into<String>,
+    retry_after: Duration,
+) -> ProxyError {
+    governance_error(code, message).with_retry_after(retry_after)
 }
 
 fn internal_error(stage: ExecutionStage, message: impl Into<String>) -> ProxyError {
@@ -219,84 +227,107 @@ pub async fn admit_api_key_request(
         .await
     {
         Ok(guard) => Ok(guard),
-        Err(ApiKeyGovernanceAdmissionError::Internal(message)) => {
+        Err(error) => Err(api_key_governance_error_to_proxy_error(api_key, error)),
+    }
+}
+
+fn api_key_governance_error_to_proxy_error(
+    api_key: &CacheApiKey,
+    error: ApiKeyGovernanceAdmissionError,
+) -> ProxyError {
+    match error {
+        ApiKeyGovernanceAdmissionError::Internal(message) => {
             crate::error_event!(
                 "auth.governance_state_error",
                 api_key_id = api_key.id,
                 error = message,
             );
-            Err(internal_error(
+            internal_error(
                 ExecutionStage::Governance,
                 format!("Internal server error while evaluating API key governance: {message}"),
-            ))
+            )
         }
-        Err(ApiKeyGovernanceAdmissionError::RateLimited { limit, current }) => {
-            Err(governance_error(
-                ProxyErrorCode::RateLimitError,
-                format!(
-                    "API key '{}' exceeded rate_limit_rpm={} (current_window_requests={})",
-                    api_key.name, limit, current
-                ),
-            ))
-        }
-        Err(ApiKeyGovernanceAdmissionError::ConcurrencyLimited { limit, current }) => {
-            Err(governance_error(
-                ProxyErrorCode::ConcurrencyLimitError,
-                format!(
-                    "API key '{}' exceeded max_concurrent_requests={} (current={})",
-                    api_key.name, limit, current
-                ),
-            ))
-        }
-        Err(ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded { limit, current }) => {
-            Err(governance_error(
-                ProxyErrorCode::QuotaExhaustedError,
-                format!(
-                    "API key '{}' exhausted daily request quota {} (current={})",
-                    api_key.name, limit, current
-                ),
-            ))
-        }
-        Err(ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded { limit, current }) => {
-            Err(governance_error(
-                ProxyErrorCode::QuotaExhaustedError,
-                format!(
-                    "API key '{}' exhausted daily token quota {} (current={})",
-                    api_key.name, limit, current
-                ),
-            ))
-        }
-        Err(ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded { limit, current }) => {
-            Err(governance_error(
-                ProxyErrorCode::QuotaExhaustedError,
-                format!(
-                    "API key '{}' exhausted monthly token quota {} (current={})",
-                    api_key.name, limit, current
-                ),
-            ))
-        }
-        Err(ApiKeyGovernanceAdmissionError::DailyBudgetExceeded {
+        ApiKeyGovernanceAdmissionError::RateLimited {
+            limit,
+            current,
+            retry_after,
+        } => governance_error_with_retry_after(
+            ProxyErrorCode::RateLimitError,
+            format!(
+                "API key '{}' exceeded rate_limit_rpm={} (current_window_requests={})",
+                api_key.name, limit, current
+            ),
+            retry_after,
+        ),
+        ApiKeyGovernanceAdmissionError::ConcurrencyLimited { limit, current } => governance_error(
+            ProxyErrorCode::ConcurrencyLimitError,
+            format!(
+                "API key '{}' exceeded max_concurrent_requests={} (current={})",
+                api_key.name, limit, current
+            ),
+        ),
+        ApiKeyGovernanceAdmissionError::DailyRequestQuotaExceeded {
+            limit,
+            current,
+            retry_after,
+        } => governance_error_with_retry_after(
+            ProxyErrorCode::QuotaExhaustedError,
+            format!(
+                "API key '{}' exhausted daily request quota {} (current={})",
+                api_key.name, limit, current
+            ),
+            retry_after,
+        ),
+        ApiKeyGovernanceAdmissionError::DailyTokenQuotaExceeded {
+            limit,
+            current,
+            retry_after,
+        } => governance_error_with_retry_after(
+            ProxyErrorCode::QuotaExhaustedError,
+            format!(
+                "API key '{}' exhausted daily token quota {} (current={})",
+                api_key.name, limit, current
+            ),
+            retry_after,
+        ),
+        ApiKeyGovernanceAdmissionError::MonthlyTokenQuotaExceeded {
+            limit,
+            current,
+            retry_after,
+        } => governance_error_with_retry_after(
+            ProxyErrorCode::QuotaExhaustedError,
+            format!(
+                "API key '{}' exhausted monthly token quota {} (current={})",
+                api_key.name, limit, current
+            ),
+            retry_after,
+        ),
+        ApiKeyGovernanceAdmissionError::DailyBudgetExceeded {
             currency,
             limit_nanos,
             current_nanos,
-        }) => Err(governance_error(
+            retry_after,
+        } => governance_error_with_retry_after(
             ProxyErrorCode::BudgetExhaustedError,
             format!(
                 "API key '{}' exhausted daily budget {} {} (current={})",
                 api_key.name, currency, limit_nanos, current_nanos
             ),
-        )),
-        Err(ApiKeyGovernanceAdmissionError::MonthlyBudgetExceeded {
+            retry_after,
+        ),
+        ApiKeyGovernanceAdmissionError::MonthlyBudgetExceeded {
             currency,
             limit_nanos,
             current_nanos,
-        }) => Err(governance_error(
+            retry_after,
+        } => governance_error_with_retry_after(
             ProxyErrorCode::BudgetExhaustedError,
             format!(
                 "API key '{}' exhausted monthly budget {} {} (current={})",
                 api_key.name, currency, limit_nanos, current_nanos
             ),
-        )),
+            retry_after,
+        ),
     }
 }
 
@@ -449,12 +480,13 @@ fn classify_inactive_api_key_row(row: &ApiKey) -> Result<(), ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKeyPosition, ProxyErrorCode, check_system_api_key, classify_inactive_api_key_row,
+        ApiKeyPosition, ProxyErrorCode, api_key_governance_error_to_proxy_error,
+        check_system_api_key, classify_inactive_api_key_row, governance_error,
         parse_anthropic_api_key_from_headers,
     };
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
     use chrono::Utc;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     use crate::config::SecretEncryptionConfig;
     use crate::database::TestDbContext;
@@ -463,6 +495,72 @@ mod tests {
     use crate::service::admin::AdminServices;
     use crate::service::app_state::create_test_app_state;
     use crate::service::secret_encryption::SecretEncryptionService;
+    use crate::service::{cache::types::CacheApiKey, runtime::ApiKeyGovernanceAdmissionError};
+
+    fn governance_cache_api_key() -> CacheApiKey {
+        CacheApiKey {
+            id: 42,
+            api_key_hash: "hash".to_string(),
+            key_prefix: "cyder-prefix".to_string(),
+            key_last4: "1234".to_string(),
+            name: "governed".to_string(),
+            description: None,
+            default_action: Action::Allow,
+            is_enabled: true,
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: vec![],
+        }
+    }
+
+    #[test]
+    fn governance_reset_facts_map_to_proxy_hints_without_guessing_unknown_times() {
+        let api_key = governance_cache_api_key();
+        let rate_error = api_key_governance_error_to_proxy_error(
+            &api_key,
+            ApiKeyGovernanceAdmissionError::RateLimited {
+                limit: 1,
+                current: 1,
+                retry_after: Duration::from_millis(1),
+            },
+        );
+        assert_eq!(rate_error.code(), ProxyErrorCode::RateLimitError);
+        assert_eq!(
+            rate_error
+                .response_hints()
+                .retry_after()
+                .map(|value| value.get()),
+            Some(1)
+        );
+
+        let concurrency_error = api_key_governance_error_to_proxy_error(
+            &api_key,
+            ApiKeyGovernanceAdmissionError::ConcurrencyLimited {
+                limit: 1,
+                current: 1,
+            },
+        );
+        assert_eq!(
+            concurrency_error.response_hints().retry_after(),
+            None,
+            "concurrency recovery depends on another request completing"
+        );
+
+        let acl_error = governance_error(ProxyErrorCode::PermissionError, "denied by ACL");
+        assert_eq!(
+            acl_error.response_hints().retry_after(),
+            None,
+            "ACL rejection is a configuration fact, not a recovery timer"
+        );
+    }
 
     #[test]
     fn proxy_auth_anthropic_prefers_x_api_key_over_authorization() {

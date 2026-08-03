@@ -23,11 +23,69 @@ struct CompatibilityMatrix {
     schema_version: u32,
     downstream_protocols: Vec<DownstreamProtocol>,
     upstream_protocols: Vec<UpstreamProtocol>,
+    downstream_error_contracts: DownstreamErrorContracts,
     evidence: Vec<Evidence>,
     provider_profiles: Vec<ProviderProfileContract>,
     routes: Vec<RouteContract>,
     generation_cells: Vec<GenerationCell>,
     utilities: Vec<UtilityContract>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DownstreamErrorContracts {
+    scope: ErrorContractScope,
+    router_rejections: Vec<RouterRejectionContract>,
+    protocols: Vec<ProtocolErrorContract>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ErrorContractScope {
+    before_headers_committed: bool,
+    after_headers_committed_owners: Vec<String>,
+    ollama_downstream_contract: ContractPresence,
+    upstream_error_location: ExtensionLocation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ContractPresence {
+    Absent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ExtensionLocation {
+    TopLevel,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RouterRejectionContract {
+    code: String,
+    http_status: u16,
+    required_header: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ProtocolErrorContract {
+    downstream_protocol: DownstreamProtocol,
+    envelope: ErrorEnvelope,
+    stable_code_path: String,
+    request_id_body_path: String,
+    request_id_headers: Vec<String>,
+    upstream_error_path: String,
+    evidence: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ErrorEnvelope {
+    OpenaiError,
+    AnthropicError,
+    GoogleRpcError,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -335,11 +393,151 @@ fn validate_matrix(matrix: &CompatibilityMatrix) -> Result<(), String> {
     }
 
     let evidence = validate_evidence(&matrix.evidence)?;
+    validate_downstream_error_contracts(&matrix.downstream_error_contracts, &evidence)?;
     validate_provider_profiles(&matrix.provider_profiles)?;
     validate_routes(&matrix.routes)?;
     validate_generation_cells(&matrix.generation_cells, &evidence)?;
     validate_utilities(&matrix.utilities, &evidence)?;
     Ok(())
+}
+
+const REQUIRED_ERROR_EVIDENCE: [(&str, &str); 3] = [
+    (
+        "error-contract-unit",
+        "proxy::error::response::tests::protocol_error_contracts_cover_all_116_proxy_and_8_router_combinations",
+    ),
+    (
+        "error-contract-golden",
+        "proxy::error_contract_regression::four_downstream_error_contracts_match_golden_fixtures",
+    ),
+    (
+        "error-contract-router",
+        "proxy::error_contract_regression::router_and_ingress_rejections_use_protocol_contracts",
+    ),
+];
+
+fn validate_downstream_error_contracts(
+    contracts: &DownstreamErrorContracts,
+    evidence: &HashMap<&str, &Evidence>,
+) -> Result<(), String> {
+    let expected = expected_downstream_error_contracts();
+    if contracts.scope != expected.scope {
+        return Err(
+            "downstream error scope must pin pre-commit handling, stream owners, absent Ollama downstream, and top-level upstream_error"
+                .to_string(),
+        );
+    }
+    if contracts.router_rejections != expected.router_rejections {
+        return Err(
+            "downstream error router rejections must exactly pin 404, 405, and Allow".to_string(),
+        );
+    }
+    if contracts.protocols.len() != DownstreamProtocol::ALL.len() {
+        return Err(format!(
+            "downstream error contracts must contain exactly {} protocols, found {}",
+            DownstreamProtocol::ALL.len(),
+            contracts.protocols.len()
+        ));
+    }
+    for (index, (contract, expected_contract)) in contracts
+        .protocols
+        .iter()
+        .zip(expected.protocols.iter())
+        .enumerate()
+    {
+        if contract.downstream_protocol != DownstreamProtocol::ALL[index] {
+            return Err(
+                "downstream error protocols must follow DownstreamProtocol::ALL with no duplicates"
+                    .to_string(),
+            );
+        }
+        if contract != expected_contract {
+            return Err(format!(
+                "downstream error contract for {:?} has an invalid envelope, path, header, or evidence list",
+                contract.downstream_protocol
+            ));
+        }
+    }
+
+    for (id, reference) in REQUIRED_ERROR_EVIDENCE {
+        let item = evidence
+            .get(id)
+            .ok_or_else(|| format!("downstream error contracts require evidence '{id}'"))?;
+        if item.kind != EvidenceKind::Test || item.reference != reference {
+            return Err(format!(
+                "downstream error evidence '{id}' must reference stable automated test '{reference}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expected_downstream_error_contracts() -> DownstreamErrorContracts {
+    let evidence = vec![
+        "error-contract-unit".to_string(),
+        "error-contract-golden".to_string(),
+        "error-contract-router".to_string(),
+    ];
+    DownstreamErrorContracts {
+        scope: ErrorContractScope {
+            before_headers_committed: true,
+            after_headers_committed_owners: vec!["R3.11".to_string(), "R3.12-R3.17".to_string()],
+            ollama_downstream_contract: ContractPresence::Absent,
+            upstream_error_location: ExtensionLocation::TopLevel,
+        },
+        router_rejections: vec![
+            RouterRejectionContract {
+                code: "route_not_found_error".to_string(),
+                http_status: 404,
+                required_header: None,
+            },
+            RouterRejectionContract {
+                code: "method_not_allowed_error".to_string(),
+                http_status: 405,
+                required_header: Some("Allow".to_string()),
+            },
+        ],
+        protocols: vec![
+            ProtocolErrorContract {
+                downstream_protocol: DownstreamProtocol::Openai,
+                envelope: ErrorEnvelope::OpenaiError,
+                stable_code_path: "error.code".to_string(),
+                request_id_body_path: "absent".to_string(),
+                request_id_headers: vec!["x-request-id".to_string()],
+                upstream_error_path: "upstream_error".to_string(),
+                evidence: evidence.clone(),
+            },
+            ProtocolErrorContract {
+                downstream_protocol: DownstreamProtocol::Responses,
+                envelope: ErrorEnvelope::OpenaiError,
+                stable_code_path: "error.code".to_string(),
+                request_id_body_path: "absent".to_string(),
+                request_id_headers: vec!["x-request-id".to_string()],
+                upstream_error_path: "upstream_error".to_string(),
+                evidence: evidence.clone(),
+            },
+            ProtocolErrorContract {
+                downstream_protocol: DownstreamProtocol::Anthropic,
+                envelope: ErrorEnvelope::AnthropicError,
+                stable_code_path: "error.code".to_string(),
+                request_id_body_path: "request_id".to_string(),
+                request_id_headers: vec!["x-request-id".to_string(), "request-id".to_string()],
+                upstream_error_path: "upstream_error".to_string(),
+                evidence: evidence.clone(),
+            },
+            ProtocolErrorContract {
+                downstream_protocol: DownstreamProtocol::Gemini,
+                envelope: ErrorEnvelope::GoogleRpcError,
+                stable_code_path: "error.details.google_rpc_error_info.metadata.cyder_code"
+                    .to_string(),
+                request_id_body_path: "error.details.google_rpc_error_info.metadata.request_id"
+                    .to_string(),
+                request_id_headers: vec!["x-request-id".to_string()],
+                upstream_error_path: "upstream_error".to_string(),
+                evidence,
+            },
+        ],
+    }
 }
 
 fn validate_evidence(items: &[Evidence]) -> Result<HashMap<&str, &Evidence>, String> {
@@ -829,6 +1027,82 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
     )
     .unwrap();
 
+    let error_contracts = &matrix.downstream_error_contracts;
+    writeln!(output, "\n## Downstream error contracts\n").unwrap();
+    writeln!(
+        output,
+        "- Scope: HTTP error envelopes apply before response headers are committed: `{}`.",
+        error_contracts.scope.before_headers_committed
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- After headers are committed, stream/error ownership remains with {}.",
+        error_contracts
+            .scope
+            .after_headers_committed_owners
+            .join(", ")
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Ollama downstream contract: `{}`; Provider error extension location: `{}`.",
+        contract_presence_label(error_contracts.scope.ollama_downstream_contract),
+        extension_location_label(error_contracts.scope.upstream_error_location)
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Every pre-commit error is JSON with `X-Request-ID`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`; Anthropic also returns `request-id`."
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- OpenAI, Responses, and Anthropic 401 responses use `WWW-Authenticate: Bearer`; Gemini does not. `Retry-After` appears only when an exact producer fact exists."
+    )
+    .unwrap();
+
+    writeln!(output, "\n### Protocol envelopes\n").unwrap();
+    writeln!(
+        output,
+        "| Protocol | Envelope | Stable code path | Request ID body path | Request ID headers | Upstream error path | Evidence |"
+    )
+    .unwrap();
+    writeln!(output, "| --- | --- | --- | --- | --- | --- | --- |").unwrap();
+    for contract in &error_contracts.protocols {
+        writeln!(
+            output,
+            "| {} | `{}` | `{}` | `{}` | {} | `{}` | {} |",
+            downstream_label(contract.downstream_protocol),
+            error_envelope_label(contract.envelope),
+            contract.stable_code_path,
+            contract.request_id_body_path,
+            contract
+                .request_id_headers
+                .iter()
+                .map(|header| format!("`{header}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            contract.upstream_error_path,
+            contract.evidence.join(", ")
+        )
+        .unwrap();
+    }
+
+    writeln!(output, "\n### Router rejections\n").unwrap();
+    writeln!(output, "| Stable code | HTTP status | Required header |").unwrap();
+    writeln!(output, "| --- | --- | --- |").unwrap();
+    for rejection in &error_contracts.router_rejections {
+        writeln!(
+            output,
+            "| `{}` | {} | {} |",
+            rejection.code,
+            rejection.http_status,
+            rejection.required_header.as_deref().unwrap_or("—")
+        )
+        .unwrap();
+    }
+
     writeln!(output, "\n## Provider runtime profiles\n").unwrap();
     writeln!(
         output,
@@ -1104,6 +1378,26 @@ const fn evidence_kind_label(value: EvidenceKind) -> &'static str {
     }
 }
 
+const fn contract_presence_label(value: ContractPresence) -> &'static str {
+    match value {
+        ContractPresence::Absent => "absent",
+    }
+}
+
+const fn extension_location_label(value: ExtensionLocation) -> &'static str {
+    match value {
+        ExtensionLocation::TopLevel => "top_level",
+    }
+}
+
+const fn error_envelope_label(value: ErrorEnvelope) -> &'static str {
+    match value {
+        ErrorEnvelope::OpenaiError => "openai_error",
+        ErrorEnvelope::AnthropicError => "anthropic_error",
+        ErrorEnvelope::GoogleRpcError => "google_rpc_error",
+    }
+}
+
 fn verify_rendered(expected: &str, actual: &str) -> Result<(), String> {
     if expected == actual {
         Ok(())
@@ -1130,6 +1424,91 @@ mod tests {
         let matrix = canonical_matrix();
         validate_matrix(&matrix).expect("canonical matrix should validate");
         assert_eq!(render_markdown(&matrix), render_markdown(&matrix));
+    }
+
+    #[test]
+    fn missing_downstream_error_protocol_is_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.downstream_error_contracts.protocols.pop();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("exactly 4 protocols")
+        );
+    }
+
+    #[test]
+    fn duplicate_downstream_error_protocol_is_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.downstream_error_contracts.protocols[1].downstream_protocol =
+            DownstreamProtocol::Openai;
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("DownstreamProtocol::ALL with no duplicates")
+        );
+    }
+
+    #[test]
+    fn ollama_downstream_error_protocol_is_rejected_during_yaml_parse() {
+        let invalid = CANONICAL_SOURCE.replacen(
+            "    - downstream_protocol: GEMINI\n      envelope: google_rpc_error",
+            "    - downstream_protocol: OLLAMA\n      envelope: google_rpc_error",
+            1,
+        );
+        assert!(serde_yaml::from_str::<CompatibilityMatrix>(&invalid).is_err());
+    }
+
+    #[test]
+    fn downstream_error_code_path_drift_is_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.downstream_error_contracts.protocols[0].stable_code_path = "code".to_string();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("invalid envelope, path, header, or evidence list")
+        );
+    }
+
+    #[test]
+    fn downstream_error_contract_missing_test_evidence_is_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix.downstream_error_contracts.protocols[0]
+            .evidence
+            .pop();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("invalid envelope, path, header, or evidence list")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix
+            .evidence
+            .retain(|item| item.id != "error-contract-router");
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("require evidence 'error-contract-router'")
+        );
+    }
+
+    #[test]
+    fn downstream_error_scope_and_router_drift_are_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix
+            .downstream_error_contracts
+            .scope
+            .before_headers_committed = false;
+        assert!(validate_matrix(&matrix).unwrap_err().contains("scope"));
+
+        let mut matrix = canonical_matrix();
+        matrix.downstream_error_contracts.router_rejections[1].required_header = None;
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("404, 405, and Allow")
+        );
     }
 
     #[test]

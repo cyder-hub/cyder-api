@@ -15,7 +15,11 @@ use ipnet::IpNet;
 
 use crate::{
     config::ClientIdentityConfig,
-    proxy::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility},
+    proxy::{
+        ExecutionStage, ProtocolErrorResponseAdapter, ProxyError, ProxyErrorCode,
+        ProxyRequestContext, ResponseVisibility,
+    },
+    schema::enum_def::DownstreamProtocol,
 };
 
 const FORWARDED: &str = "forwarded";
@@ -270,7 +274,8 @@ pub async fn manager_client_identity_middleware(
 }
 
 pub async fn proxy_client_identity_middleware(
-    State(resolver): State<Arc<ClientIdentityResolver>>,
+    resolver: Arc<ClientIdentityResolver>,
+    downstream_protocol: DownstreamProtocol,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -279,23 +284,44 @@ pub async fn proxy_client_identity_middleware(
             request.extensions_mut().insert(identity);
             next.run(request).await
         }
-        Err(HttpClientIdentityError::MissingConnectInfo) => ProxyError::gateway(
-            ProxyErrorCode::ServerError,
-            ExecutionStage::Receive,
-            ResponseVisibility::NotVisible,
-            None,
-            "client identity unavailable",
-        )
-        .into_response(),
-        Err(HttpClientIdentityError::InvalidForwardingMetadata) => ProxyError::gateway(
-            ProxyErrorCode::InvalidRequestError,
-            ExecutionStage::Receive,
-            ResponseVisibility::NotVisible,
-            Some("invalid client forwarding metadata".to_string()),
-            "invalid client forwarding metadata",
-        )
-        .into_response(),
+        Err(HttpClientIdentityError::MissingConnectInfo) => proxy_client_identity_error_response(
+            &request,
+            downstream_protocol,
+            ProxyError::gateway(
+                ProxyErrorCode::ServerError,
+                ExecutionStage::Receive,
+                ResponseVisibility::NotVisible,
+                None,
+                "client identity unavailable",
+            ),
+        ),
+        Err(HttpClientIdentityError::InvalidForwardingMetadata) => {
+            proxy_client_identity_error_response(
+                &request,
+                downstream_protocol,
+                ProxyError::gateway(
+                    ProxyErrorCode::InvalidRequestError,
+                    ExecutionStage::Receive,
+                    ResponseVisibility::NotVisible,
+                    Some("invalid client forwarding metadata".to_string()),
+                    "invalid client forwarding metadata",
+                ),
+            )
+        }
     }
+}
+
+fn proxy_client_identity_error_response(
+    request: &Request<Body>,
+    downstream_protocol: DownstreamProtocol,
+    error: ProxyError,
+) -> Response {
+    let request_context = request
+        .extensions()
+        .get::<Arc<ProxyRequestContext>>()
+        .expect("proxy client identity must run after request identity middleware");
+    ProtocolErrorResponseAdapter::new(downstream_protocol, request_context.request_id.clone())
+        .proxy_error_response(error)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,57 @@
+{
+  "protocol": "GEMINI",
+  "authentication": {
+    "status": 401,
+    "body": {"error":{"code":401,"message":"Missing API key. Provide it in 'X-Goog-Api-Key' header or 'key' query parameter.","status":"UNAUTHENTICATED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"AUTHENTICATION_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"authentication_error"}}]}},
+    "cors": true
+  },
+  "rate_limit": {
+    "status": 429,
+    "body": {"error":{"code":429,"message":"API key '$API_KEY_NAME' exceeded rate_limit_rpm=1 (current_window_requests=1)","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"rate_limit_error"}}]}},
+    "cors": true,
+    "retry_after": "1"
+  },
+  "capability": {
+    "status": 400,
+    "body": {"error":{"code":400,"message":"Enabled provider 'missing-provider' was not found.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_CAPABILITY_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"unsupported_capability_error"}}]}},
+    "cors": true
+  },
+  "provider": {
+    "status": 429,
+    "body": {"error":{"code":429,"message":"Upstream provider rate limited the request.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UPSTREAM_RATE_LIMIT_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"upstream_rate_limit_error"}}]},"upstream_error":{"status":429,"content_type":"application/json","body":{"error":{"message":"baseline throttled"}},"truncated":false,"captured_bytes":42,"limit_bytes":65536}},
+    "cors": true
+  },
+  "internal": {
+    "status": 500,
+    "body": {"error":{"code":500,"message":"The gateway encountered an internal error.","status":"INTERNAL","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVER_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"server_error"}}]}},
+    "cors": false
+  },
+  "query_rejection": {
+    "status": 400,
+    "body": {"error":{"code":400,"message":"The request query parameters are invalid.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"INVALID_REQUEST_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"invalid_request_error"}}]}},
+    "cors": true
+  },
+  "path_rejection": {
+    "status": 400,
+    "body": {"error":{"code":400,"message":"The request path parameters are invalid.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"INVALID_REQUEST_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"invalid_request_error"}}]}},
+    "cors": true
+  },
+  "route_not_found": {
+    "status": 404,
+    "body": {"error":{"code":404,"message":"The requested gateway route was not found.","status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"ROUTE_NOT_FOUND_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"route_not_found_error"}}]}},
+    "cors": true
+  },
+  "method_not_allowed": {
+    "status": 405,
+    "body": {"error":{"code":405,"message":"The requested HTTP method is not allowed for this gateway route.","status":"UNIMPLEMENTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"METHOD_NOT_ALLOWED_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"method_not_allowed_error"}}]}},
+    "cors": true,
+    "allow": "POST"
+  },
+  "utility_rejections": {
+    "countTokens": {
+      "status": 400,
+      "body": {"error":{"code":400,"message":"Action 'countTokens' is only supported for Gemini-compatible providers.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_CAPABILITY_ERROR","domain":"cyder.gateway","metadata":{"request_id":"$REQUEST_ID","cyder_code":"unsupported_capability_error"}}]}},
+      "cors": true
+    }
+  }
+}

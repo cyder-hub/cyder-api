@@ -94,24 +94,24 @@ struct GoldenEvent {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum DownstreamAuth {
+pub(super) enum DownstreamAuth {
     Bearer,
     XApiKey,
     GeminiQuery,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct RequestGolden {
-    downstream: Value,
-    upstream: Value,
-    upstream_path: String,
+pub(super) struct RequestGolden {
+    pub(super) downstream: Value,
+    pub(super) upstream: Value,
+    pub(super) upstream_path: String,
     #[serde(default)]
     upstream_query: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct NonStreamGolden {
-    upstream_response: Value,
+pub(super) struct NonStreamGolden {
+    pub(super) upstream_response: Value,
     downstream_status: u16,
     downstream_content_type: String,
     downstream_response: Value,
@@ -138,13 +138,12 @@ struct UsageGolden {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct ErrorGolden {
-    downstream_request: Value,
-    upstream_status: u16,
-    upstream_response: Value,
-    downstream_status: u16,
-    downstream_code: String,
-    downstream_message: String,
+pub(super) struct ErrorGolden {
+    pub(super) downstream_request: Value,
+    pub(super) upstream_status: u16,
+    pub(super) upstream_response: Value,
+    pub(super) downstream_status: u16,
+    pub(super) downstream_response: Value,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -159,22 +158,22 @@ struct CancellationGolden {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct DirectExecutionFixture {
-    protocol: DownstreamProtocol,
-    provider_type: ProviderType,
-    downstream_path: String,
+pub(super) struct DirectExecutionFixture {
+    pub(super) protocol: DownstreamProtocol,
+    pub(super) provider_type: ProviderType,
+    pub(super) downstream_path: String,
     downstream_stream_path: String,
-    downstream_auth: DownstreamAuth,
+    pub(super) downstream_auth: DownstreamAuth,
     upstream_headers: BTreeMap<String, String>,
-    request: RequestGolden,
-    non_stream: NonStreamGolden,
+    pub(super) request: RequestGolden,
+    pub(super) non_stream: NonStreamGolden,
     stream: StreamGolden,
     usage: UsageGolden,
-    error: ErrorGolden,
+    pub(super) error: ErrorGolden,
     cancellation: CancellationGolden,
 }
 
-fn fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
+pub(super) fn fixtures() -> Vec<(&'static str, DirectExecutionFixture)> {
     FIXTURE_SOURCES
         .iter()
         .map(|(name, source)| {
@@ -236,13 +235,17 @@ fn validate_fixture(name: &str, fixture: &DirectExecutionFixture) {
         (11, 7, 18)
     );
     assert_eq!(fixture.error.upstream_status, 429, "{name}: error sample");
+    assert!(
+        fixture.error.downstream_response.is_object(),
+        "{name}: error downstream response"
+    );
     assert_eq!(
         fixture.cancellation.expected_status,
         RequestStatus::Cancelled
     );
 }
 
-fn run_case<F, Fut>(name: &str, test: F)
+pub(super) fn run_case<F, Fut>(name: &str, test: F)
 where
     F: FnOnce(TestDbContext) -> Fut,
     Fut: Future<Output = ()> + 'static,
@@ -262,7 +265,7 @@ where
 }
 
 #[derive(Clone, Debug)]
-struct CapturedRequest {
+pub(super) struct CapturedRequest {
     method: Method,
     path: String,
     query: Option<String>,
@@ -333,14 +336,18 @@ enum ScriptedReply {
     },
 }
 
-struct TestUpstream {
-    base_url: String,
+pub(super) struct TestUpstream {
+    pub(super) base_url: String,
     captured: Arc<AsyncMutex<Vec<CapturedRequest>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
 }
 
 impl TestUpstream {
+    pub(super) async fn spawn_json(status: StatusCode, body: Value) -> Self {
+        Self::spawn(ScriptedReply::Json { status, body }).await
+    }
+
     async fn spawn(reply: ScriptedReply) -> Self {
         let captured = Arc::new(AsyncMutex::new(Vec::new()));
         let router = axum::Router::new().fallback(any({
@@ -474,11 +481,11 @@ impl TestUpstream {
         }
     }
 
-    async fn requests(&self) -> Vec<CapturedRequest> {
+    pub(super) async fn requests(&self) -> Vec<CapturedRequest> {
         self.captured.lock().await.clone()
     }
 
-    async fn shutdown(mut self) {
+    pub(super) async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -498,10 +505,11 @@ impl Drop for TestUpstream {
     }
 }
 
-struct RouterFixture {
-    app_state: Arc<AppState>,
-    downstream_key: String,
-    downstream_api_key_id: i64,
+pub(super) struct RouterFixture {
+    pub(super) app_state: Arc<AppState>,
+    pub(super) downstream_key: String,
+    pub(super) downstream_key_name: String,
+    pub(super) downstream_api_key_id: i64,
     provider_id: i64,
     provider_key: String,
     provider_name: String,
@@ -523,7 +531,11 @@ impl RequestLogPersistedSink for RecordingPersistedSink {
 }
 
 impl RouterFixture {
-    async fn new(context: TestDbContext, fixture: &DirectExecutionFixture, base_url: &str) -> Self {
+    pub(super) async fn new(
+        context: TestDbContext,
+        fixture: &DirectExecutionFixture,
+        base_url: &str,
+    ) -> Self {
         Self::new_with_default_action(context, fixture, base_url, Action::Allow).await
     }
 
@@ -559,8 +571,9 @@ impl RouterFixture {
             })
             .await
             .expect("provider fixture should bootstrap");
+        let downstream_key_name = format!("direct-execution-key-{nonce}");
         let created_key = ApiKey::create(&CreateApiKeyPayload {
-            name: format!("direct-execution-key-{nonce}"),
+            name: downstream_key_name.clone(),
             description: Some("direct execution regression".to_string()),
             default_action: Some(default_action),
             is_enabled: Some(true),
@@ -582,6 +595,7 @@ impl RouterFixture {
         Self {
             app_state,
             downstream_key,
+            downstream_key_name,
             downstream_api_key_id,
             provider_id: bootstrapped.provider.id,
             provider_key,
@@ -592,7 +606,7 @@ impl RouterFixture {
         }
     }
 
-    fn requested_model(&self) -> String {
+    pub(super) fn requested_model(&self) -> String {
         format!("{}/{}", self.provider_key, self.model_name)
     }
 
@@ -606,7 +620,7 @@ impl RouterFixture {
         sink
     }
 
-    async fn send(
+    pub(super) async fn send(
         &self,
         fixture: &DirectExecutionFixture,
         stream: bool,
@@ -782,7 +796,7 @@ impl RouterFixture {
         }
     }
 
-    async fn request_logs(&self) -> Vec<RequestLogRecord> {
+    pub(super) async fn request_logs(&self) -> Vec<RequestLogRecord> {
         self.app_state.flush_proxy_logs().await;
         RequestLog::list_full(RequestLogQueryPayload {
             provider_id: Some(self.provider_id),
@@ -831,7 +845,7 @@ async fn assert_single_persisted_terminal_fact(
     assert_eq!(contexts[0].response_visibility, expected_visibility);
 }
 
-fn render_value(value: &Value, requested_model: &str) -> Value {
+pub(super) fn render_value(value: &Value, requested_model: &str) -> Value {
     match value {
         Value::String(value) if value == "$REQUESTED_MODEL" => {
             Value::String(requested_model.to_string())
@@ -849,6 +863,25 @@ fn render_value(value: &Value, requested_model: &str) -> Value {
             values
                 .iter()
                 .map(|(key, value)| (key.clone(), render_value(value, requested_model)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn render_request_id(value: &Value, request_id: &str) -> Value {
+    match value {
+        Value::String(value) if value == "$REQUEST_ID" => Value::String(request_id.to_string()),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| render_request_id(value, request_id))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), render_request_id(value, request_id)))
                 .collect(),
         ),
         _ => value.clone(),
@@ -1072,6 +1105,29 @@ fn assert_usage(log: &RequestLogRecord, usage: &UsageGolden) {
     assert_eq!(log.total_tokens, Some(usage.total));
 }
 
+fn downstream_error_code(body: &Value, protocol: DownstreamProtocol) -> Option<&str> {
+    assert!(
+        body.get("code").is_none(),
+        "legacy top-level code must be absent"
+    );
+    assert!(
+        body.get("message").is_none(),
+        "legacy top-level message must be absent"
+    );
+    match protocol {
+        DownstreamProtocol::Openai
+        | DownstreamProtocol::Responses
+        | DownstreamProtocol::Anthropic => body["error"]["code"].as_str(),
+        DownstreamProtocol::Gemini => {
+            body["error"]["details"][0]["metadata"]["cyder_code"].as_str()
+        }
+    }
+}
+
+fn downstream_error_message(body: &Value) -> Option<&str> {
+    body["error"]["message"].as_str()
+}
+
 #[test]
 fn direct_execution_regression_fixtures_define_four_complete_protocols() {
     let fixtures = fixtures();
@@ -1104,7 +1160,10 @@ fn malformed_request_is_rejected_before_request_record_or_upstream_call() {
             .expect("parse error response body should read");
         let body: Value =
             serde_json::from_slice(&body).expect("parse error response should be JSON");
-        assert_eq!(body["code"], "invalid_request_error");
+        assert_eq!(
+            downstream_error_code(&body, fixture.protocol),
+            Some("invalid_request_error")
+        );
         assert!(router.request_logs().await.is_empty());
         assert!(upstream.requests().await.is_empty());
         upstream.shutdown().await;
@@ -1142,7 +1201,11 @@ fn model_resolution_preserves_parse_and_capability_error_codes() {
                 .expect("model resolution response body should read");
             let body: Value =
                 serde_json::from_slice(&body).expect("model resolution response should be JSON");
-            assert_eq!(body["code"], expected_code, "{requested_model}");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some(expected_code),
+                "{requested_model}"
+            );
         }
 
         assert!(router.request_logs().await.is_empty());
@@ -1415,6 +1478,10 @@ fn direct_execution_regression_non_stream_request_response_usage_and_log_golden(
                 "{name}: downstream content type"
             );
             let request_id = assert_downstream_request_identity(&response);
+            assert!(
+                response.headers().get("retry-after").is_none(),
+                "{name}: provider Retry-After must not pass through"
+            );
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
@@ -1632,33 +1699,11 @@ fn direct_execution_regression_upstream_429_is_authentic_logged_and_never_retrie
                 .await
                 .unwrap();
             let body: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["code"], fixture.error.downstream_code, "{name}: code");
             assert_eq!(
-                body["message"], fixture.error.downstream_message,
-                "{name}: fixed gateway summary"
+                body,
+                render_request_id(&fixture.error.downstream_response, &request_id),
+                "{name}: complete protocol error envelope and authentic upstream extension"
             );
-            assert_eq!(
-                body["upstream_error"]["status"], fixture.error.upstream_status,
-                "{name}: authentic upstream status"
-            );
-            assert_eq!(
-                body["upstream_error"]["content_type"], "application/json",
-                "{name}: upstream content type"
-            );
-            assert_eq!(
-                body["upstream_error"]["body"], fixture.error.upstream_response,
-                "{name}: complete provider JSON"
-            );
-            assert_eq!(body["upstream_error"]["truncated"], false, "{name}");
-            assert_eq!(body["upstream_error"]["limit_bytes"], 65_536, "{name}");
-            assert_eq!(
-                body["upstream_error"]["captured_bytes"],
-                serde_json::to_vec(&fixture.error.upstream_response)
-                    .expect("fixture error should serialize")
-                    .len(),
-                "{name}"
-            );
-            assert!(body["upstream_error"].get("notice").is_none(), "{name}");
             let captured = upstream.requests().await;
             assert_upstream(
                 name,
@@ -1808,8 +1853,18 @@ fn explicit_upstream_statuses_preserve_json_text_binary_empty_and_truncated_bodi
                 .await
                 .expect("error response should read");
             let body: Value = serde_json::from_slice(&body).expect("error response should be json");
-            assert_eq!(body["code"], case.downstream_code, "{}", case.name);
-            assert_eq!(body["message"], case.downstream_message, "{}", case.name);
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some(case.downstream_code),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                downstream_error_message(&body),
+                Some(case.downstream_message),
+                "{}",
+                case.name
+            );
             let upstream_error = &body["upstream_error"];
             assert_eq!(
                 upstream_error["status"],
@@ -1923,10 +1978,13 @@ fn direct_execution_connect_failure_has_fixed_gateway_payload_without_upstream_e
             .expect("connect error response should read");
         let body: Value =
             serde_json::from_slice(&body).expect("connect error response should be json");
-        assert_eq!(body["code"], "upstream_connect_error");
         assert_eq!(
-            body["message"],
-            "The gateway could not connect to the upstream provider."
+            downstream_error_code(&body, fixture.protocol),
+            Some("upstream_connect_error")
+        );
+        assert_eq!(
+            downstream_error_message(&body),
+            Some("The gateway could not connect to the upstream provider.")
         );
         assert!(body.get("upstream_error").is_none());
 
@@ -1963,10 +2021,13 @@ fn direct_execution_non_stream_body_interruption_is_an_upstream_response_error()
             .expect("response error body should read");
         let body: Value =
             serde_json::from_slice(&body).expect("response error should be gateway json");
-        assert_eq!(body["code"], "upstream_response_error");
         assert_eq!(
-            body["message"],
-            "The gateway could not read a valid response from the upstream provider."
+            downstream_error_code(&body, fixture.protocol),
+            Some("upstream_response_error")
+        );
+        assert_eq!(
+            downstream_error_message(&body),
+            Some("The gateway could not read a valid response from the upstream provider.")
         );
         assert!(body.get("upstream_error").is_none());
         assert_eq!(upstream.requests().await.len(), 1);
@@ -2009,7 +2070,10 @@ fn direct_execution_regression_credential_requests_never_follow_redirects() {
                 .expect("redirect error response should read");
             let body: Value =
                 serde_json::from_slice(&body).expect("redirect error response should be json");
-            assert_eq!(body["code"], "upstream_unexpected_status_error");
+            assert_eq!(
+                downstream_error_code(&body, fixture.protocol),
+                Some("upstream_unexpected_status_error")
+            );
             assert_eq!(body["upstream_error"]["status"], 307);
             assert_eq!(body["upstream_error"]["body_text"], "redirect");
             assert_eq!(body["upstream_error"]["content_type"], Value::Null);
@@ -2144,10 +2208,13 @@ fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
             .expect("provider configuration response should read");
         let body: Value =
             serde_json::from_slice(&body).expect("provider configuration response should be json");
-        assert_eq!(body["code"], "provider_configuration_error");
         assert_eq!(
-            body["message"],
-            "The gateway provider configuration is invalid."
+            downstream_error_code(&body, fixture.protocol),
+            Some("provider_configuration_error")
+        );
+        assert_eq!(
+            downstream_error_message(&body),
+            Some("The gateway provider configuration is invalid.")
         );
         assert!(body.get("upstream_error").is_none());
         assert!(upstream.requests().await.is_empty());
@@ -2272,10 +2339,13 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
             .expect("proxy configuration response should read");
         let body: Value =
             serde_json::from_slice(&body).expect("proxy configuration response should be json");
-        assert_eq!(body["code"], "provider_configuration_error");
         assert_eq!(
-            body["message"],
-            "The gateway provider configuration is invalid."
+            downstream_error_code(&body, fixture.protocol),
+            Some("provider_configuration_error")
+        );
+        assert_eq!(
+            downstream_error_message(&body),
+            Some("The gateway provider configuration is invalid.")
         );
         assert!(body.get("upstream_error").is_none());
         assert!(upstream.requests().await.is_empty());

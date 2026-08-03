@@ -1,4 +1,5 @@
 use cyder_tools::log::{info, warn};
+use std::time::Duration;
 
 use super::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility};
 use crate::service::{
@@ -17,14 +18,14 @@ pub(super) enum ProviderGovernanceCheckError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ProviderGovernanceRejection {
-    Open,
+    Open { retry_after: Option<Duration> },
     HalfOpenProbeInFlight,
 }
 
 impl ProviderGovernanceRejection {
     pub(super) fn to_proxy_error(self, provider_label: &str) -> ProxyError {
         let (code, operator_message) = match self {
-            Self::Open => (
+            Self::Open { .. } => (
                 ProxyErrorCode::ProviderCircuitOpenError,
                 format!(
                     "Provider '{provider_label}' is temporarily unavailable due to recent upstream failures."
@@ -37,13 +38,19 @@ impl ProviderGovernanceRejection {
                 ),
             ),
         };
-        ProxyError::gateway(
+        let error = ProxyError::gateway(
             code,
             ExecutionStage::Governance,
             ResponseVisibility::NotVisible,
             None,
             operator_message,
-        )
+        );
+        match self {
+            Self::Open {
+                retry_after: Some(retry_after),
+            } => error.with_retry_after(retry_after),
+            Self::Open { retry_after: None } | Self::HalfOpenProbeInFlight => error,
+        }
     }
 }
 
@@ -69,7 +76,10 @@ pub(super) async fn ensure_provider_request_allowed(
                         "Provider circuit rejected without a domain reason",
                     )));
                 };
-                let rejection = provider_circuit_rejection_to_governance_rejection(rejection);
+                let rejection = provider_circuit_rejection_to_governance_rejection(
+                    rejection,
+                    decision.retry_after,
+                );
                 return Err(ProviderGovernanceCheckError::Rejected(rejection));
             }
 
@@ -161,10 +171,12 @@ fn counts_against_provider_governance(error: &ProxyError) -> bool {
 
 fn provider_circuit_rejection_to_governance_rejection(
     rejection: ProviderCircuitRejection,
+    retry_after: Option<Duration>,
 ) -> ProviderGovernanceRejection {
     match rejection {
-        ProviderCircuitRejection::OpenCooldown => ProviderGovernanceRejection::Open,
+        ProviderCircuitRejection::OpenCooldown => ProviderGovernanceRejection::Open { retry_after },
         ProviderCircuitRejection::HalfOpenProbeInFlight => {
+            debug_assert!(retry_after.is_none());
             ProviderGovernanceRejection::HalfOpenProbeInFlight
         }
     }
@@ -193,10 +205,42 @@ fn log_provider_circuit_error(
 
 #[cfg(test)]
 mod tests {
-    use super::counts_against_provider_governance;
-    use crate::proxy::{
-        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, error::UpstreamErrorPayload,
+    use super::{
+        counts_against_provider_governance, provider_circuit_rejection_to_governance_rejection,
     };
+    use crate::{
+        proxy::{
+            ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
+            error::UpstreamErrorPayload,
+        },
+        service::runtime::ProviderCircuitRejection,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn provider_circuit_retry_fact_is_forwarded_only_for_open_cooldown() {
+        let open = provider_circuit_rejection_to_governance_rejection(
+            ProviderCircuitRejection::OpenCooldown,
+            Some(Duration::from_millis(1_001)),
+        )
+        .to_proxy_error("provider");
+        assert_eq!(open.code(), ProxyErrorCode::ProviderCircuitOpenError);
+        assert_eq!(
+            open.response_hints().retry_after().map(|value| value.get()),
+            Some(2)
+        );
+
+        let half_open = provider_circuit_rejection_to_governance_rejection(
+            ProviderCircuitRejection::HalfOpenProbeInFlight,
+            None,
+        )
+        .to_proxy_error("provider");
+        assert_eq!(
+            half_open.response_hints().retry_after(),
+            None,
+            "half-open recovery depends on the active probe"
+        );
+    }
 
     #[test]
     fn provider_governance_counts_only_upstream_availability_failures() {

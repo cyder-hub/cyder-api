@@ -16,7 +16,7 @@ upstream_protocols:
 downstream_error_contracts:
   scope:
     before_headers_committed: true
-    after_headers_committed_owners: [R3.11, R3.12-R3.17]
+    after_headers_committed_owners: [R3.7, R3.14-R3.20]
     ollama_downstream_contract: absent
     upstream_error_location: top_level
   router_rejections:
@@ -29,28 +29,28 @@ downstream_error_contracts:
       request_id_body_path: absent
       request_id_headers: [x-request-id]
       upstream_error_path: upstream_error
-      evidence: [error-contract-unit, error-contract-golden, error-contract-router]
+      evidence: [error-contract-unit, error-contract-golden, error-contract-router, response-limit-raw-four-protocol, response-limit-decoded-four-protocol, response-encoding-four-protocol, stream-resource-postcommit-four-protocol, provider-error-hard-limit-four-protocol]
     - downstream_protocol: RESPONSES
       envelope: openai_error
       stable_code_path: error.code
       request_id_body_path: absent
       request_id_headers: [x-request-id]
       upstream_error_path: upstream_error
-      evidence: [error-contract-unit, error-contract-golden, error-contract-router]
+      evidence: [error-contract-unit, error-contract-golden, error-contract-router, response-limit-raw-four-protocol, response-limit-decoded-four-protocol, response-encoding-four-protocol, stream-resource-postcommit-four-protocol, provider-error-hard-limit-four-protocol]
     - downstream_protocol: ANTHROPIC
       envelope: anthropic_error
       stable_code_path: error.code
       request_id_body_path: request_id
       request_id_headers: [x-request-id, request-id]
       upstream_error_path: upstream_error
-      evidence: [error-contract-unit, error-contract-golden, error-contract-router]
+      evidence: [error-contract-unit, error-contract-golden, error-contract-router, response-limit-raw-four-protocol, response-limit-decoded-four-protocol, response-encoding-four-protocol, stream-resource-postcommit-four-protocol, provider-error-hard-limit-four-protocol]
     - downstream_protocol: GEMINI
       envelope: google_rpc_error
       stable_code_path: error.details.google_rpc_error_info.metadata.cyder_code
       request_id_body_path: error.details.google_rpc_error_info.metadata.request_id
       request_id_headers: [x-request-id]
       upstream_error_path: upstream_error
-      evidence: [error-contract-unit, error-contract-golden, error-contract-router]
+      evidence: [error-contract-unit, error-contract-golden, error-contract-router, response-limit-raw-four-protocol, response-limit-decoded-four-protocol, response-encoding-four-protocol, stream-resource-postcommit-four-protocol, provider-error-hard-limit-four-protocol]
 
 evidence:
   - id: error-contract-unit
@@ -65,6 +65,26 @@ evidence:
     kind: test
     reference: "proxy::error_contract_regression::router_and_ingress_rejections_use_protocol_contracts"
     summary: "Exercises four-protocol ingress, extractor, utility, 404, 405, CORS, and Ollama boundaries through the real router."
+  - id: response-limit-raw-four-protocol
+    kind: test
+    reference: "proxy::direct_execution_regression::four_public_protocols_use_existing_envelopes_for_non_stream_response_limit"
+    summary: "Exercises raw response hard-limit failures through all four real downstream routers with stable pre-commit envelopes, one request log, and one upstream call."
+  - id: response-limit-decoded-four-protocol
+    kind: test
+    reference: "proxy::direct_execution_regression::four_public_protocols_use_existing_envelopes_for_decoded_response_limit"
+    summary: "Exercises gzip decoded-body hard-limit failures through all four real downstream routers without exposing an upstream_error extension."
+  - id: response-encoding-four-protocol
+    kind: test
+    reference: "proxy::direct_execution_regression::four_public_protocols_reject_sse_encoding_before_headers"
+    summary: "Exercises unsupported SSE response encoding before header commit through all four protocol adapters, including request identity and lifecycle assertions."
+  - id: stream-resource-postcommit-four-protocol
+    kind: test
+    reference: "proxy::direct_execution_regression::four_public_protocols_terminate_body_on_sse_parser_failure"
+    summary: "Exercises post-commit SSE parser failure through all four real downstream routers, proving one Body error, no second envelope, and one terminal lifecycle."
+  - id: provider-error-hard-limit-four-protocol
+    kind: test
+    reference: "proxy::direct_execution_regression::four_public_protocols_preserve_bounded_provider_error_when_body_reaches_hard_limit"
+    summary: "Exercises bounded Provider 429 payloads at the overall response hard limit through all four protocol adapters without replacing the authentic status or extension."
   - id: direct-non-stream
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_non_stream_request_response_usage_and_log_golden"

@@ -401,7 +401,7 @@ fn validate_matrix(matrix: &CompatibilityMatrix) -> Result<(), String> {
     Ok(())
 }
 
-const REQUIRED_ERROR_EVIDENCE: [(&str, &str); 3] = [
+const REQUIRED_ERROR_EVIDENCE: [(&str, &str); 8] = [
     (
         "error-contract-unit",
         "proxy::error::response::tests::protocol_error_contracts_cover_all_116_proxy_and_8_router_combinations",
@@ -413,6 +413,26 @@ const REQUIRED_ERROR_EVIDENCE: [(&str, &str); 3] = [
     (
         "error-contract-router",
         "proxy::error_contract_regression::router_and_ingress_rejections_use_protocol_contracts",
+    ),
+    (
+        "response-limit-raw-four-protocol",
+        "proxy::direct_execution_regression::four_public_protocols_use_existing_envelopes_for_non_stream_response_limit",
+    ),
+    (
+        "response-limit-decoded-four-protocol",
+        "proxy::direct_execution_regression::four_public_protocols_use_existing_envelopes_for_decoded_response_limit",
+    ),
+    (
+        "response-encoding-four-protocol",
+        "proxy::direct_execution_regression::four_public_protocols_reject_sse_encoding_before_headers",
+    ),
+    (
+        "stream-resource-postcommit-four-protocol",
+        "proxy::direct_execution_regression::four_public_protocols_terminate_body_on_sse_parser_failure",
+    ),
+    (
+        "provider-error-hard-limit-four-protocol",
+        "proxy::direct_execution_regression::four_public_protocols_preserve_bounded_provider_error_when_body_reaches_hard_limit",
     ),
 ];
 
@@ -477,11 +497,16 @@ fn expected_downstream_error_contracts() -> DownstreamErrorContracts {
         "error-contract-unit".to_string(),
         "error-contract-golden".to_string(),
         "error-contract-router".to_string(),
+        "response-limit-raw-four-protocol".to_string(),
+        "response-limit-decoded-four-protocol".to_string(),
+        "response-encoding-four-protocol".to_string(),
+        "stream-resource-postcommit-four-protocol".to_string(),
+        "provider-error-hard-limit-four-protocol".to_string(),
     ];
     DownstreamErrorContracts {
         scope: ErrorContractScope {
             before_headers_committed: true,
-            after_headers_committed_owners: vec!["R3.11".to_string(), "R3.12-R3.17".to_string()],
+            after_headers_committed_owners: vec!["R3.7".to_string(), "R3.14-R3.20".to_string()],
             ollama_downstream_contract: ContractPresence::Absent,
             upstream_error_location: ExtensionLocation::TopLevel,
         },
@@ -1508,6 +1533,40 @@ mod tests {
             validate_matrix(&matrix)
                 .unwrap_err()
                 .contains("404, 405, and Allow")
+        );
+    }
+
+    #[test]
+    fn r3_7_stream_owner_and_four_protocol_resource_evidence_are_required() {
+        let mut matrix = canonical_matrix();
+        matrix
+            .downstream_error_contracts
+            .scope
+            .after_headers_committed_owners
+            .retain(|owner| owner != "R3.7");
+        assert!(validate_matrix(&matrix).unwrap_err().contains("scope"));
+
+        let mut matrix = canonical_matrix();
+        matrix
+            .evidence
+            .retain(|item| item.id != "stream-resource-postcommit-four-protocol");
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("require evidence 'stream-resource-postcommit-four-protocol'")
+        );
+
+        let mut matrix = canonical_matrix();
+        let item = matrix
+            .evidence
+            .iter_mut()
+            .find(|item| item.id == "response-limit-decoded-four-protocol")
+            .expect("decoded response evidence");
+        item.reference = "wrong-test".to_string();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("must reference stable automated test")
         );
     }
 

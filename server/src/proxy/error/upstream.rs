@@ -53,6 +53,7 @@ pub(crate) struct UpstreamErrorPayload {
 }
 
 impl UpstreamErrorPayload {
+    #[cfg(test)]
     pub(crate) fn capture(
         status: StatusCode,
         content_type: Option<&HeaderValue>,
@@ -64,9 +65,33 @@ impl UpstreamErrorPayload {
             "upstream error body limit must be positive"
         );
 
-        let captured_bytes = body.len().min(limit_bytes);
-        let captured = &body[..captured_bytes];
         let truncated = body.len() > limit_bytes;
+        let captured_bytes = body.len().min(limit_bytes);
+        Self::from_captured_prefix(
+            status,
+            content_type,
+            &body[..captured_bytes],
+            limit_bytes,
+            truncated,
+        )
+    }
+
+    pub(crate) fn from_captured_prefix(
+        status: StatusCode,
+        content_type: Option<&HeaderValue>,
+        captured: &[u8],
+        limit_bytes: usize,
+        truncated: bool,
+    ) -> Self {
+        assert!(
+            limit_bytes > 0,
+            "upstream error body limit must be positive"
+        );
+        assert!(
+            captured.len() <= limit_bytes,
+            "captured upstream prefix must fit the disclosure limit"
+        );
+        let captured_bytes = captured.len();
         let body = if !truncated {
             match serde_json::from_slice::<Value>(captured) {
                 Ok(body) => UpstreamErrorBody::Json { body },
@@ -225,6 +250,27 @@ mod tests {
         assert_eq!(truncated_value["limit_bytes"], exact.len() - 1);
         assert_eq!(truncated_value["notice"], UPSTREAM_ERROR_TRUNCATION_NOTICE);
         assert!(truncated_value.get("body").is_none());
+    }
+
+    #[test]
+    fn externally_bounded_prefix_preserves_truncation_even_at_disclosure_limit() {
+        let prefix = br#"{"error":"provider prefix"}"#;
+        let payload = UpstreamErrorPayload::from_captured_prefix(
+            StatusCode::TOO_MANY_REQUESTS,
+            None,
+            prefix,
+            prefix.len(),
+            true,
+        );
+        let value = value(&payload);
+
+        assert_eq!(value["status"], 429);
+        assert_eq!(value["body_text"], std::str::from_utf8(prefix).unwrap());
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["captured_bytes"], prefix.len());
+        assert_eq!(value["limit_bytes"], prefix.len());
+        assert_eq!(value["notice"], UPSTREAM_ERROR_TRUNCATION_NOTICE);
+        assert!(value.get("body").is_none());
     }
 
     #[test]

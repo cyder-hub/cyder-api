@@ -2,24 +2,22 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    http::header::{CONTENT_ENCODING, CONTENT_TYPE},
+    http::header::CONTENT_TYPE,
 };
 use chrono::Utc;
 
 use super::{
     ProxyRequestFailure, ProxyRequestOutcome, ProxyResponseMode,
     ReasoningContinuationCaptureContext,
-    client::read_response_bytes_with_cancellation,
-    response::{
-        build_response_builder, decode_response_body, process_success_response_body,
-        response_content_type,
-    },
+    client::{capture_error_response_with_cancellation, read_complete_response_with_cancellation},
+    response::{build_response_builder, process_success_response_body, response_content_type},
 };
 use crate::{
+    config::NonStreamResponseConfig,
     proxy::{
         ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
         cancellation::ProxyCancellationContext,
-        classify_upstream_status,
+        classify_upstream_status_captured,
         logging::RequestLogContext,
         provider_governance::{record_provider_failure, record_provider_success},
         runtime::{
@@ -34,7 +32,7 @@ use crate::{
     schema::enum_def::{RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState, cache::types::CacheCostCatalogVersion,
-        runtime::ProviderCircuitProbePermit,
+        runtime::ProviderCircuitProbePermit, upstream_response::parse_content_encoding,
     },
 };
 use tokio::sync::Mutex as TokioMutex;
@@ -53,6 +51,7 @@ pub(super) async fn handle_non_streaming_response(
     response_mode: ProxyResponseMode,
     reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
     upstream_error_body_limit_bytes: usize,
+    non_stream_response_limits: &NonStreamResponseConfig,
     response_visibility: ResponseVisibilityTracker,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let status_code = response.status();
@@ -61,6 +60,9 @@ pub(super) async fn handle_non_streaming_response(
         let context = log_context.lock().await;
         (context.request_id.clone(), context.id)
     };
+    let content_encoding = parse_content_encoding(&response_headers)
+        .map(|encoding| encoding.as_str())
+        .unwrap_or("invalid");
     crate::debug_event!(
         "proxy.response_headers_received",
         request_id = &request_id,
@@ -68,21 +70,26 @@ pub(super) async fn handle_non_streaming_response(
         status_code = status_code.as_u16(),
         response_header_count = response_headers.len(),
         content_type = response_content_type(&response_headers),
+        content_encoding = content_encoding,
     );
-    let is_gzip = response_headers
-        .get(CONTENT_ENCODING)
-        .map_or(false, |value| value.to_str().unwrap_or("").contains("gzip"));
-
     let response_builder = build_response_builder(status_code, &response_headers);
 
-    let body_bytes = match read_response_bytes_with_cancellation(
-        response,
-        "Reading upstream response body",
-        cancellation,
-    )
-    .await
-    {
-        Ok(b) => b,
+    let body = if status_code.is_success() {
+        read_complete_response_with_cancellation(response, cancellation, non_stream_response_limits)
+            .await
+            .map(NonStreamResponseBody::Complete)
+    } else {
+        capture_error_response_with_cancellation(
+            response,
+            cancellation,
+            non_stream_response_limits,
+            upstream_error_body_limit_bytes,
+        )
+        .await
+        .map(NonStreamResponseBody::Captured)
+    };
+    let body = match body {
+        Ok(body) => body,
         Err(proxy_error) => {
             if proxy_error.code() != ProxyErrorCode::ClientCancelledError {
                 record_provider_failure(
@@ -114,11 +121,21 @@ pub(super) async fn handle_non_streaming_response(
             });
         }
     };
-
-    let decompressed_body = decode_response_body(body_bytes, is_gzip);
     let llm_response_completed_at = Utc::now().timestamp_millis();
 
     if status_code.is_success() {
+        let NonStreamResponseBody::Complete(complete_body) = body else {
+            unreachable!("successful upstream response must use complete read mode")
+        };
+        let decompressed_body = complete_body.bytes;
+        crate::debug_event!(
+            "proxy.response_body_read",
+            request_id = &request_id,
+            log_id = log_id,
+            raw_response_body_bytes = complete_body.raw_bytes,
+            decoded_response_body_bytes = complete_body.decoded_bytes,
+            content_encoding = complete_body.encoding.as_str(),
+        );
         capture_non_stream_reasoning_continuation(
             app_state,
             reasoning_capture,
@@ -205,6 +222,13 @@ pub(super) async fn handle_non_streaming_response(
             log_context: context.clone(),
         })
     } else {
+        let NonStreamResponseBody::Captured(captured_body) = body else {
+            unreachable!("failed upstream response must use capture mode")
+        };
+        let disclosure_truncated = captured_body.truncated;
+        let hard_limit_reached = captured_body.hard_limit_reached.is_some();
+        let hard_limit = captured_body.hard_limit_reached.map(|limit| limit.as_str());
+        let decompressed_body = captured_body.captured;
         let mut context = log_context.lock().await;
         crate::error_event!(
             "proxy.upstream_error_body",
@@ -212,6 +236,11 @@ pub(super) async fn handle_non_streaming_response(
             status_code = status_code.as_u16(),
             log_id = context.id,
             response_body_bytes = decompressed_body.len(),
+            raw_response_body_bytes = captured_body.raw_bytes,
+            decoded_response_body_bytes = captured_body.decoded_bytes,
+            response_body_truncated = disclosure_truncated,
+            response_body_hard_limit = hard_limit,
+            content_encoding = captured_body.encoding.as_str(),
             response_body_sha256 = sha256_hex(&decompressed_body),
             json_top_level_fields = json_top_level_field_count_from_bytes(&decompressed_body),
             content_type = response_content_type(&response_headers),
@@ -227,27 +256,54 @@ pub(super) async fn handle_non_streaming_response(
             None,
             None,
         );
-        let proxy_error = classify_upstream_status(
+        let proxy_error = classify_upstream_status_captured(
             status_code,
             response_headers.get(CONTENT_TYPE),
             &decompressed_body,
             upstream_error_body_limit_bytes,
+            disclosure_truncated,
             ResponseVisibility::NotVisible,
         );
-        record_provider_failure(
-            app_state,
-            provider_id,
-            &model_str,
-            &proxy_error,
-            provider_circuit_permit.as_ref(),
-        )
-        .await;
+        if hard_limit_reached {
+            let governance_error = ProxyError::gateway(
+                ProxyErrorCode::UpstreamResponseError,
+                ExecutionStage::UpstreamResponse,
+                ResponseVisibility::NotVisible,
+                None,
+                format!(
+                    "Provider error response reached the configured {} body limit",
+                    hard_limit.unwrap_or("response")
+                ),
+            );
+            record_provider_failure(
+                app_state,
+                provider_id,
+                &model_str,
+                &governance_error,
+                provider_circuit_permit.as_ref(),
+            )
+            .await;
+        } else {
+            record_provider_failure(
+                app_state,
+                provider_id,
+                &model_str,
+                &proxy_error,
+                provider_circuit_permit.as_ref(),
+            )
+            .await;
+        }
         api_key_request_lease.release().await;
         Err(ProxyRequestFailure {
             error: proxy_error,
             log_context: context.clone(),
         })
     }
+}
+
+enum NonStreamResponseBody {
+    Complete(crate::service::upstream_response::CompleteResponseBody),
+    Captured(crate::service::upstream_response::CapturedErrorBody),
 }
 
 pub(super) async fn capture_non_stream_reasoning_continuation(

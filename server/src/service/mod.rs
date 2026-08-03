@@ -12,4 +12,5 @@ pub mod request_patch;
 pub mod runtime;
 pub mod secret_encryption;
 pub mod transform;
+pub(crate) mod upstream_response;
 pub mod vertex;

@@ -530,11 +530,12 @@ mod tests {
             "upstream_payload_kind=json",
             "upstream_limit_bytes=65536",
             "upstream_truncated=false",
-            "operator_message=\"Upstream returned 429: quota exceeded\"",
+            "operator_message=\"Upstream returned 429: JSON error body with a message field (75 captured bytes)\"",
         ] {
             assert!(message.contains(expected), "missing {expected}: {message}");
         }
         assert!(message.contains(&format!("upstream_captured_bytes={}", upstream_body.len())));
+        assert!(!message.contains("quota exceeded"));
         assert!(!message.contains("provider-secret-detail"));
     }
 

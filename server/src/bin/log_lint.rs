@@ -173,6 +173,68 @@ fn scan_log_invocations(path: &Path, contents: &str) -> Vec<LintViolation> {
         if contains_any(
             &invocation.snippet,
             &[
+                "request_url",
+                "final_url",
+                "target_url",
+                "token_uri",
+                "check_request.url",
+                "response.url()",
+                "request.url()",
+            ],
+        ) {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "outbound URL logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
+
+        if contains_any(
+            &invocation.snippet,
+            &[
+                "headers = headers",
+                "headers = &headers",
+                "response_headers =",
+                "request_headers =",
+                "original_headers =",
+                "header_map =",
+                "{:?}",
+            ],
+        ) && contains_any(
+            &invocation.snippet,
+            &[
+                "headers",
+                "response_headers",
+                "request_headers",
+                "original_headers",
+                "header_map",
+            ],
+        ) && !logs_auth_header_value(&invocation.snippet)
+        {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "outbound header map logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
+
+        if contains_any(
+            &invocation.snippet,
+            &["reqwest_error", "reqwest::Error", "http_client_error"],
+        ) {
+            violations.push(LintViolation {
+                path: path.to_path_buf(),
+                line: invocation.line,
+                reason: "raw HTTP client error logging is forbidden",
+                excerpt: compact_excerpt(&invocation.snippet),
+            });
+        }
+
+        if contains_any(
+            &invocation.snippet,
+            &[
                 "access_token",
                 "refresh_token",
                 "mediator_token",
@@ -538,6 +600,50 @@ mod tests {
             violations
                 .iter()
                 .any(|violation| violation.reason == "auth header/value logging is forbidden")
+        );
+    }
+
+    #[test]
+    fn scan_log_invocations_rejects_outbound_url_header_map_and_reqwest_error() {
+        let path = PathBuf::from("sample.rs");
+        let contents = format!(
+            "{}\n{}\n{}",
+            concat!("debug", r#"!("target {}", final_url);"#),
+            concat!("info", r#"!("headers {:?}", response_headers);"#),
+            concat!("warn", r#"!("request failed {}", reqwest_error);"#),
+        );
+
+        let violations = scan_log_invocations(&path, &contents);
+        for reason in [
+            "outbound URL logging is forbidden",
+            "outbound header map logging is forbidden",
+            "raw HTTP client error logging is forbidden",
+        ] {
+            assert!(
+                violations
+                    .iter()
+                    .any(|violation| violation.reason == reason),
+                "expected {reason}: {violations:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_log_invocations_does_not_treat_transient_url_assignment_or_header_count_as_logging() {
+        let path = PathBuf::from("sample.rs");
+        let contents = format!(
+            "{}\n{}",
+            "context.request_url = Some(final_url.to_string());",
+            concat!(
+                "debug_event",
+                r#"!("headers", response_header_count = response_headers.len());"#
+            ),
+        );
+
+        let violations = scan_log_invocations(&path, &contents);
+        assert!(
+            violations.is_empty(),
+            "transient assignment and count-only diagnostic are allowed: {violations:#?}"
         );
     }
 

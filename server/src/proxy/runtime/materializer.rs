@@ -31,6 +31,7 @@ use crate::{
         provider_credential::{ProviderCredential, apply_provider_request_auth_header},
         runtime::{ReasoningContinuationScope, ReasoningContinuationStore},
         transform::{finalize_request_data, transform_request_data},
+        upstream_response::apply_upstream_accept_encoding,
     },
 };
 use cyder_tools::log::debug;
@@ -433,7 +434,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
 ) -> Result<MaterializedRequest, ProxyError> {
     let upstream_protocol = target.upstream_protocol;
     data = transform_request_data(data, downstream_protocol, upstream_protocol, is_stream);
-    let prepared_request = prepare_generation_request(
+    let mut prepared_request = prepare_generation_request(
         &target.provider,
         &target.model,
         data,
@@ -445,6 +446,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
         query_params,
     )
     .await?;
+    apply_upstream_accept_encoding(&mut prepared_request.final_headers, is_stream);
     debug_assert_eq!(
         prepared_request.provider_api_key_id,
         provider_credential.key_id()
@@ -488,34 +490,35 @@ pub(in crate::proxy) async fn materialize_utility_request(
     request_patches: &[RuntimeResolvedRequestPatch],
     provider_credential: &ProviderCredential,
 ) -> Result<MaterializedRequest, ProxyError> {
-    let (final_url, final_headers, final_body_value, provider_api_key_id) = match operation.protocol
-    {
-        UtilityProtocol::OpenaiCompatible => {
-            prepare_llm_request(
-                &target.provider,
-                &target.model,
-                data,
-                original_headers,
-                request_patches,
-                provider_credential,
-                &operation.downstream_path,
-            )
-            .await?
-        }
-        UtilityProtocol::GeminiCompatible => {
-            prepare_simple_gemini_request(
-                &target.provider,
-                &target.model,
-                data,
-                original_headers,
-                request_patches,
-                provider_credential,
-                &operation.downstream_path,
-                query_params,
-            )
-            .await?
-        }
-    };
+    let (final_url, mut final_headers, final_body_value, provider_api_key_id) =
+        match operation.protocol {
+            UtilityProtocol::OpenaiCompatible => {
+                prepare_llm_request(
+                    &target.provider,
+                    &target.model,
+                    data,
+                    original_headers,
+                    request_patches,
+                    provider_credential,
+                    &operation.downstream_path,
+                )
+                .await?
+            }
+            UtilityProtocol::GeminiCompatible => {
+                prepare_simple_gemini_request(
+                    &target.provider,
+                    &target.model,
+                    data,
+                    original_headers,
+                    request_patches,
+                    provider_credential,
+                    &operation.downstream_path,
+                    query_params,
+                )
+                .await?
+            }
+        };
+    apply_upstream_accept_encoding(&mut final_headers, false);
     debug_assert_eq!(provider_api_key_id, provider_credential.key_id());
     let final_body = Bytes::from(serde_json::to_vec(&final_body_value).map_err(|err| {
         protocol_transform_error(

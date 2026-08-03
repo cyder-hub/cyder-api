@@ -222,16 +222,28 @@ Gateway-owned failures—such as invalid Provider configuration, connect/request
 
 Every protocol error returns JSON, `X-Request-ID`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. OpenAI, Responses, and Anthropic 401 responses also return `WWW-Authenticate: Bearer`; Gemini does not. Anthropic additionally returns `request-id`. `Retry-After` is emitted only from an exact local producer fact: resettable API Key limits use their next UTC bucket, and Provider Circuit uses its supplied remaining cooldown. Concurrency, ACL, half-open probe, and Provider HTTP errors without a local recovery fact omit it. Provider response Headers are not passed through by this contract.
 
-These envelopes apply only before response Headers are committed. Errors after a streaming response is committed remain owned by the stream and protocol work tracked under R3.11 and R3.12–R3.17; Cyder does not replace an in-progress stream with a new HTTP envelope. Ollama remains upstream-only, so unknown `/ai/ollama/*` paths use the ordinary application 404 without Proxy Request ID, CORS, security Headers, authentication, or Request Records.
+These envelopes apply only before response Headers are committed. R3.7 owns generic post-commit SSE resource termination, while protocol-specific stream completion remains with R3.14–R3.20; Cyder does not replace an in-progress stream with a new HTTP envelope. Ollama remains upstream-only, so unknown `/ai/ollama/*` paths use the ordinary application 404 without Proxy Request ID, CORS, security Headers, authentication, or Request Records.
+
+Complete non-stream responses accept only absent/`identity` or `gzip` Content-Encoding and are bounded independently on raw and decoded bytes. SSE requests advertise `Accept-Encoding: identity`; an SSE response with any other encoding is rejected before downstream Headers, while malformed UTF-8 or line/event/buffer/frame overflow after commit terminates the Body without writing a second protocol error. Successful responses inherit only a normalized `Content-Type`, never arbitrary Provider response Headers.
 
 Configure the disclosure limit in the generated or base YAML and restart:
 
 ```yaml
 proxy_request:
   upstream_error_body_limit_bytes: 65536
+  non_stream_response:
+    raw_body_limit_bytes: 33554432
+    decoded_body_limit_bytes: 67108864
+  sse_response:
+    line_limit_bytes: 4194304
+    event_limit_bytes: 8388608
+    buffer_limit_bytes: 16777216
+    frame_count_limit: 1000000
 ```
 
-The default is 65536 bytes and the accepted startup range is 1024 through 1048576. Invalid recognized values fail startup. There is no environment-variable override or runtime write API for this field. This R3.3 limit controls what is disclosed after the current body read/decompression path; it is not yet the raw/decompressed memory hard limit or compression-bomb protection planned for R3.6.
+The Provider error disclosure default is 65536 bytes and its accepted startup range is 1024 through 1048576. Complete non-stream responses default to 33554432 raw bytes and 67108864 decoded bytes; each accepts 1048576 through 536870912 bytes. The disclosure limit must not exceed the decoded-body limit. SSE defaults are 4194304 bytes per line, 8388608 bytes per event, 16777216 retained bytes, and 1000000 blank-line frames. SSE byte limits accept 1024 through 536870912, the frame limit accepts 1 through 10000000, and startup enforces `line <= event <= buffer`.
+
+All of these settings are startup-only. Invalid recognized values fail startup, and there is no environment-variable override or runtime write API for them. Change the base YAML and restart the server.
 
 The only environment variables that can override final config fields are:
 

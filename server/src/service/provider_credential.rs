@@ -4,6 +4,7 @@ use axum::http::HeaderMap;
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use crate::{
+    config::NonStreamResponseConfig,
     database::provider::{Provider, ProviderApiKeyRepository},
     schema::enum_def::{ProviderType, UpstreamProtocol},
     service::{
@@ -87,10 +88,11 @@ async fn materialize_provider_credential(
     provider_type: &ProviderType,
     key_id: i64,
     secret: SensitiveSecret,
+    limits: &NonStreamResponseConfig,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
     let request_secret = match provider_runtime_profile(provider_type).auth {
         ProviderAuthProfile::VertexOAuth => SensitiveSecret::new(
-            get_vertex_token(client, key_id, secret.expose())
+            get_vertex_token(client, key_id, secret.expose(), limits)
                 .await
                 .map_err(|_| ProviderCredentialError::VertexTokenUnavailable)?,
         ),
@@ -141,6 +143,7 @@ pub async fn resolve_selected_provider_credential(
         &provider.provider_type,
         selected_key.id,
         secret,
+        &app_state.infra.proxy_request_config().non_stream_response,
     )
     .await
 }
@@ -162,7 +165,14 @@ pub async fn resolve_saved_provider_credential(
         .secret_encryption
         .decrypt_current(SecretDomain::ProviderApiKey(key_id), &encrypted)
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
-    materialize_provider_credential(client.as_ref(), &provider.provider_type, key_id, secret).await
+    materialize_provider_credential(
+        client.as_ref(),
+        &provider.provider_type,
+        key_id,
+        secret,
+        &app_state.infra.proxy_request_config().non_stream_response,
+    )
+    .await
 }
 
 /// Wraps a request-local draft secret without persisting or cloning it.
@@ -173,7 +183,14 @@ pub async fn resolve_draft_provider_credential(
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
     let client = provider_client(app_state, provider.use_proxy).await?;
-    materialize_provider_credential(client.as_ref(), &provider.provider_type, key_id, secret).await
+    materialize_provider_credential(
+        client.as_ref(),
+        &provider.provider_type,
+        key_id,
+        secret,
+        &app_state.infra.proxy_request_config().non_stream_response,
+    )
+    .await
 }
 
 pub fn apply_provider_request_auth_header(

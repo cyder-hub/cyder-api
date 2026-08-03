@@ -44,7 +44,7 @@ fn hot_path_modules_do_not_use_structured_builder_api() {
 }
 
 #[test]
-fn request_log_builder_ignores_transient_error_stage_and_visibility() {
+fn request_log_builder_ignores_transient_url_error_stage_and_visibility() {
     let source = include_str!("logging.rs");
     let builder = source
         .split_once("fn build_request_log")
@@ -55,12 +55,25 @@ fn request_log_builder_ignores_transient_error_stage_and_visibility() {
         .0;
 
     assert!(
+        !builder.contains("request_url"),
+        "transient raw request URL must not enter the Diesel RequestLog payload"
+    );
+    assert!(
         !builder.contains("final_error_stage"),
         "transient error stage must not enter the Diesel RequestLog payload"
     );
     assert!(
         !builder.contains("response_visibility"),
         "transient response visibility must not enter the Diesel RequestLog payload"
+    );
+}
+
+#[test]
+fn request_log_context_has_no_transient_response_header_map() {
+    let source = include_str!("logging.rs");
+    assert!(
+        !source.contains("response_headers_json"),
+        "raw upstream response headers must not be retained in request context"
     );
 }
 

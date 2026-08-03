@@ -444,6 +444,141 @@ mod tests {
     }
 
     #[test]
+    fn proxy_request_response_limits_use_generated_and_runtime_defaults() {
+        let programmatic = crate::config::programmatic_default_config();
+        assert_eq!(
+            programmatic
+                .proxy_request
+                .non_stream_response
+                .raw_body_limit_bytes,
+            33_554_432
+        );
+        assert_eq!(
+            programmatic
+                .proxy_request
+                .non_stream_response
+                .decoded_body_limit_bytes,
+            67_108_864
+        );
+        assert_eq!(
+            programmatic.proxy_request.sse_response.line_limit_bytes,
+            4_194_304
+        );
+        assert_eq!(
+            programmatic.proxy_request.sse_response.event_limit_bytes,
+            8_388_608
+        );
+        assert_eq!(
+            programmatic.proxy_request.sse_response.buffer_limit_bytes,
+            16_777_216
+        );
+        assert_eq!(
+            programmatic.proxy_request.sse_response.frame_count_limit,
+            1_000_000
+        );
+
+        let temp_dir = tempfile::tempdir().expect("config test directory should be created");
+        let paths = ConfigPaths::new(
+            temp_dir.path().join("config.default.yaml"),
+            temp_dir.path().join("config.yaml"),
+        );
+        let generated = load_default_config(&paths).expect("default snapshot should serialize");
+        for expected in [
+            "non_stream_response:",
+            "raw_body_limit_bytes: 33554432",
+            "decoded_body_limit_bytes: 67108864",
+            "sse_response:",
+            "line_limit_bytes: 4194304",
+            "event_limit_bytes: 8388608",
+            "buffer_limit_bytes: 16777216",
+            "frame_count_limit: 1000000",
+        ] {
+            assert!(
+                generated.merged_yaml.contains(expected),
+                "missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_request_response_limits_accept_exact_boundaries() {
+        for (body_limit, sse_limit, frame_limit) in [
+            (1_048_576, 1_024, 1),
+            (536_870_912, 536_870_912, 10_000_000),
+        ] {
+            let yaml = format!(
+                "proxy_request:\n  upstream_error_body_limit_bytes: 1024\n  non_stream_response:\n    raw_body_limit_bytes: {body_limit}\n    decoded_body_limit_bytes: {body_limit}\n  sse_response:\n    line_limit_bytes: {sse_limit}\n    event_limit_bytes: {sse_limit}\n    buffer_limit_bytes: {sse_limit}\n    frame_count_limit: {frame_limit}\n"
+            );
+            let config = load_user_yaml(&yaml).expect("exact response boundaries should load");
+            assert_eq!(
+                config
+                    .proxy_request
+                    .non_stream_response
+                    .raw_body_limit_bytes,
+                body_limit
+            );
+            assert_eq!(
+                config.proxy_request.sse_response.frame_count_limit,
+                frame_limit
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_request_response_limits_reject_out_of_range_and_invalid_relations() {
+        for yaml in [
+            "proxy_request:\n  non_stream_response:\n    raw_body_limit_bytes: 1048575\n",
+            "proxy_request:\n  non_stream_response:\n    decoded_body_limit_bytes: 536870913\n",
+            "proxy_request:\n  sse_response:\n    line_limit_bytes: 1023\n",
+            "proxy_request:\n  sse_response:\n    frame_count_limit: 10000001\n",
+            "proxy_request:\n  sse_response:\n    line_limit_bytes: 4096\n    event_limit_bytes: 2048\n    buffer_limit_bytes: 8192\n",
+        ] {
+            load_user_yaml(yaml).expect_err("invalid response limits must fail startup");
+        }
+    }
+
+    #[test]
+    fn proxy_request_response_limits_reject_wrong_yaml_types() {
+        for yaml in [
+            "proxy_request:\n  non_stream_response:\n    raw_body_limit_bytes: thirty-two-mib\n",
+            "proxy_request:\n  sse_response:\n    frame_count_limit: one-million\n",
+        ] {
+            load_user_yaml(yaml).expect_err("wrong response limit types must fail startup");
+        }
+    }
+
+    #[test]
+    fn tracked_config_sample_contains_all_response_resource_limits() {
+        let sample = include_str!("../../../config.sample.yaml");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(sample).expect("tracked config sample should parse");
+        assert_eq!(
+            document["proxy_request"]["non_stream_response"]["raw_body_limit_bytes"],
+            33_554_432
+        );
+        assert_eq!(
+            document["proxy_request"]["non_stream_response"]["decoded_body_limit_bytes"],
+            67_108_864
+        );
+        assert_eq!(
+            document["proxy_request"]["sse_response"]["line_limit_bytes"],
+            4_194_304
+        );
+        assert_eq!(
+            document["proxy_request"]["sse_response"]["event_limit_bytes"],
+            8_388_608
+        );
+        assert_eq!(
+            document["proxy_request"]["sse_response"]["buffer_limit_bytes"],
+            16_777_216
+        );
+        assert_eq!(
+            document["proxy_request"]["sse_response"]["frame_count_limit"],
+            1_000_000
+        );
+    }
+
+    #[test]
     fn client_identity_config_accepts_canonical_ipv4_ipv6_and_hop_boundaries() {
         for max_forwarded_hops in [1, 32] {
             let config = load_user_yaml(&format!(

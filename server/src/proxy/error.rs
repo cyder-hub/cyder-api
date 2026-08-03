@@ -2,6 +2,8 @@ use axum::http::HeaderValue;
 use reqwest::{Error as ReqwestError, StatusCode};
 use std::fmt;
 
+use crate::service::upstream_response::UpstreamHttpErrorKind;
+
 pub(crate) mod fact;
 pub(crate) mod response;
 pub(crate) mod upstream;
@@ -60,51 +62,81 @@ pub(crate) fn classify_reqwest_error(
     stage: ExecutionStage,
     response_visibility: ResponseVisibility,
 ) -> ProxyError {
-    if err.is_timeout() {
-        return ProxyError::gateway(
+    let kind = UpstreamHttpErrorKind::from_reqwest(err);
+    let (code, message) = if kind == UpstreamHttpErrorKind::Timeout {
+        (
             ProxyErrorCode::UpstreamTimeoutError,
-            stage,
-            response_visibility,
-            None,
-            format!("{context} timed out: {err}"),
-        );
-    }
-
-    let (code, message) = if err.is_connect() {
+            format!("{context} timed out ({})", kind.as_str()),
+        )
+    } else if kind == UpstreamHttpErrorKind::Connect {
         (
             ProxyErrorCode::UpstreamConnectError,
-            format!("{context} could not connect to upstream: {err}"),
+            format!(
+                "{context} could not connect to upstream ({})",
+                kind.as_str()
+            ),
         )
-    } else if err.is_body() || err.is_decode() {
+    } else if matches!(
+        kind,
+        UpstreamHttpErrorKind::Body | UpstreamHttpErrorKind::Decode
+    ) {
         (
             ProxyErrorCode::UpstreamResponseError,
-            format!("{context} failed while reading upstream body: {err}"),
+            format!(
+                "{context} failed while reading upstream body ({})",
+                kind.as_str()
+            ),
         )
-    } else if err.is_request() {
+    } else if kind == UpstreamHttpErrorKind::Request {
         (
             ProxyErrorCode::UpstreamRequestError,
-            format!("{context} could not be sent to upstream: {err}"),
+            format!(
+                "{context} could not be sent to upstream ({})",
+                kind.as_str()
+            ),
         )
-    } else if err.status().is_some() || stage == ExecutionStage::UpstreamResponse {
+    } else if kind == UpstreamHttpErrorKind::Status || stage == ExecutionStage::UpstreamResponse {
         (
             ProxyErrorCode::UpstreamResponseError,
-            format!("{context} failed while processing the upstream response: {err}"),
+            format!(
+                "{context} failed while processing the upstream response ({})",
+                kind.as_str()
+            ),
         )
     } else {
         (
             ProxyErrorCode::UpstreamRequestError,
-            format!("{context} failed: {err}"),
+            format!("{context} failed ({})", kind.as_str()),
         )
     };
 
     ProxyError::gateway(code, stage, response_visibility, None, message)
 }
 
+#[cfg(test)]
 pub(crate) fn classify_upstream_status(
     status: StatusCode,
     content_type: Option<&HeaderValue>,
     body: &[u8],
     limit_bytes: usize,
+    response_visibility: ResponseVisibility,
+) -> ProxyError {
+    classify_upstream_status_captured(
+        status,
+        content_type,
+        &body[..body.len().min(limit_bytes)],
+        limit_bytes,
+        body.len() > limit_bytes,
+        response_visibility,
+    )
+}
+
+pub(crate) fn classify_upstream_status_captured(
+    status: StatusCode,
+    content_type: Option<&HeaderValue>,
+    captured_body: &[u8],
+    limit_bytes: usize,
+    truncated: bool,
     response_visibility: ResponseVisibility,
 ) -> ProxyError {
     let code = match status {
@@ -120,8 +152,14 @@ pub(crate) fn classify_upstream_status(
         status if status.is_server_error() => ProxyErrorCode::UpstreamServiceError,
         _ => ProxyErrorCode::UpstreamUnexpectedStatusError,
     };
-    let payload = UpstreamErrorPayload::capture(status, content_type, body, limit_bytes);
-    let body_message = extract_upstream_error_message(body);
+    let payload = UpstreamErrorPayload::from_captured_prefix(
+        status,
+        content_type,
+        captured_body,
+        limit_bytes,
+        truncated,
+    );
+    let body_message = summarize_upstream_error_body(captured_body, truncated);
 
     ProxyError::upstream(
         code,
@@ -132,22 +170,35 @@ pub(crate) fn classify_upstream_status(
     )
 }
 
-fn extract_upstream_error_message(body: &[u8]) -> String {
+fn summarize_upstream_error_body(body: &[u8], truncated: bool) -> String {
     if body.is_empty() {
         return "empty upstream error body".to_string();
     }
 
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
-        if let Some(message) = value
+        if value
             .get("error")
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
+            .is_some()
         {
-            return truncate_message(message);
+            return format!(
+                "JSON error body with a message field ({} captured bytes{})",
+                body.len(),
+                if truncated { ", truncated" } else { "" }
+            );
         }
 
-        if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
-            return truncate_message(message);
+        if value
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
+            return format!(
+                "JSON error body with a message field ({} captured bytes{})",
+                body.len(),
+                if truncated { ", truncated" } else { "" }
+            );
         }
 
         return "JSON error body without a message field".to_string();
@@ -158,16 +209,6 @@ fn extract_upstream_error_message(body: &[u8]) -> String {
     } else {
         format!("binary error body ({} bytes)", body.len())
     }
-}
-
-fn truncate_message(message: &str) -> String {
-    const MAX_LEN: usize = 512;
-    if message.chars().count() <= MAX_LEN {
-        return message.to_string();
-    }
-
-    let truncated = message.chars().take(MAX_LEN).collect::<String>();
-    format!("{truncated}...")
 }
 
 fn is_body_too_large_message(message: &str) -> bool {
@@ -181,12 +222,13 @@ fn is_body_too_large_message(message: &str) -> bool {
 mod tests {
     use super::{
         ExecutionStage, ProtocolErrorResponseAdapter, ProxyError, ProxyErrorCode, ProxyLogLevel,
-        ResponseVisibility, classify_request_body_error, classify_upstream_status,
-        protocol_transform_error,
+        ResponseVisibility, classify_request_body_error, classify_reqwest_error,
+        classify_upstream_status, protocol_transform_error,
     };
     use crate::{proxy::request_context::RequestId, schema::enum_def::DownstreamProtocol};
     use axum::{body::to_bytes, http::HeaderValue};
     use reqwest::StatusCode;
+    use tokio::net::TcpListener;
 
     #[test]
     fn classify_request_body_error_maps_length_limit_to_request_payload_code() {
@@ -194,6 +236,36 @@ mod tests {
         assert_eq!(error.code(), ProxyErrorCode::RequestBodyTooLargeError);
         assert_eq!(error.stage(), ExecutionStage::Parse);
         assert_eq!(error.response_visibility(), ResponseVisibility::NotVisible);
+    }
+
+    #[tokio::test]
+    async fn reqwest_error_classification_never_copies_url_or_query() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let marker = "query-secret-marker";
+        let reqwest_error = reqwest::Client::new()
+            .get(format!("http://{address}/private?api_key={marker}"))
+            .send()
+            .await
+            .expect_err("closed local address must reject the connection");
+        assert!(
+            reqwest_error
+                .url()
+                .is_some_and(|url| url.as_str().contains(marker)),
+            "fixture must prove the source error carries the sensitive URL"
+        );
+
+        let error = classify_reqwest_error(
+            "sentinel request",
+            &reqwest_error,
+            ExecutionStage::Connect,
+            ResponseVisibility::NotVisible,
+        );
+        assert_eq!(error.code(), ProxyErrorCode::UpstreamConnectError);
+        assert!(!error.operator_message().contains(marker));
+        assert!(!error.operator_message().contains(&address.to_string()));
+        assert!(!error.operator_message().contains("api_key"));
     }
 
     #[tokio::test]
@@ -209,7 +281,12 @@ mod tests {
 
         assert_eq!(error.code(), ProxyErrorCode::UpstreamRateLimitError);
         assert_eq!(error.stage(), ExecutionStage::UpstreamResponse);
-        assert!(error.operator_message().contains("quota exceeded"));
+        assert!(
+            error
+                .operator_message()
+                .contains("JSON error body with a message field")
+        );
+        assert!(!error.operator_message().contains("quota exceeded"));
         assert_eq!(
             error.response_hints().retry_after(),
             None,

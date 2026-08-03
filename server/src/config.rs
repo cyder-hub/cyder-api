@@ -666,6 +666,108 @@ impl RuntimeStateConfig {
 // --- START PROXY REQUEST CONFIG ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NonStreamResponseConfig {
+    #[serde(default = "default_non_stream_raw_body_limit_bytes")]
+    pub raw_body_limit_bytes: usize,
+    #[serde(default = "default_non_stream_decoded_body_limit_bytes")]
+    pub decoded_body_limit_bytes: usize,
+}
+
+impl Default for NonStreamResponseConfig {
+    fn default() -> Self {
+        Self {
+            raw_body_limit_bytes: default_non_stream_raw_body_limit_bytes(),
+            decoded_body_limit_bytes: default_non_stream_decoded_body_limit_bytes(),
+        }
+    }
+}
+
+impl NonStreamResponseConfig {
+    pub const MIN_BODY_LIMIT_BYTES: usize = 1_048_576;
+    pub const MAX_BODY_LIMIT_BYTES: usize = 536_870_912;
+
+    fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("raw_body_limit_bytes", self.raw_body_limit_bytes),
+            ("decoded_body_limit_bytes", self.decoded_body_limit_bytes),
+        ] {
+            if !(Self::MIN_BODY_LIMIT_BYTES..=Self::MAX_BODY_LIMIT_BYTES).contains(&value) {
+                return Err(format!(
+                    "proxy_request.non_stream_response.{field} must be in {}..={}",
+                    Self::MIN_BODY_LIMIT_BYTES,
+                    Self::MAX_BODY_LIMIT_BYTES
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SseResponseConfig {
+    #[serde(default = "default_sse_line_limit_bytes")]
+    pub line_limit_bytes: usize,
+    #[serde(default = "default_sse_event_limit_bytes")]
+    pub event_limit_bytes: usize,
+    #[serde(default = "default_sse_buffer_limit_bytes")]
+    pub buffer_limit_bytes: usize,
+    #[serde(default = "default_sse_frame_count_limit")]
+    pub frame_count_limit: u64,
+}
+
+impl Default for SseResponseConfig {
+    fn default() -> Self {
+        Self {
+            line_limit_bytes: default_sse_line_limit_bytes(),
+            event_limit_bytes: default_sse_event_limit_bytes(),
+            buffer_limit_bytes: default_sse_buffer_limit_bytes(),
+            frame_count_limit: default_sse_frame_count_limit(),
+        }
+    }
+}
+
+impl SseResponseConfig {
+    pub const MIN_BYTE_LIMIT: usize = 1_024;
+    pub const MAX_BYTE_LIMIT: usize = 536_870_912;
+    pub const MIN_FRAME_COUNT_LIMIT: u64 = 1;
+    pub const MAX_FRAME_COUNT_LIMIT: u64 = 10_000_000;
+
+    fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("line_limit_bytes", self.line_limit_bytes),
+            ("event_limit_bytes", self.event_limit_bytes),
+            ("buffer_limit_bytes", self.buffer_limit_bytes),
+        ] {
+            if !(Self::MIN_BYTE_LIMIT..=Self::MAX_BYTE_LIMIT).contains(&value) {
+                return Err(format!(
+                    "proxy_request.sse_response.{field} must be in {}..={}",
+                    Self::MIN_BYTE_LIMIT,
+                    Self::MAX_BYTE_LIMIT
+                ));
+            }
+        }
+        if !(Self::MIN_FRAME_COUNT_LIMIT..=Self::MAX_FRAME_COUNT_LIMIT)
+            .contains(&self.frame_count_limit)
+        {
+            return Err(format!(
+                "proxy_request.sse_response.frame_count_limit must be in {}..={}",
+                Self::MIN_FRAME_COUNT_LIMIT,
+                Self::MAX_FRAME_COUNT_LIMIT
+            ));
+        }
+        if self.line_limit_bytes > self.event_limit_bytes
+            || self.event_limit_bytes > self.buffer_limit_bytes
+        {
+            return Err(
+                "proxy_request.sse_response must satisfy line_limit_bytes <= event_limit_bytes <= buffer_limit_bytes"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProxyRequestConfig {
     #[serde(default = "default_proxy_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
@@ -675,6 +777,10 @@ pub struct ProxyRequestConfig {
     pub total_timeout_seconds: Option<u64>,
     #[serde(default = "default_upstream_error_body_limit_bytes")]
     pub upstream_error_body_limit_bytes: usize,
+    #[serde(default)]
+    pub non_stream_response: NonStreamResponseConfig,
+    #[serde(default)]
+    pub sse_response: SseResponseConfig,
 }
 
 impl Default for ProxyRequestConfig {
@@ -684,6 +790,8 @@ impl Default for ProxyRequestConfig {
             first_byte_timeout_seconds: default_proxy_first_byte_timeout_seconds(),
             total_timeout_seconds: None,
             upstream_error_body_limit_bytes: default_upstream_error_body_limit_bytes(),
+            non_stream_response: NonStreamResponseConfig::default(),
+            sse_response: SseResponseConfig::default(),
         }
     }
 }
@@ -705,6 +813,8 @@ impl ProxyRequestConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.non_stream_response.validate()?;
+        self.sse_response.validate()?;
         if !(Self::MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES..=Self::MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES)
             .contains(&self.upstream_error_body_limit_bytes)
         {
@@ -712,6 +822,13 @@ impl ProxyRequestConfig {
                 "proxy_request.upstream_error_body_limit_bytes must be in {}..={}",
                 Self::MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES,
                 Self::MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES
+            ));
+        }
+        if self.upstream_error_body_limit_bytes > self.non_stream_response.decoded_body_limit_bytes
+        {
+            return Err(format!(
+                "proxy_request.upstream_error_body_limit_bytes must be <= proxy_request.non_stream_response.decoded_body_limit_bytes ({})",
+                self.non_stream_response.decoded_body_limit_bytes
             ));
         }
         Ok(())
@@ -768,6 +885,30 @@ fn default_proxy_first_byte_timeout_seconds() -> Option<u64> {
 
 fn default_upstream_error_body_limit_bytes() -> usize {
     65_536
+}
+
+fn default_non_stream_raw_body_limit_bytes() -> usize {
+    33_554_432
+}
+
+fn default_non_stream_decoded_body_limit_bytes() -> usize {
+    67_108_864
+}
+
+fn default_sse_line_limit_bytes() -> usize {
+    4_194_304
+}
+
+fn default_sse_event_limit_bytes() -> usize {
+    8_388_608
+}
+
+fn default_sse_buffer_limit_bytes() -> usize {
+    16_777_216
+}
+
+fn default_sse_frame_count_limit() -> u64 {
+    1_000_000
 }
 
 fn default_provider_governance_enabled() -> bool {

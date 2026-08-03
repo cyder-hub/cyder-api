@@ -122,6 +122,10 @@ impl AppInfra {
         self.http_clients.provider_client(use_proxy)
     }
 
+    pub(crate) fn proxy_request_config(&self) -> &ProxyRequestConfig {
+        &self.http_clients.proxy_request
+    }
+
     pub(crate) fn log_manager(&self) -> &LogManager {
         self.log_manager.as_ref()
     }
@@ -162,6 +166,10 @@ fn build_http_client(
 
     let mut builder = Client::builder()
         .connect_timeout(connect_timeout)
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .redirect(redirect::Policy::none());
 
     if let Some(timeout) = total_timeout {
@@ -184,27 +192,32 @@ fn build_http_client(
         total_timeout_ms = optional_duration_to_millis(total_timeout),
     );
 
-    builder.build().map_err(|error| {
+    builder.build().map_err(|_| {
         if proxy_url.is_some() {
             "failed to build proxy reqwest client".to_string()
         } else {
-            format!("failed to build default reqwest client: {error}")
+            "failed to build default reqwest client".to_string()
         }
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::{
         Router,
         body::Body,
         extract::{Path, State},
-        http::{StatusCode, header::LOCATION},
+        http::{
+            StatusCode,
+            header::{CONTENT_ENCODING, LOCATION},
+        },
         response::Response,
-        routing::any,
+        routing::{any, get},
     };
+    use flate2::{Compression, write::GzEncoder};
     use tokio::net::TcpListener;
 
     use super::*;
@@ -272,6 +285,48 @@ mod tests {
     async fn target_response(State(hits): State<Arc<AtomicUsize>>) -> StatusCode {
         hits.fetch_add(1, Ordering::SeqCst);
         StatusCode::NO_CONTENT
+    }
+
+    async fn gzip_response(State(encoded): State<Vec<u8>>) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_ENCODING, "gzip")
+            .body(Body::from(encoded))
+            .expect("gzip fixture response should build")
+    }
+
+    #[tokio::test]
+    async fn shared_http_client_never_automatically_decodes_gzip() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"encoded fixture").unwrap();
+        let encoded = encoder.finish().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = encoded.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/gzip", get(gzip_response))
+                    .with_state(encoded),
+            )
+            .await
+            .unwrap();
+        });
+
+        let bundle = HttpClientBundle::build(ProxyRequestConfig::default(), None).unwrap();
+        let response = bundle
+            .client
+            .get(format!("http://{address}/gzip"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.headers().get(CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(
+            response.bytes().await.unwrap().as_ref(),
+            expected.as_slice()
+        );
+        task.abort();
     }
 
     #[tokio::test]

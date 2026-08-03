@@ -69,6 +69,16 @@ proxy_request:
   connect_timeout_seconds: 10
   # Provider error bodies exposed to the current caller are capped and marked as truncated.
   upstream_error_body_limit_bytes: 65536
+  # Complete non-stream responses accept identity/gzip and are counted in raw bytes and decoded bytes.
+  non_stream_response:
+    raw_body_limit_bytes: 33554432
+    decoded_body_limit_bytes: 67108864
+  # SSE responses must use identity encoding. Limits count UTF-8 bytes retained by the parser and blank-line frames.
+  sse_response:
+    line_limit_bytes: 4194304
+    event_limit_bytes: 8388608
+    buffer_limit_bytes: 16777216
+    frame_count_limit: 1000000
   # LLM 流式/长生成请求可能持续很久，因此默认建议留空关闭整体超时。
   # total_timeout_seconds: 1800
 # cache:

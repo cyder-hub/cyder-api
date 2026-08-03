@@ -1,3 +1,4 @@
+use crate::config::NonStreamResponseConfig;
 use crate::database::{
     DbResult,
     model::{Model, ModelDetail},
@@ -38,6 +39,9 @@ use crate::service::provider_credential::{
 };
 use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::SensitiveSecret;
+use crate::service::upstream_response::{
+    apply_upstream_accept_encoding, read_complete_response_body, safe_http_error_message,
+};
 
 #[derive(Serialize)]
 struct ProviderDetailResponse {
@@ -484,14 +488,19 @@ async fn perform_provider_check(
     let check_request =
         build_provider_check_request(provider, credential, model_name, request_patches).await?;
 
+    let mut headers = check_request.headers;
+    apply_upstream_accept_encoding(&mut headers, false);
     let response = client
         .post(&check_request.url)
-        .headers(check_request.headers)
+        .headers(headers)
         .json(&check_request.body)
         .send()
         .await
-        .map_err(|e| {
-            BaseError::ParamInvalid(Some(format!("Failed to send check request: {}", e)))
+        .map_err(|error| {
+            BaseError::ParamInvalid(Some(safe_http_error_message(
+                "Failed to send provider check request",
+                &error,
+            )))
         })?;
 
     if !response.status().is_success() {
@@ -502,7 +511,7 @@ async fn perform_provider_check(
         ))));
     }
 
-    let _ = response.text().await;
+    drop(response);
     Ok(())
 }
 
@@ -715,9 +724,35 @@ async fn get_remote_models(
         .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
     let (url, headers) = build_remote_models_request(&provider, &cache_provider, &credential)?;
-    let response = client.get(url).headers(headers).send().await.map_err(|e| {
-        BaseError::ParamInvalid(Some(format!("Failed to fetch remote models: {}", e)))
-    })?;
+    let models = fetch_remote_models(
+        client.as_ref(),
+        url,
+        headers,
+        &app_state.infra.proxy_request_config().non_stream_response,
+    )
+    .await?;
+
+    Ok(HttpResult::new(models))
+}
+
+async fn fetch_remote_models(
+    client: &reqwest::Client,
+    url: Url,
+    mut headers: HeaderMap,
+    limits: &NonStreamResponseConfig,
+) -> Result<Value, BaseError> {
+    apply_upstream_accept_encoding(&mut headers, false);
+    let response = client
+        .get(url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|error| {
+            BaseError::ParamInvalid(Some(safe_http_error_message(
+                "Failed to fetch remote models",
+                &error,
+            )))
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -727,14 +762,18 @@ async fn get_remote_models(
         ))));
     }
 
-    let models = response.json::<Value>().await.map_err(|e| {
-        BaseError::ParamInvalid(Some(format!(
-            "Failed to parse remote models response: {}",
-            e
-        )))
-    })?;
-
-    Ok(HttpResult::new(models))
+    let body = read_complete_response_body(response, limits)
+        .await
+        .map_err(|error| {
+            BaseError::ParamInvalid(Some(format!(
+                "Failed to read remote models response: {error}"
+            )))
+        })?;
+    serde_json::from_slice::<Value>(&body.bytes).map_err(|_| {
+        BaseError::ParamInvalid(Some(
+            "Failed to parse remote models response (invalid_json)".to_string(),
+        ))
+    })
 }
 
 fn build_remote_models_request(
@@ -974,13 +1013,20 @@ pub fn create_provider_router() -> StateRouter {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::{net::SocketAddr, sync::Arc};
+    use std::{io::Write as _, net::SocketAddr, sync::Arc, time::Duration};
 
     use axum::{
         body::{Body, to_bytes},
         http::{Method, Request, StatusCode, header::CONTENT_TYPE},
     };
+    use flate2::{Compression, write::GzEncoder};
     use serde_json::{Value, json};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+        time::timeout,
+    };
     use tower::util::ServiceExt;
 
     use super::create_provider_router;
@@ -1026,6 +1072,76 @@ mod tests {
 
     fn credential(secret: &str) -> ProviderCredential {
         ProviderCredential::for_test(0, secret)
+    }
+
+    fn gzip(body: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(body).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn exact_json(size: usize) -> Vec<u8> {
+        let overhead = serde_json::to_vec(&json!({"data": ""})).unwrap().len();
+        let body = serde_json::to_vec(&json!({"data": "x".repeat(size - overhead)})).unwrap();
+        assert_eq!(body.len(), size);
+        body
+    }
+
+    async fn response_fixture(
+        headers: &[(&str, &str)],
+        body: &[u8],
+        query: &str,
+    ) -> (reqwest::Url, oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut wire = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        for (name, value) in headers {
+            wire.push_str(name);
+            wire.push_str(": ");
+            wire.push_str(value);
+            wire.push_str("\r\n");
+        }
+        wire.push_str("\r\n");
+        let body = body.to_vec();
+        let (request_tx, request_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8192];
+            let read = socket.read(&mut request).await.unwrap();
+            let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+            socket.write_all(wire.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        });
+        (
+            reqwest::Url::parse(&format!("http://{address}/models{query}")).unwrap(),
+            request_rx,
+        )
+    }
+
+    async fn fetch_remote_fixture(
+        headers: &[(&str, &str)],
+        body: &[u8],
+        limits: &crate::config::NonStreamResponseConfig,
+        query: &str,
+    ) -> Result<Value, BaseError> {
+        let (url, request_rx) = response_fixture(headers, body, query).await;
+        let result = super::fetch_remote_models(
+            &reqwest::Client::new(),
+            url,
+            reqwest::header::HeaderMap::new(),
+            limits,
+        )
+        .await;
+        let request = request_rx.await.unwrap();
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("accept-encoding: gzip, identity")
+        );
+        result
     }
 
     async fn send(app_state: &Arc<AppState>, request: Request<Body>) -> axum::response::Response {
@@ -1235,6 +1351,133 @@ mod tests {
             "strict"
         );
         assert_eq!(request.body["messages"][0]["content"], "patched");
+    }
+
+    #[tokio::test]
+    async fn provider_check_drops_unbounded_success_body_without_reading_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = oneshot::channel();
+        let (closed_tx, closed_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8192];
+            let read = socket.read(&mut request).await.unwrap();
+            let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nfirst\r\n",
+                )
+                .await
+                .unwrap();
+            let mut byte = [0u8; 1];
+            let closed = socket.read(&mut byte).await.unwrap() == 0;
+            let _ = closed_tx.send(closed);
+        });
+        let provider = sample_provider(ProviderType::Openai, &format!("http://{address}/v1"));
+
+        super::perform_provider_check(
+            &reqwest::Client::new(),
+            &provider,
+            &credential("provider-header-secret"),
+            "model",
+            &[],
+        )
+        .await
+        .expect("status-only provider check should succeed");
+        let request = request_rx.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("accept-encoding: gzip, identity"));
+        assert!(
+            timeout(Duration::from_secs(2), closed_rx)
+                .await
+                .expect("response drop should close the socket")
+                .expect("close signal should be delivered")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_models_shared_reader_covers_encoding_limits_json_and_safe_errors() {
+        let limits = crate::config::NonStreamResponseConfig {
+            raw_body_limit_bytes: 64,
+            decoded_body_limit_bytes: 64,
+        };
+        let exact = exact_json(64);
+        assert_eq!(
+            fetch_remote_fixture(&[("Content-Type", "application/json")], &exact, &limits, "")
+                .await
+                .unwrap()["data"]
+                .as_str()
+                .unwrap()
+                .len(),
+            53
+        );
+        assert!(
+            fetch_remote_fixture(
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Content-Encoding", "gzip")
+                ],
+                &gzip(&exact),
+                &limits,
+                ""
+            )
+            .await
+            .is_ok()
+        );
+
+        let raw_error = fetch_remote_fixture(&[], &exact_json(65), &limits, "")
+            .await
+            .expect_err("raw +1 must fail");
+        assert!(super::base_error_message(&raw_error).contains("raw response body exceeded"));
+
+        let decoded_error = fetch_remote_fixture(
+            &[("Content-Encoding", "gzip")],
+            &gzip(&exact_json(65)),
+            &limits,
+            "",
+        )
+        .await
+        .expect_err("decoded +1 must fail");
+        assert!(
+            super::base_error_message(&decoded_error).contains("decoded response body exceeded")
+        );
+
+        for (headers, body, expected_category) in [
+            (
+                vec![
+                    ("Content-Encoding", "br"),
+                    ("X-Private", "header-secret-marker"),
+                ],
+                b"provider-body-secret-marker".as_slice(),
+                "Content-Encoding",
+            ),
+            (
+                vec![("Content-Encoding", "gzip")],
+                b"invalid-gzip-body-secret".as_slice(),
+                "gzip",
+            ),
+            (
+                vec![("Content-Type", "application/json")],
+                b"invalid-json-body-secret".as_slice(),
+                "invalid_json",
+            ),
+        ] {
+            let error =
+                fetch_remote_fixture(&headers, body, &limits, "?api_key=query-secret-marker")
+                    .await
+                    .expect_err("invalid remote models response must fail");
+            let message = super::base_error_message(&error);
+            assert!(message.contains(expected_category), "{message}");
+            for secret in [
+                "query-secret-marker",
+                "header-secret-marker",
+                "provider-body-secret-marker",
+                "invalid-gzip-body-secret",
+                "invalid-json-body-secret",
+            ] {
+                assert!(!message.contains(secret), "{message}");
+            }
+        }
     }
 
     #[test]

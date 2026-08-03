@@ -553,6 +553,7 @@ dependencies = [
  "jsonwebtoken 10.3.0",
  "libsqlite3-sys",
  "log",
+ "mime",
  "openssl",
  "paste",
  "pq-sys",

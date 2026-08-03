@@ -325,6 +325,11 @@ mod tests {
                 "CYDER_PROXY_REQUEST_UPSTREAM_ERROR_BODY_LIMIT_BYTES",
                 "1024",
             ),
+            (
+                "CYDER_PROXY_REQUEST_NON_STREAM_RESPONSE_RAW_BODY_LIMIT_BYTES",
+                "1048576",
+            ),
+            ("CYDER_PROXY_REQUEST_SSE_RESPONSE_FRAME_COUNT_LIMIT", "1000"),
         ])
         .expect("environment should parse");
 
@@ -338,6 +343,8 @@ mod tests {
         assert!(!values.contains_key("db_url"));
         assert!(!values.contains_key("cyder_db_url"));
         assert!(!values.contains_key("proxy_request.upstream_error_body_limit_bytes"));
+        assert!(!values.contains_key("proxy_request.non_stream_response.raw_body_limit_bytes"));
+        assert!(!values.contains_key("proxy_request.sse_response.frame_count_limit"));
     }
 
     #[test]

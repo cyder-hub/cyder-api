@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderMap, header::CONTENT_TYPE},
+    http::{HeaderMap, StatusCode},
     response::Response,
 };
 use chrono::Utc;
@@ -25,11 +25,13 @@ use crate::{
         logging::RequestLogContext,
         provider_governance::record_provider_failure,
         runtime::api_key_lease::ApiKeyRequestLeaseFinalizer,
-        util::serialize_upstream_response_headers_for_log,
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
-    service::{app_state::AppState, cache::types::CacheCostCatalogVersion},
+    service::{
+        app_state::AppState, cache::types::CacheCostCatalogVersion,
+        upstream_response::normalize_content_type,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -57,6 +59,12 @@ impl ProxyResponseMode {
             } => (downstream_protocol, upstream_protocol),
         }
     }
+}
+
+fn is_sse_response(status: StatusCode, headers: &HeaderMap) -> bool {
+    status.is_success()
+        && normalize_content_type(headers)
+            .is_some_and(|content_type| content_type.essence == "text/event-stream")
 }
 
 pub(in crate::proxy) struct ProxyRequestOutcome {
@@ -116,6 +124,7 @@ pub(in crate::proxy) async fn send_materialized_request(
     let first_byte_timeout = client_bundle.proxy_request.first_byte_timeout();
     let upstream_error_body_limit_bytes =
         client_bundle.proxy_request.upstream_error_body_limit_bytes;
+    let sse_response_limits = client_bundle.proxy_request.sse_response.clone();
     let client = match client_bundle.provider_client(use_proxy) {
         Ok(client) => client,
         Err(error) => {
@@ -204,16 +213,7 @@ pub(in crate::proxy) async fn send_materialized_request(
     };
     drop_cancellation_guard.set_stage(ExecutionStage::UpstreamResponse);
 
-    {
-        let mut context = log_context.lock().await;
-        context.response_headers_json =
-            serialize_upstream_response_headers_for_log(response.headers());
-    }
-
-    let is_sse = response.status().is_success()
-        && response.headers().get(CONTENT_TYPE).map_or(false, |value| {
-            value.to_str().unwrap_or("").contains("text/event-stream")
-        });
+    let is_sse = is_sse_response(response.status(), response.headers());
     {
         let mut context = log_context.lock().await;
         context.is_stream = is_sse;
@@ -236,7 +236,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             upstream_protocol,
             reasoning_capture.clone(),
             first_byte_timeout,
-            upstream_error_body_limit_bytes,
+            sse_response_limits,
             response_visibility.clone(),
         )
         .await
@@ -268,10 +268,44 @@ pub(in crate::proxy) async fn send_materialized_request(
             response_mode,
             reasoning_capture.as_ref(),
             upstream_error_body_limit_bytes,
+            &client_bundle.proxy_request.non_stream_response,
             response_visibility,
         )
         .await
     };
     drop_cancellation_guard.disarm();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
+
+    use super::is_sse_response;
+
+    #[test]
+    fn sse_detection_requires_success_and_exact_normalized_media_essence() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("Text/Event-Stream; Charset=UTF-8"),
+        );
+        assert!(is_sse_response(StatusCode::OK, &headers));
+        assert!(!is_sse_response(StatusCode::BAD_REQUEST, &headers));
+
+        for value in [
+            "text/event-streamish",
+            "application/text/event-stream",
+            "text/event-stream; charset=invalid charset",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_str(value).unwrap());
+            assert!(!is_sse_response(StatusCode::OK, &headers), "{value}");
+        }
+
+        let mut duplicate = HeaderMap::new();
+        duplicate.append(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        duplicate.append(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        assert!(!is_sse_response(StatusCode::OK, &duplicate));
+    }
 }

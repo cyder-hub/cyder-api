@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use cyder_tools::log::debug;
 use serde_json::Value;
@@ -11,31 +11,6 @@ use crate::{
     service::cache::types::{CacheCostCatalogVersion, CacheModel, CacheProvider},
     service::provider_profile::provider_runtime_profile,
 };
-
-fn serialize_headers_for_log(
-    headers: &reqwest::header::HeaderMap,
-    redacted_names: &[&str],
-) -> Option<String> {
-    let mut header_map_simplified = BTreeMap::new();
-    for (name, value) in headers.iter() {
-        let normalized_name = name.as_str().to_ascii_lowercase();
-        if redacted_names.contains(&normalized_name.as_str()) {
-            continue;
-        }
-
-        header_map_simplified.insert(normalized_name, value.to_str().unwrap_or("").to_string());
-    }
-    serde_json::to_string(&header_map_simplified).ok()
-}
-
-pub(super) fn serialize_upstream_response_headers_for_log(
-    headers: &reqwest::header::HeaderMap,
-) -> Option<String> {
-    serialize_headers_for_log(
-        headers,
-        &["set-cookie", "transfer-encoding", "content-length"],
-    )
-}
 
 pub(super) fn sha256_hex(body: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(body.as_ref()))
@@ -137,12 +112,10 @@ pub(super) fn format_model_str(provider: &CacheProvider, model: &CacheModel) -> 
 mod tests {
     use super::{
         determine_upstream_protocol, json_top_level_field_count_from_bytes,
-        parse_utility_usage_normalization, serialize_upstream_response_headers_for_log, sha256_hex,
-        top_level_json_field_count,
+        parse_utility_usage_normalization, sha256_hex, top_level_json_field_count,
     };
     use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
     use crate::service::cache::types::CacheProvider;
-    use reqwest::header::{HeaderMap, HeaderValue};
     use serde_json::Value;
 
     #[test]
@@ -162,23 +135,6 @@ mod tests {
             determine_upstream_protocol(&provider),
             crate::schema::enum_def::UpstreamProtocol::Openai
         );
-    }
-
-    #[test]
-    fn serialize_upstream_response_headers_for_log_redacts_transport_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert("set-cookie", HeaderValue::from_static("session=secret"));
-        headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
-        headers.insert("content-length", HeaderValue::from_static("42"));
-        headers.insert("content-type", HeaderValue::from_static("application/json"));
-
-        let serialized = serialize_upstream_response_headers_for_log(&headers).unwrap();
-        let parsed: Value = serde_json::from_str(&serialized).unwrap();
-
-        assert!(parsed.get("set-cookie").is_none());
-        assert!(parsed.get("transfer-encoding").is_none());
-        assert!(parsed.get("content-length").is_none());
-        assert_eq!(parsed["content-type"], "application/json");
     }
 
     #[test]

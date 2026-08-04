@@ -25,7 +25,7 @@ use policy::{PolicyEngine, TransformAction, TransformLossLevel};
 pub(crate) use stream::AnthropicActiveBlockKind;
 pub use stream::{
     AnthropicActiveBlockState, AnthropicSessionState, GeminiSessionState, ResponsesSessionState,
-    SessionContext, StreamTransformer,
+    SessionContext, StreamTransformOutput, StreamTransformer,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

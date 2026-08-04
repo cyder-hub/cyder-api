@@ -1,5 +1,11 @@
 use std::sync::{Arc, Mutex};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+use crate::proxy::runtime::transport::{
+    lifecycle::{ProviderOutcome, ProxyTerminationCause, ProxyTerminationCoordinator},
+    timing::TransportTimingState,
+};
 
 use super::{
     ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
@@ -10,6 +16,9 @@ use super::{
 pub(crate) struct ProxyCancellationContext {
     token: CancellationToken,
     reason: Arc<Mutex<Option<String>>>,
+    coordinator: ProxyTerminationCoordinator,
+    timing: TransportTimingState,
+    total_deadline: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ProxyCancellationContext {
@@ -17,19 +26,66 @@ impl ProxyCancellationContext {
         Self {
             token: CancellationToken::new(),
             reason: Arc::new(Mutex::new(None)),
+            coordinator: ProxyTerminationCoordinator::default(),
+            timing: TransportTimingState::default(),
+            total_deadline: Arc::new(Mutex::new(None)),
         }
     }
 
     pub(super) fn cancel_now(&self, reason: impl Into<String>) {
+        let reason = reason.into();
         let mut guard = self
             .reason
             .lock()
             .expect("cancellation reason lock poisoned");
         if guard.is_none() {
-            *guard = Some(reason.into());
+            *guard = Some(reason.clone());
         }
         drop(guard);
+        self.coordinator
+            .try_terminate(ProxyTerminationCause::ClientCancelled);
         self.token.cancel();
+    }
+
+    pub(crate) fn coordinator(&self) -> ProxyTerminationCoordinator {
+        self.coordinator.clone()
+    }
+
+    pub(crate) fn timing(&self) -> TransportTimingState {
+        self.timing.clone()
+    }
+
+    pub(crate) fn set_total_deadline(&self, deadline: Instant) -> bool {
+        let mut guard = self
+            .total_deadline
+            .lock()
+            .expect("total deadline lock poisoned");
+        if guard.is_some() {
+            return false;
+        }
+        *guard = Some(deadline);
+        true
+    }
+
+    pub(crate) fn total_deadline(&self) -> Option<Instant> {
+        *self
+            .total_deadline
+            .lock()
+            .expect("total deadline lock poisoned")
+    }
+
+    pub(crate) fn try_terminate_error(&self, error: &ProxyError) -> bool {
+        self.coordinator.try_terminate_error(error)
+    }
+
+    pub(crate) fn try_provider_success(&self) -> bool {
+        self.coordinator
+            .try_record_provider_outcome(ProviderOutcome::Success)
+    }
+
+    pub(crate) fn try_provider_failure(&self) -> bool {
+        self.coordinator
+            .try_record_provider_outcome(ProviderOutcome::Failure)
     }
 
     pub(super) async fn cancellation_error(

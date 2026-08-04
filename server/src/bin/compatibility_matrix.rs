@@ -506,7 +506,11 @@ fn expected_downstream_error_contracts() -> DownstreamErrorContracts {
     DownstreamErrorContracts {
         scope: ErrorContractScope {
             before_headers_committed: true,
-            after_headers_committed_owners: vec!["R3.7".to_string(), "R3.14-R3.20".to_string()],
+            after_headers_committed_owners: vec![
+                "R3.7".to_string(),
+                "R3.8".to_string(),
+                "R3.14-R3.20".to_string(),
+            ],
             ollama_downstream_contract: ContractPresence::Absent,
             upstream_error_location: ExtensionLocation::TopLevel,
         },

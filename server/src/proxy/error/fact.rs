@@ -311,6 +311,37 @@ pub(crate) enum ExecutionStage {
     DownstreamSend,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TimeoutPhase {
+    Connect,
+    RequestSend,
+    FirstByte,
+    ResponseIdle,
+    Total,
+}
+
+impl TimeoutPhase {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Connect,
+        Self::RequestSend,
+        Self::FirstByte,
+        Self::ResponseIdle,
+        Self::Total,
+    ];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::RequestSend => "request_send",
+            Self::FirstByte => "first_byte",
+            Self::ResponseIdle => "response_idle",
+            Self::Total => "total",
+        }
+    }
+}
+
 impl ExecutionStage {
     #[cfg(test)]
     pub(crate) const ALL: [Self; 11] = [
@@ -372,6 +403,7 @@ pub(crate) struct ProxyError {
     client_payload: ClientErrorPayload,
     operator_message: String,
     response_hints: ErrorResponseHints,
+    timeout_phase: Option<TimeoutPhase>,
 }
 
 impl ProxyError {
@@ -386,6 +418,11 @@ impl ProxyError {
             !code.requires_upstream_payload(),
             "explicit upstream status errors require an upstream payload"
         );
+        assert_ne!(
+            code,
+            ProxyErrorCode::UpstreamTimeoutError,
+            "upstream timeout errors must use upstream_timeout with an explicit phase"
+        );
         let message = if code.allows_gateway_detail() {
             detailed_public_message.unwrap_or_else(|| code.default_public_message().to_string())
         } else {
@@ -398,6 +435,28 @@ impl ProxyError {
             client_payload: ClientErrorPayload::Gateway { message },
             operator_message: operator_message.into(),
             response_hints: ErrorResponseHints::default(),
+            timeout_phase: None,
+        }
+    }
+
+    pub(crate) fn upstream_timeout(
+        phase: TimeoutPhase,
+        stage: ExecutionStage,
+        response_visibility: super::visibility::ResponseVisibility,
+        operator_message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: ProxyErrorCode::UpstreamTimeoutError,
+            stage,
+            response_visibility,
+            client_payload: ClientErrorPayload::Gateway {
+                message: ProxyErrorCode::UpstreamTimeoutError
+                    .default_public_message()
+                    .to_string(),
+            },
+            operator_message: operator_message.into(),
+            response_hints: ErrorResponseHints::default(),
+            timeout_phase: Some(phase),
         }
     }
 
@@ -422,6 +481,7 @@ impl ProxyError {
             },
             operator_message: operator_message.into(),
             response_hints: ErrorResponseHints::default(),
+            timeout_phase: None,
         }
     }
 
@@ -444,6 +504,10 @@ impl ProxyError {
 
     pub(crate) const fn stage(&self) -> ExecutionStage {
         self.stage
+    }
+
+    pub(crate) const fn timeout_phase(&self) -> Option<TimeoutPhase> {
+        self.timeout_phase
     }
 
     pub(crate) const fn response_visibility(&self) -> super::visibility::ResponseVisibility {
@@ -494,7 +558,7 @@ impl std::error::Error for ProxyError {}
 mod tests {
     use super::{
         ClientErrorPayload, ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel,
-        RetryAfterSeconds,
+        RetryAfterSeconds, TimeoutPhase,
     };
     use crate::proxy::error::visibility::ResponseVisibility;
     use axum::http::StatusCode;
@@ -583,6 +647,57 @@ mod tests {
                 stage.as_str()
             );
         }
+    }
+
+    #[test]
+    fn timeout_phase_metadata_is_exhaustive_and_serializes_as_snake_case() {
+        assert_eq!(TimeoutPhase::ALL.len(), 5);
+        let phases = TimeoutPhase::ALL
+            .iter()
+            .map(|phase| phase.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(phases.len(), TimeoutPhase::ALL.len());
+        for phase in TimeoutPhase::ALL {
+            assert_eq!(
+                serde_json::to_value(phase).expect("timeout phase should serialize"),
+                phase.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn only_explicit_timeout_facts_carry_a_timeout_phase() {
+        let timeout = ProxyError::upstream_timeout(
+            TimeoutPhase::ResponseIdle,
+            ExecutionStage::UpstreamResponse,
+            ResponseVisibility::NotVisible,
+            "response idle timeout",
+        );
+        assert_eq!(timeout.code(), ProxyErrorCode::UpstreamTimeoutError);
+        assert_eq!(timeout.timeout_phase(), Some(TimeoutPhase::ResponseIdle));
+
+        let ordinary = ProxyError::gateway(
+            ProxyErrorCode::ServerError,
+            ExecutionStage::Materialize,
+            ResponseVisibility::NotVisible,
+            None,
+            "server error",
+        );
+        assert_eq!(ordinary.timeout_phase(), None);
+
+        let provider_timeout = ProxyError::upstream(
+            ProxyErrorCode::UpstreamTimeoutError,
+            ExecutionStage::UpstreamResponse,
+            ResponseVisibility::NotVisible,
+            crate::proxy::error::upstream::UpstreamErrorPayload::capture(
+                StatusCode::GATEWAY_TIMEOUT,
+                None,
+                b"provider timeout",
+                65_536,
+            ),
+            "provider returned HTTP 504",
+        );
+        assert_eq!(provider_timeout.timeout_phase(), None);
     }
 
     #[test]

@@ -19,6 +19,7 @@ const statsItems = computed(() =>
     label: card.label,
     value: card.value,
     secondary: card.description,
+    title: card.title,
   })),
 );
 </script>

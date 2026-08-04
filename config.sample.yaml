@@ -65,8 +65,15 @@ id:
   # Reserved Snowflake worker id. Pre-1.0 supports one running server instance.
   worker_id: 1
 # proxy: http://127.0.0.1:1080
-proxy_request:
+outbound_http:
   connect_timeout_seconds: 10
+  auxiliary_total_timeout_seconds: 60
+proxy_request:
+  timeouts:
+    request_send_seconds: 7200
+    first_byte_seconds: 7200
+    response_idle_seconds: 7200
+    total_seconds: 7200
   # Provider error bodies exposed to the current caller are capped and marked as truncated.
   upstream_error_body_limit_bytes: 65536
   # Complete non-stream responses accept identity/gzip and are counted in raw bytes and decoded bytes.
@@ -79,8 +86,6 @@ proxy_request:
     event_limit_bytes: 8388608
     buffer_limit_bytes: 16777216
     frame_count_limit: 1000000
-  # LLM 流式/长生成请求可能持续很久，因此默认建议留空关闭整体超时。
-  # total_timeout_seconds: 1800
 # cache:
 #   backend: memory # memory or redis
 #   ttl: 3600 # 1 hour

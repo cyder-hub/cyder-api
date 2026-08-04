@@ -52,7 +52,7 @@ function withMockLocalStorage(callback) {
 
 test("formatTimestamp uses the requested locale and rejects empty values", () => {
   assert.equal(formatTimestamp(null), "");
-  assert.equal(formatTimestamp(0), "");
+  assert.match(formatTimestamp(0), /1970/);
   assert.match(formatTimestamp(Date.UTC(2026, 4, 7, 8, 9, 10), "en"), /2026|05|07/);
   assert.match(formatTimestamp(Date.UTC(2026, 4, 7, 8, 9, 10), "zh"), /2026|05|07/);
 });

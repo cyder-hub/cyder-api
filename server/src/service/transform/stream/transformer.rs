@@ -25,6 +25,12 @@ pub struct StreamTransformer {
     pub(in crate::service::transform) upstream_protocol: UpstreamProtocol,
     pub(in crate::service::transform) downstream_protocol: DownstreamProtocol,
     pub(in crate::service::transform) session: SessionContext,
+    last_meaningful_output_observed: bool,
+}
+
+pub struct StreamTransformOutput {
+    pub events: Option<Vec<SseEvent>>,
+    pub meaningful_output_observed: bool,
 }
 
 impl StreamTransformer {
@@ -36,6 +42,15 @@ impl StreamTransformer {
             upstream_protocol,
             downstream_protocol,
             session: SessionContext::default(),
+            last_meaningful_output_observed: false,
+        }
+    }
+
+    pub fn transform_event_with_observation(&mut self, event: SseEvent) -> StreamTransformOutput {
+        let events = self.transform_event(event);
+        StreamTransformOutput {
+            events,
+            meaningful_output_observed: self.last_meaningful_output_observed,
         }
     }
 
@@ -314,6 +329,7 @@ impl StreamTransformer {
     }
 
     pub fn transform_event(&mut self, event: SseEvent) -> Option<Vec<SseEvent>> {
+        self.last_meaningful_output_observed = false;
         if event.data.is_empty() {
             return None;
         }
@@ -334,6 +350,7 @@ impl StreamTransformer {
                 (source_adapter.stream.decode_source)(&event.data, &mut context)
             };
             if let Ok(frame) = decoded_frame {
+                self.last_meaningful_output_observed = frame.meaningful_output_observed();
                 match frame {
                     DecodedSourceStreamFrame::Events(stream_events) => {
                         self.update_session_from_stream_events(&stream_events);
@@ -368,6 +385,10 @@ impl StreamTransformer {
             let transformed =
                 match serde_json::from_str::<responses::ResponsesChunkResponse>(&event.data) {
                     Ok(chunk) => {
+                        let source_events =
+                            responses::responses_chunk_to_unified_stream_events(chunk.clone());
+                        self.last_meaningful_output_observed =
+                            meaningful_output_from_stream_events(&source_events);
                         let mut context = self.stream_context();
                         responses::transform_responses_chunk_to_openai_events(chunk, &mut context)
                     }
@@ -400,6 +421,10 @@ impl StreamTransformer {
             let mut context = self.stream_context();
             (source_adapter.stream.decode_source)(&event.data, &mut context)
         };
+
+        self.last_meaningful_output_observed = decoded_frame
+            .as_ref()
+            .is_ok_and(DecodedSourceStreamFrame::meaningful_output_observed);
 
         let transformed = match decoded_frame {
             Ok(DecodedSourceStreamFrame::Events(stream_events)) => {

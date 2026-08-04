@@ -264,6 +264,35 @@ fn sqlite_table_column_count(
     .count
 }
 
+fn assert_sqlite_request_log_timing_schema(connection: &mut diesel::SqliteConnection) {
+    for column in [
+        "upstream_request_sent_at",
+        "upstream_response_headers_at",
+        "upstream_first_body_chunk_at",
+        "first_response_body_at",
+        "first_token_at",
+        "max_upstream_response_idle_ms",
+        "completed_at",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "request_log", column),
+            1,
+            "SQLite request_log should contain {column}"
+        );
+    }
+    for column in [
+        "response_started_to_client_at",
+        "llm_response_first_chunk_at",
+        "llm_response_completed_at",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "request_log", column),
+            0,
+            "SQLite request_log should not contain legacy {column}"
+        );
+    }
+}
+
 fn assert_postgres_request_log_protocol_schema(connection: &mut PgConnection) {
     let downstream_column = diesel::sql_query(
         "SELECT COUNT(*) AS count
@@ -360,6 +389,58 @@ fn assert_postgres_request_log_protocol_schema(connection: &mut PgConnection) {
     assert_eq!(legacy_type, 0);
 }
 
+fn assert_postgres_request_log_timing_schema(connection: &mut PgConnection) {
+    let timing_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name IN (
+               'upstream_request_sent_at',
+               'upstream_response_headers_at',
+               'upstream_first_body_chunk_at',
+               'first_response_body_at',
+               'first_token_at',
+               'max_upstream_response_idle_ms',
+               'completed_at'
+           )
+           AND is_nullable = 'YES'
+           AND data_type = 'bigint'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL request timing columns should query")
+    .count;
+    assert_eq!(timing_columns, 7);
+
+    let legacy_column_count = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name IN (
+               'response_started_to_client_at',
+               'llm_response_first_chunk_at',
+               'llm_response_completed_at'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL legacy timing columns should query")
+    .count;
+    assert_eq!(legacy_column_count, 0);
+
+    let constraint_count = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+         WHERE t.relname = 'request_log'
+           AND c.conname = 'chk_request_log_timing_contract'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL request timing constraint should query")
+    .count;
+    assert_eq!(constraint_count, 1);
+}
+
 fn assert_postgres_request_identity_schema(connection: &mut PgConnection) {
     let canonical_column = diesel::sql_query(
         "SELECT COUNT(*) AS count
@@ -416,6 +497,7 @@ fn sqlite_clean_upgrade_chain_from_empty() {
     );
 
     run_sqlite_migrations(&mut connection).expect("sqlite clean + upgrade migrations should run");
+    assert_sqlite_request_log_timing_schema(&mut connection);
 
     let applied_versions = connection
         .applied_migrations()
@@ -603,13 +685,14 @@ fn sqlite_request_identity_upgrade_is_destructive_constrained_and_preserves_roll
             INSERT INTO metric_request_rollup_minute (
                 bucket_start_ms, scope_type, scope_id, scope_label,
                 request_count, success_count, error_count, cancelled_count,
-                first_byte_latency_sum_ms, first_byte_latency_count,
+                time_to_first_response_body_sum_ms, time_to_first_response_body_count,
+                ttft_sum_ms, ttft_count,
                 total_latency_sum_ms, total_latency_count,
                 input_tokens, output_tokens, reasoning_tokens, total_tokens,
                 created_at, updated_at
             ) VALUES (
                 0, 'global', 'global', NULL,
-                1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 2, 1, 1
+                1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 2, 1, 1
             );",
         )
         .expect("pre-identity request data should insert");
@@ -717,6 +800,133 @@ fn sqlite_request_identity_upgrade_is_destructive_constrained_and_preserves_roll
         rollup_count, 1,
         "down migration must preserve minute rollups"
     );
+}
+
+#[test]
+fn sqlite_request_log_timing_upgrade_preserves_body_timing_and_round_trips() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("request-log-timing-contract-upgrade.sqlite");
+    run_sqlite_migrations(&mut connection).expect("sqlite migrations should run");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-08-04-090000_request_log_timing_contract/down.sql"
+        ))
+        .expect("request log timing down migration should run");
+    connection
+        .batch_execute(
+            "INSERT INTO api_key (
+                id, api_key_hash, key_prefix, key_last4, name, description,
+                default_action, is_enabled, expires_at, rate_limit_rpm,
+                max_concurrent_requests, quota_daily_requests, quota_daily_tokens,
+                quota_monthly_tokens, budget_daily_nanos, budget_daily_currency,
+                budget_monthly_nanos, budget_monthly_currency, deleted_at,
+                created_at, updated_at
+            ) VALUES (
+                9201, 'timing-contract-hash', 'ck-time', '9201',
+                'Timing contract key', NULL, 'ALLOW', 1, NULL, NULL,
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 1
+            );
+            INSERT INTO request_log (
+                id, request_id, client_request_id, api_key_id,
+                downstream_protocol, overall_status, request_received_at,
+                upstream_request_sent_at, response_started_to_client_at,
+                completed_at, is_stream, created_at, updated_at
+            ) VALUES (
+                9202, '018fa7d8-6a00-4c9a-8f7e-111111111111', 'timing-client', 9201,
+                'OPENAI', 'SUCCESS', 100, 110, 120, 140, 1, 100, 140
+            );
+            INSERT INTO metric_ingested_request_log (
+                request_log_id, request_received_at, completed_at, ingested_at
+            ) VALUES (9202, 100, 140, 150);",
+        )
+        .expect("pre-timing request log and marker should insert");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-08-04-090000_request_log_timing_contract/up.sql"
+        ))
+        .expect("request log timing up migration should run");
+    assert_sqlite_request_log_timing_schema(&mut connection);
+
+    let preserved = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM request_log
+         WHERE id = 9202
+           AND upstream_request_sent_at = 110
+           AND first_response_body_at = 120
+           AND upstream_response_headers_at IS NULL
+           AND upstream_first_body_chunk_at IS NULL
+           AND first_token_at IS NULL
+           AND max_upstream_response_idle_ms IS NULL
+           AND completed_at = 140",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("preserved timing row should query")
+    .count;
+    assert_eq!(preserved, 1, "old body timing must be preserved exactly");
+
+    let marker_count = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM metric_ingested_request_log
+         WHERE request_log_id = 9202 AND request_received_at = 100 AND completed_at = 140",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("ingest marker should query")
+    .count;
+    assert_eq!(
+        marker_count, 1,
+        "timing migration must not clear ingest markers"
+    );
+
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO request_log (
+                    id, request_id, api_key_id, downstream_protocol, overall_status,
+                    request_received_at, upstream_request_sent_at,
+                    upstream_response_headers_at, upstream_first_body_chunk_at,
+                    first_response_body_at, first_token_at, completed_at,
+                    is_stream, created_at, updated_at
+                ) VALUES (
+                    9203, '018fa7d8-6a00-4c9a-8f7e-222222222222', 9201,
+                    'OPENAI', 'SUCCESS', 100, 110, 115, 120, 125, 130, 140,
+                    0, 100, 140
+                );",
+            )
+            .is_err(),
+        "non-streaming first_token_at must be rejected"
+    );
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-08-04-090000_request_log_timing_contract/down.sql"
+        ))
+        .expect("request log timing down migration should round-trip");
+    assert_eq!(
+        sqlite_table_column_count(
+            &mut connection,
+            "request_log",
+            "response_started_to_client_at"
+        ),
+        1
+    );
+    let down_preserved = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM request_log
+         WHERE id = 9202 AND response_started_to_client_at = 120",
+    )
+    .get_result::<CountRow>(&mut connection)
+    .expect("down-migrated body timing should query")
+    .count;
+    assert_eq!(down_preserved, 1, "down migration must preserve old timing");
+
+    connection
+        .batch_execute(include_str!(
+            "../../migrations/sqlite/2026-08-04-090000_request_log_timing_contract/up.sql"
+        ))
+        .expect("request log timing up migration should run after down");
+    assert_sqlite_request_log_timing_schema(&mut connection);
 }
 
 #[test]
@@ -1321,6 +1531,7 @@ fn postgres_clean_upgrade_chain_from_empty() {
             .expect("postgres clean + upgrade migrations should run");
         assert_postgres_request_log_protocol_schema(&mut connection);
         assert_postgres_request_identity_schema(&mut connection);
+        assert_postgres_request_log_timing_schema(&mut connection);
 
         let applied_versions = connection
             .applied_migrations()
@@ -1399,10 +1610,11 @@ fn postgres_request_log_protocol_boundary_upgrade_clears_history() {
                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 1
                 );
                 INSERT INTO request_log (
-                    id, api_key_id, user_api_type, llm_api_type, overall_status,
+                    id, request_id, api_key_id, user_api_type, llm_api_type, overall_status,
                     request_received_at, is_stream, created_at, updated_at
                 ) VALUES (
-                    9002, 9001, 'OLLAMA', 'GEMINI_OPENAI', 'SUCCESS',
+                    9002, '018fa7d8-6a00-4c9a-8f7e-111111111111', 9001,
+                    'OLLAMA', 'GEMINI_OPENAI', 'SUCCESS',
                     1, FALSE, 1, 1
                 );",
             )
@@ -1425,11 +1637,13 @@ fn postgres_request_log_protocol_boundary_upgrade_clears_history() {
         connection
             .batch_execute(
                 "INSERT INTO request_log (
-                    id, api_key_id, downstream_protocol, upstream_protocol,
+                    id, request_id, api_key_id, downstream_protocol, upstream_protocol,
                     overall_status, request_received_at, is_stream, created_at, updated_at
                 ) VALUES
-                    (9003, 9001, 'OPENAI', NULL, 'SUCCESS', 2, FALSE, 2, 2),
-                    (9004, 9001, 'RESPONSES', 'OLLAMA', 'SUCCESS', 3, FALSE, 3, 3);",
+                    (9003, '018fa7d8-6a00-4c9a-8f7e-222222222222', 9001,
+                        'OPENAI', NULL, 'SUCCESS', 2, FALSE, 2, 2),
+                    (9004, '018fa7d8-6a00-4c9a-8f7e-333333333333', 9001,
+                        'RESPONSES', 'OLLAMA', 'SUCCESS', 3, FALSE, 3, 3);",
             )
             .expect("PostgreSQL directional request logs should insert");
     }));
@@ -1488,13 +1702,14 @@ fn postgres_request_identity_upgrade_is_destructive_constrained_and_preserves_ro
                 INSERT INTO metric_request_rollup_minute (
                     bucket_start_ms, scope_type, scope_id, scope_label,
                     request_count, success_count, error_count, cancelled_count,
-                    first_byte_latency_sum_ms, first_byte_latency_count,
+                    time_to_first_response_body_sum_ms, time_to_first_response_body_count,
+                    ttft_sum_ms, ttft_count,
                     total_latency_sum_ms, total_latency_count,
                     input_tokens, output_tokens, reasoning_tokens, total_tokens,
                     created_at, updated_at
                 ) VALUES (
                     0, 'global', 'global', NULL,
-                    1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 2, 1, 1
+                    1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 2, 1, 1
                 );",
             )
             .expect("pre-identity PostgreSQL request data should insert");

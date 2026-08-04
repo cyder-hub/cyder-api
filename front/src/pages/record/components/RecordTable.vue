@@ -52,7 +52,15 @@
         <div class="grid grid-cols-1 gap-3 rounded-lg bg-gray-50 p-3 min-[360px]:grid-cols-2">
           <MobileField :label="$t('recordPage.table.tokens')" :value="record.total_tokens ?? '/'" />
           <MobileField :label="$t('recordPage.table.cost')" :value="record.costDisplay" mono />
-          <MobileField :label="$t('recordPage.table.firstByte')" :value="record.firstRespTimeDisplay" />
+          <MobileField
+            :label="$t('recordPage.table.firstResponseBody')"
+            :value="record.firstResponseBodyTimeDisplay"
+          />
+          <MobileField :label="$t('recordPage.table.ttft')" :value="record.ttftDisplay" />
+          <MobileField
+            :label="$t('recordPage.table.totalLatency')"
+            :value="record.totalLatencyDisplay"
+          />
         </div>
 
         <template #actions>
@@ -145,8 +153,9 @@
             <TableCell class="font-mono text-xs text-gray-700">
               {{
                 formatCompactMetrics([
-                  record.firstRespTimeDisplay,
-                  record.totalRespTimeDisplay,
+                  record.firstResponseBodyTimeDisplay,
+                  record.ttftDisplay,
+                  record.totalLatencyDisplay,
                   record.tpsDisplay,
                 ])
               }}

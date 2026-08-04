@@ -1,8 +1,13 @@
-mod cancellation;
+pub(crate) mod body;
 mod client;
+pub(crate) mod lifecycle;
 mod non_stream;
 mod response;
 mod stream;
+pub(crate) mod timing;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::sync::Arc;
 
@@ -15,15 +20,17 @@ use chrono::Utc;
 use reqwest::Method;
 use tokio::sync::Mutex as TokioMutex;
 
-pub(crate) use client::send_with_first_byte_timeout;
+pub(crate) use client::send_with_deadline;
 
-use self::{non_stream::handle_non_streaming_response, stream::handle_streaming_response};
+use self::{
+    non_stream::handle_non_streaming_response_guarded, stream::handle_streaming_response_guarded,
+};
 use crate::{
     proxy::{
         ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
         cancellation::{CancellationDropGuard, ProxyCancellationContext},
         logging::RequestLogContext,
-        provider_governance::record_provider_failure,
+        provider_governance::record_provider_failure_or_release_probe,
         runtime::api_key_lease::ApiKeyRequestLeaseFinalizer,
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
@@ -91,7 +98,7 @@ fn finalize_send_failure_log_context(
     proxy_error: &ProxyError,
 ) {
     context.request_url = Some(url.to_string());
-    context.completion_ts = Some(completed_at);
+    context.completed_at = Some(completed_at);
     context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = if proxy_error.code() == ProxyErrorCode::ClientCancelledError {
         RequestStatus::Cancelled
@@ -111,17 +118,27 @@ pub(in crate::proxy) async fn send_materialized_request(
     model_str: String,
     use_proxy: bool,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
-    mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
+    api_key_request_lease: ApiKeyRequestLeaseFinalizer,
     provider_circuit_permit: Option<ProviderCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     response_visibility: ResponseVisibilityTracker,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
+    let coordinator = cancellation.coordinator();
+    let mut api_key_request_lease = api_key_request_lease.with_coordinator(coordinator.clone());
     let provider_id = log_context.provider_id;
     let log_context = Arc::new(TokioMutex::new(log_context));
+    log_context
+        .lock()
+        .await
+        .set_completion_coordinator(coordinator.clone());
+    log_context
+        .lock()
+        .await
+        .attach_transport_timing(cancellation.timing());
 
     let client_bundle = app_state.infra.client_bundle().await;
-    let first_byte_timeout = client_bundle.proxy_request.first_byte_timeout();
+    let proxy_timeouts = client_bundle.proxy_request.timeouts.clone();
     let upstream_error_body_limit_bytes =
         client_bundle.proxy_request.upstream_error_body_limit_bytes;
     let sse_response_limits = client_bundle.proxy_request.sse_response.clone();
@@ -135,6 +152,7 @@ pub(in crate::proxy) async fn send_materialized_request(
                 None,
                 error.to_string(),
             );
+            cancellation.try_terminate_error(&proxy_error);
             let completed_at = Utc::now().timestamp_millis();
             let failure_context = {
                 let mut context = log_context.lock().await;
@@ -168,31 +186,34 @@ pub(in crate::proxy) async fn send_materialized_request(
         format!("Client disconnected during proxy request for log_id {log_id}."),
     );
 
-    log_context.lock().await.llm_request_sent_at = Some(Utc::now().timestamp_millis());
-    let response = match send_with_first_byte_timeout(
+    let request_sent_at = Utc::now().timestamp_millis();
+    cancellation
+        .timing()
+        .mark_upstream_request_sent(request_sent_at, tokio::time::Instant::now());
+    let response = match send_with_deadline(
         &cancellation,
         client
             .request(Method::POST, &url)
             .headers(headers)
             .body(data),
         "LLM request",
-        first_byte_timeout,
+        &proxy_timeouts,
     )
     .await
     {
         Ok(resp) => resp,
         Err(proxy_error) => {
             drop_cancellation_guard.disarm();
-            if proxy_error.code() != ProxyErrorCode::ClientCancelledError {
-                record_provider_failure(
-                    &app_state,
-                    provider_id,
-                    &model_str,
-                    &proxy_error,
-                    provider_circuit_permit.as_ref(),
-                )
-                .await;
-            }
+            cancellation.try_terminate_error(&proxy_error);
+            record_provider_failure_or_release_probe(
+                &app_state,
+                &cancellation,
+                provider_id,
+                &model_str,
+                &proxy_error,
+                provider_circuit_permit.as_ref(),
+            )
+            .await;
             let completed_at = Utc::now().timestamp_millis();
 
             let mut context = log_context.lock().await;
@@ -211,6 +232,10 @@ pub(in crate::proxy) async fn send_materialized_request(
             });
         }
     };
+    let response_headers_at = Utc::now().timestamp_millis();
+    cancellation
+        .timing()
+        .mark_response_headers_received(response_headers_at, tokio::time::Instant::now());
     drop_cancellation_guard.set_stage(ExecutionStage::UpstreamResponse);
 
     let is_sse = is_sse_response(response.status(), response.headers());
@@ -221,7 +246,7 @@ pub(in crate::proxy) async fn send_materialized_request(
 
     let result = if is_sse {
         let (downstream_protocol, upstream_protocol) = response_mode.protocols();
-        match handle_streaming_response(
+        match handle_streaming_response_guarded(
             &app_state,
             cancellation.clone(),
             provider_id,
@@ -235,7 +260,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             downstream_protocol,
             upstream_protocol,
             reasoning_capture.clone(),
-            first_byte_timeout,
+            proxy_timeouts.clone(),
             sse_response_limits,
             response_visibility.clone(),
         )
@@ -254,7 +279,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             }),
         }
     } else {
-        handle_non_streaming_response(
+        handle_non_streaming_response_guarded(
             &app_state,
             &cancellation,
             provider_id,
@@ -269,6 +294,7 @@ pub(in crate::proxy) async fn send_materialized_request(
             reasoning_capture.as_ref(),
             upstream_error_body_limit_bytes,
             &client_bundle.proxy_request.non_stream_response,
+            proxy_timeouts,
             response_visibility,
         )
         .await

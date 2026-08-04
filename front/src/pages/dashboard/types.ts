@@ -20,6 +20,7 @@ export interface DashboardKpiCardItem {
   label: string;
   value: string;
   description: string;
+  title?: string;
 }
 
 export interface DashboardResourceItem {
@@ -56,6 +57,10 @@ export interface DashboardRuntimeBackendView {
 export type DashboardFormatCount = (value: number | null | undefined) => string;
 export type DashboardFormatPercentage = (value: number | null | undefined) => string;
 export type DashboardFormatLatency = (value: number | null | undefined) => string;
+export type DashboardFormatLatencyCoverage = (
+  value: number | null | undefined,
+  sampleCount: number | null | undefined,
+) => string;
 export type DashboardFormatDateTime = (value: number | null | undefined) => string;
 export type DashboardFormatCostEntries = (costMap: Record<string, number>) => string[];
 export type DashboardRuntimeLevelClass = (level: ProviderRuntimeLevel) => string;

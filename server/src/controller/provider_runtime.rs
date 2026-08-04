@@ -173,6 +173,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_rejects_unknown_sort_values() {
+        let context = TestDbContext::new_sqlite("provider-runtime-invalid-sort.sqlite");
+        context
+            .run_async(async {
+                let app_state = create_test_app_state(context.clone()).await;
+                let response = send(&app_state, "/provider/runtime/snapshot?sort=unknown").await;
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn snapshot_builds_summary_and_filtered_items_from_one_provider_set() {
         let context = TestDbContext::new_sqlite("provider-runtime-snapshot-filter.sqlite");
         context

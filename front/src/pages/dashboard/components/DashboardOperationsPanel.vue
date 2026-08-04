@@ -14,6 +14,7 @@ import type {
   DashboardFormatCount,
   DashboardFormatDateTime,
   DashboardFormatLatency,
+  DashboardFormatLatencyCoverage,
   DashboardFormatPercentage,
   DashboardRuntimeLevelClass,
   DashboardRuntimeLevelLabel,
@@ -28,6 +29,7 @@ const props = defineProps<{
   formatCount: DashboardFormatCount;
   formatPercentage: DashboardFormatPercentage;
   formatLatency: DashboardFormatLatency;
+  formatLatencyCoverage: DashboardFormatLatencyCoverage;
   formatDateTime: DashboardFormatDateTime;
   formatCostEntries: DashboardFormatCostEntries;
   runtimeLevelBadgeClass: DashboardRuntimeLevelClass;
@@ -304,8 +306,22 @@ const { t: $t } = useI18n();
                 >
                   {{ cost }}
                 </div>
-                <div class="mt-1 text-xs text-gray-400">
-                  {{ props.formatLatency(item.avg_total_latency_ms) }}
+                <div class="mt-1 space-y-0.5 text-xs text-gray-400">
+                  <p>
+                    {{ $t("dashboard.kpi.firstResponseBody") }}
+                    {{ props.formatLatencyCoverage(
+                      item.avg_time_to_first_response_body_ms,
+                      item.time_to_first_response_body_sample_count,
+                    ) }}
+                  </p>
+                  <p>
+                    {{ $t("dashboard.kpi.ttft") }}
+                    {{ props.formatLatencyCoverage(item.avg_ttft_ms, item.ttft_sample_count) }}
+                  </p>
+                  <p>
+                    {{ $t("dashboard.kpi.avgLatency") }}
+                    {{ props.formatLatencyCoverage(item.avg_total_latency_ms, item.total_latency_sample_count) }}
+                  </p>
                 </div>
               </div>
             </div>

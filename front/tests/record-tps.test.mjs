@@ -13,7 +13,7 @@ test("record TPS uses streaming tail duration when the stream has a meaningful t
     output_text_tokens: 50,
     reasoning_tokens: 10,
     upstream_request_sent_at: 1_000,
-    response_started_to_client_at: 3_000,
+    first_token_at: 3_000,
     completed_at: 8_000,
   });
 
@@ -28,7 +28,7 @@ test("record TPS falls back to effective duration for single-chunk-like streams"
     is_stream: true,
     output_text_tokens: 50,
     upstream_request_sent_at: 1_000,
-    response_started_to_client_at: 9_700,
+    first_token_at: 9_700,
     completed_at: 10_000,
   });
 
@@ -43,7 +43,7 @@ test("record TPS uses visible tokens and effective duration for non-stream recor
     total_output_tokens: 60,
     reasoning_tokens: 20,
     upstream_request_sent_at: 1_000,
-    response_started_to_client_at: 1_500,
+    first_token_at: 1_500,
     completed_at: 5_000,
   });
 

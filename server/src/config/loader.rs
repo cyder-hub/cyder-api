@@ -4,7 +4,7 @@ use config::{Config, File, FileFormat};
 
 use super::{
     FinalConfig, env, finalize_loaded_config, paths::ConfigPaths,
-    programmatic_default_config_for_paths,
+    persistence::DEFAULT_CONFIG_SNAPSHOT_VERSION, programmatic_default_config_for_paths,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +86,18 @@ pub fn load_default_config(paths: &ConfigPaths) -> Result<LoadedDefaultConfig, C
         .try_deserialize()
         .map_err(|err| ConfigLoadError::DeserializeDefault(err.to_string()))?;
 
-    let merged_yaml = serde_yaml::to_string(&default_config)
+    let mut merged_value = serde_yaml::to_value(&default_config)
+        .map_err(|err| ConfigLoadError::SerializeDefault(err.to_string()))?;
+    let Some(root) = merged_value.as_mapping_mut() else {
+        return Err(ConfigLoadError::SerializeDefault(
+            "default configuration did not serialize to a mapping".to_string(),
+        ));
+    };
+    root.insert(
+        serde_yaml::Value::String("config_snapshot_version".to_string()),
+        serde_yaml::Value::Number(serde_yaml::Number::from(DEFAULT_CONFIG_SNAPSHOT_VERSION)),
+    );
+    let merged_yaml = serde_yaml::to_string(&merged_value)
         .map_err(|err| ConfigLoadError::SerializeDefault(err.to_string()))?;
 
     Ok(LoadedDefaultConfig { merged_yaml })
@@ -128,8 +139,10 @@ fn load_effective_config_inner(
 
     if paths.user_config_path_required {
         validate_required_user_config_file(paths)?;
+        validate_retired_timeout_fields(paths)?;
         builder = builder.add_source(File::from(paths.user_config_path.as_path()).required(true));
     } else if paths.user_config_path.exists() {
+        validate_retired_timeout_fields(paths)?;
         builder = builder.add_source(File::from(paths.user_config_path.as_path()).required(false));
     }
 
@@ -160,12 +173,58 @@ fn load_effective_config_inner(
         .validate_manager_auth()
         .map_err(ConfigLoadError::DeserializeEffective)?;
     final_config
+        .outbound_http
+        .validate()
+        .map_err(ConfigLoadError::DeserializeEffective)?;
+    final_config
         .proxy_request
         .validate()
         .map_err(ConfigLoadError::DeserializeEffective)?;
     let final_config = finalize_loaded_config(final_config);
 
     Ok(final_config)
+}
+
+fn validate_retired_timeout_fields(paths: &ConfigPaths) -> Result<(), ConfigLoadError> {
+    let raw = fs::read_to_string(&paths.user_config_path).map_err(|source| {
+        ConfigLoadError::ReadUser {
+            path: paths.user_config_path.clone(),
+            source,
+        }
+    })?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|error| {
+        ConfigLoadError::DeserializeEffective(format!(
+            "failed to parse user configuration for retired timeout migration: {error}"
+        ))
+    })?;
+    let Some(proxy_request) = value
+        .get("proxy_request")
+        .and_then(|value| value.as_mapping())
+    else {
+        return Ok(());
+    };
+    let migrations = [
+        (
+            "connect_timeout_seconds",
+            "outbound_http.connect_timeout_seconds",
+        ),
+        (
+            "first_byte_timeout_seconds",
+            "proxy_request.timeouts.first_byte_seconds",
+        ),
+        (
+            "total_timeout_seconds",
+            "proxy_request.timeouts.total_seconds",
+        ),
+    ];
+    for (old_field, new_path) in migrations {
+        if proxy_request.contains_key(serde_yaml::Value::String(old_field.to_string())) {
+            return Err(ConfigLoadError::DeserializeEffective(format!(
+                "retired configuration field 'proxy_request.{old_field}' is not supported; use '{new_path}'"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_required_user_config_file(paths: &ConfigPaths) -> Result<(), ConfigLoadError> {
@@ -429,6 +488,73 @@ mod tests {
                 .contains("upstream_error_body_limit_bytes"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn timeout_policy_defaults_are_finite_and_match_the_contract() {
+        let config = load_user_yaml("").expect("default timeout policy should load");
+        assert_eq!(config.outbound_http.connect_timeout_seconds, 10);
+        assert_eq!(config.outbound_http.auxiliary_total_timeout_seconds, 60);
+        assert_eq!(config.proxy_request.timeouts.request_send_seconds, 7_200);
+        assert_eq!(config.proxy_request.timeouts.first_byte_seconds, 7_200);
+        assert_eq!(config.proxy_request.timeouts.response_idle_seconds, 7_200);
+        assert_eq!(config.proxy_request.timeouts.total_seconds, 7_200);
+    }
+
+    #[test]
+    fn timeout_policy_accepts_exact_boundaries_without_cross_phase_ordering() {
+        let config = load_user_yaml(
+            "outbound_http:\n  connect_timeout_seconds: 1\n  auxiliary_total_timeout_seconds: 10\nproxy_request:\n  timeouts:\n    request_send_seconds: 86400\n    first_byte_seconds: 60\n    response_idle_seconds: 60\n    total_seconds: 300\n",
+        )
+        .expect("timeout boundary values should load");
+        assert_eq!(config.outbound_http.connect_timeout_seconds, 1);
+        assert_eq!(config.proxy_request.timeouts.request_send_seconds, 86_400);
+
+        let config = load_user_yaml(
+            "outbound_http:\n  connect_timeout_seconds: 120\n  auxiliary_total_timeout_seconds: 300\nproxy_request:\n  timeouts:\n    request_send_seconds: 60\n    first_byte_seconds: 86400\n    response_idle_seconds: 86400\n    total_seconds: 300\n",
+        )
+        .expect("phase values must not require a static ordering");
+        assert_eq!(config.outbound_http.auxiliary_total_timeout_seconds, 300);
+    }
+
+    #[test]
+    fn timeout_policy_rejects_out_of_range_wrong_type_and_cross_field_values() {
+        for yaml in [
+            "outbound_http:\n  connect_timeout_seconds: 0\n",
+            "outbound_http:\n  connect_timeout_seconds: 121\n",
+            "outbound_http:\n  auxiliary_total_timeout_seconds: 9\n",
+            "outbound_http:\n  auxiliary_total_timeout_seconds: 301\n",
+            "proxy_request:\n  timeouts:\n    request_send_seconds: 59\n",
+            "proxy_request:\n  timeouts:\n    total_seconds: 299\n",
+            "proxy_request:\n  timeouts:\n    response_idle_seconds: ninety\n",
+            "outbound_http:\n  connect_timeout_seconds: 20\n  auxiliary_total_timeout_seconds: 10\n",
+        ] {
+            load_user_yaml(yaml).expect_err("invalid timeout policy must fail startup");
+        }
+    }
+
+    #[test]
+    fn retired_timeout_fields_fail_with_their_replacement_paths() {
+        for (field, replacement) in [
+            (
+                "connect_timeout_seconds",
+                "outbound_http.connect_timeout_seconds",
+            ),
+            (
+                "first_byte_timeout_seconds",
+                "proxy_request.timeouts.first_byte_seconds",
+            ),
+            (
+                "total_timeout_seconds",
+                "proxy_request.timeouts.total_seconds",
+            ),
+        ] {
+            let error = load_user_yaml(&format!("proxy_request:\n  {field}: 60\n"))
+                .expect_err("retired timeout field must fail startup");
+            let message = error.to_string();
+            assert!(message.contains(&format!("proxy_request.{field}")));
+            assert!(message.contains(replacement));
+        }
     }
 
     #[test]

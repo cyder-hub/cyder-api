@@ -21,7 +21,7 @@ export interface RecordTpsInput {
   output_text_tokens?: number | null;
   reasoning_tokens?: number | null;
   upstream_request_sent_at?: number | null;
-  response_started_to_client_at?: number | null;
+  first_token_at?: number | null;
   completed_at?: number | null;
   is_stream?: boolean | null;
 }
@@ -80,7 +80,7 @@ export const calculateRecordTps = (
 
   let durationMs = totalMs;
   let durationKind: RecordTpsDurationKind = "effective";
-  const firstTokenAt = finiteTimestamp(record.response_started_to_client_at);
+  const firstTokenAt = finiteTimestamp(record.first_token_at);
   const streamTailMs = firstTokenAt == null ? null : completedAt - firstTokenAt;
   const canUseStreamTail =
     record.is_stream === true &&
@@ -241,15 +241,23 @@ export function useRecordList(options: UseRecordListOptions) {
   const formatTps = (record: RecordListItem) =>
     calculateRecordTps(record)?.value.toFixed(2) ?? emptyValue;
 
+  const formatTtft = (record: RecordListItem) => {
+    if (!record.is_stream) return options.t("recordPage.detailDialog.timeline.notApplicable");
+    if (record.first_token_at == null) {
+      return options.t("recordPage.detailDialog.timeline.notObserved");
+    }
+    return formatDuration(record.upstream_request_sent_at, record.first_token_at);
+  };
+
   const enrichRecord = (record: RecordListItem): EnrichedRecordListItem => {
     const providerName =
       record.provider_name || getProviderName(record.provider_id);
     const apiKeyName = getApiKeyName(record.api_key_id);
-    const firstRespTimeDisplay = formatDuration(
+    const firstResponseBodyTimeDisplay = formatDuration(
       record.upstream_request_sent_at,
-      record.response_started_to_client_at,
+      record.first_response_body_at,
     );
-    const totalRespTimeDisplay = formatDuration(
+    const totalLatencyDisplay = formatDuration(
       record.upstream_request_sent_at,
       record.completed_at,
     );
@@ -260,8 +268,9 @@ export function useRecordList(options: UseRecordListOptions) {
       displayRequestedModelName:
         record.model_name || record.requested_model_name || emptyValue,
       httpStatusDisplay: record.upstream_http_status?.toString() ?? emptyValue,
-      firstRespTimeDisplay,
-      totalRespTimeDisplay,
+      firstResponseBodyTimeDisplay,
+      ttftDisplay: formatTtft(record),
+      totalLatencyDisplay,
       tpsDisplay: formatTps(record),
       costDisplay: formatPrice(
         record.estimated_cost_nanos,

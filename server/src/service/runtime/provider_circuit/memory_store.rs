@@ -87,6 +87,23 @@ impl ProviderCircuitStore for MemoryProviderCircuitStore {
         Ok(provider_state.snapshot())
     }
 
+    async fn release_probe(
+        &self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
+        permit: Option<&ProviderCircuitProbePermit>,
+    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+        if !config.is_enabled() {
+            return Ok(ProviderHealthSnapshot::synthetic_healthy());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut state = self.inner.lock().await;
+        let provider_state = state.entry(provider_id).or_default();
+        provider_state.release_probe(config, now_ms, permit);
+        Ok(provider_state.snapshot())
+    }
+
     async fn snapshot(
         &self,
         provider_id: i64,

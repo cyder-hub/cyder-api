@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use reqwest::{Client, Proxy, Url, redirect};
 
-use crate::config::ProxyRequestConfig;
+use crate::config::{OutboundHttpConfig, ProxyRequestConfig};
 #[cfg(test)]
 use crate::database::TestDbContext;
 use crate::proxy::logging::LogManager;
@@ -29,29 +29,41 @@ impl fmt::Display for ProviderHttpClientError {
 pub struct HttpClientBundle {
     pub client: Arc<Client>,
     proxy_client: Option<Arc<Client>>,
+    pub outbound_http: OutboundHttpConfig,
     pub proxy_request: ProxyRequestConfig,
 }
 
 impl HttpClientBundle {
     pub fn build(
+        outbound_http: OutboundHttpConfig,
         proxy_request: ProxyRequestConfig,
         proxy: Option<String>,
     ) -> Result<HttpClientBundle, String> {
+        outbound_http.validate()?;
+        proxy_request.validate()?;
         let proxy_url = proxy
             .as_deref()
             .map(parse_proxy_url)
             .transpose()
             .map_err(|error| format!("invalid proxy URL in configuration: {error}"))?;
-        let client = Arc::new(build_http_client("default", &proxy_request, None)?);
+        let client = Arc::new(build_http_client(
+            "default",
+            &outbound_http,
+            &proxy_request,
+            None,
+        )?);
         let proxy_client = proxy_url
             .as_ref()
-            .map(|proxy_url| build_http_client("proxy", &proxy_request, Some(proxy_url)))
+            .map(|proxy_url| {
+                build_http_client("proxy", &outbound_http, &proxy_request, Some(proxy_url))
+            })
             .transpose()?
             .map(Arc::new);
 
         Ok(HttpClientBundle {
             client,
             proxy_client,
+            outbound_http,
             proxy_request,
         })
     }
@@ -80,12 +92,13 @@ pub struct AppInfra {
 
 impl AppInfra {
     pub(crate) async fn new_with_config(
+        outbound_http: OutboundHttpConfig,
         proxy_request: ProxyRequestConfig,
         proxy: Option<String>,
         #[cfg(test)] test_db_context: Option<TestDbContext>,
     ) -> Self {
         let http_clients = Arc::new(
-            HttpClientBundle::build(proxy_request, proxy)
+            HttpClientBundle::build(outbound_http, proxy_request, proxy)
                 .expect("failed to build initial HTTP client bundle"),
         );
         let log_manager = Arc::new({
@@ -122,6 +135,19 @@ impl AppInfra {
         self.http_clients.provider_client(use_proxy)
     }
 
+    pub(crate) async fn auxiliary_client(
+        &self,
+        use_proxy: bool,
+    ) -> Result<Arc<Client>, ProviderHttpClientError> {
+        // Auxiliary requests share the same direct/proxy transport selection,
+        // while their total lifetime is enforced by auxiliary_http helpers.
+        self.http_clients.provider_client(use_proxy)
+    }
+
+    pub(crate) fn auxiliary_total_timeout(&self) -> Duration {
+        self.http_clients.outbound_http.auxiliary_total_timeout()
+    }
+
     pub(crate) fn proxy_request_config(&self) -> &ProxyRequestConfig {
         &self.http_clients.proxy_request
     }
@@ -152,17 +178,13 @@ fn duration_to_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
 }
 
-fn optional_duration_to_millis(duration: Option<Duration>) -> Option<u64> {
-    duration.map(duration_to_millis)
-}
-
 fn build_http_client(
     client_kind: &'static str,
+    outbound_http: &OutboundHttpConfig,
     proxy_request_config: &ProxyRequestConfig,
     proxy_url: Option<&Url>,
 ) -> Result<Client, String> {
-    let connect_timeout = proxy_request_config.connect_timeout();
-    let total_timeout = proxy_request_config.total_timeout();
+    let connect_timeout = outbound_http.connect_timeout();
 
     let mut builder = Client::builder()
         .connect_timeout(connect_timeout)
@@ -171,10 +193,6 @@ fn build_http_client(
         .no_deflate()
         .no_zstd()
         .redirect(redirect::Policy::none());
-
-    if let Some(timeout) = total_timeout {
-        builder = builder.timeout(timeout);
-    }
 
     if let Some(proxy_url) = proxy_url {
         let proxy = Proxy::all(proxy_url.clone())
@@ -187,9 +205,12 @@ fn build_http_client(
         client_kind = client_kind,
         use_proxy = proxy_url.is_some(),
         connect_timeout_ms = duration_to_millis(connect_timeout),
-        first_byte_timeout_ms =
-            optional_duration_to_millis(proxy_request_config.first_byte_timeout()),
-        total_timeout_ms = optional_duration_to_millis(total_timeout),
+        auxiliary_total_timeout_ms = duration_to_millis(outbound_http.auxiliary_total_timeout()),
+        request_send_timeout_ms = duration_to_millis(proxy_request_config.timeouts.request_send()),
+        first_byte_timeout_ms = duration_to_millis(proxy_request_config.timeouts.first_byte()),
+        response_idle_timeout_ms =
+            duration_to_millis(proxy_request_config.timeouts.response_idle()),
+        total_timeout_ms = duration_to_millis(proxy_request_config.timeouts.total()),
     );
 
     builder.build().map_err(|_| {
@@ -225,6 +246,7 @@ mod tests {
     #[test]
     fn http_client_bundle_rejects_invalid_proxy_url() {
         let err = match HttpClientBundle::build(
+            OutboundHttpConfig::default(),
             ProxyRequestConfig::default(),
             Some("socks5://127.0.0.1:1080".to_string()),
         ) {
@@ -244,6 +266,7 @@ mod tests {
             "http://user:secret@proxy.example#internal",
         ] {
             let err = match HttpClientBundle::build(
+                OutboundHttpConfig::default(),
                 ProxyRequestConfig::default(),
                 Some(proxy.to_string()),
             ) {
@@ -259,8 +282,12 @@ mod tests {
 
     #[test]
     fn provider_client_fails_closed_when_proxy_is_required_but_unconfigured() {
-        let bundle = HttpClientBundle::build(ProxyRequestConfig::default(), None)
-            .expect("default client bundle should build");
+        let bundle = HttpClientBundle::build(
+            OutboundHttpConfig::default(),
+            ProxyRequestConfig::default(),
+            None,
+        )
+        .expect("default client bundle should build");
 
         assert!(bundle.provider_client(false).is_ok());
         assert_eq!(
@@ -314,7 +341,12 @@ mod tests {
             .unwrap();
         });
 
-        let bundle = HttpClientBundle::build(ProxyRequestConfig::default(), None).unwrap();
+        let bundle = HttpClientBundle::build(
+            OutboundHttpConfig::default(),
+            ProxyRequestConfig::default(),
+            None,
+        )
+        .unwrap();
         let response = bundle
             .client
             .get(format!("http://{address}/gzip"))
@@ -363,8 +395,12 @@ mod tests {
             .expect("redirect server should run");
         });
 
-        let bundle = HttpClientBundle::build(ProxyRequestConfig::default(), None)
-            .expect("client bundle should build");
+        let bundle = HttpClientBundle::build(
+            OutboundHttpConfig::default(),
+            ProxyRequestConfig::default(),
+            None,
+        )
+        .expect("client bundle should build");
         for status in [301, 302, 303, 307, 308] {
             let response = bundle
                 .client
@@ -412,6 +448,7 @@ mod tests {
         drop(unavailable_proxy_listener);
 
         let bundle = HttpClientBundle::build(
+            OutboundHttpConfig::default(),
             ProxyRequestConfig::default(),
             Some(format!("http://{unavailable_proxy_addr}")),
         )

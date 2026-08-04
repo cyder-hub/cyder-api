@@ -62,3 +62,20 @@ test("buildProviderRuntimeApiParamsFromFilters removes empty search", () => {
     },
   );
 });
+
+test("provider runtime latency sorts round-trip through URL and API params", () => {
+  for (const sort of ["time_to_first_response_body", "ttft"]) {
+    const filters = buildProviderRuntimeFiltersFromQuery({
+      sort,
+      direction: "asc",
+    });
+
+    assert.equal(filters.sort, sort);
+    assert.equal(filters.direction, "asc");
+    assert.deepEqual(buildProviderRuntimeRouteQueryFromFilters(filters), {
+      sort,
+      direction: "asc",
+    });
+    assert.equal(buildProviderRuntimeApiParamsFromFilters(filters).sort, sort);
+  }
+});

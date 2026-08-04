@@ -15,7 +15,7 @@ pub use session::{
     AnthropicActiveBlockState, AnthropicSessionState, GeminiSessionState, ResponsesSessionState,
     SessionContext,
 };
-pub use transformer::StreamTransformer;
+pub use transformer::{StreamTransformOutput, StreamTransformer};
 
 #[cfg(test)]
 mod tests;

@@ -439,7 +439,9 @@ mod tests {
     use crate::{
         proxy::{
             ResponseVisibility,
-            error::{ExecutionStage, ProxyError, ProxyErrorCode, UpstreamErrorPayload},
+            error::{
+                ExecutionStage, ProxyError, ProxyErrorCode, TimeoutPhase, UpstreamErrorPayload,
+            },
             request_context::{RequestId, X_REQUEST_ID},
         },
         schema::enum_def::DownstreamProtocol,
@@ -462,13 +464,22 @@ mod tests {
     }
 
     fn gateway_error(code: ProxyErrorCode) -> ProxyError {
-        ProxyError::gateway(
-            code,
-            ExecutionStage::Governance,
-            ResponseVisibility::NotVisible,
-            None,
-            "test operator detail",
-        )
+        if code == ProxyErrorCode::UpstreamTimeoutError {
+            ProxyError::upstream_timeout(
+                TimeoutPhase::Total,
+                ExecutionStage::Governance,
+                ResponseVisibility::NotVisible,
+                "test operator detail",
+            )
+        } else {
+            ProxyError::gateway(
+                code,
+                ExecutionStage::Governance,
+                ResponseVisibility::NotVisible,
+                None,
+                "test operator detail",
+            )
+        }
     }
 
     #[derive(Clone, Copy)]

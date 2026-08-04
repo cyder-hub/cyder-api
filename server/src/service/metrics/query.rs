@@ -367,8 +367,12 @@ impl MetricsService {
                 success_count: 0,
                 error_count: 0,
                 success_rate: None,
+                avg_time_to_first_response_body_ms: None,
+                time_to_first_response_body_sample_count: 0,
+                avg_ttft_ms: None,
+                ttft_sample_count: 0,
                 avg_total_latency_ms: None,
-                latency_sample_count: 0,
+                total_latency_sample_count: 0,
                 total_cost: HashMap::new(),
             });
             entry.total_input_tokens += row.input_tokens;
@@ -378,17 +382,24 @@ impl MetricsService {
             entry.request_count += row.request_count;
             entry.success_count += row.success_count;
             entry.error_count += row.error_count + row.cancelled_count;
-            let previous_latency_sum =
-                entry.avg_total_latency_ms.unwrap_or(0.0) * entry.latency_sample_count as f64;
-            entry.latency_sample_count += row.total_latency_count;
-            entry.avg_total_latency_ms = if entry.latency_sample_count > 0 {
-                Some(
-                    (previous_latency_sum + row.total_latency_sum_ms as f64)
-                        / entry.latency_sample_count as f64,
-                )
-            } else {
-                None
-            };
+            merge_average(
+                &mut entry.avg_time_to_first_response_body_ms,
+                &mut entry.time_to_first_response_body_sample_count,
+                row.time_to_first_response_body_sum_ms,
+                row.time_to_first_response_body_count,
+            );
+            merge_average(
+                &mut entry.avg_ttft_ms,
+                &mut entry.ttft_sample_count,
+                row.ttft_sum_ms,
+                row.ttft_count,
+            );
+            merge_average(
+                &mut entry.avg_total_latency_ms,
+                &mut entry.total_latency_sample_count,
+                row.total_latency_sum_ms,
+                row.total_latency_count,
+            );
             entry.success_rate = if entry.request_count > 0 {
                 Some(entry.success_count as f64 / entry.request_count as f64)
             } else {
@@ -499,6 +510,16 @@ impl MetricsService {
         }
         Ok(rows)
     }
+}
+
+fn merge_average(current: &mut Option<f64>, count: &mut i64, sum: i64, added_count: i64) {
+    let combined_sum = current.unwrap_or(0.0) * *count as f64 + sum as f64;
+    *count += added_count;
+    *current = if *count > 0 {
+        Some(combined_sum / *count as f64)
+    } else {
+        None
+    };
 }
 
 #[derive(Debug, Clone)]
@@ -785,4 +806,37 @@ fn interval_bucket_start(timestamp_ms: i64, interval: &str) -> Result<i64, BaseE
         }
     };
     Ok(bucket)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_average;
+
+    #[test]
+    fn merge_average_uses_sum_and_sample_count_for_weighted_windows() {
+        let mut average = Some(100.0);
+        let mut sample_count = 1;
+
+        merge_average(&mut average, &mut sample_count, 300, 3);
+
+        assert_eq!(average, Some(100.0));
+        assert_eq!(sample_count, 4);
+    }
+
+    #[test]
+    fn merge_average_keeps_zero_duration_samples_distinct_from_no_samples() {
+        let mut average = None;
+        let mut sample_count = 0;
+
+        merge_average(&mut average, &mut sample_count, 0, 1);
+
+        assert_eq!(average, Some(0.0));
+        assert_eq!(sample_count, 1);
+
+        let mut no_average = None;
+        let mut no_samples = 0;
+        merge_average(&mut no_average, &mut no_samples, 0, 0);
+        assert_eq!(no_average, None);
+        assert_eq!(no_samples, 0);
+    }
 }

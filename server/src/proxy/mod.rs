@@ -25,13 +25,14 @@ mod error_contract_regression;
 #[cfg(test)]
 mod log_regression;
 
+pub(crate) use cancellation::ProxyCancellationContext;
 use error::classify_request_body_error;
 #[cfg(test)]
 pub(crate) use error::classify_upstream_status;
 pub(crate) use error::{
     ExecutionStage, ProtocolErrorResponseAdapter, ProxyError, ProxyErrorCode, ProxyLogLevel,
-    ResponseVisibility, ResponseVisibilityTracker, RouterRejection, classify_reqwest_error,
-    classify_upstream_status_captured, protocol_transform_error,
+    ResponseVisibility, ResponseVisibilityTracker, RouterRejection, TimeoutPhase,
+    classify_reqwest_error, classify_upstream_status_captured, protocol_transform_error,
 };
 pub(crate) use request_context::ProxyRequestContext;
 pub use router::create_proxy_router;

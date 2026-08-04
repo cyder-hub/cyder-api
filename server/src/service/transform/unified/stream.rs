@@ -280,6 +280,264 @@ pub enum UnifiedStreamEvent {
     },
 }
 
+/// Returns whether a typed source event contains the first meaningful output
+/// fact used by TTFT. This deliberately ignores lifecycle and metadata-only
+/// events; it never returns or stores the observed content.
+pub(crate) fn meaningful_output_from_stream_event(event: &UnifiedStreamEvent) -> bool {
+    match event {
+        // Item/part lifecycle snapshots may carry already-populated content,
+        // but the metric is established only by semantic output events.
+        UnifiedStreamEvent::ItemAdded { .. }
+        | UnifiedStreamEvent::ItemDone { .. }
+        | UnifiedStreamEvent::ContentPartAdded { .. }
+        | UnifiedStreamEvent::ReasoningSummaryPartAdded { .. } => false,
+        UnifiedStreamEvent::ContentBlockDelta { text, .. }
+        | UnifiedStreamEvent::ReasoningDelta { text, .. } => meaningful_text(text),
+        UnifiedStreamEvent::ToolCallStart { name, .. } => meaningful_text(name),
+        UnifiedStreamEvent::ToolCallArgumentsDelta {
+            name, arguments, ..
+        } => name.as_deref().is_some_and(meaningful_text) || meaningful_text(arguments),
+        UnifiedStreamEvent::BlobDelta { data, .. } => meaningful_blob_value(data),
+        UnifiedStreamEvent::MessageStart { .. }
+        | UnifiedStreamEvent::ContentPartDone { .. }
+        | UnifiedStreamEvent::MessageDelta { .. }
+        | UnifiedStreamEvent::MessageStop
+        | UnifiedStreamEvent::ContentBlockStart { .. }
+        | UnifiedStreamEvent::ContentBlockStop { .. }
+        | UnifiedStreamEvent::ToolCallStop { .. }
+        | UnifiedStreamEvent::ReasoningStart { .. }
+        | UnifiedStreamEvent::ReasoningSummaryPartDone { .. }
+        | UnifiedStreamEvent::ReasoningStop { .. }
+        | UnifiedStreamEvent::Usage { .. }
+        | UnifiedStreamEvent::Error { .. } => false,
+    }
+}
+
+pub(crate) fn meaningful_output_from_stream_events(events: &[UnifiedStreamEvent]) -> bool {
+    events.iter().any(meaningful_output_from_stream_event)
+}
+
+pub(crate) fn meaningful_output_from_legacy_chunk(chunk: &UnifiedChunkResponse) -> bool {
+    chunk.choices.iter().any(|choice| {
+        choice.delta.content.iter().any(|part| match part {
+            UnifiedContentPartDelta::TextDelta { text, .. } => meaningful_text(text),
+            UnifiedContentPartDelta::ImageDelta { url, data, .. } => {
+                url.as_deref().is_some_and(meaningful_text)
+                    || data.as_deref().is_some_and(meaningful_text)
+            }
+            UnifiedContentPartDelta::ToolCallDelta(tool_call) => {
+                tool_call.name.as_deref().is_some_and(meaningful_text)
+                    || tool_call.arguments.as_deref().is_some_and(meaningful_text)
+            }
+        })
+    })
+}
+
+fn meaningful_text(text: &str) -> bool {
+    !text.trim().is_empty()
+}
+
+/// A Blob is meaningful when it contains a non-null scalar or recursively
+/// contains a meaningful array/object member. Empty containers and null-only
+/// containers are metadata, not output.
+pub(crate) fn meaningful_blob_value(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(_) | Value::Number(_) => true,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(values) => values.iter().any(meaningful_blob_value),
+        Value::Object(values) => {
+            if is_metadata_blob_object(values) {
+                return false;
+            }
+            values.values().any(meaningful_blob_value)
+        }
+    }
+}
+
+fn is_metadata_blob_object(values: &serde_json::Map<String, Value>) -> bool {
+    let kind = values
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    kind == "signature_delta"
+        || kind.contains("metadata")
+        || values.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "provider_metadata"
+                    | "provider_session_metadata"
+                    | "response_metadata"
+                    | "synthetic_metadata"
+            )
+        })
+        || values.contains_key("provider") && values.contains_key("metadata")
+}
+
+#[cfg(test)]
+mod meaningful_output_tests {
+    use serde_json::json;
+
+    use super::{
+        UnifiedBlockKind, UnifiedContentPartDelta, UnifiedStreamEvent, UnifiedToolCallDelta,
+        meaningful_blob_value, meaningful_output_from_legacy_chunk,
+        meaningful_output_from_stream_event,
+    };
+    use crate::service::transform::unified::{
+        UnifiedChunkChoice, UnifiedChunkResponse, UnifiedMessageDelta,
+    };
+
+    #[test]
+    fn blob_meaningfulness_is_recursive_and_does_not_use_json_field_names() {
+        for value in [
+            json!(null),
+            json!(""),
+            json!([]),
+            json!({}),
+            json!([null, {}]),
+        ] {
+            assert!(!meaningful_blob_value(&value), "{value}");
+        }
+        for value in [
+            json!(false),
+            json!(0),
+            json!(" "),
+            json!([null, "payload"]),
+            json!({"metadata": {"blob": "payload"}}),
+        ] {
+            assert!(meaningful_blob_value(&value), "{value}");
+        }
+        assert!(!meaningful_blob_value(&json!({
+            "provider": "anthropic",
+            "type": "signature_delta",
+            "signature": "opaque"
+        })));
+        for value in [
+            json!({"provider": "responses", "type": "provider_metadata", "value": "opaque"}),
+            json!({"type": "response.metadata", "value": "opaque"}),
+            json!({"type": "metadata", "value": "opaque"}),
+            json!({"provider": "unknown", "metadata": {"value": "opaque"}}),
+        ] {
+            assert!(!meaningful_blob_value(&value), "{value}");
+        }
+    }
+
+    #[test]
+    fn unified_stream_event_predicate_separates_output_from_lifecycle_and_metadata() {
+        assert!(!meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::MessageStart {
+                id: Some("id-only".to_string()),
+                model: Some("model-only".to_string()),
+                role: crate::service::transform::unified::UnifiedRole::Assistant,
+            }
+        ));
+        assert!(!meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::ContentBlockStart {
+                index: 0,
+                kind: UnifiedBlockKind::Text,
+            }
+        ));
+        assert!(!meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::ContentBlockDelta {
+                index: 0,
+                item_index: None,
+                item_id: None,
+                part_index: None,
+                text: " \n".to_string(),
+            }
+        ));
+        assert!(meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::ReasoningDelta {
+                index: 0,
+                item_index: None,
+                item_id: None,
+                part_index: None,
+                text: "thinking".to_string(),
+            }
+        ));
+        assert!(meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::ToolCallStart {
+                index: 0,
+                id: "id-only".to_string(),
+                name: "lookup".to_string(),
+            }
+        ));
+        assert!(meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                item_index: None,
+                item_id: None,
+                id: Some("id-only".to_string()),
+                name: None,
+                arguments: "{}".to_string(),
+            }
+        ));
+        assert!(!meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::BlobDelta {
+                index: None,
+                data: json!({
+                    "provider": "anthropic",
+                    "type": "signature_delta",
+                    "signature": "opaque"
+                }),
+            }
+        ));
+        assert!(meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::BlobDelta {
+                index: None,
+                data: json!({"image": {"data": "payload"}}),
+            }
+        ));
+        assert!(!meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::Usage {
+                usage: Default::default(),
+            }
+        ));
+        assert!(!meaningful_output_from_stream_event(
+            &UnifiedStreamEvent::MessageDelta {
+                finish_reason: Some("stop".to_string()),
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_chunk_predicate_ignores_role_and_ids_but_accepts_tool_and_multimodal_delta() {
+        let role_only = UnifiedChunkResponse {
+            choices: vec![UnifiedChunkChoice {
+                index: 0,
+                delta: UnifiedMessageDelta {
+                    role: Some(crate::service::transform::unified::UnifiedRole::Assistant),
+                    content: vec![],
+                },
+                finish_reason: None,
+            }],
+            ..Default::default()
+        };
+        assert!(!meaningful_output_from_legacy_chunk(&role_only));
+
+        let tool = UnifiedChunkResponse {
+            choices: vec![UnifiedChunkChoice {
+                index: 0,
+                delta: UnifiedMessageDelta {
+                    role: None,
+                    content: vec![UnifiedContentPartDelta::ToolCallDelta(
+                        UnifiedToolCallDelta {
+                            index: 0,
+                            id: Some("id-only".to_string()),
+                            name: Some("lookup".to_string()),
+                            arguments: None,
+                        },
+                    )],
+                },
+                finish_reason: None,
+            }],
+            ..Default::default()
+        };
+        assert!(meaningful_output_from_legacy_chunk(&tool));
+    }
+}
+
 pub fn map_gemini_finish_reason_to_openai(reason: &str, has_tool_call: bool) -> String {
     match reason {
         "STOP" => {

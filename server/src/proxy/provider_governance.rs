@@ -1,7 +1,7 @@
 use cyder_tools::log::{info, warn};
 use std::time::Duration;
 
-use super::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility};
+use super::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, TimeoutPhase};
 use crate::service::{
     app_state::AppState,
     runtime::{
@@ -155,18 +155,59 @@ pub(super) async fn record_provider_failure(
     }
 }
 
+/// Release a half-open probe without recording a provider failure.
+pub(super) async fn release_provider_probe(
+    app_state: &AppState,
+    provider_id: i64,
+    permit: Option<&ProviderCircuitProbePermit>,
+) {
+    if permit.is_none() {
+        return;
+    }
+    match app_state
+        .provider_circuit
+        .release_provider_probe(provider_id, permit)
+        .await
+    {
+        Ok(_) => {}
+        Err(err) => log_provider_circuit_error("release_probe", provider_id, &err),
+    }
+}
+
+/// Record a provider-attributable outcome once, or release a half-open probe
+/// when the request ended before there was a provider outcome to count.
+pub(super) async fn record_provider_failure_or_release_probe(
+    app_state: &AppState,
+    cancellation: &crate::proxy::cancellation::ProxyCancellationContext,
+    provider_id: i64,
+    provider_label: &str,
+    error: &ProxyError,
+    permit: Option<&ProviderCircuitProbePermit>,
+) {
+    if !counts_against_provider_governance(error) {
+        release_provider_probe(app_state, provider_id, permit).await;
+        return;
+    }
+
+    if cancellation.try_provider_failure() {
+        record_provider_failure(app_state, provider_id, provider_label, error, permit).await;
+    }
+}
+
 fn counts_against_provider_governance(error: &ProxyError) -> bool {
-    matches!(
-        error.code(),
+    match error.code() {
+        ProxyErrorCode::UpstreamTimeoutError => {
+            !matches!(error.timeout_phase(), Some(TimeoutPhase::Total))
+        }
         ProxyErrorCode::UpstreamConnectError
-            | ProxyErrorCode::UpstreamRequestError
-            | ProxyErrorCode::UpstreamResponseError
-            | ProxyErrorCode::UpstreamAuthenticationError
-            | ProxyErrorCode::UpstreamRateLimitError
-            | ProxyErrorCode::UpstreamServiceError
-            | ProxyErrorCode::UpstreamTimeoutError
-            | ProxyErrorCode::UpstreamUnexpectedStatusError
-    )
+        | ProxyErrorCode::UpstreamRequestError
+        | ProxyErrorCode::UpstreamResponseError
+        | ProxyErrorCode::UpstreamAuthenticationError
+        | ProxyErrorCode::UpstreamRateLimitError
+        | ProxyErrorCode::UpstreamServiceError
+        | ProxyErrorCode::UpstreamUnexpectedStatusError => true,
+        _ => false,
+    }
 }
 
 fn provider_circuit_rejection_to_governance_rejection(
@@ -210,7 +251,7 @@ mod tests {
     };
     use crate::{
         proxy::{
-            ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
+            ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, TimeoutPhase,
             error::UpstreamErrorPayload,
         },
         service::runtime::ProviderCircuitRejection,
@@ -253,6 +294,13 @@ mod tests {
                     UpstreamErrorPayload::capture(code.status_code(), None, b"test", 65_536),
                     "test",
                 )
+            } else if code == ProxyErrorCode::UpstreamTimeoutError {
+                ProxyError::upstream_timeout(
+                    TimeoutPhase::Total,
+                    ExecutionStage::UpstreamResponse,
+                    ResponseVisibility::NotVisible,
+                    "test",
+                )
             } else {
                 ProxyError::gateway(
                     code,
@@ -271,11 +319,44 @@ mod tests {
             ProxyErrorCode::UpstreamAuthenticationError,
             ProxyErrorCode::UpstreamRateLimitError,
             ProxyErrorCode::UpstreamServiceError,
-            ProxyErrorCode::UpstreamTimeoutError,
             ProxyErrorCode::UpstreamUnexpectedStatusError,
         ] {
             assert!(counts_against_provider_governance(&error(code)));
         }
+        for phase in [
+            TimeoutPhase::Connect,
+            TimeoutPhase::RequestSend,
+            TimeoutPhase::FirstByte,
+            TimeoutPhase::ResponseIdle,
+        ] {
+            let timeout = ProxyError::upstream_timeout(
+                phase,
+                ExecutionStage::UpstreamResponse,
+                ResponseVisibility::NotVisible,
+                "test",
+            );
+            assert!(counts_against_provider_governance(&timeout));
+        }
+        let total = ProxyError::upstream_timeout(
+            TimeoutPhase::Total,
+            ExecutionStage::UpstreamResponse,
+            ResponseVisibility::NotVisible,
+            "test",
+        );
+        assert!(!counts_against_provider_governance(&total));
+        let provider_timeout_status = ProxyError::upstream(
+            ProxyErrorCode::UpstreamTimeoutError,
+            ExecutionStage::UpstreamResponse,
+            ResponseVisibility::NotVisible,
+            UpstreamErrorPayload::capture(
+                axum::http::StatusCode::GATEWAY_TIMEOUT,
+                None,
+                b"provider timeout",
+                65_536,
+            ),
+            "provider timeout status",
+        );
+        assert!(counts_against_provider_governance(&provider_timeout_status));
         for code in [
             ProxyErrorCode::InvalidRequestError,
             ProxyErrorCode::PermissionError,

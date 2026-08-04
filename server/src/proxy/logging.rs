@@ -17,6 +17,10 @@ use crate::{
     proxy::{
         ExecutionStage, ResponseVisibility,
         request_context::{ClientRequestId, ProxyRequestContext, RequestId},
+        runtime::transport::{
+            lifecycle::ProxyTerminationCoordinator,
+            timing::{TimingSnapshot, TransportTimingState},
+        },
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
@@ -51,12 +55,11 @@ pub struct RequestLogContext {
     pub upstream_protocol: UpstreamProtocol,
     pub request_received_at: i64,
     pub client_ip: Option<String>,
-    pub llm_request_sent_at: Option<i64>,
+    pub completed_at: Option<i64>,
     pub request_url: Option<String>,
     pub llm_status: Option<StatusCode>,
     pub is_stream: bool,
-    pub first_chunk_ts: Option<i64>,
-    pub completion_ts: Option<i64>,
+    pub(crate) transport_timing: Option<TransportTimingState>,
     pub usage: Option<UsageInfo>,
     pub usage_normalization: Option<UsageNormalization>,
     pub cost_catalog_id: Option<i64>,
@@ -66,6 +69,8 @@ pub struct RequestLogContext {
     pub final_error_message: Option<String>,
     pub final_error_stage: Option<ExecutionStage>,
     pub response_visibility: ResponseVisibility,
+    pub(crate) completion_coordinator: Option<ProxyTerminationCoordinator>,
+    pub(crate) completion_deferred: bool,
 }
 
 impl RequestLogContext {
@@ -106,12 +111,11 @@ impl RequestLogContext {
             upstream_protocol,
             request_received_at: request_context.received_at_ms,
             client_ip: client_ip_addr.clone(),
-            llm_request_sent_at: None,
+            completed_at: None,
             request_url: None,
             llm_status: None,
             is_stream: false,
-            first_chunk_ts: None,
-            completion_ts: None,
+            transport_timing: None,
             usage: None,
             usage_normalization: None,
             cost_catalog_id: model.cost_catalog_id,
@@ -121,7 +125,21 @@ impl RequestLogContext {
             final_error_message: None,
             final_error_stage: None,
             response_visibility: request_context.response_visibility.current(),
+            completion_coordinator: None,
+            completion_deferred: false,
         }
+    }
+
+    pub(crate) fn set_completion_coordinator(&mut self, coordinator: ProxyTerminationCoordinator) {
+        self.completion_coordinator = Some(coordinator);
+    }
+
+    pub(crate) fn attach_transport_timing(&mut self, timing: TransportTimingState) {
+        self.transport_timing = Some(timing);
+    }
+
+    pub(crate) fn defer_completion(&mut self) {
+        self.completion_deferred = true;
     }
 
     pub(super) fn set_model_resolution_trace(
@@ -156,7 +174,7 @@ pub(super) fn completion_delta_from_log_context(
     let cost = build_cost_outcome(context);
     ApiKeyCompletionDelta {
         api_key_id: context.api_key_id,
-        occurred_at: context.completion_ts.unwrap_or(context.request_received_at),
+        occurred_at: context.completed_at.unwrap_or(context.request_received_at),
         total_tokens: total_tokens_for_context(context),
         billed_amount_nanos: cost.estimated_cost_nanos.unwrap_or_default(),
         billed_currency: cost.estimated_cost_currency,
@@ -393,6 +411,11 @@ async fn process_log(
 
 fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
     let cost = build_cost_outcome(context);
+    let timing = context
+        .transport_timing
+        .as_ref()
+        .map(TransportTimingState::snapshot)
+        .unwrap_or_else(TimingSnapshot::default);
     RequestLog {
         id: context.id,
         request_id: context.request_id.to_string(),
@@ -407,9 +430,17 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
         final_error_code: context.final_error_code.clone(),
         final_error_message: context.final_error_message.clone(),
         request_received_at: context.request_received_at,
-        upstream_request_sent_at: context.llm_request_sent_at,
-        response_started_to_client_at: context.first_chunk_ts,
-        completed_at: context.completion_ts.or(Some(now)),
+        upstream_request_sent_at: timing.upstream_request_sent_at,
+        upstream_response_headers_at: timing.response_headers_at,
+        upstream_first_body_chunk_at: timing.upstream_first_raw_body_at,
+        first_response_body_at: timing.first_response_body_at,
+        first_token_at: if context.is_stream {
+            timing.first_token_at
+        } else {
+            None
+        },
+        max_upstream_response_idle_ms: timing.max_upstream_response_idle_ms,
+        completed_at: context.completed_at.or(Some(now)),
         is_stream: context.is_stream,
         client_ip: context.client_ip.clone(),
         provider_id: Some(context.provider_id),

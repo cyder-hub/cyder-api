@@ -4,7 +4,10 @@ use serde_json::Value;
 use super::providers::{anthropic, gemini, ollama, openai, responses};
 use super::request::apply_stream_options;
 use super::stream::StreamTransformContext;
-use super::unified::{UnifiedChunkResponse, UnifiedRequest, UnifiedResponse, UnifiedStreamEvent};
+use super::unified::{
+    UnifiedChunkResponse, UnifiedRequest, UnifiedResponse, UnifiedStreamEvent,
+    meaningful_output_from_legacy_chunk, meaningful_output_from_stream_events,
+};
 use crate::schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol};
 use crate::utils::sse::SseEvent;
 
@@ -81,6 +84,15 @@ pub(in crate::service::transform) struct UpstreamAdapter {
 pub(in crate::service::transform) enum DecodedSourceStreamFrame {
     Events(Vec<UnifiedStreamEvent>),
     LegacyChunk(UnifiedChunkResponse),
+}
+
+impl DecodedSourceStreamFrame {
+    pub(in crate::service::transform) fn meaningful_output_observed(&self) -> bool {
+        match self {
+            Self::Events(events) => meaningful_output_from_stream_events(events),
+            Self::LegacyChunk(chunk) => meaningful_output_from_legacy_chunk(chunk),
+        }
+    }
 }
 
 pub(in crate::service::transform) fn noop_finalize_request(

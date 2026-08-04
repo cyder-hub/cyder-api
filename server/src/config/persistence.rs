@@ -11,7 +11,9 @@ use cyder_tools::log::warn;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use super::{paths::ConfigPaths, programmatic_default_config_for_paths};
+use super::{SecretEncryptionConfig, paths::ConfigPaths, programmatic_default_config_for_paths};
+
+pub const DEFAULT_CONFIG_SNAPSHOT_VERSION: u32 = 2;
 
 pub const CYDER_DATA_DIR_ENV: &str = "CYDER_DATA_DIR";
 pub const CYDER_CONFIG_PATH_ENV: &str = "CYDER_CONFIG_PATH";
@@ -56,6 +58,7 @@ pub struct ResolvedPathSet {
 #[derive(Debug)]
 pub enum ConfigBootstrapError {
     SerializeDefault(serde_yaml::Error),
+    InvalidDefaultSnapshot(String),
     Io {
         operation: &'static str,
         path: PathBuf,
@@ -68,6 +71,12 @@ impl fmt::Display for ConfigBootstrapError {
         match self {
             Self::SerializeDefault(source) => {
                 write!(f, "failed to serialize default configuration: {source}")
+            }
+            Self::InvalidDefaultSnapshot(source) => {
+                write!(
+                    f,
+                    "invalid generated default configuration snapshot: {source}"
+                )
             }
             Self::Io {
                 operation,
@@ -137,19 +146,143 @@ fn warn_about_retired_managed_config_files(config_dir: &Path) {
 
 fn create_default_config_if_missing(paths: &ConfigPaths) -> Result<(), ConfigBootstrapError> {
     if paths.default_config_path.exists() {
-        return ensure_existing_file(
+        ensure_existing_file(
             &paths.default_config_path,
             "create default configuration file",
-        );
+        )?;
+        return refresh_default_config_snapshot_if_stale(paths);
     }
 
     let config = programmatic_default_config_for_paths(paths);
-    let yaml = serde_yaml::to_string(&config).map_err(ConfigBootstrapError::SerializeDefault)?;
+    let yaml = serialize_default_config_snapshot(&config, None)?;
     create_file_if_missing(
         &paths.default_config_path,
         "create default configuration file",
         yaml.as_bytes(),
     )
+}
+
+fn refresh_default_config_snapshot_if_stale(
+    paths: &ConfigPaths,
+) -> Result<(), ConfigBootstrapError> {
+    let raw = fs::read_to_string(&paths.default_config_path).map_err(|source| {
+        ConfigBootstrapError::Io {
+            operation: "read default configuration snapshot",
+            path: paths.default_config_path.clone(),
+            source,
+        }
+    })?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&raw)
+        .map_err(|error| ConfigBootstrapError::InvalidDefaultSnapshot(error.to_string()))?;
+    let version = value
+        .get("config_snapshot_version")
+        .and_then(serde_yaml::Value::as_u64)
+        .map(|version| version as u32);
+    if version == Some(DEFAULT_CONFIG_SNAPSHOT_VERSION) {
+        return Ok(());
+    }
+    if version.is_some_and(|version| version > DEFAULT_CONFIG_SNAPSHOT_VERSION) {
+        return Err(ConfigBootstrapError::InvalidDefaultSnapshot(format!(
+            "snapshot version {} is newer than supported version {}",
+            version.unwrap_or_default(),
+            DEFAULT_CONFIG_SNAPSHOT_VERSION
+        )));
+    }
+
+    let managed_secret = managed_secret_snapshot(&value)?;
+    let config = programmatic_default_config_for_paths(paths);
+    let yaml = serialize_default_config_snapshot(&config, managed_secret.as_ref())?;
+    replace_file_atomically(
+        &paths.default_config_path,
+        "replace stale default configuration snapshot",
+        yaml.as_bytes(),
+    )
+}
+
+fn managed_secret_snapshot(
+    value: &serde_yaml::Value,
+) -> Result<Option<serde_yaml::Mapping>, ConfigBootstrapError> {
+    let Some(secret_value) = value.get("secret_encryption") else {
+        return Ok(None);
+    };
+    let _: SecretEncryptionConfig =
+        serde_yaml::from_value(secret_value.clone()).map_err(|error| {
+            ConfigBootstrapError::InvalidDefaultSnapshot(format!(
+                "secret_encryption cannot be safely carried forward: {error}"
+            ))
+        })?;
+    let Some(secret_map) = secret_value.as_mapping() else {
+        return Err(ConfigBootstrapError::InvalidDefaultSnapshot(
+            "secret_encryption must be a mapping".to_string(),
+        ));
+    };
+    let mut managed = serde_yaml::Mapping::new();
+    for field in ["encryption_key", "previous_encryption_key"] {
+        let key = serde_yaml::Value::String(field.to_string());
+        if let Some(raw_value) = secret_map.get(&key) {
+            if !raw_value.is_null() && raw_value.as_str().is_none() {
+                return Err(ConfigBootstrapError::InvalidDefaultSnapshot(format!(
+                    "secret_encryption.{field} must be a string or null"
+                )));
+            }
+            managed.insert(key, raw_value.clone());
+        }
+    }
+    Ok(Some(managed))
+}
+
+fn serialize_default_config_snapshot(
+    config: &super::FinalConfig,
+    managed_secret: Option<&serde_yaml::Mapping>,
+) -> Result<String, ConfigBootstrapError> {
+    let mut value = serde_yaml::to_value(config).map_err(ConfigBootstrapError::SerializeDefault)?;
+    let Some(root) = value.as_mapping_mut() else {
+        return Err(ConfigBootstrapError::InvalidDefaultSnapshot(
+            "program defaults did not serialize to a mapping".to_string(),
+        ));
+    };
+    root.insert(
+        serde_yaml::Value::String("config_snapshot_version".to_string()),
+        serde_yaml::Value::Number(serde_yaml::Number::from(DEFAULT_CONFIG_SNAPSHOT_VERSION)),
+    );
+    if let Some(managed_secret) = managed_secret {
+        root.insert(
+            serde_yaml::Value::String("secret_encryption".to_string()),
+            serde_yaml::Value::Mapping(managed_secret.clone()),
+        );
+    }
+    serde_yaml::to_string(&value).map_err(ConfigBootstrapError::SerializeDefault)
+}
+
+fn replace_file_atomically(
+    path: &Path,
+    operation: &'static str,
+    bytes: &[u8],
+) -> Result<(), ConfigBootstrapError> {
+    if let Some(parent) = path.parent() {
+        create_dir(parent, "create parent directory")?;
+    }
+    let temp_path = unique_temp_path_for(path);
+    if let Err(error) = write_new_file(&temp_path, operation, bytes) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    match fs::rename(&temp_path, path) {
+        Ok(()) => {
+            if let Some(parent) = path.parent() {
+                sync_parent_dir(parent);
+            }
+            Ok(())
+        }
+        Err(source) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(ConfigBootstrapError::Io {
+                operation,
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    }
 }
 
 fn create_dir(path: &Path, operation: &'static str) -> Result<(), ConfigBootstrapError> {
@@ -741,7 +874,7 @@ mod tests {
     fn bootstrap_does_not_overwrite_existing_default_config() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
         let paths = ConfigPaths::for_test(temp_dir.path());
-        let existing = "port: 9123\n";
+        let existing = "config_snapshot_version: 2\nport: 9123\n";
         write_test_config(&paths.default_config_path, existing);
 
         bootstrap_config_paths(&paths).expect("bootstrap should succeed");
@@ -749,6 +882,48 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&paths.default_config_path).expect("default should read"),
             existing
+        );
+    }
+
+    #[test]
+    fn bootstrap_rebuilds_old_default_snapshot_with_current_defaults_and_preserves_only_managed_secrets()
+     {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        let key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        write_test_config(
+            &paths.default_config_path,
+            &format!(
+                "proxy_request:\n  connect_timeout_seconds: 10\n  first_byte_timeout_seconds: 60\n  total_timeout_seconds: null\n  upstream_error_body_limit_bytes: 65536\nsecret_encryption:\n  encryption_key: '{key}'\n"
+            ),
+        );
+
+        bootstrap_config_paths(&paths).expect("old default snapshot should be rebuilt");
+        let rebuilt = fs::read_to_string(&paths.default_config_path)
+            .expect("rebuilt default snapshot should read");
+        assert!(rebuilt.contains("config_snapshot_version: 2"));
+        assert!(rebuilt.contains("request_send_seconds: 7200"));
+        assert!(rebuilt.contains("response_idle_seconds: 7200"));
+        assert!(rebuilt.contains("total_seconds: 7200"));
+        assert!(rebuilt.contains(key));
+        assert!(!rebuilt.contains("connect_timeout_seconds: 10\n  first_byte_timeout_seconds"));
+        assert!(!rebuilt.contains("first_byte_timeout_seconds"));
+        assert!(!rebuilt.contains("\n  total_timeout_seconds:"));
+    }
+
+    #[test]
+    fn bootstrap_rejects_invalid_old_snapshot_without_overwriting_the_original_file() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let paths = ConfigPaths::for_test(temp_dir.path());
+        let original = "secret_encryption:\n  encryption_key: 123\n";
+        write_test_config(&paths.default_config_path, original);
+
+        let error = bootstrap_config_paths(&paths)
+            .expect_err("invalid managed secret should block snapshot rebuild");
+        assert!(error.to_string().contains("secret_encryption"));
+        assert_eq!(
+            fs::read_to_string(&paths.default_config_path).expect("original snapshot should read"),
+            original
         );
     }
 

@@ -336,6 +336,34 @@ async fn assert_success_close_contract(store: Arc<dyn ProviderCircuitStore>) {
     assert!(!snapshot.half_open_probe_in_flight);
 }
 
+async fn assert_neutral_probe_release_contract(store: Arc<dyn ProviderCircuitStore>) {
+    let config = config(1, 0);
+    store
+        .record_failure(706, &config, "timeout".to_string(), None)
+        .await
+        .expect("failure should open circuit");
+    let decision = store
+        .allow_request(706, &config)
+        .await
+        .expect("allow should evaluate");
+    let permit = decision
+        .probe_permit
+        .as_ref()
+        .expect("half-open probe should include a permit");
+    let snapshot = store
+        .release_probe(706, &config, Some(permit))
+        .await
+        .expect("neutral probe release should succeed");
+    assert_eq!(snapshot.status, ProviderHealthStatus::HalfOpen);
+    assert!(!snapshot.half_open_probe_in_flight);
+    let next = store
+        .allow_request(706, &config)
+        .await
+        .expect("a released probe should allow recovery traffic");
+    assert!(next.allowed);
+    assert!(next.probe_permit.is_some());
+}
+
 async fn assert_failure_reopen_contract(store: Arc<dyn ProviderCircuitStore>) {
     let config = config(1, 0);
     store
@@ -434,6 +462,11 @@ async fn memory_store_matching_probe_success_closes_circuit() {
 }
 
 #[tokio::test]
+async fn memory_store_releases_neutral_half_open_probe() {
+    assert_neutral_probe_release_contract(Arc::new(MemoryProviderCircuitStore::default())).await;
+}
+
+#[tokio::test]
 async fn memory_store_matching_probe_failure_reopens_circuit() {
     assert_failure_reopen_contract(Arc::new(MemoryProviderCircuitStore::default())).await;
 }
@@ -497,6 +530,15 @@ async fn redis_store_allows_new_half_open_probe_after_lease_ttl() {
         return;
     };
     assert_probe_ttl_contract(Arc::new(redis_store(pool, Duration::from_millis(20)))).await;
+}
+
+#[tokio::test]
+async fn redis_store_releases_neutral_half_open_probe() {
+    let Some(pool) = redis_pool_or_skip().await else {
+        return;
+    };
+    assert_neutral_probe_release_contract(Arc::new(redis_store(pool, Duration::from_secs(30))))
+        .await;
 }
 
 #[tokio::test]

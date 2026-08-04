@@ -10,8 +10,9 @@ use reqwest::{
     },
 };
 use thiserror::Error;
+use tokio::time::{Duration, Instant, timeout_at};
 
-use crate::config::NonStreamResponseConfig;
+use crate::{config::NonStreamResponseConfig, proxy::TimeoutPhase};
 
 const MAX_CONTENT_TYPE_BYTES: usize = 256;
 
@@ -73,6 +74,7 @@ impl UpstreamHttpErrorKind {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn safe_http_error_message(context: &'static str, error: &reqwest::Error) -> String {
     format!(
         "{context} ({})",
@@ -104,11 +106,28 @@ impl ResponseBodyLimitKind {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct CompleteResponseBody {
     pub(crate) bytes: Bytes,
     pub(crate) raw_bytes: usize,
     pub(crate) decoded_bytes: usize,
     pub(crate) encoding: UpstreamContentEncoding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResponseBodyReadTimeouts {
+    pub(crate) first_byte: Duration,
+    pub(crate) response_idle: Duration,
+}
+
+impl ResponseBodyReadTimeouts {
+    fn for_next_chunk(self, saw_nonempty_chunk: bool) -> (Duration, TimeoutPhase) {
+        if saw_nonempty_chunk {
+            (self.response_idle, TimeoutPhase::ResponseIdle)
+        } else {
+            (self.first_byte, TimeoutPhase::FirstByte)
+        }
+    }
 }
 
 pub(crate) struct CapturedErrorBody {
@@ -128,6 +147,8 @@ pub(crate) struct NormalizedContentType {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub(crate) enum UpstreamResponseReadError {
+    #[error("upstream response timed out during {phase:?}")]
+    Timeout { phase: TimeoutPhase },
     #[error("upstream response Content-Encoding is invalid or unsupported")]
     InvalidContentEncoding,
     #[error("upstream response Content-Length is invalid or conflicting")]
@@ -160,11 +181,18 @@ impl UpstreamResponseReadError {
     }
 
     pub(crate) fn is_timeout(&self) -> bool {
-        matches!(
-            self,
-            Self::Transport { kind }
-                if *kind == UpstreamHttpErrorKind::Timeout.as_str()
-        )
+        match self {
+            Self::Timeout { .. } => true,
+            Self::Transport { kind } => *kind == UpstreamHttpErrorKind::Timeout.as_str(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn timeout_phase(&self) -> Option<TimeoutPhase> {
+        match self {
+            Self::Timeout { phase } => Some(*phase),
+            _ => None,
+        }
     }
 }
 
@@ -227,6 +255,18 @@ pub(crate) async fn read_complete_response_body(
     response: Response,
     limits: &NonStreamResponseConfig,
 ) -> Result<CompleteResponseBody, UpstreamResponseReadError> {
+    read_complete_response_body_with_timeouts(response, limits, None, |_, _, _| {}).await
+}
+
+pub(crate) async fn read_complete_response_body_with_timeouts<F>(
+    response: Response,
+    limits: &NonStreamResponseConfig,
+    read_timeouts: Option<ResponseBodyReadTimeouts>,
+    mut observe_chunk: F,
+) -> Result<CompleteResponseBody, UpstreamResponseReadError>
+where
+    F: FnMut(&Bytes, Instant, Instant) + Send,
+{
     let encoding = parse_content_encoding(response.headers())?;
     if let Some(content_length) = parse_content_length(response.headers())? {
         if content_length > limits.raw_body_limit_bytes {
@@ -237,7 +277,17 @@ pub(crate) async fn read_complete_response_body(
         }
     }
 
-    match read_response_body(response, limits, usize::MAX, false, encoding).await? {
+    match read_response_body(
+        response,
+        limits,
+        usize::MAX,
+        false,
+        encoding,
+        read_timeouts,
+        &mut observe_chunk,
+    )
+    .await?
+    {
         ReadBodyOutcome::Complete(body) => Ok(body),
         ReadBodyOutcome::Captured(_) => unreachable!("complete mode must return a complete body"),
     }
@@ -248,8 +298,27 @@ pub(crate) async fn capture_error_response_body(
     limits: &NonStreamResponseConfig,
     disclosure_limit: usize,
 ) -> Result<CapturedErrorBody, UpstreamResponseReadError> {
+    capture_error_response_body_with_timeouts(response, limits, disclosure_limit, None).await
+}
+
+pub(crate) async fn capture_error_response_body_with_timeouts(
+    response: Response,
+    limits: &NonStreamResponseConfig,
+    disclosure_limit: usize,
+    read_timeouts: Option<ResponseBodyReadTimeouts>,
+) -> Result<CapturedErrorBody, UpstreamResponseReadError> {
     let encoding = parse_content_encoding(response.headers())?;
-    match read_response_body(response, limits, disclosure_limit, true, encoding).await? {
+    match read_response_body(
+        response,
+        limits,
+        disclosure_limit,
+        true,
+        encoding,
+        read_timeouts,
+        &mut |_, _, _| {},
+    )
+    .await?
+    {
         ReadBodyOutcome::Captured(body) => Ok(body),
         ReadBodyOutcome::Complete(_) => unreachable!("capture mode must return a captured body"),
     }
@@ -266,14 +335,42 @@ async fn read_response_body(
     capture_limit: usize,
     capture_mode: bool,
     encoding: UpstreamContentEncoding,
+    read_timeouts: Option<ResponseBodyReadTimeouts>,
+    observe_chunk: &mut (dyn FnMut(&Bytes, Instant, Instant) + Send),
 ) -> Result<ReadBodyOutcome, UpstreamResponseReadError> {
     let collector = DecodedCollector::new(limits.decoded_body_limit_bytes, capture_limit);
     let mut decoder = ResponseDecoder::new(encoding, collector);
     let mut raw_bytes = 0usize;
     let mut stream = response.bytes_stream();
 
-    while let Some(chunk) = stream.next().await {
+    let mut saw_nonempty_chunk = false;
+    let mut active_wait_deadline = None;
+    loop {
+        let wait_started_at = Instant::now();
+        let next_chunk = stream.next();
+        let chunk = match read_timeouts {
+            Some(timeouts) => {
+                let (duration, phase) = timeouts.for_next_chunk(saw_nonempty_chunk);
+                let deadline =
+                    *active_wait_deadline.get_or_insert_with(|| wait_started_at + duration);
+                match timeout_at(deadline, next_chunk).await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(_) => return Err(UpstreamResponseReadError::Timeout { phase }),
+                }
+            }
+            None => match next_chunk.await {
+                Some(chunk) => chunk,
+                None => break,
+            },
+        };
         let chunk = chunk.map_err(|error| UpstreamResponseReadError::transport(&error))?;
+        let received_at = Instant::now();
+        observe_chunk(&chunk, wait_started_at, received_at);
+        if !chunk.is_empty() {
+            saw_nonempty_chunk = true;
+            active_wait_deadline = None;
+        }
         let remaining_raw = limits.raw_body_limit_bytes.saturating_sub(raw_bytes);
         if chunk.len() > remaining_raw {
             if !capture_mode {
@@ -533,6 +630,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        sync::oneshot,
     };
 
     use super::*;
@@ -612,6 +710,41 @@ mod tests {
             .send()
             .await
             .unwrap()
+    }
+
+    async fn hanging_chunked_response(
+        first_chunk: Option<&[u8]>,
+    ) -> (Response, oneshot::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = oneshot::channel();
+        let first_chunk = first_chunk.map(ToOwned::to_owned);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            if let Some(chunk) = first_chunk {
+                let _ = socket
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await;
+                let _ = socket.write_all(&chunk).await;
+                let _ = socket.write_all(b"\r\n").await;
+            }
+            let _ = release_rx.await;
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/response"))
+            .send()
+            .await
+            .unwrap();
+        (response, release_tx)
     }
 
     #[tokio::test]
@@ -754,6 +887,49 @@ mod tests {
         assert_eq!(body.raw_bytes, 6);
         assert_eq!(body.decoded_bytes, 6);
         assert_eq!(body.encoding, UpstreamContentEncoding::Identity);
+    }
+
+    #[tokio::test]
+    async fn timed_complete_read_distinguishes_first_byte_and_response_idle() {
+        let (response, release) = hanging_chunked_response(None).await;
+        let error = read_complete_response_body_with_timeouts(
+            response,
+            &limits(64, 64),
+            Some(ResponseBodyReadTimeouts {
+                first_byte: Duration::from_millis(50),
+                response_idle: Duration::from_millis(50),
+            }),
+            |_, _, _| {},
+        )
+        .await
+        .expect_err("missing first raw body chunk should time out");
+        assert_eq!(
+            error,
+            UpstreamResponseReadError::Timeout {
+                phase: TimeoutPhase::FirstByte,
+            }
+        );
+        let _ = release.send(());
+
+        let (response, release) = hanging_chunked_response(Some(b"a")).await;
+        let error = read_complete_response_body_with_timeouts(
+            response,
+            &limits(64, 64),
+            Some(ResponseBodyReadTimeouts {
+                first_byte: Duration::from_millis(100),
+                response_idle: Duration::from_millis(50),
+            }),
+            |_, _, _| {},
+        )
+        .await
+        .expect_err("active response idle should time out after the first chunk");
+        assert_eq!(
+            error,
+            UpstreamResponseReadError::Timeout {
+                phase: TimeoutPhase::ResponseIdle,
+            }
+        );
+        let _ = release.send(());
     }
 
     #[tokio::test]

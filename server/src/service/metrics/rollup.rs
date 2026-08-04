@@ -134,10 +134,17 @@ fn request_rollup_delta(
     bucket_start_ms: i64,
     now_ms: i64,
 ) -> MetricRequestRollupMinute {
-    let first_byte_latency = positive_duration_ms(
+    let time_to_first_response_body = positive_duration_ms(
         request_log.upstream_request_sent_at,
-        request_log.response_started_to_client_at,
+        request_log.first_response_body_at,
     );
+    let ttft = request_log.is_stream.then(|| {
+        positive_duration_ms(
+            request_log.upstream_request_sent_at,
+            request_log.first_token_at,
+        )
+    });
+    let ttft = ttft.flatten();
     let total_latency = positive_duration_ms(
         request_log.upstream_request_sent_at,
         request_log.completed_at,
@@ -154,8 +161,10 @@ fn request_rollup_delta(
             request_log.overall_status,
             RequestStatus::Cancelled
         )),
-        first_byte_latency_sum_ms: first_byte_latency.unwrap_or_default(),
-        first_byte_latency_count: i64::from(first_byte_latency.is_some()),
+        time_to_first_response_body_sum_ms: time_to_first_response_body.unwrap_or_default(),
+        time_to_first_response_body_count: i64::from(time_to_first_response_body.is_some()),
+        ttft_sum_ms: ttft.unwrap_or_default(),
+        ttft_count: i64::from(ttft.is_some()),
         total_latency_sum_ms: total_latency.unwrap_or_default(),
         total_latency_count: i64::from(total_latency.is_some()),
         input_tokens: i64::from(request_log.total_input_tokens.unwrap_or_default().max(0)),

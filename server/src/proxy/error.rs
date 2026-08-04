@@ -12,7 +12,7 @@ pub(crate) mod visibility;
 #[allow(unused_imports)] // C1 exports consumed by the retry producer and HTTP adapter tasks.
 pub(crate) use fact::{
     ErrorResponseHints, ExecutionStage, ProxyError, ProxyErrorCode, ProxyLogLevel,
-    RetryAfterSeconds,
+    RetryAfterSeconds, TimeoutPhase,
 };
 pub(crate) use response::{ProtocolErrorResponseAdapter, RouterRejection};
 pub(crate) use upstream::UpstreamErrorPayload;
@@ -64,10 +64,21 @@ pub(crate) fn classify_reqwest_error(
 ) -> ProxyError {
     let kind = UpstreamHttpErrorKind::from_reqwest(err);
     let (code, message) = if kind == UpstreamHttpErrorKind::Timeout {
-        (
-            ProxyErrorCode::UpstreamTimeoutError,
+        let phase = if err.is_connect() {
+            TimeoutPhase::Connect
+        } else {
+            match stage {
+                ExecutionStage::UpstreamResponse => TimeoutPhase::ResponseIdle,
+                ExecutionStage::Connect => TimeoutPhase::RequestSend,
+                _ => TimeoutPhase::Total,
+            }
+        };
+        return ProxyError::upstream_timeout(
+            phase,
+            stage,
+            response_visibility,
             format!("{context} timed out ({})", kind.as_str()),
-        )
+        );
     } else if kind == UpstreamHttpErrorKind::Connect {
         (
             ProxyErrorCode::UpstreamConnectError,

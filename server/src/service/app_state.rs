@@ -85,6 +85,7 @@ impl AppState {
         #[cfg(test)]
         let infra = Arc::new(
             AppInfra::new_with_config(
+                config.outbound_http.clone(),
                 config.proxy_request.clone(),
                 config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
                 test_db_context.clone(),
@@ -95,6 +96,7 @@ impl AppState {
         #[cfg(not(test))]
         let infra = Arc::new(
             AppInfra::new_with_config(
+                config.outbound_http.clone(),
                 config.proxy_request.clone(),
                 config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
             )
@@ -333,6 +335,7 @@ mod tests {
         ));
         let infra = Arc::new(
             AppInfra::new_with_config(
+                config.outbound_http.clone(),
                 config.proxy_request.clone(),
                 config.proxy.as_ref().map(|proxy| proxy.expose().to_owned()),
                 None,

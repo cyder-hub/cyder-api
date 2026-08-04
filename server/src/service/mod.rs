@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod app_state;
+pub(crate) mod auxiliary_http;
 pub mod cache;
 pub mod catalog;
 pub mod infra;

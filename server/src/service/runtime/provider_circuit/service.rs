@@ -72,6 +72,20 @@ impl ProviderCircuitService {
             .await
     }
 
+    pub async fn release_provider_probe(
+        &self,
+        provider_id: i64,
+        permit: Option<&ProviderCircuitProbePermit>,
+    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+        if !self.config.is_enabled() {
+            return Ok(ProviderHealthSnapshot::synthetic_healthy());
+        }
+
+        self.store
+            .release_probe(provider_id, &self.config, permit)
+            .await
+    }
+
     pub async fn get_provider_health_snapshot(
         &self,
         provider_id: i64,

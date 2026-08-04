@@ -382,6 +382,72 @@ redis.call('EXPIRE', state_key, state_ttl_seconds)
 return result()
 "#;
 
+const RELEASE_PROBE_SCRIPT: &str = r#"
+local state_key = KEYS[1]
+
+local provider_id = ARGV[1]
+local now_ms = tonumber(ARGV[2])
+local state_ttl_seconds = tonumber(ARGV[3])
+local governance_enabled = ARGV[4] == '1'
+local permit_provider_id = ARGV[5]
+local permit_lease_id = ARGV[6]
+
+local function raw(field)
+    return redis.call('HGET', state_key, field) or ''
+end
+
+local function hnum(field)
+    local value = redis.call('HGET', state_key, field)
+    if not value then
+        return 0
+    end
+    return tonumber(value) or 0
+end
+
+local function status_value()
+    local status = redis.call('HGET', state_key, 'status')
+    if not status then
+        return 'healthy'
+    end
+    return status
+end
+
+local function result()
+    local probe_lease_id = redis.call('HGET', state_key, 'probe_lease_id')
+    local probe_in_flight = 0
+    if probe_lease_id then
+        probe_in_flight = 1
+    end
+    return {
+        status_value(),
+        hnum('consecutive_failures'),
+        probe_in_flight,
+        raw('opened_at'),
+        raw('last_failure_at'),
+        raw('last_recovered_at'),
+        raw('last_error')
+    }
+end
+
+if not governance_enabled then
+    return { 'healthy', 0, 0, '', '', '', '' }
+end
+
+if status_value() ~= 'half_open' then
+    return result()
+end
+
+local active_lease_id = redis.call('HGET', state_key, 'probe_lease_id')
+if permit_provider_id ~= provider_id or not active_lease_id or active_lease_id ~= permit_lease_id then
+    return result()
+end
+
+redis.call('HDEL', state_key, 'probe_decision_id', 'probe_lease_id', 'probe_issued_at', 'probe_expires_at')
+redis.call('HSET', state_key, 'updated_at_ms', now_ms)
+redis.call('EXPIRE', state_key, state_ttl_seconds)
+return result()
+"#;
+
 const SNAPSHOT_SCRIPT: &str = r#"
 local state_key = KEYS[1]
 
@@ -590,6 +656,34 @@ impl ProviderCircuitStore for RedisProviderCircuitStore {
         Self::append_permit_args(&mut command, permit);
         let result: RedisSnapshotResult = command.query_async(&mut *conn).await.map_err(|err| {
             Self::redis_error("provider circuit record failure script failed", err)
+        })?;
+        snapshot_result_to_domain(result)
+    }
+
+    async fn release_probe(
+        &self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
+        permit: Option<&ProviderCircuitProbePermit>,
+    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+        let now_ms = Utc::now().timestamp_millis();
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| Self::redis_error("failed to get redis connection", err))?;
+        let mut command = cmd("EVAL");
+        command
+            .arg(RELEASE_PROBE_SCRIPT)
+            .arg(1)
+            .arg(self.state_key(provider_id))
+            .arg(provider_id)
+            .arg(now_ms)
+            .arg(self.state_ttl_seconds())
+            .arg(if config.is_enabled() { "1" } else { "0" });
+        Self::append_permit_args(&mut command, permit);
+        let result: RedisSnapshotResult = command.query_async(&mut *conn).await.map_err(|err| {
+            Self::redis_error("provider circuit release probe script failed", err)
         })?;
         snapshot_result_to_domain(result)
     }

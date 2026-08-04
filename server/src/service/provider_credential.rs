@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
 use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
@@ -89,12 +89,19 @@ async fn materialize_provider_credential(
     key_id: i64,
     secret: SensitiveSecret,
     limits: &NonStreamResponseConfig,
+    auxiliary_total_timeout: Duration,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
     let request_secret = match provider_runtime_profile(provider_type).auth {
         ProviderAuthProfile::VertexOAuth => SensitiveSecret::new(
-            get_vertex_token(client, key_id, secret.expose(), limits)
-                .await
-                .map_err(|_| ProviderCredentialError::VertexTokenUnavailable)?,
+            get_vertex_token(
+                client,
+                key_id,
+                secret.expose(),
+                limits,
+                auxiliary_total_timeout,
+            )
+            .await
+            .map_err(|_| ProviderCredentialError::VertexTokenUnavailable)?,
         ),
         _ => secret,
     };
@@ -105,13 +112,13 @@ async fn materialize_provider_credential(
     })
 }
 
-async fn provider_client(
+async fn auxiliary_client(
     app_state: &AppState,
     use_proxy: bool,
 ) -> Result<Arc<reqwest::Client>, ProviderCredentialError> {
     app_state
         .infra
-        .provider_client(use_proxy)
+        .auxiliary_client(use_proxy)
         .await
         .map_err(|_| ProviderCredentialError::ProxyRequiredButNotConfigured)
 }
@@ -122,7 +129,7 @@ pub async fn resolve_selected_provider_credential(
     provider: &CacheProvider,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = provider_client(app_state, provider.use_proxy).await?;
+    let client = auxiliary_client(app_state, provider.use_proxy).await?;
     let strategy = GroupItemSelectionStrategy::from(provider.provider_api_key_mode.clone());
     let selected_key = app_state
         .provider_key_selector
@@ -144,6 +151,7 @@ pub async fn resolve_selected_provider_credential(
         selected_key.id,
         secret,
         &app_state.infra.proxy_request_config().non_stream_response,
+        app_state.infra.auxiliary_total_timeout(),
     )
     .await
 }
@@ -155,7 +163,7 @@ pub async fn resolve_saved_provider_credential(
     key_id: i64,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = provider_client(app_state, provider.use_proxy).await?;
+    let client = auxiliary_client(app_state, provider.use_proxy).await?;
     let stored = ProviderApiKeyRepository::get_stored_by_id(provider.id, key_id)
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
     let encrypted = stored
@@ -171,6 +179,7 @@ pub async fn resolve_saved_provider_credential(
         key_id,
         secret,
         &app_state.infra.proxy_request_config().non_stream_response,
+        app_state.infra.auxiliary_total_timeout(),
     )
     .await
 }
@@ -182,13 +191,14 @@ pub async fn resolve_draft_provider_credential(
     secret: SensitiveSecret,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = provider_client(app_state, provider.use_proxy).await?;
+    let client = auxiliary_client(app_state, provider.use_proxy).await?;
     materialize_provider_credential(
         client.as_ref(),
         &provider.provider_type,
         key_id,
         secret,
         &app_state.infra.proxy_request_config().non_stream_response,
+        app_state.infra.auxiliary_total_timeout(),
     )
     .await
 }

@@ -30,8 +30,9 @@ export type EnrichedRecordListItem = RecordListItem & {
   apiKeyName: string;
   displayRequestedModelName: string;
   httpStatusDisplay: string;
-  firstRespTimeDisplay: string;
-  totalRespTimeDisplay: string;
+  firstResponseBodyTimeDisplay: string;
+  ttftDisplay: string;
+  totalLatencyDisplay: string;
   tpsDisplay: string;
   costDisplay: string;
   request_at_formatted: string;

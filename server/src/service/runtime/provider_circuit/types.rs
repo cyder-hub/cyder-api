@@ -357,6 +357,22 @@ impl ProviderHealthState {
             self.half_open_probe = None;
         }
     }
+
+    pub(crate) fn release_probe(
+        &mut self,
+        config: &ProviderGovernanceConfig,
+        now_ms: i64,
+        permit: Option<&ProviderCircuitProbePermit>,
+    ) {
+        if !config.is_enabled() {
+            return;
+        }
+
+        self.prune_expired_probe(now_ms);
+        if self.status == ProviderHealthStatus::HalfOpen && self.probe_permit_matches(permit) {
+            self.half_open_probe = None;
+        }
+    }
 }
 
 #[async_trait]
@@ -379,6 +395,13 @@ pub trait ProviderCircuitStore: Send + Sync {
         provider_id: i64,
         config: &ProviderGovernanceConfig,
         error_message: String,
+        permit: Option<&ProviderCircuitProbePermit>,
+    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError>;
+
+    async fn release_probe(
+        &self,
+        provider_id: i64,
+        config: &ProviderGovernanceConfig,
         permit: Option<&ProviderCircuitProbePermit>,
     ) -> Result<ProviderHealthSnapshot, ProviderCircuitError>;
 

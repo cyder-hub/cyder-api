@@ -6,6 +6,13 @@ import { formatPriceFromNanos, nanosToMajorUnit } from "@/utils/money";
 import { formatNumberValue } from "@/utils/number";
 import * as dashboardService from "@/services/dashboard";
 import type { UsageStatItem, UsageStatsPeriod } from "@/services/types";
+import {
+  isAverageUsageMetric,
+  usageMetricSampleCount,
+  usageMetricValue,
+  weightedUsageAverage,
+  type UsageMetric,
+} from "./usageMetrics";
 import ECharts from "./ECharts.vue";
 import { Button } from "./ui/button";
 import {
@@ -46,17 +53,6 @@ type TimeRange =
   | "this_year"
   | "last_1_year";
 
-type UsageMetric =
-  | "total_input_tokens"
-  | "total_output_tokens"
-  | "total_reasoning_tokens"
-  | "total_tokens"
-  | "request_count"
-  | "total_cost"
-  | "success_rate"
-  | "avg_latency"
-  | "error_count";
-
 type UsageGroupBy = "provider" | "model" | "api_key";
 
 interface UsageStatsResponse {
@@ -78,7 +74,7 @@ type TooltipAxisParam = CallbackDataParams & {
   axisValue: string | number;
   marker: string;
   seriesName: string;
-  value: [number, number];
+  value: [number, number | null, number | null];
 };
 
 const { t, locale } = useI18n();
@@ -207,8 +203,7 @@ const getTimeRangeDetails = (value: TimeRange) => {
   return { startTime, endTime, interval };
 };
 
-const getApiMetric = (metric: UsageMetric) =>
-  metric === "avg_latency" ? "avg_latency" : metric;
+const getApiMetric = (metric: UsageMetric) => metric;
 
 const fetchUsageStats = async () => {
   isLoading.value = true;
@@ -254,6 +249,14 @@ const metricOptions = computed(() => [
   { value: "success_rate", label: t("dashboard.usageStats.metrics.success_rate") },
   { value: "error_count", label: t("dashboard.usageStats.metrics.error_count") },
   { value: "avg_latency", label: t("dashboard.usageStats.metrics.avg_latency") },
+  {
+    value: "avg_time_to_first_response_body",
+    label: t("dashboard.usageStats.metrics.avg_time_to_first_response_body"),
+  },
+  {
+    value: "avg_ttft",
+    label: t("dashboard.usageStats.metrics.avg_ttft"),
+  },
   {
     value: "total_input_tokens",
     label: t("dashboard.usageStats.metrics.total_input_tokens"),
@@ -309,6 +312,8 @@ const formatMetric = (value: number, metric: UsageMetric, currency?: string) => 
     case "success_rate":
       return `${(value * 100).toFixed(1)}%`;
     case "avg_latency":
+    case "avg_time_to_first_response_body":
+    case "avg_ttft":
       return `${formatNumberValue(Math.round(value), undefined, locale.value)} ms`;
     default:
       return formatNumberValue(value, undefined, locale.value);
@@ -326,7 +331,7 @@ const formatCostAxisLabel = (value: number) =>
 const formatAxisLabel = (value: number, metric: UsageMetric) => {
   if (metric === "total_cost") return formatCostAxisLabel(value);
   if (metric === "success_rate") return `${(value * 100).toFixed(0)}%`;
-  if (metric === "avg_latency") return `${Math.round(value)}ms`;
+  if (isAverageUsageMetric(metric)) return `${Math.round(value)}ms`;
   return formatNumberValue(value, undefined, locale.value);
 };
 
@@ -336,28 +341,27 @@ const displayGroupLabel = (item: UsageStatItem) =>
 const displayGroupDetail = (item: UsageStatItem) =>
   item.is_other ? null : item.group_detail;
 
-const metricValueFromItem = (item: UsageStatItem, metric: UsageMetric) => {
-  switch (metric) {
-    case "total_input_tokens":
-      return item.total_input_tokens;
-    case "total_output_tokens":
-      return item.total_output_tokens;
-    case "total_reasoning_tokens":
-      return item.total_reasoning_tokens;
-    case "total_tokens":
-      return item.total_tokens;
-    case "request_count":
-      return item.request_count;
-    case "total_cost":
-      return Object.values(item.total_cost).reduce((sum, value) => sum + value, 0);
-    case "success_rate":
-      return item.success_rate ?? 0;
-    case "avg_latency":
-      return item.avg_total_latency_ms ?? 0;
-    case "error_count":
-      return item.error_count;
-  }
-};
+const metricValueFromItem = (item: UsageStatItem, metric: UsageMetric) =>
+  usageMetricValue(item, metric);
+
+const metricSampleCountFromItem = (item: UsageStatItem, metric: UsageMetric) =>
+  usageMetricSampleCount(item, metric);
+
+const formatSampleCount = (sampleCount: number) =>
+  sampleCount === 0
+    ? t("common.noSamples")
+    : sampleCount === 1
+      ? t("common.oneSample")
+      : t("common.samples", { count: formatNumberValue(sampleCount, undefined, locale.value) });
+
+const formatAverageValue = (
+  average: number | null,
+  sampleCount: number,
+  metric: UsageMetric,
+) =>
+  sampleCount > 0 && average != null
+    ? `${formatMetric(average, metric)} · ${formatSampleCount(sampleCount)}`
+    : t("common.noSamples");
 
 const isTooltipAxisParam = (
   param: CallbackDataParams,
@@ -369,7 +373,7 @@ const isTooltipAxisParam = (
 
 const getTooltipRows = (params: TooltipAxisParam[]) =>
   params
-    .filter((param) => Number(param.value?.[1] ?? 0) !== 0)
+    .filter((param) => param.value?.[1] != null)
     .sort((a, b) => Number(b.value?.[1] ?? 0) - Number(a.value?.[1] ?? 0))
     .slice(0, 10);
 
@@ -398,26 +402,20 @@ const totalMetricSumText = computed(() => {
       : "";
   }
 
-  if (selectedMetric.value === "avg_latency") {
-    const latencySampleCount = items.reduce(
-      (sum, item) => sum + item.latency_sample_count,
-      0,
+  if (isAverageUsageMetric(selectedMetric.value)) {
+    const weighted = weightedUsageAverage(items, selectedMetric.value);
+    return formatAverageValue(
+      weighted.average,
+      weighted.sampleCount,
+      selectedMetric.value,
     );
-    const weightedLatency = items.reduce(
-      (sum, item) =>
-        sum + (item.avg_total_latency_ms ?? 0) * item.latency_sample_count,
-      0,
-    );
-    return latencySampleCount > 0
-      ? formatMetric(weightedLatency / latencySampleCount, "avg_latency")
-      : "";
   }
 
   const total = items.reduce(
-    (sum, item) => sum + metricValueFromItem(item, selectedMetric.value),
+    (sum, item) => sum + (metricValueFromItem(item, selectedMetric.value) ?? 0),
     0,
   );
-  return total > 0 ? formatMetric(total, selectedMetric.value) : "";
+  return formatMetric(total, selectedMetric.value);
 });
 
 const groupSummaryRows = computed<GroupSummaryRow[]>(() => {
@@ -433,6 +431,10 @@ const groupSummaryRows = computed<GroupSummaryRow[]>(() => {
       errorCount: number;
       latencySampleCount: number;
       latencyWeighted: number;
+      bodySampleCount: number;
+      bodyWeighted: number;
+      ttftSampleCount: number;
+      ttftWeighted: number;
       metrics: Record<string, number>;
       costMap: Record<string, number>;
     }
@@ -449,6 +451,10 @@ const groupSummaryRows = computed<GroupSummaryRow[]>(() => {
         errorCount: 0,
         latencySampleCount: 0,
         latencyWeighted: 0,
+        bodySampleCount: 0,
+        bodyWeighted: 0,
+        ttftSampleCount: 0,
+        ttftWeighted: 0,
         metrics: {},
         costMap: {},
       };
@@ -456,9 +462,15 @@ const groupSummaryRows = computed<GroupSummaryRow[]>(() => {
       current.requestCount += item.request_count;
       current.successCount += item.success_count;
       current.errorCount += item.error_count;
-      current.latencySampleCount += item.latency_sample_count;
+      current.latencySampleCount += item.total_latency_sample_count;
       current.latencyWeighted +=
-        (item.avg_total_latency_ms ?? 0) * item.latency_sample_count;
+        (item.avg_total_latency_ms ?? 0) * item.total_latency_sample_count;
+      current.bodySampleCount += item.time_to_first_response_body_sample_count;
+      current.bodyWeighted +=
+        (item.avg_time_to_first_response_body_ms ?? 0) *
+        item.time_to_first_response_body_sample_count;
+      current.ttftSampleCount += item.ttft_sample_count;
+      current.ttftWeighted += (item.avg_ttft_ms ?? 0) * item.ttft_sample_count;
       current.metrics.total_input_tokens =
         (current.metrics.total_input_tokens || 0) + item.total_input_tokens;
       current.metrics.total_output_tokens =
@@ -507,17 +519,26 @@ const groupSummaryRows = computed<GroupSummaryRow[]>(() => {
         };
       }
 
-      if (selectedMetric.value === "avg_latency") {
-        const value =
-          group.latencySampleCount > 0
-            ? group.latencyWeighted / group.latencySampleCount
-            : 0;
+      if (isAverageUsageMetric(selectedMetric.value)) {
+        const sampleCount =
+          selectedMetric.value === "avg_latency"
+            ? group.latencySampleCount
+            : selectedMetric.value === "avg_time_to_first_response_body"
+              ? group.bodySampleCount
+              : group.ttftSampleCount;
+        const weighted =
+          selectedMetric.value === "avg_latency"
+            ? group.latencyWeighted
+            : selectedMetric.value === "avg_time_to_first_response_body"
+              ? group.bodyWeighted
+              : group.ttftWeighted;
+        const value = sampleCount > 0 ? weighted / sampleCount : null;
         return {
           key,
           label: group.label,
           detail: group.detail,
-          valueText: formatMetric(value, "avg_latency"),
-          sortValue: value,
+          valueText: formatAverageValue(value, sampleCount, selectedMetric.value),
+          sortValue: value ?? 0,
         };
       }
 
@@ -566,7 +587,8 @@ const chartOptions = computed<EChartsOption>(() => {
     {
       name: string;
       type: "line" | "bar";
-      data: [number, number][];
+      data: [number, number | null, number | null][];
+      observed: boolean[];
       stack?: string;
       groupKey: string;
       currency?: string;
@@ -584,6 +606,7 @@ const chartOptions = computed<EChartsOption>(() => {
               name: `${label} (${currency})`,
               type: chartType.value,
               data: [],
+              observed: [],
               stack: chartType.value === "bar" ? currency : undefined,
               groupKey: item.group_key,
               currency,
@@ -598,6 +621,7 @@ const chartOptions = computed<EChartsOption>(() => {
           name: label,
           type: chartType.value,
           data: [],
+          observed: [],
           stack: chartType.value === "bar" ? "total" : undefined,
           groupKey: item.group_key,
         });
@@ -606,18 +630,38 @@ const chartOptions = computed<EChartsOption>(() => {
   });
 
   seriesMap.forEach((series) => {
-    series.data = timeBuckets.map((bucketTime) => {
+    series.data = timeBuckets.map<[number, number | null, number | null]>((bucketTime) => {
       const item = statsByTime.get(bucketTime)?.get(series.groupKey);
-      if (!item) return [bucketTime, 0];
-      if (selectedMetric.value === "total_cost") {
-        return [bucketTime, item.total_cost[series.currency || ""] || 0];
+      if (!item) {
+        return [
+          bucketTime,
+          isAverageUsageMetric(selectedMetric.value) ? null : 0,
+          isAverageUsageMetric(selectedMetric.value) ? 0 : null,
+        ];
       }
-      return [bucketTime, metricValueFromItem(item, selectedMetric.value)];
+      if (selectedMetric.value === "total_cost") {
+        return [bucketTime, item.total_cost[series.currency || ""] || 0, null];
+      }
+      return [
+        bucketTime,
+        metricValueFromItem(item, selectedMetric.value),
+        isAverageUsageMetric(selectedMetric.value)
+          ? metricSampleCountFromItem(item, selectedMetric.value) ?? 0
+          : null,
+      ];
+    });
+    series.observed = timeBuckets.map((bucketTime) => {
+      const item = statsByTime.get(bucketTime)?.get(series.groupKey);
+      return item != null &&
+        (selectedMetric.value === "total_cost" ||
+          !isAverageUsageMetric(selectedMetric.value) ||
+          (metricSampleCountFromItem(item, selectedMetric.value) ?? 0) > 0);
     });
   });
 
   const finalSeries = Array.from(seriesMap.values()).filter((series) =>
-    series.data.some((point) => point[1] !== 0),
+    series.data.some((point) => point[1] != null && point[1] !== 0) ||
+    series.observed.some(Boolean),
   );
 
   if (!finalSeries.length) {
@@ -656,11 +700,14 @@ const chartOptions = computed<EChartsOption>(() => {
               selectedMetric.value === "total_cost"
                 ? row.seriesName.match(/ \((.*)\)$/)?.[1]
                 : undefined;
-            return `${row.marker} ${row.seriesName}: ${formatMetric(
-              row.value[1],
-              selectedMetric.value,
-              currency,
-            )}`;
+            const formattedValue = isAverageUsageMetric(selectedMetric.value)
+              ? formatAverageValue(
+                  row.value[1],
+                  row.value[2] ?? 0,
+                  selectedMetric.value,
+                )
+              : formatMetric(row.value[1] ?? 0, selectedMetric.value, currency);
+            return `${row.marker} ${row.seriesName}: ${formattedValue}`;
           })
           .join("<br/>")}`;
       },

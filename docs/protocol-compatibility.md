@@ -14,7 +14,7 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 ## Downstream error contracts
 
 - Scope: HTTP error envelopes apply before response headers are committed: `true`.
-- After headers are committed, stream/error ownership remains with R3.7, R3.14-R3.20.
+- After headers are committed, stream/error ownership remains with R3.7, R3.8, R3.14-R3.20.
 - Ollama downstream contract: `absent`; Provider error extension location: `top_level`.
 - Every pre-commit error is JSON with `X-Request-ID`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`; Anthropic also returns `request-id`.
 - OpenAI, Responses, and Anthropic 401 responses use `WWW-Authenticate: Bearer`; Gemini does not. `Retry-After` appears only when an exact producer fact exists.

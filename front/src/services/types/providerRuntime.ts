@@ -23,6 +23,8 @@ export type ProviderRuntimeSortField =
   | "health"
   | "error_rate"
   | "latency"
+  | "time_to_first_response_body"
+  | "ttft"
   | "last_error_at"
   | "request_count";
 
@@ -61,8 +63,12 @@ export interface ProviderRuntimeItem {
   success_count: number;
   error_count: number;
   success_rate: number | null;
-  avg_first_byte_ms: number | null;
+  avg_time_to_first_response_body_ms: number | null;
+  time_to_first_response_body_sample_count: number;
+  avg_ttft_ms: number | null;
+  ttft_sample_count: number;
   avg_total_latency_ms: number | null;
+  total_latency_sample_count: number;
   last_request_at: number | null;
   last_success_at: number | null;
   last_error_at: number | null;

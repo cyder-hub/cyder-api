@@ -37,6 +37,8 @@ const VALID_SORT_FIELDS: ProviderRuntimeSortField[] = [
   "health",
   "error_rate",
   "latency",
+  "time_to_first_response_body",
+  "ttft",
   "last_error_at",
   "request_count",
 ];

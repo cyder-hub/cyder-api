@@ -25,9 +25,11 @@ db_object! {
         pub final_error_message: Option<String>,
         pub request_received_at: i64,
         pub upstream_request_sent_at: Option<i64>,
-        #[diesel(column_name = llm_response_first_chunk_at)]
-        pub response_started_to_client_at: Option<i64>,
-        #[diesel(column_name = llm_response_completed_at)]
+        pub upstream_response_headers_at: Option<i64>,
+        pub upstream_first_body_chunk_at: Option<i64>,
+        pub first_response_body_at: Option<i64>,
+        pub first_token_at: Option<i64>,
+        pub max_upstream_response_idle_ms: Option<i64>,
         pub completed_at: Option<i64>,
         pub is_stream: bool,
         pub client_ip: Option<String>,
@@ -74,9 +76,8 @@ db_object! {
         pub overall_status: RequestStatus,
         pub request_received_at: i64,
         pub upstream_request_sent_at: Option<i64>,
-        #[diesel(column_name = llm_response_first_chunk_at)]
-        pub response_started_to_client_at: Option<i64>,
-        #[diesel(column_name = llm_response_completed_at)]
+        pub first_response_body_at: Option<i64>,
+        pub first_token_at: Option<i64>,
         pub completed_at: Option<i64>,
         pub is_stream: bool,
         pub provider_id: Option<i64>,
@@ -220,24 +221,20 @@ impl RequestLog {
                 }
             }
             if let Some(val) = payload.latency_ms_min {
-                let filter = request_log::dsl::llm_response_completed_at
-                    .is_not_null()
-                    .and(
-                        request_log::dsl::llm_response_completed_at
-                            .assume_not_null()
-                            .ge(request_log::dsl::request_received_at + val),
-                    );
+                let filter = request_log::dsl::completed_at.is_not_null().and(
+                    request_log::dsl::completed_at
+                        .assume_not_null()
+                        .ge(request_log::dsl::request_received_at + val),
+                );
                 query = query.filter(filter.clone());
                 count_query = count_query.filter(filter);
             }
             if let Some(val) = payload.latency_ms_max {
-                let filter = request_log::dsl::llm_response_completed_at
-                    .is_not_null()
-                    .and(
-                        request_log::dsl::llm_response_completed_at
-                            .assume_not_null()
-                            .le(request_log::dsl::request_received_at + val),
-                    );
+                let filter = request_log::dsl::completed_at.is_not_null().and(
+                    request_log::dsl::completed_at
+                        .assume_not_null()
+                        .le(request_log::dsl::request_received_at + val),
+                );
                 query = query.filter(filter.clone());
                 count_query = count_query.filter(filter);
             }
@@ -406,24 +403,20 @@ impl RequestLog {
                 }
             }
             if let Some(val) = payload.latency_ms_min {
-                let filter = request_log::dsl::llm_response_completed_at
-                    .is_not_null()
-                    .and(
-                        request_log::dsl::llm_response_completed_at
-                            .assume_not_null()
-                            .ge(request_log::dsl::request_received_at + val),
-                    );
+                let filter = request_log::dsl::completed_at.is_not_null().and(
+                    request_log::dsl::completed_at
+                        .assume_not_null()
+                        .ge(request_log::dsl::request_received_at + val),
+                );
                 query = query.filter(filter.clone());
                 count_query = count_query.filter(filter);
             }
             if let Some(val) = payload.latency_ms_max {
-                let filter = request_log::dsl::llm_response_completed_at
-                    .is_not_null()
-                    .and(
-                        request_log::dsl::llm_response_completed_at
-                            .assume_not_null()
-                            .le(request_log::dsl::request_received_at + val),
-                    );
+                let filter = request_log::dsl::completed_at.is_not_null().and(
+                    request_log::dsl::completed_at
+                        .assume_not_null()
+                        .le(request_log::dsl::request_received_at + val),
+                );
                 query = query.filter(filter.clone());
                 count_query = count_query.filter(filter);
             }
@@ -611,7 +604,11 @@ mod tests {
             final_error_message: None,
             request_received_at: 1_000,
             upstream_request_sent_at: None,
-            response_started_to_client_at: None,
+            upstream_response_headers_at: None,
+            upstream_first_body_chunk_at: None,
+            first_response_body_at: None,
+            first_token_at: None,
+            max_upstream_response_idle_ms: None,
             completed_at: Some(1_001),
             is_stream: false,
             client_ip: None,

@@ -16,7 +16,7 @@ upstream_protocols:
 downstream_error_contracts:
   scope:
     before_headers_committed: true
-    after_headers_committed_owners: [R3.7, R3.14-R3.20]
+    after_headers_committed_owners: [R3.7, R3.8, R3.14-R3.20]
     ollama_downstream_contract: absent
     upstream_error_location: top_level
   router_rejections:

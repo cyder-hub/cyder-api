@@ -19,7 +19,7 @@ const props = defineProps<{
   formatCount: (value: number | null | undefined) => string;
   formatCost: (nanos: number, currency: string) => string;
   formatDateTime: (value: number | null | undefined) => string;
-  formatLatency: (value: number | null) => string;
+  formatLatencyCoverage: (value: number | null, sampleCount: number) => string;
   formatPercentage: (value: number | null) => string;
   runtimeBadgeClass: (level: ProviderRuntimeLevel) => string;
   runtimeLevelLabel: (level: ProviderRuntimeLevel) => string;
@@ -41,6 +41,8 @@ const { t: $t } = useAppI18n();
           <TableHead>{{ $t("providerRuntimePage.table.provider") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.table.health") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.requests") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.metrics.firstResponseBody") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.metrics.ttft") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.totalLatency") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.lastError") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.cost") }}</TableHead>
@@ -105,13 +107,18 @@ const { t: $t } = useAppI18n();
             </p>
           </TableCell>
           <TableCell class="align-top">
-            <p class="text-sm text-gray-900">
-              {{ props.formatLatency(item.avg_total_latency_ms) }}
-            </p>
-            <p class="mt-1 text-xs text-gray-500">
-              {{ $t("providerRuntimePage.metrics.firstByte") }}
-              {{ props.formatLatency(item.avg_first_byte_ms) }}
-            </p>
+            {{
+              props.formatLatencyCoverage(
+                item.avg_time_to_first_response_body_ms,
+                item.time_to_first_response_body_sample_count,
+              )
+            }}
+          </TableCell>
+          <TableCell class="align-top">
+            {{ props.formatLatencyCoverage(item.avg_ttft_ms, item.ttft_sample_count) }}
+          </TableCell>
+          <TableCell class="align-top">
+            {{ props.formatLatencyCoverage(item.avg_total_latency_ms, item.total_latency_sample_count) }}
           </TableCell>
           <TableCell class="max-w-xs align-top">
             <p class="text-sm text-gray-900">

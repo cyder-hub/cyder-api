@@ -31,8 +31,10 @@ db_object! {
         pub success_count: i64,
         pub error_count: i64,
         pub cancelled_count: i64,
-        pub first_byte_latency_sum_ms: i64,
-        pub first_byte_latency_count: i64,
+        pub time_to_first_response_body_sum_ms: i64,
+        pub time_to_first_response_body_count: i64,
+        pub ttft_sum_ms: i64,
+        pub ttft_count: i64,
         pub total_latency_sum_ms: i64,
         pub total_latency_count: i64,
         pub input_tokens: i64,
@@ -79,8 +81,10 @@ pub struct MetricRequestWindowAggregate {
     pub success_count: i64,
     pub error_count: i64,
     pub cancelled_count: i64,
-    pub first_byte_latency_sum_ms: i64,
-    pub first_byte_latency_count: i64,
+    pub time_to_first_response_body_sum_ms: i64,
+    pub time_to_first_response_body_count: i64,
+    pub ttft_sum_ms: i64,
+    pub ttft_count: i64,
     pub total_latency_sum_ms: i64,
     pub total_latency_count: i64,
     pub input_tokens: i64,
@@ -151,12 +155,24 @@ macro_rules! upsert_request_rollup_delta_in_tx {
                 metric_request_rollup_minute::dsl::cancelled_count
                     .eq(metric_request_rollup_minute::dsl::cancelled_count
                         + excluded(metric_request_rollup_minute::dsl::cancelled_count)),
-                metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
-                    .eq(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
-                        + excluded(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms)),
-                metric_request_rollup_minute::dsl::first_byte_latency_count
-                    .eq(metric_request_rollup_minute::dsl::first_byte_latency_count
-                        + excluded(metric_request_rollup_minute::dsl::first_byte_latency_count)),
+                metric_request_rollup_minute::dsl::time_to_first_response_body_sum_ms.eq(
+                    metric_request_rollup_minute::dsl::time_to_first_response_body_sum_ms
+                        + excluded(
+                            metric_request_rollup_minute::dsl::time_to_first_response_body_sum_ms,
+                        ),
+                ),
+                metric_request_rollup_minute::dsl::time_to_first_response_body_count.eq(
+                    metric_request_rollup_minute::dsl::time_to_first_response_body_count
+                        + excluded(
+                            metric_request_rollup_minute::dsl::time_to_first_response_body_count,
+                        ),
+                ),
+                metric_request_rollup_minute::dsl::ttft_sum_ms
+                    .eq(metric_request_rollup_minute::dsl::ttft_sum_ms
+                        + excluded(metric_request_rollup_minute::dsl::ttft_sum_ms)),
+                metric_request_rollup_minute::dsl::ttft_count
+                    .eq(metric_request_rollup_minute::dsl::ttft_count
+                        + excluded(metric_request_rollup_minute::dsl::ttft_count)),
                 metric_request_rollup_minute::dsl::total_latency_sum_ms
                     .eq(metric_request_rollup_minute::dsl::total_latency_sum_ms
                         + excluded(metric_request_rollup_minute::dsl::total_latency_sum_ms)),
@@ -620,12 +636,24 @@ pub fn add_request_rollup_delta(
                 metric_request_rollup_minute::dsl::cancelled_count
                     .eq(metric_request_rollup_minute::dsl::cancelled_count
                         + excluded(metric_request_rollup_minute::dsl::cancelled_count)),
-                metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
-                    .eq(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms
-                        + excluded(metric_request_rollup_minute::dsl::first_byte_latency_sum_ms)),
-                metric_request_rollup_minute::dsl::first_byte_latency_count
-                    .eq(metric_request_rollup_minute::dsl::first_byte_latency_count
-                        + excluded(metric_request_rollup_minute::dsl::first_byte_latency_count)),
+                metric_request_rollup_minute::dsl::time_to_first_response_body_sum_ms.eq(
+                    metric_request_rollup_minute::dsl::time_to_first_response_body_sum_ms
+                        + excluded(
+                            metric_request_rollup_minute::dsl::time_to_first_response_body_sum_ms,
+                        ),
+                ),
+                metric_request_rollup_minute::dsl::time_to_first_response_body_count.eq(
+                    metric_request_rollup_minute::dsl::time_to_first_response_body_count
+                        + excluded(
+                            metric_request_rollup_minute::dsl::time_to_first_response_body_count,
+                        ),
+                ),
+                metric_request_rollup_minute::dsl::ttft_sum_ms
+                    .eq(metric_request_rollup_minute::dsl::ttft_sum_ms
+                        + excluded(metric_request_rollup_minute::dsl::ttft_sum_ms)),
+                metric_request_rollup_minute::dsl::ttft_count
+                    .eq(metric_request_rollup_minute::dsl::ttft_count
+                        + excluded(metric_request_rollup_minute::dsl::ttft_count)),
                 metric_request_rollup_minute::dsl::total_latency_sum_ms
                     .eq(metric_request_rollup_minute::dsl::total_latency_sum_ms
                         + excluded(metric_request_rollup_minute::dsl::total_latency_sum_ms)),
@@ -981,8 +1009,10 @@ fn aggregate_request_rows(
         entry.success_count += row.success_count;
         entry.error_count += row.error_count;
         entry.cancelled_count += row.cancelled_count;
-        entry.first_byte_latency_sum_ms += row.first_byte_latency_sum_ms;
-        entry.first_byte_latency_count += row.first_byte_latency_count;
+        entry.time_to_first_response_body_sum_ms += row.time_to_first_response_body_sum_ms;
+        entry.time_to_first_response_body_count += row.time_to_first_response_body_count;
+        entry.ttft_sum_ms += row.ttft_sum_ms;
+        entry.ttft_count += row.ttft_count;
         entry.total_latency_sum_ms += row.total_latency_sum_ms;
         entry.total_latency_count += row.total_latency_count;
         entry.input_tokens += row.input_tokens;
@@ -1026,8 +1056,10 @@ mod tests {
             success_count: 1,
             error_count: 0,
             cancelled_count: 0,
-            first_byte_latency_sum_ms: 100,
-            first_byte_latency_count: 1,
+            time_to_first_response_body_sum_ms: 100,
+            time_to_first_response_body_count: 1,
+            ttft_sum_ms: 80,
+            ttft_count: 1,
             total_latency_sum_ms: 250,
             total_latency_count: 1,
             input_tokens: 10,
@@ -1080,9 +1112,54 @@ mod tests {
                 query_request_window_aggregates(0, 120_000, Some("provider"), Some("7")).unwrap();
             assert_eq!(aggregates.len(), 1);
             assert_eq!(aggregates[0].request_count, 2);
-            assert_eq!(aggregates[0].first_byte_latency_sum_ms, 200);
+            assert_eq!(aggregates[0].time_to_first_response_body_sum_ms, 200);
+            assert_eq!(aggregates[0].ttft_sum_ms, 160);
+            assert_eq!(aggregates[0].ttft_count, 2);
             assert_eq!(aggregates[0].total_latency_count, 2);
             assert_eq!(aggregates[0].total_tokens, 66);
+        });
+    }
+
+    #[test]
+    fn request_rollup_window_preserves_independent_latency_sample_counts() {
+        let context = TestDbContext::new_sqlite("metrics-weighted-window.sqlite");
+        context.run_sync(|| {
+            let first = request_delta(60_000, "global", "global");
+            let mut second = request_delta(120_000, "global", "global");
+            second.time_to_first_response_body_sum_ms = 300;
+            second.time_to_first_response_body_count = 3;
+            second.ttft_sum_ms = 600;
+            second.ttft_count = 3;
+            second.total_latency_sum_ms = 900;
+            second.total_latency_count = 3;
+
+            add_request_rollup_delta(&first).unwrap();
+            add_request_rollup_delta(&second).unwrap();
+
+            let aggregate = query_request_window_aggregates(0, 180_000, Some("global"), None)
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("global aggregate");
+            assert_eq!(aggregate.time_to_first_response_body_sum_ms, 400);
+            assert_eq!(aggregate.time_to_first_response_body_count, 4);
+            assert_eq!(aggregate.ttft_sum_ms, 680);
+            assert_eq!(aggregate.ttft_count, 4);
+            assert_eq!(aggregate.total_latency_sum_ms, 1_150);
+            assert_eq!(aggregate.total_latency_count, 4);
+            assert_eq!(
+                aggregate.time_to_first_response_body_sum_ms as f64
+                    / aggregate.time_to_first_response_body_count as f64,
+                100.0
+            );
+            assert_eq!(
+                aggregate.ttft_sum_ms as f64 / aggregate.ttft_count as f64,
+                170.0
+            );
+            assert_eq!(
+                aggregate.total_latency_sum_ms as f64 / aggregate.total_latency_count as f64,
+                287.5
+            );
         });
     }
 

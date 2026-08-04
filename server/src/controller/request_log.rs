@@ -78,7 +78,8 @@ struct RequestLogListItemResponse {
     overall_status: RequestStatus,
     request_received_at: i64,
     upstream_request_sent_at: Option<i64>,
-    response_started_to_client_at: Option<i64>,
+    first_response_body_at: Option<i64>,
+    first_token_at: Option<i64>,
     completed_at: Option<i64>,
     is_stream: bool,
     provider_id: Option<i64>,
@@ -110,7 +111,8 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
             overall_status: value.overall_status,
             request_received_at: value.request_received_at,
             upstream_request_sent_at: value.upstream_request_sent_at,
-            response_started_to_client_at: value.response_started_to_client_at,
+            first_response_body_at: value.first_response_body_at,
+            first_token_at: value.first_token_at,
             completed_at: value.completed_at,
             is_stream: value.is_stream,
             provider_id: value.provider_id,
@@ -146,7 +148,11 @@ struct RequestLogResponse {
     final_error_message: Option<String>,
     request_received_at: i64,
     upstream_request_sent_at: Option<i64>,
-    response_started_to_client_at: Option<i64>,
+    upstream_response_headers_at: Option<i64>,
+    upstream_first_body_chunk_at: Option<i64>,
+    first_response_body_at: Option<i64>,
+    first_token_at: Option<i64>,
+    max_upstream_response_idle_ms: Option<i64>,
     completed_at: Option<i64>,
     is_stream: bool,
     client_ip: Option<String>,
@@ -195,7 +201,11 @@ impl From<RequestLogRecord> for RequestLogResponse {
             final_error_message: value.final_error_message,
             request_received_at: value.request_received_at,
             upstream_request_sent_at: value.upstream_request_sent_at,
-            response_started_to_client_at: value.response_started_to_client_at,
+            upstream_response_headers_at: value.upstream_response_headers_at,
+            upstream_first_body_chunk_at: value.upstream_first_body_chunk_at,
+            first_response_body_at: value.first_response_body_at,
+            first_token_at: value.first_token_at,
+            max_upstream_response_idle_ms: value.max_upstream_response_idle_ms,
             completed_at: value.completed_at,
             is_stream: value.is_stream,
             client_ip: value.client_ip,
@@ -280,7 +290,11 @@ mod tests {
             final_error_message: None,
             request_received_at: 100,
             upstream_request_sent_at: None,
-            response_started_to_client_at: None,
+            upstream_response_headers_at: None,
+            upstream_first_body_chunk_at: None,
+            first_response_body_at: None,
+            first_token_at: None,
+            max_upstream_response_idle_ms: None,
             completed_at: Some(110),
             is_stream: false,
             client_ip: None,
@@ -346,6 +360,12 @@ mod tests {
         assert!(value["upstream_protocol"].is_null());
         assert_eq!(value["request_id"], "018fa7d8-6a00-4c9a-8f7e-111111111111");
         assert_eq!(value["client_request_id"], "controller-test");
+        assert!(value.get("first_response_body_at").is_some());
+        assert!(value.get("first_token_at").is_some());
+        assert!(value.get("upstream_response_headers_at").is_some());
+        assert!(value.get("upstream_first_body_chunk_at").is_some());
+        assert!(value.get("max_upstream_response_idle_ms").is_some());
+        assert!(value.get("response_started_to_client_at").is_none());
         assert!(value.get("user_api_type").is_none());
         assert!(value.get("llm_api_type").is_none());
     }

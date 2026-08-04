@@ -20,7 +20,8 @@ export interface RecordListItem {
   overall_status: string;
   request_received_at: number;
   upstream_request_sent_at: number | null;
-  response_started_to_client_at: number | null;
+  first_response_body_at: number | null;
+  first_token_at: number | null;
   completed_at: number | null;
   is_stream: boolean;
   provider_id: number | null;
@@ -43,6 +44,9 @@ export interface RecordRequest extends RecordListItem {
   final_error_code: string | null;
   final_error_message: string | null;
   client_ip: string | null;
+  upstream_response_headers_at: number | null;
+  upstream_first_body_chunk_at: number | null;
+  max_upstream_response_idle_ms: number | null;
   provider_api_key_id: number | null;
   provider_key: string | null;
   upstream_protocol: UpstreamProtocol | null;

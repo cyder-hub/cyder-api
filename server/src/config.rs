@@ -768,13 +768,138 @@ impl SseResponseConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProxyRequestConfig {
-    #[serde(default = "default_proxy_connect_timeout_seconds")]
+pub struct OutboundHttpConfig {
+    #[serde(default = "default_outbound_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
+    #[serde(default = "default_auxiliary_total_timeout_seconds")]
+    pub auxiliary_total_timeout_seconds: u64,
+}
+
+impl Default for OutboundHttpConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_seconds: default_outbound_connect_timeout_seconds(),
+            auxiliary_total_timeout_seconds: default_auxiliary_total_timeout_seconds(),
+        }
+    }
+}
+
+impl OutboundHttpConfig {
+    pub const MIN_CONNECT_TIMEOUT_SECONDS: u64 = 1;
+    pub const MAX_CONNECT_TIMEOUT_SECONDS: u64 = 120;
+    pub const MIN_AUXILIARY_TOTAL_TIMEOUT_SECONDS: u64 = 10;
+    pub const MAX_AUXILIARY_TOTAL_TIMEOUT_SECONDS: u64 = 300;
+
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_secs(self.connect_timeout_seconds)
+    }
+
+    pub fn auxiliary_total_timeout(&self) -> Duration {
+        Duration::from_secs(self.auxiliary_total_timeout_seconds)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !(Self::MIN_CONNECT_TIMEOUT_SECONDS..=Self::MAX_CONNECT_TIMEOUT_SECONDS)
+            .contains(&self.connect_timeout_seconds)
+        {
+            return Err(format!(
+                "outbound_http.connect_timeout_seconds must be in {}..={}",
+                Self::MIN_CONNECT_TIMEOUT_SECONDS,
+                Self::MAX_CONNECT_TIMEOUT_SECONDS
+            ));
+        }
+        if !(Self::MIN_AUXILIARY_TOTAL_TIMEOUT_SECONDS..=Self::MAX_AUXILIARY_TOTAL_TIMEOUT_SECONDS)
+            .contains(&self.auxiliary_total_timeout_seconds)
+        {
+            return Err(format!(
+                "outbound_http.auxiliary_total_timeout_seconds must be in {}..={}",
+                Self::MIN_AUXILIARY_TOTAL_TIMEOUT_SECONDS,
+                Self::MAX_AUXILIARY_TOTAL_TIMEOUT_SECONDS
+            ));
+        }
+        if self.connect_timeout_seconds > self.auxiliary_total_timeout_seconds {
+            return Err(
+                "outbound_http.connect_timeout_seconds must be <= outbound_http.auxiliary_total_timeout_seconds"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyTimeoutConfig {
+    #[serde(default = "default_proxy_request_send_timeout_seconds")]
+    pub request_send_seconds: u64,
+    #[serde(default = "default_proxy_first_byte_timeout_seconds")]
+    pub first_byte_seconds: u64,
+    #[serde(default = "default_proxy_response_idle_timeout_seconds")]
+    pub response_idle_seconds: u64,
+    #[serde(default = "default_proxy_total_timeout_seconds")]
+    pub total_seconds: u64,
+}
+
+impl Default for ProxyTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            request_send_seconds: default_proxy_request_send_timeout_seconds(),
+            first_byte_seconds: default_proxy_first_byte_timeout_seconds(),
+            response_idle_seconds: default_proxy_response_idle_timeout_seconds(),
+            total_seconds: default_proxy_total_timeout_seconds(),
+        }
+    }
+}
+
+impl ProxyTimeoutConfig {
+    pub const MIN_PHASE_SECONDS: u64 = 60;
+    pub const MAX_PHASE_SECONDS: u64 = 86_400;
+    pub const MIN_TOTAL_SECONDS: u64 = 300;
+
+    pub fn request_send(&self) -> Duration {
+        Duration::from_secs(self.request_send_seconds)
+    }
+
+    pub fn first_byte(&self) -> Duration {
+        Duration::from_secs(self.first_byte_seconds)
+    }
+
+    pub fn response_idle(&self) -> Duration {
+        Duration::from_secs(self.response_idle_seconds)
+    }
+
+    pub fn total(&self) -> Duration {
+        Duration::from_secs(self.total_seconds)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("request_send_seconds", self.request_send_seconds),
+            ("first_byte_seconds", self.first_byte_seconds),
+            ("response_idle_seconds", self.response_idle_seconds),
+        ] {
+            if !(Self::MIN_PHASE_SECONDS..=Self::MAX_PHASE_SECONDS).contains(&value) {
+                return Err(format!(
+                    "proxy_request.timeouts.{field} must be in {}..={}",
+                    Self::MIN_PHASE_SECONDS,
+                    Self::MAX_PHASE_SECONDS
+                ));
+            }
+        }
+        if !(Self::MIN_TOTAL_SECONDS..=Self::MAX_PHASE_SECONDS).contains(&self.total_seconds) {
+            return Err(format!(
+                "proxy_request.timeouts.total_seconds must be in {}..={}",
+                Self::MIN_TOTAL_SECONDS,
+                Self::MAX_PHASE_SECONDS
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyRequestConfig {
     #[serde(default)]
-    pub first_byte_timeout_seconds: Option<u64>,
-    #[serde(default)]
-    pub total_timeout_seconds: Option<u64>,
+    pub timeouts: ProxyTimeoutConfig,
     #[serde(default = "default_upstream_error_body_limit_bytes")]
     pub upstream_error_body_limit_bytes: usize,
     #[serde(default)]
@@ -786,9 +911,7 @@ pub struct ProxyRequestConfig {
 impl Default for ProxyRequestConfig {
     fn default() -> Self {
         Self {
-            connect_timeout_seconds: default_proxy_connect_timeout_seconds(),
-            first_byte_timeout_seconds: default_proxy_first_byte_timeout_seconds(),
-            total_timeout_seconds: None,
+            timeouts: ProxyTimeoutConfig::default(),
             upstream_error_body_limit_bytes: default_upstream_error_body_limit_bytes(),
             non_stream_response: NonStreamResponseConfig::default(),
             sse_response: SseResponseConfig::default(),
@@ -800,19 +923,8 @@ impl ProxyRequestConfig {
     pub const MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES: usize = 1_024;
     pub const MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES: usize = 1_048_576;
 
-    pub fn connect_timeout(&self) -> Duration {
-        Duration::from_secs(self.connect_timeout_seconds)
-    }
-
-    pub fn first_byte_timeout(&self) -> Option<Duration> {
-        self.first_byte_timeout_seconds.map(Duration::from_secs)
-    }
-
-    pub fn total_timeout(&self) -> Option<Duration> {
-        self.total_timeout_seconds.map(Duration::from_secs)
-    }
-
     pub fn validate(&self) -> Result<(), String> {
+        self.timeouts.validate()?;
         self.non_stream_response.validate()?;
         self.sse_response.validate()?;
         if !(Self::MIN_UPSTREAM_ERROR_BODY_LIMIT_BYTES..=Self::MAX_UPSTREAM_ERROR_BODY_LIMIT_BYTES)
@@ -875,12 +987,28 @@ fn default_negative_ttl_seconds() -> u64 {
     60 // 1 minute
 }
 
-fn default_proxy_connect_timeout_seconds() -> u64 {
+fn default_outbound_connect_timeout_seconds() -> u64 {
     10
 }
 
-fn default_proxy_first_byte_timeout_seconds() -> Option<u64> {
-    Some(60)
+fn default_auxiliary_total_timeout_seconds() -> u64 {
+    60
+}
+
+fn default_proxy_request_send_timeout_seconds() -> u64 {
+    7_200
+}
+
+fn default_proxy_first_byte_timeout_seconds() -> u64 {
+    7_200
+}
+
+fn default_proxy_response_idle_timeout_seconds() -> u64 {
+    7_200
+}
+
+fn default_proxy_total_timeout_seconds() -> u64 {
+    7_200
 }
 
 fn default_upstream_error_body_limit_bytes() -> usize {
@@ -1113,6 +1241,8 @@ pub struct FinalConfig {
     #[serde(default)]
     pub id: IdConfig,
     #[serde(default)]
+    pub outbound_http: OutboundHttpConfig,
+    #[serde(default)]
     pub proxy_request: ProxyRequestConfig,
     #[serde(default)]
     pub provider_governance: ProviderGovernanceConfig,
@@ -1205,6 +1335,7 @@ pub(crate) fn programmatic_default_config() -> FinalConfig {
         manager_auth: ManagerAuthConfig::default(),
         client_identity: ClientIdentityConfig::default(),
         id: IdConfig::default(),
+        outbound_http: OutboundHttpConfig::default(),
         proxy_request: ProxyRequestConfig::default(),
         provider_governance: ProviderGovernanceConfig::default(),
         cache: CacheConfig::default(),

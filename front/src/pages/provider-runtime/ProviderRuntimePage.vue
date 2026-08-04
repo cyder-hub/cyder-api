@@ -79,6 +79,11 @@ const sortOptions: Array<{ value: ProviderRuntimeSortField; label: string }> = [
   { value: "health", label: $t("providerRuntimePage.sort.health") },
   { value: "error_rate", label: $t("providerRuntimePage.sort.error_rate") },
   { value: "latency", label: $t("providerRuntimePage.sort.latency") },
+  {
+    value: "time_to_first_response_body",
+    label: $t("providerRuntimePage.sort.time_to_first_response_body"),
+  },
+  { value: "ttft", label: $t("providerRuntimePage.sort.ttft") },
   { value: "last_error_at", label: $t("providerRuntimePage.sort.last_error_at") },
   { value: "request_count", label: $t("providerRuntimePage.sort.request_count") },
 ];
@@ -249,6 +254,22 @@ function formatLatency(value: number | null) {
   return `${formatNumberValue(Math.round(value), undefined, locale.value)} ms`;
 }
 
+function formatSampleCount(sampleCount: number) {
+  if (sampleCount === 0) {
+    return $t("common.noSamples");
+  }
+  if (sampleCount === 1) {
+    return $t("common.oneSample");
+  }
+  return $t("common.samples", {
+    count: formatNumberValue(sampleCount, undefined, locale.value),
+  });
+}
+
+function formatLatencyCoverage(value: number | null, sampleCount: number) {
+  return `${formatLatency(value)} · ${formatSampleCount(sampleCount)}`;
+}
+
 function formatCount(value: number | null | undefined) {
   if (value == null) {
     return "-";
@@ -294,12 +315,19 @@ function buildPrimaryMetrics(item: ProviderRuntimeItem) {
       value: formatPercentage(item.success_rate),
     },
     {
-      label: $t("providerRuntimePage.metrics.firstByte"),
-      value: formatLatency(item.avg_first_byte_ms),
+      label: $t("providerRuntimePage.metrics.firstResponseBody"),
+      value: formatLatencyCoverage(
+        item.avg_time_to_first_response_body_ms,
+        item.time_to_first_response_body_sample_count,
+      ),
+    },
+    {
+      label: $t("providerRuntimePage.metrics.ttft"),
+      value: formatLatencyCoverage(item.avg_ttft_ms, item.ttft_sample_count),
     },
     {
       label: $t("providerRuntimePage.metrics.totalLatency"),
-      value: formatLatency(item.avg_total_latency_ms),
+      value: formatLatencyCoverage(item.avg_total_latency_ms, item.total_latency_sample_count),
     },
     {
       label: $t("providerRuntimePage.metrics.errors"),
@@ -536,7 +564,7 @@ onMounted(() => {
           :format-count="formatCount"
           :format-cost="formatCost"
           :format-date-time="formatDateTime"
-          :format-latency="formatLatency"
+          :format-latency-coverage="formatLatencyCoverage"
           :format-percentage="formatPercentage"
           :runtime-badge-class="runtimeBadgeClass"
           :runtime-level-label="runtimeLevelLabel"

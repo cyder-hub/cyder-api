@@ -56,6 +56,7 @@ const {
   formatCount,
   formatDateTime: formatOperationsDateTime,
   formatLatency,
+  formatLatencyCoverage,
   formatPercentage,
   runtimeLevelBadgeClass,
   runtimeLevelLabel,
@@ -128,6 +129,7 @@ onMounted(() => {
             :format-count="formatCount"
             :format-percentage="formatPercentage"
             :format-latency="formatLatency"
+            :format-latency-coverage="formatLatencyCoverage"
             :format-date-time="formatOperationsDateTime"
             :format-cost-entries="formatCostEntries"
             :runtime-level-badge-class="runtimeLevelBadgeClass"

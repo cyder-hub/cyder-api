@@ -15,6 +15,58 @@ fn sse(data: impl Into<String>) -> SseEvent {
     }
 }
 
+#[test]
+fn meaningful_output_observation_is_shared_by_four_source_protocols_and_targets() {
+    let openai_text = "{\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}";
+    for downstream in [
+        DownstreamProtocol::Openai,
+        DownstreamProtocol::Responses,
+        DownstreamProtocol::Anthropic,
+        DownstreamProtocol::Gemini,
+    ] {
+        let mut transformer = StreamTransformer::new(UpstreamProtocol::Openai, downstream);
+        let output = transformer.transform_event_with_observation(sse(openai_text));
+        assert!(output.meaningful_output_observed);
+    }
+
+    for (upstream, source_frame) in [
+        (UpstreamProtocol::Openai, openai_text),
+        (
+            UpstreamProtocol::Responses,
+            "{\"type\":\"response.output_text.delta\",\"item_id\":\"item\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\",\"sequence_number\":1}",
+        ),
+        (
+            UpstreamProtocol::Anthropic,
+            "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}",
+        ),
+        (
+            UpstreamProtocol::Gemini,
+            "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\"}]},\"index\":0}]}",
+        ),
+    ] {
+        let mut transformer = StreamTransformer::new(upstream, DownstreamProtocol::Openai);
+        let output = transformer.transform_event_with_observation(sse(source_frame));
+        assert!(
+            output.meaningful_output_observed,
+            "source protocol {upstream:?} must classify text at the typed source layer"
+        );
+    }
+}
+
+#[test]
+fn meaningful_output_observation_ignores_passthrough_lifecycle_and_decode_failure() {
+    let mut transformer =
+        StreamTransformer::new(UpstreamProtocol::Openai, DownstreamProtocol::Openai);
+    let role_only = transformer.transform_event_with_observation(sse(
+        "{\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}",
+    ));
+    assert!(!role_only.meaningful_output_observed);
+
+    let invalid = transformer.transform_event_with_observation(sse("{not-json}"));
+    assert!(!invalid.meaningful_output_observed);
+    assert_eq!(invalid.events.unwrap()[0].data, "{not-json}");
+}
+
 fn load_sse_fixture(raw: &str) -> Vec<SseEvent> {
     serde_json::from_str(raw).expect("valid SSE fixture")
 }

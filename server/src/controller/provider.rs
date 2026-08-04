@@ -1,12 +1,14 @@
-use crate::config::NonStreamResponseConfig;
+use crate::config::{NonStreamResponseConfig, ProxyTimeoutConfig};
 use crate::database::{
     DbResult,
     model::{Model, ModelDetail},
     provider::{BootstrapProviderResult, Provider, ProviderApiKeySummary, ProviderSummaryItem},
     request_patch::RequestPatchRuleResponse,
 };
+use crate::proxy::runtime::transport::send_with_deadline;
 use crate::proxy::{
-    ProxyError, ProxyErrorCode, apply_request_patches, load_runtime_request_patch_trace,
+    ProxyCancellationContext, ProxyError, ProxyErrorCode, apply_request_patches,
+    load_runtime_request_patch_trace,
 };
 use crate::service::admin::provider::{
     BootstrapProviderCommand, CreateProviderApiKeyInput, ProviderApiKeyReveal, ProviderUpsertInput,
@@ -31,6 +33,9 @@ use crate::utils::{HttpResult, ID_GENERATOR, auth::ManagerAuthContext};
 
 use super::{BaseError, auth::authorize_secret_governance_command};
 use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+use crate::service::auxiliary_http::{
+    parse_auxiliary_json, read_auxiliary_response_body, send_auxiliary_request,
+};
 use crate::service::cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch};
 use crate::service::provider_credential::{
     ProviderCredential, ProviderCredentialError, apply_provider_request_auth_header,
@@ -39,9 +44,7 @@ use crate::service::provider_credential::{
 };
 use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::SensitiveSecret;
-use crate::service::upstream_response::{
-    apply_upstream_accept_encoding, read_complete_response_body, safe_http_error_message,
-};
+use crate::service::upstream_response::apply_upstream_accept_encoding;
 
 #[derive(Serialize)]
 struct ProviderDetailResponse {
@@ -484,24 +487,25 @@ async fn perform_provider_check(
     credential: &ProviderCredential,
     model_name: &str,
     request_patches: &[RuntimeResolvedRequestPatch],
+    proxy_timeouts: &ProxyTimeoutConfig,
 ) -> Result<(), BaseError> {
     let check_request =
         build_provider_check_request(provider, credential, model_name, request_patches).await?;
 
     let mut headers = check_request.headers;
     apply_upstream_accept_encoding(&mut headers, false);
-    let response = client
-        .post(&check_request.url)
-        .headers(headers)
-        .json(&check_request.body)
-        .send()
-        .await
-        .map_err(|error| {
-            BaseError::ParamInvalid(Some(safe_http_error_message(
-                "Failed to send provider check request",
-                &error,
-            )))
-        })?;
+    let cancellation = ProxyCancellationContext::new();
+    let response = send_with_deadline(
+        &cancellation,
+        client
+            .post(&check_request.url)
+            .headers(headers)
+            .json(&check_request.body),
+        "Provider check request",
+        proxy_timeouts,
+    )
+    .await
+    .map_err(|error| BaseError::ParamInvalid(Some(error.public_message().to_string())))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -591,12 +595,14 @@ async fn check_provider(
         .await
         .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
+    let proxy_timeouts = app_state.infra.proxy_request_config().timeouts.clone();
     perform_provider_check(
         client.as_ref(),
         &provider,
         &credential,
         &model_name,
         &request_patches,
+        &proxy_timeouts,
     )
     .await?;
     Ok(HttpResult::new(serde_json::Value::Null))
@@ -670,24 +676,28 @@ async fn bootstrap_provider(
                 success: false,
                 message: base_error_message(&error),
             }),
-            Ok((client, credential, request_patches)) => match perform_provider_check(
-                client.as_ref(),
-                &created.provider,
-                &credential,
-                &model_name_to_check,
-                &request_patches,
-            )
-            .await
-            {
-                Ok(()) => Some(BootstrapCheckResult {
-                    success: true,
-                    message: "Provider check succeeded".to_string(),
-                }),
-                Err(e) => Some(BootstrapCheckResult {
-                    success: false,
-                    message: base_error_message(&e),
-                }),
-            },
+            Ok((client, credential, request_patches)) => {
+                let proxy_timeouts = app_state.infra.proxy_request_config().timeouts.clone();
+                match perform_provider_check(
+                    client.as_ref(),
+                    &created.provider,
+                    &credential,
+                    &model_name_to_check,
+                    &request_patches,
+                    &proxy_timeouts,
+                )
+                .await
+                {
+                    Ok(()) => Some(BootstrapCheckResult {
+                        success: true,
+                        message: "Provider check succeeded".to_string(),
+                    }),
+                    Err(e) => Some(BootstrapCheckResult {
+                        success: false,
+                        message: base_error_message(&e),
+                    }),
+                }
+            }
         }
     } else {
         None
@@ -719,7 +729,7 @@ async fn get_remote_models(
 
     let client = app_state
         .infra
-        .provider_client(provider.use_proxy)
+        .auxiliary_client(provider.use_proxy)
         .await
         .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
@@ -729,6 +739,7 @@ async fn get_remote_models(
         url,
         headers,
         &app_state.infra.proxy_request_config().non_stream_response,
+        app_state.infra.auxiliary_total_timeout(),
     )
     .await?;
 
@@ -740,40 +751,39 @@ async fn fetch_remote_models(
     url: Url,
     mut headers: HeaderMap,
     limits: &NonStreamResponseConfig,
+    auxiliary_total_timeout: std::time::Duration,
 ) -> Result<Value, BaseError> {
     apply_upstream_accept_encoding(&mut headers, false);
-    let response = client
-        .get(url)
-        .headers(headers)
-        .send()
-        .await
-        .map_err(|error| {
-            BaseError::ParamInvalid(Some(safe_http_error_message(
-                "Failed to fetch remote models",
-                &error,
-            )))
-        })?;
+    let auxiliary_response =
+        send_auxiliary_request(client.get(url).headers(headers), auxiliary_total_timeout)
+            .await
+            .map_err(|error| {
+                BaseError::ParamInvalid(Some(error.with_context("Failed to fetch remote models")))
+            })?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    if !auxiliary_response.status().is_success() {
+        let status = auxiliary_response.status();
         return Err(BaseError::ParamInvalid(Some(format!(
             "Provider API returned status {}",
             status
         ))));
     }
 
-    let body = read_complete_response_body(response, limits)
+    let deadline = auxiliary_response.deadline();
+    let body = read_auxiliary_response_body(auxiliary_response, limits)
         .await
         .map_err(|error| {
-            BaseError::ParamInvalid(Some(format!(
-                "Failed to read remote models response: {error}"
-            )))
+            BaseError::ParamInvalid(Some(
+                error.with_context("Failed to read remote models response"),
+            ))
         })?;
-    serde_json::from_slice::<Value>(&body.bytes).map_err(|_| {
-        BaseError::ParamInvalid(Some(
-            "Failed to parse remote models response (invalid_json)".to_string(),
-        ))
-    })
+    parse_auxiliary_json::<Value>(body.bytes, deadline)
+        .await
+        .map_err(|error| {
+            BaseError::ParamInvalid(Some(
+                error.with_context("Failed to parse remote models response"),
+            ))
+        })
 }
 
 fn build_remote_models_request(
@@ -1025,7 +1035,7 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         sync::oneshot,
-        time::timeout,
+        time::{sleep, timeout},
     };
     use tower::util::ServiceExt;
 
@@ -1133,6 +1143,7 @@ mod tests {
             url,
             reqwest::header::HeaderMap::new(),
             limits,
+            Duration::from_secs(60),
         )
         .await;
         let request = request_rx.await.unwrap();
@@ -1382,6 +1393,7 @@ mod tests {
             &credential("provider-header-secret"),
             "model",
             &[],
+            &crate::config::ProxyTimeoutConfig::default(),
         )
         .await
         .expect("status-only provider check should succeed");
@@ -1393,6 +1405,82 @@ mod tests {
                 .expect("response drop should close the socket")
                 .expect("close signal should be delivered")
         );
+    }
+
+    #[tokio::test]
+    async fn provider_check_header_stall_uses_proxy_policy_without_circuit_attribution() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8192];
+            let read = socket.read(&mut request).await.unwrap();
+            let _ = request_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+            sleep(Duration::from_secs(2)).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        });
+        let provider = sample_provider(ProviderType::Openai, &format!("http://{address}/v1"));
+        let mut proxy_timeouts = crate::config::ProxyTimeoutConfig::default();
+        proxy_timeouts.request_send_seconds = 1;
+        proxy_timeouts.total_seconds = 2;
+
+        let error = timeout(
+            Duration::from_secs(3),
+            super::perform_provider_check(
+                &reqwest::Client::new(),
+                &provider,
+                &credential("provider-check-secret"),
+                "model",
+                &[],
+                &proxy_timeouts,
+            ),
+        )
+        .await
+        .expect("header stall should be bounded")
+        .expect_err("header stall should fail the provider check");
+
+        assert!(matches!(error, BaseError::ParamInvalid(_)));
+        let message = super::base_error_message(&error);
+        assert!(!message.contains("provider-check-secret"));
+        assert!(request_rx.await.unwrap().contains("POST"));
+    }
+
+    #[tokio::test]
+    async fn remote_models_body_timeout_stays_in_manager_param_error_category() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nfirst\r\n",
+                )
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(2)).await;
+        });
+
+        let error = timeout(
+            Duration::from_secs(3),
+            super::fetch_remote_models(
+                &reqwest::Client::new(),
+                reqwest::Url::parse(&format!("http://{address}/models")).unwrap(),
+                reqwest::header::HeaderMap::new(),
+                &crate::config::ProxyRequestConfig::default().non_stream_response,
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("remote model body timeout should be bounded")
+        .expect_err("stalled remote model body should fail");
+
+        assert!(matches!(error, BaseError::ParamInvalid(_)));
+        assert!(super::base_error_message(&error).contains("timeout"));
     }
 
     #[tokio::test]

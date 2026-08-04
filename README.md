@@ -229,7 +229,15 @@ Complete non-stream responses accept only absent/`identity` or `gzip` Content-En
 Configure the disclosure limit in the generated or base YAML and restart:
 
 ```yaml
+outbound_http:
+  connect_timeout_seconds: 10
+  auxiliary_total_timeout_seconds: 60
 proxy_request:
+  timeouts:
+    request_send_seconds: 7200
+    first_byte_seconds: 7200
+    response_idle_seconds: 7200
+    total_seconds: 7200
   upstream_error_body_limit_bytes: 65536
   non_stream_response:
     raw_body_limit_bytes: 33554432
@@ -240,6 +248,8 @@ proxy_request:
     buffer_limit_bytes: 16777216
     frame_count_limit: 1000000
 ```
+
+Proxy timeout settings are finite and startup-only. The defaults are 2 hours for request send, first response Body, active response idle, and the request total; the accepted phase range is 60 through 86400 seconds and the total range is 300 through 86400 seconds. Auxiliary HTTP operations use a separate 60-second total, with an accepted range of 10 through 300 seconds. `outbound_http.connect_timeout_seconds` accepts 1 through 120 seconds and must not exceed the auxiliary total. The retired `proxy_request.connect_timeout_seconds`, `first_byte_timeout_seconds`, and `total_timeout_seconds` paths fail startup with their replacement paths; timeout values cannot be disabled by null, zero, or omission.
 
 The Provider error disclosure default is 65536 bytes and its accepted startup range is 1024 through 1048576. Complete non-stream responses default to 33554432 raw bytes and 67108864 decoded bytes; each accepts 1048576 through 536870912 bytes. The disclosure limit must not exceed the decoded-body limit. SSE defaults are 4194304 bytes per line, 8388608 bytes per event, 16777216 retained bytes, and 1000000 blank-line frames. SSE byte limits accept 1024 through 536870912, the frame limit accepts 1 through 10000000, and startup enforces `line <= event <= buffer`.
 

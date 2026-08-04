@@ -46,7 +46,12 @@ pub struct DashboardTopProviderReadItem {
     pub error_count: i64,
     pub success_rate: Option<f64>,
     pub total_cost: HashMap<String, i64>,
+    pub avg_time_to_first_response_body_ms: Option<f64>,
+    pub time_to_first_response_body_sample_count: i64,
+    pub avg_ttft_ms: Option<f64>,
+    pub ttft_sample_count: i64,
     pub avg_total_latency_ms: Option<f64>,
+    pub total_latency_sample_count: i64,
 }
 
 pub fn operational_signals_from_runtime_items(
@@ -182,7 +187,12 @@ fn top_provider_item_from_runtime_item(item: &ProviderRuntimeItem) -> DashboardT
             .iter()
             .map(|cost| (cost.currency.clone(), cost.amount_nanos))
             .collect(),
+        avg_time_to_first_response_body_ms: item.avg_time_to_first_response_body_ms,
+        time_to_first_response_body_sample_count: item.time_to_first_response_body_sample_count,
+        avg_ttft_ms: item.avg_ttft_ms,
+        ttft_sample_count: item.ttft_sample_count,
         avg_total_latency_ms: item.avg_total_latency_ms,
+        total_latency_sample_count: item.total_latency_sample_count,
     }
 }
 
@@ -257,8 +267,12 @@ mod tests {
             error_count,
             success_rate: (request_count > 0)
                 .then_some((request_count - error_count) as f64 / request_count as f64),
-            avg_first_byte_ms: Some(100.0),
+            avg_time_to_first_response_body_ms: Some(100.0),
+            time_to_first_response_body_sample_count: 1,
+            avg_ttft_ms: Some(80.0),
+            ttft_sample_count: 1,
             avg_total_latency_ms: Some(300.0),
+            total_latency_sample_count: 1,
             last_request_at: None,
             last_success_at: None,
             last_error_at: None,

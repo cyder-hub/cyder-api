@@ -58,7 +58,7 @@ pub(in crate::proxy) fn finalize_request_failure_context(
     context: &mut RequestLogContext,
     proxy_error: &ProxyError,
 ) {
-    context.completion_ts = Some(Utc::now().timestamp_millis());
+    context.completed_at = Some(Utc::now().timestamp_millis());
     context.overall_status = if proxy_error.code() == ProxyErrorCode::ClientCancelledError {
         RequestStatus::Cancelled
     } else {
@@ -85,6 +85,18 @@ pub(in crate::proxy) async fn record_completion(
     app_state: &Arc<AppState>,
     log_context: RequestLogContext,
 ) -> bool {
+    if let Some(coordinator) = &log_context.completion_coordinator
+        && !coordinator.claim_request_log()
+    {
+        return false;
+    }
+    record_completion_claimed(app_state, log_context).await
+}
+
+pub(in crate::proxy) async fn record_completion_claimed(
+    app_state: &Arc<AppState>,
+    log_context: RequestLogContext,
+) -> bool {
     record_request_completion_and_log(app_state, log_context).await;
     true
 }
@@ -100,7 +112,7 @@ pub(in crate::proxy) fn finalize_non_streaming_log_context(
     context: &mut RequestLogContext,
     url: &str,
     status_code: StatusCode,
-    completion_ts: i64,
+    completed_at: i64,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     overall_status: RequestStatus,
     usage: Option<UsageInfo>,
@@ -108,7 +120,7 @@ pub(in crate::proxy) fn finalize_non_streaming_log_context(
 ) {
     context.request_url = Some(url.to_string());
     context.llm_status = Some(status_code);
-    context.completion_ts = Some(completion_ts);
+    context.completed_at = Some(completed_at);
     context.usage = usage;
     context.usage_normalization = usage_normalization;
     context.cost_catalog_version = cost_catalog_version.cloned();
@@ -119,14 +131,14 @@ pub(in crate::proxy) fn finalize_streaming_log_context(
     context: &mut RequestLogContext,
     url: &str,
     status_code: StatusCode,
-    completion_ts: i64,
+    completed_at: i64,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     overall_status: RequestStatus,
     final_error: Option<&ProxyError>,
 ) {
     context.request_url = Some(url.to_string());
     context.llm_status = Some(status_code);
-    context.completion_ts = Some(completion_ts);
+    context.completed_at = Some(completed_at);
     context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = overall_status;
     if let Some(error) = final_error {
@@ -143,9 +155,14 @@ pub(in crate::proxy) async fn finalize_cancelled_log_context(
     proxy_error: &ProxyError,
 ) -> bool {
     let mut context = log_context.lock().await;
+    if let Some(coordinator) = &context.completion_coordinator
+        && !coordinator.claim_request_log()
+    {
+        return false;
+    }
     context.request_url = Some(url.to_string());
     context.llm_status = status_code;
-    context.completion_ts = Some(Utc::now().timestamp_millis());
+    context.completed_at = Some(Utc::now().timestamp_millis());
     context.cost_catalog_version = cost_catalog_version.cloned();
     context.overall_status = RequestStatus::Cancelled;
     apply_final_error_fact(&mut context, proxy_error);
@@ -155,5 +172,5 @@ pub(in crate::proxy) async fn finalize_cancelled_log_context(
         Some(context.id),
         proxy_error,
     );
-    record_completion(app_state, context.clone()).await
+    record_completion_claimed(app_state, context.clone()).await
 }

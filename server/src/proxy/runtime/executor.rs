@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::{body::Body, http::HeaderMap, response::Response};
-use chrono::Utc;
 use serde_json::Value;
 
 use crate::{
@@ -309,7 +308,6 @@ pub(in crate::proxy) async fn execute_request(
     apply_gateway_request_identity(&mut materialized.final_headers, &request_context);
 
     log_context.request_url = Some(materialized.final_url.clone());
-    log_context.llm_request_sent_at = Some(Utc::now().timestamp_millis());
 
     let provider_permit = match allow_provider(&app_state, &target, &materialized.model_str).await {
         Ok(permit) => permit,
@@ -348,7 +346,7 @@ pub(in crate::proxy) async fn execute_request(
     .await
     {
         Ok(outcome) => {
-            if !outcome.log_context.is_stream {
+            if !outcome.log_context.is_stream && !outcome.log_context.completion_deferred {
                 record_completion(&app_state, outcome.log_context).await;
             }
             Ok(outcome.response)

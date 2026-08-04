@@ -57,6 +57,12 @@ fn proxy_error_event_message(
         ("error_code", Some(error.code().as_str().to_string())),
         ("stage", Some(error.stage().as_str().to_string())),
         (
+            "timeout_phase",
+            error
+                .timeout_phase()
+                .map(|phase| phase.as_str().to_string()),
+        ),
+        (
             "response_visibility",
             Some(error.response_visibility().as_str().to_string()),
         ),
@@ -353,7 +359,10 @@ mod tests {
         THIRD_PARTY_DEBUG_ENV, format_log_line, is_app_target, parse_level,
         proxy_error_event_message, set_level, third_party_debug_enabled, with_request_id_scope,
     };
-    use crate::proxy::{ResponseVisibility, classify_upstream_status};
+    use crate::proxy::{
+        ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, TimeoutPhase,
+        classify_upstream_status,
+    };
     use axum::http::{HeaderValue, StatusCode};
 
     static LOG_LEVEL_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -537,6 +546,22 @@ mod tests {
         assert!(message.contains(&format!("upstream_captured_bytes={}", upstream_body.len())));
         assert!(!message.contains("quota exceeded"));
         assert!(!message.contains("provider-secret-detail"));
+    }
+
+    #[test]
+    fn proxy_timeout_event_contains_the_typed_timeout_phase() {
+        let error = ProxyError::upstream_timeout(
+            TimeoutPhase::FirstByte,
+            ExecutionStage::UpstreamResponse,
+            ResponseVisibility::NotVisible,
+            "first byte timeout",
+        );
+        let message = proxy_error_event_message("proxy.timeout", None, None, &error).to_string();
+
+        assert!(message.contains("error_code=upstream_timeout_error"));
+        assert!(message.contains("timeout_phase=first_byte"));
+        assert!(!message.contains("timeout_phase=total"));
+        assert_eq!(error.code(), ProxyErrorCode::UpstreamTimeoutError);
     }
 
     #[tokio::test]

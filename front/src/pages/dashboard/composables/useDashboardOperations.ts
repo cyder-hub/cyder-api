@@ -50,6 +50,18 @@ export function useDashboardOperations(
       ? t("dashboard.empty.noLatency")
       : `${formatNumberValue(Math.round(value))} ms`;
 
+  const formatLatencyCoverage = (
+    value: number | null | undefined,
+    sampleCount: number | null | undefined,
+  ) => {
+    const coverage = sampleCount == null || sampleCount === 0
+      ? t("common.noSamples")
+      : sampleCount === 1
+        ? t("common.oneSample")
+        : t("common.samples", { count: formatNumberValue(sampleCount) });
+    return `${formatLatency(value)} · ${coverage}`;
+  };
+
   const formatDateTime = (value: number | null | undefined) =>
     formatTimestamp(value) || "-";
 
@@ -88,6 +100,7 @@ export function useDashboardOperations(
     formatCount,
     formatDateTime,
     formatLatency,
+    formatLatencyCoverage,
     formatPercentage,
     runtimeLevelBadgeClass,
     runtimeLevelLabel,

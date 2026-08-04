@@ -91,8 +91,12 @@ pub struct DashboardTodayStats {
     pub total_reasoning_tokens: i64,
     pub total_tokens: i64,
     pub total_cost: HashMap<String, i64>,
-    pub avg_first_byte_ms: Option<f64>,
+    pub avg_time_to_first_response_body_ms: Option<f64>,
+    pub time_to_first_response_body_sample_count: i64,
+    pub avg_ttft_ms: Option<f64>,
+    pub ttft_sample_count: i64,
     pub avg_total_latency_ms: Option<f64>,
+    pub total_latency_sample_count: i64,
     pub active_provider_count: i64,
     pub active_model_count: i64,
     pub active_api_key_count: i64,
@@ -174,9 +178,17 @@ struct DashboardTodayAggregateRow {
     #[diesel(sql_type = BigInt)]
     total_tokens: i64,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_first_byte_ms: Option<f64>,
+    avg_time_to_first_response_body_ms: Option<f64>,
+    #[diesel(sql_type = BigInt)]
+    time_to_first_response_body_sample_count: i64,
+    #[diesel(sql_type = Nullable<Double>)]
+    avg_ttft_ms: Option<f64>,
+    #[diesel(sql_type = BigInt)]
+    ttft_sample_count: i64,
     #[diesel(sql_type = Nullable<Double>)]
     avg_total_latency_ms: Option<f64>,
+    #[diesel(sql_type = BigInt)]
+    total_latency_sample_count: i64,
     #[diesel(sql_type = BigInt)]
     active_provider_count: i64,
     #[diesel(sql_type = BigInt)]
@@ -213,8 +225,12 @@ pub struct UsageStatsQueryItem {
     pub success_count: i64,
     pub error_count: i64,
     pub success_rate: Option<f64>,
+    pub avg_time_to_first_response_body_ms: Option<f64>,
+    pub time_to_first_response_body_sample_count: i64,
+    pub avg_ttft_ms: Option<f64>,
+    pub ttft_sample_count: i64,
     pub avg_total_latency_ms: Option<f64>,
-    pub latency_sample_count: i64,
+    pub total_latency_sample_count: i64,
     pub total_cost: HashMap<String, i64>,
 }
 
@@ -257,9 +273,17 @@ struct UsageStatsBaseRow {
     #[diesel(sql_type = BigInt)]
     error_count: i64,
     #[diesel(sql_type = Nullable<Double>)]
-    latency_sum_ms: Option<f64>,
+    time_to_first_response_body_sum_ms: Option<f64>,
     #[diesel(sql_type = BigInt)]
-    latency_sample_count: i64,
+    time_to_first_response_body_sample_count: i64,
+    #[diesel(sql_type = Nullable<Double>)]
+    ttft_sum_ms: Option<f64>,
+    #[diesel(sql_type = BigInt)]
+    ttft_sample_count: i64,
+    #[diesel(sql_type = Nullable<Double>)]
+    total_latency_sum_ms: Option<f64>,
+    #[diesel(sql_type = BigInt)]
+    total_latency_sample_count: i64,
 }
 
 #[derive(QueryableByName, Debug)]
@@ -438,8 +462,13 @@ pub fn get_dashboard_today_stats(timezone: Option<&str>) -> DbResult<DashboardTo
         total_reasoning_tokens: aggregate.total_reasoning_tokens,
         total_tokens: aggregate.total_tokens,
         total_cost: load_today_cost_by_currency(conn, start_of_today)?,
-        avg_first_byte_ms: aggregate.avg_first_byte_ms,
+        avg_time_to_first_response_body_ms: aggregate.avg_time_to_first_response_body_ms,
+        time_to_first_response_body_sample_count: aggregate
+            .time_to_first_response_body_sample_count,
+        avg_ttft_ms: aggregate.avg_ttft_ms,
+        ttft_sample_count: aggregate.ttft_sample_count,
         avg_total_latency_ms: aggregate.avg_total_latency_ms,
+        total_latency_sample_count: aggregate.total_latency_sample_count,
         active_provider_count: aggregate.active_provider_count,
         active_model_count: aggregate.active_model_count,
         active_api_key_count: aggregate.active_api_key_count,
@@ -568,9 +597,26 @@ pub fn get_usage_stats_aggregates(
     let mut items = base_rows
         .into_iter()
         .map(|row| {
-            let latency_sample_count = row.latency_sample_count;
-            let avg_total_latency_ms = if latency_sample_count > 0 {
-                Some(row.latency_sum_ms.unwrap_or(0.0) / latency_sample_count as f64)
+            let time_to_first_response_body_sample_count =
+                row.time_to_first_response_body_sample_count;
+            let avg_time_to_first_response_body_ms = if time_to_first_response_body_sample_count > 0
+            {
+                Some(
+                    row.time_to_first_response_body_sum_ms.unwrap_or(0.0)
+                        / time_to_first_response_body_sample_count as f64,
+                )
+            } else {
+                None
+            };
+            let ttft_sample_count = row.ttft_sample_count;
+            let avg_ttft_ms = if ttft_sample_count > 0 {
+                Some(row.ttft_sum_ms.unwrap_or(0.0) / ttft_sample_count as f64)
+            } else {
+                None
+            };
+            let total_latency_sample_count = row.total_latency_sample_count;
+            let avg_total_latency_ms = if total_latency_sample_count > 0 {
+                Some(row.total_latency_sum_ms.unwrap_or(0.0) / total_latency_sample_count as f64)
             } else {
                 None
             };
@@ -597,8 +643,12 @@ pub fn get_usage_stats_aggregates(
                     success_count: row.success_count,
                     error_count: row.error_count,
                     success_rate: calculate_success_rate(row.request_count, row.success_count),
+                    avg_time_to_first_response_body_ms,
+                    time_to_first_response_body_sample_count,
+                    avg_ttft_ms,
+                    ttft_sample_count,
                     avg_total_latency_ms,
-                    latency_sample_count,
+                    total_latency_sample_count,
                     total_cost: HashMap::new(),
                 },
             )
@@ -813,15 +863,35 @@ fn load_usage_stats_base_rows(
                     CAST(COUNT(*) AS BIGINT) AS request_count, \
                     CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT) AS success_count, \
                     CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END) AS BIGINT) AS error_count, \
+                    CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.first_response_body_at >= rl.upstream_request_sent_at \
+                                 THEN (rl.first_response_body_at - rl.upstream_request_sent_at)::DOUBLE PRECISION \
+                                 ELSE 0 END) AS DOUBLE PRECISION) AS time_to_first_response_body_sum_ms, \
+                    CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.first_response_body_at >= rl.upstream_request_sent_at \
+                                 THEN 1 ELSE 0 END) AS BIGINT) AS time_to_first_response_body_sample_count, \
+                    CAST(SUM(CASE WHEN rl.is_stream = TRUE \
+                                      AND rl.first_token_at IS NOT NULL \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.first_token_at >= rl.upstream_request_sent_at \
+                                 THEN (rl.first_token_at - rl.upstream_request_sent_at)::DOUBLE PRECISION \
+                                 ELSE 0 END) AS DOUBLE PRECISION) AS ttft_sum_ms, \
+                    CAST(SUM(CASE WHEN rl.is_stream = TRUE \
+                                      AND rl.first_token_at IS NOT NULL \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.first_token_at >= rl.upstream_request_sent_at \
+                                 THEN 1 ELSE 0 END) AS BIGINT) AS ttft_sample_count, \
                     CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
                                       AND rl.upstream_request_sent_at IS NOT NULL \
                                       AND rl.completed_at >= rl.upstream_request_sent_at \
                                  THEN (rl.completed_at - rl.upstream_request_sent_at)::DOUBLE PRECISION \
-                                 ELSE 0 END) AS DOUBLE PRECISION) AS latency_sum_ms, \
+                                 ELSE 0 END) AS DOUBLE PRECISION) AS total_latency_sum_ms, \
                     CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
                                       AND rl.upstream_request_sent_at IS NOT NULL \
                                       AND rl.completed_at >= rl.upstream_request_sent_at \
-                                 THEN 1 ELSE 0 END) AS BIGINT) AS latency_sample_count \
+                                 THEN 1 ELSE 0 END) AS BIGINT) AS total_latency_sample_count \
                  FROM request_log rl \
                  LEFT JOIN provider p ON p.id = rl.provider_id \
                  LEFT JOIN model m ON m.id = rl.model_id \
@@ -864,15 +934,35 @@ fn load_usage_stats_base_rows(
                     CAST(COUNT(*) AS BIGINT) AS request_count, \
                     CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) = 'SUCCESS' THEN 1 ELSE 0 END) AS BIGINT) AS success_count, \
                     CAST(SUM(CASE WHEN CAST(rl.overall_status AS TEXT) IN ('ERROR', 'CANCELLED') THEN 1 ELSE 0 END) AS BIGINT) AS error_count, \
+                    CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.first_response_body_at >= rl.upstream_request_sent_at \
+                                 THEN rl.first_response_body_at - rl.upstream_request_sent_at \
+                                 ELSE 0 END) AS REAL) AS time_to_first_response_body_sum_ms, \
+                    CAST(SUM(CASE WHEN rl.first_response_body_at IS NOT NULL \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.first_response_body_at >= rl.upstream_request_sent_at \
+                                 THEN 1 ELSE 0 END) AS BIGINT) AS time_to_first_response_body_sample_count, \
+                    CAST(SUM(CASE WHEN rl.is_stream = 1 \
+                                      AND rl.first_token_at IS NOT NULL \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.first_token_at >= rl.upstream_request_sent_at \
+                                 THEN rl.first_token_at - rl.upstream_request_sent_at \
+                                 ELSE 0 END) AS REAL) AS ttft_sum_ms, \
+                    CAST(SUM(CASE WHEN rl.is_stream = 1 \
+                                      AND rl.first_token_at IS NOT NULL \
+                                      AND rl.upstream_request_sent_at IS NOT NULL \
+                                      AND rl.first_token_at >= rl.upstream_request_sent_at \
+                                 THEN 1 ELSE 0 END) AS BIGINT) AS ttft_sample_count, \
                     CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
                                       AND rl.upstream_request_sent_at IS NOT NULL \
                                       AND rl.completed_at >= rl.upstream_request_sent_at \
                                  THEN rl.completed_at - rl.upstream_request_sent_at \
-                                 ELSE 0 END) AS REAL) AS latency_sum_ms, \
+                                 ELSE 0 END) AS REAL) AS total_latency_sum_ms, \
                     CAST(SUM(CASE WHEN rl.completed_at IS NOT NULL \
                                       AND rl.upstream_request_sent_at IS NOT NULL \
                                       AND rl.completed_at >= rl.upstream_request_sent_at \
-                                 THEN 1 ELSE 0 END) AS BIGINT) AS latency_sample_count \
+                                 THEN 1 ELSE 0 END) AS BIGINT) AS total_latency_sample_count \
                  FROM request_log rl \
                  LEFT JOIN provider p ON p.id = rl.provider_id \
                  LEFT JOIN model m ON m.id = rl.model_id \
@@ -1085,11 +1175,32 @@ fn load_dashboard_today_aggregate(
                 CAST(COALESCE(SUM(total_tokens), 0) AS BIGINT) AS total_tokens, \
                 CAST(AVG(CASE \
                     WHEN upstream_request_sent_at IS NOT NULL \
-                     AND response_started_to_client_at IS NOT NULL \
-                     AND response_started_to_client_at >= upstream_request_sent_at \
-                    THEN (response_started_to_client_at - upstream_request_sent_at)::DOUBLE PRECISION \
+                    AND first_response_body_at IS NOT NULL \
+                    AND first_response_body_at >= upstream_request_sent_at \
+                    THEN (first_response_body_at - upstream_request_sent_at)::DOUBLE PRECISION \
                     ELSE NULL \
-                END) AS DOUBLE PRECISION) AS avg_first_byte_ms, \
+                END) AS DOUBLE PRECISION) AS avg_time_to_first_response_body_ms, \
+                CAST(COUNT(CASE \
+                    WHEN upstream_request_sent_at IS NOT NULL \
+                    AND first_response_body_at IS NOT NULL \
+                    AND first_response_body_at >= upstream_request_sent_at \
+                    THEN 1 ELSE NULL \
+                END) AS BIGINT) AS time_to_first_response_body_sample_count, \
+                CAST(AVG(CASE \
+                    WHEN is_stream = TRUE \
+                    AND upstream_request_sent_at IS NOT NULL \
+                    AND first_token_at IS NOT NULL \
+                    AND first_token_at >= upstream_request_sent_at \
+                    THEN (first_token_at - upstream_request_sent_at)::DOUBLE PRECISION \
+                    ELSE NULL \
+                END) AS DOUBLE PRECISION) AS avg_ttft_ms, \
+                CAST(COUNT(CASE \
+                    WHEN is_stream = TRUE \
+                    AND upstream_request_sent_at IS NOT NULL \
+                    AND first_token_at IS NOT NULL \
+                    AND first_token_at >= upstream_request_sent_at \
+                    THEN 1 ELSE NULL \
+                END) AS BIGINT) AS ttft_sample_count, \
                 CAST(AVG(CASE \
                     WHEN upstream_request_sent_at IS NOT NULL \
                      AND completed_at IS NOT NULL \
@@ -1097,6 +1208,12 @@ fn load_dashboard_today_aggregate(
                     THEN (completed_at - upstream_request_sent_at)::DOUBLE PRECISION \
                     ELSE NULL \
                 END) AS DOUBLE PRECISION) AS avg_total_latency_ms, \
+                CAST(COUNT(CASE \
+                    WHEN upstream_request_sent_at IS NOT NULL \
+                    AND completed_at IS NOT NULL \
+                    AND completed_at >= upstream_request_sent_at \
+                    THEN 1 ELSE NULL \
+                END) AS BIGINT) AS total_latency_sample_count, \
                 CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count, \
                 CAST(COUNT(DISTINCT model_id) AS BIGINT) AS active_model_count, \
                 CAST(COUNT(DISTINCT api_key_id) AS BIGINT) AS active_api_key_count \
@@ -1122,11 +1239,32 @@ fn load_dashboard_today_aggregate(
                 CAST(COALESCE(SUM(total_tokens), 0) AS BIGINT) AS total_tokens, \
                 CAST(AVG(CASE \
                     WHEN upstream_request_sent_at IS NOT NULL \
-                     AND response_started_to_client_at IS NOT NULL \
-                     AND response_started_to_client_at >= upstream_request_sent_at \
-                    THEN (response_started_to_client_at - upstream_request_sent_at) \
+                    AND first_response_body_at IS NOT NULL \
+                    AND first_response_body_at >= upstream_request_sent_at \
+                    THEN (first_response_body_at - upstream_request_sent_at) \
                     ELSE NULL \
-                END) AS REAL) AS avg_first_byte_ms, \
+                END) AS REAL) AS avg_time_to_first_response_body_ms, \
+                CAST(COUNT(CASE \
+                    WHEN upstream_request_sent_at IS NOT NULL \
+                    AND first_response_body_at IS NOT NULL \
+                    AND first_response_body_at >= upstream_request_sent_at \
+                    THEN 1 ELSE NULL \
+                END) AS BIGINT) AS time_to_first_response_body_sample_count, \
+                CAST(AVG(CASE \
+                    WHEN is_stream = 1 \
+                    AND upstream_request_sent_at IS NOT NULL \
+                    AND first_token_at IS NOT NULL \
+                    AND first_token_at >= upstream_request_sent_at \
+                    THEN (first_token_at - upstream_request_sent_at) \
+                    ELSE NULL \
+                END) AS REAL) AS avg_ttft_ms, \
+                CAST(COUNT(CASE \
+                    WHEN is_stream = 1 \
+                    AND upstream_request_sent_at IS NOT NULL \
+                    AND first_token_at IS NOT NULL \
+                    AND first_token_at >= upstream_request_sent_at \
+                    THEN 1 ELSE NULL \
+                END) AS BIGINT) AS ttft_sample_count, \
                 CAST(AVG(CASE \
                     WHEN upstream_request_sent_at IS NOT NULL \
                      AND completed_at IS NOT NULL \
@@ -1134,6 +1272,12 @@ fn load_dashboard_today_aggregate(
                     THEN (completed_at - upstream_request_sent_at) \
                     ELSE NULL \
                 END) AS REAL) AS avg_total_latency_ms, \
+                CAST(COUNT(CASE \
+                    WHEN upstream_request_sent_at IS NOT NULL \
+                    AND completed_at IS NOT NULL \
+                    AND completed_at >= upstream_request_sent_at \
+                    THEN 1 ELSE NULL \
+                END) AS BIGINT) AS total_latency_sample_count, \
                 CAST(COUNT(DISTINCT provider_id) AS BIGINT) AS active_provider_count, \
                 CAST(COUNT(DISTINCT model_id) AS BIGINT) AS active_model_count, \
                 CAST(COUNT(DISTINCT api_key_id) AS BIGINT) AS active_api_key_count \
@@ -1517,7 +1661,7 @@ mod tests {
                 id, request_id, client_request_id, api_key_id, requested_model_name,
                 downstream_protocol, overall_status, final_error_code, final_error_message,
                 request_received_at,
-                upstream_request_sent_at, response_started_to_client_at, completed_at,
+                upstream_request_sent_at, first_response_body_at, completed_at,
                 provider_id, provider_api_key_id, model_id,
                 provider_key_snapshot, provider_name_snapshot,
                 model_name_snapshot, real_model_name_snapshot, upstream_protocol,
@@ -1601,8 +1745,12 @@ mod tests {
         assert_eq!(row.success_count, 1);
         assert_eq!(row.error_count, 1);
         assert_eq!(row.total_tokens, 57);
-        assert_eq!(row.latency_sample_count, 2);
-        assert_eq!(row.latency_sum_ms, Some(700.0));
+        assert_eq!(row.time_to_first_response_body_sample_count, 2);
+        assert_eq!(row.time_to_first_response_body_sum_ms, Some(150.0));
+        assert_eq!(row.ttft_sample_count, 0);
+        assert_eq!(row.ttft_sum_ms, Some(0.0));
+        assert_eq!(row.total_latency_sample_count, 2);
+        assert_eq!(row.total_latency_sum_ms, Some(700.0));
 
         let costs = load_usage_stats_cost_rows(
             &mut conn,
@@ -1678,8 +1826,12 @@ mod tests {
         assert_eq!(aggregate.success_count, 2);
         assert_eq!(aggregate.error_count, 1);
         assert_eq!(aggregate.total_tokens, 60);
-        assert_eq!(aggregate.avg_first_byte_ms, Some(75.0));
+        assert_eq!(aggregate.avg_time_to_first_response_body_ms, Some(75.0));
+        assert_eq!(aggregate.time_to_first_response_body_sample_count, 2);
+        assert_eq!(aggregate.avg_ttft_ms, None);
+        assert_eq!(aggregate.ttft_sample_count, 0);
         assert_eq!(aggregate.avg_total_latency_ms, Some(350.0));
+        assert_eq!(aggregate.total_latency_sample_count, 2);
         assert_eq!(aggregate.active_provider_count, 1);
         assert_eq!(aggregate.active_model_count, 1);
         assert_eq!(aggregate.active_api_key_count, 1);

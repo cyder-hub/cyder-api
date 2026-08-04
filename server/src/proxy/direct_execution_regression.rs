@@ -39,7 +39,7 @@ use super::{
     request_context::{X_CLIENT_REQUEST_ID, X_REQUEST_ID},
 };
 use crate::{
-    config::{ClientIdentityConfig, ProxyRequestConfig},
+    config::{ClientIdentityConfig, OutboundHttpConfig, ProxyRequestConfig},
     database::{
         TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
@@ -656,8 +656,15 @@ impl RouterFixture {
         proxy_request: ProxyRequestConfig,
     ) {
         let mut app_state = (*self.app_state).clone();
-        app_state.infra =
-            Arc::new(AppInfra::new_with_config(proxy_request, None, Some(context)).await);
+        app_state.infra = Arc::new(
+            AppInfra::new_with_config(
+                OutboundHttpConfig::default(),
+                proxy_request,
+                None,
+                Some(context),
+            )
+            .await,
+        );
         self.app_state = Arc::new(app_state);
     }
 
@@ -1209,6 +1216,50 @@ fn assert_log_common(
     assert_eq!(log.client_ip.as_deref(), Some("127.0.0.1"));
 }
 
+fn assert_log_timing_order(log: &RequestLogRecord) {
+    let sent = log
+        .upstream_request_sent_at
+        .expect("upstream request timing should be persisted");
+    let headers = log
+        .upstream_response_headers_at
+        .expect("upstream response headers timing should be persisted");
+    assert!(headers >= sent);
+    if let Some(raw) = log.upstream_first_body_chunk_at {
+        assert!(raw >= headers);
+    }
+    if let Some(first_response_body) = log.first_response_body_at {
+        assert!(first_response_body >= sent);
+        if let Some(raw) = log.upstream_first_body_chunk_at {
+            assert!(first_response_body >= raw);
+        }
+    }
+    if let Some(first_token) = log.first_token_at {
+        assert!(log.is_stream);
+        let raw = log
+            .upstream_first_body_chunk_at
+            .expect("TTFT requires an upstream raw body timestamp");
+        assert!(first_token >= raw);
+    }
+    if let Some(max_idle) = log.max_upstream_response_idle_ms {
+        assert!(max_idle >= 0);
+    }
+    let completed = log
+        .completed_at
+        .expect("completed timing should be persisted");
+    assert!(completed >= sent);
+    for stage in [
+        log.upstream_response_headers_at,
+        log.upstream_first_body_chunk_at,
+        log.first_response_body_at,
+        log.first_token_at,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(completed >= stage);
+    }
+}
+
 fn assert_usage(log: &RequestLogRecord, usage: &UsageGolden) {
     assert_eq!(log.total_input_tokens, Some(usage.input));
     assert_eq!(log.total_output_tokens, Some(usage.output));
@@ -1461,8 +1512,13 @@ fn acl_rejection_precedes_missing_proxy_preflight() {
         .await;
         let mut app_state = (*router.app_state).clone();
         app_state.infra = Arc::new(
-            AppInfra::new_with_config(ProxyRequestConfig::default(), None, Some(infra_context))
-                .await,
+            AppInfra::new_with_config(
+                OutboundHttpConfig::default(),
+                ProxyRequestConfig::default(),
+                None,
+                Some(infra_context),
+            )
+            .await,
         );
         router.app_state = Arc::new(app_state);
         Provider::update(
@@ -1690,6 +1746,8 @@ fn direct_execution_regression_non_stream_request_response_usage_and_log_golden(
                 "{name}: response and persisted canonical request id"
             );
             assert_log_common(&router, &fixture, &log);
+            assert_log_timing_order(&log);
+            assert!(log.first_token_at.is_none());
             assert_eq!(log.upstream_http_status, Some(200));
             assert_usage(&log, &fixture.usage);
             upstream.shutdown().await;
@@ -1723,6 +1781,9 @@ fn persisted_log_sink_receives_the_canonical_request_id() {
             .await;
         assert_eq!(response.status(), StatusCode::OK);
         let request_id = assert_downstream_request_identity(&response);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("successful response body should be consumed before persistence assertion");
         let log = router.wait_for_log(RequestStatus::Success).await;
         let contexts = sink.contexts.lock().await;
 
@@ -1793,6 +1854,9 @@ fn direct_execution_client_identity_http_persists_normalized_forwarded_ip() {
             )
             .await;
         assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("successful response body should be consumed before log assertion");
         let log = router.wait_for_log(RequestStatus::Success).await;
         assert_eq!(log.client_ip.as_deref(), Some("198.51.100.42"));
         upstream.shutdown().await;
@@ -1846,6 +1910,8 @@ fn direct_execution_regression_stream_events_usage_and_single_call_golden() {
                 "{name}: stream response and persisted canonical request id"
             );
             assert_log_common(&router, &fixture, &log);
+            assert_log_timing_order(&log);
+            assert!(log.first_token_at.is_some(), "{name}: stream TTFT sample");
             assert!(log.is_stream, "{name}: log should be streaming");
             assert_usage(&log, &fixture.usage);
             upstream.shutdown().await;
@@ -2610,22 +2676,11 @@ fn direct_execution_non_stream_body_interruption_is_an_upstream_response_error()
         let response = router
             .send(&fixture, false, &fixture.request.downstream)
             .await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::OK);
         assert_downstream_request_identity(&response);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("response error body should read");
-        let body: Value =
-            serde_json::from_slice(&body).expect("response error should be gateway json");
-        assert_eq!(
-            downstream_error_code(&body, fixture.protocol),
-            Some("upstream_response_error")
-        );
-        assert_eq!(
-            downstream_error_message(&body),
-            Some("The gateway could not read a valid response from the upstream provider.")
-        );
-        assert!(body.get("upstream_error").is_none());
+            .expect_err("interrupted successful response body should surface an I/O error");
         assert_eq!(upstream.requests().await.len(), 1);
 
         let log = router.wait_for_log(RequestStatus::Error).await;
@@ -2677,28 +2732,14 @@ fn direct_execution_non_stream_identity_and_gzip_enforce_exact_and_plus_one_limi
             let response = router
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
-            assert_eq!(
-                response.status(),
-                if succeeds {
-                    StatusCode::OK
-                } else {
-                    StatusCode::BAD_GATEWAY
-                },
-                "{case_name}"
-            );
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+            let body_result = axum::body::to_bytes(response.into_body(), usize::MAX).await;
             if succeeds {
+                let body = body_result.unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(body, response_value, "{case_name}");
             } else {
-                assert_eq!(
-                    downstream_error_code(&body, fixture.protocol),
-                    Some("upstream_response_error"),
-                    "{case_name}"
-                );
-                assert!(body.get("upstream_error").is_none(), "{case_name}");
+                body_result.expect_err("{case_name}: guarded body should surface an I/O error");
             }
 
             let captured = upstream.requests().await;
@@ -2758,18 +2799,11 @@ fn four_public_protocols_use_existing_envelopes_for_non_stream_response_limit() 
             let response = router
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
-            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{name}");
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
             assert_downstream_request_identity(&response);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
-                .unwrap();
-            let body: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(
-                downstream_error_code(&body, fixture.protocol),
-                Some("upstream_response_error"),
-                "{name}"
-            );
-            assert!(body.get("upstream_error").is_none(), "{name}");
+                .expect_err("{name}: response limit should surface through the guarded body");
             assert_eq!(upstream.requests().await.len(), 1, "{name}: no retry");
             let log = router.wait_for_log(RequestStatus::Error).await;
             assert_eq!(
@@ -2824,18 +2858,13 @@ fn four_public_protocols_use_existing_envelopes_for_decoded_response_limit() {
             let response = router
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
-            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{name}");
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
             assert_downstream_request_identity(&response);
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
-                .unwrap();
-            let body: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(
-                downstream_error_code(&body, fixture.protocol),
-                Some("upstream_response_error"),
-                "{name}"
-            );
-            assert!(body.get("upstream_error").is_none(), "{name}");
+                .expect_err(
+                    "{name}: decoded response limit should surface through the guarded body",
+                );
             assert_eq!(upstream.requests().await.len(), 1, "{name}: no retry");
             let log = router.wait_for_log(RequestStatus::Error).await;
             assert_eq!(
@@ -3108,17 +3137,24 @@ fn direct_execution_invalid_gzip_never_falls_back_to_compressed_bytes() {
             let response = router
                 .send(&fixture, false, &fixture.request.downstream)
                 .await;
-            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let body: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(
-                downstream_error_code(&body, fixture.protocol),
-                Some("upstream_response_error"),
-                "{case_name}"
-            );
-            assert!(body.get("upstream_error").is_none(), "{case_name}");
+            if upstream_status.is_success() {
+                assert_eq!(response.status(), StatusCode::OK, "{case_name}");
+                axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect_err("{case_name}: invalid gzip should fail in the guarded body");
+            } else {
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{case_name}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    downstream_error_code(&body, fixture.protocol),
+                    Some("upstream_response_error"),
+                    "{case_name}"
+                );
+                assert!(body.get("upstream_error").is_none(), "{case_name}");
+            }
             assert_eq!(upstream.requests().await.len(), 1, "{case_name}");
             let log = router.wait_for_log(RequestStatus::Error).await;
             assert_eq!(
@@ -3378,6 +3414,9 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
                 .endpoint,
             legacy_endpoint
         );
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("successful response body should be consumed before log assertion");
         router.wait_for_log(RequestStatus::Success).await;
         upstream.shutdown().await;
     });
@@ -3399,8 +3438,13 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
         let mut router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
         let mut app_state = (*router.app_state).clone();
         app_state.infra = Arc::new(
-            AppInfra::new_with_config(ProxyRequestConfig::default(), None, Some(infra_context))
-                .await,
+            AppInfra::new_with_config(
+                OutboundHttpConfig::default(),
+                ProxyRequestConfig::default(),
+                None,
+                Some(infra_context),
+            )
+            .await,
         );
         router.app_state = Arc::new(app_state);
         Provider::update(
@@ -3509,6 +3553,7 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
                 "{name}: cancelled stream response and persisted canonical request id"
             );
             assert_log_common(&router, &fixture, &log);
+            assert_log_timing_order(&log);
             assert_eq!(log.overall_status, RequestStatus::Cancelled);
             assert_eq!(
                 log.final_error_code.as_deref(),
@@ -3633,7 +3678,10 @@ fn direct_execution_stream_interruption_before_first_chunk_is_headers_committed(
             log.final_error_code.as_deref(),
             Some("upstream_response_error")
         );
-        assert!(log.response_started_to_client_at.is_none());
+        assert_log_timing_order(&log);
+        assert!(log.upstream_first_body_chunk_at.is_none());
+        assert!(log.first_token_at.is_none());
+        assert!(log.first_response_body_at.is_none());
         assert_single_persisted_terminal_fact(
             &persisted_sink,
             ExecutionStage::UpstreamResponse,

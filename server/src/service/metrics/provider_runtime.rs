@@ -107,6 +107,8 @@ pub enum ProviderRuntimeSortField {
     Health,
     ErrorRate,
     Latency,
+    TimeToFirstResponseBody,
+    Ttft,
     LastErrorAt,
     RequestCount,
 }
@@ -184,8 +186,12 @@ pub struct ProviderRuntimeItem {
     pub success_count: i64,
     pub error_count: i64,
     pub success_rate: Option<f64>,
-    pub avg_first_byte_ms: Option<f64>,
+    pub avg_time_to_first_response_body_ms: Option<f64>,
+    pub time_to_first_response_body_sample_count: i64,
+    pub avg_ttft_ms: Option<f64>,
+    pub ttft_sample_count: i64,
     pub avg_total_latency_ms: Option<f64>,
+    pub total_latency_sample_count: i64,
     pub last_request_at: Option<i64>,
     pub last_success_at: Option<i64>,
     pub last_error_at: Option<i64>,
@@ -353,8 +359,15 @@ impl MetricsService {
                 request_count: request.map_or(0, |item| item.request_count),
                 success_count: request.map_or(0, |item| item.success_count),
                 error_count: request.map_or(0, |item| item.error_count + item.cancelled_count),
-                avg_first_byte_ms: provider_runtime_first_byte_latency(request),
+                avg_time_to_first_response_body_ms: provider_runtime_time_to_first_response_body(
+                    request,
+                ),
+                time_to_first_response_body_sample_count: request
+                    .map_or(0, |item| item.time_to_first_response_body_count),
+                avg_ttft_ms: provider_runtime_ttft(request),
+                ttft_sample_count: request.map_or(0, |item| item.ttft_count),
                 avg_total_latency_ms: provider_runtime_total_latency(request),
+                total_latency_sample_count: request.map_or(0, |item| item.total_latency_count),
                 last_request_at: request.and_then(|item| item.last_request_at),
                 last_success_at: request.and_then(|item| item.last_success_at),
                 last_error_at: request.and_then(|item| item.last_error_at),
@@ -470,8 +483,12 @@ impl MetricsService {
                         request_count: 0,
                         success_count: 0,
                         error_count: 0,
-                        avg_first_byte_ms: None,
+                        avg_time_to_first_response_body_ms: None,
+                        time_to_first_response_body_sample_count: 0,
+                        avg_ttft_ms: None,
+                        ttft_sample_count: 0,
                         avg_total_latency_ms: None,
+                        total_latency_sample_count: 0,
                         last_request_at: None,
                         last_success_at: None,
                         last_error_at: None,
@@ -518,8 +535,14 @@ impl MetricsService {
                     runtime_aggregate.request_count,
                     runtime_aggregate.success_count,
                 ),
-                avg_first_byte_ms: runtime_aggregate.avg_first_byte_ms,
+                avg_time_to_first_response_body_ms: runtime_aggregate
+                    .avg_time_to_first_response_body_ms,
+                time_to_first_response_body_sample_count: runtime_aggregate
+                    .time_to_first_response_body_sample_count,
+                avg_ttft_ms: runtime_aggregate.avg_ttft_ms,
+                ttft_sample_count: runtime_aggregate.ttft_sample_count,
                 avg_total_latency_ms: runtime_aggregate.avg_total_latency_ms,
+                total_latency_sample_count: runtime_aggregate.total_latency_sample_count,
                 last_request_at: runtime_aggregate.last_request_at,
                 last_success_at: runtime_aggregate.last_success_at,
                 last_error_at: runtime_aggregate.last_error_at,
@@ -589,15 +612,19 @@ fn average_or_none(sum: i64, count: i64) -> Option<f64> {
     }
 }
 
-fn provider_runtime_first_byte_latency(
+fn provider_runtime_time_to_first_response_body(
     request: Option<&MetricRequestWindowAggregate>,
 ) -> Option<f64> {
     request.and_then(|item| {
         average_or_none(
-            item.first_byte_latency_sum_ms,
-            item.first_byte_latency_count,
+            item.time_to_first_response_body_sum_ms,
+            item.time_to_first_response_body_count,
         )
     })
+}
+
+fn provider_runtime_ttft(request: Option<&MetricRequestWindowAggregate>) -> Option<f64> {
+    request.and_then(|item| average_or_none(item.ttft_sum_ms, item.ttft_count))
 }
 
 fn provider_runtime_total_latency(request: Option<&MetricRequestWindowAggregate>) -> Option<f64> {
@@ -747,6 +774,16 @@ pub(crate) fn sort_provider_runtime_items(
                 compare_f64_option(left.avg_total_latency_ms, right.avg_total_latency_ms).then_with(
                     || health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level)),
                 )
+            }
+            ProviderRuntimeSortField::TimeToFirstResponseBody => compare_f64_option(
+                left.avg_time_to_first_response_body_ms,
+                right.avg_time_to_first_response_body_ms,
+            )
+            .then_with(|| health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))),
+            ProviderRuntimeSortField::Ttft => {
+                compare_f64_option(left.avg_ttft_ms, right.avg_ttft_ms).then_with(|| {
+                    health_rank(left.runtime_level).cmp(&health_rank(right.runtime_level))
+                })
             }
             ProviderRuntimeSortField::LastErrorAt => {
                 compare_i64_option(left.last_error_at, right.last_error_at).then_with(|| {

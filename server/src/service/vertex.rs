@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cyder_tools::log::{error, info};
 use dashmap::DashMap;
@@ -9,9 +9,15 @@ use std::sync::LazyLock;
 
 use crate::config::NonStreamResponseConfig;
 
+#[cfg(test)]
+use super::upstream_response::read_complete_response_body;
 use super::{
+    auxiliary_http::{
+        AuxiliaryHttpError, parse_auxiliary_json, read_auxiliary_response_body,
+        send_auxiliary_request,
+    },
     provider_http::validate_vertex_token_uri,
-    upstream_response::{apply_upstream_accept_encoding, read_complete_response_body},
+    upstream_response::apply_upstream_accept_encoding,
 };
 
 #[derive(Clone)]
@@ -126,6 +132,7 @@ pub async fn get_vertex_token(
     provider_key_id: i64,
     service_account_str: &str,
     limits: &NonStreamResponseConfig,
+    auxiliary_total_timeout: Duration,
 ) -> Result<String, String> {
     let account: VertexServiceAccount = serde_json::from_str(service_account_str)
         .map_err(|_| "Vertex credential must be a valid service account JSON".to_string())?;
@@ -139,7 +146,8 @@ pub async fn get_vertex_token(
     // If not in cache or expired, request a new token
     let now = get_current_timestamp();
     info!("{provider_key_id} vertex token not in cache or expired, regenerate token");
-    let vertex_token_result = request_google_token(client, service_account_str, limits).await?;
+    let vertex_token_result =
+        request_google_token(client, service_account_str, limits, auxiliary_total_timeout).await?;
     Ok(cache_vertex_token_result(
         provider_key_id,
         vertex_token_result,
@@ -168,6 +176,7 @@ pub async fn request_google_token(
     client: &Client,
     service_account_str: &str,
     limits: &NonStreamResponseConfig,
+    auxiliary_total_timeout: Duration,
 ) -> Result<VertexTokenResult, String> {
     let vertex_account: VertexServiceAccount = serde_json::from_str(service_account_str)
         .map_err(|_| "Vertex credential must be a valid service account JSON".to_string())?;
@@ -209,15 +218,19 @@ pub async fn request_google_token(
     .map_err(|_| "Failed to encode Vertex OAuth request".to_string())?;
 
     let headers = vertex_oauth_request_headers();
-    let response = client
-        .post(token_uri)
-        .headers(headers)
-        .body(body_str)
-        .send()
-        .await
-        .map_err(|_| "Failed to send Vertex OAuth request".to_string())?;
+    let auxiliary_response = send_auxiliary_request(
+        client.post(token_uri).headers(headers).body(body_str),
+        auxiliary_total_timeout,
+    )
+    .await
+    .map_err(|error| auxiliary_error_message("Failed to send Vertex OAuth request", &error))?;
+    let (response, deadline) = auxiliary_response.into_parts();
 
-    read_vertex_token_response(response, limits).await
+    read_vertex_token_response_with_deadline(response, limits, deadline).await
+}
+
+fn auxiliary_error_message(context: &'static str, error: &AuxiliaryHttpError) -> String {
+    format!("{context} ({})", error.safe_kind())
 }
 
 fn vertex_oauth_request_headers() -> reqwest::header::HeaderMap {
@@ -230,6 +243,7 @@ fn vertex_oauth_request_headers() -> reqwest::header::HeaderMap {
     headers
 }
 
+#[cfg(test)]
 async fn read_vertex_token_response(
     response: reqwest::Response,
     limits: &NonStreamResponseConfig,
@@ -250,6 +264,31 @@ async fn read_vertex_token_response(
     }
 }
 
+async fn read_vertex_token_response_with_deadline(
+    response: reqwest::Response,
+    limits: &NonStreamResponseConfig,
+    deadline: tokio::time::Instant,
+) -> Result<VertexTokenResult, String> {
+    let status = response.status();
+    if status.is_success() {
+        let body = read_auxiliary_response_body(
+            super::auxiliary_http::AuxiliaryResponse::from_parts(response, deadline),
+            limits,
+        )
+        .await
+        .map_err(|error| format!("Vertex OAuth response was invalid ({error})"))?;
+        parse_auxiliary_json::<VertexTokenResult>(body.bytes, deadline)
+            .await
+            .map_err(|error| format!("Vertex OAuth response was invalid ({})", error.safe_kind()))
+    } else {
+        error!("Vertex token request failed with status {}", status);
+        Err(format!(
+            "Vertex token request failed with status {}",
+            status
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
@@ -258,6 +297,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        time::timeout,
     };
 
     use super::*;
@@ -326,10 +366,13 @@ mod tests {
     #[tokio::test]
     async fn malformed_service_account_error_never_echoes_input() {
         let marker = "vertex-private-sensitive-marker";
-        let error = match request_google_token(&Client::new(), marker, &limits()).await {
-            Ok(_) => panic!("malformed credential should fail"),
-            Err(error) => error,
-        };
+        let error =
+            match request_google_token(&Client::new(), marker, &limits(), Duration::from_secs(60))
+                .await
+            {
+                Ok(_) => panic!("malformed credential should fail"),
+                Err(error) => error,
+            };
 
         assert_eq!(
             error,
@@ -361,6 +404,7 @@ mod tests {
             key_id,
             r#"{"client_email":"svc@example.com","token_uri":"https://oauth2.googleapis.com/token","private_key_id":"kid","private_key":"not-a-key"}"#,
             &limits(),
+            Duration::from_secs(60),
         )
         .await
         .expect("cached token should be returned without parsing the private key");
@@ -379,6 +423,7 @@ mod tests {
             key_id,
             r#"{"client_email":"svc@example.com","token_uri":"https://oauth.example.com/token","private_key_id":"kid","private_key":"not-a-key"}"#,
             &limits(),
+            Duration::from_secs(60),
         )
         .await
         .expect_err("legacy unsupported token URI must fail even when a token was cached");
@@ -396,6 +441,7 @@ mod tests {
             &Client::new(),
             r#"{"client_email":"svc@example.com","token_uri":"https://oauth.example.com/token","private_key_id":"kid","private_key":"not-a-key"}"#,
             &limits(),
+            Duration::from_secs(60),
         )
         .await
         {
@@ -510,6 +556,48 @@ mod tests {
                 assert!(!error.contains(secret), "{error}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn vertex_auxiliary_body_timeout_is_reported_as_a_safe_credential_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nfirst\r\n",
+                )
+                .await
+                .unwrap();
+            let mut byte = [0u8; 1];
+            let _ = socket.read(&mut byte).await;
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/token"))
+            .send()
+            .await
+            .unwrap();
+        let result = timeout(
+            Duration::from_secs(2),
+            read_vertex_token_response_with_deadline(
+                response,
+                &limits(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("Vertex auxiliary body read should be bounded");
+        let error = match result {
+            Ok(_) => panic!("stalled Vertex body should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("timed out"));
+        assert!(!error.contains("token"));
     }
 
     #[tokio::test]

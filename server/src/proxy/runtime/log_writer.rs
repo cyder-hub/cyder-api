@@ -39,6 +39,7 @@ pub(in crate::proxy) fn new_request_log_context(
         input.api_key,
         &input.target.provider,
         &input.target.model,
+        &input.target.upstream_source,
         None,
         input.requested_model_name,
         input.request_context,

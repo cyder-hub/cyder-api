@@ -8,12 +8,12 @@ use std::{
 };
 
 use cyder_api::{
-    schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol},
-    service::provider_profile::provider_runtime_profile,
+    schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol},
+    service::upstream_profile::upstream_runtime_profile,
 };
 use serde::Deserialize;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const SOURCE_RELATIVE_PATH: &str = "docs/protocol-compatibility.yaml";
 const GENERATED_RELATIVE_PATH: &str = "docs/protocol-compatibility.md";
 
@@ -25,7 +25,8 @@ struct CompatibilityMatrix {
     upstream_protocols: Vec<UpstreamProtocol>,
     downstream_error_contracts: DownstreamErrorContracts,
     evidence: Vec<Evidence>,
-    provider_profiles: Vec<ProviderProfileContract>,
+    upstream_source_contract: UpstreamSourceContract,
+    upstream_source_profiles: Vec<UpstreamSourceProfileContract>,
     routes: Vec<RouteContract>,
     generation_cells: Vec<GenerationCell>,
     utilities: Vec<UtilityContract>,
@@ -106,8 +107,20 @@ enum EvidenceKind {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProviderProfileContract {
-    provider_type: ProviderType,
+struct UpstreamSourceContract {
+    owner: String,
+    exactly_one_active_source_per_provider: bool,
+    required_source_key: String,
+    source_enabled_implicitly: bool,
+    source_default_implicitly: bool,
+    credential_scope: String,
+    evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpstreamSourceProfileContract {
+    profile_type: UpstreamProfileType,
     upstream_protocol: UpstreamProtocol,
     dialect: String,
     auth: String,
@@ -394,7 +407,8 @@ fn validate_matrix(matrix: &CompatibilityMatrix) -> Result<(), String> {
 
     let evidence = validate_evidence(&matrix.evidence)?;
     validate_downstream_error_contracts(&matrix.downstream_error_contracts, &evidence)?;
-    validate_provider_profiles(&matrix.provider_profiles)?;
+    validate_upstream_source_contract(&matrix.upstream_source_contract, &evidence)?;
+    validate_upstream_source_profiles(&matrix.upstream_source_profiles)?;
     validate_routes(&matrix.routes)?;
     validate_generation_cells(&matrix.generation_cells, &evidence)?;
     validate_utilities(&matrix.utilities, &evidence)?;
@@ -588,36 +602,67 @@ fn validate_evidence(items: &[Evidence]) -> Result<HashMap<&str, &Evidence>, Str
     Ok(indexed)
 }
 
-fn validate_provider_profiles(profiles: &[ProviderProfileContract]) -> Result<(), String> {
-    if profiles.len() != ProviderType::ALL.len() {
+fn validate_upstream_source_contract(
+    contract: &UpstreamSourceContract,
+    evidence: &HashMap<&str, &Evidence>,
+) -> Result<(), String> {
+    const REQUIRED_EVIDENCE: [&str; 2] = [
+        "r3-9-primary-source-aggregate",
+        "r3-9-source-runtime-evidence",
+    ];
+    if contract.owner != "R3.9"
+        || !contract.exactly_one_active_source_per_provider
+        || contract.required_source_key != "primary"
+        || !contract.source_enabled_implicitly
+        || !contract.source_default_implicitly
+        || contract.credential_scope != "provider"
+        || contract.evidence != REQUIRED_EVIDENCE
+    {
+        return Err(
+            "upstream_source_contract must pin the exact R3.9 single-primary Provider-credential boundary"
+                .to_string(),
+        );
+    }
+    for id in REQUIRED_EVIDENCE {
+        if !evidence.contains_key(id) {
+            return Err(format!("upstream_source_contract requires evidence '{id}'"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_upstream_source_profiles(
+    profiles: &[UpstreamSourceProfileContract],
+) -> Result<(), String> {
+    if profiles.len() != UpstreamProfileType::ALL.len() {
         return Err(format!(
-            "provider_profiles must contain {} entries, found {}",
-            ProviderType::ALL.len(),
+            "upstream_source_profiles must contain {} entries, found {}",
+            UpstreamProfileType::ALL.len(),
             profiles.len()
         ));
     }
     let mut seen = HashSet::new();
     for profile in profiles {
-        if !seen.insert(profile.provider_type) {
+        if !seen.insert(profile.profile_type) {
             return Err(format!(
-                "duplicate provider profile for {:?}",
-                profile.provider_type
+                "duplicate upstream Source profile for {:?}",
+                profile.profile_type
             ));
         }
-        let runtime = provider_runtime_profile(&profile.provider_type);
+        let runtime = upstream_runtime_profile(&profile.profile_type);
         if profile.upstream_protocol != runtime.upstream_protocol
             || profile.dialect != runtime.dialect.as_key()
             || profile.auth != runtime.auth.as_key()
             || profile.endpoint != runtime.endpoint.as_key()
         {
             return Err(format!(
-                "provider profile for {:?} differs from provider_runtime_profile",
-                profile.provider_type
+                "upstream Source profile for {:?} differs from upstream_runtime_profile",
+                profile.profile_type
             ));
         }
     }
-    if seen != ProviderType::ALL.into_iter().collect() {
-        return Err("provider_profiles do not exhaust ProviderType::ALL".to_string());
+    if seen != UpstreamProfileType::ALL.into_iter().collect() {
+        return Err("upstream_source_profiles do not exhaust UpstreamProfileType::ALL".to_string());
     }
     Ok(())
 }
@@ -1038,6 +1083,7 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
     .unwrap();
 
     writeln!(output, "\n## Protocol boundaries\n").unwrap();
+    writeln!(output, "- Matrix schema: v{}", matrix.schema_version).unwrap();
     writeln!(
         output,
         "- Downstream: {}",
@@ -1132,18 +1178,39 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
         .unwrap();
     }
 
-    writeln!(output, "\n## Provider runtime profiles\n").unwrap();
+    let source_contract = &matrix.upstream_source_contract;
+    writeln!(output, "\n## Upstream Source contract\n").unwrap();
     writeln!(
         output,
-        "| Provider type | Upstream protocol | Dialect | Auth | Endpoint |"
+        "- Owner: `{}`; every active Logical Provider has exactly one implicitly enabled and implicitly default Source with `source_key={}`.",
+        source_contract.owner, source_contract.required_source_key
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Credentials remain `{}` scoped and are applied according to the selected Source Profile.",
+        source_contract.credential_scope
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Evidence: {}.",
+        source_contract.evidence.join(", ")
+    )
+    .unwrap();
+
+    writeln!(output, "\n## Upstream Source profiles\n").unwrap();
+    writeln!(
+        output,
+        "| Profile type | Upstream protocol | Dialect | Auth | Endpoint |"
     )
     .unwrap();
     writeln!(output, "| --- | --- | --- | --- | --- |").unwrap();
-    for profile in &matrix.provider_profiles {
+    for profile in &matrix.upstream_source_profiles {
         writeln!(
             output,
             "| {} | {} | `{}` | `{}` | `{}` |",
-            provider_label(profile.provider_type),
+            profile_label(profile.profile_type),
             upstream_label(profile.upstream_protocol),
             profile.dialect,
             profile.auth,
@@ -1365,16 +1432,16 @@ const fn upstream_label(value: UpstreamProtocol) -> &'static str {
     }
 }
 
-const fn provider_label(value: ProviderType) -> &'static str {
+const fn profile_label(value: UpstreamProfileType) -> &'static str {
     match value {
-        ProviderType::Openai => "OpenAI",
-        ProviderType::Gemini => "Gemini",
-        ProviderType::Vertex => "Vertex",
-        ProviderType::VertexOpenai => "VertexOpenAI",
-        ProviderType::Ollama => "Ollama",
-        ProviderType::Anthropic => "Anthropic",
-        ProviderType::Responses => "Responses",
-        ProviderType::GeminiOpenai => "GeminiOpenAI",
+        UpstreamProfileType::Openai => "OpenAI",
+        UpstreamProfileType::Gemini => "Gemini",
+        UpstreamProfileType::Vertex => "Vertex",
+        UpstreamProfileType::VertexOpenai => "VertexOpenAI",
+        UpstreamProfileType::Ollama => "Ollama",
+        UpstreamProfileType::Anthropic => "Anthropic",
+        UpstreamProfileType::Responses => "Responses",
+        UpstreamProfileType::GeminiOpenai => "GeminiOpenAI",
     }
 }
 
@@ -1625,14 +1692,40 @@ mod tests {
     }
 
     #[test]
-    fn provider_profile_drift_is_rejected() {
+    fn upstream_source_profile_drift_is_rejected() {
         let mut matrix = canonical_matrix();
-        matrix.provider_profiles[0].auth = "wrong".to_string();
+        matrix.upstream_source_profiles[0].auth = "wrong".to_string();
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("differs from provider_runtime_profile")
+                .contains("differs from upstream_runtime_profile")
         );
+    }
+
+    #[test]
+    fn r3_9_source_contract_drift_is_rejected() {
+        let mut matrix = canonical_matrix();
+        matrix
+            .upstream_source_contract
+            .exactly_one_active_source_per_provider = false;
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("single-primary Provider-credential boundary")
+        );
+    }
+
+    #[test]
+    fn schema_v1_and_provider_profile_fields_are_not_accepted() {
+        let v1 = CANONICAL_SOURCE.replacen("schema_version: 2", "schema_version: 1", 1);
+        let matrix = serde_yaml::from_str::<CompatibilityMatrix>(&v1)
+            .expect("schema number should parse before validation");
+        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 2"));
+
+        let legacy = CANONICAL_SOURCE
+            .replacen("upstream_source_profiles:", "provider_profiles:", 1)
+            .replacen("profile_type:", "provider_type:", 1);
+        assert!(serde_yaml::from_str::<CompatibilityMatrix>(&legacy).is_err());
     }
 
     #[test]

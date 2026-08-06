@@ -1,6 +1,6 @@
 {
   "protocol":"ANTHROPIC",
-  "provider_type":"OPENAI",
+  "profile_type":"OPENAI",
   "downstream_path":"/anthropic/v1/messages",
   "downstream_stream_path":"/anthropic/v1/messages",
   "downstream_auth":"x_api_key",

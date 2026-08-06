@@ -5,7 +5,10 @@ import * as providerService from "@/services/providers";
 import { toastController } from "@/services/uiFeedback";
 import type { EditingProviderData } from "../types";
 import type { ProviderCheckPayload } from "@/services/types";
-import { buildCheckOptions } from "./providerCheckViewModel";
+import {
+  buildCheckOptions,
+  formatCheckSourceEvidence,
+} from "./providerCheckViewModel";
 
 export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
   const { t: $t } = useI18n();
@@ -97,9 +100,12 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     };
 
     try {
-      await providerService.checkProviderConnection(data.id, payload);
+      const result = await providerService.checkProviderConnection(data.id, payload);
+      const evidence = formatCheckSourceEvidence(result);
       data.models[modelIndex].checkStatus = "success";
+      data.models[modelIndex].checkMessage = evidence;
       data.provider_keys[apiKeyIndex].checkStatus = "success";
+      data.provider_keys[apiKeyIndex].checkMessage = evidence;
     } catch (error) {
       const errMsg = (error as Error).message || $t("common.unknownError");
       data.models[modelIndex].checkStatus = "error";
@@ -133,9 +139,10 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         provider_api_key_id: key.id,
       };
       try {
-        await providerService.checkProviderConnection(data.id!, payload);
+        const result = await providerService.checkProviderConnection(data.id!, payload);
         successCount++;
         data.models[index].checkStatus = "success";
+        data.models[index].checkMessage = formatCheckSourceEvidence(result);
       } catch (error) {
         const errMsg = (error as Error).message || $t("common.unknownError");
         data.models[index].checkStatus = "error";
@@ -175,9 +182,10 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         provider_api_key_id: key.id,
       };
       try {
-        await providerService.checkProviderConnection(data.id!, payload);
+        const result = await providerService.checkProviderConnection(data.id!, payload);
         successCount++;
         data.provider_keys[index].checkStatus = "success";
+        data.provider_keys[index].checkMessage = formatCheckSourceEvidence(result);
       } catch (error) {
         const errMsg = (error as Error).message || $t("common.unknownError");
         data.provider_keys[index].checkStatus = "error";

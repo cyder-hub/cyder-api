@@ -29,6 +29,9 @@ export interface RecordListItem {
   model_id: number | null;
   model_name: string | null;
   real_model_name: string | null;
+  source_id: number | null;
+  source_key: string | null;
+  source_profile_type: string | null;
   upstream_http_status: number | null;
   estimated_cost_nanos: number | null;
   estimated_cost_currency: string | null;
@@ -50,6 +53,7 @@ export interface RecordRequest extends RecordListItem {
   provider_api_key_id: number | null;
   provider_key: string | null;
   upstream_protocol: UpstreamProtocol | null;
+  source_endpoint: string | null;
   cost_catalog_id: number | null;
   cost_catalog_version_id: number | null;
   cost_snapshot_json: string | null;
@@ -69,6 +73,7 @@ export interface RecordListParams {
   page_size?: number;
   api_key_id?: number;
   provider_id?: number;
+  source_id?: number;
   model_id?: number;
   status?: string;
   downstream_protocol?: DownstreamProtocol;

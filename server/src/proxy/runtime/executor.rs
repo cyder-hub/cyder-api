@@ -8,7 +8,6 @@ use crate::{
         ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
         auth::{admit_api_key_request, check_access_control},
         cancellation::ProxyCancellationContext,
-        provider_governance::{ProviderGovernanceCheckError, ensure_provider_request_allowed},
         request_context::ProxyRequestContext,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
@@ -25,6 +24,7 @@ use crate::{
             route_resolver::{ExecutionPlan, ExecutionTarget},
             transport::{ReasoningContinuationCaptureContext, send_materialized_request},
         },
+        source_governance::{SourceGovernanceCheckError, ensure_source_request_allowed},
         util::get_cost_catalog_version,
         utility::{UtilityOperation, validate_utility_target},
     },
@@ -34,7 +34,7 @@ use crate::{
         cache::types::CacheApiKey,
         provider_credential::{ProviderCredentialError, resolve_selected_provider_credential},
         provider_http::normalize_provider_endpoint,
-        runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
+        runtime::{ReasoningContinuationScope, SourceCircuitProbePermit},
     },
 };
 
@@ -91,17 +91,24 @@ fn provider_credential_proxy_error(error: ProviderCredentialError) -> ProxyError
     )
 }
 
-async fn allow_provider(
+async fn allow_source(
     app_state: &AppState,
     target: &ExecutionTarget,
-    provider_label: &str,
-) -> Result<Option<ProviderCircuitProbePermit>, ProxyError> {
-    match ensure_provider_request_allowed(app_state, target.provider.id, provider_label).await {
+    target_label: &str,
+) -> Result<Option<SourceCircuitProbePermit>, ProxyError> {
+    let source_label = format!(
+        "{} via source {}/{} ({:?})",
+        target_label,
+        target.upstream_source.id,
+        target.upstream_source.source_key,
+        target.upstream_source.profile_type
+    );
+    match ensure_source_request_allowed(app_state, target.upstream_source.id, &source_label).await {
         Ok(permit) => Ok(permit),
-        Err(ProviderGovernanceCheckError::Rejected(rejection)) => {
-            Err(rejection.to_proxy_error(provider_label))
+        Err(SourceGovernanceCheckError::Rejected(rejection)) => {
+            Err(rejection.to_proxy_error(&source_label))
         }
-        Err(ProviderGovernanceCheckError::Backend(error)) => Err(error),
+        Err(SourceGovernanceCheckError::Backend(error)) => Err(error),
     }
 }
 
@@ -179,8 +186,9 @@ pub(in crate::proxy) async fn execute_request(
         return fail_before_send(&app_state, log_context, error).await;
     }
 
-    let mut normalized_provider = (*target.provider).clone();
-    normalized_provider.endpoint = match normalize_provider_endpoint(&target.provider.endpoint) {
+    let mut normalized_source = (*target.upstream_source).clone();
+    normalized_source.endpoint = match normalize_provider_endpoint(&target.upstream_source.endpoint)
+    {
         Ok(endpoint) => endpoint,
         Err(error) => {
             return fail_before_send(
@@ -192,17 +200,18 @@ pub(in crate::proxy) async fn execute_request(
                     ResponseVisibility::NotVisible,
                     None,
                     format!(
-                        "Provider endpoint is invalid and must be repaired before use: {error}"
+                        "Upstream source endpoint is invalid and must be repaired before use: {error}"
                     ),
                 ),
             )
             .await;
         }
     };
-    target.provider = Arc::new(normalized_provider);
+    target.upstream_source = Arc::new(normalized_source);
+    log_context.set_source_endpoint_snapshot(&target.upstream_source.endpoint);
     if let Err(error) = app_state
         .infra
-        .provider_client(target.provider.use_proxy)
+        .provider_client(target.upstream_source.use_proxy)
         .await
     {
         return fail_before_send(
@@ -230,6 +239,15 @@ pub(in crate::proxy) async fn execute_request(
         Ok(trace) => trace,
         Err(error) => return fail_before_send(&app_state, log_context, error).await,
     };
+    debug_assert_eq!(request_patch_trace.source_id, target.upstream_source.id);
+    debug_assert_eq!(
+        request_patch_trace.source_key,
+        target.upstream_source.source_key
+    );
+    debug_assert_eq!(
+        request_patch_trace.profile_type,
+        target.upstream_source.profile_type
+    );
     if let Some(error) = request_patch_trace.conflict_error(&target.model.model_name) {
         return fail_before_send(&app_state, log_context, error).await;
     }
@@ -245,19 +263,24 @@ pub(in crate::proxy) async fn execute_request(
         request_context.request_id.clone(),
     );
 
-    let provider_credential =
-        match resolve_selected_provider_credential(&target.provider, &app_state).await {
-            Ok(credential) => credential,
-            Err(error) => {
-                request_lease.release().await;
-                return fail_before_send(
-                    &app_state,
-                    log_context,
-                    provider_credential_proxy_error(error),
-                )
-                .await;
-            }
-        };
+    let provider_credential = match resolve_selected_provider_credential(
+        &target.provider,
+        &target.upstream_source,
+        &app_state,
+    )
+    .await
+    {
+        Ok(credential) => credential,
+        Err(error) => {
+            request_lease.release().await;
+            return fail_before_send(
+                &app_state,
+                log_context,
+                provider_credential_proxy_error(error),
+            )
+            .await;
+        }
+    };
     log_context.provider_api_key_id = Some(provider_credential.key_id());
 
     let mut materialized = match kind {
@@ -309,7 +332,7 @@ pub(in crate::proxy) async fn execute_request(
 
     log_context.request_url = Some(materialized.final_url.clone());
 
-    let provider_permit = match allow_provider(&app_state, &target, &materialized.model_str).await {
+    let source_permit = match allow_source(&app_state, &target, &materialized.model_str).await {
         Ok(permit) => permit,
         Err(error) => {
             request_lease.release().await;
@@ -325,6 +348,7 @@ pub(in crate::proxy) async fn execute_request(
         feature_enabled: target
             .runtime_features
             .openai_reasoning_content_repair_enabled,
+        target_is_openai_compatible_generation: target.is_openai_compatible_generation(),
     });
 
     match send_materialized_request(
@@ -335,10 +359,10 @@ pub(in crate::proxy) async fn execute_request(
         materialized.final_body,
         materialized.final_headers,
         materialized.model_str,
-        target.provider.use_proxy,
+        target.upstream_source.use_proxy,
         cost_catalog_version,
         request_lease,
-        provider_permit,
+        source_permit,
         materialized.response_mode,
         reasoning_capture,
         request_context.response_visibility.clone(),

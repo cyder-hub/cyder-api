@@ -9,8 +9,8 @@ use crate::config::ProviderGovernanceConfig;
 use crate::service::redis::RedisPool;
 
 use super::types::{
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitProbePermit,
-    ProviderCircuitRejection, ProviderCircuitStore, ProviderHealthSnapshot, ProviderHealthStatus,
+    SourceCircuitDecision, SourceCircuitError, SourceCircuitProbePermit, SourceCircuitRejection,
+    SourceCircuitStore, SourceHealthSnapshot, SourceHealthStatus,
 };
 
 const ALLOW_SCRIPT: &str = r#"
@@ -160,11 +160,11 @@ return result(1, '', -1, probe_expires_at)
 const RECORD_SUCCESS_SCRIPT: &str = r#"
 local state_key = KEYS[1]
 
-local provider_id = ARGV[1]
+local source_id = ARGV[1]
 local now_ms = tonumber(ARGV[2])
 local state_ttl_seconds = tonumber(ARGV[3])
 local governance_enabled = ARGV[4] == '1'
-local permit_provider_id = ARGV[5]
+local permit_source_id = ARGV[5]
 local permit_lease_id = ARGV[6]
 
 local function raw(field)
@@ -240,7 +240,7 @@ end
 
 if status == 'half_open' then
     local active_lease_id = redis.call('HGET', state_key, 'probe_lease_id')
-    if permit_provider_id ~= provider_id or not active_lease_id or active_lease_id ~= permit_lease_id then
+    if permit_source_id ~= source_id or not active_lease_id or active_lease_id ~= permit_lease_id then
         return result()
     end
 elseif permit_lease_id ~= '' then
@@ -270,13 +270,13 @@ return result()
 const RECORD_FAILURE_SCRIPT: &str = r#"
 local state_key = KEYS[1]
 
-local provider_id = ARGV[1]
+local source_id = ARGV[1]
 local now_ms = tonumber(ARGV[2])
 local state_ttl_seconds = tonumber(ARGV[3])
 local governance_enabled = ARGV[4] == '1'
 local failure_threshold = tonumber(ARGV[5])
 local error_message = ARGV[6]
-local permit_provider_id = ARGV[7]
+local permit_source_id = ARGV[7]
 local permit_lease_id = ARGV[8]
 
 local function raw(field)
@@ -349,7 +349,7 @@ end
 local half_open_probe_failed = false
 if status == 'half_open' then
     local active_lease_id = redis.call('HGET', state_key, 'probe_lease_id')
-    half_open_probe_failed = permit_provider_id == provider_id and active_lease_id and active_lease_id == permit_lease_id
+    half_open_probe_failed = permit_source_id == source_id and active_lease_id and active_lease_id == permit_lease_id
     if not half_open_probe_failed then
         return result()
     end
@@ -385,11 +385,11 @@ return result()
 const RELEASE_PROBE_SCRIPT: &str = r#"
 local state_key = KEYS[1]
 
-local provider_id = ARGV[1]
+local source_id = ARGV[1]
 local now_ms = tonumber(ARGV[2])
 local state_ttl_seconds = tonumber(ARGV[3])
 local governance_enabled = ARGV[4] == '1'
-local permit_provider_id = ARGV[5]
+local permit_source_id = ARGV[5]
 local permit_lease_id = ARGV[6]
 
 local function raw(field)
@@ -438,7 +438,7 @@ if status_value() ~= 'half_open' then
 end
 
 local active_lease_id = redis.call('HGET', state_key, 'probe_lease_id')
-if permit_provider_id ~= provider_id or not active_lease_id or active_lease_id ~= permit_lease_id then
+if permit_source_id ~= source_id or not active_lease_id or active_lease_id ~= permit_lease_id then
     return result()
 end
 
@@ -512,14 +512,14 @@ type RedisAllowResult = (
 type RedisSnapshotResult = (String, i64, i64, String, String, String, String);
 
 #[derive(Clone)]
-pub struct RedisProviderCircuitStore {
+pub struct RedisSourceCircuitStore {
     pool: RedisPool,
     key_prefix: String,
     probe_lease_ttl: Duration,
     state_ttl: Duration,
 }
 
-impl RedisProviderCircuitStore {
+impl RedisSourceCircuitStore {
     pub fn new(
         pool: RedisPool,
         key_prefix: impl Into<String>,
@@ -534,8 +534,8 @@ impl RedisProviderCircuitStore {
         }
     }
 
-    fn state_key(&self, provider_id: i64) -> String {
-        format!("{}provider_circuit:{}:state", self.key_prefix, provider_id)
+    fn state_key(&self, source_id: i64) -> String {
+        format!("{}source_circuit:{}:state", self.key_prefix, source_id)
     }
 
     fn state_ttl_seconds(&self) -> u64 {
@@ -546,13 +546,13 @@ impl RedisProviderCircuitStore {
         i64::try_from(self.probe_lease_ttl.as_millis()).unwrap_or(i64::MAX)
     }
 
-    fn redis_error(context: &str, err: impl Display) -> ProviderCircuitError {
-        ProviderCircuitError::Backend(format!("{context}: {err}"))
+    fn redis_error(context: &str, err: impl Display) -> SourceCircuitError {
+        SourceCircuitError::Backend(format!("{context}: {err}"))
     }
 
-    fn append_permit_args(command: &mut Cmd, permit: Option<&ProviderCircuitProbePermit>) {
+    fn append_permit_args(command: &mut Cmd, permit: Option<&SourceCircuitProbePermit>) {
         if let Some(permit) = permit {
-            command.arg(permit.provider_id()).arg(permit.lease_id());
+            command.arg(permit.source_id()).arg(permit.lease_id());
         } else {
             command.arg("").arg("");
         }
@@ -560,9 +560,9 @@ impl RedisProviderCircuitStore {
 
     async fn evaluate_allow_request(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
-    ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+    ) -> Result<SourceCircuitDecision, SourceCircuitError> {
         let now_ms = Utc::now().timestamp_millis();
         let decision_id = Uuid::new_v4().to_string();
         let lease_id = Uuid::new_v4().to_string();
@@ -575,7 +575,7 @@ impl RedisProviderCircuitStore {
         let result: RedisAllowResult = cmd("EVAL")
             .arg(ALLOW_SCRIPT)
             .arg(1)
-            .arg(self.state_key(provider_id))
+            .arg(self.state_key(source_id))
             .arg(now_ms)
             .arg(if config.is_enabled() { "1" } else { "0" })
             .arg(cooldown_ms)
@@ -585,28 +585,28 @@ impl RedisProviderCircuitStore {
             .arg(&lease_id)
             .query_async(&mut *conn)
             .await
-            .map_err(|err| Self::redis_error("provider circuit allow script failed", err))?;
+            .map_err(|err| Self::redis_error("source circuit allow script failed", err))?;
 
-        allow_result_to_domain(provider_id, decision_id, lease_id, now_ms, result)
+        allow_result_to_domain(source_id, decision_id, lease_id, now_ms, result)
     }
 }
 
 #[async_trait]
-impl ProviderCircuitStore for RedisProviderCircuitStore {
+impl SourceCircuitStore for RedisSourceCircuitStore {
     async fn allow_request(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
-    ) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
-        self.evaluate_allow_request(provider_id, config).await
+    ) -> Result<SourceCircuitDecision, SourceCircuitError> {
+        self.evaluate_allow_request(source_id, config).await
     }
 
     async fn record_success(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
-        permit: Option<&ProviderCircuitProbePermit>,
-    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+        permit: Option<&SourceCircuitProbePermit>,
+    ) -> Result<SourceHealthSnapshot, SourceCircuitError> {
         let now_ms = Utc::now().timestamp_millis();
         let mut conn = self
             .pool
@@ -617,25 +617,26 @@ impl ProviderCircuitStore for RedisProviderCircuitStore {
         command
             .arg(RECORD_SUCCESS_SCRIPT)
             .arg(1)
-            .arg(self.state_key(provider_id))
-            .arg(provider_id)
+            .arg(self.state_key(source_id))
+            .arg(source_id)
             .arg(now_ms)
             .arg(self.state_ttl_seconds())
             .arg(if config.is_enabled() { "1" } else { "0" });
         Self::append_permit_args(&mut command, permit);
-        let result: RedisSnapshotResult = command.query_async(&mut *conn).await.map_err(|err| {
-            Self::redis_error("provider circuit record success script failed", err)
-        })?;
+        let result: RedisSnapshotResult = command
+            .query_async(&mut *conn)
+            .await
+            .map_err(|err| Self::redis_error("source circuit record success script failed", err))?;
         snapshot_result_to_domain(result)
     }
 
     async fn record_failure(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
         error_message: String,
-        permit: Option<&ProviderCircuitProbePermit>,
-    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+        permit: Option<&SourceCircuitProbePermit>,
+    ) -> Result<SourceHealthSnapshot, SourceCircuitError> {
         let now_ms = Utc::now().timestamp_millis();
         let mut conn = self
             .pool
@@ -646,26 +647,27 @@ impl ProviderCircuitStore for RedisProviderCircuitStore {
         command
             .arg(RECORD_FAILURE_SCRIPT)
             .arg(1)
-            .arg(self.state_key(provider_id))
-            .arg(provider_id)
+            .arg(self.state_key(source_id))
+            .arg(source_id)
             .arg(now_ms)
             .arg(self.state_ttl_seconds())
             .arg(if config.is_enabled() { "1" } else { "0" })
             .arg(config.consecutive_failure_threshold)
             .arg(error_message);
         Self::append_permit_args(&mut command, permit);
-        let result: RedisSnapshotResult = command.query_async(&mut *conn).await.map_err(|err| {
-            Self::redis_error("provider circuit record failure script failed", err)
-        })?;
+        let result: RedisSnapshotResult = command
+            .query_async(&mut *conn)
+            .await
+            .map_err(|err| Self::redis_error("source circuit record failure script failed", err))?;
         snapshot_result_to_domain(result)
     }
 
     async fn release_probe(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
-        permit: Option<&ProviderCircuitProbePermit>,
-    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+        permit: Option<&SourceCircuitProbePermit>,
+    ) -> Result<SourceHealthSnapshot, SourceCircuitError> {
         let now_ms = Utc::now().timestamp_millis();
         let mut conn = self
             .pool
@@ -676,22 +678,20 @@ impl ProviderCircuitStore for RedisProviderCircuitStore {
         command
             .arg(RELEASE_PROBE_SCRIPT)
             .arg(1)
-            .arg(self.state_key(provider_id))
-            .arg(provider_id)
+            .arg(self.state_key(source_id))
+            .arg(source_id)
             .arg(now_ms)
             .arg(self.state_ttl_seconds())
             .arg(if config.is_enabled() { "1" } else { "0" });
         Self::append_permit_args(&mut command, permit);
-        let result: RedisSnapshotResult = command.query_async(&mut *conn).await.map_err(|err| {
-            Self::redis_error("provider circuit release probe script failed", err)
-        })?;
+        let result: RedisSnapshotResult = command
+            .query_async(&mut *conn)
+            .await
+            .map_err(|err| Self::redis_error("source circuit release probe script failed", err))?;
         snapshot_result_to_domain(result)
     }
 
-    async fn snapshot(
-        &self,
-        provider_id: i64,
-    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+    async fn snapshot(&self, source_id: i64) -> Result<SourceHealthSnapshot, SourceCircuitError> {
         let now_ms = Utc::now().timestamp_millis();
         let mut conn = self
             .pool
@@ -701,22 +701,22 @@ impl ProviderCircuitStore for RedisProviderCircuitStore {
         let result: RedisSnapshotResult = cmd("EVAL")
             .arg(SNAPSHOT_SCRIPT)
             .arg(1)
-            .arg(self.state_key(provider_id))
+            .arg(self.state_key(source_id))
             .arg(now_ms)
             .query_async(&mut *conn)
             .await
-            .map_err(|err| Self::redis_error("provider circuit snapshot script failed", err))?;
+            .map_err(|err| Self::redis_error("source circuit snapshot script failed", err))?;
         snapshot_result_to_domain(result)
     }
 }
 
 fn allow_result_to_domain(
-    provider_id: i64,
+    source_id: i64,
     decision_id: String,
     lease_id: String,
     issued_at_ms: i64,
     result: RedisAllowResult,
-) -> Result<ProviderCircuitDecision, ProviderCircuitError> {
+) -> Result<SourceCircuitDecision, SourceCircuitError> {
     let (
         allowed,
         status,
@@ -740,8 +740,8 @@ fn allow_result_to_domain(
         last_error,
     )?;
     let permit = if allowed == 1 && permit_expires_at_ms >= 0 {
-        Some(ProviderCircuitProbePermit::new(
-            provider_id,
+        Some(SourceCircuitProbePermit::new(
+            source_id,
             decision_id,
             lease_id,
             issued_at_ms,
@@ -751,7 +751,7 @@ fn allow_result_to_domain(
         None
     };
     if allowed == 1 {
-        return Ok(ProviderCircuitDecision::allowed(snapshot, permit));
+        return Ok(SourceCircuitDecision::allowed(snapshot, permit));
     }
     let retry_after = if retry_after_ms >= 0 {
         Some(Duration::from_millis(
@@ -760,7 +760,7 @@ fn allow_result_to_domain(
     } else {
         None
     };
-    Ok(ProviderCircuitDecision::rejected(
+    Ok(SourceCircuitDecision::rejected(
         snapshot,
         parse_rejection(&rejection)?,
         retry_after,
@@ -769,7 +769,7 @@ fn allow_result_to_domain(
 
 fn snapshot_result_to_domain(
     result: RedisSnapshotResult,
-) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
+) -> Result<SourceHealthSnapshot, SourceCircuitError> {
     let (
         status,
         consecutive_failures,
@@ -798,8 +798,8 @@ fn snapshot_from_parts(
     last_failure_at: String,
     last_recovered_at: String,
     last_error: String,
-) -> Result<ProviderHealthSnapshot, ProviderCircuitError> {
-    Ok(ProviderHealthSnapshot {
+) -> Result<SourceHealthSnapshot, SourceCircuitError> {
+    Ok(SourceHealthSnapshot {
         status: parse_status(&status)?,
         consecutive_failures: u32::try_from(consecutive_failures).unwrap_or(u32::MAX),
         half_open_probe_in_flight: half_open_probe_in_flight > 0,
@@ -814,23 +814,23 @@ fn snapshot_from_parts(
     })
 }
 
-fn parse_status(status: &str) -> Result<ProviderHealthStatus, ProviderCircuitError> {
+fn parse_status(status: &str) -> Result<SourceHealthStatus, SourceCircuitError> {
     match status {
-        "healthy" => Ok(ProviderHealthStatus::Healthy),
-        "open" => Ok(ProviderHealthStatus::Open),
-        "half_open" => Ok(ProviderHealthStatus::HalfOpen),
-        other => Err(ProviderCircuitError::Backend(format!(
-            "provider circuit returned unknown status: {other}"
+        "healthy" => Ok(SourceHealthStatus::Healthy),
+        "open" => Ok(SourceHealthStatus::Open),
+        "half_open" => Ok(SourceHealthStatus::HalfOpen),
+        other => Err(SourceCircuitError::Backend(format!(
+            "source circuit returned unknown status: {other}"
         ))),
     }
 }
 
-fn parse_rejection(rejection: &str) -> Result<ProviderCircuitRejection, ProviderCircuitError> {
+fn parse_rejection(rejection: &str) -> Result<SourceCircuitRejection, SourceCircuitError> {
     match rejection {
-        "open_cooldown" => Ok(ProviderCircuitRejection::OpenCooldown),
-        "half_open_probe_in_flight" => Ok(ProviderCircuitRejection::HalfOpenProbeInFlight),
-        other => Err(ProviderCircuitError::Backend(format!(
-            "provider circuit returned unknown rejection: {other}"
+        "open_cooldown" => Ok(SourceCircuitRejection::OpenCooldown),
+        "half_open_probe_in_flight" => Ok(SourceCircuitRejection::HalfOpenProbeInFlight),
+        other => Err(SourceCircuitError::Backend(format!(
+            "source circuit returned unknown rejection: {other}"
         ))),
     }
 }
@@ -860,7 +860,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_returns_backend_error_when_redis_connection_fails() {
-        let store = RedisProviderCircuitStore::new(
+        let store = RedisSourceCircuitStore::new(
             redis_unavailable_pool(),
             "runtime:test:unavailable:",
             Duration::from_secs(30),
@@ -871,7 +871,7 @@ mod tests {
             .snapshot(1)
             .await
             .expect_err("redis connection failure should be reported");
-        assert!(matches!(err, ProviderCircuitError::Backend(_)));
+        assert!(matches!(err, SourceCircuitError::Backend(_)));
     }
 
     #[test]
@@ -886,12 +886,12 @@ mod tests {
             String::new(),
         ))
         .expect_err("unknown status should be a backend error");
-        assert!(matches!(err, ProviderCircuitError::Backend(_)));
+        assert!(matches!(err, SourceCircuitError::Backend(_)));
     }
 
     async fn redis_pool_or_skip() -> Option<RedisPool> {
         let Ok(url) = env::var("CYDER_TEST_REDIS_URL") else {
-            println!("skipping redis provider circuit tests: CYDER_TEST_REDIS_URL is not set");
+            println!("skipping redis source circuit tests: CYDER_TEST_REDIS_URL is not set");
             return None;
         };
         let manager = RedisConnectionManager::new(url.as_str())
@@ -905,8 +905,8 @@ mod tests {
         )
     }
 
-    fn redis_store(pool: RedisPool, key_prefix: &str) -> RedisProviderCircuitStore {
-        RedisProviderCircuitStore::new(
+    fn redis_store(pool: RedisPool, key_prefix: &str) -> RedisSourceCircuitStore {
+        RedisSourceCircuitStore::new(
             pool,
             key_prefix.to_string(),
             Duration::from_secs(30),
@@ -923,7 +923,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn redis_store_unknown_provider_snapshot_defaults_to_healthy() {
+    async fn redis_store_unknown_source_snapshot_defaults_to_healthy() {
         let Some(pool) = redis_pool_or_skip().await else {
             return;
         };
@@ -931,7 +931,7 @@ mod tests {
         let store = redis_store(pool, &prefix);
 
         let snapshot = store.snapshot(720_000).await.expect("snapshot should load");
-        assert_eq!(snapshot.status, ProviderHealthStatus::Healthy);
+        assert_eq!(snapshot.status, SourceHealthStatus::Healthy);
         assert_eq!(snapshot.consecutive_failures, 0);
         assert!(!snapshot.half_open_probe_in_flight);
     }
@@ -945,38 +945,38 @@ mod tests {
         let store_a = redis_store(pool.clone(), &prefix);
         let store_b = redis_store(pool, &prefix);
         let config = config(1, 0);
-        let provider_id = 720_001;
+        let source_id = 720_001;
 
         store_a
-            .record_failure(provider_id, &config, "timeout".to_string(), None)
+            .record_failure(source_id, &config, "timeout".to_string(), None)
             .await
             .expect("failure should open circuit");
 
         let first = store_a
-            .allow_request(provider_id, &config)
+            .allow_request(source_id, &config)
             .await
             .expect("first probe should evaluate");
         assert!(first.allowed);
-        assert_eq!(first.snapshot.status, ProviderHealthStatus::HalfOpen);
+        assert_eq!(first.snapshot.status, SourceHealthStatus::HalfOpen);
         let permit = first
             .probe_permit
             .as_ref()
             .expect("half-open probe should include a permit");
-        assert_eq!(permit.provider_id(), provider_id);
+        assert_eq!(permit.source_id(), source_id);
         assert!(!permit.decision_id().is_empty());
         assert!(!permit.lease_id().is_empty());
         assert!(permit.probe_expires_at_ms() > permit.issued_at_ms());
 
         let second = store_b
-            .allow_request(provider_id, &config)
+            .allow_request(source_id, &config)
             .await
             .expect("second probe should evaluate");
         assert!(!second.allowed);
         assert_eq!(
             second.rejection,
-            Some(ProviderCircuitRejection::HalfOpenProbeInFlight)
+            Some(SourceCircuitRejection::HalfOpenProbeInFlight)
         );
-        assert_eq!(second.snapshot.status, ProviderHealthStatus::HalfOpen);
+        assert_eq!(second.snapshot.status, SourceHealthStatus::HalfOpen);
         assert!(second.snapshot.half_open_probe_in_flight);
     }
 
@@ -989,14 +989,14 @@ mod tests {
         let store_a = redis_store(pool.clone(), &prefix);
         let store_b = redis_store(pool, &prefix);
         let config = config(1, 0);
-        let provider_id = 720_002;
+        let source_id = 720_002;
 
         store_a
-            .record_failure(provider_id, &config, "timeout".to_string(), None)
+            .record_failure(source_id, &config, "timeout".to_string(), None)
             .await
             .expect("failure should open circuit");
         let decision = store_b
-            .allow_request(provider_id, &config)
+            .allow_request(source_id, &config)
             .await
             .expect("probe should be allowed");
         let permit = decision
@@ -1005,14 +1005,14 @@ mod tests {
             .expect("half-open probe should include a permit");
 
         store_a
-            .record_success(provider_id, &config, Some(permit))
+            .record_success(source_id, &config, Some(permit))
             .await
             .expect("matching probe success should close circuit");
         let snapshot = store_b
-            .snapshot(provider_id)
+            .snapshot(source_id)
             .await
             .expect("snapshot should load");
-        assert_eq!(snapshot.status, ProviderHealthStatus::Healthy);
+        assert_eq!(snapshot.status, SourceHealthStatus::Healthy);
         assert_eq!(snapshot.consecutive_failures, 0);
         assert!(!snapshot.half_open_probe_in_flight);
         assert!(snapshot.last_recovered_at.is_some());
@@ -1028,14 +1028,14 @@ mod tests {
         let store_a = redis_store(pool.clone(), &prefix);
         let store_b = redis_store(pool, &prefix);
         let config = config(1, 0);
-        let provider_id = 720_003;
+        let source_id = 720_003;
 
         store_a
-            .record_failure(provider_id, &config, "timeout".to_string(), None)
+            .record_failure(source_id, &config, "timeout".to_string(), None)
             .await
             .expect("failure should open circuit");
         let decision = store_a
-            .allow_request(provider_id, &config)
+            .allow_request(source_id, &config)
             .await
             .expect("probe should be allowed");
         let permit = decision
@@ -1045,14 +1045,14 @@ mod tests {
 
         let snapshot = store_b
             .record_failure(
-                provider_id,
+                source_id,
                 &config,
                 "half-open timeout".to_string(),
                 Some(permit),
             )
             .await
             .expect("matching probe failure should reopen circuit");
-        assert_eq!(snapshot.status, ProviderHealthStatus::Open);
+        assert_eq!(snapshot.status, SourceHealthStatus::Open);
         assert!(!snapshot.half_open_probe_in_flight);
         assert_eq!(snapshot.last_error.as_deref(), Some("half-open timeout"));
     }
@@ -1066,22 +1066,22 @@ mod tests {
         let store_a = redis_store(pool.clone(), &prefix);
         let store_b = redis_store(pool, &prefix);
         let config = config(1, 60);
-        let provider_id = 720_004;
+        let source_id = 720_004;
 
         store_a
-            .record_failure(provider_id, &config, "timeout".to_string(), None)
+            .record_failure(source_id, &config, "timeout".to_string(), None)
             .await
             .expect("failure should open circuit");
 
         let decision = store_b
-            .allow_request(provider_id, &config)
+            .allow_request(source_id, &config)
             .await
             .expect("allow should evaluate");
         assert!(!decision.allowed);
-        assert_eq!(decision.snapshot.status, ProviderHealthStatus::Open);
+        assert_eq!(decision.snapshot.status, SourceHealthStatus::Open);
         assert_eq!(
             decision.rejection,
-            Some(ProviderCircuitRejection::OpenCooldown)
+            Some(SourceCircuitRejection::OpenCooldown)
         );
         assert!(decision.retry_after.is_some());
         assert!(decision.probe_permit.is_none());
@@ -1095,19 +1095,19 @@ mod tests {
         let prefix = format!("runtime:test:{}:", Uuid::new_v4());
         let store_a = redis_store(pool.clone(), &prefix);
         let config = config(1, 60);
-        let provider_id = 720_005;
+        let source_id = 720_005;
 
         store_a
-            .record_failure(provider_id, &config, "timeout".to_string(), None)
+            .record_failure(source_id, &config, "timeout".to_string(), None)
             .await
             .expect("failure should open circuit");
 
         let restarted_store = redis_store(pool, &prefix);
         let snapshot = restarted_store
-            .snapshot(provider_id)
+            .snapshot(source_id)
             .await
             .expect("snapshot should load from shared Redis state");
-        assert_eq!(snapshot.status, ProviderHealthStatus::Open);
+        assert_eq!(snapshot.status, SourceHealthStatus::Open);
         assert_eq!(snapshot.consecutive_failures, 1);
         assert_eq!(snapshot.last_error.as_deref(), Some("timeout"));
     }

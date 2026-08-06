@@ -31,7 +31,7 @@ async fn provider_runtime_snapshot(
 
     if let Some(search) = params.search.as_ref().map(|value| value.trim()) {
         if !search.is_empty() {
-            items.retain(|item| search_matches(&item.provider_name, &item.provider_key, search));
+            items.retain(|item| search_matches(item, search));
         }
     }
 
@@ -63,7 +63,8 @@ mod tests {
     use crate::config::MetricsConfig;
     use crate::database::TestDbContext;
     use crate::database::provider::{NewProvider, Provider};
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::metrics::MetricsService;
 
@@ -99,18 +100,27 @@ mod tests {
     }
 
     fn insert_provider(id: i64, is_enabled: bool) {
-        Provider::create(&NewProvider {
-            id,
-            provider_key: format!("provider-{id}"),
-            name: format!("Provider {id}"),
-            endpoint: "https://example.com".to_string(),
-            use_proxy: false,
-            is_enabled,
-            created_at: 1,
-            updated_at: 1,
-            provider_type: ProviderType::Openai,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-        })
+        Provider::create(
+            &NewProvider {
+                id,
+                provider_key: format!("provider-{id}"),
+                name: format!("Provider {id}"),
+                is_enabled,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            &NewUpstreamSource {
+                id: id * 10 + 1,
+                provider_id: id,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type: UpstreamProfileType::Openai,
+                endpoint: "https://example.com/v1".to_string(),
+                use_proxy: false,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
         .expect("provider should insert");
     }
 
@@ -192,6 +202,11 @@ mod tests {
                 insert_provider(1, true);
                 insert_provider(2, false);
                 let app_state = create_test_app_state(context.clone()).await;
+                app_state
+                    .source_circuit
+                    .record_source_failure(11, "source timeout".to_string(), None)
+                    .await
+                    .expect("source health should update");
 
                 let response = send(&app_state, "/provider/runtime/snapshot").await;
                 assert_eq!(response.status(), StatusCode::OK);
@@ -205,6 +220,31 @@ mod tests {
                     body.pointer("/data/items")
                         .and_then(Value::as_array)
                         .map(Vec::len),
+                    Some(1)
+                );
+                assert_eq!(
+                    body.pointer("/data/items/0/source_id")
+                        .and_then(Value::as_i64),
+                    Some(11)
+                );
+                assert_eq!(
+                    body.pointer("/data/items/0/source_key")
+                        .and_then(Value::as_str),
+                    Some("primary")
+                );
+                assert_eq!(
+                    body.pointer("/data/items/0/source_profile_type")
+                        .and_then(Value::as_str),
+                    Some("OPENAI")
+                );
+                assert_eq!(
+                    body.pointer("/data/items/0/source_endpoint")
+                        .and_then(Value::as_str),
+                    Some("https://example.com/v1")
+                );
+                assert_eq!(
+                    body.pointer("/data/items/0/consecutive_failures")
+                        .and_then(Value::as_u64),
                     Some(1)
                 );
 

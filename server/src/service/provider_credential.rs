@@ -5,14 +5,14 @@ use reqwest::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use crate::{
     config::NonStreamResponseConfig,
-    database::provider::{Provider, ProviderApiKeyRepository},
-    schema::enum_def::{ProviderType, UpstreamProtocol},
+    database::provider::{ProviderAggregate, ProviderApiKeyRepository},
+    schema::enum_def::{UpstreamProfileType, UpstreamProtocol},
     service::{
         app_state::AppState,
-        cache::types::CacheProvider,
-        provider_profile::{ProviderAuthProfile, provider_runtime_profile},
+        cache::types::{CacheProvider, CacheUpstreamSource},
         runtime::GroupItemSelectionStrategy,
         secret_encryption::{SecretDomain, SensitiveSecret},
+        upstream_profile::{UpstreamAuthProfile, upstream_runtime_profile},
         vertex::get_vertex_token,
     },
 };
@@ -85,14 +85,14 @@ impl fmt::Debug for ProviderCredential {
 
 async fn materialize_provider_credential(
     client: &reqwest::Client,
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     key_id: i64,
     secret: SensitiveSecret,
     limits: &NonStreamResponseConfig,
     auxiliary_total_timeout: Duration,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let request_secret = match provider_runtime_profile(provider_type).auth {
-        ProviderAuthProfile::VertexOAuth => SensitiveSecret::new(
+    let request_secret = match upstream_runtime_profile(profile_type).auth {
+        UpstreamAuthProfile::VertexOAuth => SensitiveSecret::new(
             get_vertex_token(
                 client,
                 key_id,
@@ -127,9 +127,10 @@ async fn auxiliary_client(
 /// provider-specific request credential at the last possible boundary.
 pub async fn resolve_selected_provider_credential(
     provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = auxiliary_client(app_state, provider.use_proxy).await?;
+    let client = auxiliary_client(app_state, source.use_proxy).await?;
     let strategy = GroupItemSelectionStrategy::from(provider.provider_api_key_mode.clone());
     let selected_key = app_state
         .provider_key_selector
@@ -147,7 +148,7 @@ pub async fn resolve_selected_provider_credential(
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
     materialize_provider_credential(
         client.as_ref(),
-        &provider.provider_type,
+        &source.profile_type,
         selected_key.id,
         secret,
         &app_state.infra.proxy_request_config().non_stream_response,
@@ -159,11 +160,11 @@ pub async fn resolve_selected_provider_credential(
 /// Resolves a saved key by identity. This is used by explicit manager checks;
 /// runtime selection continues to use `resolve_selected_provider_credential`.
 pub async fn resolve_saved_provider_credential(
-    provider: &Provider,
+    provider: &ProviderAggregate,
     key_id: i64,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = auxiliary_client(app_state, provider.use_proxy).await?;
+    let client = auxiliary_client(app_state, provider.upstream_source.use_proxy).await?;
     let stored = ProviderApiKeyRepository::get_stored_by_id(provider.id, key_id)
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
     let encrypted = stored
@@ -175,7 +176,7 @@ pub async fn resolve_saved_provider_credential(
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
     materialize_provider_credential(
         client.as_ref(),
-        &provider.provider_type,
+        &provider.upstream_source.profile_type,
         key_id,
         secret,
         &app_state.infra.proxy_request_config().non_stream_response,
@@ -186,15 +187,15 @@ pub async fn resolve_saved_provider_credential(
 
 /// Wraps a request-local draft secret without persisting or cloning it.
 pub async fn resolve_draft_provider_credential(
-    provider: &Provider,
+    provider: &ProviderAggregate,
     key_id: i64,
     secret: SensitiveSecret,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = auxiliary_client(app_state, provider.use_proxy).await?;
+    let client = auxiliary_client(app_state, provider.upstream_source.use_proxy).await?;
     materialize_provider_credential(
         client.as_ref(),
-        &provider.provider_type,
+        &provider.upstream_source.profile_type,
         key_id,
         secret,
         &app_state.infra.proxy_request_config().non_stream_response,
@@ -205,19 +206,19 @@ pub async fn resolve_draft_provider_credential(
 
 pub fn apply_provider_request_auth_header(
     headers: &mut HeaderMap,
-    provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     upstream_protocol: UpstreamProtocol,
     credential: &ProviderCredential,
 ) -> Result<(), ProviderCredentialError> {
-    let profile = provider_runtime_profile(&provider.provider_type);
+    let profile = upstream_runtime_profile(&source.profile_type);
     if profile.upstream_protocol != upstream_protocol {
         return Err(ProviderCredentialError::UnsupportedProtocol);
     }
 
     let header_name = match profile.auth {
-        ProviderAuthProfile::BearerApiKey | ProviderAuthProfile::VertexOAuth => AUTHORIZATION,
-        ProviderAuthProfile::GeminiApiKey => HeaderName::from_static("x-goog-api-key"),
-        ProviderAuthProfile::AnthropicApiKey => HeaderName::from_static("x-api-key"),
+        UpstreamAuthProfile::BearerApiKey | UpstreamAuthProfile::VertexOAuth => AUTHORIZATION,
+        UpstreamAuthProfile::GeminiApiKey => HeaderName::from_static("x-goog-api-key"),
+        UpstreamAuthProfile::AnthropicApiKey => HeaderName::from_static("x-api-key"),
     };
 
     let secret = credential.expose_for_request();
@@ -235,8 +236,8 @@ pub fn apply_provider_request_auth_header(
     Ok(())
 }
 
-pub fn provider_upstream_protocol(provider_type: &ProviderType) -> UpstreamProtocol {
-    provider_runtime_profile(provider_type).upstream_protocol
+pub fn upstream_protocol_for_profile(profile_type: &UpstreamProfileType) -> UpstreamProtocol {
+    upstream_runtime_profile(profile_type).upstream_protocol
 }
 
 #[cfg(test)]
@@ -245,17 +246,22 @@ mod tests {
 
     use super::*;
     use crate::schema::enum_def::ProviderApiKeyMode;
+    use crate::service::cache::types::CacheUpstreamSource;
 
-    fn provider(provider_type: ProviderType) -> CacheProvider {
+    fn provider(profile_type: UpstreamProfileType) -> CacheProvider {
         CacheProvider {
             id: 1,
             provider_key: "provider".to_string(),
             name: "Provider".to_string(),
-            endpoint: "https://example.com".to_string(),
-            use_proxy: false,
-            provider_type,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
             is_enabled: true,
+            upstream_source: CacheUpstreamSource {
+                id: 2,
+                source_key: "primary".to_string(),
+                profile_type,
+                endpoint: "https://example.com".to_string(),
+                use_proxy: false,
+            },
         }
     }
 
@@ -268,7 +274,7 @@ mod tests {
 
     #[test]
     fn auth_header_replaces_all_legacy_auth_headers() {
-        let provider = provider(ProviderType::Gemini);
+        let provider = provider(UpstreamProfileType::Gemini);
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer stale"));
         headers.insert("x-api-key", HeaderValue::from_static("stale"));
@@ -276,7 +282,7 @@ mod tests {
 
         apply_provider_request_auth_header(
             &mut headers,
-            &provider,
+            &provider.upstream_source,
             UpstreamProtocol::Gemini,
             &credential(),
         )
@@ -289,62 +295,86 @@ mod tests {
 
     #[test]
     fn auth_header_contract_covers_supported_protocols() {
-        for (provider_type, api_type, name, expected) in [
+        for (profile_type, api_type, name, expected) in [
             (
-                ProviderType::Openai,
+                UpstreamProfileType::Openai,
                 UpstreamProtocol::Openai,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
-                ProviderType::VertexOpenai,
+                UpstreamProfileType::VertexOpenai,
                 UpstreamProtocol::Openai,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
-                ProviderType::GeminiOpenai,
+                UpstreamProfileType::GeminiOpenai,
                 UpstreamProtocol::Openai,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
-                ProviderType::Responses,
+                UpstreamProfileType::Responses,
                 UpstreamProtocol::Responses,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
-                ProviderType::Ollama,
+                UpstreamProfileType::Ollama,
                 UpstreamProtocol::Ollama,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
-                ProviderType::Gemini,
+                UpstreamProfileType::Gemini,
                 UpstreamProtocol::Gemini,
                 "x-goog-api-key",
                 "provider-secret",
             ),
             (
-                ProviderType::Vertex,
+                UpstreamProfileType::Vertex,
                 UpstreamProtocol::Gemini,
                 "authorization",
                 "Bearer provider-secret",
             ),
             (
-                ProviderType::Anthropic,
+                UpstreamProfileType::Anthropic,
                 UpstreamProtocol::Anthropic,
                 "x-api-key",
                 "provider-secret",
             ),
         ] {
-            let provider = provider(provider_type);
+            let provider = provider(profile_type);
             let mut headers = HeaderMap::new();
-            apply_provider_request_auth_header(&mut headers, &provider, api_type, &credential())
-                .expect("supported auth should apply");
+            apply_provider_request_auth_header(
+                &mut headers,
+                &provider.upstream_source,
+                api_type,
+                &credential(),
+            )
+            .expect("supported auth should apply");
             assert_eq!(headers.get(name).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn source_profile_and_protocol_mismatch_rejects_credential_before_header_mutation() {
+        let provider = provider(UpstreamProfileType::Gemini);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer existing"));
+
+        let error = apply_provider_request_auth_header(
+            &mut headers,
+            &provider.upstream_source,
+            UpstreamProtocol::Openai,
+            &credential(),
+        )
+        .expect_err("mismatched source profile must fail closed");
+
+        assert_eq!(error, ProviderCredentialError::UnsupportedProtocol);
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer existing");
+        assert!(headers.get("x-goog-api-key").is_none());
     }
 
     #[test]

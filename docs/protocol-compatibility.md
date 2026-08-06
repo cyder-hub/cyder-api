@@ -7,6 +7,7 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 
 ## Protocol boundaries
 
+- Matrix schema: v2
 - Downstream: OpenAI, Responses, Anthropic, Gemini
 - Upstream: OpenAI, Responses, Anthropic, Gemini, Ollama
 - Ollama is an upstream-only protocol and has no public downstream router.
@@ -35,9 +36,15 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 | `route_not_found_error` | 404 | — |
 | `method_not_allowed_error` | 405 | Allow |
 
-## Provider runtime profiles
+## Upstream Source contract
 
-| Provider type | Upstream protocol | Dialect | Auth | Endpoint |
+- Owner: `R3.9`; every active Logical Provider has exactly one implicitly enabled and implicitly default Source with `source_key=primary`.
+- Credentials remain `provider` scoped and are applied according to the selected Source Profile.
+- Evidence: r3-9-primary-source-aggregate, r3-9-source-runtime-evidence.
+
+## Upstream Source profiles
+
+| Profile type | Upstream protocol | Dialect | Auth | Endpoint |
 | --- | --- | --- | --- | --- |
 | OpenAI | OpenAI | `standard` | `bearer_api_key` | `base_url` |
 | Gemini | Gemini | `standard` | `gemini_api_key` | `base_url` |
@@ -141,6 +148,8 @@ Unversioned downstream routes are compatibility aliases for the current `/v1` se
 | `direct-upstream-error` | test | `proxy::direct_execution_regression::direct_execution_regression_upstream_429_is_authentic_logged_and_never_retried` | Exercises authentic upstream error conversion, complete protocol bodies, safe logging, and the no-retry contract for the four representative cells. |
 | `direct-cancellation` | test | `proxy::direct_execution_regression::direct_execution_regression_client_cancellation_closes_upstream_and_logs_cancelled` | Exercises client cancellation, upstream connection closure, cancelled logging, and the no-retry contract for the four representative cells. |
 | `direct-call-count` | test | `proxy::direct_execution_regression::four_public_downstream_generation_paths_call_upstream_at_most_once` | Pins each representative public generation path to exactly one real upstream request. |
+| `r3-9-primary-source-aggregate` | test | `database::provider::tests::provider_aggregate_reads_fail_closed_for_missing_or_ambiguous_source` | Pins every readable Logical Provider to exactly one active primary Upstream Source and fails closed for zero or multiple Sources. |
+| `r3-9-source-runtime-evidence` | test | `controller::provider_runtime::tests::snapshot_builds_summary_and_filtered_items_from_one_provider_set` | Pins Provider Runtime aggregation to the selected Source identity, Profile, safe endpoint snapshot, and Source-scoped circuit health. |
 | `representative-fixture-scope` | test | `proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols` | Proves that the direct-execution suite contains exactly the four representative cells and no downstream Ollama fixture. |
 | `reachable-materializers-without-cell-regression` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | OpenAI and Gemini upstream materializers exist, but cells outside the representative suite lack complete direct-execution evidence. |
 | `native-materializer-unavailable` | code | `server/src/proxy/runtime/materializer.rs::select_generation_prepare_kind` | Responses and Anthropic upstream generation protocols are rejected before HTTP materialization. |

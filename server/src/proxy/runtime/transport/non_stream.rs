@@ -27,14 +27,13 @@ use crate::{
         cancellation::ProxyCancellationContext,
         classify_upstream_status_captured,
         logging::RequestLogContext,
-        provider_governance::{
-            record_provider_failure_or_release_probe, record_provider_success,
-            release_provider_probe,
-        },
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{apply_final_error_fact, finalize_non_streaming_log_context},
             reasoning_content_repair::continuation_snapshots_from_openai_response_body,
+        },
+        source_governance::{
+            record_source_failure_or_release_probe, record_source_success, release_source_probe,
         },
         util::{
             json_top_level_field_count_from_bytes, parse_utility_usage_normalization, sha256_hex,
@@ -44,7 +43,7 @@ use crate::{
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
-        runtime::ProviderCircuitProbePermit,
+        runtime::SourceCircuitProbePermit,
         upstream_response::parse_content_encoding,
         upstream_response::{
             ResponseBodyReadTimeouts, UpstreamResponseReadError,
@@ -57,14 +56,14 @@ use tokio::sync::Mutex as TokioMutex;
 pub(super) async fn handle_non_streaming_response(
     app_state: &Arc<AppState>,
     cancellation: &ProxyCancellationContext,
-    provider_id: i64,
+    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
+    source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
     upstream_error_body_limit_bytes: usize,
@@ -111,13 +110,13 @@ pub(super) async fn handle_non_streaming_response(
         Ok(body) => body,
         Err(proxy_error) => {
             cancellation.try_terminate_error(&proxy_error);
-            record_provider_failure_or_release_probe(
+            record_source_failure_or_release_probe(
                 app_state,
                 cancellation,
-                provider_id,
+                source_id,
                 &model_str,
                 &proxy_error,
-                provider_circuit_permit.as_ref(),
+                source_circuit_permit.as_ref(),
             )
             .await;
             let completed_at = Utc::now().timestamp_millis();
@@ -199,11 +198,11 @@ pub(super) async fn handle_non_streaming_response(
             parsed_usage_normalization,
         );
         if cancellation.try_provider_success() {
-            record_provider_success(
+            record_source_success(
                 app_state,
-                provider_id,
+                source_id,
                 &model_str,
-                provider_circuit_permit.as_ref(),
+                source_circuit_permit.as_ref(),
             )
             .await;
         }
@@ -298,23 +297,23 @@ pub(super) async fn handle_non_streaming_response(
                     hard_limit.unwrap_or("response")
                 ),
             );
-            record_provider_failure_or_release_probe(
+            record_source_failure_or_release_probe(
                 app_state,
                 cancellation,
-                provider_id,
+                source_id,
                 &model_str,
                 &governance_error,
-                provider_circuit_permit.as_ref(),
+                source_circuit_permit.as_ref(),
             )
             .await;
         } else {
-            record_provider_failure_or_release_probe(
+            record_source_failure_or_release_probe(
                 app_state,
                 cancellation,
-                provider_id,
+                source_id,
                 &model_str,
                 &proxy_error,
-                provider_circuit_permit.as_ref(),
+                source_circuit_permit.as_ref(),
             )
             .await;
         }
@@ -501,7 +500,7 @@ async fn run_guarded_non_stream_worker(
     app_state: Arc<AppState>,
     cancellation: ProxyCancellationContext,
     coordinator: ProxyTerminationCoordinator,
-    provider_id: i64,
+    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
@@ -509,7 +508,7 @@ async fn run_guarded_non_stream_worker(
     status_code: axum::http::StatusCode,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
+    source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     proxy_timeouts: ProxyTimeoutConfig,
@@ -548,10 +547,10 @@ async fn run_guarded_non_stream_worker(
     let body_result = tokio::select! {
         biased;
         _ = cancellation.cancelled() => {
-            release_provider_probe(
+            release_source_probe(
                 &app_state,
-                provider_id,
-                provider_circuit_permit.as_ref(),
+                source_id,
+                source_circuit_permit.as_ref(),
             )
             .await;
             return;
@@ -577,13 +576,13 @@ async fn run_guarded_non_stream_worker(
         Ok(body) => body,
         Err(proxy_error) => {
             coordinator.try_terminate_error(&proxy_error);
-            record_provider_failure_or_release_probe(
+            record_source_failure_or_release_probe(
                 &app_state,
                 &cancellation,
-                provider_id,
+                source_id,
                 &model_str,
                 &proxy_error,
-                provider_circuit_permit.as_ref(),
+                source_circuit_permit.as_ref(),
             )
             .await;
             finalize_guarded_non_stream_failure(
@@ -644,11 +643,11 @@ async fn run_guarded_non_stream_worker(
         }
     };
     if cancellation.try_provider_success() {
-        record_provider_success(
+        record_source_success(
             &app_state,
-            provider_id,
+            source_id,
             &model_str,
-            provider_circuit_permit.as_ref(),
+            source_circuit_permit.as_ref(),
         )
         .await;
     }
@@ -732,14 +731,14 @@ async fn run_guarded_non_stream_worker(
 pub(super) async fn handle_non_streaming_response_guarded(
     app_state: &Arc<AppState>,
     cancellation: &ProxyCancellationContext,
-    provider_id: i64,
+    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<&CacheCostCatalogVersion>,
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
+    source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     reasoning_capture: Option<&ReasoningContinuationCaptureContext>,
     upstream_error_body_limit_bytes: usize,
@@ -751,14 +750,14 @@ pub(super) async fn handle_non_streaming_response_guarded(
         return handle_non_streaming_response(
             app_state,
             cancellation,
-            provider_id,
+            source_id,
             log_context,
             model_str,
             response,
             url,
             cost_catalog_version,
             api_key_request_lease,
-            provider_circuit_permit,
+            source_circuit_permit,
             response_mode,
             reasoning_capture,
             upstream_error_body_limit_bytes,
@@ -786,7 +785,7 @@ pub(super) async fn handle_non_streaming_response_guarded(
             Arc::clone(app_state),
             cancellation.clone(),
             coordinator.clone(),
-            provider_id,
+            source_id,
             log_context.clone(),
             model_str,
             response,
@@ -794,7 +793,7 @@ pub(super) async fn handle_non_streaming_response_guarded(
             status_code,
             cost_catalog_version.cloned(),
             api_key_request_lease.with_coordinator(coordinator.clone()),
-            provider_circuit_permit,
+            source_circuit_permit,
             response_mode,
             reasoning_capture.cloned(),
             proxy_timeouts,
@@ -853,7 +852,9 @@ pub(super) async fn capture_non_stream_reasoning_continuation(
     if !reasoning_capture.feature_enabled {
         return;
     }
-    if !target_is_openai_compatible_generation(response_mode) {
+    if !reasoning_capture.target_is_openai_compatible_generation
+        || !target_is_openai_compatible_generation(response_mode)
+    {
         return;
     }
 

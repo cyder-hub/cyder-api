@@ -2,7 +2,10 @@ use crate::config::{NonStreamResponseConfig, ProxyTimeoutConfig};
 use crate::database::{
     DbResult,
     model::{Model, ModelDetail},
-    provider::{BootstrapProviderResult, Provider, ProviderApiKeySummary, ProviderSummaryItem},
+    provider::{
+        BootstrapProviderResult, Provider, ProviderAggregate, ProviderApiKeySummary,
+        ProviderSummaryItem,
+    },
     request_patch::RequestPatchRuleResponse,
 };
 use crate::proxy::runtime::transport::send_with_deadline;
@@ -12,7 +15,7 @@ use crate::proxy::{
 };
 use crate::service::admin::provider::{
     BootstrapProviderCommand, CreateProviderApiKeyInput, ProviderApiKeyReveal, ProviderUpsertInput,
-    ReplaceProviderApiKeyInput, UpdateProviderApiKeyInput,
+    ReplaceProviderApiKeyInput, UpdateProviderApiKeyInput, UpstreamSourceUpsertInput,
 };
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use axum::{
@@ -21,6 +24,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
+use cyder_tools::log::info;
 use reqwest::{
     StatusCode, Url,
     header::{CONTENT_TYPE, HeaderMap, HeaderValue},
@@ -32,15 +36,15 @@ use std::sync::Arc; // Added Arc
 use crate::utils::{HttpResult, ID_GENERATOR, auth::ManagerAuthContext};
 
 use super::{BaseError, auth::authorize_secret_governance_command};
-use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
 use crate::service::auxiliary_http::{
     parse_auxiliary_json, read_auxiliary_response_body, send_auxiliary_request,
 };
 use crate::service::cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch};
 use crate::service::provider_credential::{
     ProviderCredential, ProviderCredentialError, apply_provider_request_auth_header,
-    provider_upstream_protocol, resolve_draft_provider_credential,
-    resolve_saved_provider_credential, resolve_selected_provider_credential,
+    resolve_draft_provider_credential, resolve_saved_provider_credential,
+    resolve_selected_provider_credential, upstream_protocol_for_profile,
 };
 use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::SensitiveSecret;
@@ -48,24 +52,31 @@ use crate::service::upstream_response::apply_upstream_accept_encoding;
 
 #[derive(Serialize)]
 struct ProviderDetailResponse {
-    provider: Provider,
+    provider: ProviderAggregate,
     models: Vec<ModelDetail>,
     provider_keys: Vec<ProviderApiKeySummary>,
     request_patches: Vec<RequestPatchRuleResponse>,
 }
 
 #[derive(Deserialize)]
-struct BootstrapProviderPayload {
+#[serde(deny_unknown_fields)]
+struct UpstreamSourcePayload {
     endpoint: String,
+    #[serde(default)]
+    profile_type: UpstreamProfileType,
+    #[serde(default)]
+    use_proxy: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapProviderPayload {
+    upstream_source: UpstreamSourcePayload,
     api_key: String,
     model_name: String,
-    #[serde(default)]
-    provider_type: ProviderType,
     name: Option<String>,
     key: Option<String>,
     real_model_name: Option<String>,
-    #[serde(default)]
-    use_proxy: bool,
     #[serde(default)]
     save_and_test: bool,
     api_key_description: Option<String>,
@@ -79,7 +90,7 @@ struct BootstrapCheckResult {
 
 #[derive(Serialize)]
 struct BootstrapProviderResponse {
-    provider: Provider,
+    provider: ProviderAggregate,
     created_key: ProviderApiKeySummary,
     created_model: Model,
     provider_name: String,
@@ -87,7 +98,15 @@ struct BootstrapProviderResponse {
     check_result: Option<BootstrapCheckResult>,
 }
 
-async fn list() -> DbResult<HttpResult<Vec<Provider>>> {
+#[derive(Serialize)]
+struct ProviderRemoteModelsResponse {
+    source_id: i64,
+    source_key: String,
+    profile_type: UpstreamProfileType,
+    models: Value,
+}
+
+async fn list() -> DbResult<HttpResult<Vec<ProviderAggregate>>> {
     let result = Provider::list_all()?;
     Ok(HttpResult::new(result))
 }
@@ -98,28 +117,29 @@ async fn list_summary() -> DbResult<HttpResult<Vec<ProviderSummaryItem>>> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InserPayload {
     pub name: String,
     pub key: String,
-    pub endpoint: String,
-    pub use_proxy: bool,
-    pub provider_type: Option<ProviderType>,
+    pub upstream_source: UpstreamSourcePayload,
     pub provider_api_key_mode: Option<ProviderApiKeyMode>,
 }
 
 async fn insert(
     State(app_state): State<Arc<AppState>>,
     Json(payload): Json<InserPayload>,
-) -> DbResult<HttpResult<Provider>> {
+) -> DbResult<HttpResult<ProviderAggregate>> {
     let created_provider = app_state
         .admin
         .provider
         .create_provider(ProviderUpsertInput {
             name: payload.name,
             key: payload.key,
-            endpoint: payload.endpoint,
-            use_proxy: payload.use_proxy,
-            provider_type: payload.provider_type,
+            upstream_source: UpstreamSourceUpsertInput {
+                endpoint: payload.upstream_source.endpoint,
+                use_proxy: payload.upstream_source.use_proxy,
+                profile_type: Some(payload.upstream_source.profile_type),
+            },
             provider_api_key_mode: payload.provider_api_key_mode,
         })
         .await?;
@@ -127,7 +147,7 @@ async fn insert(
     Ok(HttpResult::new(created_provider))
 }
 
-async fn get_provider(Path(id): Path<i64>) -> Result<HttpResult<Provider>, BaseError> {
+async fn get_provider(Path(id): Path<i64>) -> Result<HttpResult<ProviderAggregate>, BaseError> {
     let provider = Provider::get_by_id(id)?;
 
     Ok(HttpResult::new(provider))
@@ -137,7 +157,7 @@ async fn update_provider(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(payload): Json<InserPayload>,
-) -> Result<HttpResult<Provider>, BaseError> {
+) -> Result<HttpResult<ProviderAggregate>, BaseError> {
     let updated_provider = app_state
         .admin
         .provider
@@ -146,9 +166,11 @@ async fn update_provider(
             ProviderUpsertInput {
                 name: payload.name,
                 key: payload.key,
-                endpoint: payload.endpoint,
-                use_proxy: payload.use_proxy,
-                provider_type: payload.provider_type,
+                upstream_source: UpstreamSourceUpsertInput {
+                    endpoint: payload.upstream_source.endpoint,
+                    use_proxy: payload.upstream_source.use_proxy,
+                    profile_type: Some(payload.upstream_source.profile_type),
+                },
                 provider_api_key_mode: payload.provider_api_key_mode,
             },
         )
@@ -209,7 +231,7 @@ fn provider_check_patch_error(err: ProxyError) -> BaseError {
 
 async fn resolve_provider_check_request_patches(
     app_state: &Arc<AppState>,
-    provider: &Provider,
+    provider: &ProviderAggregate,
     model: Option<&Model>,
 ) -> Result<Vec<RuntimeResolvedRequestPatch>, BaseError> {
     let cache_provider = CacheProvider::from(provider.clone());
@@ -228,7 +250,7 @@ async fn resolve_provider_check_request_patches(
 }
 
 async fn build_provider_check_request(
-    provider: &Provider,
+    provider: &ProviderAggregate,
     credential: &ProviderCredential,
     model_name: &str,
     request_patches: &[RuntimeResolvedRequestPatch],
@@ -238,14 +260,14 @@ async fn build_provider_check_request(
     let cache_provider = CacheProvider::from(provider.clone());
     apply_provider_request_auth_header(
         &mut headers,
-        &cache_provider,
-        provider_upstream_protocol(&cache_provider.provider_type),
+        &cache_provider.upstream_source,
+        upstream_protocol_for_profile(&cache_provider.upstream_source.profile_type),
         credential,
     )
     .map_err(provider_credential_error)?;
 
-    let mut request = match provider.provider_type {
-        ProviderType::Gemini => ProviderCheckRequest {
+    let mut request = match provider.upstream_source.profile_type {
+        UpstreamProfileType::Gemini => ProviderCheckRequest {
             url: format_gemini_generate_content_url(provider, model_name),
             headers,
             body: json!({
@@ -258,7 +280,7 @@ async fn build_provider_check_request(
                 ]
             }),
         },
-        ProviderType::Vertex => ProviderCheckRequest {
+        UpstreamProfileType::Vertex => ProviderCheckRequest {
             url: format_gemini_generate_content_url(provider, model_name),
             headers,
             body: json!({
@@ -271,7 +293,7 @@ async fn build_provider_check_request(
                 ]
             }),
         },
-        ProviderType::VertexOpenai => ProviderCheckRequest {
+        UpstreamProfileType::VertexOpenai => ProviderCheckRequest {
             url: format_openai_check_url(provider),
             headers,
             body: json!({
@@ -284,10 +306,13 @@ async fn build_provider_check_request(
                 ]
             }),
         },
-        ProviderType::Anthropic => {
+        UpstreamProfileType::Anthropic => {
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             ProviderCheckRequest {
-                url: format!("{}/messages", provider.endpoint.trim_end_matches('/')),
+                url: format!(
+                    "{}/messages",
+                    provider.upstream_source.endpoint.trim_end_matches('/')
+                ),
                 headers,
                 body: json!({
                     "model": model_name,
@@ -301,8 +326,11 @@ async fn build_provider_check_request(
                 }),
             }
         }
-        ProviderType::Ollama => ProviderCheckRequest {
-            url: format!("{}/api/chat", provider.endpoint.trim_end_matches('/')),
+        UpstreamProfileType::Ollama => ProviderCheckRequest {
+            url: format!(
+                "{}/api/chat",
+                provider.upstream_source.endpoint.trim_end_matches('/')
+            ),
             headers,
             body: json!({
                 "model": model_name,
@@ -315,21 +343,21 @@ async fn build_provider_check_request(
                 ]
             }),
         },
-        ProviderType::Openai | ProviderType::Responses | ProviderType::GeminiOpenai => {
-            ProviderCheckRequest {
-                url: format_openai_check_url(provider),
-                headers,
-                body: json!({
-                    "model": model_name,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": "hi"
-                        }
-                    ]
-                }),
-            }
-        }
+        UpstreamProfileType::Openai
+        | UpstreamProfileType::Responses
+        | UpstreamProfileType::GeminiOpenai => ProviderCheckRequest {
+            url: format_openai_check_url(provider),
+            headers,
+            body: json!({
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "hi"
+                    }
+                ]
+            }),
+        },
     };
 
     let mut url = Url::parse(&request.url).map_err(|e| {
@@ -347,17 +375,17 @@ async fn build_provider_check_request(
     Ok(request)
 }
 
-fn format_openai_check_url(provider: &Provider) -> String {
+fn format_openai_check_url(provider: &ProviderAggregate) -> String {
     format!(
         "{}/chat/completions",
-        provider.endpoint.trim_end_matches('/')
+        provider.upstream_source.endpoint.trim_end_matches('/')
     )
 }
 
-fn format_gemini_generate_content_url(provider: &Provider, model_name: &str) -> String {
+fn format_gemini_generate_content_url(provider: &ProviderAggregate, model_name: &str) -> String {
     format!(
         "{}/{}:generateContent",
-        provider.endpoint.trim_end_matches('/'),
+        provider.upstream_source.endpoint.trim_end_matches('/'),
         model_name
     )
 }
@@ -378,25 +406,28 @@ fn provider_credential_error(error: ProviderCredentialError) -> BaseError {
     }
 }
 
-fn normalize_provider_for_outbound(mut provider: Provider) -> Result<Provider, BaseError> {
-    provider.endpoint = normalize_provider_endpoint(&provider.endpoint).map_err(|error| {
-        BaseError::ParamInvalid(Some(format!(
-            "provider endpoint is invalid and must be repaired before use: {error}"
-        )))
-    })?;
+fn normalize_provider_for_outbound(
+    mut provider: ProviderAggregate,
+) -> Result<ProviderAggregate, BaseError> {
+    provider.upstream_source.endpoint =
+        normalize_provider_endpoint(&provider.upstream_source.endpoint).map_err(|error| {
+            BaseError::ParamInvalid(Some(format!(
+                "upstream source endpoint is invalid and must be repaired before use: {error}"
+            )))
+        })?;
     Ok(provider)
 }
 
-fn provider_type_label(provider_type: &ProviderType) -> &'static str {
-    match provider_type {
-        ProviderType::Openai => "OpenAI",
-        ProviderType::Gemini => "Gemini",
-        ProviderType::Vertex => "Vertex",
-        ProviderType::VertexOpenai => "Vertex OpenAI",
-        ProviderType::Ollama => "Ollama",
-        ProviderType::Anthropic => "Anthropic",
-        ProviderType::Responses => "Responses",
-        ProviderType::GeminiOpenai => "Gemini OpenAI",
+fn profile_type_label(profile_type: &UpstreamProfileType) -> &'static str {
+    match profile_type {
+        UpstreamProfileType::Openai => "OpenAI",
+        UpstreamProfileType::Gemini => "Gemini",
+        UpstreamProfileType::Vertex => "Vertex",
+        UpstreamProfileType::VertexOpenai => "Vertex OpenAI",
+        UpstreamProfileType::Ollama => "Ollama",
+        UpstreamProfileType::Anthropic => "Anthropic",
+        UpstreamProfileType::Responses => "Responses",
+        UpstreamProfileType::GeminiOpenai => "Gemini OpenAI",
     }
 }
 
@@ -421,12 +452,12 @@ fn endpoint_host(endpoint: &str) -> String {
         .to_string()
 }
 
-fn generated_provider_name(provider_type: &ProviderType, endpoint: &str) -> String {
+fn generated_provider_name(profile_type: &UpstreamProfileType, endpoint: &str) -> String {
     let host = endpoint_host(endpoint);
     if host.is_empty() {
-        provider_type_label(provider_type).to_string()
+        profile_type_label(profile_type).to_string()
     } else {
-        format!("{} {}", provider_type_label(provider_type), host)
+        format!("{} {}", profile_type_label(profile_type), host)
     }
 }
 
@@ -466,13 +497,13 @@ fn base_error_message(error: &BaseError) -> String {
 }
 
 fn resolve_bootstrap_identity(
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     endpoint: &str,
     name: Option<String>,
     key: Option<String>,
 ) -> Result<(String, String), BaseError> {
     let provider_name = normalize_optional_text(name)
-        .unwrap_or_else(|| generated_provider_name(provider_type, endpoint));
+        .unwrap_or_else(|| generated_provider_name(profile_type, endpoint));
 
     let provider_key = normalize_optional_text(key).ok_or_else(|| {
         BaseError::ParamInvalid(Some("provider_key must be provided".to_string()))
@@ -483,7 +514,7 @@ fn resolve_bootstrap_identity(
 
 async fn perform_provider_check(
     client: &reqwest::Client,
-    provider: &Provider,
+    provider: &ProviderAggregate,
     credential: &ProviderCredential,
     model_name: &str,
     request_patches: &[RuntimeResolvedRequestPatch],
@@ -591,7 +622,7 @@ async fn check_provider(
 
     let client = app_state
         .infra
-        .provider_client(provider.use_proxy)
+        .provider_client(provider.upstream_source.use_proxy)
         .await
         .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
@@ -605,7 +636,18 @@ async fn check_provider(
         &proxy_timeouts,
     )
     .await?;
-    Ok(HttpResult::new(serde_json::Value::Null))
+    info!(
+        "provider check succeeded: provider_id={}, source_id={}, source_key={}, profile_type={:?}",
+        provider.id,
+        provider.upstream_source.id,
+        provider.upstream_source.source_key,
+        provider.upstream_source.profile_type,
+    );
+    Ok(HttpResult::new(json!({
+        "source_id": provider.upstream_source.id,
+        "source_key": provider.upstream_source.source_key,
+        "profile_type": provider.upstream_source.profile_type,
+    })))
 }
 
 async fn bootstrap_provider(
@@ -613,8 +655,8 @@ async fn bootstrap_provider(
     Json(payload): Json<BootstrapProviderPayload>,
 ) -> Result<HttpResult<BootstrapProviderResponse>, BaseError> {
     let (provider_name, provider_key) = resolve_bootstrap_identity(
-        &payload.provider_type,
-        &payload.endpoint,
+        &payload.upstream_source.profile_type,
+        &payload.upstream_source.endpoint,
         payload.name.clone(),
         payload.key.clone(),
     )?;
@@ -623,9 +665,9 @@ async fn bootstrap_provider(
         provider_id: ID_GENERATOR.generate_id(),
         provider_key: provider_key.clone(),
         name: provider_name.clone(),
-        endpoint: payload.endpoint.clone(),
-        use_proxy: payload.use_proxy,
-        provider_type: payload.provider_type.clone(),
+        endpoint: payload.upstream_source.endpoint.clone(),
+        use_proxy: payload.upstream_source.use_proxy,
+        profile_type: payload.upstream_source.profile_type,
         provider_api_key_mode: ProviderApiKeyMode::Queue,
         api_key: payload.api_key.clone(),
         api_key_description: normalize_optional_text(payload.api_key_description.clone()),
@@ -642,7 +684,7 @@ async fn bootstrap_provider(
     let check_result = if payload.save_and_test {
         let client = app_state
             .infra
-            .provider_client(created.provider.use_proxy)
+            .provider_client(created.provider.upstream_source.use_proxy)
             .await;
         let model_name_to_check = created
             .created_model
@@ -720,16 +762,20 @@ async fn bootstrap_provider(
 async fn get_remote_models(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-) -> Result<HttpResult<Value>, BaseError> {
+) -> Result<HttpResult<ProviderRemoteModelsResponse>, BaseError> {
     let provider = normalize_provider_for_outbound(Provider::get_by_id(id)?)?;
     let cache_provider = CacheProvider::from(provider.clone());
-    let credential = resolve_selected_provider_credential(&cache_provider, &app_state)
-        .await
-        .map_err(provider_credential_error)?;
+    let credential = resolve_selected_provider_credential(
+        &cache_provider,
+        &cache_provider.upstream_source,
+        &app_state,
+    )
+    .await
+    .map_err(provider_credential_error)?;
 
     let client = app_state
         .infra
-        .auxiliary_client(provider.use_proxy)
+        .auxiliary_client(provider.upstream_source.use_proxy)
         .await
         .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
@@ -743,7 +789,20 @@ async fn get_remote_models(
     )
     .await?;
 
-    Ok(HttpResult::new(models))
+    info!(
+        "provider model discovery succeeded: provider_id={}, source_id={}, source_key={}, profile_type={:?}",
+        provider.id,
+        provider.upstream_source.id,
+        provider.upstream_source.source_key,
+        provider.upstream_source.profile_type,
+    );
+
+    Ok(HttpResult::new(ProviderRemoteModelsResponse {
+        source_id: provider.upstream_source.id,
+        source_key: provider.upstream_source.source_key,
+        profile_type: provider.upstream_source.profile_type,
+        models,
+    }))
 }
 
 async fn fetch_remote_models(
@@ -787,15 +846,15 @@ async fn fetch_remote_models(
 }
 
 fn build_remote_models_request(
-    provider: &Provider,
+    provider: &ProviderAggregate,
     cache_provider: &CacheProvider,
     credential: &ProviderCredential,
 ) -> Result<(Url, HeaderMap), BaseError> {
     let url = if matches!(
-        provider.provider_type,
-        ProviderType::Gemini | ProviderType::Vertex
+        provider.upstream_source.profile_type,
+        UpstreamProfileType::Gemini | UpstreamProfileType::Vertex
     ) {
-        Url::parse(&provider.endpoint).map_err(|e| {
+        Url::parse(&provider.upstream_source.endpoint).map_err(|e| {
             BaseError::ParamInvalid(Some(format!(
                 "Failed to parse provider endpoint as URL: {}",
                 e
@@ -804,7 +863,7 @@ fn build_remote_models_request(
     } else {
         Url::parse(&format!(
             "{}/models",
-            provider.endpoint.trim_end_matches('/')
+            provider.upstream_source.endpoint.trim_end_matches('/')
         ))
         .map_err(|e| {
             BaseError::ParamInvalid(Some(format!(
@@ -816,8 +875,8 @@ fn build_remote_models_request(
     let mut headers = HeaderMap::new();
     apply_provider_request_auth_header(
         &mut headers,
-        &cache_provider,
-        provider_upstream_protocol(&cache_provider.provider_type),
+        &cache_provider.upstream_source,
+        upstream_protocol_for_profile(&cache_provider.upstream_source.profile_type),
         &credential,
     )
     .map_err(provider_credential_error)?;
@@ -1039,15 +1098,18 @@ mod tests {
     };
     use tower::util::ServiceExt;
 
-    use super::create_provider_router;
+    use super::{ProviderRemoteModelsResponse, create_provider_router};
     use crate::controller::BaseError;
     use crate::database::TestDbContext;
     use crate::database::model::Model;
     use crate::database::provider::ProviderSummaryItem;
-    use crate::database::provider::{Provider, ProviderApiKeyRepository, ProviderApiKeySummary};
+    use crate::database::provider::{
+        Provider, ProviderAggregate, ProviderApiKeyRepository, ProviderApiKeySummary,
+    };
+    use crate::database::upstream_source::{PRIMARY_SOURCE_KEY, UpstreamSource};
     use crate::ingress::client_identity::{ClientIdentity, ClientIdentitySource};
     use crate::schema::enum_def::{
-        ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
+        ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
     };
     use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::cache::types::{
@@ -1191,7 +1253,7 @@ mod tests {
 
     #[tokio::test]
     async fn openai_style_check_request_uses_chat_completions() {
-        let provider = sample_provider(ProviderType::Openai, "https://api.example.com/v1");
+        let provider = sample_provider(UpstreamProfileType::Openai, "https://api.example.com/v1");
         let request = super::build_provider_check_request(
             &provider,
             &credential("sk-test"),
@@ -1216,7 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn gemini_openai_check_request_uses_openai_chat_completions() {
         let provider = sample_provider(
-            ProviderType::GeminiOpenai,
+            UpstreamProfileType::GeminiOpenai,
             "https://generativelanguage.googleapis.com/v1beta/openai",
         );
         let request = super::build_provider_check_request(
@@ -1245,7 +1307,10 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_check_request_uses_messages_and_version_header() {
-        let provider = sample_provider(ProviderType::Anthropic, "https://api.anthropic.com/v1");
+        let provider = sample_provider(
+            UpstreamProfileType::Anthropic,
+            "https://api.anthropic.com/v1",
+        );
         let request = super::build_provider_check_request(
             &provider,
             &credential("ak-test"),
@@ -1274,7 +1339,7 @@ mod tests {
     #[tokio::test]
     async fn gemini_check_request_uses_generate_content() {
         let provider = sample_provider(
-            ProviderType::Gemini,
+            UpstreamProfileType::Gemini,
             "https://generativelanguage.googleapis.com/v1beta/models",
         );
         let request = super::build_provider_check_request(
@@ -1302,7 +1367,7 @@ mod tests {
 
     #[tokio::test]
     async fn ollama_check_request_uses_api_chat() {
-        let provider = sample_provider(ProviderType::Ollama, "http://localhost:11434");
+        let provider = sample_provider(UpstreamProfileType::Ollama, "http://localhost:11434");
         let request = super::build_provider_check_request(
             &provider,
             &credential("ollama-key"),
@@ -1320,7 +1385,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_check_request_applies_request_patches_to_body_query_and_headers() {
-        let provider = sample_provider(ProviderType::Openai, "https://api.example.com/v1");
+        let provider = sample_provider(UpstreamProfileType::Openai, "https://api.example.com/v1");
         let request_patches = vec![
             request_patch(
                 1,
@@ -1385,7 +1450,8 @@ mod tests {
             let closed = socket.read(&mut byte).await.unwrap() == 0;
             let _ = closed_tx.send(closed);
         });
-        let provider = sample_provider(ProviderType::Openai, &format!("http://{address}/v1"));
+        let provider =
+            sample_provider(UpstreamProfileType::Openai, &format!("http://{address}/v1"));
 
         super::perform_provider_check(
             &reqwest::Client::new(),
@@ -1422,7 +1488,8 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await;
         });
-        let provider = sample_provider(ProviderType::Openai, &format!("http://{address}/v1"));
+        let provider =
+            sample_provider(UpstreamProfileType::Openai, &format!("http://{address}/v1"));
         let mut proxy_timeouts = crate::config::ProxyTimeoutConfig::default();
         proxy_timeouts.request_send_seconds = 1;
         proxy_timeouts.total_seconds = 2;
@@ -1570,27 +1637,27 @@ mod tests {
 
     #[test]
     fn remote_models_uses_shared_auth_headers_and_never_query_credentials() {
-        for (provider_type, endpoint, expected_header, expected_path) in [
+        for (profile_type, endpoint, expected_header, expected_path) in [
             (
-                ProviderType::Openai,
+                UpstreamProfileType::Openai,
                 "https://api.example.com/v1",
                 "authorization",
                 "/v1/models",
             ),
             (
-                ProviderType::Gemini,
+                UpstreamProfileType::Gemini,
                 "https://api.example.com/v1/models",
                 "x-goog-api-key",
                 "/v1/models",
             ),
             (
-                ProviderType::Anthropic,
+                UpstreamProfileType::Anthropic,
                 "https://api.example.com/v1",
                 "x-api-key",
                 "/v1/models",
             ),
         ] {
-            let provider = sample_provider(provider_type, endpoint);
+            let provider = sample_provider(profile_type, endpoint);
             let cache_provider = CacheProvider::from(provider.clone());
             let (url, headers) = super::build_remote_models_request(
                 &provider,
@@ -1623,12 +1690,15 @@ mod tests {
     #[test]
     fn bootstrap_provider_defaults_name_and_requires_explicit_key() {
         assert_eq!(
-            super::generated_provider_name(&ProviderType::Openai, "https://api.example.com/v1"),
+            super::generated_provider_name(
+                &UpstreamProfileType::Openai,
+                "https://api.example.com/v1"
+            ),
             "OpenAI api.example.com"
         );
 
         let (provider_name, provider_key) = super::resolve_bootstrap_identity(
-            &ProviderType::Openai,
+            &UpstreamProfileType::Openai,
             "https://api.example.com/v1",
             None,
             Some("  ds  ".to_string()),
@@ -1640,7 +1710,7 @@ mod tests {
         );
 
         let err = super::resolve_bootstrap_identity(
-            &ProviderType::Openai,
+            &UpstreamProfileType::Openai,
             "https://api.example.com/v1",
             None,
             Some("  ".to_string()),
@@ -1653,7 +1723,7 @@ mod tests {
     #[test]
     fn bootstrap_provider_preserves_explicit_name_and_key() {
         let (provider_name, provider_key) = super::resolve_bootstrap_identity(
-            &ProviderType::Openai,
+            &UpstreamProfileType::Openai,
             "https://api.example.com/v1",
             Some("  DeepSeek Main  ".to_string()),
             Some("  ds  ".to_string()),
@@ -1704,6 +1774,17 @@ mod tests {
             provider_key: "openai-api-example-com".to_string(),
             name: "OpenAI api.example.com".to_string(),
             is_enabled: true,
+            upstream_source: UpstreamSource {
+                id: 43,
+                provider_id: 42,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type: UpstreamProfileType::Openai,
+                endpoint: "https://api.example.com/v1".to_string(),
+                use_proxy: false,
+                deleted_at: None,
+                created_at: 0,
+                updated_at: 0,
+            },
         }]);
 
         let value = serde_json::to_value(payload).expect("summary payload should serialize");
@@ -1725,8 +1806,10 @@ mod tests {
                 "provider_key".to_string(),
                 "name".to_string(),
                 "is_enabled".to_string(),
+                "upstream_source".to_string(),
             ])
         );
+        assert_eq!(item["upstream_source"]["source_key"], PRIMARY_SOURCE_KEY);
         assert!(item.get("models").is_none());
         assert!(item.get("provider_keys").is_none());
         assert!(item.get("custom_fields").is_none());
@@ -1748,6 +1831,32 @@ mod tests {
                 let auth_context = decode_access_token(&tokens.access_token)
                     .expect("bootstrap access should decode");
 
+                let legacy_flat_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider",
+                        json!({
+                            "name": "Legacy Flat Provider",
+                            "key": "legacy-flat-provider",
+                            "endpoint": "https://api.example.com/v1",
+                            "use_proxy": false,
+                            "provider_type": "OPENAI",
+                            "provider_api_key_mode": "QUEUE"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    legacy_flat_response.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY
+                );
+                assert!(
+                    Provider::list_all()
+                        .expect("providers should list")
+                        .is_empty()
+                );
+
                 let create_response = send(
                     &app_state,
                     json_request(
@@ -1756,9 +1865,11 @@ mod tests {
                         json!({
                             "name": "HTTP Provider",
                             "key": "http-provider",
-                            "endpoint": "  HTTPS://API.EXAMPLE.COM:443/v1///  ",
-                            "use_proxy": false,
-                            "provider_type": "OPENAI",
+                            "upstream_source": {
+                                "endpoint": "  HTTPS://API.EXAMPLE.COM:443/v1///  ",
+                                "use_proxy": false,
+                                "profile_type": "OPENAI"
+                            },
                             "provider_api_key_mode": "QUEUE"
                         }),
                     ),
@@ -1769,16 +1880,21 @@ mod tests {
                 assert_eq!(create_body["code"], 0);
                 assert_eq!(create_body["data"]["provider_key"], "http-provider");
                 assert_eq!(
-                    create_body["data"]["endpoint"],
+                    create_body["data"]["upstream_source"]["endpoint"],
                     "https://api.example.com/v1"
                 );
+                assert!(create_body["data"].get("endpoint").is_none());
+                assert!(create_body["data"].get("profile_type").is_none());
 
                 let provider_id = create_body["data"]["id"]
                     .as_i64()
                     .expect("provider id should be returned");
                 let provider = Provider::get_by_id(provider_id).expect("provider should persist");
                 assert_eq!(provider.name, "HTTP Provider");
-                assert_eq!(provider.endpoint, "https://api.example.com/v1");
+                assert_eq!(
+                    provider.upstream_source.endpoint,
+                    "https://api.example.com/v1"
+                );
 
                 let provider_cached = app_state
                     .catalog
@@ -1787,7 +1903,10 @@ mod tests {
                     .expect("provider cache should load")
                     .expect("provider should exist in cache");
                 assert_eq!(provider_cached.provider_key, "http-provider");
-                assert_eq!(provider_cached.endpoint, "https://api.example.com/v1");
+                assert_eq!(
+                    provider_cached.upstream_source.endpoint,
+                    "https://api.example.com/v1"
+                );
 
                 let key_response = send(
                     &app_state,
@@ -1978,9 +2097,11 @@ mod tests {
                         json!({
                             "name": "Invalid Provider",
                             "key": "invalid-provider",
-                            "endpoint": "https://api.example.com/v1?tenant=one",
-                            "use_proxy": false,
-                            "provider_type": "OPENAI",
+                            "upstream_source": {
+                                "endpoint": "https://api.example.com/v1?tenant=one",
+                                "use_proxy": false,
+                                "profile_type": "OPENAI"
+                            },
                             "provider_api_key_mode": "QUEUE"
                         }),
                     ),
@@ -1992,7 +2113,7 @@ mod tests {
                 assert_eq!(body["code"], 1001);
                 assert_eq!(
                     body["msg"],
-                    "provider endpoint must not contain a query string"
+                    "upstream source endpoint must not contain a query string"
                 );
                 assert!(
                     Provider::list_all()
@@ -2005,7 +2126,7 @@ mod tests {
 
     fn sample_bootstrap_result() -> super::BootstrapProviderResult {
         super::BootstrapProviderResult {
-            provider: sample_provider(ProviderType::Openai, "https://api.example.com/v1"),
+            provider: sample_provider(UpstreamProfileType::Openai, "https://api.example.com/v1"),
             created_key: ProviderApiKeySummary {
                 id: 2,
                 provider_id: 1,
@@ -2045,7 +2166,7 @@ mod tests {
         ))
         .expect("manager Provider OpenAPI should parse");
         assert_eq!(document["openapi"].as_str(), Some("3.1.0"));
-        assert_eq!(document["info"]["version"].as_str(), Some("1.0.0-pre.3"));
+        assert_eq!(document["info"]["version"].as_str(), Some("1.0.0-pre.4"));
         assert_eq!(
             document["x-cyder-default-cache-control"].as_str(),
             Some("no-store")
@@ -2092,6 +2213,67 @@ mod tests {
                     .as_str(),
                 Some("#/components/headers/NoStore")
             );
+        }
+
+        let provider_operations = [
+            ("/ai/manager/api/provider", "post"),
+            ("/ai/manager/api/provider/list", "get"),
+            ("/ai/manager/api/provider/summary/list", "get"),
+            ("/ai/manager/api/provider/bootstrap", "post"),
+            ("/ai/manager/api/provider/{id}", "get"),
+            ("/ai/manager/api/provider/{id}", "put"),
+            ("/ai/manager/api/provider/{id}", "delete"),
+            ("/ai/manager/api/provider/{id}/check", "post"),
+            ("/ai/manager/api/provider/{id}/remote_models", "get"),
+        ];
+        for (path, method) in provider_operations {
+            let operation = &document["paths"][path][method];
+            assert!(operation.is_mapping(), "missing {method} {path}");
+            let success_ref = operation["responses"]["200"]["$ref"]
+                .as_str()
+                .expect("Provider success response must reference an explicit DTO");
+            let response_name = success_ref
+                .rsplit('/')
+                .next()
+                .expect("response ref should contain a name");
+            assert_eq!(
+                document["components"]["responses"][response_name]["headers"]
+                    ["Cache-Control"]["$ref"]
+                    .as_str(),
+                Some("#/components/headers/NoStore")
+            );
+        }
+
+        let aggregate_properties =
+            document["components"]["schemas"]["ProviderAggregate"]["properties"]
+                .as_mapping()
+                .expect("Provider aggregate properties should exist");
+        assert!(aggregate_properties.contains_key(serde_yaml::Value::from("upstream_source")));
+        for forbidden in ["endpoint", "provider_type", "profile_type", "use_proxy"] {
+            assert!(!aggregate_properties.contains_key(serde_yaml::Value::from(forbidden)));
+        }
+        let upsert = &document["components"]["schemas"]["ProviderUpsert"];
+        assert_eq!(upsert["additionalProperties"].as_bool(), Some(false));
+        let upsert_properties = upsert["properties"]
+            .as_mapping()
+            .expect("Provider upsert properties should exist");
+        assert!(upsert_properties.contains_key(serde_yaml::Value::from("upstream_source")));
+        for forbidden in ["endpoint", "provider_type", "profile_type", "use_proxy"] {
+            assert!(!upsert_properties.contains_key(serde_yaml::Value::from(forbidden)));
+        }
+        assert_eq!(
+            document["components"]["schemas"]["UpstreamSource"]["properties"]["source_key"]
+                ["const"]
+                .as_str(),
+            Some("primary")
+        );
+        for schema in ["SourceEvidence", "ProviderRemoteModels"] {
+            let properties = document["components"]["schemas"][schema]["properties"]
+                .as_mapping()
+                .expect("Source evidence properties should exist");
+            for field in ["source_id", "source_key", "profile_type"] {
+                assert!(properties.contains_key(serde_yaml::Value::from(field)));
+            }
         }
 
         let reveal = &document["paths"]["/ai/manager/api/provider/{id}/provider_keys/{key_id}/reveal"]
@@ -2175,19 +2357,44 @@ mod tests {
         assert_eq!(refresh_body["code"], 1201);
     }
 
-    fn sample_provider(provider_type: ProviderType, endpoint: &str) -> Provider {
-        Provider {
-            id: 1,
-            provider_key: "provider".to_string(),
-            name: "provider".to_string(),
-            endpoint: endpoint.to_string(),
-            use_proxy: false,
-            is_enabled: true,
-            deleted_at: None,
-            created_at: 0,
-            updated_at: 0,
-            provider_type,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
+    #[test]
+    fn remote_model_discovery_response_includes_exact_source_evidence() {
+        let response = ProviderRemoteModelsResponse {
+            source_id: 42,
+            source_key: "primary".to_string(),
+            profile_type: UpstreamProfileType::Gemini,
+            models: json!({"models": [{"name": "models/gemini"}]}),
+        };
+        let value = serde_json::to_value(response).expect("response should serialize");
+        assert_eq!(value["source_id"], 42);
+        assert_eq!(value["source_key"], "primary");
+        assert_eq!(value["profile_type"], "GEMINI");
+        assert_eq!(value["models"]["models"][0]["name"], "models/gemini");
+    }
+
+    fn sample_provider(profile_type: UpstreamProfileType, endpoint: &str) -> ProviderAggregate {
+        ProviderAggregate {
+            provider: Provider {
+                id: 1,
+                provider_key: "provider".to_string(),
+                name: "provider".to_string(),
+                is_enabled: true,
+                deleted_at: None,
+                created_at: 0,
+                updated_at: 0,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            upstream_source: UpstreamSource {
+                id: 2,
+                provider_id: 1,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type,
+                endpoint: endpoint.to_string(),
+                use_proxy: false,
+                deleted_at: None,
+                created_at: 0,
+                updated_at: 0,
+            },
         }
     }
 }

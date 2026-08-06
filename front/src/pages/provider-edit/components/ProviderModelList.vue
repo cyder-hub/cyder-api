@@ -503,9 +503,10 @@ const handleFetchRemoteModels = async () => {
 
     let remoteModels: ProviderRemoteModelItem[] = [];
     let isGeminiLike = false;
-    if (response) {
-      const wrappedResponse = response as Exclude<
-        ProviderRemoteModelsResponse,
+    const discoveredModels = response.models;
+    if (discoveredModels) {
+      const wrappedResponse = discoveredModels as Exclude<
+        ProviderRemoteModelsResponse["models"],
         ProviderRemoteModelItem[]
       >;
       if (Array.isArray(wrappedResponse.data)) {
@@ -513,8 +514,8 @@ const handleFetchRemoteModels = async () => {
       } else if (Array.isArray(wrappedResponse.models)) {
         remoteModels = wrappedResponse.models;
         isGeminiLike = true;
-      } else if (Array.isArray(response)) {
-        remoteModels = response;
+      } else if (Array.isArray(discoveredModels)) {
+        remoteModels = discoveredModels;
       }
     }
 
@@ -532,10 +533,10 @@ const handleFetchRemoteModels = async () => {
     const newModels: LocalEditableModelItem[] = [];
     remoteModels.forEach((item) => {
       let model_name = (item.id as string) || (item.name as string);
-      const providerType = data.provider_type;
+      const profileType = data.upstream_source.profile_type;
       const isGoogleOwned = item.owned_by === "google";
       const isGeminiProvider =
-        providerType === "GEMINI" || providerType === "VERTEX";
+        profileType === "GEMINI" || profileType === "VERTEX";
 
       if (
         (isGeminiProvider || isGeminiLike || isGoogleOwned) &&
@@ -569,10 +570,15 @@ const handleFetchRemoteModels = async () => {
       toastController.success(
         $t("providerEditPage.alert.newModelsAdded", {
           count: newModels.length,
+          source: `${response.source_key} · ${response.profile_type} · #${response.source_id}`,
         }),
       );
     } else {
-      toastController.info($t("providerEditPage.alert.noNewModels"));
+      toastController.info(
+        $t("providerEditPage.alert.noNewModelsFromSource", {
+          source: `${response.source_key} · ${response.profile_type} · #${response.source_id}`,
+        }),
+      );
     }
   } catch (error) {
     console.error("Failed to fetch remote models:", error);

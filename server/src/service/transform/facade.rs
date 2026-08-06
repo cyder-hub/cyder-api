@@ -4,16 +4,16 @@ pub use super::request::RequestTransformOutput;
 pub use super::response::ResponseTransformOutput;
 use super::{request, response};
 use crate::cost::UsageNormalization;
-use crate::schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol};
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
 use crate::utils::usage::UsageInfo;
 
 pub fn finalize_request_data(
     data: Value,
     upstream_protocol: UpstreamProtocol,
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     downstream_path: &str,
 ) -> Value {
-    request::finalize_request_data(data, upstream_protocol, provider_type, downstream_path)
+    request::finalize_request_data(data, upstream_protocol, profile_type, downstream_path)
 }
 
 pub fn transform_request_data(

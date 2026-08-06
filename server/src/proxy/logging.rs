@@ -22,10 +22,13 @@ use crate::{
             timing::{TimingSnapshot, TransportTimingState},
         },
     },
-    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
+    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProfileType, UpstreamProtocol},
     service::{
         app_state::AppState,
-        cache::types::{CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider},
+        cache::types::{
+            CacheApiKey, CacheCostCatalogVersion, CacheModel, CacheProvider, CacheUpstreamSource,
+        },
+        provider_http::normalize_provider_endpoint,
         runtime::ApiKeyCompletionDelta,
     },
     utils::{ID_GENERATOR, usage::UsageInfo},
@@ -44,6 +47,10 @@ pub struct RequestLogContext {
     pub provider_key: String,
     pub provider_name: String,
     pub model_id: i64,
+    pub source_id: i64,
+    pub source_key: String,
+    pub source_profile_type: UpstreamProfileType,
+    pub source_endpoint: Option<String>,
     pub provider_api_key_id: Option<i64>,
     pub requested_model_name: String,
     pub base_requested_model_name: String,
@@ -79,6 +86,7 @@ impl RequestLogContext {
         api_key: &CacheApiKey,
         provider: &CacheProvider,
         model: &CacheModel,
+        source: &CacheUpstreamSource,
         provider_api_key_id: Option<i64>,
         requested_model_name: &str,
         request_context: &ProxyRequestContext,
@@ -100,6 +108,10 @@ impl RequestLogContext {
             provider_key: provider.provider_key.clone(),
             provider_name: provider.name.clone(),
             model_id: model.id,
+            source_id: source.id,
+            source_key: source.source_key.clone(),
+            source_profile_type: source.profile_type,
+            source_endpoint: None,
             provider_api_key_id,
             requested_model_name: requested_model_name.to_string(),
             base_requested_model_name: requested_model_name.to_string(),
@@ -152,6 +164,14 @@ impl RequestLogContext {
         self.resolved_reasoning_suffix = resolved_reasoning_suffix.map(str::to_string);
         self.resolved_reasoning_preset = resolved_reasoning_preset.map(str::to_string);
     }
+
+    pub(crate) fn set_source_endpoint_snapshot(&mut self, normalized_endpoint: &str) {
+        self.source_endpoint = safe_source_endpoint_snapshot(normalized_endpoint);
+    }
+}
+
+fn safe_source_endpoint_snapshot(endpoint: &str) -> Option<String> {
+    normalize_provider_endpoint(endpoint).ok()
 }
 
 fn total_tokens_for_context(context: &RequestLogContext) -> i64 {
@@ -446,10 +466,14 @@ fn build_request_log(context: &RequestLogContext, now: i64) -> RequestLog {
         provider_id: Some(context.provider_id),
         provider_api_key_id: context.provider_api_key_id,
         model_id: Some(context.model_id),
+        source_id: Some(context.source_id),
         provider_key_snapshot: Some(context.provider_key.clone()),
         provider_name_snapshot: Some(context.provider_name.clone()),
         model_name_snapshot: Some(context.model_name.clone()),
         real_model_name_snapshot: Some(context.real_model_name.clone()),
+        source_key_snapshot: Some(context.source_key.clone()),
+        source_profile_type_snapshot: Some(context.source_profile_type),
+        source_endpoint_snapshot: context.source_endpoint.clone(),
         upstream_protocol: Some(context.upstream_protocol),
         upstream_http_status: context.llm_status.map(|status| i32::from(status.as_u16())),
         estimated_cost_nanos: cost.estimated_cost_nanos,
@@ -567,5 +591,21 @@ fn build_cost_outcome(context: &RequestLogContext) -> CostOutcome {
         estimated_cost_currency: Some(snapshot.currency.clone()),
         cost_catalog_version_id: Some(snapshot.cost_catalog_version_id),
         cost_snapshot_json: serde_json::to_string(&snapshot).ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_source_endpoint_snapshot;
+
+    #[test]
+    fn source_endpoint_snapshot_is_normalized_and_rejects_secret_bearing_urls() {
+        assert_eq!(
+            safe_source_endpoint_snapshot("  HTTPS://API.EXAMPLE.COM:443/v1///  ").as_deref(),
+            Some("https://api.example.com/v1")
+        );
+        assert!(safe_source_endpoint_snapshot("https://user:secret@api.example.com/v1").is_none());
+        assert!(safe_source_endpoint_snapshot("https://api.example.com/v1?key=secret").is_none());
+        assert!(safe_source_endpoint_snapshot("https://api.example.com/v1#secret").is_none());
     }
 }

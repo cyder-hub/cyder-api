@@ -13,6 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { ProviderRuntimeItem, ProviderRuntimeLevel } from "@/services/types";
+import { formatSafeSourceEndpoint } from "@/utils/sourceEvidence";
 
 const props = defineProps<{
   items: ProviderRuntimeItem[];
@@ -39,7 +40,8 @@ const { t: $t } = useAppI18n();
       <TableHeader>
         <TableRow class="bg-gray-50/80 hover:bg-gray-50/80">
           <TableHead>{{ $t("providerRuntimePage.table.provider") }}</TableHead>
-          <TableHead>{{ $t("providerRuntimePage.table.health") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.table.source") }}</TableHead>
+          <TableHead>{{ $t("providerRuntimePage.table.sourceCircuit") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.requests") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.firstResponseBody") }}</TableHead>
           <TableHead>{{ $t("providerRuntimePage.metrics.ttft") }}</TableHead>
@@ -55,13 +57,6 @@ const { t: $t } = useAppI18n();
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-medium text-gray-900">{{ item.provider_name }}</span>
-                <Badge variant="outline" class="text-[11px]">
-                  {{ item.provider_type }}
-                </Badge>
-                <Badge variant="outline" class="bg-gray-50 text-[11px] text-gray-500">
-                  {{ $t("providerRuntimePage.metrics.proxy") }}:
-                  {{ item.use_proxy ? $t("common.yes") : $t("common.no") }}
-                </Badge>
               </div>
               <p class="mt-1 font-mono text-xs text-gray-400">
                 {{ item.provider_key }}
@@ -83,6 +78,26 @@ const { t: $t } = useAppI18n();
                 }}
               </p>
             </div>
+          </TableCell>
+          <TableCell class="max-w-xs align-top">
+            <div class="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" class="font-mono text-[10px]">
+                {{ item.source_key }}
+              </Badge>
+              <span class="font-mono text-xs text-gray-700">
+                {{ item.source_profile_type }}
+              </span>
+            </div>
+            <p
+              class="mt-1 truncate font-mono text-[11px] text-gray-500"
+              :title="formatSafeSourceEndpoint(item.source_endpoint, '-')"
+            >
+              {{ formatSafeSourceEndpoint(item.source_endpoint, "-") }}
+            </p>
+            <p class="mt-1 font-mono text-[11px] text-gray-400">
+              #{{ item.source_id }} · {{ $t("providerRuntimePage.metrics.proxy") }}:
+              {{ item.source_use_proxy ? $t("common.yes") : $t("common.no") }}
+            </p>
           </TableCell>
           <TableCell class="align-top">
             <Badge :class="props.runtimeBadgeClass(item.runtime_level)">

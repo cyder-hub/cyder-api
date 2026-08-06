@@ -28,6 +28,7 @@
       "limitModel": "限制模型",
       "models": "模型",
       "apiKeys": "API密钥",
+      "primarySource": "主上游源",
       "status": "状态"
     },
     "confirmDelete": "您确定要删除渠道\"{name}\"吗？",
@@ -248,7 +249,7 @@
     "editProvider": "编辑渠道",
     "viewRecords": "查看请求记录",
     "activeOnly": "仅看启用渠道",
-    "searchPlaceholder": "按渠道名称或 Provider Key 搜索",
+    "searchPlaceholder": "搜索 Provider 或主 Source Key、Profile、Endpoint",
     "empty": "当前筛选条件下没有可展示的渠道。",
     "noData": "当前没有可用的渠道运行数据。",
     "summary": {
@@ -309,7 +310,13 @@
     },
     "table": {
       "provider": "渠道",
-      "health": "健康"
+      "health": "健康",
+      "source": "主 Source",
+      "sourceCircuit": "Source 熔断"
+    },
+    "source": {
+      "title": "主 Source",
+      "circuitScope": "熔断状态归属此 Source"
     },
     "detail": {
       "statusCode": "状态码",
@@ -354,6 +361,7 @@
       "title": "筛选",
       "apiKeyLabel": "API Key",
       "providerLabel": "渠道",
+      "sourceLabel": "Source",
       "modelLabel": "模型",
       "statusLabel": "状态",
       "searchLabel": "搜索",
@@ -381,6 +389,7 @@
       "collapse": "收起",
       "allApiKeys": "所有API Keys",
       "allProviders": "所有渠道",
+      "allSources": "所有 Source",
       "allModels": "所有模型",
       "allStatuses": "所有状态",
       "allDownstreamProtocols": "所有下游协议",
@@ -401,6 +410,7 @@
       "model": "模型",
       "requestId": "网关请求 ID",
       "provider": "渠道",
+      "source": "Source",
       "apiKey": "API Key",
       "status": "状态",
       "tokens": "Tokens",
@@ -414,6 +424,9 @@
       "noRecordsMatch": "未找到符合条件的记录。",
       "view": "查看",
       "viewDetails": "查看详情"
+    },
+    "source": {
+      "unselected": "未选定 Source"
     },
     "detailModal": {
       "fetchFailed": "获取记录详情失败"
@@ -434,6 +447,9 @@
       "summary": {
         "apiKey": "API Key",
         "provider": "渠道",
+        "source": "实际执行 Source",
+        "sourceId": "Source ID",
+        "sourceEndpoint": "Source Endpoint",
         "model": "模型",
         "realModel": "真实模型",
         "downstreamProtocol": "下游协议",
@@ -1125,6 +1141,7 @@
       "fetchDetailFailed": "获取渠道详情失败，ID {providerId}",
       "loadDataFailed": "加载渠道数据失败，ID: {providerId}。",
       "providerTypeRequired": "渠道类型不能为空。",
+      "profileTypeRequired": "主上游源 Profile 不能为空。",
       "nameRequired": "名称 不能为空。",
       "providerKeyRequired": "渠道标识 不能为空。",
       "endpointRequired": "地址 不能为空。",
@@ -1151,8 +1168,9 @@
       "deleteApiKeyFailed": "删除 API Key 失败: {error}",
       "fetchRemoteModelsFailed": "获取远程模型失败: {error}",
       "noRemoteModels": "无法从远程获取模型，或列表为空。",
-      "newModelsAdded": "已添加 {count} 个新模型。",
+      "newModelsAdded": "已从 {source} 添加 {count} 个新模型。",
       "noNewModels": "没有新模型可添加。所有远程模型可能已存在。",
+      "noNewModelsFromSource": "{source} 没有可添加的新模型；发现的模型可能都已存在。",
       "uncommittedCleared": "已清除未提交的模型。",
       "noUncommittedToClear": "没有未提交的模型可清除。",
       "noModels": "暂无模型",
@@ -1187,13 +1205,22 @@
         "identityTitle": "渠道身份",
         "identityDescription": "bootstrap 之后，渠道名称和 Key 仍然可以继续调整。"
       },
+      "logicalProvider": {
+        "title": "逻辑 Provider",
+        "description": "负责身份、模型、凭据以及 Provider 级配置。"
+      },
+      "primarySource": {
+        "title": "主上游源",
+        "description": "R3.9 唯一的执行 Source。Source Key 固定；在这里配置其线协议 Profile、Endpoint 和代理。"
+      },
       "advanced": {
         "title": "高级",
         "description": "在这里管理额外 API Key、更多模型、request patch 和远端模型同步。"
       },
       "advancedConfig": {
         "title": "推理设置",
-        "description": "管理这个渠道的推理后缀和回调修复。"
+        "description": "管理这个渠道的推理后缀和回调修复。",
+        "scopeDescription": "当前上游 Profile 为 {profile}，归属主上游源。推理、运行时特性和请求改写仍然只作用于 Provider 或 Model。"
       },
       "modelsDescription": "这里可直接编辑模型名称、映射模型名称、能力和启用状态。完整配置仍然留在 ModelEdit。"
     },
@@ -1236,6 +1263,7 @@
       "vertexPlaceholder": "粘贴完整的 Google Service Account JSON",
       "vertexHelp": "必填字段：client_email、private_key、private_key_id、token_uri。私钥只发送给 Manager API。",
       "vertexInvalid": "请输入包含全部必填字段的有效 Service Account JSON。",
+      "providerOwnership": "凭据归属逻辑 Provider。该 Provider 的所有 Source 都使用同一个凭据池；pre-1.0 不支持 Source 级凭据。",
       "mutationSuccess": "Provider 凭据已更新。",
       "mutationFailed": "凭据操作失败：{error}。由于持久化后可能发生运行时激活失败，页面已重新拉取保存状态。",
       "revealFailed": "查看 Provider 凭据失败：{error}"
@@ -1330,11 +1358,14 @@
     "labelName": "名称",
     "labelProviderKey": "渠道标识",
     "labelProviderType": "渠道类型",
+    "labelSourceKey": "Source Key",
+    "labelProfileType": "上游 Profile",
     "labelEndpoint": "地址",
     "labelUseProxy": "使用代理",
     "labelEnabled": "启用",
     "labelLimitModel": "限制模型",
     "placeholderProviderType": "选择渠道类型",
+    "placeholderProfileType": "选择上游 Profile",
     "buttonUpdateBaseInfo": "更新渠道基本信息",
     "buttonCreateBaseInfo": "创建渠道并保存基本信息",
     "sectionModels": "模型",

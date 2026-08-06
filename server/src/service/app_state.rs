@@ -17,12 +17,12 @@ use super::admin::AdminServices;
 use super::catalog::CatalogService;
 use super::infra::AppInfra;
 use super::runtime::{
-    ApiKeyGovernanceService, ProviderCircuitService, ProviderKeySelector,
-    ReasoningContinuationStore, RuntimeStateBackendBundle, RuntimeStateBackendError,
-    RuntimeStateBackendOperatorStatus, RuntimeStateBackendStatus,
+    ApiKeyGovernanceService, ProviderKeySelector, ReasoningContinuationStore,
+    RuntimeStateBackendBundle, RuntimeStateBackendError, RuntimeStateBackendOperatorStatus,
+    RuntimeStateBackendStatus, SourceCircuitService,
 };
 
-const RUNTIME_STATE_BACKEND_HEALTHCHECK_PROVIDER_ID: i64 = 0;
+const RUNTIME_STATE_BACKEND_HEALTHCHECK_SOURCE_ID: i64 = 0;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -31,7 +31,7 @@ pub struct AppState {
     pub admin: Arc<AdminServices>,
     pub provider_key_selector: Arc<ProviderKeySelector>,
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
-    pub provider_circuit: Arc<ProviderCircuitService>,
+    pub source_circuit: Arc<SourceCircuitService>,
     pub reasoning_continuation_store: Arc<dyn ReasoningContinuationStore>,
     pub metrics: Arc<MetricsService>,
     pub runtime_backend_status: Arc<RuntimeStateBackendStatus>,
@@ -130,7 +130,7 @@ impl AppState {
             admin,
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
-            provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
+            source_circuit: Arc::clone(&runtime_backend.source_circuit),
             reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
@@ -151,8 +151,8 @@ impl AppState {
         let runtime_read_error =
             if self.runtime_backend_status.effective_backend == RuntimeStateBackendType::Redis {
                 match self
-                    .provider_circuit
-                    .get_provider_health_snapshot(RUNTIME_STATE_BACKEND_HEALTHCHECK_PROVIDER_ID)
+                    .source_circuit
+                    .get_source_health_snapshot(RUNTIME_STATE_BACKEND_HEALTHCHECK_SOURCE_ID)
                     .await
                 {
                     Ok(_) => None,
@@ -160,7 +160,7 @@ impl AppState {
                         let error = err.to_string();
                         crate::warn_event!(
                             "runtime_state.read_failed",
-                            component = "provider_circuit_healthcheck",
+                            component = "source_circuit_healthcheck",
                             backend = self.runtime_backend_status.effective_backend.as_str(),
                             error = &error,
                         );
@@ -358,7 +358,7 @@ mod tests {
             admin,
             provider_key_selector,
             api_key_governance: Arc::clone(&runtime_backend.api_key_governance),
-            provider_circuit: Arc::clone(&runtime_backend.provider_circuit),
+            source_circuit: Arc::clone(&runtime_backend.source_circuit),
             reasoning_continuation_store: Arc::clone(&runtime_backend.reasoning_continuation_store),
             metrics,
             runtime_backend_status: Arc::new(runtime_backend.status),
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&app_state.admin), 1);
         assert_eq!(Arc::strong_count(&app_state.provider_key_selector), 1);
         assert_eq!(Arc::strong_count(&app_state.api_key_governance), 1);
-        assert_eq!(Arc::strong_count(&app_state.provider_circuit), 1);
+        assert_eq!(Arc::strong_count(&app_state.source_circuit), 1);
         assert_eq!(
             Arc::strong_count(&app_state.reasoning_continuation_store),
             1

@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { ProviderRuntimeItem, ProviderRuntimeLevel } from "@/services/types";
 import type { ProviderRuntimeMetric } from "../types";
+import { formatSafeSourceEndpoint } from "@/utils/sourceEvidence";
 
 const props = defineProps<{
   items: ProviderRuntimeItem[];
@@ -41,9 +42,6 @@ const { t: $t } = useI18n();
               <Badge :class="props.runtimeBadgeClass(item.runtime_level)">
                 {{ props.runtimeLevelLabel(item.runtime_level) }}
               </Badge>
-              <Badge variant="outline" class="text-[11px]">
-                {{ item.provider_type }}
-              </Badge>
             </div>
             <p class="mt-1 truncate font-mono text-xs text-gray-400" :title="item.provider_key">
               {{ item.provider_key }}
@@ -77,13 +75,33 @@ const { t: $t } = useI18n();
             </Badge>
             <Badge variant="outline" class="bg-gray-50 text-[11px] text-gray-500">
               {{ $t("providerRuntimePage.metrics.proxy") }}:
-              {{ item.use_proxy ? $t("common.yes") : $t("common.no") }}
+              {{ item.source_use_proxy ? $t("common.yes") : $t("common.no") }}
             </Badge>
           </div>
         </div>
       </div>
 
       <div class="space-y-4 px-4 pb-4 sm:px-5">
+        <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
+              {{ $t("providerRuntimePage.source.title") }}
+            </span>
+            <Badge variant="outline" class="font-mono text-[10px]">
+              {{ item.source_key }}
+            </Badge>
+            <Badge variant="outline" class="font-mono text-[10px]">
+              {{ item.source_profile_type }}
+            </Badge>
+          </div>
+          <p class="mt-2 truncate font-mono text-xs text-gray-600" :title="formatSafeSourceEndpoint(item.source_endpoint, '-')">
+            {{ formatSafeSourceEndpoint(item.source_endpoint, "-") }}
+          </p>
+          <p class="mt-1 font-mono text-[11px] text-gray-400">
+            source #{{ item.source_id }} · {{ $t("providerRuntimePage.source.circuitScope") }}
+          </p>
+        </div>
+
         <div
           v-if="item.runtime_state_backend_degraded && item.runtime_state_backend_error"
           class="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs text-orange-700"

@@ -34,6 +34,22 @@
             {{ provider.provider_key }}
           </span>
         </div>
+        <div class="rounded-lg border border-gray-100 px-3 py-2.5">
+          <div class="flex items-center justify-between gap-3">
+            <span>{{ t("providerPage.table.primarySource") }}</span>
+            <div class="flex min-w-0 items-center gap-2">
+              <Badge variant="outline" class="font-mono text-[10px]">
+                {{ provider.upstream_source.source_key }}
+              </Badge>
+              <span class="font-mono text-gray-700">
+                {{ provider.upstream_source.profile_type }}
+              </span>
+            </div>
+          </div>
+          <p class="mt-2 truncate text-right font-mono text-[11px] text-gray-500" :title="provider.upstream_source.endpoint">
+            {{ provider.upstream_source.endpoint }}
+          </p>
+        </div>
       </div>
 
       <template #actions>

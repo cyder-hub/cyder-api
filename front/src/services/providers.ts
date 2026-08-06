@@ -6,6 +6,7 @@ import type {
   ProviderBootstrapPayload,
   ProviderBootstrapResponse,
   ProviderCheckPayload,
+  ProviderCheckResponse,
   ProviderKeyPayload,
   ProviderKeyReplacePayload,
   ProviderKeyUpdatePayload,
@@ -36,7 +37,7 @@ export function createProvider(payload: ProviderPayload): Promise<ProviderBase> 
 export function updateProvider(
   id: number | string,
   payload: ProviderPayload,
-): Promise<void> {
+): Promise<ProviderBase> {
   return request.put(`/ai/manager/api/provider/${id}`, payload);
 }
 
@@ -104,6 +105,6 @@ export function deleteProviderKey(
 export function checkProviderConnection(
   id: number | string,
   payload?: ProviderCheckPayload,
-): Promise<null> {
+): Promise<ProviderCheckResponse> {
   return request.post(`/ai/manager/api/provider/${id}/check`, payload || {});
 }

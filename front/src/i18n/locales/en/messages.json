@@ -28,6 +28,7 @@
       "limitModel": "Limit Model",
       "models": "Models",
       "apiKeys": "API Keys",
+      "primarySource": "Primary Source",
       "status": "Status"
     },
     "confirmDelete": "Are you sure you want to delete the provider '{name}'?",
@@ -248,7 +249,7 @@
     "editProvider": "Edit Provider",
     "viewRecords": "View Records",
     "activeOnly": "Enabled providers only",
-    "searchPlaceholder": "Search by provider name or provider key",
+    "searchPlaceholder": "Search Provider or Primary Source key, Profile, endpoint",
     "empty": "No providers match the current filters.",
     "noData": "No provider runtime data is available yet.",
     "summary": {
@@ -309,7 +310,13 @@
     },
     "table": {
       "provider": "Provider",
-      "health": "Health"
+      "health": "Health",
+      "source": "Primary Source",
+      "sourceCircuit": "Source Circuit"
+    },
+    "source": {
+      "title": "Primary Source",
+      "circuitScope": "Circuit scoped to this Source"
     },
     "detail": {
       "statusCode": "Status code",
@@ -354,6 +361,7 @@
       "title": "Filters",
       "apiKeyLabel": "API Key",
       "providerLabel": "Provider",
+      "sourceLabel": "Source",
       "modelLabel": "Model",
       "statusLabel": "Status",
       "searchLabel": "Search",
@@ -381,6 +389,7 @@
       "collapse": "Collapse",
       "allApiKeys": "All API Keys",
       "allProviders": "All Providers",
+      "allSources": "All Sources",
       "allModels": "All Models",
       "allStatuses": "All Statuses",
       "allDownstreamProtocols": "All Downstream Protocols",
@@ -401,6 +410,7 @@
       "model": "Model",
       "requestId": "Gateway Request ID",
       "provider": "Provider",
+      "source": "Source",
       "apiKey": "API Key",
       "status": "Status",
       "tokens": "Tokens",
@@ -414,6 +424,9 @@
       "noRecordsMatch": "No records found matching your criteria.",
       "view": "View",
       "viewDetails": "View Details"
+    },
+    "source": {
+      "unselected": "Source not selected"
     },
     "detailModal": {
       "fetchFailed": "Failed to fetch record detail"
@@ -434,6 +447,9 @@
       "summary": {
         "apiKey": "API Key",
         "provider": "Provider",
+        "source": "Executed Source",
+        "sourceId": "Source ID",
+        "sourceEndpoint": "Source Endpoint",
         "model": "Model",
         "realModel": "Real Model",
         "downstreamProtocol": "Downstream Protocol",
@@ -1125,6 +1141,7 @@
       "fetchDetailFailed": "Failed to fetch provider detail for ID {providerId}",
       "loadDataFailed": "Failed to load provider data for ID: {providerId}.",
       "providerTypeRequired": "Provider Type cannot be empty.",
+      "profileTypeRequired": "Primary Source Profile cannot be empty.",
       "nameRequired": "Name cannot be empty.",
       "providerKeyRequired": "Provider Key cannot be empty.",
       "endpointRequired": "Endpoint cannot be empty.",
@@ -1151,8 +1168,9 @@
       "deleteApiKeyFailed": "Failed to delete API Key: {error}",
       "fetchRemoteModelsFailed": "Failed to fetch remote models: {error}",
       "noRemoteModels": "Could not get models from remote, or the list is empty.",
-      "newModelsAdded": "{count} new models added.",
+      "newModelsAdded": "{count} new models added from {source}.",
       "noNewModels": "No new models to add. All remote models may already exist.",
+      "noNewModelsFromSource": "No new models from {source}. All discovered models may already exist.",
       "uncommittedCleared": "Uncommitted models have been cleared.",
       "noUncommittedToClear": "No uncommitted models to clear.",
       "noModels": "No models available.",
@@ -1187,13 +1205,22 @@
         "identityTitle": "Provider Identity",
         "identityDescription": "The provider name and key can still be adjusted after bootstrap."
       },
+      "logicalProvider": {
+        "title": "Logical Provider",
+        "description": "Owns identity, models, credentials, and Provider-level configuration."
+      },
+      "primarySource": {
+        "title": "Primary Upstream Source",
+        "description": "The only execution Source in R3.9. Its key is fixed; configure its wire Profile, endpoint, and proxy here."
+      },
       "advanced": {
         "title": "Advanced",
         "description": "Manage extra API keys, more models, request patches, and remote model sync here."
       },
       "advancedConfig": {
         "title": "Reasoning",
-        "description": "Manage reasoning suffixes and callback repair for this provider."
+        "description": "Manage reasoning suffixes and callback repair for this provider.",
+        "scopeDescription": "The active upstream Profile is {profile}, owned by the Primary Source. Reasoning, runtime features, and request patches remain scoped to the Provider or Model."
       },
       "modelsDescription": "Edit model name, mapped model name, capabilities, and enabled state inline. Full configuration still lives in ModelEdit."
     },
@@ -1236,6 +1263,7 @@
       "vertexPlaceholder": "Paste the complete Google service account JSON",
       "vertexHelp": "Required fields: client_email, private_key, private_key_id, and token_uri. The private key is sent only to the manager API.",
       "vertexInvalid": "Enter a valid service account JSON with all required fields.",
+      "providerOwnership": "Credentials belong to the Logical Provider. Every Source for this Provider uses this shared credential pool; Source-level credentials are not supported before 1.0.",
       "mutationSuccess": "Provider credential updated.",
       "mutationFailed": "The credential operation failed: {error}. The saved state was refreshed because runtime activation may have failed after persistence.",
       "revealFailed": "Failed to reveal provider credential: {error}"
@@ -1330,11 +1358,14 @@
     "labelName": "Name",
     "labelProviderKey": "Provider Key",
     "labelProviderType": "Provider Type",
+    "labelSourceKey": "Source Key",
+    "labelProfileType": "Upstream Profile",
     "labelEndpoint": "Endpoint",
     "labelUseProxy": "Use Proxy",
     "labelEnabled": "Enabled",
     "labelLimitModel": "Limit Model",
     "placeholderProviderType": "Select Provider Type",
+    "placeholderProfileType": "Select Upstream Profile",
     "buttonUpdateBaseInfo": "Update Provider Base Info",
     "buttonCreateBaseInfo": "Create Provider & Save Base Info",
     "sectionModels": "Models",

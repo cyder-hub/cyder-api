@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use crate::{
     database::reasoning_config::{ReasoningPatchFamily, ReasoningPreset},
     schema::enum_def::{
-        ProviderType, RequestPatchOperation, RequestPatchPlacement, UpstreamProtocol,
+        RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType, UpstreamProtocol,
     },
-    service::{cache::types::CacheModel, provider_profile::provider_runtime_profile},
+    service::{cache::types::CacheModel, upstream_profile::upstream_runtime_profile},
 };
 
 const OPENAI_DEFAULT_REASONING_EFFORT: &str = "medium";
@@ -208,10 +208,10 @@ pub(crate) fn generate_reasoning_patches(
     }
 }
 
-pub(crate) fn upstream_protocol_for_provider_type(
-    provider_type: &ProviderType,
+pub(crate) fn upstream_protocol_for_profile(
+    profile_type: &UpstreamProfileType,
 ) -> UpstreamProtocol {
-    provider_runtime_profile(provider_type).upstream_protocol
+    upstream_runtime_profile(profile_type).upstream_protocol
 }
 
 pub(crate) fn upstream_protocols_for_reasoning_family(

@@ -94,9 +94,14 @@ export function useProviderEdit() {
           id: detail.provider.id,
           name: detail.provider.name,
           provider_key: detail.provider.provider_key,
-          provider_type: detail.provider.provider_type || "OPENAI",
-          endpoint: detail.provider.endpoint,
-          use_proxy: detail.provider.use_proxy,
+          upstream_source: {
+            id: detail.provider.upstream_source.id,
+            provider_id: detail.provider.upstream_source.provider_id,
+            source_key: detail.provider.upstream_source.source_key,
+            profile_type: detail.provider.upstream_source.profile_type,
+            endpoint: detail.provider.upstream_source.endpoint,
+            use_proxy: detail.provider.upstream_source.use_proxy,
+          },
           models: detail.models.map((m) => ({
             id: m.model.id,
             model_name: m.model.model_name,

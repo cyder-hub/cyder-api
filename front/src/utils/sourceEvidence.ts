@@ -1,0 +1,35 @@
+export interface SourceIdentityEvidence {
+  source_id: number | null;
+  source_key: string | null;
+  source_profile_type: string | null;
+}
+
+export function formatSourceIdentity(
+  source: SourceIdentityEvidence,
+  unselectedLabel: string,
+): string {
+  if (source.source_id == null) {
+    return unselectedLabel;
+  }
+
+  const key = source.source_key?.trim() || `#${source.source_id}`;
+  const profile = source.source_profile_type?.trim();
+  return profile ? `${key} · ${profile}` : key;
+}
+
+export function formatSafeSourceEndpoint(
+  endpoint: string | null | undefined,
+  emptyLabel: string,
+): string {
+  if (!endpoint) return emptyLabel;
+
+  try {
+    const parsed = new URL(endpoint);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return emptyLabel;
+    }
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return emptyLabel;
+  }
+}

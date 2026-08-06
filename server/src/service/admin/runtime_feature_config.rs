@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::controller::BaseError;
 use crate::database::model::Model;
-use crate::database::provider::Provider;
+use crate::database::provider::{Provider, ProviderAggregate};
 use crate::database::runtime_feature_config::{
     RuntimeFeatureConfig, RuntimeFeatureConfigScope, RuntimeFeatureConfigView, RuntimeFeatureKey,
 };
@@ -253,7 +253,7 @@ fn parse_feature_key(value: &str) -> Result<RuntimeFeatureKey, BaseError> {
     RuntimeFeatureKey::from_str(value).map_err(|err| BaseError::ParamInvalid(Some(err)))
 }
 
-fn ensure_provider(provider_id: i64) -> Result<Provider, BaseError> {
+fn ensure_provider(provider_id: i64) -> Result<ProviderAggregate, BaseError> {
     Provider::get_by_id(provider_id)
         .map_err(|err| map_owner_not_found(err, "provider", provider_id))
 }
@@ -393,7 +393,8 @@ mod tests {
     use crate::database::TestDbContext;
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::provider::{NewProvider, Provider};
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::app_state::create_test_app_state;
 
     use super::{
@@ -403,19 +404,29 @@ mod tests {
     use crate::database::runtime_feature_config::{RuntimeFeatureConfigScope, RuntimeFeatureKey};
 
     fn seed_provider(id: i64, provider_key: &str) -> Provider {
-        Provider::create(&NewProvider {
-            id,
-            provider_key: provider_key.to_string(),
-            name: provider_key.to_string(),
-            endpoint: "https://api.example.com/v1".to_string(),
-            use_proxy: false,
-            is_enabled: true,
-            created_at: 1,
-            updated_at: 1,
-            provider_type: ProviderType::Openai,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-        })
+        Provider::create(
+            &NewProvider {
+                id,
+                provider_key: provider_key.to_string(),
+                name: provider_key.to_string(),
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            &NewUpstreamSource {
+                id,
+                provider_id: id,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type: UpstreamProfileType::Openai,
+                endpoint: "https://api.example.com/v1".to_string(),
+                use_proxy: false,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
         .expect("provider seed should succeed")
+        .provider
     }
 
     fn seed_model(provider_id: i64, model_name: &str) -> Model {

@@ -132,7 +132,7 @@ fn test_finalize_request_data_for_vertex_openai_applies_gemini_variant_policy() 
     let finalized = finalize_request_data(
         data,
         UpstreamProtocol::Openai,
-        &ProviderType::VertexOpenai,
+        &UpstreamProfileType::VertexOpenai,
         "chat/completions",
     );
 

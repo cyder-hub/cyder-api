@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Default, Encode, Decode,
 )]
-#[db_enum(pg_type = "provider_type_enum")]
+#[db_enum(pg_type = "upstream_profile_type_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ProviderType {
+pub enum UpstreamProfileType {
     #[default]
     Openai,
     Gemini,
@@ -20,7 +20,7 @@ pub enum ProviderType {
     GeminiOpenai,
 }
 
-impl ProviderType {
+impl UpstreamProfileType {
     pub const ALL: [Self; 8] = [
         Self::Openai,
         Self::Gemini,
@@ -56,7 +56,7 @@ impl DownstreamProtocol {
 /// Wire protocol used for the selected upstream provider.
 ///
 /// Provider-specific dialects and authentication behavior belong to
-/// `ProviderRuntimeProfile`, not this protocol identity.
+/// `UpstreamRuntimeProfile`, not this protocol identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, DbEnum, Default)]
 #[db_enum(pg_type = "upstream_protocol_enum")]
 #[db_enum(value_style = "SCREAMING_SNAKE_CASE")]

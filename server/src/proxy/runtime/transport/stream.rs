@@ -32,22 +32,21 @@ use crate::{
         TimeoutPhase,
         cancellation::ProxyCancellationContext,
         logging::RequestLogContext,
-        provider_governance::{
-            record_provider_failure_or_release_probe, record_provider_success,
-            release_provider_probe,
-        },
         request_context::RequestId,
         runtime::{
             api_key_lease::ApiKeyRequestLeaseFinalizer,
             log_writer::{finalize_streaming_log_context, record_streaming_completion},
             reasoning_content_repair::continuation_snapshot_from_parts,
         },
+        source_governance::{
+            record_source_failure_or_release_probe, record_source_success, release_source_probe,
+        },
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::CacheCostCatalogVersion,
-        runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
+        runtime::{ReasoningContinuationScope, SourceCircuitProbePermit},
         transform::StreamTransformer,
         upstream_response::{UpstreamContentEncoding, parse_content_encoding},
     },
@@ -122,15 +121,22 @@ impl OpenAiReasoningStreamCapture {
         upstream_protocol: UpstreamProtocol,
         request_id: RequestId,
     ) -> Self {
-        let (scope, feature_enabled) = match capture_context {
-            Some(context) => (Some(context.scope), context.feature_enabled),
-            None => (None, false),
+        let (scope, feature_enabled, source_is_openai_compatible_generation) = match capture_context
+        {
+            Some(context) => (
+                Some(context.scope),
+                context.feature_enabled,
+                context.target_is_openai_compatible_generation,
+            ),
+            None => (None, false, false),
         };
+        let target_is_openai_compatible_generation =
+            source_is_openai_compatible_generation && upstream_protocol == UpstreamProtocol::Openai;
         Self {
             request_id,
             scope,
             feature_enabled,
-            target_is_openai_compatible_generation: upstream_protocol == UpstreamProtocol::Openai,
+            target_is_openai_compatible_generation,
             choices: BTreeMap::new(),
             parse_failed_count: 0,
         }
@@ -472,21 +478,21 @@ fn watchdog_timeout_phase(
     }
 }
 
-async fn record_guarded_provider_failure(
+async fn record_guarded_source_failure(
     app_state: &Arc<AppState>,
     cancellation: &ProxyCancellationContext,
-    provider_id: i64,
+    source_id: i64,
     model_str: &str,
-    provider_circuit_permit: Option<&ProviderCircuitProbePermit>,
+    source_circuit_permit: Option<&SourceCircuitProbePermit>,
     proxy_error: &ProxyError,
 ) {
-    record_provider_failure_or_release_probe(
+    record_source_failure_or_release_probe(
         app_state,
         cancellation,
-        provider_id,
+        source_id,
         model_str,
         proxy_error,
-        provider_circuit_permit,
+        source_circuit_permit,
     )
     .await;
 }
@@ -639,7 +645,7 @@ async fn run_guarded_stream_worker(
     app_state: Arc<AppState>,
     cancellation: ProxyCancellationContext,
     coordinator: ProxyTerminationCoordinator,
-    provider_id: i64,
+    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
@@ -647,7 +653,7 @@ async fn run_guarded_stream_worker(
     status_code: StatusCode,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     mut api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
+    source_circuit_permit: Option<SourceCircuitProbePermit>,
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
     reasoning_capture: Option<ReasoningContinuationCaptureContext>,
@@ -683,10 +689,10 @@ async fn run_guarded_stream_worker(
         let read_result = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                release_provider_probe(
+                release_source_probe(
                     &app_state,
-                    provider_id,
-                    provider_circuit_permit.as_ref(),
+                    source_id,
+                    source_circuit_permit.as_ref(),
                 )
                 .await;
                 return;
@@ -731,10 +737,10 @@ async fn run_guarded_stream_worker(
                     format!("LLM stream exceeded the {phase:?} timeout"),
                 )),
                 None => {
-                    release_provider_probe(
+                    release_source_probe(
                         &app_state,
-                        provider_id,
-                        provider_circuit_permit.as_ref(),
+                        source_id,
+                        source_circuit_permit.as_ref(),
                     )
                     .await;
                     return;
@@ -760,12 +766,12 @@ async fn run_guarded_stream_worker(
                             failure.operator_message,
                         );
                         coordinator.try_terminate_error(&proxy_error);
-                        record_guarded_provider_failure(
+                        record_guarded_source_failure(
                             &app_state,
                             &cancellation,
-                            provider_id,
+                            source_id,
                             &model_str,
-                            provider_circuit_permit.as_ref(),
+                            source_circuit_permit.as_ref(),
                             &proxy_error,
                         )
                         .await;
@@ -802,12 +808,12 @@ async fn run_guarded_stream_worker(
             Ok(None) => parser.finish(),
             Err(proxy_error) => {
                 coordinator.try_terminate_error(&proxy_error);
-                record_guarded_provider_failure(
+                record_guarded_source_failure(
                     &app_state,
                     &cancellation,
-                    provider_id,
+                    source_id,
                     &model_str,
-                    provider_circuit_permit.as_ref(),
+                    source_circuit_permit.as_ref(),
                     &proxy_error,
                 )
                 .await;
@@ -840,12 +846,12 @@ async fn run_guarded_stream_worker(
                         format!("SSE response parsing failed: {parse_error}"),
                     );
                     coordinator.try_terminate_error(&proxy_error);
-                    record_guarded_provider_failure(
+                    record_guarded_source_failure(
                         &app_state,
                         &cancellation,
-                        provider_id,
+                        source_id,
                         &model_str,
-                        provider_circuit_permit.as_ref(),
+                        source_circuit_permit.as_ref(),
                         &proxy_error,
                     )
                     .await;
@@ -890,12 +896,8 @@ async fn run_guarded_stream_worker(
                     )
                     .await;
                     if let Err(delivery_error) = delivery {
-                        release_provider_probe(
-                            &app_state,
-                            provider_id,
-                            provider_circuit_permit.as_ref(),
-                        )
-                        .await;
+                        release_source_probe(&app_state, source_id, source_circuit_permit.as_ref())
+                            .await;
                         let proxy_error = match delivery_error {
                             FrameDeliveryError::ClientCancelled
                             | FrameDeliveryError::DownstreamDropped => {
@@ -928,11 +930,11 @@ async fn run_guarded_stream_worker(
                     }
                     if downstream_openai_done {
                         if cancellation.try_provider_success() {
-                            record_provider_success(
+                            record_source_success(
                                 &app_state,
-                                provider_id,
+                                source_id,
                                 &model_str,
-                                provider_circuit_permit.as_ref(),
+                                source_circuit_permit.as_ref(),
                             )
                             .await;
                         }
@@ -967,15 +969,15 @@ async fn run_guarded_stream_worker(
     }
 
     if cancellation.is_cancelled() {
-        release_provider_probe(&app_state, provider_id, provider_circuit_permit.as_ref()).await;
+        release_source_probe(&app_state, source_id, source_circuit_permit.as_ref()).await;
         return;
     }
     if cancellation.try_provider_success() {
-        record_provider_success(
+        record_source_success(
             &app_state,
-            provider_id,
+            source_id,
             &model_str,
-            provider_circuit_permit.as_ref(),
+            source_circuit_permit.as_ref(),
         )
         .await;
     }
@@ -997,7 +999,7 @@ async fn run_guarded_stream_worker(
         )
         .await;
         if let Err(delivery_error) = delivery {
-            release_provider_probe(&app_state, provider_id, provider_circuit_permit.as_ref()).await;
+            release_source_probe(&app_state, source_id, source_circuit_permit.as_ref()).await;
             match delivery_error {
                 FrameDeliveryError::ClientCancelled | FrameDeliveryError::DownstreamDropped => {
                     cancellation.cancel_now("downstream stopped consuming the guarded stream body");
@@ -1047,14 +1049,14 @@ async fn run_guarded_stream_worker(
 pub(super) async fn handle_streaming_response_guarded(
     app_state: &Arc<AppState>,
     cancellation: ProxyCancellationContext,
-    provider_id: i64,
+    source_id: i64,
     log_context: Arc<TokioMutex<RequestLogContext>>,
     model_str: String,
     response: reqwest::Response,
     url: &str,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
+    source_circuit_permit: Option<SourceCircuitProbePermit>,
     downstream_protocol: DownstreamProtocol,
     upstream_protocol: UpstreamProtocol,
     reasoning_capture: Option<ReasoningContinuationCaptureContext>,
@@ -1077,13 +1079,13 @@ pub(super) async fn handle_streaming_response_guarded(
             Some(log_id),
             &proxy_error,
         );
-        record_provider_failure_or_release_probe(
+        record_source_failure_or_release_probe(
             app_state,
             &cancellation,
-            provider_id,
+            source_id,
             &model_str,
             &proxy_error,
-            provider_circuit_permit.as_ref(),
+            source_circuit_permit.as_ref(),
         )
         .await;
         let mut context = log_context.lock().await;
@@ -1110,7 +1112,7 @@ pub(super) async fn handle_streaming_response_guarded(
             Arc::clone(app_state),
             cancellation.clone(),
             coordinator.clone(),
-            provider_id,
+            source_id,
             log_context.clone(),
             model_str,
             response,
@@ -1118,7 +1120,7 @@ pub(super) async fn handle_streaming_response_guarded(
             status_code,
             cost_catalog_version.clone(),
             api_key_request_lease.with_coordinator(coordinator.clone()),
-            provider_circuit_permit,
+            source_circuit_permit,
             downstream_protocol,
             upstream_protocol,
             reasoning_capture,

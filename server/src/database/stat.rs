@@ -1627,11 +1627,19 @@ mod tests {
             );
 
             INSERT INTO provider (
-                id, provider_key, name, endpoint, use_proxy, is_enabled, deleted_at,
-                created_at, updated_at, provider_type, provider_api_key_mode
+                id, provider_key, name, is_enabled, deleted_at,
+                created_at, updated_at, provider_api_key_mode
             ) VALUES (
-                10, 'openai-main', 'OpenAI Main', 'https://api.example.com/v1', 0, 1, NULL,
-                1, 1, 'OPENAI', 'QUEUE'
+                10, 'openai-main', 'OpenAI Main', 1, NULL,
+                1, 1, 'QUEUE'
+            );
+
+            INSERT INTO upstream_source (
+                id, provider_id, source_key, profile_type, endpoint, use_proxy,
+                deleted_at, created_at, updated_at
+            ) VALUES (
+                15, 10, 'primary', 'OPENAI', 'https://api.example.com/v1', 0,
+                NULL, 1, 1
             );
 
             INSERT INTO provider_api_key (
@@ -1662,9 +1670,11 @@ mod tests {
                 downstream_protocol, overall_status, final_error_code, final_error_message,
                 request_received_at,
                 upstream_request_sent_at, first_response_body_at, completed_at,
-                provider_id, provider_api_key_id, model_id,
+                provider_id, provider_api_key_id, model_id, source_id,
                 provider_key_snapshot, provider_name_snapshot,
-                model_name_snapshot, real_model_name_snapshot, upstream_protocol,
+                model_name_snapshot, real_model_name_snapshot,
+                source_key_snapshot, source_profile_type_snapshot, source_endpoint_snapshot,
+                upstream_protocol,
                 estimated_cost_nanos, estimated_cost_currency,
                 total_input_tokens, total_output_tokens, reasoning_tokens, total_tokens,
                 created_at, updated_at
@@ -1674,9 +1684,10 @@ mod tests {
                 'OPENAI', 'SUCCESS', NULL, NULL,
                 1000,
                 1100, 1200, 1500,
-                10, 20, 30,
+                10, 20, 30, 15,
                 'openai-main', 'OpenAI Main',
-                'gpt-test', 'gpt-test-real', 'OPENAI',
+                'gpt-test', 'gpt-test-real',
+                'primary', 'OPENAI', 'https://api.example.com/v1', 'OPENAI',
                 500, 'USD',
                 10, 20, 5, 35,
                 1000, 1500
@@ -1686,9 +1697,10 @@ mod tests {
                 'OPENAI', 'ERROR', 'upstream_service_error', 'failed',
                 2000,
                 2250, 2300, 2550,
-                10, 20, 30,
+                10, 20, 30, 15,
                 'openai-main', 'OpenAI Main',
-                'gpt-test', 'gpt-test-real', 'OPENAI',
+                'gpt-test', 'gpt-test-real',
+                'primary', 'OPENAI', 'https://api.example.com/v1', 'OPENAI',
                 300, 'USD',
                 7, 13, 2, 22,
                 2000, 2550
@@ -1698,9 +1710,10 @@ mod tests {
                 'OPENAI', 'SUCCESS', NULL, NULL,
                 3000,
                 NULL, NULL, 3100,
-                NULL, NULL, NULL,
+                NULL, NULL, NULL, NULL,
                 NULL, NULL,
-                NULL, NULL, NULL,
+                NULL, NULL,
+                NULL, NULL, NULL, NULL,
                 NULL, NULL,
                 1, 2, 0, 3,
                 3000, 3100

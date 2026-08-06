@@ -1,8 +1,8 @@
 use serde_json::Value;
 
 use crate::{
-    schema::enum_def::ProviderType,
-    service::provider_profile::{ProviderDialect, provider_runtime_profile},
+    schema::enum_def::UpstreamProfileType,
+    service::upstream_profile::{UpstreamDialect, upstream_runtime_profile},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,10 +147,10 @@ impl OpenAiVariantPolicy {
 }
 
 pub(crate) fn determine_openai_variant(
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     downstream_path: &str,
 ) -> OpenAiVariant {
-    if provider_runtime_profile(provider_type).dialect == ProviderDialect::GeminiOpenAiCompatibility
+    if upstream_runtime_profile(profile_type).dialect == UpstreamDialect::GeminiOpenAiCompatibility
         && downstream_path == "chat/completions"
     {
         OpenAiVariant::GeminiCompat
@@ -161,18 +161,18 @@ pub(crate) fn determine_openai_variant(
 
 #[cfg(test)]
 pub(crate) fn resolve_openai_variant_policy(
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     downstream_path: &str,
 ) -> OpenAiVariantPolicy {
-    OpenAiVariantPolicy::for_variant(determine_openai_variant(provider_type, downstream_path))
+    OpenAiVariantPolicy::for_variant(determine_openai_variant(profile_type, downstream_path))
 }
 
 pub(crate) fn finalize_openai_compatible_request_payload(
     payload: &mut Value,
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     downstream_path: &str,
 ) -> (OpenAiVariant, OpenAiSanitizeReport) {
-    let variant = determine_openai_variant(provider_type, downstream_path);
+    let variant = determine_openai_variant(profile_type, downstream_path);
     let report = sanitize_openai_request_payload(payload, variant);
     (variant, report)
 }

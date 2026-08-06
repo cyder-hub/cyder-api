@@ -13,6 +13,7 @@ export const FALLBACK_RECORD_PAGE_SIZE = 10;
 export const DEFAULT_RECORD_FILTERS: RecordFilters = {
   api_key_id: 0,
   provider_id: 0,
+  source_id: 0,
   model_id: 0,
   status: "ALL",
   downstream_protocol: "ALL",
@@ -61,6 +62,7 @@ const validDetailTabs = new Set(RECORD_DETAIL_TABS.map((tab) => tab.value));
 
 export type RecordQueryEntityValidators = {
   hasProviderId?: (id: number) => boolean;
+  hasSourceId?: (id: number) => boolean;
   hasApiKeyId?: (id: number) => boolean;
   hasModelId?: (id: number) => boolean;
 };
@@ -139,6 +141,10 @@ export const parseRecordQueryState = (
     query.api_key_id,
     DEFAULT_RECORD_FILTERS.api_key_id,
   );
+  const sourceId = parsePositiveIntRecordQuery(
+    query.source_id,
+    DEFAULT_RECORD_FILTERS.source_id,
+  );
   const modelId = parsePositiveIntRecordQuery(
     query.model_id,
     DEFAULT_RECORD_FILTERS.model_id,
@@ -149,6 +155,7 @@ export const parseRecordQueryState = (
     provider_id: acceptsEntityId(providerId, validators.hasProviderId)
       ? providerId
       : 0,
+    source_id: acceptsEntityId(sourceId, validators.hasSourceId) ? sourceId : 0,
     model_id: acceptsEntityId(modelId, validators.hasModelId) ? modelId : 0,
     status: parseRecordStatusQuery(query.status),
     downstream_protocol: parseDownstreamProtocolQuery(query.downstream_protocol),
@@ -254,6 +261,7 @@ export const buildRecordListParams = (
   page_size: pageSize,
   api_key_id: filters.api_key_id || undefined,
   provider_id: filters.provider_id || undefined,
+  source_id: filters.source_id || undefined,
   model_id: filters.model_id || undefined,
   status: filters.status === "ALL" ? undefined : filters.status,
   downstream_protocol:

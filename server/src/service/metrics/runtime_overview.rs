@@ -203,6 +203,7 @@ fn total_cost_rank_value(cost: &HashMap<String, i64>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::enum_def::UpstreamProfileType;
     use crate::service::metrics::provider_runtime::{
         ProviderRuntimeCostStat, ProviderRuntimeHealthStatus, ProviderRuntimeStatusCodeStat,
     };
@@ -247,9 +248,12 @@ mod tests {
             provider_id,
             provider_key: format!("p{provider_id}"),
             provider_name: format!("Provider {provider_id}"),
-            provider_type: "OPENAI".to_string(),
             is_enabled: true,
-            use_proxy: false,
+            source_id: provider_id * 10 + 1,
+            source_key: "primary".to_string(),
+            source_profile_type: UpstreamProfileType::Openai,
+            source_endpoint: "https://api.example.com/v1".to_string(),
+            source_use_proxy: false,
             enabled_model_count: 1,
             enabled_provider_key_count: 1,
             health_status: ProviderRuntimeHealthStatus::Healthy,

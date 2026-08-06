@@ -68,12 +68,17 @@
 
           <template v-else-if="activeTab === 'advanced'">
             <div v-if="editingData.id">
+              <div class="mb-4 rounded-lg border border-gray-200 bg-gray-50/60 px-3.5 py-3 text-xs leading-5 text-gray-600">
+                {{ $t("providerEditPage.sections.advancedConfig.scopeDescription", {
+                  profile: editingData.upstream_source.profile_type,
+                }) }}
+              </div>
               <ReasoningConfigPanel
                 owner-kind="provider"
                 :owner-id="editingData.id"
                 :actions="reasoningActions"
                 :title="$t('providerEditPage.sections.advancedConfig.title')"
-                :provider-type="editingData.provider_type"
+                :profile-type="editingData.upstream_source.profile_type"
                 @saved="handleReasoningConfigSaved"
               >
                 <template #runtime-feature>

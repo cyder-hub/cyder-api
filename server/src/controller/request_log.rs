@@ -12,7 +12,7 @@ use crate::{
             RequestLogRecord,
         },
     },
-    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
+    schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProfileType, UpstreamProtocol},
     service::app_state::StateRouter,
     utils::HttpResult,
 };
@@ -25,6 +25,7 @@ struct RequestLogQueryParams {
     api_key_id: Option<i64>,
     provider_id: Option<i64>,
     model_id: Option<i64>,
+    source_id: Option<i64>,
     status: Option<RequestStatus>,
     downstream_protocol: Option<DownstreamProtocol>,
     final_error_code: Option<String>,
@@ -47,6 +48,7 @@ impl From<RequestLogQueryParams> for DbRequestLogQueryPayload {
             api_key_id: value.api_key_id,
             provider_id: value.provider_id,
             model_id: value.model_id,
+            source_id: value.source_id,
             status: value.status,
             downstream_protocol: value.downstream_protocol,
             final_error_code: value.final_error_code,
@@ -87,6 +89,9 @@ struct RequestLogListItemResponse {
     model_id: Option<i64>,
     model_name: Option<String>,
     real_model_name: Option<String>,
+    source_id: Option<i64>,
+    source_key: Option<String>,
+    source_profile_type: Option<UpstreamProfileType>,
     upstream_http_status: Option<i32>,
     estimated_cost_nanos: Option<i64>,
     estimated_cost_currency: Option<String>,
@@ -120,6 +125,9 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
             model_id: value.model_id,
             model_name: value.model_name_snapshot,
             real_model_name: value.real_model_name_snapshot,
+            source_id: value.source_id,
+            source_key: value.source_key_snapshot,
+            source_profile_type: value.source_profile_type_snapshot,
             upstream_http_status: value.upstream_http_status,
             estimated_cost_nanos: value.estimated_cost_nanos,
             estimated_cost_currency: value.estimated_cost_currency,
@@ -159,10 +167,14 @@ struct RequestLogResponse {
     provider_id: Option<i64>,
     provider_api_key_id: Option<i64>,
     model_id: Option<i64>,
+    source_id: Option<i64>,
     provider_key: Option<String>,
     provider_name: Option<String>,
     model_name: Option<String>,
     real_model_name: Option<String>,
+    source_key: Option<String>,
+    source_profile_type: Option<UpstreamProfileType>,
+    source_endpoint: Option<String>,
     upstream_protocol: Option<UpstreamProtocol>,
     upstream_http_status: Option<i32>,
     estimated_cost_nanos: Option<i64>,
@@ -212,10 +224,14 @@ impl From<RequestLogRecord> for RequestLogResponse {
             provider_id: value.provider_id,
             provider_api_key_id: value.provider_api_key_id,
             model_id: value.model_id,
+            source_id: value.source_id,
             provider_key: value.provider_key_snapshot,
             provider_name: value.provider_name_snapshot,
             model_name: value.model_name_snapshot,
             real_model_name: value.real_model_name_snapshot,
+            source_key: value.source_key_snapshot,
+            source_profile_type: value.source_profile_type_snapshot,
+            source_endpoint: value.source_endpoint_snapshot,
             upstream_protocol: value.upstream_protocol,
             upstream_http_status: value.upstream_http_status,
             estimated_cost_nanos: value.estimated_cost_nanos,
@@ -271,7 +287,7 @@ mod tests {
     use super::{DbRequestLogQueryPayload, RequestLogQueryParams, RequestLogResponse};
     use crate::{
         database::request_log::RequestLogRecord,
-        schema::enum_def::{DownstreamProtocol, RequestStatus},
+        schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProfileType},
     };
 
     fn request_log_record() -> RequestLogRecord {
@@ -301,10 +317,14 @@ mod tests {
             provider_id: None,
             provider_api_key_id: None,
             model_id: None,
+            source_id: Some(3),
             provider_key_snapshot: None,
             provider_name_snapshot: None,
             model_name_snapshot: None,
             real_model_name_snapshot: None,
+            source_key_snapshot: Some("primary".to_string()),
+            source_profile_type_snapshot: Some(UpstreamProfileType::Openai),
+            source_endpoint_snapshot: Some("https://api.example.com/v1".to_string()),
             upstream_protocol: None,
             upstream_http_status: None,
             estimated_cost_nanos: None,
@@ -352,6 +372,14 @@ mod tests {
     }
 
     #[test]
+    fn request_log_query_maps_source_filter() {
+        let parsed: RequestLogQueryParams =
+            serde_json::from_value(json!({"source_id": 42})).expect("source filter should parse");
+        let database_query = DbRequestLogQueryPayload::from(parsed);
+        assert_eq!(database_query.source_id, Some(42));
+    }
+
+    #[test]
     fn request_log_detail_serializes_directional_fields_without_legacy_aliases() {
         let response = RequestLogResponse::from(request_log_record());
         let value = serde_json::to_value(response).expect("response should serialize");
@@ -360,6 +388,10 @@ mod tests {
         assert!(value["upstream_protocol"].is_null());
         assert_eq!(value["request_id"], "018fa7d8-6a00-4c9a-8f7e-111111111111");
         assert_eq!(value["client_request_id"], "controller-test");
+        assert_eq!(value["source_id"], 3);
+        assert_eq!(value["source_key"], "primary");
+        assert_eq!(value["source_profile_type"], "OPENAI");
+        assert_eq!(value["source_endpoint"], "https://api.example.com/v1");
         assert!(value.get("first_response_body_at").is_some());
         assert!(value.get("first_token_at").is_some());
         assert!(value.get("upstream_response_headers_at").is_some());

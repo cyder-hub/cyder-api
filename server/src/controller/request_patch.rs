@@ -235,25 +235,36 @@ mod tests {
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::request_patch::RequestPatchRule;
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::app_state::{AppState, create_test_app_state};
 
     use super::create_request_patch_router;
 
     fn seed_provider(id: i64, provider_key: &str) -> Provider {
-        Provider::create(&NewProvider {
-            id,
-            provider_key: provider_key.to_string(),
-            name: provider_key.to_string(),
-            endpoint: "https://api.example.com/v1".to_string(),
-            use_proxy: false,
-            is_enabled: true,
-            created_at: 1,
-            updated_at: 1,
-            provider_type: ProviderType::Openai,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-        })
+        Provider::create(
+            &NewProvider {
+                id,
+                provider_key: provider_key.to_string(),
+                name: provider_key.to_string(),
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            &NewUpstreamSource {
+                id,
+                provider_id: id,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type: UpstreamProfileType::Openai,
+                endpoint: "https://api.example.com/v1".to_string(),
+                use_proxy: false,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
         .expect("provider seed should succeed")
+        .provider
     }
 
     fn seed_model_for_provider(provider_id: i64, model_name: &str) -> Model {

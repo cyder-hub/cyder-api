@@ -21,6 +21,7 @@ use axum::{
     routing::any,
     serve,
 };
+use diesel::prelude::*;
 use flate2::{Compression, write::GzEncoder};
 use futures::StreamExt;
 use serde::Deserialize;
@@ -41,23 +42,25 @@ use super::{
 use crate::{
     config::{ClientIdentityConfig, OutboundHttpConfig, ProxyRequestConfig},
     database::{
-        TestDbContext,
+        DbConnection, TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
+        get_connection,
         provider::{Provider, UpdateProviderData},
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
         request_patch::CreateRequestPatchPayload,
+        upstream_source::UpdateUpstreamSourceData,
     },
     ingress::client_identity::ClientIdentityResolver,
     schema::enum_def::{
-        Action, DownstreamProtocol, ProviderApiKeyMode, ProviderType, RequestPatchOperation,
-        RequestPatchPlacement, RequestStatus,
+        Action, DownstreamProtocol, ProviderApiKeyMode, RequestPatchOperation,
+        RequestPatchPlacement, RequestStatus, UpstreamProfileType,
     },
     service::{
         admin::model::UpdateModelInput,
         admin::provider::BootstrapProviderCommand,
         app_state::{AppState, create_test_app_state},
         infra::AppInfra,
-        provider_profile::provider_runtime_profile,
+        upstream_profile::upstream_runtime_profile,
     },
     utils::{
         ID_GENERATOR,
@@ -165,7 +168,7 @@ struct CancellationGolden {
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct DirectExecutionFixture {
     pub(super) protocol: DownstreamProtocol,
-    pub(super) provider_type: ProviderType,
+    pub(super) profile_type: UpstreamProfileType,
     pub(super) downstream_path: String,
     downstream_stream_path: String,
     pub(super) downstream_auth: DownstreamAuth,
@@ -553,6 +556,7 @@ pub(super) struct RouterFixture {
     provider_id: i64,
     provider_key: String,
     provider_name: String,
+    source_id: i64,
     provider_api_key_id: i64,
     model_id: i64,
     model_name: String,
@@ -586,8 +590,8 @@ impl RouterFixture {
         default_action: Action,
     ) -> Self {
         let nonce = ID_GENERATOR.generate_id();
-        let endpoint = match fixture.provider_type {
-            ProviderType::Gemini => format!("{base_url}/v1beta/models"),
+        let endpoint = match fixture.profile_type {
+            UpstreamProfileType::Gemini => format!("{base_url}/v1beta/models"),
             _ => format!("{base_url}/v1"),
         };
         let provider_key = format!("baseline-provider-{nonce}");
@@ -602,7 +606,7 @@ impl RouterFixture {
                 name: provider_name.clone(),
                 endpoint,
                 use_proxy: false,
-                provider_type: fixture.provider_type.clone(),
+                profile_type: fixture.profile_type.clone(),
                 provider_api_key_mode: ProviderApiKeyMode::Queue,
                 api_key: PROVIDER_SECRET.to_string(),
                 api_key_description: Some("direct execution regression".to_string()),
@@ -640,6 +644,7 @@ impl RouterFixture {
             provider_id: bootstrapped.provider.id,
             provider_key,
             provider_name,
+            source_id: bootstrapped.provider.upstream_source.id,
             provider_api_key_id: bootstrapped.created_key.id,
             model_id: bootstrapped.created_model.id,
             model_name: bootstrapped.created_model.model_name,
@@ -837,6 +842,7 @@ impl RouterFixture {
             let logs = RequestLog::list_full(RequestLogQueryPayload {
                 provider_id: Some(self.provider_id),
                 model_id: Some(self.model_id),
+                source_id: Some(self.source_id),
                 page: Some(1),
                 page_size: Some(10),
                 ..Default::default()
@@ -844,6 +850,17 @@ impl RouterFixture {
             .expect("request logs should be queryable")
             .list;
             if let Some(log) = logs.into_iter().find(|log| log.overall_status == expected) {
+                assert_eq!(log.source_id, Some(self.source_id));
+                assert_eq!(log.source_key_snapshot.as_deref(), Some("primary"));
+                assert!(log.source_profile_type_snapshot.is_some());
+                if expected == RequestStatus::Success {
+                    assert!(log.source_endpoint_snapshot.is_some());
+                }
+                if let Some(endpoint) = log.source_endpoint_snapshot.as_deref() {
+                    assert!(!endpoint.contains('@'));
+                    assert!(!endpoint.contains('?'));
+                    assert!(!endpoint.contains('#'));
+                }
                 return log;
             }
             assert!(
@@ -859,6 +876,7 @@ impl RouterFixture {
         RequestLog::list_full(RequestLogQueryPayload {
             provider_id: Some(self.provider_id),
             model_id: Some(self.model_id),
+            source_id: Some(self.source_id),
             page: Some(1),
             page_size: Some(10),
             ..Default::default()
@@ -1185,7 +1203,7 @@ fn assert_log_common(
     fixture: &DirectExecutionFixture,
     log: &RequestLogRecord,
 ) {
-    let upstream_protocol = provider_runtime_profile(&fixture.provider_type).upstream_protocol;
+    let upstream_protocol = upstream_runtime_profile(&fixture.profile_type).upstream_protocol;
     uuid::Uuid::parse_str(&log.request_id).expect("persisted request id should be a UUID");
     assert_eq!(
         log.client_request_id.as_deref(),
@@ -1453,11 +1471,14 @@ fn acl_rejection_precedes_invalid_provider_endpoint_preflight() {
             &UpdateProviderData {
                 provider_key: None,
                 name: None,
+                is_enabled: None,
+                provider_api_key_mode: None,
+            },
+            &UpdateUpstreamSourceData {
+                profile_type: None,
                 endpoint: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
                 use_proxy: None,
-                is_enabled: None,
-                provider_type: None,
-                provider_api_key_mode: None,
+                updated_at: 2,
             },
         )
         .expect("legacy invalid endpoint should be seeded directly");
@@ -1526,11 +1547,14 @@ fn acl_rejection_precedes_missing_proxy_preflight() {
             &UpdateProviderData {
                 provider_key: None,
                 name: None,
+                is_enabled: None,
+                provider_api_key_mode: None,
+            },
+            &UpdateUpstreamSourceData {
+                profile_type: None,
                 endpoint: None,
                 use_proxy: Some(true),
-                is_enabled: None,
-                provider_type: None,
-                provider_api_key_mode: None,
+                updated_at: 2,
             },
         )
         .expect("proxy requirement should be seeded directly");
@@ -1977,8 +2001,8 @@ fn four_public_protocols_reject_sse_encoding_before_headers() {
             assert_eq!(router.request_logs().await.len(), 1, "{name}");
             let health = router
                 .app_state
-                .provider_circuit
-                .get_provider_health_snapshot(router.provider_id)
+                .source_circuit
+                .get_source_health_snapshot(router.source_id)
                 .await
                 .unwrap();
             assert_eq!(health.consecutive_failures, 1, "{name}");
@@ -2064,8 +2088,8 @@ fn four_public_protocols_terminate_body_on_sse_parser_failure() {
             assert_eq!(router.request_logs().await.len(), 1, "{name}");
             let health = router
                 .app_state
-                .provider_circuit
-                .get_provider_health_snapshot(router.provider_id)
+                .source_circuit
+                .get_source_health_snapshot(router.source_id)
                 .await
                 .unwrap();
             assert_eq!(health.consecutive_failures, 1, "{name}");
@@ -2197,8 +2221,8 @@ fn direct_execution_sse_resource_limits_finalize_once() {
             assert_eq!(
                 router
                     .app_state
-                    .provider_circuit
-                    .get_provider_health_snapshot(router.provider_id)
+                    .source_circuit
+                    .get_source_health_snapshot(router.source_id)
                     .await
                     .unwrap()
                     .consecutive_failures,
@@ -2285,8 +2309,8 @@ fn direct_execution_openai_done_closes_upstream_and_finalizes_once() {
         drop(contexts);
         let health = router
             .app_state
-            .provider_circuit
-            .get_provider_health_snapshot(router.provider_id)
+            .source_circuit
+            .get_source_health_snapshot(router.source_id)
             .await
             .unwrap();
         assert_eq!(health.consecutive_failures, 0);
@@ -2762,14 +2786,14 @@ fn direct_execution_non_stream_identity_and_gzip_enforce_exact_and_plus_one_limi
                 "{case_name}"
             );
             router.wait_for_api_key_lease_release().await;
-            let provider_health = router
+            let source_health = router
                 .app_state
-                .provider_circuit
-                .get_provider_health_snapshot(router.provider_id)
+                .source_circuit
+                .get_source_health_snapshot(router.source_id)
                 .await
                 .unwrap();
             assert_eq!(
-                provider_health.consecutive_failures,
+                source_health.consecutive_failures,
                 if succeeds { 0 } else { 1 },
                 "{case_name}"
             );
@@ -2817,8 +2841,8 @@ fn four_public_protocols_use_existing_envelopes_for_non_stream_response_limit() 
             assert_eq!(
                 router
                     .app_state
-                    .provider_circuit
-                    .get_provider_health_snapshot(router.provider_id)
+                    .source_circuit
+                    .get_source_health_snapshot(router.source_id)
                     .await
                     .unwrap()
                     .consecutive_failures,
@@ -2878,8 +2902,8 @@ fn four_public_protocols_use_existing_envelopes_for_decoded_response_limit() {
             assert_eq!(
                 router
                     .app_state
-                    .provider_circuit
-                    .get_provider_health_snapshot(router.provider_id)
+                    .source_circuit
+                    .get_source_health_snapshot(router.source_id)
                     .await
                     .unwrap()
                     .consecutive_failures,
@@ -2965,8 +2989,8 @@ fn four_public_protocols_preserve_bounded_provider_error_when_body_reaches_hard_
             assert_eq!(
                 router
                     .app_state
-                    .provider_circuit
-                    .get_provider_health_snapshot(router.provider_id)
+                    .source_circuit
+                    .get_source_health_snapshot(router.source_id)
                     .await
                     .unwrap()
                     .consecutive_failures,
@@ -3097,8 +3121,8 @@ fn direct_execution_provider_error_hard_limit_preserves_status_and_disclosure_pr
             assert_eq!(
                 router
                     .app_state
-                    .provider_circuit
-                    .get_provider_health_snapshot(router.provider_id)
+                    .source_circuit
+                    .get_source_health_snapshot(router.source_id)
                     .await
                     .unwrap()
                     .consecutive_failures,
@@ -3313,11 +3337,14 @@ fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
             &UpdateProviderData {
                 provider_key: None,
                 name: None,
+                is_enabled: None,
+                provider_api_key_mode: None,
+            },
+            &UpdateUpstreamSourceData {
+                profile_type: None,
                 endpoint: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
                 use_proxy: None,
-                is_enabled: None,
-                provider_type: None,
-                provider_api_key_mode: None,
+                updated_at: 2,
             },
         )
         .expect("legacy invalid endpoint should be seeded directly");
@@ -3367,6 +3394,49 @@ fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
 }
 
 #[test]
+fn direct_execution_missing_primary_source_fails_before_upstream_access() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let conn = &mut get_connection().expect("test connection should load");
+        let DbConnection::Sqlite(conn) = conn else {
+            panic!("direct execution test must use SQLite");
+        };
+        diesel::delete(
+            crate::database::_sqlite_schema::upstream_source::table.find(router.source_id),
+        )
+        .execute(conn)
+        .expect("source should be removed for corruption fixture");
+        let invalidation = router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await;
+        assert!(
+            invalidation.is_err(),
+            "corrupt provider aggregate should fail closed while invalidating"
+        );
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(upstream.requests().await.is_empty());
+        assert!(router.request_logs().await.is_empty());
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
 fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_database_write() {
     let (name, fixture) = fixtures()
         .into_iter()
@@ -3388,11 +3458,14 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
             &UpdateProviderData {
                 provider_key: None,
                 name: None,
+                is_enabled: None,
+                provider_api_key_mode: None,
+            },
+            &UpdateUpstreamSourceData {
+                profile_type: None,
                 endpoint: Some(legacy_endpoint.clone()),
                 use_proxy: None,
-                is_enabled: None,
-                provider_type: None,
-                provider_api_key_mode: None,
+                updated_at: 2,
             },
         )
         .expect("legacy noncanonical endpoint should be seeded directly");
@@ -3411,6 +3484,7 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
         assert_eq!(
             Provider::get_by_id(router.provider_id)
                 .expect("provider should remain persisted")
+                .upstream_source
                 .endpoint,
             legacy_endpoint
         );
@@ -3452,11 +3526,14 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
             &UpdateProviderData {
                 provider_key: None,
                 name: None,
+                is_enabled: None,
+                provider_api_key_mode: None,
+            },
+            &UpdateUpstreamSourceData {
+                profile_type: None,
                 endpoint: None,
                 use_proxy: Some(true),
-                is_enabled: None,
-                provider_type: None,
-                provider_api_key_mode: None,
+                updated_at: 2,
             },
         )
         .expect("proxy requirement should be seeded directly");
@@ -3571,14 +3648,14 @@ fn direct_execution_regression_client_cancellation_closes_upstream_and_logs_canc
                 1,
                 "{name}: cancelled stream must persist exactly one terminal request log"
             );
-            let provider_health = router
+            let source_health = router
                 .app_state
-                .provider_circuit
-                .get_provider_health_snapshot(router.provider_id)
+                .source_circuit
+                .get_source_health_snapshot(router.source_id)
                 .await
-                .expect("provider circuit snapshot should load");
-            assert_eq!(provider_health.consecutive_failures, 0);
-            assert!(!provider_health.half_open_probe_in_flight);
+                .expect("source circuit snapshot should load");
+            assert_eq!(source_health.consecutive_failures, 0);
+            assert!(!source_health.half_open_probe_in_flight);
             assert_single_persisted_terminal_fact(
                 &persisted_sink,
                 ExecutionStage::DownstreamSend,

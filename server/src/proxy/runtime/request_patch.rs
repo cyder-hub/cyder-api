@@ -15,12 +15,13 @@ use crate::{
         },
         runtime::route_resolver::ExecutionTarget,
     },
-    schema::enum_def::{RequestPatchOperation, RequestPatchPlacement},
+    schema::enum_def::{RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType},
     service::{
         app_state::AppState,
         cache::types::{
             CacheModel, CacheProvider, CacheRequestPatchConflict, CacheResolvedRequestPatch,
-            RequestPatchSource, RuntimeRequestPatchConflict, RuntimeResolvedRequestPatch,
+            CacheUpstreamSource, RequestPatchSource, RuntimeRequestPatchConflict,
+            RuntimeResolvedRequestPatch,
         },
         request_patch::resolve_effective_request_patches,
     },
@@ -39,6 +40,9 @@ fn patch_error(message: impl Into<String>) -> ProxyError {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeRequestPatchTrace {
+    pub source_id: i64,
+    pub source_key: String,
+    pub profile_type: UpstreamProfileType,
     pub applied_rules: Vec<RuntimeResolvedRequestPatch>,
     pub conflicts: Vec<RuntimeRequestPatchConflict>,
     pub has_conflicts: bool,
@@ -369,6 +373,7 @@ pub(crate) fn apply_request_patches(
 }
 
 fn build_runtime_request_patch_trace(
+    source: &CacheUpstreamSource,
     effective_rules: Vec<CacheResolvedRequestPatch>,
     conflicts: Vec<CacheRequestPatchConflict>,
     has_conflicts: bool,
@@ -398,6 +403,9 @@ fn build_runtime_request_patch_trace(
     };
 
     Ok(RuntimeRequestPatchTrace {
+        source_id: source.id,
+        source_key: source.source_key.clone(),
+        profile_type: source.profile_type,
         applied_rules,
         conflicts: runtime_conflicts,
         has_conflicts,
@@ -664,6 +672,9 @@ pub(crate) async fn load_runtime_request_patch_trace(
     target: Option<&ExecutionTarget>,
     app_state: &Arc<AppState>,
 ) -> Result<RuntimeRequestPatchTrace, ProxyError> {
+    let source = target
+        .map(|target| target.upstream_source.as_ref())
+        .unwrap_or(&provider.upstream_source);
     let generated_rules = generate_target_reasoning_request_patches(target)?;
 
     if let Some(model) = model {
@@ -689,6 +700,7 @@ pub(crate) async fn load_runtime_request_patch_trace(
             })?;
 
         return build_runtime_request_patch_trace(
+            source,
             resolved.effective_rules.clone(),
             resolved.conflicts.clone(),
             resolved.has_conflicts,
@@ -713,6 +725,7 @@ pub(crate) async fn load_runtime_request_patch_trace(
 
     let resolved = resolve_effective_request_patches(provider.id, 0, &provider_rules, &[]);
     build_runtime_request_patch_trace(
+        source,
         resolved.effective_rules,
         resolved.conflicts,
         resolved.has_conflicts,

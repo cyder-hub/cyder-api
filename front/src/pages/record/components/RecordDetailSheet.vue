@@ -140,6 +140,10 @@ import {
 import { toastController } from "@/services/uiFeedback";
 import type { RecordRequest } from "@/services/types";
 import { copyText } from "@/utils/clipboard";
+import {
+  formatSafeSourceEndpoint,
+  formatSourceIdentity,
+} from "@/utils/sourceEvidence";
 import type { RecordDetailTab } from "../composables/useRecordDetail";
 import {
   emptyValue,
@@ -191,6 +195,25 @@ const overviewItems = computed(() => {
   return [
     { label: $t("recordPage.detailDialog.summary.apiKey"), value: props.apiKeyName },
     { label: $t("recordPage.detailDialog.summary.provider"), value: props.providerName },
+    {
+      label: $t("recordPage.detailDialog.summary.source"),
+      value: formatSourceIdentity(record, $t("recordPage.source.unselected")),
+      mono: true,
+    },
+    ...(record.source_id == null
+      ? []
+      : [
+          {
+            label: $t("recordPage.detailDialog.summary.sourceId"),
+            value: String(record.source_id),
+            mono: true,
+          },
+          {
+            label: $t("recordPage.detailDialog.summary.sourceEndpoint"),
+            value: formatSafeSourceEndpoint(record.source_endpoint, emptyValue),
+            mono: true,
+          },
+        ]),
     { label: $t("recordPage.detailDialog.summary.model"), value: value(record.model_name || record.requested_model_name), mono: true },
     { label: $t("recordPage.detailDialog.summary.realModel"), value: value(record.real_model_name), mono: true },
     { label: $t("recordPage.detailDialog.summary.downstreamProtocol"), value: value(record.downstream_protocol), mono: true },

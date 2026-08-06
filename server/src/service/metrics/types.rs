@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum MetricsScopeType {
     Global,
     Provider,
+    Source,
     Model,
     ApiKey,
     ProviderApiKey,
@@ -16,6 +17,7 @@ impl MetricsScopeType {
         match self {
             Self::Global => "global",
             Self::Provider => "provider",
+            Self::Source => "source",
             Self::Model => "model",
             Self::ApiKey => "api_key",
             Self::ProviderApiKey => "provider_api_key",

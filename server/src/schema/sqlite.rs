@@ -252,7 +252,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    use crate::schema::enum_def::ProviderTypeMapping;
     use crate::schema::enum_def::ProviderApiKeyModeMapping;
     use diesel::sql_types::{BigInt, Text, Bool, Nullable};
 
@@ -260,14 +259,28 @@ diesel::table! {
         id -> BigInt,
         provider_key -> Text,
         name -> Text,
-        endpoint -> Text,
-        use_proxy -> Bool,
         is_enabled -> Bool,
         deleted_at -> Nullable<BigInt>,
         created_at -> BigInt,
         updated_at -> BigInt,
-        provider_type -> ProviderTypeMapping,
         provider_api_key_mode -> ProviderApiKeyModeMapping,
+    }
+}
+
+diesel::table! {
+    use crate::schema::enum_def::UpstreamProfileTypeMapping;
+    use diesel::sql_types::{BigInt, Text, Bool, Nullable};
+
+    upstream_source (id) {
+        id -> BigInt,
+        provider_id -> BigInt,
+        source_key -> Text,
+        profile_type -> UpstreamProfileTypeMapping,
+        endpoint -> Text,
+        use_proxy -> Bool,
+        deleted_at -> Nullable<BigInt>,
+        created_at -> BigInt,
+        updated_at -> BigInt,
     }
 }
 
@@ -295,6 +308,7 @@ diesel::table! {
 diesel::table! {
     use crate::schema::enum_def::DownstreamProtocolMapping;
     use crate::schema::enum_def::RequestStatusMapping;
+    use crate::schema::enum_def::UpstreamProfileTypeMapping;
     use crate::schema::enum_def::UpstreamProtocolMapping;
     use diesel::sql_types::{BigInt, Bool, Integer, Nullable, Text};
 
@@ -320,10 +334,14 @@ diesel::table! {
         provider_id -> Nullable<BigInt>,
         provider_api_key_id -> Nullable<BigInt>,
         model_id -> Nullable<BigInt>,
+        source_id -> Nullable<BigInt>,
         provider_key_snapshot -> Nullable<Text>,
         provider_name_snapshot -> Nullable<Text>,
         model_name_snapshot -> Nullable<Text>,
         real_model_name_snapshot -> Nullable<Text>,
+        source_key_snapshot -> Nullable<Text>,
+        source_profile_type_snapshot -> Nullable<UpstreamProfileTypeMapping>,
+        source_endpoint_snapshot -> Nullable<Text>,
         upstream_protocol -> Nullable<UpstreamProtocolMapping>,
         upstream_http_status -> Nullable<Integer>,
         #[sql_name = "overall_status"]
@@ -458,8 +476,10 @@ diesel::joinable!(request_log -> cost_catalogs (cost_catalog_id));
 diesel::joinable!(request_log -> model (model_id));
 diesel::joinable!(request_log -> provider (provider_id));
 diesel::joinable!(request_log -> provider_api_key (provider_api_key_id));
+diesel::joinable!(request_log -> upstream_source (source_id));
 diesel::joinable!(request_patch_rule -> model (model_id));
 diesel::joinable!(request_patch_rule -> provider (provider_id));
+diesel::joinable!(upstream_source -> provider (provider_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     api_key,
@@ -484,4 +504,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     runtime_feature_config,
     request_log,
     request_patch_rule,
+    upstream_source,
 );

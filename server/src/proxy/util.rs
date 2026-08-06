@@ -8,8 +8,10 @@ use crate::{
     cost::UsageNormalization,
     schema::enum_def::UpstreamProtocol,
     service::app_state::AppState,
-    service::cache::types::{CacheCostCatalogVersion, CacheModel, CacheProvider},
-    service::provider_profile::provider_runtime_profile,
+    service::cache::types::{
+        CacheCostCatalogVersion, CacheModel, CacheProvider, CacheUpstreamSource,
+    },
+    service::upstream_profile::upstream_runtime_profile,
 };
 
 pub(super) fn sha256_hex(body: impl AsRef<[u8]>) -> String {
@@ -85,8 +87,8 @@ pub(super) fn parse_utility_usage_normalization(
     })
 }
 
-pub(crate) fn determine_upstream_protocol(provider: &CacheProvider) -> UpstreamProtocol {
-    provider_runtime_profile(&provider.provider_type).upstream_protocol
+pub(crate) fn determine_upstream_protocol(source: &CacheUpstreamSource) -> UpstreamProtocol {
+    upstream_runtime_profile(&source.profile_type).upstream_protocol
 }
 
 // Formats a model string for logging purposes.
@@ -114,8 +116,8 @@ mod tests {
         determine_upstream_protocol, json_top_level_field_count_from_bytes,
         parse_utility_usage_normalization, sha256_hex, top_level_json_field_count,
     };
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
-    use crate::service::cache::types::CacheProvider;
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
+    use crate::service::cache::types::{CacheProvider, CacheUpstreamSource};
     use serde_json::Value;
 
     #[test]
@@ -124,15 +126,19 @@ mod tests {
             id: 1,
             provider_key: "provider".to_string(),
             name: "provider".to_string(),
-            endpoint: "https://example.com".to_string(),
-            use_proxy: false,
-            provider_type: ProviderType::GeminiOpenai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
             is_enabled: true,
+            upstream_source: CacheUpstreamSource {
+                id: 2,
+                source_key: "primary".to_string(),
+                profile_type: UpstreamProfileType::GeminiOpenai,
+                endpoint: "https://example.com".to_string(),
+                use_proxy: false,
+            },
         };
 
         assert_eq!(
-            determine_upstream_protocol(&provider),
+            determine_upstream_protocol(&provider.upstream_source),
             crate::schema::enum_def::UpstreamProtocol::Openai
         );
     }

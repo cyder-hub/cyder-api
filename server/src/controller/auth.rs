@@ -2932,9 +2932,11 @@ mod tests {
                         Some(json!({
                             "name": "Sensitive Provider",
                             "key": "sensitive-provider",
-                            "endpoint": "https://api.example.com/v1",
-                            "use_proxy": false,
-                            "provider_type": "OPENAI",
+                            "upstream_source": {
+                                "endpoint": "https://api.example.com/v1",
+                                "use_proxy": false,
+                                "profile_type": "OPENAI"
+                            },
                             "provider_api_key_mode": "QUEUE"
                         })),
                         None,
@@ -3124,9 +3126,11 @@ mod tests {
                         Some(json!({
                             "name": "Delete Provider",
                             "key": "delete-provider",
-                            "endpoint": "https://delete.example.com/v1",
-                            "use_proxy": false,
-                            "provider_type": "OPENAI",
+                            "upstream_source": {
+                                "endpoint": "https://delete.example.com/v1",
+                                "use_proxy": false,
+                                "profile_type": "OPENAI"
+                            },
                             "provider_api_key_mode": "QUEUE"
                         })),
                         None,
@@ -3314,9 +3318,11 @@ mod tests {
                         Some(json!({
                             "name": "Unavailable Provider",
                             "key": "unavailable-provider",
-                            "endpoint": "https://api.example.com/v1",
-                            "use_proxy": false,
-                            "provider_type": "OPENAI",
+                            "upstream_source": {
+                                "endpoint": "https://api.example.com/v1",
+                                "use_proxy": false,
+                                "profile_type": "OPENAI"
+                            },
                             "provider_api_key_mode": "QUEUE"
                         })),
                         None,

@@ -6,15 +6,15 @@ use uuid::Uuid;
 use crate::config::ProviderGovernanceConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderHealthStatus {
+pub enum SourceHealthStatus {
     Healthy,
     Open,
     HalfOpen,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderHealthSnapshot {
-    pub status: ProviderHealthStatus,
+pub struct SourceHealthSnapshot {
+    pub status: SourceHealthStatus,
     pub consecutive_failures: u32,
     pub half_open_probe_in_flight: bool,
     pub opened_at: Option<i64>,
@@ -23,16 +23,16 @@ pub struct ProviderHealthSnapshot {
     pub last_error: Option<String>,
 }
 
-impl Default for ProviderHealthSnapshot {
+impl Default for SourceHealthSnapshot {
     fn default() -> Self {
         Self::synthetic_healthy()
     }
 }
 
-impl ProviderHealthSnapshot {
+impl SourceHealthSnapshot {
     pub fn synthetic_healthy() -> Self {
         Self {
-            status: ProviderHealthStatus::Healthy,
+            status: SourceHealthStatus::Healthy,
             consecutive_failures: 0,
             half_open_probe_in_flight: false,
             opened_at: None,
@@ -44,24 +44,24 @@ impl ProviderHealthSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderCircuitProbePermit {
-    provider_id: i64,
+pub struct SourceCircuitProbePermit {
+    source_id: i64,
     decision_id: String,
     lease_id: String,
     issued_at_ms: i64,
     probe_expires_at_ms: i64,
 }
 
-impl ProviderCircuitProbePermit {
+impl SourceCircuitProbePermit {
     pub(crate) fn new(
-        provider_id: i64,
+        source_id: i64,
         decision_id: String,
         lease_id: String,
         issued_at_ms: i64,
         probe_expires_at_ms: i64,
     ) -> Self {
         Self {
-            provider_id,
+            source_id,
             decision_id,
             lease_id,
             issued_at_ms,
@@ -69,8 +69,8 @@ impl ProviderCircuitProbePermit {
         }
     }
 
-    pub fn provider_id(&self) -> i64 {
-        self.provider_id
+    pub fn source_id(&self) -> i64 {
+        self.source_id
     }
 
     pub fn decision_id(&self) -> &str {
@@ -95,24 +95,24 @@ impl ProviderCircuitProbePermit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderCircuitRejection {
+pub enum SourceCircuitRejection {
     OpenCooldown,
     HalfOpenProbeInFlight,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProviderCircuitDecision {
-    pub snapshot: ProviderHealthSnapshot,
+pub struct SourceCircuitDecision {
+    pub snapshot: SourceHealthSnapshot,
     pub allowed: bool,
-    pub rejection: Option<ProviderCircuitRejection>,
+    pub rejection: Option<SourceCircuitRejection>,
     pub retry_after: Option<Duration>,
-    pub probe_permit: Option<ProviderCircuitProbePermit>,
+    pub probe_permit: Option<SourceCircuitProbePermit>,
 }
 
-impl ProviderCircuitDecision {
+impl SourceCircuitDecision {
     pub(crate) fn allowed(
-        snapshot: ProviderHealthSnapshot,
-        probe_permit: Option<ProviderCircuitProbePermit>,
+        snapshot: SourceHealthSnapshot,
+        probe_permit: Option<SourceCircuitProbePermit>,
     ) -> Self {
         Self {
             snapshot,
@@ -124,8 +124,8 @@ impl ProviderCircuitDecision {
     }
 
     pub(crate) fn rejected(
-        snapshot: ProviderHealthSnapshot,
-        rejection: ProviderCircuitRejection,
+        snapshot: SourceHealthSnapshot,
+        rejection: SourceCircuitRejection,
         retry_after: Option<Duration>,
     ) -> Self {
         Self {
@@ -139,37 +139,37 @@ impl ProviderCircuitDecision {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProviderCircuitError {
+pub enum SourceCircuitError {
     Backend(String),
 }
 
-impl fmt::Display for ProviderCircuitError {
+impl fmt::Display for SourceCircuitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProviderCircuitError::Backend(message) => {
-                write!(f, "provider circuit backend error: {message}")
+            SourceCircuitError::Backend(message) => {
+                write!(f, "source circuit backend error: {message}")
             }
         }
     }
 }
 
-impl std::error::Error for ProviderCircuitError {}
+impl std::error::Error for SourceCircuitError {}
 
 #[derive(Clone, Debug)]
-pub(crate) struct ProviderHealthState {
-    pub(crate) status: ProviderHealthStatus,
+pub(crate) struct SourceHealthState {
+    pub(crate) status: SourceHealthStatus,
     pub(crate) consecutive_failures: u32,
     pub(crate) opened_at: Option<i64>,
-    pub(crate) half_open_probe: Option<ProviderCircuitProbePermit>,
+    pub(crate) half_open_probe: Option<SourceCircuitProbePermit>,
     pub(crate) last_failure_at: Option<i64>,
     pub(crate) last_recovered_at: Option<i64>,
     pub(crate) last_error: Option<String>,
 }
 
-impl Default for ProviderHealthState {
+impl Default for SourceHealthState {
     fn default() -> Self {
         Self {
-            status: ProviderHealthStatus::Healthy,
+            status: SourceHealthStatus::Healthy,
             consecutive_failures: 0,
             opened_at: None,
             half_open_probe: None,
@@ -180,9 +180,9 @@ impl Default for ProviderHealthState {
     }
 }
 
-impl ProviderHealthState {
-    pub(crate) fn snapshot(&self) -> ProviderHealthSnapshot {
-        ProviderHealthSnapshot {
+impl SourceHealthState {
+    pub(crate) fn snapshot(&self) -> SourceHealthSnapshot {
+        SourceHealthSnapshot {
             status: self.status,
             consecutive_failures: self.consecutive_failures,
             half_open_probe_in_flight: self.half_open_probe.is_some(),
@@ -213,15 +213,15 @@ impl ProviderHealthState {
 
     fn create_probe_permit(
         &mut self,
-        provider_id: i64,
+        source_id: i64,
         now_ms: i64,
         probe_lease_ttl: Duration,
-    ) -> ProviderCircuitProbePermit {
-        self.status = ProviderHealthStatus::HalfOpen;
+    ) -> SourceCircuitProbePermit {
+        self.status = SourceHealthStatus::HalfOpen;
         let ttl_ms = i64::try_from(probe_lease_ttl.as_millis()).unwrap_or(i64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
-        let permit = ProviderCircuitProbePermit::new(
-            provider_id,
+        let permit = SourceCircuitProbePermit::new(
+            source_id,
             Uuid::new_v4().to_string(),
             Uuid::new_v4().to_string(),
             now_ms,
@@ -231,59 +231,54 @@ impl ProviderHealthState {
         permit
     }
 
-    fn probe_permit_matches(&self, permit: Option<&ProviderCircuitProbePermit>) -> bool {
+    fn probe_permit_matches(&self, permit: Option<&SourceCircuitProbePermit>) -> bool {
         let Some(permit) = permit else {
             return false;
         };
         self.half_open_probe.as_ref().is_some_and(|active| {
-            active.provider_id == permit.provider_id && active.lease_id == permit.lease_id
+            active.source_id == permit.source_id && active.lease_id == permit.lease_id
         })
     }
 
     pub(crate) fn allow_request(
         &mut self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
         now_ms: i64,
         probe_lease_ttl: Duration,
-    ) -> ProviderCircuitDecision {
+    ) -> SourceCircuitDecision {
         if !config.is_enabled() {
-            return ProviderCircuitDecision::allowed(
-                ProviderHealthSnapshot::synthetic_healthy(),
-                None,
-            );
+            return SourceCircuitDecision::allowed(SourceHealthSnapshot::synthetic_healthy(), None);
         }
 
         self.prune_expired_probe(now_ms);
 
         match self.status {
-            ProviderHealthStatus::Healthy => {
-                ProviderCircuitDecision::allowed(self.snapshot(), None)
-            }
-            ProviderHealthStatus::Open => {
+            SourceHealthStatus::Healthy => SourceCircuitDecision::allowed(self.snapshot(), None),
+            SourceHealthStatus::Open => {
                 let retry_after = self.retry_after_for_open(config, now_ms);
                 if !retry_after.is_zero() {
-                    return ProviderCircuitDecision::rejected(
+                    return SourceCircuitDecision::rejected(
                         self.snapshot(),
-                        ProviderCircuitRejection::OpenCooldown,
+                        SourceCircuitRejection::OpenCooldown,
                         Some(retry_after),
                     );
                 }
 
-                let permit = self.create_probe_permit(provider_id, now_ms, probe_lease_ttl);
-                ProviderCircuitDecision::allowed(self.snapshot(), Some(permit))
+                let permit = self.create_probe_permit(source_id, now_ms, probe_lease_ttl);
+                SourceCircuitDecision::allowed(self.snapshot(), Some(permit))
             }
-            ProviderHealthStatus::HalfOpen => {
+            SourceHealthStatus::HalfOpen => {
                 if self.half_open_probe.is_some() {
-                    return ProviderCircuitDecision::rejected(
+                    return SourceCircuitDecision::rejected(
                         self.snapshot(),
-                        ProviderCircuitRejection::HalfOpenProbeInFlight,
+                        SourceCircuitRejection::HalfOpenProbeInFlight,
                         None,
                     );
                 }
 
-                let permit = self.create_probe_permit(provider_id, now_ms, probe_lease_ttl);
-                ProviderCircuitDecision::allowed(self.snapshot(), Some(permit))
+                let permit = self.create_probe_permit(source_id, now_ms, probe_lease_ttl);
+                SourceCircuitDecision::allowed(self.snapshot(), Some(permit))
             }
         }
     }
@@ -292,7 +287,7 @@ impl ProviderHealthState {
         &mut self,
         config: &ProviderGovernanceConfig,
         now_ms: i64,
-        permit: Option<&ProviderCircuitProbePermit>,
+        permit: Option<&SourceCircuitProbePermit>,
     ) {
         if !config.is_enabled() {
             return;
@@ -300,20 +295,20 @@ impl ProviderHealthState {
 
         self.prune_expired_probe(now_ms);
         let matching_probe =
-            self.status == ProviderHealthStatus::HalfOpen && self.probe_permit_matches(permit);
+            self.status == SourceHealthStatus::HalfOpen && self.probe_permit_matches(permit);
         if permit.is_some() && !matching_probe {
             return;
         }
         if matches!(
             self.status,
-            ProviderHealthStatus::Open | ProviderHealthStatus::HalfOpen
+            SourceHealthStatus::Open | SourceHealthStatus::HalfOpen
         ) && !matching_probe
         {
             return;
         }
 
-        let was_unhealthy = self.status != ProviderHealthStatus::Healthy;
-        self.status = ProviderHealthStatus::Healthy;
+        let was_unhealthy = self.status != SourceHealthStatus::Healthy;
+        self.status = SourceHealthStatus::Healthy;
         self.consecutive_failures = 0;
         self.opened_at = None;
         self.half_open_probe = None;
@@ -328,7 +323,7 @@ impl ProviderHealthState {
         config: &ProviderGovernanceConfig,
         now_ms: i64,
         error_message: String,
-        permit: Option<&ProviderCircuitProbePermit>,
+        permit: Option<&SourceCircuitProbePermit>,
     ) {
         if !config.is_enabled() {
             return;
@@ -337,11 +332,11 @@ impl ProviderHealthState {
         self.prune_expired_probe(now_ms);
 
         let half_open_probe_failed =
-            self.status == ProviderHealthStatus::HalfOpen && self.probe_permit_matches(permit);
+            self.status == SourceHealthStatus::HalfOpen && self.probe_permit_matches(permit);
         if permit.is_some() && !half_open_probe_failed {
             return;
         }
-        if self.status == ProviderHealthStatus::HalfOpen && !half_open_probe_failed {
+        if self.status == SourceHealthStatus::HalfOpen && !half_open_probe_failed {
             return;
         }
 
@@ -352,7 +347,7 @@ impl ProviderHealthState {
         if half_open_probe_failed
             || self.consecutive_failures >= config.consecutive_failure_threshold
         {
-            self.status = ProviderHealthStatus::Open;
+            self.status = SourceHealthStatus::Open;
             self.opened_at = Some(now_ms);
             self.half_open_probe = None;
         }
@@ -362,51 +357,48 @@ impl ProviderHealthState {
         &mut self,
         config: &ProviderGovernanceConfig,
         now_ms: i64,
-        permit: Option<&ProviderCircuitProbePermit>,
+        permit: Option<&SourceCircuitProbePermit>,
     ) {
         if !config.is_enabled() {
             return;
         }
 
         self.prune_expired_probe(now_ms);
-        if self.status == ProviderHealthStatus::HalfOpen && self.probe_permit_matches(permit) {
+        if self.status == SourceHealthStatus::HalfOpen && self.probe_permit_matches(permit) {
             self.half_open_probe = None;
         }
     }
 }
 
 #[async_trait]
-pub trait ProviderCircuitStore: Send + Sync {
+pub trait SourceCircuitStore: Send + Sync {
     async fn allow_request(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
-    ) -> Result<ProviderCircuitDecision, ProviderCircuitError>;
+    ) -> Result<SourceCircuitDecision, SourceCircuitError>;
 
     async fn record_success(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
-        permit: Option<&ProviderCircuitProbePermit>,
-    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError>;
+        permit: Option<&SourceCircuitProbePermit>,
+    ) -> Result<SourceHealthSnapshot, SourceCircuitError>;
 
     async fn record_failure(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
         error_message: String,
-        permit: Option<&ProviderCircuitProbePermit>,
-    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError>;
+        permit: Option<&SourceCircuitProbePermit>,
+    ) -> Result<SourceHealthSnapshot, SourceCircuitError>;
 
     async fn release_probe(
         &self,
-        provider_id: i64,
+        source_id: i64,
         config: &ProviderGovernanceConfig,
-        permit: Option<&ProviderCircuitProbePermit>,
-    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError>;
+        permit: Option<&SourceCircuitProbePermit>,
+    ) -> Result<SourceHealthSnapshot, SourceCircuitError>;
 
-    async fn snapshot(
-        &self,
-        provider_id: i64,
-    ) -> Result<ProviderHealthSnapshot, ProviderCircuitError>;
+    async fn snapshot(&self, source_id: i64) -> Result<SourceHealthSnapshot, SourceCircuitError>;
 }

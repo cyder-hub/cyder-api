@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::{
     controller::BaseError,
-    schema::enum_def::ProviderType,
+    schema::enum_def::UpstreamProfileType,
     service::{
         admin::reasoning_config::{
             ModelReasoningConfigWriteMode, PreviewProviderReasoningConfigInput,
@@ -48,7 +48,7 @@ struct UpsertProviderReasoningConfigPayload {
 
 #[derive(Debug, Deserialize)]
 struct PreviewProviderReasoningConfigPayload {
-    provider_type: Option<ProviderType>,
+    profile_type: Option<UpstreamProfileType>,
     family_key: Option<String>,
     #[serde(default)]
     presets: Vec<ReasoningConfigPresetPayload>,
@@ -153,7 +153,7 @@ async fn preview_provider_config_draft(
             .preview_provider_config_draft(
                 provider_id,
                 PreviewProviderReasoningConfigInput {
-                    provider_type: payload.provider_type,
+                    profile_type: payload.profile_type,
                     family_key: payload.family_key,
                     presets: payload.presets.into_iter().map(Into::into).collect(),
                 },
@@ -275,29 +275,43 @@ mod tests {
 
     use crate::database::TestDbContext;
     use crate::database::model::{Model, ModelCapabilityFlags};
-    use crate::database::provider::{NewProvider, Provider};
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::database::provider::{NewProvider, Provider, ProviderAggregate};
+    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::app_state::{AppState, create_test_app_state};
 
     use super::create_reasoning_config_router;
 
-    fn seed_provider(id: i64, provider_key: &str) -> Provider {
-        seed_provider_of_type(id, provider_key, ProviderType::Openai)
+    fn seed_provider(id: i64, provider_key: &str) -> ProviderAggregate {
+        seed_provider_of_type(id, provider_key, UpstreamProfileType::Openai)
     }
 
-    fn seed_provider_of_type(id: i64, provider_key: &str, provider_type: ProviderType) -> Provider {
-        Provider::create(&NewProvider {
-            id,
-            provider_key: provider_key.to_string(),
-            name: provider_key.to_string(),
-            endpoint: "https://api.example.com/v1".to_string(),
-            use_proxy: false,
-            is_enabled: true,
-            created_at: 1,
-            updated_at: 1,
-            provider_type,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-        })
+    fn seed_provider_of_type(
+        id: i64,
+        provider_key: &str,
+        profile_type: UpstreamProfileType,
+    ) -> ProviderAggregate {
+        Provider::create(
+            &NewProvider {
+                id,
+                provider_key: provider_key.to_string(),
+                name: provider_key.to_string(),
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            &NewUpstreamSource {
+                id: id + 1,
+                provider_id: id,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type,
+                endpoint: "https://api.example.com/v1".to_string(),
+                use_proxy: false,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
         .expect("provider seed should succeed")
     }
 
@@ -413,7 +427,7 @@ mod tests {
                         Method::POST,
                         format!("/provider/{}/reasoning_config/preview", provider.id),
                         json!({
-                            "provider_type": "RESPONSES",
+                            "profile_type": "RESPONSES",
                             "family_key": "openai_responses_reasoning",
                             "presets": []
                         }),

@@ -1,5 +1,5 @@
 use super::*;
-use crate::schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol};
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
 use crate::service::transform::{StreamTransformer, unified::*};
 use serde_json::{Value, json};
 
@@ -758,15 +758,15 @@ fn test_transform_unified_chunk_to_openai_events_emits_diagnostic_for_image_delt
 #[test]
 fn test_determine_openai_variant_for_vertex_openai_chat_completions() {
     assert_eq!(
-        determine_openai_variant(&ProviderType::VertexOpenai, "chat/completions"),
+        determine_openai_variant(&UpstreamProfileType::VertexOpenai, "chat/completions"),
         OpenAiVariant::GeminiCompat
     );
     assert_eq!(
-        determine_openai_variant(&ProviderType::Openai, "chat/completions"),
+        determine_openai_variant(&UpstreamProfileType::Openai, "chat/completions"),
         OpenAiVariant::Standard
     );
     assert_eq!(
-        determine_openai_variant(&ProviderType::VertexOpenai, "embeddings"),
+        determine_openai_variant(&UpstreamProfileType::VertexOpenai, "embeddings"),
         OpenAiVariant::Standard
     );
 }
@@ -828,8 +828,9 @@ fn test_sanitize_openai_request_payload_for_standard_variant_is_noop() {
 
 #[test]
 fn test_resolve_openai_variant_policy_keeps_standard_and_compat_separate() {
-    let standard = resolve_openai_variant_policy(&ProviderType::Openai, "chat/completions");
-    let compat = resolve_openai_variant_policy(&ProviderType::VertexOpenai, "chat/completions");
+    let standard = resolve_openai_variant_policy(&UpstreamProfileType::Openai, "chat/completions");
+    let compat =
+        resolve_openai_variant_policy(&UpstreamProfileType::VertexOpenai, "chat/completions");
 
     assert_eq!(standard.variant(), OpenAiVariant::Standard);
     assert_eq!(compat.variant(), OpenAiVariant::GeminiCompat);
@@ -884,7 +885,7 @@ fn test_finalize_openai_compatible_request_payload_uses_variant_layer_only() {
 
     let (variant, report) = finalize_openai_compatible_request_payload(
         &mut payload,
-        &ProviderType::VertexOpenai,
+        &UpstreamProfileType::VertexOpenai,
         "chat/completions",
     );
 

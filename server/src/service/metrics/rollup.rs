@@ -93,6 +93,13 @@ fn request_scopes(request_log: &RequestLog) -> Vec<MetricsScope> {
             request_log.provider_name_snapshot.clone(),
         ));
     }
+    if let Some(source_id) = request_log.source_id {
+        scopes.push(id_scope(
+            MetricsScopeType::Source,
+            source_id,
+            request_log.source_key_snapshot.clone(),
+        ));
+    }
     if let Some(model_id) = request_log.model_id {
         scopes.push(id_scope(
             MetricsScopeType::Model,
@@ -126,6 +133,36 @@ fn request_scopes(request_log: &RequestLog) -> Vec<MetricsScope> {
         });
     }
     scopes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_scopes;
+    use crate::{database::request_log::RequestLog, service::metrics::types::MetricsScopeType};
+
+    #[test]
+    fn request_scopes_preserve_provider_and_add_selected_source() {
+        let request_log = RequestLog {
+            api_key_id: 1,
+            provider_id: Some(2),
+            provider_name_snapshot: Some("Logical Provider".to_string()),
+            source_id: Some(3),
+            source_key_snapshot: Some("primary".to_string()),
+            ..RequestLog::default()
+        };
+
+        let scopes = request_scopes(&request_log);
+        assert!(scopes.iter().any(|scope| {
+            scope.scope_type == MetricsScopeType::Provider
+                && scope.scope_id == "2"
+                && scope.scope_label.as_deref() == Some("Logical Provider")
+        }));
+        assert!(scopes.iter().any(|scope| {
+            scope.scope_type == MetricsScopeType::Source
+                && scope.scope_id == "3"
+                && scope.scope_label.as_deref() == Some("primary")
+        }));
+    }
 }
 
 fn request_rollup_delta(

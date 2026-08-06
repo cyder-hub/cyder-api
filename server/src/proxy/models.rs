@@ -222,7 +222,8 @@ fn build_direct_reasoning_target(provider: &CacheProvider, model: &CacheModel) -
     ExecutionTarget {
         provider: Arc::new(provider.clone()),
         model: Arc::new(model.clone()),
-        upstream_protocol: determine_upstream_protocol(provider),
+        upstream_source: Arc::new(provider.upstream_source.clone()),
+        upstream_protocol: determine_upstream_protocol(&provider.upstream_source),
         reasoning_config_id: None,
         reasoning_config_scope: None,
         reasoning_config_source: None,

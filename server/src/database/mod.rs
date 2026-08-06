@@ -44,6 +44,7 @@ pub mod request_log;
 pub mod request_patch;
 pub mod runtime_feature_config;
 pub mod stat;
+pub mod upstream_source;
 //pub mod record; // Assuming this will be replaced or removed if request_log supersedes it
 
 #[cfg(test)]

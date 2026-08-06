@@ -6,13 +6,16 @@ use serde::Serialize;
 use crate::controller::BaseError;
 use crate::database::provider::{
     BootstrapProviderInput, BootstrapProviderResult, NewProvider, NewProviderApiKey, Provider,
-    ProviderApiKeyRepository, ProviderApiKeySummary, UpdateProviderApiKeyMetadata,
-    UpdateProviderData,
+    ProviderAggregate, ProviderApiKeyRepository, ProviderApiKeySummary,
+    UpdateProviderApiKeyMetadata, UpdateProviderData,
 };
-use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+use crate::database::upstream_source::{
+    NewUpstreamSource, PRIMARY_SOURCE_KEY, UpdateUpstreamSourceData,
+};
+use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
 use crate::service::provider_http::normalize_provider_endpoint;
-use crate::service::provider_profile::{ProviderAuthProfile, provider_runtime_profile};
 use crate::service::secret_encryption::{SecretDomain, SecretEncryptionService, SensitiveSecret};
+use crate::service::upstream_profile::{UpstreamAuthProfile, upstream_runtime_profile};
 use crate::service::vertex::{invalidate_vertex_token, validate_vertex_service_account};
 use crate::utils::ID_GENERATOR;
 
@@ -23,10 +26,15 @@ use super::mutation::{AdminCatalogInvalidation, AdminMutationEffect, AdminMutati
 pub struct ProviderUpsertInput {
     pub name: String,
     pub key: String,
+    pub upstream_source: UpstreamSourceUpsertInput,
+    pub provider_api_key_mode: Option<ProviderApiKeyMode>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamSourceUpsertInput {
     pub endpoint: String,
     pub use_proxy: bool,
-    pub provider_type: Option<ProviderType>,
-    pub provider_api_key_mode: Option<ProviderApiKeyMode>,
+    pub profile_type: Option<UpstreamProfileType>,
 }
 
 #[derive(Clone)]
@@ -60,7 +68,7 @@ pub struct BootstrapProviderCommand {
     pub name: String,
     pub endpoint: String,
     pub use_proxy: bool,
-    pub provider_type: ProviderType,
+    pub profile_type: UpstreamProfileType,
     pub provider_api_key_mode: ProviderApiKeyMode,
     pub api_key: String,
     pub api_key_description: Option<String>,
@@ -89,25 +97,41 @@ impl ProviderAdminService {
         &self.mutation_runner
     }
 
-    pub async fn create_provider(&self, input: ProviderUpsertInput) -> Result<Provider, BaseError> {
-        let endpoint = normalize_provider_endpoint(&input.endpoint)
-            .map_err(|error| BaseError::ParamInvalid(Some(format!("provider endpoint {error}"))))?;
+    pub async fn create_provider(
+        &self,
+        input: ProviderUpsertInput,
+    ) -> Result<ProviderAggregate, BaseError> {
+        let endpoint =
+            normalize_provider_endpoint(&input.upstream_source.endpoint).map_err(|error| {
+                BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
+            })?;
         let current_time = Utc::now().timestamp_millis();
+        let provider_id = ID_GENERATOR.generate_id();
         let new_provider_data = NewProvider {
-            id: ID_GENERATOR.generate_id(),
+            id: provider_id,
             provider_key: input.key,
             name: input.name,
-            endpoint,
-            use_proxy: input.use_proxy,
             is_enabled: true,
             created_at: current_time,
             updated_at: current_time,
-            provider_type: input.provider_type.unwrap_or(ProviderType::Openai),
             provider_api_key_mode: input
                 .provider_api_key_mode
                 .unwrap_or(ProviderApiKeyMode::Queue),
         };
-        let created_provider = Provider::create(&new_provider_data)?;
+        let new_source_data = NewUpstreamSource {
+            id: ID_GENERATOR.generate_id(),
+            provider_id,
+            source_key: PRIMARY_SOURCE_KEY.to_string(),
+            profile_type: input
+                .upstream_source
+                .profile_type
+                .unwrap_or(UpstreamProfileType::Openai),
+            endpoint,
+            use_proxy: input.upstream_source.use_proxy,
+            created_at: current_time,
+            updated_at: current_time,
+        };
+        let created_provider = Provider::create(&new_provider_data, &new_source_data)?;
 
         self.run_post_commit_effects(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
@@ -125,19 +149,24 @@ impl ProviderAdminService {
         &self,
         id: i64,
         input: ProviderUpsertInput,
-    ) -> Result<Provider, BaseError> {
-        let endpoint = normalize_provider_endpoint(&input.endpoint)
-            .map_err(|error| BaseError::ParamInvalid(Some(format!("provider endpoint {error}"))))?;
+    ) -> Result<ProviderAggregate, BaseError> {
+        let endpoint =
+            normalize_provider_endpoint(&input.upstream_source.endpoint).map_err(|error| {
+                BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
+            })?;
         let update_data = UpdateProviderData {
             provider_key: None,
             name: Some(input.name),
-            endpoint: Some(endpoint),
-            use_proxy: Some(input.use_proxy),
             is_enabled: None,
-            provider_type: input.provider_type,
             provider_api_key_mode: input.provider_api_key_mode,
         };
-        let updated_provider = Provider::update(id, &update_data)?;
+        let source_update = UpdateUpstreamSourceData {
+            profile_type: input.upstream_source.profile_type,
+            endpoint: Some(endpoint),
+            use_proxy: Some(input.upstream_source.use_proxy),
+            updated_at: 0,
+        };
+        let updated_provider = Provider::update(id, &update_data, &source_update)?;
 
         self.run_post_commit_effects(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
@@ -160,7 +189,7 @@ impl ProviderAdminService {
         let current_time = Utc::now().timestamp_millis();
         let key_id = ID_GENERATOR.generate_id();
         let secret = validate_provider_secret(input.api_key)?;
-        validate_provider_secret_for_type(&provider.provider_type, &secret)?;
+        validate_provider_secret_for_type(&provider.upstream_source.profile_type, &secret)?;
         let (key_prefix, key_last4) = secret_mask_parts(secret.expose());
         let encrypted_secret = self
             .secret_encryption
@@ -284,7 +313,7 @@ impl ProviderAdminService {
         let provider = Provider::get_by_id(provider_id)?;
         let _existing = self.validate_provider_key_membership(provider_id, key_id)?;
         let secret = validate_provider_secret(input.api_key)?;
-        validate_provider_secret_for_type(&provider.provider_type, &secret)?;
+        validate_provider_secret_for_type(&provider.upstream_source.profile_type, &secret)?;
         let (key_prefix, key_last4) = secret_mask_parts(secret.expose());
         let encrypted = self
             .secret_encryption
@@ -372,7 +401,7 @@ impl ProviderAdminService {
             .map_err(|error| BaseError::ParamInvalid(Some(format!("provider endpoint {error}"))))?;
         let key_id = ID_GENERATOR.generate_id();
         let secret = validate_provider_secret(input.api_key)?;
-        validate_provider_secret_for_type(&input.provider_type, &secret)?;
+        validate_provider_secret_for_type(&input.profile_type, &secret)?;
         let (key_prefix, key_last4) = secret_mask_parts(secret.expose());
         let encrypted_secret = self
             .secret_encryption
@@ -386,9 +415,10 @@ impl ProviderAdminService {
             provider_id: input.provider_id,
             provider_key: input.provider_key,
             name: input.name,
+            source_id: ID_GENERATOR.generate_id(),
             endpoint,
             use_proxy: input.use_proxy,
-            provider_type: input.provider_type,
+            profile_type: input.profile_type,
             provider_api_key_mode: input.provider_api_key_mode,
             provider_api_key_id: key_id,
             api_key_description: input.api_key_description,
@@ -450,7 +480,7 @@ impl ProviderAdminService {
     }
 }
 
-fn provider_audit_event(action: &'static str, provider: &Provider) -> AdminAuditEvent {
+fn provider_audit_event(action: &'static str, provider: &ProviderAggregate) -> AdminAuditEvent {
     let event_name = match action {
         "create" => "manager.provider_created",
         "update" => "manager.provider_updated",
@@ -466,6 +496,12 @@ fn provider_audit_event(action: &'static str, provider: &Provider) -> AdminAudit
             AdminAuditField::new("provider_key", &provider.provider_key),
             AdminAuditField::new("provider_name", &provider.name),
             AdminAuditField::new("is_enabled", provider.is_enabled),
+            AdminAuditField::new("source_id", provider.upstream_source.id),
+            AdminAuditField::new("source_key", &provider.upstream_source.source_key),
+            AdminAuditField::new(
+                "source_profile_type",
+                format!("{:?}", provider.upstream_source.profile_type),
+            ),
         ],
     )
 }
@@ -480,6 +516,12 @@ fn provider_bootstrap_audit_event(
         AdminAuditField::new("provider_key", &created.provider.provider_key),
         AdminAuditField::new("provider_name", &created.provider.name),
         AdminAuditField::new("is_enabled", created.provider.is_enabled),
+        AdminAuditField::new("source_id", created.provider.upstream_source.id),
+        AdminAuditField::new("source_key", &created.provider.upstream_source.source_key),
+        AdminAuditField::new(
+            "source_profile_type",
+            format!("{:?}", created.provider.upstream_source.profile_type),
+        ),
         AdminAuditField::new("provider_api_key_id", created.created_key.id),
         AdminAuditField::new("model_id", created.created_model.id),
         AdminAuditField::new("model_name", &created.created_model.model_name),
@@ -539,10 +581,10 @@ fn secret_mask_parts(secret: &str) -> (String, String) {
 }
 
 fn validate_provider_secret_for_type(
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     secret: &SensitiveSecret,
 ) -> Result<(), BaseError> {
-    if provider_runtime_profile(provider_type).auth == ProviderAuthProfile::VertexOAuth {
+    if upstream_runtime_profile(profile_type).auth == UpstreamAuthProfile::VertexOAuth {
         validate_vertex_service_account(secret.expose())
             .map_err(|message| BaseError::ParamInvalid(Some(message)))?;
     }
@@ -603,7 +645,7 @@ mod tests {
             r#"{{"client_email":"svc@example.com","token_uri":"https://oauth.example.com/token","private_key_id":"kid","private_key":"{marker}"}}"#
         ));
         let error =
-            validate_provider_secret_for_type(&ProviderType::Vertex, &unsupported_token_uri)
+            validate_provider_secret_for_type(&UpstreamProfileType::Vertex, &unsupported_token_uri)
                 .expect_err("unsupported token URI must be rejected");
         let message = match error {
             BaseError::ParamInvalid(Some(message)) => message,
@@ -618,7 +660,7 @@ mod tests {
         let malformed = SensitiveSecret::new(format!(
             r#"{{"client_email":"svc@example.com","token_uri":"https://oauth2.googleapis.com/token","private_key_id":"kid","private_key":"{marker}"}}"#
         ));
-        let error = validate_provider_secret_for_type(&ProviderType::Vertex, &malformed)
+        let error = validate_provider_secret_for_type(&UpstreamProfileType::Vertex, &malformed)
             .expect_err("invalid RSA key must be rejected");
         let message = match error {
             BaseError::ParamInvalid(Some(message)) => message,
@@ -630,7 +672,7 @@ mod tests {
         );
         assert!(!message.contains(marker));
 
-        validate_provider_secret_for_type(&ProviderType::Openai, &malformed)
+        validate_provider_secret_for_type(&UpstreamProfileType::Openai, &malformed)
             .expect("ordinary provider credentials are opaque strings");
     }
 }

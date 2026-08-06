@@ -1061,8 +1061,9 @@ mod tests {
     use super::*;
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::provider::{NewProvider, Provider};
+    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
     use crate::database::{TestDbContext, open_test_sqlite_connection};
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use diesel::connection::SimpleConnection;
     use diesel::{QueryableByName, sql_query};
 
@@ -1072,18 +1073,30 @@ mod tests {
             id,
             provider_key: key.to_string(),
             name: key.to_string(),
-            endpoint: "https://example.com".to_string(),
-            use_proxy: false,
             is_enabled: true,
             created_at: now,
             updated_at: now,
-            provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
         }
     }
 
     fn create_provider(id: i64, key: &str) -> crate::database::provider::Provider {
-        Provider::create(&provider_input(id, key)).expect("provider")
+        let now = Utc::now().timestamp_millis();
+        Provider::create(
+            &provider_input(id, key),
+            &NewUpstreamSource {
+                id,
+                provider_id: id,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type: UpstreamProfileType::Openai,
+                endpoint: "https://example.com".to_string(),
+                use_proxy: false,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .expect("provider")
+        .provider
     }
 
     fn create_model(provider_id: i64, name: &str) -> crate::database::model::Model {
@@ -1436,7 +1449,7 @@ mod tests {
                 id, profile_key, name, family_key, is_enabled, deleted_at, created_at, updated_at
             )
                 VALUES
-                    (100, 'provider_profile', 'Provider', 'openai_chat_reasoning_effort', true, NULL, 1000, 1100),
+                    (100, 'upstream_profile', 'Provider', 'openai_chat_reasoning_effort', true, NULL, 1000, 1100),
                     (200, 'model_profile', 'Model', 'gemini25_thinking_budget', true, NULL, 2000, 2100),
                     (300, 'unreferenced_profile', 'Unused', 'anthropic_thinking_budget', true, NULL, 3000, 3100);
             INSERT INTO reasoning_profile_preset (

@@ -30,11 +30,11 @@ use crate::{
         ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, ResponseVisibilityTracker,
         cancellation::{CancellationDropGuard, ProxyCancellationContext},
         logging::RequestLogContext,
-        provider_governance::record_provider_failure_or_release_probe,
         runtime::api_key_lease::ApiKeyRequestLeaseFinalizer,
+        source_governance::record_source_failure_or_release_probe,
     },
     schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol},
-    service::runtime::{ProviderCircuitProbePermit, ReasoningContinuationScope},
+    service::runtime::{ReasoningContinuationScope, SourceCircuitProbePermit},
     service::{
         app_state::AppState, cache::types::CacheCostCatalogVersion,
         upstream_response::normalize_content_type,
@@ -88,6 +88,7 @@ pub(in crate::proxy) struct ProxyRequestFailure {
 pub(in crate::proxy) struct ReasoningContinuationCaptureContext {
     pub scope: ReasoningContinuationScope,
     pub feature_enabled: bool,
+    pub target_is_openai_compatible_generation: bool,
 }
 
 fn finalize_send_failure_log_context(
@@ -119,14 +120,14 @@ pub(in crate::proxy) async fn send_materialized_request(
     use_proxy: bool,
     cost_catalog_version: Option<CacheCostCatalogVersion>,
     api_key_request_lease: ApiKeyRequestLeaseFinalizer,
-    provider_circuit_permit: Option<ProviderCircuitProbePermit>,
+    source_circuit_permit: Option<SourceCircuitProbePermit>,
     response_mode: ProxyResponseMode,
     reasoning_capture: Option<ReasoningContinuationCaptureContext>,
     response_visibility: ResponseVisibilityTracker,
 ) -> Result<ProxyRequestOutcome, ProxyRequestFailure> {
     let coordinator = cancellation.coordinator();
     let mut api_key_request_lease = api_key_request_lease.with_coordinator(coordinator.clone());
-    let provider_id = log_context.provider_id;
+    let source_id = log_context.source_id;
     let log_context = Arc::new(TokioMutex::new(log_context));
     log_context
         .lock()
@@ -205,13 +206,13 @@ pub(in crate::proxy) async fn send_materialized_request(
         Err(proxy_error) => {
             drop_cancellation_guard.disarm();
             cancellation.try_terminate_error(&proxy_error);
-            record_provider_failure_or_release_probe(
+            record_source_failure_or_release_probe(
                 &app_state,
                 &cancellation,
-                provider_id,
+                source_id,
                 &model_str,
                 &proxy_error,
-                provider_circuit_permit.as_ref(),
+                source_circuit_permit.as_ref(),
             )
             .await;
             let completed_at = Utc::now().timestamp_millis();
@@ -249,14 +250,14 @@ pub(in crate::proxy) async fn send_materialized_request(
         match handle_streaming_response_guarded(
             &app_state,
             cancellation.clone(),
-            provider_id,
+            source_id,
             log_context.clone(),
             model_str,
             response,
             &url,
             cost_catalog_version,
             api_key_request_lease,
-            provider_circuit_permit,
+            source_circuit_permit,
             downstream_protocol,
             upstream_protocol,
             reasoning_capture.clone(),
@@ -282,14 +283,14 @@ pub(in crate::proxy) async fn send_materialized_request(
         handle_non_streaming_response_guarded(
             &app_state,
             &cancellation,
-            provider_id,
+            source_id,
             log_context,
             model_str,
             response,
             &url,
             cost_catalog_version.as_ref(),
             api_key_request_lease,
-            provider_circuit_permit,
+            source_circuit_permit,
             response_mode,
             reasoning_capture.as_ref(),
             upstream_error_body_limit_bytes,

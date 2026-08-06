@@ -10,6 +10,9 @@
             {{ t("providerPage.table.key") }}
           </TableHead>
           <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
+            {{ t("providerPage.table.primarySource") }}
+          </TableHead>
+          <TableHead class="text-xs font-medium uppercase tracking-wider text-gray-500">
             {{ t("providerPage.table.status") }}
           </TableHead>
           <TableHead class="text-right text-xs font-medium uppercase tracking-wider text-gray-500">
@@ -27,6 +30,22 @@
           </TableCell>
           <TableCell class="font-mono text-sm text-gray-700">
             {{ provider.provider_key }}
+          </TableCell>
+          <TableCell>
+            <div class="flex items-center gap-2">
+              <Badge variant="outline" class="font-mono text-[10px]">
+                {{ provider.upstream_source.source_key }}
+              </Badge>
+              <span class="font-mono text-xs text-gray-700">
+                {{ provider.upstream_source.profile_type }}
+              </span>
+            </div>
+            <div
+              class="mt-1 max-w-72 truncate font-mono text-[11px] text-gray-500"
+              :title="provider.upstream_source.endpoint"
+            >
+              {{ provider.upstream_source.endpoint }}
+            </div>
           </TableCell>
           <TableCell>
             <div class="flex flex-wrap items-center gap-2">

@@ -602,7 +602,7 @@ mod tests {
     use super::*;
     use crate::database::_sqlite_schema::*;
     use crate::database::provider::NewProvider;
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use serde_json::Value;
 
     struct TestSqliteDb {
@@ -626,18 +626,18 @@ mod tests {
         name_val: &str,
     ) {
         use crate::database::provider::_sqlite_model::*;
+        use crate::database::upstream_source::{
+            _sqlite_model::NewUpstreamSourceDb, NewUpstreamSource, PRIMARY_SOURCE_KEY,
+        };
 
         let now = 1_000_000;
         let data = NewProvider {
             id,
             provider_key: provider_key_val.to_string(),
             name: name_val.to_string(),
-            endpoint: "https://example.com/v1".to_string(),
-            use_proxy: false,
             is_enabled: true,
             created_at: now,
             updated_at: now,
-            provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
         };
 
@@ -645,6 +645,21 @@ mod tests {
             .values(NewProviderDb::to_db(&data))
             .execute(conn)
             .expect("provider seed should succeed");
+
+        let source = NewUpstreamSource {
+            id,
+            provider_id: id,
+            source_key: PRIMARY_SOURCE_KEY.to_string(),
+            profile_type: UpstreamProfileType::Openai,
+            endpoint: "https://example.com/v1".to_string(),
+            use_proxy: false,
+            created_at: now,
+            updated_at: now,
+        };
+        diesel::insert_into(upstream_source::table)
+            .values(NewUpstreamSourceDb::to_db(&source))
+            .execute(conn)
+            .expect("upstream source seed should succeed");
     }
 
     fn seed_model(

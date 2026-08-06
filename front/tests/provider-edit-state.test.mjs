@@ -19,7 +19,7 @@ import { useProviderCredentialSecretState } from "../src/pages/provider-edit/com
 test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () => {
   const payload = buildProviderBootstrapPayload(
     {
-      provider_type: "  VERTEX  ",
+      profile_type: "  VERTEX  ",
       endpoint: "  https://api.example.com/v1  ",
       api_key: "  secret-key  ",
       model_name: "  gemini-1.5-pro  ",
@@ -33,14 +33,16 @@ test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () 
   );
 
   assert.deepEqual(payload, {
-    endpoint: "https://api.example.com/v1",
+    upstream_source: {
+      profile_type: "VERTEX",
+      endpoint: "https://api.example.com/v1",
+      use_proxy: true,
+    },
     api_key: "secret-key",
     model_name: "gemini-1.5-pro",
-    provider_type: "VERTEX",
     name: "Example Cloud",
     key: "example-cloud",
     real_model_name: "gemini-1.5-pro-latest",
-    use_proxy: true,
     save_and_test: true,
     api_key_description: "first key",
   });
@@ -48,7 +50,7 @@ test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () 
 
 test("buildProviderBootstrapPreview requires explicit provider key", () => {
   const preview = buildProviderBootstrapPreview({
-    provider_type: "openai",
+    profile_type: "openai",
     endpoint: "https://api.example.com/v1",
     api_key: "",
     model_name: "gpt-4o",
@@ -68,9 +70,9 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
   const editingData = createEmptyEditingProviderData();
   editingData.name = "Old Provider";
   editingData.provider_key = "old-provider";
-  editingData.provider_type = "OPENAI";
-  editingData.endpoint = "https://old.example.com";
-  editingData.use_proxy = false;
+  editingData.upstream_source.profile_type = "OPENAI";
+  editingData.upstream_source.endpoint = "https://old.example.com";
+  editingData.upstream_source.use_proxy = false;
   editingData.models.push({
     id: 1,
     model_name: "legacy-model",
@@ -96,9 +98,22 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
       id: 99,
       name: "Bootstrapped Provider",
       provider_key: "boot-key",
-      provider_type: "VERTEX",
-      endpoint: "https://bootstrap.example.com",
-      use_proxy: true,
+      is_enabled: true,
+      deleted_at: null,
+      created_at: 1,
+      updated_at: 2,
+      provider_api_key_mode: "ROUND_ROBIN",
+      upstream_source: {
+        id: 100,
+        provider_id: 99,
+        source_key: "primary",
+        profile_type: "VERTEX",
+        endpoint: "https://bootstrap.example.com",
+        use_proxy: true,
+        deleted_at: null,
+        created_at: 1,
+        updated_at: 2,
+      },
     },
     created_key: {
       id: 12,
@@ -124,9 +139,14 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
   assert.equal(hydrated.id, 99);
   assert.equal(hydrated.name, "Bootstrapped Provider");
   assert.equal(hydrated.provider_key, "boot-key");
-  assert.equal(hydrated.provider_type, "VERTEX");
-  assert.equal(hydrated.endpoint, "https://bootstrap.example.com");
-  assert.equal(hydrated.use_proxy, true);
+  assert.deepEqual(hydrated.upstream_source, {
+    id: 100,
+    provider_id: 99,
+    source_key: "primary",
+    profile_type: "VERTEX",
+    endpoint: "https://bootstrap.example.com",
+    use_proxy: true,
+  });
   assert.equal(hydrated.provider_keys.length, 2);
   assert.deepEqual(hydrated.provider_keys[1], {
     id: 12,
@@ -177,14 +197,14 @@ test("syncProviderBootstrapFormState copies saved provider identity into the edi
   editingData.id = 7;
   editingData.name = "Saved Provider";
   editingData.provider_key = "saved-provider";
-  editingData.provider_type = "ANTHROPIC";
-  editingData.endpoint = "https://anthropic.example.com/v1";
-  editingData.use_proxy = true;
+  editingData.upstream_source.profile_type = "ANTHROPIC";
+  editingData.upstream_source.endpoint = "https://anthropic.example.com/v1";
+  editingData.upstream_source.use_proxy = true;
 
   syncProviderBootstrapFormState(form, editingData);
 
   assert.deepEqual(form, {
-    provider_type: "ANTHROPIC",
+    profile_type: "ANTHROPIC",
     endpoint: "https://anthropic.example.com/v1",
     api_key: "",
     model_name: "",
@@ -200,12 +220,12 @@ test("buildProviderUpdatePayload keeps the existing provider key immutable", () 
   editingData.id = 11;
   editingData.name = "Existing Provider";
   editingData.provider_key = "existing-provider";
-  editingData.provider_type = "OPENAI";
-  editingData.endpoint = "https://old.example.com/v1";
-  editingData.use_proxy = false;
+  editingData.upstream_source.profile_type = "OPENAI";
+  editingData.upstream_source.endpoint = "https://old.example.com/v1";
+  editingData.upstream_source.use_proxy = false;
 
   const payload = buildProviderUpdatePayload(editingData, {
-    provider_type: "RESPONSES",
+    profile_type: "RESPONSES",
     endpoint: " https://new.example.com/v1 ",
     api_key: "",
     model_name: "",
@@ -218,10 +238,37 @@ test("buildProviderUpdatePayload keeps the existing provider key immutable", () 
   assert.deepEqual(payload, {
     key: "existing-provider",
     name: "Updated Name",
-    endpoint: "https://new.example.com/v1",
-    use_proxy: true,
-    provider_type: "RESPONSES",
+    upstream_source: {
+      profile_type: "RESPONSES",
+      endpoint: "https://new.example.com/v1",
+      use_proxy: true,
+    },
   });
+});
+
+test("provider state requires the nested Primary Source contract without legacy fallbacks", async () => {
+  const [state, edit, baseForm] = await Promise.all([
+    readFile(
+      new URL("src/pages/provider-edit/composables/providerEditState.ts", ROOT),
+      "utf8",
+    ),
+    readFile(
+      new URL("src/pages/provider-edit/composables/useProviderEdit.ts", ROOT),
+      "utf8",
+    ),
+    readFile(
+      new URL("src/pages/provider-edit/components/ProviderBaseInfoForm.vue", ROOT),
+      "utf8",
+    ),
+  ]);
+
+  assert.match(state, /upstream_source:\s*\{/);
+  assert.match(state, /source_key: "primary"/);
+  assert.match(edit, /detail\.provider\.upstream_source\.profile_type/);
+  assert.doesNotMatch(state, /provider_type/);
+  assert.doesNotMatch(edit, /detail\.provider\.provider_type/);
+  assert.match(baseForm, /labelSourceKey/);
+  assert.doesNotMatch(baseForm, /source.*(?:create|delete|enable|default)/i);
 });
 
 test("provider credential plaintext stays in dialog-local state and clears on every boundary", () => {
@@ -293,4 +340,25 @@ test("provider credential service and UI keep saved summaries plaintext-free", a
   assert.doesNotMatch(check, /provider_api_key: keyItem/);
   assert.doesNotMatch(component, /localStorage|sessionStorage|console\.error/);
   assert.doesNotMatch(bootstrap, /localStorage|sessionStorage|console\.error/);
+});
+
+test("remote model discovery returns explicit Primary Source evidence without a legacy payload fallback", async () => {
+  const [types, component] = await Promise.all([
+    readFile(new URL("src/services/types/providers.ts", ROOT), "utf8"),
+    readFile(
+      new URL("src/pages/provider-edit/components/ProviderModelList.vue", ROOT),
+      "utf8",
+    ),
+  ]);
+
+  const responseContract = types.match(
+    /interface ProviderRemoteModelsResponse \{[\s\S]*?\n\}/,
+  )?.[0];
+  assert.ok(responseContract);
+  assert.match(responseContract, /source_id: number/);
+  assert.match(responseContract, /source_key: string/);
+  assert.match(responseContract, /profile_type: string/);
+  assert.match(responseContract, /models: ProviderRemoteModelsPayload/);
+  assert.match(component, /const discoveredModels = response\.models/);
+  assert.doesNotMatch(component, /Array\.isArray\(response\)/);
 });

@@ -1,6 +1,6 @@
 {
   "protocol":"GEMINI",
-  "provider_type":"GEMINI",
+  "profile_type":"GEMINI",
   "downstream_path":"/gemini/v1beta/models/$REQUESTED_MODEL:generateContent",
   "downstream_stream_path":"/gemini/v1beta/models/$REQUESTED_MODEL:streamGenerateContent",
   "downstream_auth":"gemini_query",

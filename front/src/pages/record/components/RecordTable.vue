@@ -37,6 +37,11 @@
 
         <div class="grid grid-cols-1 gap-3 text-sm min-[360px]:grid-cols-2">
           <MobileField :label="$t('recordPage.table.provider')" :value="record.providerName" />
+          <MobileField
+            :label="$t('recordPage.table.source')"
+            :value="record.sourceDisplay"
+            mono
+          />
           <MobileField :label="$t('recordPage.table.apiKey')" :value="record.apiKeyName" />
           <div class="space-y-1">
             <p class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
@@ -121,7 +126,12 @@
                 </div>
               </div>
             </TableCell>
-            <TableCell>{{ record.providerName }}</TableCell>
+            <TableCell>
+              <div>{{ record.providerName }}</div>
+              <div class="mt-1 font-mono text-[11px] text-gray-500">
+                {{ record.sourceDisplay }}
+              </div>
+            </TableCell>
             <TableCell>{{ record.apiKeyName }}</TableCell>
             <TableCell class="w-14 text-center">
               <div

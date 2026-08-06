@@ -5,9 +5,10 @@ use crate::database::manager_credential::{MANAGER_ID, ManagerCredential, NewMana
 use crate::database::provider::{
     NewProvider, NewProviderApiKey, Provider, ProviderApiKeyRepository, StoredProviderApiKey,
 };
+use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
 use crate::database::{DbConnection, TestDbContext, get_connection};
 use crate::db_execute;
-use crate::schema::enum_def::{Action, ProviderApiKeyMode, ProviderType};
+use crate::schema::enum_def::{Action, ProviderApiKeyMode, UpstreamProfileType};
 use diesel::connection::SimpleConnection;
 use diesel::{Connection, PgConnection, QueryableByName, RunQueryDsl, sql_types::Text};
 use std::env;
@@ -177,19 +178,29 @@ fn load_manager_totp_secret() -> EncryptedSecret {
 }
 
 fn create_test_provider(id: i64) -> Provider {
-    Provider::create(&NewProvider {
-        id,
-        provider_key: format!("secret-startup-provider-{id}"),
-        name: format!("Secret Startup Provider {id}"),
-        endpoint: "https://api.example.com/v1".to_string(),
-        use_proxy: false,
-        is_enabled: true,
-        created_at: 1,
-        updated_at: 1,
-        provider_type: ProviderType::Openai,
-        provider_api_key_mode: ProviderApiKeyMode::Queue,
-    })
+    Provider::create(
+        &NewProvider {
+            id,
+            provider_key: format!("secret-startup-provider-{id}"),
+            name: format!("Secret Startup Provider {id}"),
+            is_enabled: true,
+            created_at: 1,
+            updated_at: 1,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        },
+        &NewUpstreamSource {
+            id,
+            provider_id: id,
+            source_key: PRIMARY_SOURCE_KEY.to_string(),
+            profile_type: UpstreamProfileType::Openai,
+            endpoint: "https://api.example.com/v1".to_string(),
+            use_proxy: false,
+            created_at: 1,
+            updated_at: 1,
+        },
+    )
     .expect("test provider should create")
+    .provider
 }
 
 fn create_test_provider_secret(

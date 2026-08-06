@@ -33,9 +33,14 @@ export interface EditingProviderData {
   id: number | null;
   name: string;
   provider_key: string;
-  provider_type: string;
-  endpoint: string;
-  use_proxy: boolean;
+  upstream_source: {
+    id: number | null;
+    provider_id: number | null;
+    source_key: string;
+    profile_type: string;
+    endpoint: string;
+    use_proxy: boolean;
+  };
   models: LocalEditableModelItem[];
   provider_keys: LocalProviderApiKeyItem[];
   request_patches: RequestPatchRule[];

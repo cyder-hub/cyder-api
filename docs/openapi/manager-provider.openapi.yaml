@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: Cyder Manager Provider Key Living Contract
-  version: 1.0.0-pre.3
-  description: Provider credential lifecycle contract for the single-manager gateway.
+  title: Cyder Manager Logical Provider Living Contract
+  version: 1.0.0-pre.4
+  description: Logical Provider, unique Primary Upstream Source, and Provider-owned credential lifecycle contract for the single-manager gateway.
 servers:
   - url: /
 security:
@@ -12,6 +12,85 @@ x-cyder-web-security-client-identity-contract: ../web-security-client-identity.m
 x-cyder-secret-governance-reauth-operation-ids: [revealProviderKeySecret]
 x-cyder-provider-mutation-operation-ids-without-totp: [createProviderKey, updateProviderKeyMetadata, replaceProviderKeySecret, deleteProviderKey]
 paths:
+  /ai/manager/api/provider:
+    post:
+      operationId: createProvider
+      description: Atomically creates one Logical Provider and exactly one implicit, enabled, default Primary Upstream Source. Legacy top-level endpoint, provider_type, and use_proxy fields are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderUpsert" }
+      responses:
+        "200": { $ref: "#/components/responses/ProviderAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/list:
+    get:
+      operationId: listProviders
+      responses:
+        "200": { $ref: "#/components/responses/ProviderAggregateList" }
+  /ai/manager/api/provider/summary/list:
+    get:
+      operationId: listProviderSummaries
+      responses:
+        "200": { $ref: "#/components/responses/ProviderSummaryList" }
+  /ai/manager/api/provider/bootstrap:
+    post:
+      operationId: bootstrapProvider
+      description: Atomically creates the Logical Provider, its Primary Source, one Provider credential, and one model. The credential belongs to the Provider and is applied using the Source Profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderBootstrap" }
+      responses:
+        "200": { $ref: "#/components/responses/ProviderBootstrap" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+    get:
+      operationId: getProvider
+      responses:
+        "200": { $ref: "#/components/responses/ProviderAggregate" }
+    put:
+      operationId: updateProvider
+      description: Atomically updates the Logical Provider and its unique Primary Source. It never creates, deletes, enables, or selects a Source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderUpsert" }
+      responses:
+        "200": { $ref: "#/components/responses/ProviderAggregate" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+    delete:
+      operationId: deleteProvider
+      responses:
+        "200": { $ref: "#/components/responses/Empty" }
+  /ai/manager/api/provider/{id}/check:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+    post:
+      operationId: checkProvider
+      description: Checks one saved or draft Provider credential against the unique Primary Source and returns the exact Source evidence used.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderCheck" }
+      responses:
+        "200": { $ref: "#/components/responses/SourceEvidence" }
+        "422": { $ref: "#/components/responses/ManagerError" }
+  /ai/manager/api/provider/{id}/remote_models:
+    parameters:
+      - $ref: "#/components/parameters/ProviderId"
+    get:
+      operationId: discoverProviderModels
+      description: Discovers models through the unique Primary Source and returns the exact Source evidence alongside the unmodified upstream model payload.
+      responses:
+        "200": { $ref: "#/components/responses/ProviderRemoteModels" }
+        "422": { $ref: "#/components/responses/ManagerError" }
   /ai/manager/api/provider/{id}/provider_keys:
     parameters:
       - $ref: "#/components/parameters/ProviderId"
@@ -131,6 +210,143 @@ components:
       required: true
       schema: { type: string, const: no-store }
   schemas:
+    UpstreamProfileType:
+      type: string
+      enum: [OPENAI, GEMINI, VERTEX, VERTEX_OPENAI, OLLAMA, ANTHROPIC, RESPONSES, GEMINI_OPENAI]
+    UpstreamSourceInput:
+      type: object
+      additionalProperties: false
+      required: [profile_type, endpoint, use_proxy]
+      properties:
+        profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
+        endpoint: { type: string, format: uri, minLength: 1 }
+        use_proxy: { type: boolean }
+    UpstreamSource:
+      type: object
+      additionalProperties: false
+      required: [id, provider_id, source_key, profile_type, endpoint, use_proxy, deleted_at, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        source_key: { type: string, const: primary }
+        profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
+        endpoint: { type: string, format: uri }
+        use_proxy: { type: boolean }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    ProviderAggregate:
+      type: object
+      additionalProperties: false
+      required: [id, provider_key, name, is_enabled, deleted_at, created_at, updated_at, provider_api_key_mode, upstream_source]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_key: { type: string }
+        name: { type: string }
+        is_enabled: { type: boolean }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+        provider_api_key_mode: { type: string, enum: [QUEUE, RANDOM] }
+        upstream_source: { $ref: "#/components/schemas/UpstreamSource" }
+    ProviderSummary:
+      type: object
+      additionalProperties: false
+      required: [id, provider_key, name, is_enabled, upstream_source]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_key: { type: string }
+        name: { type: string }
+        is_enabled: { type: boolean }
+        upstream_source: { $ref: "#/components/schemas/UpstreamSource" }
+    ProviderUpsert:
+      type: object
+      additionalProperties: false
+      required: [name, key, upstream_source]
+      properties:
+        name: { type: string, minLength: 1 }
+        key: { type: string, minLength: 1 }
+        upstream_source: { $ref: "#/components/schemas/UpstreamSourceInput" }
+        provider_api_key_mode: { type: [string, "null"], enum: [QUEUE, RANDOM, null] }
+    ProviderBootstrap:
+      type: object
+      additionalProperties: false
+      required: [upstream_source, api_key, model_name]
+      properties:
+        upstream_source: { $ref: "#/components/schemas/UpstreamSourceInput" }
+        api_key: { type: string, minLength: 1 }
+        model_name: { type: string, minLength: 1 }
+        name: { type: [string, "null"] }
+        key: { type: [string, "null"] }
+        real_model_name: { type: [string, "null"] }
+        save_and_test: { type: boolean, default: false }
+        api_key_description: { type: [string, "null"] }
+    ProviderCheck:
+      type: object
+      additionalProperties: false
+      properties:
+        model_id: { type: [integer, "null"], format: int64 }
+        model_name: { type: [string, "null"] }
+        provider_api_key_id: { type: [integer, "null"], format: int64 }
+        provider_api_key: { type: [string, "null"] }
+    SourceEvidence:
+      type: object
+      additionalProperties: false
+      required: [source_id, source_key, profile_type]
+      properties:
+        source_id: { type: integer, format: int64 }
+        source_key: { type: string, const: primary }
+        profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
+    ProviderRemoteModels:
+      type: object
+      additionalProperties: false
+      required: [source_id, source_key, profile_type, models]
+      properties:
+        source_id: { type: integer, format: int64 }
+        source_key: { type: string, const: primary }
+        profile_type: { $ref: "#/components/schemas/UpstreamProfileType" }
+        models: {}
+    Model:
+      type: object
+      additionalProperties: false
+      required: [id, provider_id, model_name, real_model_name, cost_catalog_id, supports_streaming, supports_tools, supports_reasoning, supports_image_input, supports_embeddings, supports_rerank, deleted_at, is_enabled, created_at, updated_at]
+      properties:
+        id: { type: integer, format: int64 }
+        provider_id: { type: integer, format: int64 }
+        model_name: { type: string }
+        real_model_name: { type: [string, "null"] }
+        cost_catalog_id: { type: [integer, "null"], format: int64 }
+        supports_streaming: { type: boolean }
+        supports_tools: { type: boolean }
+        supports_reasoning: { type: boolean }
+        supports_image_input: { type: boolean }
+        supports_embeddings: { type: boolean }
+        supports_rerank: { type: boolean }
+        deleted_at: { type: [integer, "null"], format: int64 }
+        is_enabled: { type: boolean }
+        created_at: { type: integer, format: int64 }
+        updated_at: { type: integer, format: int64 }
+    BootstrapCheckResult:
+      type: object
+      additionalProperties: false
+      required: [success, message]
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+    ProviderBootstrapResult:
+      type: object
+      additionalProperties: false
+      required: [provider, created_key, created_model, provider_name, provider_key, check_result]
+      properties:
+        provider: { $ref: "#/components/schemas/ProviderAggregate" }
+        created_key: { $ref: "#/components/schemas/ProviderKeySummary" }
+        created_model: { $ref: "#/components/schemas/Model" }
+        provider_name: { type: string }
+        provider_key: { type: string }
+        check_result:
+          anyOf:
+            - $ref: "#/components/schemas/BootstrapCheckResult"
+            - type: "null"
     ProviderKeyCreate:
       type: object
       additionalProperties: false
@@ -171,6 +387,52 @@ components:
           required: [api_key]
           properties:
             api_key: { type: string }
+    ProviderAggregateEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ProviderAggregate" }
+    ProviderAggregateListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderAggregate" }
+    ProviderSummaryListEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ProviderSummary" }
+    ProviderBootstrapEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ProviderBootstrapResult" }
+    SourceEvidenceEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/SourceEvidence" }
+    ProviderRemoteModelsEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, data]
+      properties:
+        code: { type: integer, const: 0 }
+        data: { $ref: "#/components/schemas/ProviderRemoteModels" }
     ProviderKeySummaryEnvelope:
       type: object
       required: [code, data]
@@ -204,6 +466,48 @@ components:
         code: { type: integer }
         msg: { type: string }
   responses:
+    ProviderAggregate:
+      description: Logical Provider with its exactly one Primary Upstream Source.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderAggregateEnvelope" }
+    ProviderAggregateList:
+      description: Logical Providers with one nested Primary Upstream Source each.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderAggregateListEnvelope" }
+    ProviderSummaryList:
+      description: Provider summaries with Primary Source evidence for management selectors and lists.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderSummaryListEnvelope" }
+    ProviderBootstrap:
+      description: Atomically bootstrapped Provider aggregate, Provider credential summary, model, and optional check result.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderBootstrapEnvelope" }
+    SourceEvidence:
+      description: Exact Primary Source used by the Provider check.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SourceEvidenceEnvelope" }
+    ProviderRemoteModels:
+      description: Exact Primary Source evidence plus the unmodified upstream model discovery payload.
+      headers:
+        Cache-Control: { $ref: "#/components/headers/NoStore" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ProviderRemoteModelsEnvelope" }
     ProviderKeyList:
       description: Safe provider key summaries without plaintext or encrypted secret fields.
       headers:

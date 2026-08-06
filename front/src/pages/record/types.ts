@@ -5,6 +5,7 @@ import type { RecordDetailTab } from "./composables/useRecordDetail";
 export type RecordFilters = {
   api_key_id: number;
   provider_id: number;
+  source_id: number;
   model_id: number;
   status: string;
   downstream_protocol: "ALL" | DownstreamProtocol;
@@ -27,6 +28,7 @@ export type FilterOption = {
 
 export type EnrichedRecordListItem = RecordListItem & {
   providerName: string;
+  sourceDisplay: string;
   apiKeyName: string;
   displayRequestedModelName: string;
   httpStatusDisplay: string;

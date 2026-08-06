@@ -25,6 +25,10 @@
       </template>
     </SectionHeader>
 
+    <div class="rounded-lg border border-gray-200 bg-gray-50/60 px-3.5 py-3 text-xs leading-5 text-gray-600">
+      {{ $t("providerEditPage.credentials.providerOwnership") }}
+    </div>
+
     <div
       v-if="editingData.provider_keys.length === 0"
       class="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-10"
@@ -59,7 +63,11 @@
           <p class="truncate text-sm text-gray-600">
             {{ keyItem.description || $t("providerEditPage.credentials.noDescription") }}
           </p>
-          <p v-if="keyItem.checkMessage" class="text-xs text-red-600">
+          <p
+            v-if="keyItem.checkMessage"
+            class="text-xs"
+            :class="keyItem.checkStatus === 'error' ? 'text-red-600' : 'font-mono text-gray-500'"
+          >
             {{ keyItem.checkMessage }}
           </p>
         </div>
@@ -321,7 +329,9 @@ const revealTargetKey = ref<LocalProviderApiKeyItem | null>(null);
 const isRevealBusy = ref(false);
 
 const isVertex = computed(() =>
-  ["VERTEX", "VERTEX_OPENAI"].includes(editingData.value.provider_type),
+  ["VERTEX", "VERTEX_OPENAI"].includes(
+    editingData.value.upstream_source.profile_type,
+  ),
 );
 
 const keyMask = (key: LocalProviderApiKeyItem) =>

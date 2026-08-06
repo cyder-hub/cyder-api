@@ -134,7 +134,7 @@ export interface ProviderReasoningConfigPayload {
 }
 
 export interface ProviderReasoningConfigPreviewPayload {
-  provider_type?: string | null;
+  profile_type?: string | null;
   family_key?: ReasoningPatchFamilyKey | null;
   presets?: ReasoningConfigPresetPayload[];
 }

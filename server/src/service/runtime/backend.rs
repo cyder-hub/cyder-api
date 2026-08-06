@@ -10,14 +10,14 @@ use crate::service::redis::{self, RedisPool};
 use super::api_key_governance::{
     ApiKeyGovernanceService, MemoryApiKeyRuntimeStore, RedisApiKeyRuntimeStore,
 };
-use super::provider_circuit::{
-    MemoryProviderCircuitStore, ProviderCircuitService, RedisProviderCircuitStore,
-};
 use super::provider_key_selection::{
     MemoryProviderKeyCursorStore, ProviderKeyCursorStore, RedisProviderKeyCursorStore,
 };
 use super::reasoning_continuation::{
     MemoryReasoningContinuationStore, ReasoningContinuationStore, RedisReasoningContinuationStore,
+};
+use super::source_circuit::{
+    MemorySourceCircuitStore, RedisSourceCircuitStore, SourceCircuitService,
 };
 
 #[derive(Debug, Error)]
@@ -80,7 +80,7 @@ impl RuntimeStateBackendStatus {
 
 pub struct RuntimeStateBackendBundle {
     pub api_key_governance: Arc<ApiKeyGovernanceService>,
-    pub provider_circuit: Arc<ProviderCircuitService>,
+    pub source_circuit: Arc<SourceCircuitService>,
     pub provider_key_cursor_store: Arc<dyn ProviderKeyCursorStore>,
     pub reasoning_continuation_store: Arc<dyn ReasoningContinuationStore>,
     pub status: RuntimeStateBackendStatus,
@@ -194,8 +194,8 @@ impl RuntimeStateBackendBundle {
             api_key_governance: Arc::new(ApiKeyGovernanceService::new(Arc::new(
                 MemoryApiKeyRuntimeStore::default(),
             ))),
-            provider_circuit: Arc::new(ProviderCircuitService::new_with_config(
-                Arc::new(MemoryProviderCircuitStore::default()),
+            source_circuit: Arc::new(SourceCircuitService::new_with_config(
+                Arc::new(MemorySourceCircuitStore::default()),
                 config.provider_governance.clone(),
             )),
             provider_key_cursor_store: Arc::new(MemoryProviderKeyCursorStore::default()),
@@ -236,8 +236,8 @@ impl RuntimeStateBackendBundle {
                     state_ttl,
                 ),
             ))),
-            provider_circuit: Arc::new(ProviderCircuitService::new_with_config(
-                Arc::new(RedisProviderCircuitStore::new(
+            source_circuit: Arc::new(SourceCircuitService::new_with_config(
+                Arc::new(RedisSourceCircuitStore::new(
                     pool.clone(),
                     key_prefix.clone(),
                     config.runtime_state.provider_circuit_probe_lease_ttl(),

@@ -1,6 +1,6 @@
 {
   "protocol": "OPENAI",
-  "provider_type": "OPENAI",
+  "profile_type": "OPENAI",
   "downstream_path": "/openai/v1/chat/completions",
   "downstream_stream_path": "/openai/v1/chat/completions",
   "downstream_auth": "bearer",

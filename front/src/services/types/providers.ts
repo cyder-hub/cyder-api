@@ -7,9 +7,30 @@ export interface ProviderBase {
   id: number;
   provider_key: string;
   name: string;
+  is_enabled: boolean;
+  deleted_at: number | null;
+  created_at: number;
+  updated_at: number;
+  provider_api_key_mode: string;
+  upstream_source: UpstreamSource;
+}
+
+export interface UpstreamSource {
+  id: number;
+  provider_id: number;
+  source_key: string;
+  profile_type: string;
   endpoint: string;
   use_proxy: boolean;
-  provider_type: string;
+  deleted_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface UpstreamSourcePayload {
+  profile_type: string;
+  endpoint: string;
+  use_proxy: boolean;
 }
 
 export interface ProviderSummaryItem {
@@ -17,6 +38,7 @@ export interface ProviderSummaryItem {
   provider_key: string;
   name: string;
   is_enabled: boolean;
+  upstream_source: UpstreamSource;
 }
 
 export interface ProviderApiKeySummary {
@@ -50,12 +72,19 @@ export interface ProviderRemoteModelItem {
   owned_by?: string;
 }
 
-export type ProviderRemoteModelsResponse =
+export type ProviderRemoteModelsPayload =
   | ProviderRemoteModelItem[]
   | {
       data?: ProviderRemoteModelItem[];
       models?: ProviderRemoteModelItem[];
     };
+
+export interface ProviderRemoteModelsResponse {
+  source_id: number;
+  source_key: string;
+  profile_type: string;
+  models: ProviderRemoteModelsPayload;
+}
 
 export interface ProviderCheckPayload {
   model_id?: number;
@@ -64,15 +93,19 @@ export interface ProviderCheckPayload {
   provider_api_key?: string;
 }
 
+export interface ProviderCheckResponse {
+  source_id: number;
+  source_key: string;
+  profile_type: string;
+}
+
 export interface ProviderBootstrapPayload {
-  endpoint: string;
+  upstream_source: UpstreamSourcePayload;
   api_key: string;
   model_name: string;
   key: string;
-  provider_type?: string;
   name?: string;
   real_model_name?: string | null;
-  use_proxy?: boolean;
   save_and_test?: boolean;
   api_key_description?: string | null;
 }
@@ -89,9 +122,7 @@ export interface ProviderBootstrapResponse {
 export interface ProviderPayload {
   key: string;
   name: string;
-  endpoint: string;
-  use_proxy: boolean;
-  provider_type: string;
+  upstream_source: UpstreamSourcePayload;
 }
 
 export interface ProviderKeyPayload {

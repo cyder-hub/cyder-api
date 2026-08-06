@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::controller::BaseError;
 use crate::database::model::Model;
-use crate::database::provider::Provider;
+use crate::database::provider::{Provider, ProviderAggregate};
 use crate::database::reasoning_config::{
     ReasoningConfig, ReasoningConfigMode, ReasoningConfigPresetInput, ReasoningConfigScope,
     ReasoningConfigWithPresets, ReasoningPatchFamily, ReasoningPreset,
@@ -13,10 +13,10 @@ use crate::database::reasoning_config::{
 use crate::proxy::reasoning_suffix::{
     ReasoningGeneratedPatchPreview as ProxyReasoningGeneratedPatchPreview, ReasoningPatchContext,
     ReasoningPresetPatchPreview as ProxyReasoningPresetPatchPreview, ReasoningPresetPreviewInput,
-    preview_reasoning_patches, upstream_protocol_for_provider_type,
+    preview_reasoning_patches, upstream_protocol_for_profile,
     upstream_protocols_for_reasoning_family,
 };
-use crate::schema::enum_def::{ProviderType, UpstreamProtocol};
+use crate::schema::enum_def::{UpstreamProfileType, UpstreamProtocol};
 use crate::service::cache::types::CacheModel;
 
 use super::audit::{AdminAuditEvent, AdminAuditField};
@@ -68,7 +68,7 @@ pub struct UpsertProviderReasoningConfigInput {
 
 #[derive(Debug, Clone)]
 pub struct PreviewProviderReasoningConfigInput {
-    pub provider_type: Option<ProviderType>,
+    pub profile_type: Option<UpstreamProfileType>,
     pub family_key: Option<String>,
     pub presets: Vec<ReasoningConfigPresetAdminInput>,
 }
@@ -279,7 +279,8 @@ impl ReasoningConfigAdminService {
         provider_id: i64,
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let provider = ensure_provider(provider_id)?;
-        let upstream_protocol = upstream_protocol_for_provider_type(&provider.provider_type);
+        let upstream_protocol =
+            upstream_protocol_for_profile(&provider.upstream_source.profile_type);
         let config = provider_config_response(provider_id)?;
         Ok(build_preview_response(
             config,
@@ -299,11 +300,11 @@ impl ReasoningConfigAdminService {
         input: PreviewProviderReasoningConfigInput,
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let provider = ensure_provider(provider_id)?;
-        let upstream_protocol = upstream_protocol_for_provider_type(
+        let upstream_protocol = upstream_protocol_for_profile(
             input
-                .provider_type
+                .profile_type
                 .as_ref()
-                .unwrap_or(&provider.provider_type),
+                .unwrap_or(&provider.upstream_source.profile_type),
         );
         let config = provider_draft_config_response(provider_id, input)?;
         Ok(build_preview_response(
@@ -415,7 +416,8 @@ impl ReasoningConfigAdminService {
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let model = ensure_model(model_id)?;
         let provider = ensure_provider(model.provider_id)?;
-        let upstream_protocol = upstream_protocol_for_provider_type(&provider.provider_type);
+        let upstream_protocol =
+            upstream_protocol_for_profile(&provider.upstream_source.profile_type);
         let cache_model = CacheModel::from(model);
         let config = model_config_response(model_id)?;
         Ok(build_preview_response(
@@ -432,7 +434,8 @@ impl ReasoningConfigAdminService {
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let model = ensure_model(model_id)?;
         let provider = ensure_provider(model.provider_id)?;
-        let upstream_protocol = upstream_protocol_for_provider_type(&provider.provider_type);
+        let upstream_protocol =
+            upstream_protocol_for_profile(&provider.upstream_source.profile_type);
         let cache_model = CacheModel::from(model);
         let config = model_draft_config_response(&cache_model, input)?;
         Ok(build_preview_response(
@@ -473,7 +476,7 @@ fn normalize_preset_inputs(
     presets.into_iter().map(Into::into).collect()
 }
 
-fn ensure_provider(provider_id: i64) -> Result<Provider, BaseError> {
+fn ensure_provider(provider_id: i64) -> Result<ProviderAggregate, BaseError> {
     Provider::get_by_id(provider_id)
         .map_err(|err| map_owner_not_found(err, "provider", provider_id))
 }
@@ -948,9 +951,10 @@ fn reasoning_config_audit_event(
 mod tests {
     use crate::database::TestDbContext;
     use crate::database::model::{Model, ModelCapabilityFlags};
-    use crate::database::provider::{NewProvider, Provider};
+    use crate::database::provider::{NewProvider, Provider, ProviderAggregate};
     use crate::database::reasoning_config::ReasoningConfig;
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::app_state::create_test_app_state;
 
     use super::{
@@ -959,19 +963,28 @@ mod tests {
         UpsertProviderReasoningConfigInput,
     };
 
-    fn seed_provider(id: i64, provider_key: &str) -> Provider {
-        Provider::create(&NewProvider {
-            id,
-            provider_key: provider_key.to_string(),
-            name: provider_key.to_string(),
-            endpoint: "https://api.example.com/v1".to_string(),
-            use_proxy: false,
-            is_enabled: true,
-            created_at: 1,
-            updated_at: 1,
-            provider_type: ProviderType::Openai,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-        })
+    fn seed_provider(id: i64, provider_key: &str) -> ProviderAggregate {
+        Provider::create(
+            &NewProvider {
+                id,
+                provider_key: provider_key.to_string(),
+                name: provider_key.to_string(),
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            &NewUpstreamSource {
+                id: id + 1,
+                provider_id: id,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type: UpstreamProfileType::Openai,
+                endpoint: "https://api.example.com/v1".to_string(),
+                use_proxy: false,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
         .expect("provider seed should succeed")
     }
 

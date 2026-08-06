@@ -8,7 +8,7 @@ use super::unified::{
     UnifiedChunkResponse, UnifiedRequest, UnifiedResponse, UnifiedStreamEvent,
     meaningful_output_from_legacy_chunk, meaningful_output_from_stream_events,
 };
-use crate::schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol};
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
 use crate::utils::sse::SseEvent;
 
 pub(in crate::service::transform) type RequestDecodeFn =
@@ -28,7 +28,8 @@ pub(in crate::service::transform) type TargetStreamEventsEncodeFn =
     fn(Vec<UnifiedStreamEvent>, &mut StreamTransformContext<'_>) -> Option<Vec<SseEvent>>;
 pub(in crate::service::transform) type TargetLegacyChunkEncodeFn =
     fn(UnifiedChunkResponse, &mut StreamTransformContext<'_>) -> Option<Vec<SseEvent>>;
-pub(in crate::service::transform) type RequestFinalizeFn = fn(Value, &ProviderType, &str) -> Value;
+pub(in crate::service::transform) type RequestFinalizeFn =
+    fn(Value, &UpstreamProfileType, &str) -> Value;
 
 #[derive(Clone, Copy)]
 pub(in crate::service::transform) struct DownstreamRequestCodec {
@@ -97,7 +98,7 @@ impl DecodedSourceStreamFrame {
 
 pub(in crate::service::transform) fn noop_finalize_request(
     data: Value,
-    _provider_type: &ProviderType,
+    _profile_type: &UpstreamProfileType,
     _downstream_path: &str,
 ) -> Value {
     data
@@ -105,14 +106,14 @@ pub(in crate::service::transform) fn noop_finalize_request(
 
 fn finalize_openai_request(
     mut data: Value,
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     downstream_path: &str,
 ) -> Value {
     apply_stream_options(&mut data);
 
     let (openai_variant, sanitize_report) = openai::finalize_openai_compatible_request_payload(
         &mut data,
-        provider_type,
+        profile_type,
         downstream_path,
     );
     if !sanitize_report.removed_fields.is_empty() || !sanitize_report.injected_defaults.is_empty() {

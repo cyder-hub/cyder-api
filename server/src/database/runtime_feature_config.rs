@@ -526,7 +526,8 @@ mod tests {
     use crate::database::TestDbContext;
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::provider::{NewProvider, Provider};
-    use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
 
     fn provider_input(id: i64, key: &str) -> NewProvider {
         let now = Utc::now().timestamp_millis();
@@ -534,18 +535,30 @@ mod tests {
             id,
             provider_key: key.to_string(),
             name: key.to_string(),
-            endpoint: "https://example.com".to_string(),
-            use_proxy: false,
             is_enabled: true,
             created_at: now,
             updated_at: now,
-            provider_type: ProviderType::Openai,
             provider_api_key_mode: ProviderApiKeyMode::Queue,
         }
     }
 
     fn create_provider(id: i64, key: &str) -> Provider {
-        Provider::create(&provider_input(id, key)).expect("provider")
+        let now = Utc::now().timestamp_millis();
+        Provider::create(
+            &provider_input(id, key),
+            &NewUpstreamSource {
+                id,
+                provider_id: id,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type: UpstreamProfileType::Openai,
+                endpoint: "https://example.com".to_string(),
+                use_proxy: false,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .expect("provider")
+        .provider
     }
 
     fn create_model(provider_id: i64, name: &str) -> Model {

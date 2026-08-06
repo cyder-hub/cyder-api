@@ -14,6 +14,7 @@
           :advanced-active-filter-count="advancedActiveFilterCount"
           :api-key-options="apiKeyOptions"
           :provider-options="providerOptions"
+          :source-options="sourceOptions"
           :model-options="modelOptions"
           :status-options="statusOptions"
           :downstream-protocol-options="downstreamProtocolOptions"
@@ -93,6 +94,8 @@ const queryState = useRecordQuery({
   router,
   validators: {
     hasProviderId: (id) => providerStore.providers.some((item) => item.id === id),
+    hasSourceId: (id) =>
+      providerStore.providers.some((item) => item.upstream_source.id === id),
     hasApiKeyId: (id) => apiKeyStore.apiKeys.some((item) => item.id === id),
     hasModelId: (id) => modelStore.modelOptions.some((item) => Number(item.value) === id),
   },
@@ -132,6 +135,7 @@ const {
   errorMsg,
   apiKeyOptions,
   providerOptions,
+  sourceOptions,
   modelOptions,
   statusOptions,
   downstreamProtocolOptions,
@@ -197,7 +201,12 @@ const handleClearSearch = () => {
 };
 
 const handleFilterChange = (key: keyof RecordFiltersState, value: string) => {
-  if (key === "api_key_id" || key === "provider_id" || key === "model_id") {
+  if (
+    key === "api_key_id" ||
+    key === "provider_id" ||
+    key === "source_id" ||
+    key === "model_id"
+  ) {
     handleNumberFilterChange(key, value);
     return;
   }
@@ -207,7 +216,7 @@ const handleFilterChange = (key: keyof RecordFiltersState, value: string) => {
 };
 
 const handleNumberFilterChange = (
-  key: "api_key_id" | "provider_id" | "model_id",
+  key: "api_key_id" | "provider_id" | "source_id" | "model_id",
   value: string,
 ) => {
   const nextId = Number(value);

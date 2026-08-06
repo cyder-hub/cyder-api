@@ -1,6 +1,6 @@
 {
   "protocol":"RESPONSES",
-  "provider_type":"OPENAI",
+  "profile_type":"OPENAI",
   "downstream_path":"/responses/v1/responses",
   "downstream_stream_path":"/responses/v1/responses",
   "downstream_auth":"bearer",

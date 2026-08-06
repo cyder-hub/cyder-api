@@ -13,8 +13,34 @@ import {
 
 test("provider summary helpers derive options and lookup maps from summary items", () => {
   const providers = [
-    { id: 1, provider_key: "openai", name: "OpenAI", is_enabled: true },
-    { id: 2, provider_key: "anthropic", name: "Anthropic", is_enabled: false },
+    {
+      id: 1,
+      provider_key: "openai",
+      name: "OpenAI",
+      is_enabled: true,
+      upstream_source: {
+        id: 101,
+        provider_id: 1,
+        source_key: "primary",
+        profile_type: "OPENAI",
+        endpoint: "https://api.openai.com/v1",
+        use_proxy: false,
+      },
+    },
+    {
+      id: 2,
+      provider_key: "anthropic",
+      name: "Anthropic",
+      is_enabled: false,
+      upstream_source: {
+        id: 102,
+        provider_id: 2,
+        source_key: "primary",
+        profile_type: "ANTHROPIC",
+        endpoint: "https://api.anthropic.com/v1",
+        use_proxy: false,
+      },
+    },
   ];
 
   assert.deepEqual(buildProviderOptions(providers), [

@@ -364,12 +364,12 @@ const props = withDefaults(
     actions: ReasoningConfigActions;
     title?: string;
     modelSupportsReasoning?: boolean;
-    providerType?: string | null;
+    profileType?: string | null;
   }>(),
   {
     title: undefined,
     modelSupportsReasoning: undefined,
-    providerType: undefined,
+    profileType: undefined,
   },
 );
 
@@ -434,7 +434,7 @@ const activePreview = computed(() => {
 
 const currentUpstreamProtocol = computed(
   () =>
-    upstreamProtocolFromProviderType(props.providerType) ||
+    upstreamProtocolFromProfileType(props.profileType) ||
     activePreview.value?.upstream_protocol ||
     null,
 );
@@ -581,10 +581,10 @@ function normalizeEnumValue(value: string | null | undefined): string | null {
   return normalized || null;
 }
 
-function upstreamProtocolFromProviderType(
-  providerType: string | null | undefined,
+function upstreamProtocolFromProfileType(
+  profileType: string | null | undefined,
 ): UpstreamProtocol | null {
-  switch (normalizeEnumValue(providerType)) {
+  switch (normalizeEnumValue(profileType)) {
     case "OPENAI":
     case "VERTEX_OPENAI":
     case "GEMINI_OPENAI":
@@ -817,7 +817,7 @@ function buildPresetPayload() {
 
 function buildProviderDraftPreviewPayload(): ProviderReasoningConfigPreviewPayload {
   return {
-    provider_type: normalizeEnumValue(props.providerType),
+    profile_type: normalizeEnumValue(props.profileType),
     family_key: familyKeyDraft.value || null,
     presets: familyKeyDraft.value ? buildPresetPayload() : [],
   };
@@ -1015,7 +1015,7 @@ watch(currentSnapshot, () => {
 });
 
 watch(
-  () => props.providerType,
+  () => props.profileType,
   () => {
     if (props.ownerKind === "provider" && props.ownerId) {
       void load();

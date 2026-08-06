@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 downstream_protocols:
   - OPENAI
@@ -105,6 +105,14 @@ evidence:
     kind: test
     reference: "proxy::direct_execution_regression::four_public_downstream_generation_paths_call_upstream_at_most_once"
     summary: "Pins each representative public generation path to exactly one real upstream request."
+  - id: r3-9-primary-source-aggregate
+    kind: test
+    reference: "database::provider::tests::provider_aggregate_reads_fail_closed_for_missing_or_ambiguous_source"
+    summary: "Pins every readable Logical Provider to exactly one active primary Upstream Source and fails closed for zero or multiple Sources."
+  - id: r3-9-source-runtime-evidence
+    kind: test
+    reference: "controller::provider_runtime::tests::snapshot_builds_summary_and_filtered_items_from_one_provider_set"
+    summary: "Pins Provider Runtime aggregation to the selected Source identity, Profile, safe endpoint snapshot, and Source-scoped circuit health."
   - id: representative-fixture-scope
     kind: test
     reference: "proxy::direct_execution_regression::direct_execution_regression_fixtures_define_four_complete_protocols"
@@ -146,43 +154,52 @@ evidence:
     reference: "proxy::direct_execution_regression::incompatible_utility_targets_are_rejected_before_any_upstream_call"
     summary: "Proves incompatible embeddings, rerank, and countTokens targets fail before any HTTP upstream request."
 
-provider_profiles:
-  - provider_type: OPENAI
+upstream_source_contract:
+  owner: R3.9
+  exactly_one_active_source_per_provider: true
+  required_source_key: primary
+  source_enabled_implicitly: true
+  source_default_implicitly: true
+  credential_scope: provider
+  evidence: [r3-9-primary-source-aggregate, r3-9-source-runtime-evidence]
+
+upstream_source_profiles:
+  - profile_type: OPENAI
     upstream_protocol: OPENAI
     dialect: standard
     auth: bearer_api_key
     endpoint: base_url
-  - provider_type: GEMINI
+  - profile_type: GEMINI
     upstream_protocol: GEMINI
     dialect: standard
     auth: gemini_api_key
     endpoint: base_url
-  - provider_type: VERTEX
+  - profile_type: VERTEX
     upstream_protocol: GEMINI
     dialect: standard
     auth: vertex_oauth
     endpoint: vertex_gemini
-  - provider_type: VERTEX_OPENAI
+  - profile_type: VERTEX_OPENAI
     upstream_protocol: OPENAI
     dialect: gemini_openai_compatibility
     auth: vertex_oauth
     endpoint: vertex_openai
-  - provider_type: OLLAMA
+  - profile_type: OLLAMA
     upstream_protocol: OLLAMA
     dialect: standard
     auth: bearer_api_key
     endpoint: base_url
-  - provider_type: ANTHROPIC
+  - profile_type: ANTHROPIC
     upstream_protocol: ANTHROPIC
     dialect: standard
     auth: anthropic_api_key
     endpoint: base_url
-  - provider_type: RESPONSES
+  - profile_type: RESPONSES
     upstream_protocol: RESPONSES
     dialect: standard
     auth: bearer_api_key
     endpoint: base_url
-  - provider_type: GEMINI_OPENAI
+  - profile_type: GEMINI_OPENAI
     upstream_protocol: OPENAI
     dialect: gemini_openai_compatibility
     auth: bearer_api_key

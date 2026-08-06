@@ -12,6 +12,7 @@ import {
   formatDuration,
   formatPrice,
 } from "./recordFormat.ts";
+import { formatSourceIdentity } from "../../../utils/sourceEvidence.ts";
 import { DEFAULT_RECORD_FILTERS, RECORD_ADVANCED_FILTER_KEYS } from "./useRecordQuery.ts";
 
 export type RecordTpsDurationKind = "stream_tail" | "effective";
@@ -113,6 +114,14 @@ type NamedEntity = {
   name: string;
 };
 
+type ProviderEntity = NamedEntity & {
+  upstream_source: {
+    id: number;
+    source_key: string;
+    profile_type: string;
+  };
+};
+
 type ModelOption = {
   value: number | string;
   label: string;
@@ -125,7 +134,7 @@ export interface UseRecordListOptions {
   buildListParams: () => RecordListParams;
   t: RecordListTranslator;
   providerStore: {
-    providers: NamedEntity[];
+    providers: ProviderEntity[];
     fetchProviders: () => Promise<unknown>;
   };
   apiKeyStore: {
@@ -169,6 +178,14 @@ export function useRecordList(options: UseRecordListOptions) {
     ...(options.providerStore.providers || []).map((provider) => ({
       value: String(provider.id),
       label: provider.name,
+    })),
+  ]);
+
+  const sourceOptions = computed<FilterOption[]>(() => [
+    { value: "0", label: options.t("recordPage.filter.allSources") },
+    ...(options.providerStore.providers || []).map((provider) => ({
+      value: String(provider.upstream_source.id),
+      label: `${provider.name} / ${provider.upstream_source.source_key} / ${provider.upstream_source.profile_type}`,
     })),
   ]);
 
@@ -264,6 +281,10 @@ export function useRecordList(options: UseRecordListOptions) {
     return {
       ...record,
       providerName,
+      sourceDisplay: formatSourceIdentity(
+        record,
+        options.t("recordPage.source.unselected"),
+      ),
       apiKeyName,
       displayRequestedModelName:
         record.model_name || record.requested_model_name || emptyValue,
@@ -313,6 +334,7 @@ export function useRecordList(options: UseRecordListOptions) {
     errorMsg,
     apiKeyOptions,
     providerOptions,
+    sourceOptions,
     modelOptions,
     statusOptions,
     downstreamProtocolOptions,

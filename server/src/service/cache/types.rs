@@ -12,8 +12,8 @@ use crate::database::runtime_feature_config::{
 };
 use crate::database::{api_key::ApiKey, api_key_acl_rule::ApiKeyAclRule};
 use crate::schema::enum_def::{
-    Action, ProviderApiKeyMode, ProviderType, RequestPatchOperation, RequestPatchPlacement,
-    RuleScope,
+    Action, ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, RuleScope,
+    UpstreamProfileType,
 };
 use serde::{Deserialize, Serialize, de};
 use serde_with::serde_as;
@@ -75,11 +75,19 @@ pub struct CacheProvider {
     pub id: i64,
     pub provider_key: String,
     pub name: String,
-    pub endpoint: String,
-    pub use_proxy: bool,
-    pub provider_type: ProviderType,
     pub provider_api_key_mode: ProviderApiKeyMode,
     pub is_enabled: bool,
+    pub upstream_source: CacheUpstreamSource,
+}
+
+/// Immutable execution entry nested under a cached logical provider.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CacheUpstreamSource {
+    pub id: i64,
+    pub source_key: String,
+    pub profile_type: UpstreamProfileType,
+    pub endpoint: String,
+    pub use_proxy: bool,
 }
 
 /// Cached provider/model-scoped reasoning config and active presets.
@@ -465,17 +473,21 @@ impl From<crate::database::provider::ProviderApiKeySelection> for CacheProviderK
     }
 }
 
-impl From<crate::database::provider::Provider> for CacheProvider {
-    fn from(db: crate::database::provider::Provider) -> Self {
+impl From<crate::database::provider::ProviderAggregate> for CacheProvider {
+    fn from(db: crate::database::provider::ProviderAggregate) -> Self {
         Self {
             id: db.id,
-            provider_key: db.provider_key,
-            name: db.name,
-            endpoint: db.endpoint,
-            use_proxy: db.use_proxy,
-            provider_type: db.provider_type,
-            provider_api_key_mode: db.provider_api_key_mode,
+            provider_key: db.provider_key.clone(),
+            name: db.name.clone(),
+            provider_api_key_mode: db.provider_api_key_mode.clone(),
             is_enabled: db.is_enabled,
+            upstream_source: CacheUpstreamSource {
+                id: db.upstream_source.id,
+                source_key: db.upstream_source.source_key,
+                profile_type: db.upstream_source.profile_type,
+                endpoint: db.upstream_source.endpoint,
+                use_proxy: db.upstream_source.use_proxy,
+            },
         }
     }
 }

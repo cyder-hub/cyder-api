@@ -1,3 +1,5 @@
+import type { ProviderCheckResponse } from "@/services/types";
+
 export interface CheckOption {
   value: number;
   label: string;
@@ -19,4 +21,10 @@ export function buildCheckOptions<T>(
     })),
     defaultSelectedValue: null,
   };
+}
+
+export function formatCheckSourceEvidence(
+  result: ProviderCheckResponse,
+): string {
+  return `${result.source_key} · ${result.profile_type} · source #${result.source_id}`;
 }

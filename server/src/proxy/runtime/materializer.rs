@@ -27,7 +27,9 @@ use crate::{
     },
     schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
     service::{
-        cache::types::{CacheModel, CacheProvider, RuntimeResolvedRequestPatch},
+        cache::types::{
+            CacheModel, CacheProvider, CacheUpstreamSource, RuntimeResolvedRequestPatch,
+        },
         provider_credential::{ProviderCredential, apply_provider_request_auth_header},
         runtime::{ReasoningContinuationScope, ReasoningContinuationStore},
         transform::{finalize_request_data, transform_request_data},
@@ -83,7 +85,7 @@ fn select_generation_prepare_kind(
 
 fn build_gemini_headers(
     original_headers: &HeaderMap,
-    provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     credential: &ProviderCredential,
 ) -> Result<HeaderMap, ProxyError> {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -101,33 +103,28 @@ fn build_gemini_headers(
         }
     }
 
-    apply_provider_request_auth_header(
-        &mut headers,
-        provider,
-        UpstreamProtocol::Gemini,
-        credential,
-    )
-    .map_err(|error| {
-        ProxyError::gateway(
-            ProxyErrorCode::ProviderConfigurationError,
-            ExecutionStage::Materialize,
-            ResponseVisibility::NotVisible,
-            None,
-            error.to_string(),
-        )
-    })?;
+    apply_provider_request_auth_header(&mut headers, source, UpstreamProtocol::Gemini, credential)
+        .map_err(|error| {
+            ProxyError::gateway(
+                ProxyErrorCode::ProviderConfigurationError,
+                ExecutionStage::Materialize,
+                ResponseVisibility::NotVisible,
+                None,
+                error.to_string(),
+            )
+        })?;
 
     Ok(headers)
 }
 
 fn build_gemini_url(
-    provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     real_model_name: &str,
     action: &str,
     params: &HashMap<String, String>,
     is_stream: bool,
 ) -> Result<Url, ProxyError> {
-    let target_url_str = format!("{}/{}:{}", provider.endpoint, real_model_name, action);
+    let target_url_str = format!("{}/{}:{}", source.endpoint, real_model_name, action);
     let mut url = Url::parse(&target_url_str).map_err(|error| {
         ProxyError::gateway(
             ProxyErrorCode::ProviderConfigurationError,
@@ -153,7 +150,7 @@ fn build_gemini_url(
 
 fn build_new_headers(
     pre_headers: &HeaderMap,
-    provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     upstream_protocol: UpstreamProtocol,
     credential: &ProviderCredential,
 ) -> Result<HeaderMap, ProxyError> {
@@ -169,7 +166,7 @@ fn build_new_headers(
             headers.insert(name.clone(), value.clone());
         }
     }
-    apply_provider_request_auth_header(&mut headers, provider, upstream_protocol, credential)
+    apply_provider_request_auth_header(&mut headers, source, upstream_protocol, credential)
         .map_err(|error| {
             ProxyError::gateway(
                 ProxyErrorCode::ProviderConfigurationError,
@@ -211,6 +208,7 @@ fn ensure_request_body_object(data: &mut Value) {
 
 async fn prepare_llm_request(
     provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     model: &CacheModel,
     mut data: Value,
     original_headers: &HeaderMap,
@@ -223,7 +221,7 @@ async fn prepare_llm_request(
         provider.name, model.model_name
     );
 
-    let target_url = format!("{}/{}", provider.endpoint, path);
+    let target_url = format!("{}/{}", source.endpoint, path);
     let mut url = Url::parse(&target_url).map_err(|error| {
         ProxyError::gateway(
             ProxyErrorCode::ProviderConfigurationError,
@@ -233,10 +231,10 @@ async fn prepare_llm_request(
             format!("failed to parse target url: {error}"),
         )
     })?;
-    let upstream_protocol = determine_upstream_protocol(provider);
+    let upstream_protocol = determine_upstream_protocol(source);
     let mut headers = build_new_headers(
         original_headers,
-        provider,
+        source,
         upstream_protocol,
         provider_credential,
     )?;
@@ -246,12 +244,7 @@ async fn prepare_llm_request(
         obj.insert("model".to_string(), json!(resolve_real_model_name(model)));
     }
 
-    data = finalize_request_data(
-        data,
-        UpstreamProtocol::Openai,
-        &provider.provider_type,
-        path,
-    );
+    data = finalize_request_data(data, UpstreamProtocol::Openai, &source.profile_type, path);
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
 
     Ok((url.to_string(), headers, data, provider_credential.key_id()))
@@ -259,6 +252,7 @@ async fn prepare_llm_request(
 
 async fn prepare_generation_request(
     provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     model: &CacheModel,
     data: Value,
     original_headers: &HeaderMap,
@@ -273,6 +267,7 @@ async fn prepare_generation_request(
             let (final_url, final_headers, final_body_value, provider_api_key_id) =
                 prepare_llm_request(
                     provider,
+                    source,
                     model,
                     data,
                     original_headers,
@@ -292,6 +287,7 @@ async fn prepare_generation_request(
             let (final_url, final_headers, final_body_value, provider_api_key_id) =
                 prepare_gemini_llm_request(
                     provider,
+                    source,
                     model,
                     data,
                     original_headers,
@@ -313,6 +309,7 @@ async fn prepare_generation_request(
 
 async fn prepare_simple_gemini_request(
     provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     model: &CacheModel,
     mut data: Value,
     original_headers: &HeaderMap,
@@ -327,8 +324,8 @@ async fn prepare_simple_gemini_request(
     );
 
     let real_model_name = resolve_real_model_name(model);
-    let mut url = build_gemini_url(provider, real_model_name, action, params, false)?;
-    let mut headers = build_gemini_headers(original_headers, provider, provider_credential)?;
+    let mut url = build_gemini_url(source, real_model_name, action, params, false)?;
+    let mut headers = build_gemini_headers(original_headers, source, provider_credential)?;
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
 
     Ok((url.to_string(), headers, data, provider_credential.key_id()))
@@ -336,6 +333,7 @@ async fn prepare_simple_gemini_request(
 
 async fn prepare_gemini_llm_request(
     provider: &CacheProvider,
+    source: &CacheUpstreamSource,
     model: &CacheModel,
     mut data: Value,
     original_headers: &HeaderMap,
@@ -355,16 +353,12 @@ async fn prepare_gemini_llm_request(
     } else {
         "generateContent"
     };
-    let mut url = build_gemini_url(provider, real_model_name, action, params, is_stream)?;
-    let mut headers = build_gemini_headers(original_headers, provider, provider_credential)?;
+    let mut url = build_gemini_url(source, real_model_name, action, params, is_stream)?;
+    let mut headers = build_gemini_headers(original_headers, source, provider_credential)?;
 
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
 
     Ok((url.to_string(), headers, data, provider_credential.key_id()))
-}
-
-fn is_openai_compatible_generation_target(upstream_protocol: UpstreamProtocol) -> bool {
-    upstream_protocol == UpstreamProtocol::Openai
 }
 
 fn target_has_explicit_reasoning_disabled(target: &ExecutionTarget) -> bool {
@@ -392,7 +386,6 @@ async fn repair_generation_request_body(
     target: &ExecutionTarget,
     final_body_value: &mut Value,
     downstream_api_key_id: i64,
-    upstream_protocol: UpstreamProtocol,
     reasoning_continuation_store: &dyn ReasoningContinuationStore,
 ) -> Result<(), ProxyError> {
     repair_openai_reasoning_content(ReasoningContentRepairRequest {
@@ -402,9 +395,7 @@ async fn repair_generation_request_body(
         feature_enabled: target
             .runtime_features
             .openai_reasoning_content_repair_enabled,
-        target_is_openai_compatible_generation: is_openai_compatible_generation_target(
-            upstream_protocol,
-        ),
+        target_is_openai_compatible_generation: target.is_openai_compatible_generation(),
         explicit_reasoning_disabled: target_has_explicit_reasoning_disabled(target),
         now_ms: chrono::Utc::now().timestamp_millis(),
     })
@@ -436,6 +427,7 @@ pub(in crate::proxy) async fn materialize_generation_request(
     data = transform_request_data(data, downstream_protocol, upstream_protocol, is_stream);
     let mut prepared_request = prepare_generation_request(
         &target.provider,
+        &target.upstream_source,
         &target.model,
         data,
         original_headers,
@@ -457,7 +449,6 @@ pub(in crate::proxy) async fn materialize_generation_request(
         target,
         &mut final_body_value,
         downstream_api_key_id,
-        upstream_protocol,
         reasoning_continuation_store,
     )
     .await?;
@@ -495,6 +486,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
             UtilityProtocol::OpenaiCompatible => {
                 prepare_llm_request(
                     &target.provider,
+                    &target.upstream_source,
                     &target.model,
                     data,
                     original_headers,
@@ -507,6 +499,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
             UtilityProtocol::GeminiCompatible => {
                 prepare_simple_gemini_request(
                     &target.provider,
+                    &target.upstream_source,
                     &target.model,
                     data,
                     original_headers,

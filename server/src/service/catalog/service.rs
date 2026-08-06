@@ -34,6 +34,7 @@ use super::reload::{
 };
 
 type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
+const CATALOG_CACHE_SCHEMA_PREFIX: &str = "r39:";
 type ProviderApiKeysInvalidationHook = Arc<
     dyn Fn(i64) -> Pin<Box<dyn Future<Output = Result<(), AppStoreError>> + Send + 'static>>
         + Send
@@ -145,9 +146,10 @@ impl CatalogService {
                 .as_ref()
                 .expect("Redis config should exist if pool exists");
             let key_prefix = format!(
-                "{}{}",
+                "{}{}{}",
                 redis_config.key_prefix,
-                CONFIG.cache.catalog_redis_key_prefix()
+                CONFIG.cache.catalog_redis_key_prefix(),
+                CATALOG_CACHE_SCHEMA_PREFIX,
             );
             let backend = RedisCacheBackend::new(pool.clone(), key_prefix);
             Arc::new(CacheRepository::new(backend, ttl))
@@ -767,17 +769,21 @@ impl CatalogService {
         let cache_key = CacheKey::ProviderById(id).to_compact_string();
 
         self.get_or_load(&self.provider_cache, &cache_key, || async {
-            if let Ok(db_provider) = Provider::get_by_id(id) {
-                let cache_item = CacheProvider::from(db_provider.clone());
-                self.provider_cache
-                    .set_positive(
-                        &CacheKey::ProviderByKey(&db_provider.provider_key).to_compact_string(),
-                        &cache_item,
-                    )
-                    .await?;
-                Ok(Some(cache_item))
-            } else {
-                Ok(None)
+            match Provider::get_by_id(id) {
+                Ok(db_provider) => {
+                    let cache_item = CacheProvider::from(db_provider.clone());
+                    self.provider_cache
+                        .set_positive(
+                            &CacheKey::ProviderByKey(&db_provider.provider_key).to_compact_string(),
+                            &cache_item,
+                        )
+                        .await?;
+                    Ok(Some(cache_item))
+                }
+                Err(BaseError::ParamInvalid(_)) => Ok(None),
+                Err(error) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to load provider aggregate {id}: {error:?}"
+                ))),
             }
         })
         .await
@@ -800,17 +806,21 @@ impl CatalogService {
         let cache_key = CacheKey::ProviderByKey(key).to_compact_string();
 
         self.get_or_load(&self.provider_cache, &cache_key, || async {
-            if let Ok(Some(db_provider)) = Provider::get_by_key(key) {
-                let cache_item = CacheProvider::from(db_provider.clone());
-                self.provider_cache
-                    .set_positive(
-                        &CacheKey::ProviderById(db_provider.id).to_compact_string(),
-                        &cache_item,
-                    )
-                    .await?;
-                Ok(Some(cache_item))
-            } else {
-                Ok(None)
+            match Provider::get_by_key(key) {
+                Ok(Some(db_provider)) => {
+                    let cache_item = CacheProvider::from(db_provider.clone());
+                    self.provider_cache
+                        .set_positive(
+                            &CacheKey::ProviderById(db_provider.id).to_compact_string(),
+                            &cache_item,
+                        )
+                        .await?;
+                    Ok(Some(cache_item))
+                }
+                Ok(None) => Ok(None),
+                Err(error) => Err(AppStoreError::DatabaseError(format!(
+                    "failed to load provider aggregate by key {key}: {error:?}"
+                ))),
             }
         })
         .await
@@ -844,7 +854,7 @@ impl CatalogService {
 
         let provider_key = Provider::get_by_id(provider_id)
             .ok()
-            .map(|provider| provider.provider_key);
+            .map(|provider| provider.provider_key.clone());
         if let Some(key) = provider_key.as_deref() {
             let _ = self.invalidate_provider_by_key(key).await;
         }
@@ -1378,13 +1388,14 @@ mod tests {
     use crate::config::CacheBackendType;
     use crate::database::TestDbContext;
     use crate::database::model::{Model, ModelCapabilityFlags};
-    use crate::database::provider::{NewProvider, Provider};
+    use crate::database::provider::{NewProvider, Provider, ProviderAggregate};
     use crate::database::reasoning_config::{
         ReasoningConfig, ReasoningConfigMode, ReasoningConfigPresetInput, ReasoningConfigScope,
         ReasoningPatchFamily, ReasoningPreset,
     };
     use crate::database::runtime_feature_config::{RuntimeFeatureConfig, RuntimeFeatureKey};
-    use crate::schema::enum_def::{Action, ProviderApiKeyMode, ProviderType};
+    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::schema::enum_def::{Action, ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::cache::types::{
         CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModel, CacheModelsCatalog,
         CacheProvider,
@@ -1416,19 +1427,28 @@ mod tests {
         }
     }
 
-    fn seed_provider(id: i64, provider_key: &str) -> Provider {
-        Provider::create(&NewProvider {
-            id,
-            provider_key: provider_key.to_string(),
-            name: provider_key.to_string(),
-            endpoint: "https://api.example.com/v1".to_string(),
-            use_proxy: false,
-            is_enabled: true,
-            created_at: 1,
-            updated_at: 1,
-            provider_type: ProviderType::Openai,
-            provider_api_key_mode: ProviderApiKeyMode::Queue,
-        })
+    fn seed_provider(id: i64, provider_key: &str) -> ProviderAggregate {
+        Provider::create(
+            &NewProvider {
+                id,
+                provider_key: provider_key.to_string(),
+                name: provider_key.to_string(),
+                is_enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            &NewUpstreamSource {
+                id: id + 10_000,
+                provider_id: id,
+                source_key: PRIMARY_SOURCE_KEY.to_string(),
+                profile_type: UpstreamProfileType::Openai,
+                endpoint: "https://api.example.com/v1".to_string(),
+                use_proxy: false,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
         .expect("provider seed should succeed")
     }
 

@@ -15,10 +15,10 @@ use crate::database::provider_runtime::{
     ProviderRuntimeAggregate, ProviderRuntimeCostAggregate, ProviderRuntimeStatusCodeCount,
     get_provider_runtime_aggregates_in_range,
 };
-use crate::schema::enum_def::ProviderType;
+use crate::schema::enum_def::UpstreamProfileType;
 use crate::service::app_state::AppState;
 use crate::service::runtime::{
-    ProviderHealthSnapshot, ProviderHealthStatus, RuntimeStateBackendOperatorStatus,
+    RuntimeStateBackendOperatorStatus, SourceHealthSnapshot, SourceHealthStatus,
 };
 
 use super::service::MetricsService;
@@ -167,9 +167,12 @@ pub struct ProviderRuntimeItem {
     pub provider_id: i64,
     pub provider_key: String,
     pub provider_name: String,
-    pub provider_type: String,
     pub is_enabled: bool,
-    pub use_proxy: bool,
+    pub source_id: i64,
+    pub source_key: String,
+    pub source_profile_type: UpstreamProfileType,
+    pub source_endpoint: String,
+    pub source_use_proxy: bool,
     pub enabled_model_count: i64,
     pub enabled_provider_key_count: i64,
     pub health_status: ProviderRuntimeHealthStatus,
@@ -457,10 +460,11 @@ impl MetricsService {
 
         let mut items = Vec::with_capacity(providers.len());
         for provider in providers {
+            let source = &provider.upstream_source;
             let (health_snapshot, runtime_state_backend_degraded, runtime_state_backend_error) =
                 app_state
-                    .provider_circuit
-                    .get_provider_health_snapshot(provider.id)
+                    .source_circuit
+                    .get_source_health_snapshot(source.id)
                     .await
                     .map(|snapshot| (snapshot, false, None))
                     .unwrap_or_else(|err| {
@@ -468,11 +472,12 @@ impl MetricsService {
                         crate::warn_event!(
                             "runtime_state.read_failed",
                             read_model = "provider_runtime",
-                            component = "provider_circuit",
+                            component = "source_circuit",
                             provider_id = provider.id,
+                            source_id = source.id,
                             error = &error,
                         );
-                        (ProviderHealthSnapshot::default(), true, Some(error))
+                        (SourceHealthSnapshot::default(), true, Some(error))
                     });
             let runtime_aggregate =
                 aggregate_map
@@ -507,9 +512,12 @@ impl MetricsService {
                 provider_id: provider.id,
                 provider_key: provider.provider_key.clone(),
                 provider_name: provider.name.clone(),
-                provider_type: map_provider_type(&provider.provider_type).to_string(),
                 is_enabled: provider.is_enabled,
-                use_proxy: provider.use_proxy,
+                source_id: source.id,
+                source_key: source.source_key.clone(),
+                source_profile_type: source.profile_type.clone(),
+                source_endpoint: source.endpoint.clone(),
+                source_use_proxy: source.use_proxy,
                 enabled_model_count: enabled_model_count_by_provider
                     .get(&provider.id)
                     .copied()
@@ -631,24 +639,11 @@ fn provider_runtime_total_latency(request: Option<&MetricRequestWindowAggregate>
     request.and_then(|item| average_or_none(item.total_latency_sum_ms, item.total_latency_count))
 }
 
-fn map_health_status(status: ProviderHealthStatus) -> ProviderRuntimeHealthStatus {
+fn map_health_status(status: SourceHealthStatus) -> ProviderRuntimeHealthStatus {
     match status {
-        ProviderHealthStatus::Healthy => ProviderRuntimeHealthStatus::Healthy,
-        ProviderHealthStatus::Open => ProviderRuntimeHealthStatus::Open,
-        ProviderHealthStatus::HalfOpen => ProviderRuntimeHealthStatus::HalfOpen,
-    }
-}
-
-fn map_provider_type(provider_type: &ProviderType) -> &'static str {
-    match provider_type {
-        ProviderType::Openai => "OPENAI",
-        ProviderType::Gemini => "GEMINI",
-        ProviderType::Vertex => "VERTEX",
-        ProviderType::VertexOpenai => "VERTEX_OPENAI",
-        ProviderType::Ollama => "OLLAMA",
-        ProviderType::Anthropic => "ANTHROPIC",
-        ProviderType::Responses => "RESPONSES",
-        ProviderType::GeminiOpenai => "GEMINI_OPENAI",
+        SourceHealthStatus::Healthy => ProviderRuntimeHealthStatus::Healthy,
+        SourceHealthStatus::Open => ProviderRuntimeHealthStatus::Open,
+        SourceHealthStatus::HalfOpen => ProviderRuntimeHealthStatus::HalfOpen,
     }
 }
 
@@ -669,15 +664,15 @@ fn calculate_error_rate(request_count: i64, error_count: i64) -> Option<f64> {
 }
 
 pub(crate) fn compute_runtime_level(
-    health_status: ProviderHealthStatus,
+    health_status: SourceHealthStatus,
     request_count: i64,
     error_count: i64,
     avg_total_latency_ms: Option<f64>,
 ) -> ProviderRuntimeLevel {
     match health_status {
-        ProviderHealthStatus::Open => ProviderRuntimeLevel::Open,
-        ProviderHealthStatus::HalfOpen => ProviderRuntimeLevel::HalfOpen,
-        ProviderHealthStatus::Healthy => {
+        SourceHealthStatus::Open => ProviderRuntimeLevel::Open,
+        SourceHealthStatus::HalfOpen => ProviderRuntimeLevel::HalfOpen,
+        SourceHealthStatus::Healthy => {
             if request_count == 0 {
                 return ProviderRuntimeLevel::NoTraffic;
             }
@@ -696,7 +691,7 @@ pub(crate) fn compute_runtime_level(
 }
 
 pub(crate) fn build_last_error_summary(
-    health_snapshot: &ProviderHealthSnapshot,
+    health_snapshot: &SourceHealthSnapshot,
     runtime_aggregate: &ProviderRuntimeAggregate,
 ) -> Option<String> {
     if let Some(last_error) = health_snapshot.last_error.as_ref() {
@@ -748,10 +743,24 @@ pub(crate) fn matches_status_filter(
     }
 }
 
-pub(crate) fn search_matches(provider_name: &str, provider_key: &str, search: &str) -> bool {
-    let needle = search.to_ascii_lowercase();
-    provider_name.to_ascii_lowercase().contains(&needle)
-        || provider_key.to_ascii_lowercase().contains(&needle)
+pub(crate) fn search_matches(item: &ProviderRuntimeItem, search: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .map(|character| character.to_ascii_lowercase())
+            .collect::<String>()
+    };
+    let needle = normalize(search);
+    [
+        item.provider_name.as_str(),
+        item.provider_key.as_str(),
+        item.source_key.as_str(),
+        item.source_endpoint.as_str(),
+    ]
+    .into_iter()
+    .any(|value| normalize(value).contains(&needle))
+        || normalize(&format!("{:?}", item.source_profile_type)).contains(&needle)
 }
 
 pub(crate) fn sort_provider_runtime_items(

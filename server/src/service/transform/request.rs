@@ -5,7 +5,7 @@ use super::capability::TransformValueKind;
 use super::diagnostics::{capture_transform_diagnostics, json_value_log_summary};
 use super::unified::{UnifiedRequest, UnifiedTransformDiagnostic};
 use super::{TransformProtocol, apply_transform_policy};
-use crate::schema::enum_def::{DownstreamProtocol, ProviderType, UpstreamProtocol};
+use crate::schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol};
 
 fn protocols_share_wire_format(
     downstream_protocol: DownstreamProtocol,
@@ -40,12 +40,12 @@ pub(in crate::service::transform) fn apply_stream_options(data: &mut Value) {
 pub(in crate::service::transform) fn finalize_request_data(
     data: Value,
     upstream_protocol: UpstreamProtocol,
-    provider_type: &ProviderType,
+    profile_type: &UpstreamProfileType,
     downstream_path: &str,
 ) -> Value {
     let adapter = upstream_adapter_for(upstream_protocol);
     let finalize = adapter.request.finalize.unwrap_or(noop_finalize_request);
-    finalize(data, provider_type, downstream_path)
+    finalize(data, profile_type, downstream_path)
 }
 
 pub(in crate::service::transform) fn transform_request_data(

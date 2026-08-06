@@ -6,8 +6,9 @@ use crate::config::SecretEncryptionConfig;
 use crate::database::provider::{
     NewProvider, NewProviderApiKey, Provider, ProviderApiKeyRepository, ProviderApiKeySummary,
 };
+use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
 use crate::database::{DbConnection, TestDbContext, get_connection};
-use crate::schema::enum_def::{ProviderApiKeyMode, ProviderType};
+use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
 use crate::service::catalog::CatalogService;
 use crate::service::redis::RedisPool;
 use crate::service::secret_encryption::{SecretDomain, SecretEncryptionService, SensitiveSecret};
@@ -22,19 +23,29 @@ use uuid::Uuid;
 const TEST_REDIS_STATE_TTL: Duration = Duration::from_secs(60);
 
 fn seed_provider(id: i64) -> Provider {
-    Provider::create(&NewProvider {
-        id,
-        provider_key: format!("provider-key-cursor-{id}"),
-        name: format!("Provider Key Cursor {id}"),
-        endpoint: "https://api.example.com/v1".to_string(),
-        use_proxy: false,
-        is_enabled: true,
-        created_at: 1,
-        updated_at: 1,
-        provider_type: ProviderType::Openai,
-        provider_api_key_mode: ProviderApiKeyMode::Queue,
-    })
+    Provider::create(
+        &NewProvider {
+            id,
+            provider_key: format!("provider-key-cursor-{id}"),
+            name: format!("Provider Key Cursor {id}"),
+            is_enabled: true,
+            created_at: 1,
+            updated_at: 1,
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+        },
+        &NewUpstreamSource {
+            id,
+            provider_id: id,
+            source_key: PRIMARY_SOURCE_KEY.to_string(),
+            profile_type: UpstreamProfileType::Openai,
+            endpoint: "https://api.example.com/v1".to_string(),
+            use_proxy: false,
+            created_at: 1,
+            updated_at: 1,
+        },
+    )
     .expect("provider seed should succeed")
+    .provider
 }
 
 fn seed_provider_api_key(

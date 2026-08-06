@@ -83,7 +83,7 @@ impl ProxyCancellationContext {
             .try_record_provider_outcome(ProviderOutcome::Success)
     }
 
-    pub(crate) fn try_provider_failure(&self) -> bool {
+    pub(crate) fn try_source_failure(&self) -> bool {
         self.coordinator
             .try_record_provider_outcome(ProviderOutcome::Failure)
     }

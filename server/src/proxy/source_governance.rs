@@ -5,36 +5,35 @@ use super::{ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, Time
 use crate::service::{
     app_state::AppState,
     runtime::{
-        ProviderCircuitError, ProviderCircuitProbePermit, ProviderCircuitRejection,
-        ProviderHealthStatus,
+        SourceCircuitError, SourceCircuitProbePermit, SourceCircuitRejection, SourceHealthStatus,
     },
 };
 
 #[derive(Debug)]
-pub(super) enum ProviderGovernanceCheckError {
-    Rejected(ProviderGovernanceRejection),
+pub(super) enum SourceGovernanceCheckError {
+    Rejected(SourceGovernanceRejection),
     Backend(ProxyError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ProviderGovernanceRejection {
+pub(super) enum SourceGovernanceRejection {
     Open { retry_after: Option<Duration> },
     HalfOpenProbeInFlight,
 }
 
-impl ProviderGovernanceRejection {
-    pub(super) fn to_proxy_error(self, provider_label: &str) -> ProxyError {
+impl SourceGovernanceRejection {
+    pub(super) fn to_proxy_error(self, source_label: &str) -> ProxyError {
         let (code, operator_message) = match self {
             Self::Open { .. } => (
                 ProxyErrorCode::ProviderCircuitOpenError,
                 format!(
-                    "Provider '{provider_label}' is temporarily unavailable due to recent upstream failures."
+                    "Upstream source '{source_label}' is temporarily unavailable due to recent upstream failures."
                 ),
             ),
             Self::HalfOpenProbeInFlight => (
                 ProxyErrorCode::ProviderHalfOpenProbeInFlightError,
                 format!(
-                    "Provider '{provider_label}' is temporarily unavailable because another half-open probe is already in flight."
+                    "Upstream source '{source_label}' is temporarily unavailable because another half-open probe is already in flight."
                 ),
             ),
         };
@@ -54,147 +53,147 @@ impl ProviderGovernanceRejection {
     }
 }
 
-pub(super) async fn ensure_provider_request_allowed(
+pub(super) async fn ensure_source_request_allowed(
     app_state: &AppState,
-    provider_id: i64,
-    provider_label: &str,
-) -> Result<Option<ProviderCircuitProbePermit>, ProviderGovernanceCheckError> {
+    source_id: i64,
+    source_label: &str,
+) -> Result<Option<SourceCircuitProbePermit>, SourceGovernanceCheckError> {
     let decision = app_state
-        .provider_circuit
-        .allow_provider_request(provider_id)
+        .source_circuit
+        .allow_source_request(source_id)
         .await;
 
     match decision {
         Ok(decision) => {
             if !decision.allowed {
                 let Some(rejection) = decision.rejection else {
-                    return Err(ProviderGovernanceCheckError::Backend(ProxyError::gateway(
+                    return Err(SourceGovernanceCheckError::Backend(ProxyError::gateway(
                         ProxyErrorCode::ServerError,
                         ExecutionStage::Governance,
                         ResponseVisibility::NotVisible,
                         None,
-                        "Provider circuit rejected without a domain reason",
+                        "Source circuit rejected without a domain reason",
                     )));
                 };
-                let rejection = provider_circuit_rejection_to_governance_rejection(
+                let rejection = source_circuit_rejection_to_governance_rejection(
                     rejection,
                     decision.retry_after,
                 );
-                return Err(ProviderGovernanceCheckError::Rejected(rejection));
+                return Err(SourceGovernanceCheckError::Rejected(rejection));
             }
 
-            if decision.snapshot.status == ProviderHealthStatus::HalfOpen {
+            if decision.snapshot.status == SourceHealthStatus::HalfOpen {
                 info!(
-                    "Provider governance entering half-open probe: provider_id={}, provider={}",
-                    provider_id, provider_label
+                    "Source governance entering half-open probe: source_id={}, source={}",
+                    source_id, source_label
                 );
             }
             Ok(decision.probe_permit)
         }
         Err(err) => {
-            log_provider_circuit_error("allow", provider_id, &err);
-            Err(ProviderGovernanceCheckError::Backend(
-                provider_circuit_error_to_proxy_error(err),
+            log_source_circuit_error("allow", source_id, &err);
+            Err(SourceGovernanceCheckError::Backend(
+                source_circuit_error_to_proxy_error(err),
             ))
         }
     }
 }
 
-pub(super) async fn record_provider_success(
+pub(super) async fn record_source_success(
     app_state: &AppState,
-    provider_id: i64,
-    provider_label: &str,
-    permit: Option<&ProviderCircuitProbePermit>,
+    source_id: i64,
+    source_label: &str,
+    permit: Option<&SourceCircuitProbePermit>,
 ) {
     let snapshot = app_state
-        .provider_circuit
-        .record_provider_success(provider_id, permit)
+        .source_circuit
+        .record_source_success(source_id, permit)
         .await;
     let snapshot = match snapshot {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            log_provider_circuit_error("record_success", provider_id, &err);
+            log_source_circuit_error("record_success", source_id, &err);
             return;
         }
     };
-    if snapshot.status == ProviderHealthStatus::Healthy && snapshot.consecutive_failures == 0 {
+    if snapshot.status == SourceHealthStatus::Healthy && snapshot.consecutive_failures == 0 {
         info!(
-            "Provider governance marked provider healthy: provider_id={}, provider={}",
-            provider_id, provider_label
+            "Source governance marked source healthy: source_id={}, source={}",
+            source_id, source_label
         );
     }
 }
 
-pub(super) async fn record_provider_failure(
+pub(super) async fn record_source_failure(
     app_state: &AppState,
-    provider_id: i64,
-    provider_label: &str,
+    source_id: i64,
+    source_label: &str,
     error: &ProxyError,
-    permit: Option<&ProviderCircuitProbePermit>,
+    permit: Option<&SourceCircuitProbePermit>,
 ) {
-    if !counts_against_provider_governance(error) {
+    if !counts_against_source_governance(error) {
         return;
     }
 
     let snapshot = app_state
-        .provider_circuit
-        .record_provider_failure(provider_id, error.to_string(), permit)
+        .source_circuit
+        .record_source_failure(source_id, error.to_string(), permit)
         .await;
     let snapshot = match snapshot {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            log_provider_circuit_error("record_failure", provider_id, &err);
+            log_source_circuit_error("record_failure", source_id, &err);
             return;
         }
     };
-    if snapshot.status == ProviderHealthStatus::Open {
+    if snapshot.status == SourceHealthStatus::Open {
         warn!(
-            "Provider governance opened circuit: provider_id={}, provider={}, consecutive_failures={}, error={}",
-            provider_id, provider_label, snapshot.consecutive_failures, error
+            "Source governance opened circuit: source_id={}, source={}, consecutive_failures={}, error={}",
+            source_id, source_label, snapshot.consecutive_failures, error
         );
     }
 }
 
-/// Release a half-open probe without recording a provider failure.
-pub(super) async fn release_provider_probe(
+/// Release a half-open probe without recording a source failure.
+pub(super) async fn release_source_probe(
     app_state: &AppState,
-    provider_id: i64,
-    permit: Option<&ProviderCircuitProbePermit>,
+    source_id: i64,
+    permit: Option<&SourceCircuitProbePermit>,
 ) {
     if permit.is_none() {
         return;
     }
     match app_state
-        .provider_circuit
-        .release_provider_probe(provider_id, permit)
+        .source_circuit
+        .release_source_probe(source_id, permit)
         .await
     {
         Ok(_) => {}
-        Err(err) => log_provider_circuit_error("release_probe", provider_id, &err),
+        Err(err) => log_source_circuit_error("release_probe", source_id, &err),
     }
 }
 
-/// Record a provider-attributable outcome once, or release a half-open probe
-/// when the request ended before there was a provider outcome to count.
-pub(super) async fn record_provider_failure_or_release_probe(
+/// Record a source-attributable outcome once, or release a half-open probe
+/// when the request ended before there was a source outcome to count.
+pub(super) async fn record_source_failure_or_release_probe(
     app_state: &AppState,
     cancellation: &crate::proxy::cancellation::ProxyCancellationContext,
-    provider_id: i64,
-    provider_label: &str,
+    source_id: i64,
+    source_label: &str,
     error: &ProxyError,
-    permit: Option<&ProviderCircuitProbePermit>,
+    permit: Option<&SourceCircuitProbePermit>,
 ) {
-    if !counts_against_provider_governance(error) {
-        release_provider_probe(app_state, provider_id, permit).await;
+    if !counts_against_source_governance(error) {
+        release_source_probe(app_state, source_id, permit).await;
         return;
     }
 
-    if cancellation.try_provider_failure() {
-        record_provider_failure(app_state, provider_id, provider_label, error, permit).await;
+    if cancellation.try_source_failure() {
+        record_source_failure(app_state, source_id, source_label, error, permit).await;
     }
 }
 
-fn counts_against_provider_governance(error: &ProxyError) -> bool {
+fn counts_against_source_governance(error: &ProxyError) -> bool {
     match error.code() {
         ProxyErrorCode::UpstreamTimeoutError => {
             !matches!(error.timeout_phase(), Some(TimeoutPhase::Total))
@@ -210,58 +209,54 @@ fn counts_against_provider_governance(error: &ProxyError) -> bool {
     }
 }
 
-fn provider_circuit_rejection_to_governance_rejection(
-    rejection: ProviderCircuitRejection,
+fn source_circuit_rejection_to_governance_rejection(
+    rejection: SourceCircuitRejection,
     retry_after: Option<Duration>,
-) -> ProviderGovernanceRejection {
+) -> SourceGovernanceRejection {
     match rejection {
-        ProviderCircuitRejection::OpenCooldown => ProviderGovernanceRejection::Open { retry_after },
-        ProviderCircuitRejection::HalfOpenProbeInFlight => {
+        SourceCircuitRejection::OpenCooldown => SourceGovernanceRejection::Open { retry_after },
+        SourceCircuitRejection::HalfOpenProbeInFlight => {
             debug_assert!(retry_after.is_none());
-            ProviderGovernanceRejection::HalfOpenProbeInFlight
+            SourceGovernanceRejection::HalfOpenProbeInFlight
         }
     }
 }
 
-fn provider_circuit_error_to_proxy_error(error: ProviderCircuitError) -> ProxyError {
+fn source_circuit_error_to_proxy_error(error: SourceCircuitError) -> ProxyError {
     ProxyError::gateway(
         ProxyErrorCode::ServerError,
         ExecutionStage::Governance,
         ResponseVisibility::NotVisible,
         None,
-        format!("Provider circuit state backend error: {error}"),
+        format!("Source circuit state backend error: {error}"),
     )
 }
 
-fn log_provider_circuit_error(
-    operation: &'static str,
-    provider_id: i64,
-    error: &ProviderCircuitError,
-) {
+fn log_source_circuit_error(operation: &'static str, source_id: i64, error: &SourceCircuitError) {
     warn!(
-        "Provider governance state backend error: operation={}, provider_id={}, error={}",
-        operation, provider_id, error
+        "Source governance state backend error: operation={}, source_id={}, error={}",
+        operation, source_id, error
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        counts_against_provider_governance, provider_circuit_rejection_to_governance_rejection,
+        counts_against_source_governance, source_circuit_rejection_to_governance_rejection,
     };
     use crate::{
         proxy::{
             ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility, TimeoutPhase,
             error::UpstreamErrorPayload,
         },
-        service::runtime::ProviderCircuitRejection,
+        service::runtime::SourceCircuitRejection,
     };
     use std::time::Duration;
 
     #[test]
-    fn provider_circuit_retry_fact_is_forwarded_only_for_open_cooldown() {
-        let open = provider_circuit_rejection_to_governance_rejection(
-            ProviderCircuitRejection::OpenCooldown,
+    fn source_circuit_retry_fact_is_forwarded_only_for_open_cooldown() {
+        let open = source_circuit_rejection_to_governance_rejection(
+            SourceCircuitRejection::OpenCooldown,
             Some(Duration::from_millis(1_001)),
         )
         .to_proxy_error("provider");
@@ -271,8 +266,8 @@ mod tests {
             Some(2)
         );
 
-        let half_open = provider_circuit_rejection_to_governance_rejection(
-            ProviderCircuitRejection::HalfOpenProbeInFlight,
+        let half_open = source_circuit_rejection_to_governance_rejection(
+            SourceCircuitRejection::HalfOpenProbeInFlight,
             None,
         )
         .to_proxy_error("provider");
@@ -321,7 +316,7 @@ mod tests {
             ProxyErrorCode::UpstreamServiceError,
             ProxyErrorCode::UpstreamUnexpectedStatusError,
         ] {
-            assert!(counts_against_provider_governance(&error(code)));
+            assert!(counts_against_source_governance(&error(code)));
         }
         for phase in [
             TimeoutPhase::Connect,
@@ -335,7 +330,7 @@ mod tests {
                 ResponseVisibility::NotVisible,
                 "test",
             );
-            assert!(counts_against_provider_governance(&timeout));
+            assert!(counts_against_source_governance(&timeout));
         }
         let total = ProxyError::upstream_timeout(
             TimeoutPhase::Total,
@@ -343,7 +338,7 @@ mod tests {
             ResponseVisibility::NotVisible,
             "test",
         );
-        assert!(!counts_against_provider_governance(&total));
+        assert!(!counts_against_source_governance(&total));
         let provider_timeout_status = ProxyError::upstream(
             ProxyErrorCode::UpstreamTimeoutError,
             ExecutionStage::UpstreamResponse,
@@ -356,7 +351,7 @@ mod tests {
             ),
             "provider timeout status",
         );
-        assert!(counts_against_provider_governance(&provider_timeout_status));
+        assert!(counts_against_source_governance(&provider_timeout_status));
         for code in [
             ProxyErrorCode::InvalidRequestError,
             ProxyErrorCode::PermissionError,
@@ -365,7 +360,7 @@ mod tests {
             ProxyErrorCode::ProviderConfigurationError,
             ProxyErrorCode::ClientCancelledError,
         ] {
-            assert!(!counts_against_provider_governance(&error(code)));
+            assert!(!counts_against_source_governance(&error(code)));
         }
     }
 }

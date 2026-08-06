@@ -339,7 +339,7 @@ function buildPrimaryMetrics(item: ProviderRuntimeItem) {
     },
     {
       label: $t("providerRuntimePage.metrics.proxy"),
-      value: item.use_proxy ? $t("common.yes") : $t("common.no"),
+      value: item.source_use_proxy ? $t("common.yes") : $t("common.no"),
     },
   ];
 }
@@ -347,6 +347,7 @@ function buildPrimaryMetrics(item: ProviderRuntimeItem) {
 function openProviderRecords(item: ProviderRuntimeItem) {
   const query: Record<string, string> = {
     provider_id: String(item.provider_id),
+    source_id: String(item.source_id),
   };
 
   if (

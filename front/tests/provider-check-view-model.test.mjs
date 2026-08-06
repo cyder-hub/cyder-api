@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildCheckOptions } from "../src/pages/provider-edit/composables/providerCheckViewModel.ts";
+import {
+  buildCheckOptions,
+  formatCheckSourceEvidence,
+} from "../src/pages/provider-edit/composables/providerCheckViewModel.ts";
 
 test("buildCheckOptions keeps selection empty until the user chooses a target", () => {
   const result = buildCheckOptions(["first", "second"], (item, index) => {
@@ -15,4 +18,15 @@ test("buildCheckOptions keeps selection empty until the user chooses a target", 
     ],
     defaultSelectedValue: null,
   });
+});
+
+test("formatCheckSourceEvidence exposes the exact Primary Source used", () => {
+  assert.equal(
+    formatCheckSourceEvidence({
+      source_id: 42,
+      source_key: "primary",
+      profile_type: "RESPONSES",
+    }),
+    "primary · RESPONSES · source #42",
+  );
 });

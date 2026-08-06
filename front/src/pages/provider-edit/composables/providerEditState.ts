@@ -12,7 +12,7 @@ import type {
 } from "../types";
 
 export interface ProviderBootstrapPreviewState {
-  provider_type: string;
+  profile_type: string;
   endpoint: string;
   provider_name?: string;
   provider_key?: string;
@@ -35,12 +35,13 @@ export function createProviderBootstrapFormState(
   editingData?: Partial<EditingProviderData> | null,
 ): ProviderBootstrapFormState {
   return {
-    provider_type: trimText(editingData?.provider_type) || "OPENAI",
-    endpoint: trimText(editingData?.endpoint),
+    profile_type:
+      trimText(editingData?.upstream_source?.profile_type) || "OPENAI",
+    endpoint: trimText(editingData?.upstream_source?.endpoint),
     api_key: "",
     model_name: "",
     api_key_description: "",
-    use_proxy: editingData?.use_proxy ?? false,
+    use_proxy: editingData?.upstream_source?.use_proxy ?? false,
     provider_name: trimText(editingData?.name),
     provider_key: trimText(editingData?.provider_key),
   };
@@ -54,9 +55,10 @@ export function syncProviderBootstrapFormState(
     return form;
   }
 
-  form.provider_type = trimText(editingData.provider_type) || "OPENAI";
-  form.endpoint = trimText(editingData.endpoint);
-  form.use_proxy = editingData.use_proxy ?? false;
+  form.profile_type =
+    trimText(editingData.upstream_source?.profile_type) || "OPENAI";
+  form.endpoint = trimText(editingData.upstream_source?.endpoint);
+  form.use_proxy = editingData.upstream_source?.use_proxy ?? false;
   form.provider_name = trimText(editingData.name);
   form.provider_key = trimText(editingData.provider_key);
 
@@ -136,9 +138,14 @@ export function createEmptyEditingProviderData(): EditingProviderData {
     id: null,
     name: "",
     provider_key: "",
-    provider_type: "OPENAI",
-    endpoint: "",
-    use_proxy: false,
+    upstream_source: {
+      id: null,
+      provider_id: null,
+      source_key: "primary",
+      profile_type: "OPENAI",
+      endpoint: "",
+      use_proxy: false,
+    },
     models: [],
     provider_keys: [],
     request_patches: [],
@@ -150,18 +157,16 @@ export function buildProviderBootstrapPayload(
   saveAndTest = false,
 ): ProviderBootstrapPayload {
   const payload: ProviderBootstrapPayload = {
-    endpoint: trimText(form.endpoint),
+    upstream_source: {
+      profile_type: trimText(form.profile_type),
+      endpoint: trimText(form.endpoint),
+      use_proxy: !!form.use_proxy,
+    },
     api_key: trimText(form.api_key),
     model_name: trimText(form.model_name),
     key: trimText(form.key ?? form.provider_key),
     save_and_test: !!saveAndTest,
-    use_proxy: !!form.use_proxy,
   };
-
-  const providerType = trimText(form.provider_type);
-  if (providerType) {
-    payload.provider_type = providerType;
-  }
 
   const providerName = trimText(form.name ?? form.provider_name);
   if (providerName) {
@@ -188,9 +193,13 @@ export function buildProviderUpdatePayload(
   return {
     key: trimText(editingData.provider_key),
     name: trimText(form.provider_name) || trimText(editingData.name),
-    endpoint: trimText(form.endpoint),
-    use_proxy: !!form.use_proxy,
-    provider_type: trimText(form.provider_type) || trimText(editingData.provider_type),
+    upstream_source: {
+      profile_type:
+        trimText(form.profile_type) ||
+        trimText(editingData.upstream_source.profile_type),
+      endpoint: trimText(form.endpoint),
+      use_proxy: !!form.use_proxy,
+    },
   };
 }
 
@@ -205,7 +214,7 @@ export function buildProviderBootstrapPreview(
     trimText(response?.provider_name) ||
     trimText(response?.provider?.name) ||
     trimText(form.provider_name ?? form.name) ||
-    titleize(form.provider_type) ||
+    titleize(form.profile_type) ||
     "Provider";
 
   const providerKey =
@@ -228,7 +237,15 @@ export function hydrateEditingProviderDataFromBootstrap(
   }
 
   const provider = response.provider;
-  const preview = buildProviderBootstrapPreview(editingData, response);
+  const preview = buildProviderBootstrapPreview(
+    {
+      profile_type: editingData.upstream_source.profile_type,
+      endpoint: editingData.upstream_source.endpoint,
+      provider_name: editingData.name,
+      provider_key: editingData.provider_key,
+    },
+    response,
+  );
 
   if (provider?.id !== undefined && provider.id !== null) {
     editingData.id = provider.id;
@@ -240,12 +257,16 @@ export function hydrateEditingProviderDataFromBootstrap(
     trimText(provider?.provider_key) ||
     preview.provider_key ||
     editingData.provider_key;
-  editingData.provider_type =
-    trimText(provider?.provider_type) || editingData.provider_type;
-  editingData.endpoint = trimText(provider?.endpoint) || editingData.endpoint;
-
-  if (typeof provider?.use_proxy === "boolean") {
-    editingData.use_proxy = provider.use_proxy;
+  const source = provider?.upstream_source;
+  if (source) {
+    editingData.upstream_source = {
+      id: source.id,
+      provider_id: source.provider_id,
+      source_key: trimText(source.source_key),
+      profile_type: trimText(source.profile_type),
+      endpoint: trimText(source.endpoint),
+      use_proxy: source.use_proxy,
+    };
   }
 
   if (response.created_key) {

@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{DbResult, ListResult, get_connection};
 use crate::controller::BaseError;
-use crate::schema::enum_def::{DownstreamProtocol, RequestStatus, UpstreamProtocol};
+use crate::schema::enum_def::{
+    DownstreamProtocol, RequestStatus, UpstreamProfileType, UpstreamProtocol,
+};
 use crate::{db_execute, db_object};
 
 db_object! {
@@ -36,10 +38,14 @@ db_object! {
         pub provider_id: Option<i64>,
         pub provider_api_key_id: Option<i64>,
         pub model_id: Option<i64>,
+        pub source_id: Option<i64>,
         pub provider_key_snapshot: Option<String>,
         pub provider_name_snapshot: Option<String>,
         pub model_name_snapshot: Option<String>,
         pub real_model_name_snapshot: Option<String>,
+        pub source_key_snapshot: Option<String>,
+        pub source_profile_type_snapshot: Option<UpstreamProfileType>,
+        pub source_endpoint_snapshot: Option<String>,
         pub upstream_protocol: Option<UpstreamProtocol>,
         pub upstream_http_status: Option<i32>,
         pub estimated_cost_nanos: Option<i64>,
@@ -85,6 +91,9 @@ db_object! {
         pub model_id: Option<i64>,
         pub model_name_snapshot: Option<String>,
         pub real_model_name_snapshot: Option<String>,
+        pub source_id: Option<i64>,
+        pub source_key_snapshot: Option<String>,
+        pub source_profile_type_snapshot: Option<UpstreamProfileType>,
         pub upstream_http_status: Option<i32>,
         pub estimated_cost_nanos: Option<i64>,
         pub estimated_cost_currency: Option<String>,
@@ -103,6 +112,7 @@ pub struct RequestLogQueryPayload {
     pub api_key_id: Option<i64>,
     pub provider_id: Option<i64>,
     pub model_id: Option<i64>,
+    pub source_id: Option<i64>,
     pub status: Option<RequestStatus>,
     pub downstream_protocol: Option<DownstreamProtocol>,
     pub final_error_code: Option<String>,
@@ -204,6 +214,10 @@ impl RequestLog {
             if let Some(val) = payload.model_id {
                 query = query.filter(request_log::dsl::model_id.eq(Some(val)));
                 count_query = count_query.filter(request_log::dsl::model_id.eq(Some(val)));
+            }
+            if let Some(val) = payload.source_id {
+                query = query.filter(request_log::dsl::source_id.eq(Some(val)));
+                count_query = count_query.filter(request_log::dsl::source_id.eq(Some(val)));
             }
             if let Some(val) = payload.status {
                 query = query.filter(request_log::dsl::status.eq(val.clone()));
@@ -615,10 +629,14 @@ mod tests {
             provider_id: None,
             provider_api_key_id: None,
             model_id: None,
+            source_id: None,
             provider_key_snapshot: None,
             provider_name_snapshot: None,
             model_name_snapshot: None,
             real_model_name_snapshot: None,
+            source_key_snapshot: None,
+            source_profile_type_snapshot: None,
+            source_endpoint_snapshot: None,
             upstream_protocol,
             upstream_http_status: None,
             estimated_cost_nanos: None,

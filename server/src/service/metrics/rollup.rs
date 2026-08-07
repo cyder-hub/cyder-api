@@ -5,7 +5,7 @@ use crate::{
         },
         request_log::RequestLog,
     },
-    schema::enum_def::RequestStatus,
+    schema::enum_def::{RequestStatus, UpstreamProfileType},
 };
 
 use super::types::{MetricsScope, MetricsScopeType};
@@ -97,7 +97,9 @@ fn request_scopes(request_log: &RequestLog) -> Vec<MetricsScope> {
         scopes.push(id_scope(
             MetricsScopeType::Source,
             source_id,
-            request_log.source_key_snapshot.clone(),
+            request_log
+                .source_profile_type_snapshot
+                .map(upstream_profile_wire_name),
         ));
     }
     if let Some(model_id) = request_log.model_id {
@@ -135,10 +137,21 @@ fn request_scopes(request_log: &RequestLog) -> Vec<MetricsScope> {
     scopes
 }
 
+fn upstream_profile_wire_name(profile: UpstreamProfileType) -> String {
+    serde_json::to_value(profile)
+        .expect("upstream profile type serialization is infallible")
+        .as_str()
+        .expect("upstream profile type serializes as a string")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::request_scopes;
-    use crate::{database::request_log::RequestLog, service::metrics::types::MetricsScopeType};
+    use crate::{
+        database::request_log::RequestLog, schema::enum_def::UpstreamProfileType,
+        service::metrics::types::MetricsScopeType,
+    };
 
     #[test]
     fn request_scopes_preserve_provider_and_add_selected_source() {
@@ -147,7 +160,9 @@ mod tests {
             provider_id: Some(2),
             provider_name_snapshot: Some("Logical Provider".to_string()),
             source_id: Some(3),
-            source_key_snapshot: Some("primary".to_string()),
+            source_profile_type_snapshot: Some(
+                crate::schema::enum_def::UpstreamProfileType::Openai,
+            ),
             ..RequestLog::default()
         };
 
@@ -160,8 +175,29 @@ mod tests {
         assert!(scopes.iter().any(|scope| {
             scope.scope_type == MetricsScopeType::Source
                 && scope.scope_id == "3"
-                && scope.scope_label.as_deref() == Some("primary")
+                && scope.scope_label.as_deref() == Some("OPENAI")
         }));
+    }
+
+    #[test]
+    fn request_scopes_use_wire_names_for_compound_profiles() {
+        for (profile, expected) in [
+            (UpstreamProfileType::VertexOpenai, "VERTEX_OPENAI"),
+            (UpstreamProfileType::GeminiOpenai, "GEMINI_OPENAI"),
+        ] {
+            let request_log = RequestLog {
+                api_key_id: 1,
+                source_id: Some(3),
+                source_profile_type_snapshot: Some(profile),
+                ..RequestLog::default()
+            };
+
+            let source_scope = request_scopes(&request_log)
+                .into_iter()
+                .find(|scope| scope.scope_type == MetricsScopeType::Source)
+                .expect("source scope should be present");
+            assert_eq!(source_scope.scope_label.as_deref(), Some(expected));
+        }
     }
 }
 

@@ -49,7 +49,12 @@ test("record downstream filter exposes exactly four protocols", () => {
     pageSize: { value: 10 },
     buildListParams: () => ({}),
     t: (key) => key,
-    providerStore: { providers: [], fetchProviders: async () => {} },
+    providerStore: {
+      providers: [],
+      sources: [],
+      fetchProviders: async () => {},
+      fetchProviderSources: async () => {},
+    },
     apiKeyStore: { apiKeys: [], fetchApiKeys: async () => {} },
     modelStore: { modelOptions: [], fetchModels: async () => {} },
     api: {

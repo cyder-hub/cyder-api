@@ -137,6 +137,53 @@ async fn assert_threshold_open_contract(store: Arc<dyn SourceCircuitStore>) {
     assert!(snapshot.opened_at.is_some());
 }
 
+async fn assert_clear_source_contract(store: Arc<dyn SourceCircuitStore>) {
+    let config = config(1, 60);
+    for source_id in [730, 731] {
+        store
+            .record_failure(source_id, &config, "timeout".to_string(), None)
+            .await
+            .expect("failure should open circuit");
+        assert_eq!(
+            store
+                .snapshot(source_id)
+                .await
+                .expect("open snapshot should load")
+                .status,
+            SourceHealthStatus::Open
+        );
+    }
+
+    store
+        .clear(730)
+        .await
+        .expect("clear should remove one source state");
+    assert_eq!(
+        store
+            .snapshot(730)
+            .await
+            .expect("cleared snapshot should load"),
+        synthetic_healthy()
+    );
+    assert_eq!(
+        store
+            .snapshot(731)
+            .await
+            .expect("unrelated snapshot should load")
+            .status,
+        SourceHealthStatus::Open
+    );
+
+    store.clear(730).await.expect("clear should be idempotent");
+    assert_eq!(
+        store
+            .snapshot(730)
+            .await
+            .expect("cleared snapshot should load"),
+        synthetic_healthy()
+    );
+}
+
 async fn assert_disabled_governance_noop_contract(
     store: Arc<dyn SourceCircuitStore>,
     disabled_config: ProviderGovernanceConfig,
@@ -436,6 +483,11 @@ async fn memory_store_opens_after_threshold_failures() {
 }
 
 #[tokio::test]
+async fn memory_store_clear_removes_only_the_selected_source_state() {
+    assert_clear_source_contract(Arc::new(MemorySourceCircuitStore::default())).await;
+}
+
+#[tokio::test]
 async fn memory_store_rejects_during_cooldown_then_allows_half_open_probe() {
     assert_cooldown_then_half_open_contract(Arc::new(MemorySourceCircuitStore::default())).await;
 }
@@ -505,6 +557,38 @@ async fn redis_store_opens_after_threshold_failures() {
         return;
     };
     assert_threshold_open_contract(Arc::new(redis_store(pool, Duration::from_secs(30)))).await;
+}
+
+#[tokio::test]
+async fn redis_store_clear_deletes_state_key_and_is_idempotent() {
+    let Some(pool) = redis_pool_or_skip().await else {
+        return;
+    };
+    let key_prefix = format!("runtime:test:{}:", Uuid::new_v4());
+    let source_id = 732;
+    let state_key = redis_state_key(&key_prefix, source_id);
+    let store = redis_store_with_prefix(
+        pool.clone(),
+        key_prefix,
+        Duration::from_secs(30),
+        TEST_REDIS_STATE_TTL,
+    );
+    store
+        .record_failure(source_id, &config(1, 60), "timeout".to_string(), None)
+        .await
+        .expect("failure should create source state");
+    assert!(redis_key_exists(pool.clone(), &state_key).await);
+
+    store
+        .clear(source_id)
+        .await
+        .expect("clear should delete state");
+    assert!(!redis_key_exists(pool.clone(), &state_key).await);
+    store
+        .clear(source_id)
+        .await
+        .expect("clear should be idempotent");
+    assert!(!redis_key_exists(pool, &state_key).await);
 }
 
 #[tokio::test]

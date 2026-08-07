@@ -86,6 +86,10 @@ impl SourceCircuitService {
             .await
     }
 
+    pub async fn clear_source(&self, source_id: i64) -> Result<(), SourceCircuitError> {
+        self.store.clear(source_id).await
+    }
+
     pub async fn get_source_health_snapshot(
         &self,
         source_id: i64,
@@ -233,5 +237,47 @@ mod tests {
 
         assert_eq!(second.status, SourceHealthStatus::Open);
         assert_eq!(second.consecutive_failures, 2);
+    }
+
+    #[tokio::test]
+    async fn clear_source_removes_state_even_when_governance_is_disabled() {
+        let enabled_config = ProviderGovernanceConfig {
+            enabled: true,
+            consecutive_failure_threshold: 1,
+            open_cooldown_seconds: 30,
+        };
+        let disabled_config = ProviderGovernanceConfig {
+            enabled: false,
+            consecutive_failure_threshold: 1,
+            open_cooldown_seconds: 30,
+        };
+        let store = Arc::new(MemorySourceCircuitStore::default());
+        let source_id = 32;
+        store
+            .record_failure(source_id, &enabled_config, "timeout".to_string(), None)
+            .await
+            .expect("seed failure should open circuit");
+        assert_eq!(
+            store
+                .snapshot(source_id)
+                .await
+                .expect("seed snapshot should load")
+                .status,
+            SourceHealthStatus::Open
+        );
+
+        let service = SourceCircuitService::new_with_config(store.clone(), disabled_config);
+        service
+            .clear_source(source_id)
+            .await
+            .expect("clear should not depend on governance being enabled");
+
+        assert_eq!(
+            store
+                .snapshot(source_id)
+                .await
+                .expect("cleared snapshot should load"),
+            SourceHealthSnapshot::synthetic_healthy()
+        );
     }
 }

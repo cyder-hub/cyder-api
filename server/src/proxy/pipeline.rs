@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
-use cyder_tools::log::debug;
 
 use super::{
     ExecutionStage, ProxyError, ProxyErrorCode, ResponseVisibility,
@@ -13,7 +12,7 @@ use super::{
     models::execute_models_listing,
     request::parse_json_request,
     request_context::ProxyRequestContext,
-    runtime::route_resolver::{ExecutionPlanBuildError, build_execution_plan},
+    runtime::route_resolver::{ExecutionPlan, ExecutionPlanBuildError, build_execution_plan},
     utility::{UtilityExecutionInput, UtilityOperation, execute_utility_proxy},
 };
 use crate::{
@@ -253,21 +252,21 @@ async fn execute_generation_operation(
     let parsed_request = parse_json_request(request, max_body_size).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
     let is_stream = resolve_stream_mode(operation.stream_mode, &parsed_request.data);
-    let execution_plan = build_execution_plan(&context.app_state, &requested_model)
-        .await
-        .map_err(|error| {
-            crate::debug_event!(
-                "proxy.execution_plan_build_failed",
-                requested_model = &requested_model,
-                error = &error,
-            );
-            execution_plan_build_error(error)
-        })?;
-    debug!(
-        "Built execution plan for '{}': {}",
-        requested_model,
-        execution_plan.target_summary_for_log()
-    );
+    let execution_plan = build_execution_plan(
+        &context.app_state,
+        &requested_model,
+        operation.downstream_protocol,
+    )
+    .await
+    .map_err(|error| {
+        crate::debug_event!(
+            "proxy.execution_plan_build_failed",
+            requested_model = &requested_model,
+            error = &error,
+        );
+        execution_plan_build_error(error)
+    })?;
+    log_execution_plan(&requested_model, &execution_plan);
 
     execute_generation_proxy(
         context.app_state,
@@ -296,21 +295,21 @@ async fn execute_utility_operation(
     let max_body_size = context.app_state.max_body_size;
     let parsed_request = parse_json_request(request, max_body_size).await?;
     let requested_model = resolve_model_source(&operation.model_source, &parsed_request.data)?;
-    let execution_plan = build_execution_plan(&context.app_state, &requested_model)
-        .await
-        .map_err(|error| {
-            crate::debug_event!(
-                "proxy.execution_plan_build_failed",
-                requested_model = &requested_model,
-                error = &error,
-            );
-            execution_plan_build_error(error)
-        })?;
-    debug!(
-        "Built utility execution plan for '{}': {}",
-        requested_model,
-        execution_plan.target_summary_for_log()
-    );
+    let execution_plan = build_execution_plan(
+        &context.app_state,
+        &requested_model,
+        operation.operation.downstream_protocol,
+    )
+    .await
+    .map_err(|error| {
+        crate::debug_event!(
+            "proxy.execution_plan_build_failed",
+            requested_model = &requested_model,
+            error = &error,
+        );
+        execution_plan_build_error(error)
+    })?;
+    log_execution_plan(&requested_model, &execution_plan);
 
     execute_utility_proxy(
         context.app_state,
@@ -327,6 +326,22 @@ async fn execute_utility_operation(
         },
     )
     .await
+}
+
+fn log_execution_plan(requested_model: &str, execution_plan: &ExecutionPlan) {
+    let target = &execution_plan.target;
+    crate::debug_event!(
+        "proxy.execution_plan_selected",
+        requested_model = requested_model,
+        provider_id = target.provider.id,
+        provider_key = &target.provider.provider_key,
+        model_id = target.model.id,
+        source_id = target.upstream_source.id,
+        source_profile_type = format!("{:?}", target.upstream_source.profile_type),
+        downstream_protocol = format!("{:?}", target.downstream_protocol),
+        upstream_protocol = format!("{:?}", target.upstream_protocol),
+        selection_reason = target.selection_reason.as_key(),
+    );
 }
 
 fn resolve_model_source(
@@ -350,6 +365,11 @@ fn execution_plan_build_error(error: ExecutionPlanBuildError) -> ProxyError {
         ExecutionPlanBuildError::TargetNotFound(_)
         | ExecutionPlanBuildError::UnsupportedCapability(_) => (
             ProxyErrorCode::UnsupportedCapabilityError,
+            ExecutionStage::Capability,
+            Some(message.clone()),
+        ),
+        ExecutionPlanBuildError::ProviderConfiguration(_) => (
+            ProxyErrorCode::ProviderConfigurationError,
             ExecutionStage::Capability,
             Some(message.clone()),
         ),
@@ -445,6 +465,11 @@ mod tests {
             (
                 ExecutionPlanBuildError::UnsupportedCapability("unsupported reasoning".to_string()),
                 ProxyErrorCode::UnsupportedCapabilityError,
+                ExecutionStage::Capability,
+            ),
+            (
+                ExecutionPlanBuildError::ProviderConfiguration("invalid source".to_string()),
+                ProxyErrorCode::ProviderConfigurationError,
                 ExecutionStage::Capability,
             ),
             (

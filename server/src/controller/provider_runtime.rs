@@ -26,8 +26,8 @@ async fn provider_runtime_snapshot(
         .await?;
     let summary = app_state
         .metrics
-        .provider_runtime_summary_from_items(&app_state, window, &items)
-        .await;
+        .provider_runtime_summary_from_items(&app_state, window, &items, params.only_enabled)
+        .await?;
 
     if let Some(search) = params.search.as_ref().map(|value| value.trim()) {
         if !search.is_empty() {
@@ -63,7 +63,7 @@ mod tests {
     use crate::config::MetricsConfig;
     use crate::database::TestDbContext;
     use crate::database::provider::{NewProvider, Provider};
-    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::database::upstream_source::NewUpstreamSource;
     use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::app_state::{AppState, create_test_app_state};
     use crate::service::metrics::MetricsService;
@@ -113,15 +113,32 @@ mod tests {
             &NewUpstreamSource {
                 id: id * 10 + 1,
                 provider_id: id,
-                source_key: PRIMARY_SOURCE_KEY.to_string(),
                 profile_type: UpstreamProfileType::Openai,
                 endpoint: "https://example.com/v1".to_string(),
                 use_proxy: false,
+                is_enabled: true,
+                is_default: true,
                 created_at: 1,
                 updated_at: 1,
             },
         )
         .expect("provider should insert");
+    }
+
+    fn insert_provider_without_source(id: i64, is_enabled: bool) {
+        Provider::create_optional(
+            &NewProvider {
+                id,
+                provider_key: format!("provider-{id}"),
+                name: format!("Provider {id}"),
+                is_enabled,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            None,
+        )
+        .expect("provider without source should insert");
     }
 
     #[tokio::test]
@@ -201,6 +218,7 @@ mod tests {
             .run_async(async {
                 insert_provider(1, true);
                 insert_provider(2, false);
+                insert_provider_without_source(3, true);
                 let app_state = create_test_app_state(context.clone()).await;
                 app_state
                     .source_circuit
@@ -213,6 +231,21 @@ mod tests {
                 let body = response_json(response).await;
                 assert_eq!(
                     body.pointer("/data/summary/total_provider_count")
+                        .and_then(Value::as_i64),
+                    Some(2)
+                );
+                assert_eq!(
+                    body.pointer("/data/summary/enabled_provider_count")
+                        .and_then(Value::as_i64),
+                    Some(2)
+                );
+                assert_eq!(
+                    body.pointer("/data/summary/total_source_count")
+                        .and_then(Value::as_i64),
+                    Some(1)
+                );
+                assert_eq!(
+                    body.pointer("/data/summary/enabled_source_count")
                         .and_then(Value::as_i64),
                     Some(1)
                 );
@@ -227,11 +260,7 @@ mod tests {
                         .and_then(Value::as_i64),
                     Some(11)
                 );
-                assert_eq!(
-                    body.pointer("/data/items/0/source_key")
-                        .and_then(Value::as_str),
-                    Some("primary")
-                );
+                assert!(body.pointer("/data/items/0/source_key").is_none());
                 assert_eq!(
                     body.pointer("/data/items/0/source_profile_type")
                         .and_then(Value::as_str),
@@ -257,6 +286,21 @@ mod tests {
                 let body = response_json(response).await;
                 assert_eq!(
                     body.pointer("/data/summary/total_provider_count")
+                        .and_then(Value::as_i64),
+                    Some(3)
+                );
+                assert_eq!(
+                    body.pointer("/data/summary/enabled_provider_count")
+                        .and_then(Value::as_i64),
+                    Some(2)
+                );
+                assert_eq!(
+                    body.pointer("/data/summary/total_source_count")
+                        .and_then(Value::as_i64),
+                    Some(2)
+                );
+                assert_eq!(
+                    body.pointer("/data/summary/enabled_source_count")
                         .and_then(Value::as_i64),
                     Some(2)
                 );

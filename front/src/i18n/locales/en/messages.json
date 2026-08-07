@@ -28,8 +28,15 @@
       "limitModel": "Limit Model",
       "models": "Models",
       "apiKeys": "API Keys",
-      "primarySource": "Primary Source",
+      "sources": "Sources",
       "status": "Status"
+    },
+    "sources": {
+      "count": "{count} sources",
+      "enabled": "{count} enabled",
+      "default": "Default",
+      "noDefault": "No default source",
+      "manage": "Manage Sources"
     },
     "confirmDelete": "Are you sure you want to delete the provider '{name}'?",
     "deleteFailed": "Failed to delete provider: {error}"
@@ -86,6 +93,9 @@
       "activeToday": "Active today"
     },
     "runtime": {
+      "providers": "Runtime Providers",
+      "sources": "Runtime Sources",
+      "enabledSources": "Enabled Sources",
       "windowDetail": "Window: {window}",
       "degradedHint": "Observed latency or error-rate degradation",
       "halfOpenHint": "In half-open recovery probing",
@@ -249,11 +259,13 @@
     "editProvider": "Edit Provider",
     "viewRecords": "View Records",
     "activeOnly": "Enabled providers only",
-    "searchPlaceholder": "Search Provider or Primary Source key, Profile, endpoint",
+    "searchPlaceholder": "Search Provider or Source Profile, ID, endpoint",
     "empty": "No providers match the current filters.",
     "noData": "No provider runtime data is available yet.",
     "summary": {
       "total": "Total Providers",
+      "totalSources": "Total Sources",
+      "enabledSources": "Enabled Sources",
       "healthy": "Healthy",
       "degraded": "Degraded",
       "halfOpen": "Half Open",
@@ -311,11 +323,11 @@
     "table": {
       "provider": "Provider",
       "health": "Health",
-      "source": "Primary Source",
+      "source": "Source",
       "sourceCircuit": "Source Circuit"
     },
     "source": {
-      "title": "Primary Source",
+      "title": "Source",
       "circuitScope": "Circuit scoped to this Source"
     },
     "detail": {
@@ -390,6 +402,7 @@
       "allApiKeys": "All API Keys",
       "allProviders": "All Providers",
       "allSources": "All Sources",
+      "retiredSource": "Retired or unavailable Source #{id}",
       "allModels": "All Models",
       "allStatuses": "All Statuses",
       "allDownstreamProtocols": "All Downstream Protocols",
@@ -825,6 +838,7 @@
     "alert": {
       "selectPatchFamily": "Select a reasoning patch family first.",
       "previewFailed": "Failed to preview reasoning config draft.",
+      "savedPreviewFailed": "Saved reasoning preview is unavailable for this Source set; the configuration remains editable.",
       "loadFailed": "Failed to load reasoning config.",
       "saveFailed": "Failed to save reasoning config.",
       "clearFailed": "Failed to clear reasoning config.",
@@ -1127,6 +1141,7 @@
   "providerEditPage": {
     "tabs": {
       "base": "Basic",
+      "sources": "Sources",
       "models": "Models",
       "credentials": "Credentials",
       "advanced": "Advanced"
@@ -1141,7 +1156,7 @@
       "fetchDetailFailed": "Failed to fetch provider detail for ID {providerId}",
       "loadDataFailed": "Failed to load provider data for ID: {providerId}.",
       "providerTypeRequired": "Provider Type cannot be empty.",
-      "profileTypeRequired": "Primary Source Profile cannot be empty.",
+      "profileTypeRequired": "Initial Source Profile cannot be empty.",
       "nameRequired": "Name cannot be empty.",
       "providerKeyRequired": "Provider Key cannot be empty.",
       "endpointRequired": "Endpoint cannot be empty.",
@@ -1156,8 +1171,6 @@
       "bootstrapFailed": "Failed to bootstrap provider: {error}",
       "providerNotSavedForApiKey": "Provider must be saved before API Keys can be added.",
       "apiKeyRequiredWithIndex": "API Key #{index} cannot be empty.",
-      "vertexApiKeyMissingFields": "Vertex API Key #{index} (JSON) is missing or has empty fields: {fields}.",
-      "vertexApiKeyInvalidJson": "Vertex API Key #{index} must be a valid JSON format.",
       "saveApiKeyFailed": "Failed to save API Key: {error}",
       "providerNotSavedForModel": "Provider must be saved before models can be added or edited.",
       "modelIdRequiredWithIndex": "Model ID for model #{index} cannot be empty.",
@@ -1183,6 +1196,10 @@
       "providerNotSavedForCheck": "Provider must be saved before a check can be performed.",
       "noApiKeyForCheck": "At least one API Key must be saved to perform a model check.",
       "noModelForCheck": "At least one model must be saved to perform an API key check.",
+      "noSourceForCheck": "At least one Source must be saved before a check can be performed.",
+      "sourceRequiredForCheck": "Select a concrete Source before running a check.",
+      "noSourceForModel": "At least one Source must be saved before remote model discovery.",
+      "discoveryInheritanceWarning": "Discovery uses {source}; imported models remain Provider-owned and are not Source-bound.",
       "checking": "Performing check...",
       "checkSuccess": "Check successful. The connection is valid.",
       "checkFailed": "Check failed: {error}",
@@ -1209,9 +1226,9 @@
         "title": "Logical Provider",
         "description": "Owns identity, models, credentials, and Provider-level configuration."
       },
-      "primarySource": {
-        "title": "Primary Upstream Source",
-        "description": "The only execution Source in R3.9. Its key is fixed; configure its wire Profile, endpoint, and proxy here."
+      "initialSource": {
+        "title": "Initial Source",
+        "description": "The first Source is created with the provider. Add and manage additional Sources from the Sources tab."
       },
       "advanced": {
         "title": "Advanced",
@@ -1220,12 +1237,20 @@
       "advancedConfig": {
         "title": "Reasoning",
         "description": "Manage reasoning suffixes and callback repair for this provider.",
-        "scopeDescription": "The active upstream Profile is {profile}, owned by the Primary Source. Reasoning, runtime features, and request patches remain scoped to the Provider or Model."
+        "scopeDescription": "Reasoning, runtime features, and request patches are temporary global Provider/Model settings here; they are not bound to a Source."
       },
       "modelsDescription": "Edit model name, mapped model name, capabilities, and enabled state inline. Full configuration still lives in ModelEdit."
     },
     "modelCapabilities": {
       "title": "Capabilities"
+    },
+    "sourceSelection": {
+      "title": "Source for upstream actions",
+      "description": "Choose the concrete Source used by model discovery and checks. The selection is required and is never inferred from the Provider default.",
+      "label": "Selected Source",
+      "placeholder": "Select a Source",
+      "warning": "The selected Source is sent as source_id. Changing the default Source does not change this selection.",
+      "empty": "No Source is available. Add and enable a Source before running upstream actions."
     },
     "preview": {
       "title": "Identity Preview",
@@ -1260,9 +1285,6 @@
       "revealConfirm": "Confirm this plaintext reveal. When authenticator verification is enabled, submit a fresh code before decryption.",
       "checkDraft": "Check Draft",
       "secretLocalOnly": "The plaintext is kept only in this dialog and is cleared when it closes.",
-      "vertexPlaceholder": "Paste the complete Google service account JSON",
-      "vertexHelp": "Required fields: client_email, private_key, private_key_id, and token_uri. The private key is sent only to the manager API.",
-      "vertexInvalid": "Enter a valid service account JSON with all required fields.",
       "providerOwnership": "Credentials belong to the Logical Provider. Every Source for this Provider uses this shared credential pool; Source-level credentials are not supported before 1.0.",
       "mutationSuccess": "Provider credential updated.",
       "mutationFailed": "The credential operation failed: {error}. The saved state was refreshed because runtime activation may have failed after persistence.",
@@ -1279,6 +1301,15 @@
       "description": "Please select an API key to perform the check with the selected model.",
       "target": "Selected model: {target}",
       "selectPlaceholder": "Select an API key"
+    },
+    "modalSourceCheck": {
+      "title": "Check a Source",
+      "description": "Select both a saved model and a saved credential for this Source. The check will use exactly the Source shown below.",
+      "source": "Source: {target}",
+      "modelLabel": "Model",
+      "modelPlaceholder": "Select a model",
+      "apiKeyLabel": "Credential",
+      "apiKeyPlaceholder": "Select a credential"
     },
     "requestPatch": {
       "title": "Request Patches",
@@ -1358,14 +1389,19 @@
     "labelName": "Name",
     "labelProviderKey": "Provider Key",
     "labelProviderType": "Provider Type",
-    "labelSourceKey": "Source Key",
     "labelProfileType": "Upstream Profile",
     "labelEndpoint": "Endpoint",
     "labelUseProxy": "Use Proxy",
     "labelEnabled": "Enabled",
+    "labelApiKeyMode": "API Key Mode",
     "labelLimitModel": "Limit Model",
     "placeholderProviderType": "Select Provider Type",
     "placeholderProfileType": "Select Upstream Profile",
+    "placeholderApiKeyMode": "Select API Key Mode",
+    "apiKeyModes": {
+      "QUEUE": "Queue",
+      "RANDOM": "Random"
+    },
     "buttonUpdateBaseInfo": "Update Provider Base Info",
     "buttonCreateBaseInfo": "Create Provider & Save Base Info",
     "sectionModels": "Models",
@@ -1385,7 +1421,45 @@
     "placeholderDescription": "Optional description",
     "buttonSaveThisKey": "Save This Key",
     "buttonAddApiKey": "Add API Key",
-    "buttonBackToList": "Back to List"
+    "buttonBackToList": "Back to List",
+    "sources": {
+      "title": "Provider Sources",
+      "description": "Manage the endpoint and runtime state for every upstream Source owned by this Provider.",
+      "add": "Add Source",
+      "addTitle": "Add Source",
+      "editTitle": "Edit Source",
+      "drawerDescription": "Source identity is fixed after creation. Update only its endpoint, proxy, and runtime flags.",
+      "createHint": "Save the Provider from the Basic tab first. The initial Source is submitted with the bootstrap form.",
+      "zeroWarning": "This Provider has no Sources.",
+      "zeroDescription": "Requests cannot execute until an enabled Source is available. You can add one now; deleting the last Source is allowed.",
+      "profile": "Upstream Profile",
+      "profilePlaceholder": "Select Upstream Profile",
+      "endpoint": "Endpoint",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "default": "Default",
+      "defaultHint": "Only one enabled Source can be the Provider default.",
+      "circuitUnavailable": "Circuit unavailable",
+      "table": {
+        "profile": "Profile",
+        "endpoint": "Endpoint",
+        "state": "State"
+      },
+      "editAction": "Edit Source",
+      "checkAction": "Check Source",
+      "enableAction": "Enable Source",
+      "disableAction": "Disable Source",
+      "setDefaultAction": "Set Default Source",
+      "unsetDefaultAction": "Unset Default Source",
+      "deleteAction": "Delete Source",
+      "confirmDelete": "Delete Source {target}? The last Source may also be deleted.",
+      "endpointRequired": "Endpoint cannot be empty.",
+      "createSuccess": "Source created successfully.",
+      "updateSuccess": "Source updated successfully.",
+      "deleteSuccess": "Source deleted successfully.",
+      "saveFailed": "Failed to save Source: {error}",
+      "deleteFailed": "Failed to delete Source: {error}"
+    }
   },
   "modelEditPage": {
     "title": "Edit Model",

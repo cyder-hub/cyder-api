@@ -28,8 +28,15 @@
       "limitModel": "限制模型",
       "models": "模型",
       "apiKeys": "API密钥",
-      "primarySource": "主上游源",
+      "sources": "Sources",
       "status": "状态"
+    },
+    "sources": {
+      "count": "{count} 个 Source",
+      "enabled": "{count} 个已启用",
+      "default": "默认",
+      "noDefault": "没有默认 Source",
+      "manage": "管理 Sources"
     },
     "confirmDelete": "您确定要删除渠道\"{name}\"吗？",
     "deleteFailed": "删除渠道失败: {error}"
@@ -86,6 +93,9 @@
       "activeToday": "今日活跃"
     },
     "runtime": {
+      "providers": "Runtime 渠道",
+      "sources": "Runtime Source",
+      "enabledSources": "已启用 Source",
       "windowDetail": "窗口：{window}",
       "degradedHint": "存在错误率或延迟劣化",
       "halfOpenHint": "处于半开探测恢复阶段",
@@ -249,11 +259,13 @@
     "editProvider": "编辑渠道",
     "viewRecords": "查看请求记录",
     "activeOnly": "仅看启用渠道",
-    "searchPlaceholder": "搜索 Provider 或主 Source Key、Profile、Endpoint",
+    "searchPlaceholder": "搜索 Provider、Source Profile、ID 或 Endpoint",
     "empty": "当前筛选条件下没有可展示的渠道。",
     "noData": "当前没有可用的渠道运行数据。",
     "summary": {
       "total": "渠道总数",
+      "totalSources": "Source 总数",
+      "enabledSources": "已启用 Source",
       "healthy": "健康",
       "degraded": "降级",
       "halfOpen": "半开",
@@ -311,11 +323,11 @@
     "table": {
       "provider": "渠道",
       "health": "健康",
-      "source": "主 Source",
+      "source": "Source",
       "sourceCircuit": "Source 熔断"
     },
     "source": {
-      "title": "主 Source",
+      "title": "Source",
       "circuitScope": "熔断状态归属此 Source"
     },
     "detail": {
@@ -390,6 +402,7 @@
       "allApiKeys": "所有API Keys",
       "allProviders": "所有渠道",
       "allSources": "所有 Source",
+      "retiredSource": "已退役或不可用 Source #{id}",
       "allModels": "所有模型",
       "allStatuses": "所有状态",
       "allDownstreamProtocols": "所有下游协议",
@@ -825,6 +838,7 @@
     "alert": {
       "selectPatchFamily": "请先选择推理 Patch 类型。",
       "previewFailed": "预览推理配置草稿失败。",
+      "savedPreviewFailed": "当前 Source 组合无法生成已保存配置预览；配置仍可编辑。",
       "loadFailed": "加载推理配置失败。",
       "saveFailed": "保存推理配置失败。",
       "clearFailed": "清空推理配置失败。",
@@ -1127,6 +1141,7 @@
   "providerEditPage": {
     "tabs": {
       "base": "基础",
+      "sources": "Sources",
       "models": "模型",
       "credentials": "凭证",
       "advanced": "高级"
@@ -1141,7 +1156,7 @@
       "fetchDetailFailed": "获取渠道详情失败，ID {providerId}",
       "loadDataFailed": "加载渠道数据失败，ID: {providerId}。",
       "providerTypeRequired": "渠道类型不能为空。",
-      "profileTypeRequired": "主上游源 Profile 不能为空。",
+      "profileTypeRequired": "初始 Source Profile 不能为空。",
       "nameRequired": "名称 不能为空。",
       "providerKeyRequired": "渠道标识 不能为空。",
       "endpointRequired": "地址 不能为空。",
@@ -1156,8 +1171,6 @@
       "bootstrapFailed": "bootstrap 渠道失败: {error}",
       "providerNotSavedForApiKey": "必须先保存渠道，然后才能添加 API Key。",
       "apiKeyRequiredWithIndex": "API Key #{index} 不能为空。",
-      "vertexApiKeyMissingFields": "Vertex API Key #{index} (JSON) 缺少或为空的字段: {fields}。",
-      "vertexApiKeyInvalidJson": "Vertex API Key #{index} 必须是有效的 JSON 格式。",
       "saveApiKeyFailed": "保存 API Key 失败: {error}",
       "providerNotSavedForModel": "必须先保存渠道，然后才能添加或编辑模型。",
       "modelIdRequiredWithIndex": "模型 #{index} 的模型ID不能为空。",
@@ -1183,6 +1196,10 @@
       "providerNotSavedForCheck": "必须先保存渠道，然后才能执行检查。",
       "noApiKeyForCheck": "必须至少保存一个API密钥才能执行模型检查。",
       "noModelForCheck": "必须至少保存一个模型才能执行API密钥检查。",
+      "noSourceForCheck": "必须至少保存一个 Source 才能执行检查。",
+      "sourceRequiredForCheck": "执行检查前必须选择一个具体的 Source。",
+      "noSourceForModel": "必须至少保存一个 Source 才能获取远程模型。",
+      "discoveryInheritanceWarning": "本次发现使用 {source}；导入的模型仍归 Provider 所有，不绑定到 Source。",
       "checking": "正在执行检查...",
       "checkSuccess": "检查成功。连接有效。",
       "checkFailed": "检查失败: {error}",
@@ -1209,9 +1226,9 @@
         "title": "逻辑 Provider",
         "description": "负责身份、模型、凭据以及 Provider 级配置。"
       },
-      "primarySource": {
-        "title": "主上游源",
-        "description": "R3.9 唯一的执行 Source。Source Key 固定；在这里配置其线协议 Profile、Endpoint 和代理。"
+      "initialSource": {
+        "title": "初始 Source",
+        "description": "创建渠道时会一并创建第一个 Source；更多 Source 请在 Sources 标签页管理。"
       },
       "advanced": {
         "title": "高级",
@@ -1220,12 +1237,20 @@
       "advancedConfig": {
         "title": "推理设置",
         "description": "管理这个渠道的推理后缀和回调修复。",
-        "scopeDescription": "当前上游 Profile 为 {profile}，归属主上游源。推理、运行时特性和请求改写仍然只作用于 Provider 或 Model。"
+        "scopeDescription": "这里的推理、运行时特性和请求改写是临时的 Provider/Model 全局设置，不绑定任何 Source。"
       },
       "modelsDescription": "这里可直接编辑模型名称、映射模型名称、能力和启用状态。完整配置仍然留在 ModelEdit。"
     },
     "modelCapabilities": {
       "title": "能力"
+    },
+    "sourceSelection": {
+      "title": "上游操作使用的 Source",
+      "description": "选择模型发现和检查实际使用的 Source。必须显式选择，不会从 Provider 默认值推断。",
+      "label": "当前 Source",
+      "placeholder": "选择 Source",
+      "warning": "请求会携带 source_id。修改 Provider 默认 Source 不会改变这里的选择。",
+      "empty": "当前没有可用 Source。请先添加并启用 Source，再执行上游操作。"
     },
     "preview": {
       "title": "身份预览",
@@ -1260,9 +1285,6 @@
       "revealConfirm": "请确认查看凭据明文。启用认证器验证后，解密前需要提交一枚新的验证码。",
       "checkDraft": "检查草稿",
       "secretLocalOnly": "明文只保留在当前对话框内，关闭时会立即清除。",
-      "vertexPlaceholder": "粘贴完整的 Google Service Account JSON",
-      "vertexHelp": "必填字段：client_email、private_key、private_key_id、token_uri。私钥只发送给 Manager API。",
-      "vertexInvalid": "请输入包含全部必填字段的有效 Service Account JSON。",
       "providerOwnership": "凭据归属逻辑 Provider。该 Provider 的所有 Source 都使用同一个凭据池；pre-1.0 不支持 Source 级凭据。",
       "mutationSuccess": "Provider 凭据已更新。",
       "mutationFailed": "凭据操作失败：{error}。由于持久化后可能发生运行时激活失败，页面已重新拉取保存状态。",
@@ -1279,6 +1301,15 @@
       "description": "请选择一个API密钥以使用所选模型执行检查。",
       "target": "当前模型：{target}",
       "selectPlaceholder": "选择一个API密钥"
+    },
+    "modalSourceCheck": {
+      "title": "检查 Source",
+      "description": "为这个 Source 选择一个已保存模型和一个已保存凭据。检查只会使用下方显示的 Source。",
+      "source": "Source：{target}",
+      "modelLabel": "模型",
+      "modelPlaceholder": "选择模型",
+      "apiKeyLabel": "凭据",
+      "apiKeyPlaceholder": "选择凭据"
     },
     "requestPatch": {
       "title": "请求改写",
@@ -1358,14 +1389,19 @@
     "labelName": "名称",
     "labelProviderKey": "渠道标识",
     "labelProviderType": "渠道类型",
-    "labelSourceKey": "Source Key",
     "labelProfileType": "上游 Profile",
     "labelEndpoint": "地址",
     "labelUseProxy": "使用代理",
     "labelEnabled": "启用",
+    "labelApiKeyMode": "API Key 模式",
     "labelLimitModel": "限制模型",
     "placeholderProviderType": "选择渠道类型",
     "placeholderProfileType": "选择上游 Profile",
+    "placeholderApiKeyMode": "选择 API Key 模式",
+    "apiKeyModes": {
+      "QUEUE": "队列",
+      "RANDOM": "随机"
+    },
     "buttonUpdateBaseInfo": "更新渠道基本信息",
     "buttonCreateBaseInfo": "创建渠道并保存基本信息",
     "sectionModels": "模型",
@@ -1385,7 +1421,45 @@
     "placeholderDescription": "可选描述",
     "buttonSaveThisKey": "保存此Key",
     "buttonAddApiKey": "添加API Key",
-    "buttonBackToList": "返回列表"
+    "buttonBackToList": "返回列表",
+    "sources": {
+      "title": "Provider Sources",
+      "description": "管理这个 Provider 所有上游 Source 的地址和运行状态。",
+      "add": "添加 Source",
+      "addTitle": "添加 Source",
+      "editTitle": "编辑 Source",
+      "drawerDescription": "Source 创建后身份固定；这里只更新地址、代理和运行标记。",
+      "createHint": "请先在基础标签页保存渠道。初始 Source 会随 bootstrap 表单一起提交。",
+      "zeroWarning": "这个 Provider 没有 Source。",
+      "zeroDescription": "没有启用的 Source 时请求无法执行。现在可以添加 Source；删除最后一个 Source 也是允许的。",
+      "profile": "上游 Profile",
+      "profilePlaceholder": "选择上游 Profile",
+      "endpoint": "地址",
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "default": "默认",
+      "defaultHint": "每个 Provider 最多只有一个启用的默认 Source。",
+      "circuitUnavailable": "Circuit 状态不可用",
+      "table": {
+        "profile": "Profile",
+        "endpoint": "地址",
+        "state": "状态"
+      },
+      "editAction": "编辑 Source",
+      "checkAction": "检查 Source",
+      "enableAction": "启用 Source",
+      "disableAction": "停用 Source",
+      "setDefaultAction": "设为默认 Source",
+      "unsetDefaultAction": "取消默认 Source",
+      "deleteAction": "删除 Source",
+      "confirmDelete": "删除 Source {target}？最后一个 Source 也可以删除。",
+      "endpointRequired": "地址不能为空。",
+      "createSuccess": "Source 创建成功。",
+      "updateSuccess": "Source 更新成功。",
+      "deleteSuccess": "Source 删除成功。",
+      "saveFailed": "保存 Source 失败：{error}",
+      "deleteFailed": "删除 Source 失败：{error}"
+    }
   },
   "modelEditPage": {
     "title": "编辑模型",

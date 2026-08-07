@@ -148,23 +148,12 @@
         <div class="space-y-4">
           <div class="space-y-1.5">
             <Label>{{ $t("providerEditPage.tableHeaderApiKey") }}</Label>
-            <textarea
-              v-if="isVertex"
-              v-model="secretInput"
-              rows="9"
-              class="flex w-full resize-y rounded-md border border-gray-200 bg-white px-3 py-2 font-mono text-sm text-gray-900 outline-none focus:border-gray-400"
-              :placeholder="$t('providerEditPage.credentials.vertexPlaceholder')"
-            />
             <Input
-              v-else
               v-model="secretInput"
               type="password"
               class="font-mono"
               :placeholder="$t('providerEditPage.placeholderApiKey')"
             />
-            <p v-if="isVertex" class="text-xs leading-5 text-gray-500">
-              {{ $t("providerEditPage.credentials.vertexHelp") }}
-            </p>
           </div>
           <div v-if="secretDialogMode === 'create'" class="space-y-1.5">
             <Label>{{ $t("providerEditPage.tableHeaderDescription") }}</Label>
@@ -264,7 +253,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
 import SectionHeader from "@/components/SectionHeader.vue";
@@ -307,6 +296,9 @@ import type { EditingProviderData, LocalProviderApiKeyItem } from "../types";
 const { t: $t } = useI18n();
 const authStore = useAuthStore();
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
+const props = defineProps<{
+  sourceId: number | null;
+}>();
 const emit = defineEmits<{
   (event: "checkSingle", index: number): void;
   (event: "checkBatch"): void;
@@ -327,12 +319,6 @@ const isBusy = ref(false);
 const busyKeyId = ref<number | null>(null);
 const revealTargetKey = ref<LocalProviderApiKeyItem | null>(null);
 const isRevealBusy = ref(false);
-
-const isVertex = computed(() =>
-  ["VERTEX", "VERTEX_OPENAI"].includes(
-    editingData.value.upstream_source.profile_type,
-  ),
-);
 
 const keyMask = (key: LocalProviderApiKeyItem) =>
   `${key.key_prefix}••••${key.key_last4}`;
@@ -373,15 +359,6 @@ const handleRevealDialogOpen = (open: boolean) => {
 const validateSecret = (): boolean => {
   if (!secretInput.value.trim()) {
     toastController.warn($t("providerEditPage.alert.apiKeyRequired"));
-    return false;
-  }
-  if (!isVertex.value) return true;
-  try {
-    const parsed = JSON.parse(secretInput.value) as Record<string, unknown>;
-    const required = ["client_email", "private_key", "private_key_id", "token_uri"];
-    if (required.some((field) => !parsed[field])) throw new Error("missing field");
-  } catch {
-    toastController.warn($t("providerEditPage.credentials.vertexInvalid"));
     return false;
   }
   return true;
@@ -456,7 +433,11 @@ const handleDraftCheck = async () => {
   }
   isBusy.value = true;
   try {
-    await providerService.checkProviderConnection(providerId, {
+    if (props.sourceId === null) {
+      toastController.warn($t("providerEditPage.alert.sourceRequiredForCheck"));
+      return;
+    }
+    await providerService.checkProviderConnection(providerId, props.sourceId, {
       model_id: model.id ?? undefined,
       provider_api_key: secretInput.value,
     });

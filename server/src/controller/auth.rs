@@ -1803,6 +1803,7 @@ mod tests {
         app_state.admin = Arc::new(AdminServices::new(
             Arc::clone(&app_state.catalog),
             Arc::clone(&secret_encryption),
+            Arc::clone(&app_state.source_circuit),
         ));
         let service_now = Arc::clone(&now);
         Arc::get_mut(&mut app_state.admin)
@@ -1844,6 +1845,7 @@ mod tests {
         let mut admin = AdminServices::new(
             Arc::clone(&restarted.catalog),
             Arc::clone(&restarted.secret_encryption),
+            Arc::clone(&restarted.source_circuit),
         );
         let service_now = Arc::clone(now);
         admin.auth = Arc::new(ManagerAuthService::new_for_test_with_secret_encryption(
@@ -2932,10 +2934,12 @@ mod tests {
                         Some(json!({
                             "name": "Sensitive Provider",
                             "key": "sensitive-provider",
-                            "upstream_source": {
+                            "initial_source": {
                                 "endpoint": "https://api.example.com/v1",
                                 "use_proxy": false,
-                                "profile_type": "OPENAI"
+                                "profile_type": "OPENAI",
+                                "is_enabled": true,
+                                "is_default": true
                             },
                             "provider_api_key_mode": "QUEUE"
                         })),
@@ -3126,10 +3130,12 @@ mod tests {
                         Some(json!({
                             "name": "Delete Provider",
                             "key": "delete-provider",
-                            "upstream_source": {
+                            "initial_source": {
                                 "endpoint": "https://delete.example.com/v1",
                                 "use_proxy": false,
-                                "profile_type": "OPENAI"
+                                "profile_type": "OPENAI",
+                                "is_enabled": true,
+                                "is_default": true
                             },
                             "provider_api_key_mode": "QUEUE"
                         })),
@@ -3318,10 +3324,12 @@ mod tests {
                         Some(json!({
                             "name": "Unavailable Provider",
                             "key": "unavailable-provider",
-                            "upstream_source": {
+                            "initial_source": {
                                 "endpoint": "https://api.example.com/v1",
                                 "use_proxy": false,
-                                "profile_type": "OPENAI"
+                                "profile_type": "OPENAI",
+                                "is_enabled": true,
+                                "is_default": true
                             },
                             "provider_api_key_mode": "QUEUE"
                         })),

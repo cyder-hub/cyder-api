@@ -13,7 +13,7 @@ use cyder_api::{
 };
 use serde::Deserialize;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const SOURCE_RELATIVE_PATH: &str = "docs/protocol-compatibility.yaml";
 const GENERATED_RELATIVE_PATH: &str = "docs/protocol-compatibility.md";
 
@@ -109,11 +109,24 @@ enum EvidenceKind {
 #[serde(deny_unknown_fields)]
 struct UpstreamSourceContract {
     owner: String,
-    exactly_one_active_source_per_provider: bool,
-    required_source_key: String,
-    source_enabled_implicitly: bool,
-    source_default_implicitly: bool,
+    source_cardinality: String,
+    source_identity: String,
+    aggregate_field: String,
+    source_state: String,
+    default_semantics: String,
+    profile_mutability: String,
+    family_uniqueness: String,
+    disabled_source_reserves_family: bool,
+    deleted_source_releases_family: bool,
+    selection_order: Vec<String>,
+    no_fallback_after_selection: bool,
     credential_scope: String,
+    credential_representation: String,
+    model_scope: String,
+    model_owner: String,
+    request_patch_scope: String,
+    reasoning_scope: String,
+    config_owner: String,
     evidence: Vec<String>,
 }
 
@@ -523,7 +536,7 @@ fn expected_downstream_error_contracts() -> DownstreamErrorContracts {
             after_headers_committed_owners: vec![
                 "R3.7".to_string(),
                 "R3.8".to_string(),
-                "R3.14-R3.20".to_string(),
+                "R3.15-R3.21".to_string(),
             ],
             ollama_downstream_contract: ContractPresence::Absent,
             upstream_error_location: ExtensionLocation::TopLevel,
@@ -606,20 +619,37 @@ fn validate_upstream_source_contract(
     contract: &UpstreamSourceContract,
     evidence: &HashMap<&str, &Evidence>,
 ) -> Result<(), String> {
-    const REQUIRED_EVIDENCE: [&str; 2] = [
-        "r3-9-primary-source-aggregate",
-        "r3-9-source-runtime-evidence",
+    const REQUIRED_EVIDENCE: [&str; 6] = [
+        "r3-10-source-aggregate",
+        "r3-10-source-repository",
+        "r3-10-source-selector",
+        "r3-10-manager-source-contract",
+        "r3-10-runtime-source-contract",
+        "r3-10-migration-contract",
     ];
-    if contract.owner != "R3.9"
-        || !contract.exactly_one_active_source_per_provider
-        || contract.required_source_key != "primary"
-        || !contract.source_enabled_implicitly
-        || !contract.source_default_implicitly
+    if contract.owner != "R3.10"
+        || contract.source_cardinality != "zero_to_many"
+        || contract.source_identity != "source_id_only"
+        || contract.aggregate_field != "upstream_sources"
+        || contract.source_state != "explicit_enabled_and_default"
+        || contract.default_semantics != "optional"
+        || contract.profile_mutability != "create_only"
+        || contract.family_uniqueness != "one_active_source_per_wire_family"
+        || !contract.disabled_source_reserves_family
+        || !contract.deleted_source_releases_family
+        || contract.selection_order != ["protocol_match".to_string(), "enabled_default".to_string()]
+        || !contract.no_fallback_after_selection
         || contract.credential_scope != "provider"
+        || contract.credential_representation != "opaque"
+        || contract.model_scope != "provider_all_enabled_sources"
+        || contract.model_owner != "R3.11"
+        || contract.request_patch_scope != "provider_global"
+        || contract.reasoning_scope != "provider_global"
+        || contract.config_owner != "R3.12"
         || contract.evidence != REQUIRED_EVIDENCE
     {
         return Err(
-            "upstream_source_contract must pin the exact R3.9 single-primary Provider-credential boundary"
+            "upstream_source_contract must pin the R3.10 zero-to-many Source, ID-only, selector, and Provider-credential boundary"
                 .to_string(),
         );
     }
@@ -783,7 +813,7 @@ fn validate_generation_cells(
                 assessment.status == AdvancedStatus::Full,
                 &assessment.evidence,
                 assessment.owner.as_deref(),
-                Some(owner),
+                Some(transform_owner()),
                 evidence,
             )?;
             if assessment.status == AdvancedStatus::ExplicitReject
@@ -874,11 +904,26 @@ fn validate_initial_generation_truth(cell: &GenerationCell) -> Result<(), String
 
 fn generation_owner(upstream: UpstreamProtocol) -> &'static str {
     match upstream {
-        UpstreamProtocol::Openai => "R3.12",
-        UpstreamProtocol::Responses => "R3.13",
-        UpstreamProtocol::Anthropic => "R3.14",
-        UpstreamProtocol::Gemini => "R3.15",
-        UpstreamProtocol::Ollama => "R3.16",
+        UpstreamProtocol::Openai => "R3.16",
+        UpstreamProtocol::Responses => "R3.17",
+        UpstreamProtocol::Anthropic => "R3.18",
+        UpstreamProtocol::Gemini => "R3.19",
+        UpstreamProtocol::Ollama => "R3.20",
+    }
+}
+
+fn transform_owner() -> &'static str {
+    "R3.15"
+}
+
+fn utility_owner(utility: &UtilityContract) -> &'static str {
+    match utility.allowed_upstreams.first().copied() {
+        Some(UpstreamProtocol::Openai) => "R3.16",
+        Some(UpstreamProtocol::Responses) => "R3.17",
+        Some(UpstreamProtocol::Anthropic) => "R3.18",
+        Some(UpstreamProtocol::Gemini) => "R3.19",
+        Some(UpstreamProtocol::Ollama) => "R3.20",
+        None => "R3.21",
     }
 }
 
@@ -966,7 +1011,11 @@ fn validate_utilities(
             is_complete,
             &utility.verification.evidence,
             utility.verification.owner.as_deref(),
-            if is_complete { None } else { Some("R3.17") },
+            if is_complete {
+                None
+            } else {
+                Some(utility_owner(utility))
+            },
             evidence,
         )?;
     }
@@ -1182,14 +1231,41 @@ fn render_markdown(matrix: &CompatibilityMatrix) -> String {
     writeln!(output, "\n## Upstream Source contract\n").unwrap();
     writeln!(
         output,
-        "- Owner: `{}`; every active Logical Provider has exactly one implicitly enabled and implicitly default Source with `source_key={}`.",
-        source_contract.owner, source_contract.required_source_key
+        "- Owner: `{}`; aggregate field `{}` has `{}` cardinality and `{}` identity. Source state is `{}`, default semantics are `{}`, and Profile mutability is `{}`.",
+        source_contract.owner,
+        source_contract.aggregate_field,
+        source_contract.source_cardinality,
+        source_contract.source_identity,
+        source_contract.source_state,
+        source_contract.default_semantics,
+        source_contract.profile_mutability
     )
     .unwrap();
     writeln!(
         output,
-        "- Credentials remain `{}` scoped and are applied according to the selected Source Profile.",
-        source_contract.credential_scope
+        "- Family uniqueness is `{}`; disabled Sources reserve family capacity: `{}`; deleted Sources release it: `{}`.",
+        source_contract.family_uniqueness,
+        source_contract.disabled_source_reserves_family,
+        source_contract.deleted_source_releases_family
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Selection order: `{}`; no fallback after selection: `{}`. Credentials remain `{}` scoped and `{}` representation; models use `{}`.",
+        source_contract.selection_order.join(" -> "),
+        source_contract.no_fallback_after_selection,
+        source_contract.credential_scope,
+        source_contract.credential_representation,
+        source_contract.model_scope
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "- Model owner: `{}`; Request Patch scope: `{}`; Reasoning scope: `{}`; configuration owner: `{}`.",
+        source_contract.model_owner,
+        source_contract.request_patch_scope,
+        source_contract.reasoning_scope,
+        source_contract.config_owner
     )
     .unwrap();
     writeln!(
@@ -1687,7 +1763,7 @@ mod tests {
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("must be owned by R3.12")
+                .contains("must be owned by R3.15")
         );
     }
 
@@ -1703,24 +1779,65 @@ mod tests {
     }
 
     #[test]
-    fn r3_9_source_contract_drift_is_rejected() {
+    fn r3_10_source_contract_drift_is_rejected() {
         let mut matrix = canonical_matrix();
-        matrix
-            .upstream_source_contract
-            .exactly_one_active_source_per_provider = false;
+        matrix.upstream_source_contract.source_cardinality = "exactly_one".to_string();
         assert!(
             validate_matrix(&matrix)
                 .unwrap_err()
-                .contains("single-primary Provider-credential boundary")
+                .contains("zero-to-many Source")
+        );
+    }
+
+    #[test]
+    fn r3_10_source_contract_requires_new_evidence_and_owner_chain() {
+        let mut matrix = canonical_matrix();
+        matrix
+            .evidence
+            .retain(|item| item.id != "r3-10-source-selector");
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("r3-10-source-selector")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.upstream_source_contract.config_owner = "R3.13".to_string();
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("zero-to-many Source")
+        );
+    }
+
+    #[test]
+    fn protocol_and_transform_owners_follow_r3_15_to_r3_20() {
+        let mut matrix = canonical_matrix();
+        matrix.generation_cells[3].base.non_stream_text.owner = Some("R3.19".to_string());
+        assert!(validate_matrix(&matrix).is_ok());
+
+        matrix.generation_cells[3].advanced.tools.owner = Some("R3.17".to_string());
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("must be owned by R3.15")
+        );
+
+        let mut matrix = canonical_matrix();
+        matrix.utilities[1].verification.owner = Some("R3.17".to_string());
+        assert!(
+            validate_matrix(&matrix)
+                .unwrap_err()
+                .contains("utility embeddings verification must be owned by R3.16")
         );
     }
 
     #[test]
     fn schema_v1_and_provider_profile_fields_are_not_accepted() {
-        let v1 = CANONICAL_SOURCE.replacen("schema_version: 2", "schema_version: 1", 1);
+        let v1 = CANONICAL_SOURCE.replacen("schema_version: 3", "schema_version: 1", 1);
         let matrix = serde_yaml::from_str::<CompatibilityMatrix>(&v1)
             .expect("schema number should parse before validation");
-        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 2"));
+        assert!(validate_matrix(&matrix).unwrap_err().contains("must be 3"));
 
         let legacy = CANONICAL_SOURCE
             .replacen("upstream_source_profiles:", "provider_profiles:", 1)

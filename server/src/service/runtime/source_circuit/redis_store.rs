@@ -691,6 +691,20 @@ impl SourceCircuitStore for RedisSourceCircuitStore {
         snapshot_result_to_domain(result)
     }
 
+    async fn clear(&self, source_id: i64) -> Result<(), SourceCircuitError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| Self::redis_error("failed to get redis connection", err))?;
+        cmd("DEL")
+            .arg(self.state_key(source_id))
+            .query_async::<i64>(&mut *conn)
+            .await
+            .map_err(|err| Self::redis_error("source circuit clear failed", err))?;
+        Ok(())
+    }
+
     async fn snapshot(&self, source_id: i64) -> Result<SourceHealthSnapshot, SourceCircuitError> {
         let now_ms = Utc::now().timestamp_millis();
         let mut conn = self

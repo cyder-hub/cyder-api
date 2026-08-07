@@ -128,17 +128,18 @@ mod tests {
             name: "provider".to_string(),
             provider_api_key_mode: ProviderApiKeyMode::Queue,
             is_enabled: true,
-            upstream_source: CacheUpstreamSource {
+            upstream_sources: vec![CacheUpstreamSource {
                 id: 2,
-                source_key: "primary".to_string(),
                 profile_type: UpstreamProfileType::GeminiOpenai,
                 endpoint: "https://example.com".to_string(),
                 use_proxy: false,
-            },
+                is_enabled: true,
+                is_default: true,
+            }],
         };
 
         assert_eq!(
-            determine_upstream_protocol(&provider.upstream_source),
+            determine_upstream_protocol(&provider.upstream_sources[0]),
             crate::schema::enum_def::UpstreamProtocol::Openai
         );
     }

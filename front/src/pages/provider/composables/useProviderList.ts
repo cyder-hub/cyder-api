@@ -8,6 +8,7 @@ import * as providerService from "@/services/providers";
 import { useProviderStore } from "@/store/providerStore";
 import type { ProviderRuntimeLevel, ProviderSummaryItem } from "@/services/types";
 import type { ProviderRuntimeLevelMap, ProviderSummaryCard } from "../types";
+import { aggregateProviderRuntimeLevels } from "./providerRuntimeAggregation";
 
 export function useProviderList() {
   const { t } = useI18n();
@@ -67,9 +68,7 @@ export function useProviderList() {
         window: "1h",
         only_enabled: false,
       });
-      providerRuntimeLevelMap.value = Object.fromEntries(
-        runtimeItems.map((item) => [item.provider_id, item.runtime_level]),
-      );
+      providerRuntimeLevelMap.value = aggregateProviderRuntimeLevels(runtimeItems);
     } catch (err) {
       console.error("Failed to fetch provider runtime levels:", err);
       providerRuntimeLevelMap.value = {};

@@ -1061,7 +1061,7 @@ mod tests {
     use super::*;
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::provider::{NewProvider, Provider};
-    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::database::upstream_source::NewUpstreamSource;
     use crate::database::{TestDbContext, open_test_sqlite_connection};
     use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use diesel::connection::SimpleConnection;
@@ -1087,10 +1087,11 @@ mod tests {
             &NewUpstreamSource {
                 id,
                 provider_id: id,
-                source_key: PRIMARY_SOURCE_KEY.to_string(),
                 profile_type: UpstreamProfileType::Openai,
                 endpoint: "https://example.com".to_string(),
                 use_proxy: false,
+                is_enabled: true,
+                is_default: true,
                 created_at: now,
                 updated_at: now,
             },

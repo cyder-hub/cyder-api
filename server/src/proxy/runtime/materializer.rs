@@ -22,7 +22,7 @@ use crate::{
             route_resolver::{ExecutionTarget, ReasoningConfigSource},
             transport::ProxyResponseMode,
         },
-        util::{determine_upstream_protocol, format_model_str},
+        util::format_model_str,
         utility::{UtilityOperation, UtilityProtocol},
     },
     schema::enum_def::{DownstreamProtocol, UpstreamProtocol},
@@ -214,6 +214,7 @@ async fn prepare_llm_request(
     original_headers: &HeaderMap,
     request_patches: &[RuntimeResolvedRequestPatch],
     provider_credential: &ProviderCredential,
+    upstream_protocol: UpstreamProtocol,
     path: &str,
 ) -> Result<(String, HeaderMap, Value, i64), ProxyError> {
     debug!(
@@ -231,7 +232,6 @@ async fn prepare_llm_request(
             format!("failed to parse target url: {error}"),
         )
     })?;
-    let upstream_protocol = determine_upstream_protocol(source);
     let mut headers = build_new_headers(
         original_headers,
         source,
@@ -244,7 +244,7 @@ async fn prepare_llm_request(
         obj.insert("model".to_string(), json!(resolve_real_model_name(model)));
     }
 
-    data = finalize_request_data(data, UpstreamProtocol::Openai, &source.profile_type, path);
+    data = finalize_request_data(data, upstream_protocol, &source.profile_type, path);
     apply_request_patches(&mut data, &mut url, &mut headers, request_patches)?;
 
     Ok((url.to_string(), headers, data, provider_credential.key_id()))
@@ -273,6 +273,7 @@ async fn prepare_generation_request(
                     original_headers,
                     request_patches,
                     provider_credential,
+                    upstream_protocol,
                     path,
                 )
                 .await?;
@@ -492,6 +493,7 @@ pub(in crate::proxy) async fn materialize_utility_request(
                     original_headers,
                     request_patches,
                     provider_credential,
+                    target.upstream_protocol,
                     &operation.downstream_path,
                 )
                 .await?

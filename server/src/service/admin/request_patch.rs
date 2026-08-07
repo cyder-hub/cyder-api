@@ -210,7 +210,7 @@ mod tests {
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::provider::{NewProvider, Provider};
     use crate::database::request_patch::RequestPatchRule;
-    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::database::upstream_source::NewUpstreamSource;
     use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::schema::enum_def::{RequestPatchOperation, RequestPatchPlacement};
     use crate::service::app_state::create_test_app_state;
@@ -235,10 +235,11 @@ mod tests {
             &NewUpstreamSource {
                 id,
                 provider_id: id,
-                source_key: PRIMARY_SOURCE_KEY.to_string(),
                 profile_type: UpstreamProfileType::Openai,
                 endpoint: "https://api.example.com/v1".to_string(),
                 use_proxy: false,
+                is_enabled: true,
+                is_default: true,
                 created_at: 1,
                 updated_at: 1,
             },

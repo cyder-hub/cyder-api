@@ -41,7 +41,6 @@ fn patch_error(message: impl Into<String>) -> ProxyError {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeRequestPatchTrace {
     pub source_id: i64,
-    pub source_key: String,
     pub profile_type: UpstreamProfileType,
     pub applied_rules: Vec<RuntimeResolvedRequestPatch>,
     pub conflicts: Vec<RuntimeRequestPatchConflict>,
@@ -404,7 +403,6 @@ fn build_runtime_request_patch_trace(
 
     Ok(RuntimeRequestPatchTrace {
         source_id: source.id,
-        source_key: source.source_key.clone(),
         profile_type: source.profile_type,
         applied_rules,
         conflicts: runtime_conflicts,
@@ -670,11 +668,13 @@ pub(crate) async fn load_runtime_request_patch_trace(
     provider: &CacheProvider,
     model: Option<&CacheModel>,
     target: Option<&ExecutionTarget>,
+    source_override: Option<&CacheUpstreamSource>,
     app_state: &Arc<AppState>,
 ) -> Result<RuntimeRequestPatchTrace, ProxyError> {
     let source = target
         .map(|target| target.upstream_source.as_ref())
-        .unwrap_or(&provider.upstream_source);
+        .or(source_override)
+        .ok_or_else(|| patch_error("selected Source is required for request patch resolution"))?;
     let generated_rules = generate_target_reasoning_request_patches(target)?;
 
     if let Some(model) = model {

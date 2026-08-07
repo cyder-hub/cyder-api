@@ -97,11 +97,8 @@ async fn allow_source(
     target_label: &str,
 ) -> Result<Option<SourceCircuitProbePermit>, ProxyError> {
     let source_label = format!(
-        "{} via source {}/{} ({:?})",
-        target_label,
-        target.upstream_source.id,
-        target.upstream_source.source_key,
-        target.upstream_source.profile_type
+        "{} via source {} ({:?})",
+        target_label, target.upstream_source.id, target.upstream_source.profile_type
     );
     match ensure_source_request_allowed(app_state, target.upstream_source.id, &source_label).await {
         Ok(permit) => Ok(permit),
@@ -131,8 +128,14 @@ pub(in crate::proxy) async fn execute_request(
         RequestExecutionKind::Generation {
             downstream_protocol,
             ..
-        } => *downstream_protocol,
-        RequestExecutionKind::Utility { operation, .. } => operation.downstream_protocol,
+        } => {
+            debug_assert_eq!(*downstream_protocol, target.downstream_protocol);
+            target.downstream_protocol
+        }
+        RequestExecutionKind::Utility { operation, .. } => {
+            debug_assert_eq!(operation.downstream_protocol, target.downstream_protocol);
+            target.downstream_protocol
+        }
     };
     let mut log_context = new_request_log_context(RequestLogContextInput {
         api_key: &api_key,
@@ -232,6 +235,7 @@ pub(in crate::proxy) async fn execute_request(
         &target.provider,
         Some(&target.model),
         Some(&target),
+        None,
         &app_state,
     )
     .await
@@ -240,10 +244,6 @@ pub(in crate::proxy) async fn execute_request(
         Err(error) => return fail_before_send(&app_state, log_context, error).await,
     };
     debug_assert_eq!(request_patch_trace.source_id, target.upstream_source.id);
-    debug_assert_eq!(
-        request_patch_trace.source_key,
-        target.upstream_source.source_key
-    );
     debug_assert_eq!(
         request_patch_trace.profile_type,
         target.upstream_source.profile_type
@@ -285,14 +285,12 @@ pub(in crate::proxy) async fn execute_request(
 
     let mut materialized = match kind {
         RequestExecutionKind::Generation {
-            downstream_protocol,
-            is_stream,
-            data,
+            is_stream, data, ..
         } => {
             match materialize_generation_request(
                 &target,
                 data,
-                downstream_protocol,
+                target.downstream_protocol,
                 is_stream,
                 &original_headers,
                 &query_params,

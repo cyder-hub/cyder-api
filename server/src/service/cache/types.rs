@@ -77,17 +77,18 @@ pub struct CacheProvider {
     pub name: String,
     pub provider_api_key_mode: ProviderApiKeyMode,
     pub is_enabled: bool,
-    pub upstream_source: CacheUpstreamSource,
+    pub upstream_sources: Vec<CacheUpstreamSource>,
 }
 
 /// Immutable execution entry nested under a cached logical provider.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct CacheUpstreamSource {
     pub id: i64,
-    pub source_key: String,
     pub profile_type: UpstreamProfileType,
     pub endpoint: String,
     pub use_proxy: bool,
+    pub is_enabled: bool,
+    pub is_default: bool,
 }
 
 /// Cached provider/model-scoped reasoning config and active presets.
@@ -481,13 +482,18 @@ impl From<crate::database::provider::ProviderAggregate> for CacheProvider {
             name: db.name.clone(),
             provider_api_key_mode: db.provider_api_key_mode.clone(),
             is_enabled: db.is_enabled,
-            upstream_source: CacheUpstreamSource {
-                id: db.upstream_source.id,
-                source_key: db.upstream_source.source_key,
-                profile_type: db.upstream_source.profile_type,
-                endpoint: db.upstream_source.endpoint,
-                use_proxy: db.upstream_source.use_proxy,
-            },
+            upstream_sources: db
+                .upstream_sources
+                .into_iter()
+                .map(|source| CacheUpstreamSource {
+                    id: source.id,
+                    profile_type: source.profile_type,
+                    endpoint: source.endpoint,
+                    use_proxy: source.use_proxy,
+                    is_enabled: source.is_enabled,
+                    is_default: source.is_default,
+                })
+                .collect(),
         }
     }
 }

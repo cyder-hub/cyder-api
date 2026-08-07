@@ -46,6 +46,13 @@
         </div>
       </div>
 
+      <div
+        v-if="savedPreviewError"
+        class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-800"
+      >
+        {{ savedPreviewError }}
+      </div>
+
       <div v-if="ownerKind === 'model'" class="space-y-3 border-t border-gray-100 pt-4">
         <div class="flex flex-col gap-2 sm:flex-row">
           <Button
@@ -391,6 +398,7 @@ const isLoading = ref(false);
 const isSaving = ref(false);
 const isPreviewLoading = ref(false);
 const error = ref<string | null>(null);
+const savedPreviewError = ref<string | null>(null);
 const previewError = ref<string | null>(null);
 let draftPreviewTimer: ReturnType<typeof setTimeout> | null = null;
 let draftPreviewRequestId = 0;
@@ -841,6 +849,9 @@ function clearDraftPreviewTimer() {
 
 function shouldRequestDraftPreview(): boolean {
   if (!isDirty.value || !props.ownerId || !catalog.value || !config.value) return false;
+  // Provider reasoning is global across Sources. Without an explicit protocol
+  // context, do not guess a Source family merely to render a draft preview.
+  if (props.ownerKind === "provider" && !props.profileType) return false;
   return !showCustomEditor.value || !!familyKeyDraft.value;
 }
 
@@ -906,19 +917,29 @@ async function load() {
   if (!props.ownerId) return;
   isLoading.value = true;
   error.value = null;
+  savedPreviewError.value = null;
   try {
-    const [catalogResponse, configResponse, previewResponse] = await Promise.all([
+    const [catalogResponse, configResponse] = await Promise.all([
       props.actions.getCatalog(),
       props.actions.getConfig(props.ownerId),
-      props.actions.previewSaved(props.ownerId),
     ]);
 
     catalog.value = catalogResponse;
     config.value = configResponse;
-    savedPreview.value = previewResponse;
+    savedPreview.value = null;
     draftPreview.value = null;
     previewError.value = null;
     hydrateDraft(configResponse);
+
+    try {
+      savedPreview.value = await props.actions.previewSaved(props.ownerId);
+    } catch (err) {
+      const normalized = normalizeError(
+        err,
+        t("reasoningConfigPanel.alert.savedPreviewFailed"),
+      );
+      savedPreviewError.value = normalized.message;
+    }
   } catch (err) {
     const normalized = normalizeError(
       err,

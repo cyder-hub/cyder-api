@@ -20,13 +20,12 @@ test("buildCheckOptions keeps selection empty until the user chooses a target", 
   });
 });
 
-test("formatCheckSourceEvidence exposes the exact Primary Source used", () => {
+test("formatCheckSourceEvidence exposes the exact Source used", () => {
   assert.equal(
     formatCheckSourceEvidence({
       source_id: 42,
-      source_key: "primary",
       profile_type: "RESPONSES",
     }),
-    "primary · RESPONSES · source #42",
+    "RESPONSES · source #42",
   );
 });

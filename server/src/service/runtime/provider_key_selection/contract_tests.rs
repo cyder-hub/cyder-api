@@ -6,7 +6,7 @@ use crate::config::SecretEncryptionConfig;
 use crate::database::provider::{
     NewProvider, NewProviderApiKey, Provider, ProviderApiKeyRepository, ProviderApiKeySummary,
 };
-use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+use crate::database::upstream_source::NewUpstreamSource;
 use crate::database::{DbConnection, TestDbContext, get_connection};
 use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
 use crate::service::catalog::CatalogService;
@@ -36,10 +36,11 @@ fn seed_provider(id: i64) -> Provider {
         &NewUpstreamSource {
             id,
             provider_id: id,
-            source_key: PRIMARY_SOURCE_KEY.to_string(),
             profile_type: UpstreamProfileType::Openai,
             endpoint: "https://api.example.com/v1".to_string(),
             use_proxy: false,
+            is_enabled: true,
+            is_default: true,
             created_at: 1,
             updated_at: 1,
         },

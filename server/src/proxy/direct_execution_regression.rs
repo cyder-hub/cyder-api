@@ -45,10 +45,10 @@ use crate::{
         DbConnection, TestDbContext,
         api_key::{ApiKey, CreateApiKeyPayload},
         get_connection,
-        provider::{Provider, UpdateProviderData},
+        provider::Provider,
         request_log::{RequestLog, RequestLogQueryPayload, RequestLogRecord},
         request_patch::CreateRequestPatchPayload,
-        upstream_source::UpdateUpstreamSourceData,
+        upstream_source::{NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource},
     },
     ingress::client_identity::ClientIdentityResolver,
     schema::enum_def::{
@@ -583,19 +583,57 @@ impl RouterFixture {
         Self::new_with_default_action(context, fixture, base_url, Action::Allow).await
     }
 
+    pub(super) async fn new_deepseek(
+        context: TestDbContext,
+        fixture: &DirectExecutionFixture,
+        base_url: &str,
+    ) -> Self {
+        Self::new_with_default_action_and_identity(
+            context,
+            fixture,
+            base_url,
+            Action::Allow,
+            "deepseek-provider",
+            "DeepSeek Provider",
+            "deepseek-chat",
+        )
+        .await
+    }
+
     async fn new_with_default_action(
         context: TestDbContext,
         fixture: &DirectExecutionFixture,
         base_url: &str,
         default_action: Action,
     ) -> Self {
+        Self::new_with_default_action_and_identity(
+            context,
+            fixture,
+            base_url,
+            default_action,
+            "baseline-provider",
+            "Baseline Provider",
+            "baseline-model",
+        )
+        .await
+    }
+
+    async fn new_with_default_action_and_identity(
+        context: TestDbContext,
+        fixture: &DirectExecutionFixture,
+        base_url: &str,
+        default_action: Action,
+        provider_key_prefix: &str,
+        provider_name_prefix: &str,
+        model_name: &str,
+    ) -> Self {
         let nonce = ID_GENERATOR.generate_id();
         let endpoint = match fixture.profile_type {
             UpstreamProfileType::Gemini => format!("{base_url}/v1beta/models"),
             _ => format!("{base_url}/v1"),
         };
-        let provider_key = format!("baseline-provider-{nonce}");
-        let provider_name = format!("Baseline Provider {nonce}");
+        let provider_key = format!("{provider_key_prefix}-{nonce}");
+        let provider_name = format!("{provider_name_prefix} {nonce}");
         let app_state = create_test_app_state(context).await;
         let bootstrapped = app_state
             .admin
@@ -610,7 +648,7 @@ impl RouterFixture {
                 provider_api_key_mode: ProviderApiKeyMode::Queue,
                 api_key: PROVIDER_SECRET.to_string(),
                 api_key_description: Some("direct execution regression".to_string()),
-                model_name: "baseline-model".to_string(),
+                model_name: model_name.to_string(),
                 real_model_name: Some(UPSTREAM_MODEL.to_string()),
             })
             .await
@@ -644,7 +682,7 @@ impl RouterFixture {
             provider_id: bootstrapped.provider.id,
             provider_key,
             provider_name,
-            source_id: bootstrapped.provider.upstream_source.id,
+            source_id: bootstrapped.provider.upstream_sources[0].id,
             provider_api_key_id: bootstrapped.created_key.id,
             model_id: bootstrapped.created_model.id,
             model_name: bootstrapped.created_model.model_name,
@@ -836,13 +874,21 @@ impl RouterFixture {
     }
 
     async fn wait_for_log(&self, expected: RequestStatus) -> RequestLogRecord {
+        self.wait_for_log_for_source(self.source_id, expected).await
+    }
+
+    async fn wait_for_log_for_source(
+        &self,
+        source_id: i64,
+        expected: RequestStatus,
+    ) -> RequestLogRecord {
         let deadline = Instant::now() + WAIT_TIMEOUT;
         loop {
             self.app_state.flush_proxy_logs().await;
             let logs = RequestLog::list_full(RequestLogQueryPayload {
                 provider_id: Some(self.provider_id),
                 model_id: Some(self.model_id),
-                source_id: Some(self.source_id),
+                source_id: Some(source_id),
                 page: Some(1),
                 page_size: Some(10),
                 ..Default::default()
@@ -850,8 +896,7 @@ impl RouterFixture {
             .expect("request logs should be queryable")
             .list;
             if let Some(log) = logs.into_iter().find(|log| log.overall_status == expected) {
-                assert_eq!(log.source_id, Some(self.source_id));
-                assert_eq!(log.source_key_snapshot.as_deref(), Some("primary"));
+                assert_eq!(log.source_id, Some(source_id));
                 assert!(log.source_profile_type_snapshot.is_some());
                 if expected == RequestStatus::Success {
                     assert!(log.source_endpoint_snapshot.is_some());
@@ -1466,19 +1511,15 @@ fn acl_rejection_precedes_invalid_provider_endpoint_preflight() {
             Action::Deny,
         )
         .await;
-        Provider::update(
+        UpstreamSource::update(
+            router.source_id,
             router.provider_id,
-            &UpdateProviderData {
-                provider_key: None,
-                name: None,
-                is_enabled: None,
-                provider_api_key_mode: None,
-            },
             &UpdateUpstreamSourceData {
-                profile_type: None,
                 endpoint: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
                 use_proxy: None,
-                updated_at: 2,
+                is_enabled: None,
+                is_default: None,
+                updated_at: chrono::Utc::now().timestamp_millis(),
             },
         )
         .expect("legacy invalid endpoint should be seeded directly");
@@ -1542,19 +1583,15 @@ fn acl_rejection_precedes_missing_proxy_preflight() {
             .await,
         );
         router.app_state = Arc::new(app_state);
-        Provider::update(
+        UpstreamSource::update(
+            router.source_id,
             router.provider_id,
-            &UpdateProviderData {
-                provider_key: None,
-                name: None,
-                is_enabled: None,
-                provider_api_key_mode: None,
-            },
             &UpdateUpstreamSourceData {
-                profile_type: None,
                 endpoint: None,
                 use_proxy: Some(true),
-                updated_at: 2,
+                is_enabled: None,
+                is_default: None,
+                updated_at: chrono::Utc::now().timestamp_millis(),
             },
         )
         .expect("proxy requirement should be seeded directly");
@@ -1847,6 +1884,276 @@ fn four_public_downstream_generation_paths_call_upstream_at_most_once() {
             upstream.shutdown().await;
         });
     }
+}
+
+#[test]
+fn deepseek_multi_source_provider_freezes_exact_or_default_source_once_for_public_downstreams() {
+    for (name, fixture) in fixtures() {
+        run_case(name, move |context| async move {
+            let upstream = TestUpstream::spawn(ScriptedReply::Json {
+                status: StatusCode::OK,
+                body: fixture.non_stream.upstream_response.clone(),
+            })
+            .await;
+            let router = RouterFixture::new_deepseek(context, &fixture, &upstream.base_url).await;
+            let alternate_profile = match fixture.protocol {
+                DownstreamProtocol::Gemini => UpstreamProfileType::Openai,
+                DownstreamProtocol::Openai
+                | DownstreamProtocol::Responses
+                | DownstreamProtocol::Anthropic => UpstreamProfileType::Ollama,
+            };
+            let alternate_endpoint = match alternate_profile {
+                UpstreamProfileType::Openai => format!("{}/v1", upstream.base_url),
+                UpstreamProfileType::Ollama => upstream.base_url.clone(),
+                _ => unreachable!("the DeepSeek regression uses OpenAI/Ollama alternates"),
+            };
+            let alternate_source = UpstreamSource::create(&NewUpstreamSource {
+                id: ID_GENERATOR.generate_id(),
+                provider_id: router.provider_id,
+                profile_type: alternate_profile.clone(),
+                endpoint: alternate_endpoint,
+                use_proxy: false,
+                is_enabled: true,
+                is_default: false,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .expect("DeepSeek alternate Source should be created");
+            router
+                .app_state
+                .catalog
+                .invalidate_provider(router.provider_id, Some(&router.provider_key))
+                .await
+                .expect("multi-Source fixture should invalidate its catalog");
+
+            let exact_or_default = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+            assert_eq!(exact_or_default.status(), StatusCode::OK, "{name}");
+            axum::body::to_bytes(exact_or_default.into_body(), usize::MAX)
+                .await
+                .expect("exact/default response should be consumed");
+            let first_requests = upstream.requests().await;
+            assert_eq!(
+                first_requests.len(),
+                1,
+                "{name}: first selection must call once"
+            );
+            let first_log = router.wait_for_log(RequestStatus::Success).await;
+            assert_eq!(first_log.source_id, Some(router.source_id));
+
+            let mutation_time = chrono::Utc::now().timestamp_millis();
+            UpstreamSource::update(
+                router.source_id,
+                router.provider_id,
+                &UpdateUpstreamSourceData {
+                    endpoint: None,
+                    use_proxy: None,
+                    is_enabled: Some(false),
+                    is_default: Some(false),
+                    updated_at: mutation_time,
+                },
+            )
+            .expect("the initial Source should be disabled");
+            UpstreamSource::update(
+                alternate_source.id,
+                router.provider_id,
+                &UpdateUpstreamSourceData {
+                    endpoint: None,
+                    use_proxy: None,
+                    is_enabled: Some(true),
+                    is_default: Some(true),
+                    updated_at: mutation_time,
+                },
+            )
+            .expect("the alternate Source should become default");
+            router
+                .app_state
+                .catalog
+                .invalidate_provider(router.provider_id, Some(&router.provider_key))
+                .await
+                .expect("default switch should invalidate its catalog");
+
+            let default_transform = router
+                .send(&fixture, false, &fixture.request.downstream)
+                .await;
+            assert_eq!(default_transform.status(), StatusCode::OK, "{name}");
+            axum::body::to_bytes(default_transform.into_body(), usize::MAX)
+                .await
+                .expect("default transform response should be consumed");
+            let requests = upstream.requests().await;
+            assert_eq!(
+                requests.len(),
+                2,
+                "{name}: default selection must call once"
+            );
+            match alternate_profile {
+                UpstreamProfileType::Openai => {
+                    assert_eq!(requests[1].path, "/v1/chat/completions", "{name}");
+                }
+                UpstreamProfileType::Ollama => {
+                    assert_eq!(requests[1].path, "/api/chat", "{name}");
+                }
+                _ => unreachable!(),
+            }
+            let second_log = router
+                .wait_for_log_for_source(alternate_source.id, RequestStatus::Success)
+                .await;
+            assert_eq!(second_log.source_id, Some(alternate_source.id));
+            assert_eq!(
+                second_log.source_profile_type_snapshot,
+                Some(alternate_profile),
+                "{name}: request log must retain the selected Source profile"
+            );
+            router.wait_for_api_key_lease_release().await;
+            upstream.shutdown().await;
+        });
+    }
+}
+
+#[test]
+fn direct_execution_exact_default_and_zero_source_have_stable_call_counts() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: fixture.non_stream.upstream_response.clone(),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("exact Source response should be consumed");
+        assert_eq!(upstream.requests().await.len(), 1);
+        router.wait_for_log(RequestStatus::Success).await;
+        router.wait_for_api_key_lease_release().await;
+
+        let mutation_time = chrono::Utc::now().timestamp_millis();
+        UpstreamSource::update(
+            router.source_id,
+            router.provider_id,
+            &UpdateUpstreamSourceData {
+                endpoint: None,
+                use_proxy: None,
+                is_enabled: Some(false),
+                is_default: Some(false),
+                updated_at: mutation_time,
+            },
+        )
+        .expect("exact Source should be disabled");
+        let default_source = UpstreamSource::create(&NewUpstreamSource {
+            id: ID_GENERATOR.generate_id(),
+            provider_id: router.provider_id,
+            profile_type: UpstreamProfileType::Ollama,
+            endpoint: upstream.base_url.clone(),
+            use_proxy: false,
+            is_enabled: true,
+            is_default: true,
+            created_at: mutation_time,
+            updated_at: mutation_time,
+        })
+        .expect("default fallback Source should be created");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("Source mutation should invalidate provider cache");
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("default Source response should be consumed");
+        let requests = upstream.requests().await;
+        assert_eq!(
+            requests.len(),
+            2,
+            "default fallback should still issue exactly one request"
+        );
+        assert_eq!(requests[1].path, "/api/chat");
+        assert_eq!(
+            requests[1]
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("Bearer {PROVIDER_SECRET}").as_str())
+        );
+        router.wait_for_api_key_lease_release().await;
+
+        UpstreamSource::delete(router.source_id, router.provider_id)
+            .expect("exact Source should be soft deleted");
+        UpstreamSource::delete(default_source.id, router.provider_id)
+            .expect("default Source should be soft deleted");
+        router
+            .app_state
+            .catalog
+            .invalidate_provider(router.provider_id, Some(&router.provider_key))
+            .await
+            .expect("zero-source mutation should invalidate provider cache");
+
+        let response = router
+            .send(&fixture, false, &fixture.request.downstream)
+            .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("zero-source response should be consumed");
+        let body: Value = serde_json::from_slice(&body).expect("zero-source error should be JSON");
+        assert_eq!(
+            downstream_error_code(&body, fixture.protocol),
+            Some("provider_configuration_error")
+        );
+        assert_eq!(upstream.requests().await.len(), 2);
+        upstream.shutdown().await;
+    });
+}
+
+#[test]
+fn direct_execution_openai_utility_exact_source_issues_one_call() {
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| *name == "openai")
+        .expect("openai fixture");
+    run_case(name, move |context| async move {
+        let upstream = TestUpstream::spawn(ScriptedReply::Json {
+            status: StatusCode::OK,
+            body: json!({
+                "object": "list",
+                "data": [],
+                "model": UPSTREAM_MODEL,
+                "usage": {"prompt_tokens": 1, "total_tokens": 1}
+            }),
+        })
+        .await;
+        let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
+        let response = router
+            .send_raw_post(
+                "/openai/v1/embeddings".to_string(),
+                json!({"model": router.requested_model(), "input": "hello"}),
+                DownstreamAuth::Bearer,
+            )
+            .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("utility response should be consumed");
+        let requests = upstream.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/embeddings");
+        router.wait_for_api_key_lease_release().await;
+        upstream.shutdown().await;
+    });
 }
 
 #[test]
@@ -3332,19 +3639,15 @@ fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
         })
         .await;
         let router = RouterFixture::new(context, &fixture, &upstream.base_url).await;
-        Provider::update(
+        UpstreamSource::update(
+            router.source_id,
             router.provider_id,
-            &UpdateProviderData {
-                provider_key: None,
-                name: None,
-                is_enabled: None,
-                provider_api_key_mode: None,
-            },
             &UpdateUpstreamSourceData {
-                profile_type: None,
                 endpoint: Some("http://user:secret@127.0.0.1:1/v1".to_string()),
                 use_proxy: None,
-                updated_at: 2,
+                is_enabled: None,
+                is_default: None,
+                updated_at: chrono::Utc::now().timestamp_millis(),
             },
         )
         .expect("legacy invalid endpoint should be seeded directly");
@@ -3394,7 +3697,7 @@ fn direct_execution_legacy_invalid_endpoint_fails_before_upstream_access() {
 }
 
 #[test]
-fn direct_execution_missing_primary_source_fails_before_upstream_access() {
+fn direct_execution_missing_source_fails_before_upstream_access() {
     let (name, fixture) = fixtures()
         .into_iter()
         .find(|(name, _)| *name == "openai")
@@ -3421,8 +3724,8 @@ fn direct_execution_missing_primary_source_fails_before_upstream_access() {
             .invalidate_provider(router.provider_id, Some(&router.provider_key))
             .await;
         assert!(
-            invalidation.is_err(),
-            "corrupt provider aggregate should fail closed while invalidating"
+            invalidation.is_ok(),
+            "zero-source provider aggregate should remain cacheable"
         );
 
         let response = router
@@ -3453,19 +3756,15 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
             "  {}/v1///  ",
             upstream.base_url.replacen("http://", "HTTP://", 1)
         );
-        Provider::update(
+        UpstreamSource::update(
+            router.source_id,
             router.provider_id,
-            &UpdateProviderData {
-                provider_key: None,
-                name: None,
-                is_enabled: None,
-                provider_api_key_mode: None,
-            },
             &UpdateUpstreamSourceData {
-                profile_type: None,
                 endpoint: Some(legacy_endpoint.clone()),
                 use_proxy: None,
-                updated_at: 2,
+                is_enabled: None,
+                is_default: None,
+                updated_at: chrono::Utc::now().timestamp_millis(),
             },
         )
         .expect("legacy noncanonical endpoint should be seeded directly");
@@ -3484,7 +3783,7 @@ fn direct_execution_legacy_valid_endpoint_is_normalized_per_request_without_data
         assert_eq!(
             Provider::get_by_id(router.provider_id)
                 .expect("provider should remain persisted")
-                .upstream_source
+                .upstream_sources[0]
                 .endpoint,
             legacy_endpoint
         );
@@ -3521,19 +3820,15 @@ fn direct_execution_proxy_requirement_without_configuration_fails_closed() {
             .await,
         );
         router.app_state = Arc::new(app_state);
-        Provider::update(
+        UpstreamSource::update(
+            router.source_id,
             router.provider_id,
-            &UpdateProviderData {
-                provider_key: None,
-                name: None,
-                is_enabled: None,
-                provider_api_key_mode: None,
-            },
             &UpdateUpstreamSourceData {
-                profile_type: None,
                 endpoint: None,
                 use_proxy: Some(true),
-                updated_at: 2,
+                is_enabled: None,
+                is_default: None,
+                updated_at: chrono::Utc::now().timestamp_millis(),
             },
         )
         .expect("proxy requirement should be seeded directly");

@@ -44,12 +44,13 @@ export interface ProviderRuntimeItem {
   provider_id: number;
   provider_key: string;
   provider_name: string;
-  is_enabled: boolean;
+  provider_is_enabled: boolean;
   source_id: number;
-  source_key: string;
   source_profile_type: string;
   source_endpoint: string;
   source_use_proxy: boolean;
+  source_is_enabled: boolean;
+  source_is_default: boolean;
   enabled_model_count: number;
   enabled_provider_key_count: number;
   health_status: ProviderRuntimeHealthStatus;
@@ -82,6 +83,9 @@ export interface ProviderRuntimeItem {
 
 export interface ProviderRuntimeSummary {
   total_provider_count: number;
+  enabled_provider_count: number;
+  total_source_count: number;
+  enabled_source_count: number;
   healthy_count: number;
   degraded_count: number;
   half_open_count: number;

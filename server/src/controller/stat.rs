@@ -25,6 +25,8 @@ use axum::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Serialize, Debug)]
@@ -286,6 +288,10 @@ pub struct DashboardOperationsSection {
 #[derive(Serialize, Debug)]
 pub struct DashboardRuntimeSummary {
     window: ProviderRuntimeWindow,
+    total_provider_count: i64,
+    enabled_provider_count: i64,
+    total_source_count: i64,
+    enabled_source_count: i64,
     healthy_count: i64,
     degraded_count: i64,
     half_open_count: i64,
@@ -297,6 +303,10 @@ impl From<ProviderRuntimeSummary> for DashboardRuntimeSummary {
     fn from(value: ProviderRuntimeSummary) -> Self {
         Self {
             window: value.window,
+            total_provider_count: value.total_provider_count,
+            enabled_provider_count: value.enabled_provider_count,
+            total_source_count: value.total_source_count,
+            enabled_source_count: value.enabled_source_count,
             healthy_count: value.healthy_count,
             degraded_count: value.degraded_count,
             half_open_count: value.half_open_count,
@@ -696,8 +706,21 @@ fn configured_timezone(app_state: &Arc<AppState>) -> Option<String> {
 
 #[cfg(test)]
 fn runtime_summary_from_items(items: &[ProviderRuntimeItem]) -> DashboardRuntimeSummary {
+    let provider_ids = items
+        .iter()
+        .map(|item| item.provider_id)
+        .collect::<HashSet<_>>();
     let mut summary = DashboardRuntimeSummary {
         window: ProviderRuntimeWindow::OneHour,
+        total_provider_count: provider_ids.len() as i64,
+        enabled_provider_count: items
+            .iter()
+            .filter(|item| item.provider_is_enabled)
+            .map(|item| item.provider_id)
+            .collect::<HashSet<_>>()
+            .len() as i64,
+        total_source_count: items.len() as i64,
+        enabled_source_count: items.iter().filter(|item| item.source_is_enabled).count() as i64,
         healthy_count: 0,
         degraded_count: 0,
         half_open_count: 0,
@@ -954,12 +977,13 @@ mod tests {
             provider_id,
             provider_key: format!("p{}", provider_id),
             provider_name: format!("Provider {}", provider_id),
-            is_enabled: true,
+            provider_is_enabled: true,
             source_id: provider_id * 10 + 1,
-            source_key: "primary".to_string(),
             source_profile_type: UpstreamProfileType::Openai,
             source_endpoint: "https://api.example.com/v1".to_string(),
             source_use_proxy: false,
+            source_is_enabled: true,
+            source_is_default: true,
             enabled_model_count: 1,
             enabled_provider_key_count: 1,
             health_status: ProviderRuntimeHealthStatus::Healthy,

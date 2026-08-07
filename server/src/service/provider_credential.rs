@@ -161,10 +161,11 @@ pub async fn resolve_selected_provider_credential(
 /// runtime selection continues to use `resolve_selected_provider_credential`.
 pub async fn resolve_saved_provider_credential(
     provider: &ProviderAggregate,
+    source: &CacheUpstreamSource,
     key_id: i64,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = auxiliary_client(app_state, provider.upstream_source.use_proxy).await?;
+    let client = auxiliary_client(app_state, source.use_proxy).await?;
     let stored = ProviderApiKeyRepository::get_stored_by_id(provider.id, key_id)
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
     let encrypted = stored
@@ -176,7 +177,7 @@ pub async fn resolve_saved_provider_credential(
         .map_err(|_| ProviderCredentialError::CredentialUnavailable)?;
     materialize_provider_credential(
         client.as_ref(),
-        &provider.upstream_source.profile_type,
+        &source.profile_type,
         key_id,
         secret,
         &app_state.infra.proxy_request_config().non_stream_response,
@@ -187,15 +188,16 @@ pub async fn resolve_saved_provider_credential(
 
 /// Wraps a request-local draft secret without persisting or cloning it.
 pub async fn resolve_draft_provider_credential(
-    provider: &ProviderAggregate,
+    _provider: &ProviderAggregate,
+    source: &CacheUpstreamSource,
     key_id: i64,
     secret: SensitiveSecret,
     app_state: &Arc<AppState>,
 ) -> Result<ProviderCredential, ProviderCredentialError> {
-    let client = auxiliary_client(app_state, provider.upstream_source.use_proxy).await?;
+    let client = auxiliary_client(app_state, source.use_proxy).await?;
     materialize_provider_credential(
         client.as_ref(),
-        &provider.upstream_source.profile_type,
+        &source.profile_type,
         key_id,
         secret,
         &app_state.infra.proxy_request_config().non_stream_response,
@@ -255,13 +257,14 @@ mod tests {
             name: "Provider".to_string(),
             provider_api_key_mode: ProviderApiKeyMode::Queue,
             is_enabled: true,
-            upstream_source: CacheUpstreamSource {
+            upstream_sources: vec![CacheUpstreamSource {
                 id: 2,
-                source_key: "primary".to_string(),
                 profile_type,
                 endpoint: "https://example.com".to_string(),
                 use_proxy: false,
-            },
+                is_enabled: true,
+                is_default: true,
+            }],
         }
     }
 
@@ -282,7 +285,7 @@ mod tests {
 
         apply_provider_request_auth_header(
             &mut headers,
-            &provider.upstream_source,
+            &provider.upstream_sources[0],
             UpstreamProtocol::Gemini,
             &credential(),
         )
@@ -349,7 +352,7 @@ mod tests {
             let mut headers = HeaderMap::new();
             apply_provider_request_auth_header(
                 &mut headers,
-                &provider.upstream_source,
+                &provider.upstream_sources[0],
                 api_type,
                 &credential(),
             )
@@ -366,7 +369,7 @@ mod tests {
 
         let error = apply_provider_request_auth_header(
             &mut headers,
-            &provider.upstream_source,
+            &provider.upstream_sources[0],
             UpstreamProtocol::Openai,
             &credential(),
         )

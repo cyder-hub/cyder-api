@@ -279,8 +279,7 @@ impl ReasoningConfigAdminService {
         provider_id: i64,
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let provider = ensure_provider(provider_id)?;
-        let upstream_protocol =
-            upstream_protocol_for_profile(&provider.upstream_source.profile_type);
+        let upstream_protocol = preview_protocol_for_provider(&provider)?;
         let config = provider_config_response(provider_id)?;
         Ok(build_preview_response(
             config,
@@ -299,13 +298,14 @@ impl ReasoningConfigAdminService {
         provider_id: i64,
         input: PreviewProviderReasoningConfigInput,
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
-        let provider = ensure_provider(provider_id)?;
-        let upstream_protocol = upstream_protocol_for_profile(
-            input
-                .profile_type
-                .as_ref()
-                .unwrap_or(&provider.upstream_source.profile_type),
-        );
+        let _provider = ensure_provider(provider_id)?;
+        let upstream_protocol =
+            upstream_protocol_for_profile(input.profile_type.as_ref().ok_or_else(|| {
+                BaseError::ParamInvalid(Some(
+                    "a profile_type is required when a provider has multiple Source families"
+                        .to_string(),
+                ))
+            })?);
         let config = provider_draft_config_response(provider_id, input)?;
         Ok(build_preview_response(
             config,
@@ -416,8 +416,7 @@ impl ReasoningConfigAdminService {
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let model = ensure_model(model_id)?;
         let provider = ensure_provider(model.provider_id)?;
-        let upstream_protocol =
-            upstream_protocol_for_profile(&provider.upstream_source.profile_type);
+        let upstream_protocol = preview_protocol_for_provider(&provider)?;
         let cache_model = CacheModel::from(model);
         let config = model_config_response(model_id)?;
         Ok(build_preview_response(
@@ -434,8 +433,7 @@ impl ReasoningConfigAdminService {
     ) -> Result<ReasoningConfigPreviewResponse, BaseError> {
         let model = ensure_model(model_id)?;
         let provider = ensure_provider(model.provider_id)?;
-        let upstream_protocol =
-            upstream_protocol_for_profile(&provider.upstream_source.profile_type);
+        let upstream_protocol = preview_protocol_for_provider(&provider)?;
         let cache_model = CacheModel::from(model);
         let config = model_draft_config_response(&cache_model, input)?;
         Ok(build_preview_response(
@@ -483,6 +481,26 @@ fn ensure_provider(provider_id: i64) -> Result<ProviderAggregate, BaseError> {
 
 fn ensure_model(model_id: i64) -> Result<Model, BaseError> {
     Model::get_by_id(model_id).map_err(|err| map_owner_not_found(err, "model", model_id))
+}
+
+fn preview_protocol_for_provider(
+    provider: &ProviderAggregate,
+) -> Result<UpstreamProtocol, BaseError> {
+    let protocols = provider
+        .upstream_sources
+        .iter()
+        .map(|source| upstream_protocol_for_profile(&source.profile_type))
+        .collect::<HashSet<_>>();
+    match protocols.into_iter().collect::<Vec<_>>().as_slice() {
+        [protocol] => Ok(*protocol),
+        [] => Err(BaseError::ParamInvalid(Some(
+            "reasoning preview requires at least one Source family".to_string(),
+        ))),
+        _ => Err(BaseError::ParamInvalid(Some(
+            "reasoning preview is not Source-bound; provide an explicit profile for a multi-family provider"
+                .to_string(),
+        ))),
+    }
 }
 
 fn map_owner_not_found(err: BaseError, owner_kind: &'static str, owner_id: i64) -> BaseError {
@@ -949,11 +967,12 @@ fn reasoning_config_audit_event(
 
 #[cfg(test)]
 mod tests {
+    use crate::controller::BaseError;
     use crate::database::TestDbContext;
     use crate::database::model::{Model, ModelCapabilityFlags};
     use crate::database::provider::{NewProvider, Provider, ProviderAggregate};
     use crate::database::reasoning_config::ReasoningConfig;
-    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::database::upstream_source::{NewUpstreamSource, UpstreamSource};
     use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::app_state::create_test_app_state;
 
@@ -977,10 +996,11 @@ mod tests {
             &NewUpstreamSource {
                 id: id + 1,
                 provider_id: id,
-                source_key: PRIMARY_SOURCE_KEY.to_string(),
                 profile_type: UpstreamProfileType::Openai,
                 endpoint: "https://api.example.com/v1".to_string(),
                 use_proxy: false,
+                is_enabled: true,
+                is_default: true,
                 created_at: 1,
                 updated_at: 1,
             },
@@ -1005,6 +1025,57 @@ mod tests {
             expose_in_models: true,
             is_enabled: true,
         }
+    }
+
+    fn preview_source(id: i64, profile_type: UpstreamProfileType) -> UpstreamSource {
+        UpstreamSource {
+            id,
+            provider_id: 501,
+            profile_type,
+            endpoint: format!("https://source-{id}.example.com"),
+            use_proxy: false,
+            is_enabled: true,
+            is_default: id == 1,
+            deleted_at: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn preview_provider(upstream_sources: Vec<UpstreamSource>) -> ProviderAggregate {
+        ProviderAggregate {
+            provider: Provider {
+                id: 501,
+                provider_key: "preview-provider".to_string(),
+                name: "Preview Provider".to_string(),
+                is_enabled: true,
+                deleted_at: None,
+                created_at: 1,
+                updated_at: 1,
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+            },
+            upstream_sources,
+        }
+    }
+
+    #[test]
+    fn reasoning_preview_is_not_bound_to_a_singular_source() {
+        let error = super::preview_protocol_for_provider(&preview_provider(vec![
+            preview_source(1, UpstreamProfileType::Openai),
+            preview_source(2, UpstreamProfileType::Gemini),
+        ]))
+        .expect_err("multi-family provider preview must not guess a Source");
+        assert!(matches!(
+            error,
+            BaseError::ParamInvalid(Some(message)) if message.contains("not Source-bound")
+        ));
+
+        let error = super::preview_protocol_for_provider(&preview_provider(vec![]))
+            .expect_err("zero-source provider preview must fail closed");
+        assert!(matches!(
+            error,
+            BaseError::ParamInvalid(Some(message)) if message.contains("at least one Source")
+        ));
     }
 
     #[tokio::test]

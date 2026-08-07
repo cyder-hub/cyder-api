@@ -55,6 +55,10 @@ export function buildEmptyDashboard(): DashboardResponse {
     },
     runtime: {
       window: "1h",
+      total_provider_count: 0,
+      enabled_provider_count: 0,
+      total_source_count: 0,
+      enabled_source_count: 0,
       healthy_count: 0,
       degraded_count: 0,
       half_open_count: 0,
@@ -431,6 +435,30 @@ export function useDashboardData(options: UseDashboardDataOptions) {
   ]);
 
   const runtimeItems = computed(() => [
+    {
+      key: "total_provider_count",
+      label: t("dashboard.runtime.providers"),
+      value: formatCount(resourcesSection.value.runtime.total_provider_count),
+      description: t("dashboard.runtime.windowDetail", {
+        window: runtimeWindowLabel(resourcesSection.value.runtime.window),
+      }),
+    },
+    {
+      key: "total_source_count",
+      label: t("dashboard.runtime.sources"),
+      value: formatCount(resourcesSection.value.runtime.total_source_count),
+      description: t("dashboard.runtime.windowDetail", {
+        window: runtimeWindowLabel(resourcesSection.value.runtime.window),
+      }),
+    },
+    {
+      key: "enabled_source_count",
+      label: t("dashboard.runtime.enabledSources"),
+      value: formatCount(resourcesSection.value.runtime.enabled_source_count),
+      description: t("dashboard.runtime.windowDetail", {
+        window: runtimeWindowLabel(resourcesSection.value.runtime.window),
+      }),
+    },
     {
       key: "healthy_count",
       label: t("providerRuntimePage.summary.healthy"),

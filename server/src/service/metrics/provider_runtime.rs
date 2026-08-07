@@ -167,12 +167,13 @@ pub struct ProviderRuntimeItem {
     pub provider_id: i64,
     pub provider_key: String,
     pub provider_name: String,
-    pub is_enabled: bool,
+    pub provider_is_enabled: bool,
     pub source_id: i64,
-    pub source_key: String,
     pub source_profile_type: UpstreamProfileType,
     pub source_endpoint: String,
     pub source_use_proxy: bool,
+    pub source_is_enabled: bool,
+    pub source_is_default: bool,
     pub enabled_model_count: i64,
     pub enabled_provider_key_count: i64,
     pub health_status: ProviderRuntimeHealthStatus,
@@ -206,6 +207,9 @@ pub struct ProviderRuntimeItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderRuntimeSummary {
     pub total_provider_count: i64,
+    pub enabled_provider_count: i64,
+    pub total_source_count: i64,
+    pub enabled_source_count: i64,
     pub healthy_count: i64,
     pub degraded_count: i64,
     pub half_open_count: i64,
@@ -279,24 +283,42 @@ impl MetricsService {
         end_time_ms: i64,
         provider_id_filter: Option<i64>,
     ) -> Result<Vec<ProviderRuntimeAggregate>, BaseError> {
-        let provider_scope_id = provider_id_filter.map(|value| value.to_string());
-        let request_aggregates = self.query_request_window_metrics(
-            start_time_ms,
-            end_time_ms,
-            Some("provider"),
-            provider_scope_id.as_deref(),
-        )?;
+        let providers = Provider::list_all()?;
+        let source_to_provider = providers
+            .into_iter()
+            .flat_map(|provider| {
+                let provider_id = provider.id;
+                provider
+                    .upstream_sources
+                    .into_iter()
+                    .map(move |source| (source.id, provider_id))
+            })
+            .filter(|(_, provider_id)| {
+                provider_id_filter.is_none_or(|filter| *provider_id == filter)
+            })
+            .collect::<HashMap<_, _>>();
+        let request_aggregates =
+            self.query_request_window_metrics(start_time_ms, end_time_ms, Some("source"), None)?;
         let request_by_scope = request_aggregates
             .into_iter()
+            .filter(|item| {
+                item.scope_id
+                    .parse::<i64>()
+                    .ok()
+                    .is_some_and(|source_id| source_to_provider.contains_key(&source_id))
+            })
             .map(|item| (item.scope_id.clone(), item))
             .collect::<HashMap<_, _>>();
         let mut status_by_scope = HashMap::<String, HashMap<i32, i64>>::new();
-        for row in list_http_status_rollup_minutes(
-            start_time_ms,
-            end_time_ms,
-            "provider",
-            provider_scope_id.as_deref(),
-        )? {
+        for row in list_http_status_rollup_minutes(start_time_ms, end_time_ms, "source", None)? {
+            if row
+                .scope_id
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|source_id| !source_to_provider.contains_key(&source_id))
+            {
+                continue;
+            }
             *status_by_scope
                 .entry(row.scope_id)
                 .or_default()
@@ -304,12 +326,15 @@ impl MetricsService {
                 .or_default() += row.count;
         }
         let mut cost_by_scope = HashMap::<String, BTreeMap<String, i64>>::new();
-        for row in list_cost_rollup_minutes(
-            start_time_ms,
-            end_time_ms,
-            Some("provider"),
-            provider_scope_id.as_deref(),
-        )? {
+        for row in list_cost_rollup_minutes(start_time_ms, end_time_ms, Some("source"), None)? {
+            if row
+                .scope_id
+                .parse::<i64>()
+                .ok()
+                .is_none_or(|source_id| !source_to_provider.contains_key(&source_id))
+            {
+                continue;
+            }
             *cost_by_scope
                 .entry(row.scope_id)
                 .or_default()
@@ -321,8 +346,8 @@ impl MetricsService {
         let mut result = Vec::with_capacity(scope_ids.len());
 
         for scope_id in scope_ids {
-            let provider_id = match scope_id.parse::<i64>() {
-                Ok(provider_id) => provider_id,
+            let source_id = match scope_id.parse::<i64>() {
+                Ok(source_id) => source_id,
                 Err(err) => {
                     crate::warn_event!(
                         "metrics.provider_runtime_invalid_scope_id",
@@ -331,6 +356,9 @@ impl MetricsService {
                     );
                     continue;
                 }
+            };
+            let Some(provider_id) = source_to_provider.get(&source_id).copied() else {
+                continue;
             };
             let request = request_by_scope.get(&scope_id);
 
@@ -359,6 +387,7 @@ impl MetricsService {
 
             result.push(ProviderRuntimeAggregate {
                 provider_id,
+                source_id,
                 request_count: request.map_or(0, |item| item.request_count),
                 success_count: request.map_or(0, |item| item.success_count),
                 error_count: request.map_or(0, |item| item.error_count + item.cancelled_count),
@@ -379,7 +408,7 @@ impl MetricsService {
             });
         }
 
-        result.sort_by_key(|item| item.provider_id);
+        result.sort_by_key(|item| (item.provider_id, item.source_id));
         Ok(result)
     }
 
@@ -435,7 +464,7 @@ impl MetricsService {
             self.provider_runtime_aggregates_in_range(start_time_ms, now, None)?;
         let aggregate_map = runtime_aggregates
             .into_iter()
-            .map(|item| (item.provider_id, item))
+            .map(|item| (item.source_id, item))
             .collect::<HashMap<_, _>>();
 
         let mut enabled_model_count_by_provider: HashMap<i64, i64> = HashMap::new();
@@ -458,121 +487,134 @@ impl MetricsService {
                 .or_insert(0) += 1;
         }
 
-        let mut items = Vec::with_capacity(providers.len());
+        let mut items = Vec::new();
         for provider in providers {
-            let source = &provider.upstream_source;
-            let (health_snapshot, runtime_state_backend_degraded, runtime_state_backend_error) =
-                app_state
-                    .source_circuit
-                    .get_source_health_snapshot(source.id)
-                    .await
-                    .map(|snapshot| (snapshot, false, None))
-                    .unwrap_or_else(|err| {
-                        let error = err.to_string();
-                        crate::warn_event!(
-                            "runtime_state.read_failed",
-                            read_model = "provider_runtime",
-                            component = "source_circuit",
-                            provider_id = provider.id,
-                            source_id = source.id,
-                            error = &error,
-                        );
-                        (SourceHealthSnapshot::default(), true, Some(error))
-                    });
-            let runtime_aggregate =
-                aggregate_map
-                    .get(&provider.id)
-                    .cloned()
-                    .unwrap_or(ProviderRuntimeAggregate {
-                        provider_id: provider.id,
-                        request_count: 0,
-                        success_count: 0,
-                        error_count: 0,
-                        avg_time_to_first_response_body_ms: None,
-                        time_to_first_response_body_sample_count: 0,
-                        avg_ttft_ms: None,
-                        ttft_sample_count: 0,
-                        avg_total_latency_ms: None,
-                        total_latency_sample_count: 0,
-                        last_request_at: None,
-                        last_success_at: None,
-                        last_error_at: None,
-                        status_code_breakdown: Vec::new(),
-                        total_cost: Vec::new(),
-                    });
+            let provider_id = provider.id;
+            let provider_key = provider.provider_key.clone();
+            let provider_name = provider.name.clone();
+            let provider_is_enabled = provider.is_enabled;
+            for source in provider.upstream_sources {
+                if only_enabled && !source.is_enabled {
+                    continue;
+                }
+                let (health_snapshot, runtime_state_backend_degraded, runtime_state_backend_error) =
+                    app_state
+                        .source_circuit
+                        .get_source_health_snapshot(source.id)
+                        .await
+                        .map(|snapshot| (snapshot, false, None))
+                        .unwrap_or_else(|err| {
+                            let error = err.to_string();
+                            crate::warn_event!(
+                                "runtime_state.read_failed",
+                                read_model = "provider_runtime",
+                                component = "source_circuit",
+                                provider_id = provider_id,
+                                source_id = source.id,
+                                error = &error,
+                            );
+                            (SourceHealthSnapshot::default(), true, Some(error))
+                        });
+                let runtime_aggregate =
+                    aggregate_map
+                        .get(&source.id)
+                        .cloned()
+                        .unwrap_or(ProviderRuntimeAggregate {
+                            provider_id,
+                            source_id: source.id,
+                            request_count: 0,
+                            success_count: 0,
+                            error_count: 0,
+                            avg_time_to_first_response_body_ms: None,
+                            time_to_first_response_body_sample_count: 0,
+                            avg_ttft_ms: None,
+                            ttft_sample_count: 0,
+                            avg_total_latency_ms: None,
+                            total_latency_sample_count: 0,
+                            last_request_at: None,
+                            last_success_at: None,
+                            last_error_at: None,
+                            status_code_breakdown: Vec::new(),
+                            total_cost: Vec::new(),
+                        });
 
-            let runtime_level = compute_runtime_level(
-                health_snapshot.status,
-                runtime_aggregate.request_count,
-                runtime_aggregate.error_count,
-                runtime_aggregate.avg_total_latency_ms,
-            );
-
-            let item = ProviderRuntimeItem {
-                provider_id: provider.id,
-                provider_key: provider.provider_key.clone(),
-                provider_name: provider.name.clone(),
-                is_enabled: provider.is_enabled,
-                source_id: source.id,
-                source_key: source.source_key.clone(),
-                source_profile_type: source.profile_type.clone(),
-                source_endpoint: source.endpoint.clone(),
-                source_use_proxy: source.use_proxy,
-                enabled_model_count: enabled_model_count_by_provider
-                    .get(&provider.id)
-                    .copied()
-                    .unwrap_or(0),
-                enabled_provider_key_count: enabled_provider_key_count_by_provider
-                    .get(&provider.id)
-                    .copied()
-                    .unwrap_or(0),
-                health_status: map_health_status(health_snapshot.status),
-                runtime_level,
-                consecutive_failures: health_snapshot.consecutive_failures,
-                half_open_probe_in_flight: health_snapshot.half_open_probe_in_flight,
-                opened_at: health_snapshot.opened_at,
-                last_failure_at: health_snapshot.last_failure_at,
-                last_recovered_at: health_snapshot.last_recovered_at,
-                last_error: health_snapshot.last_error.clone(),
-                runtime_state_backend_degraded,
-                runtime_state_backend_error,
-                request_count: runtime_aggregate.request_count,
-                success_count: runtime_aggregate.success_count,
-                error_count: runtime_aggregate.error_count,
-                success_rate: calculate_success_rate(
+                let runtime_level = compute_runtime_level(
+                    health_snapshot.status,
                     runtime_aggregate.request_count,
-                    runtime_aggregate.success_count,
-                ),
-                avg_time_to_first_response_body_ms: runtime_aggregate
-                    .avg_time_to_first_response_body_ms,
-                time_to_first_response_body_sample_count: runtime_aggregate
-                    .time_to_first_response_body_sample_count,
-                avg_ttft_ms: runtime_aggregate.avg_ttft_ms,
-                ttft_sample_count: runtime_aggregate.ttft_sample_count,
-                avg_total_latency_ms: runtime_aggregate.avg_total_latency_ms,
-                total_latency_sample_count: runtime_aggregate.total_latency_sample_count,
-                last_request_at: runtime_aggregate.last_request_at,
-                last_success_at: runtime_aggregate.last_success_at,
-                last_error_at: runtime_aggregate.last_error_at,
-                last_error_summary: build_last_error_summary(&health_snapshot, &runtime_aggregate),
-                status_code_breakdown: runtime_aggregate
-                    .status_code_breakdown
-                    .into_iter()
-                    .map(|item| ProviderRuntimeStatusCodeStat {
-                        status_code: item.status_code,
-                        count: item.count,
-                    })
-                    .collect(),
-                total_cost: runtime_aggregate
-                    .total_cost
-                    .into_iter()
-                    .map(|item| ProviderRuntimeCostStat {
-                        currency: item.currency,
-                        amount_nanos: item.amount_nanos,
-                    })
-                    .collect(),
-            };
-            items.push(item);
+                    runtime_aggregate.error_count,
+                    runtime_aggregate.avg_total_latency_ms,
+                );
+
+                let item = ProviderRuntimeItem {
+                    provider_id,
+                    provider_key: provider_key.clone(),
+                    provider_name: provider_name.clone(),
+                    provider_is_enabled,
+                    source_id: source.id,
+                    source_profile_type: source.profile_type.clone(),
+                    source_endpoint: source.endpoint.clone(),
+                    source_use_proxy: source.use_proxy,
+                    source_is_enabled: source.is_enabled,
+                    source_is_default: source.is_default,
+                    enabled_model_count: enabled_model_count_by_provider
+                        .get(&provider_id)
+                        .copied()
+                        .unwrap_or(0),
+                    enabled_provider_key_count: enabled_provider_key_count_by_provider
+                        .get(&provider_id)
+                        .copied()
+                        .unwrap_or(0),
+                    health_status: map_health_status(health_snapshot.status),
+                    runtime_level,
+                    consecutive_failures: health_snapshot.consecutive_failures,
+                    half_open_probe_in_flight: health_snapshot.half_open_probe_in_flight,
+                    opened_at: health_snapshot.opened_at,
+                    last_failure_at: health_snapshot.last_failure_at,
+                    last_recovered_at: health_snapshot.last_recovered_at,
+                    last_error: health_snapshot.last_error.clone(),
+                    runtime_state_backend_degraded,
+                    runtime_state_backend_error,
+                    request_count: runtime_aggregate.request_count,
+                    success_count: runtime_aggregate.success_count,
+                    error_count: runtime_aggregate.error_count,
+                    success_rate: calculate_success_rate(
+                        runtime_aggregate.request_count,
+                        runtime_aggregate.success_count,
+                    ),
+                    avg_time_to_first_response_body_ms: runtime_aggregate
+                        .avg_time_to_first_response_body_ms,
+                    time_to_first_response_body_sample_count: runtime_aggregate
+                        .time_to_first_response_body_sample_count,
+                    avg_ttft_ms: runtime_aggregate.avg_ttft_ms,
+                    ttft_sample_count: runtime_aggregate.ttft_sample_count,
+                    avg_total_latency_ms: runtime_aggregate.avg_total_latency_ms,
+                    total_latency_sample_count: runtime_aggregate.total_latency_sample_count,
+                    last_request_at: runtime_aggregate.last_request_at,
+                    last_success_at: runtime_aggregate.last_success_at,
+                    last_error_at: runtime_aggregate.last_error_at,
+                    last_error_summary: build_last_error_summary(
+                        &health_snapshot,
+                        &runtime_aggregate,
+                    ),
+                    status_code_breakdown: runtime_aggregate
+                        .status_code_breakdown
+                        .into_iter()
+                        .map(|item| ProviderRuntimeStatusCodeStat {
+                            status_code: item.status_code,
+                            count: item.count,
+                        })
+                        .collect(),
+                    total_cost: runtime_aggregate
+                        .total_cost
+                        .into_iter()
+                        .map(|item| ProviderRuntimeCostStat {
+                            currency: item.currency,
+                            amount_nanos: item.amount_nanos,
+                        })
+                        .collect(),
+                };
+                items.push(item);
+            }
         }
 
         Ok(items)
@@ -583,11 +625,23 @@ impl MetricsService {
         app_state: &Arc<AppState>,
         window: ProviderRuntimeWindow,
         items: &[ProviderRuntimeItem],
-    ) -> ProviderRuntimeSummary {
+        only_enabled: bool,
+    ) -> Result<ProviderRuntimeSummary, BaseError> {
         let runtime_state_backend =
             runtime_backend_status_for_provider_items(app_state, items).await;
+        let providers = if only_enabled {
+            Provider::list_all_active()?
+        } else {
+            Provider::list_all()?
+        };
         let mut summary = ProviderRuntimeSummary {
-            total_provider_count: items.len() as i64,
+            total_provider_count: providers.len() as i64,
+            enabled_provider_count: providers
+                .iter()
+                .filter(|provider| provider.is_enabled)
+                .count() as i64,
+            total_source_count: items.len() as i64,
+            enabled_source_count: items.iter().filter(|item| item.source_is_enabled).count() as i64,
             healthy_count: 0,
             degraded_count: 0,
             half_open_count: 0,
@@ -608,7 +662,7 @@ impl MetricsService {
             }
         }
 
-        summary
+        Ok(summary)
     }
 }
 
@@ -755,12 +809,12 @@ pub(crate) fn search_matches(item: &ProviderRuntimeItem, search: &str) -> bool {
     [
         item.provider_name.as_str(),
         item.provider_key.as_str(),
-        item.source_key.as_str(),
         item.source_endpoint.as_str(),
     ]
     .into_iter()
     .any(|value| normalize(value).contains(&needle))
         || normalize(&format!("{:?}", item.source_profile_type)).contains(&needle)
+        || item.source_id.to_string().contains(&needle)
 }
 
 pub(crate) fn sort_provider_runtime_items(
@@ -808,7 +862,8 @@ pub(crate) fn sort_provider_runtime_items(
 
         let with_tiebreaker = ordering
             .then_with(|| left.provider_name.cmp(&right.provider_name))
-            .then_with(|| left.provider_id.cmp(&right.provider_id));
+            .then_with(|| left.provider_id.cmp(&right.provider_id))
+            .then_with(|| left.source_id.cmp(&right.source_id));
 
         match direction {
             SortDirection::Asc => with_tiebreaker,

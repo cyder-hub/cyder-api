@@ -10,7 +10,10 @@ import {
   formatCheckSourceEvidence,
 } from "./providerCheckViewModel";
 
-export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
+export function useProviderCheck(
+  editingData: Ref<EditingProviderData | null>,
+  selectedSourceId: Ref<number | null>,
+) {
   const { t: $t } = useI18n();
 
   // Modal states
@@ -22,6 +25,10 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
   const modelIndexToCheck = ref<number | null>(null);
   const apiKeyIndexToUseStr = ref<string | null>(null);
   const isBatchCheckingModels = ref(false);
+  const isSourceCheckModalOpen = ref(false);
+  const sourceCheckSourceId = ref<number | null>(null);
+  const sourceCheckModelIndex = ref<string | null>(null);
+  const sourceCheckApiKeyIndex = ref<string | null>(null);
 
   // Computed options
   const modelOptionsForSelect = computed(() => {
@@ -75,12 +82,34 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     );
   });
 
-  const performCheck = async (modelIndex: number, apiKeyIndex: number) => {
+  const selectedSourceCheckTargetLabel = computed(() => {
+    if (sourceCheckSourceId.value === null) return "";
+    const source = editingData.value?.upstream_sources.find(
+      (item) => item.id === sourceCheckSourceId.value,
+    );
+    return source ? `${source.profile_type} · #${source.id}` : `#${sourceCheckSourceId.value}`;
+  });
+
+  const performCheck = async (
+    modelIndex: number,
+    apiKeyIndex: number,
+    sourceIdOverride?: number,
+  ) => {
     const data = editingData.value;
     if (!data || !data.id) {
       toastController.warn(
         $t("providerEditPage.alert.providerNotSavedForCheck"),
       );
+      return;
+    }
+
+    const sourceId = sourceIdOverride ?? selectedSourceId.value;
+    if (sourceId === null || sourceId === undefined) {
+      const message = $t("providerEditPage.alert.noSourceForCheck");
+      data.models[modelIndex].checkStatus = "error";
+      data.models[modelIndex].checkMessage = message;
+      data.provider_keys[apiKeyIndex].checkStatus = "error";
+      data.provider_keys[apiKeyIndex].checkMessage = message;
       return;
     }
 
@@ -100,7 +129,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     };
 
     try {
-      const result = await providerService.checkProviderConnection(data.id, payload);
+      const result = await providerService.checkProviderConnection(data.id, sourceId, payload);
       const evidence = formatCheckSourceEvidence(result);
       data.models[modelIndex].checkStatus = "success";
       data.models[modelIndex].checkMessage = evidence;
@@ -115,9 +144,17 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     }
   };
 
-  const performBatchModelCheck = async (apiKeyIndex: number) => {
+  const performBatchModelCheck = async (
+    apiKeyIndex: number,
+    sourceIdOverride?: number,
+  ) => {
     const data = editingData.value;
     if (!data || !data.id) return;
+    const sourceId = sourceIdOverride ?? selectedSourceId.value;
+    if (sourceId === null || sourceId === undefined) {
+      toastController.warn($t("providerEditPage.alert.noSourceForCheck"));
+      return;
+    }
 
     const translatedType = $t("providerEditPage.alert.checkTypeModels");
     toastController.info(
@@ -139,7 +176,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         provider_api_key_id: key.id,
       };
       try {
-        const result = await providerService.checkProviderConnection(data.id!, payload);
+        const result = await providerService.checkProviderConnection(data.id!, sourceId, payload);
         successCount++;
         data.models[index].checkStatus = "success";
         data.models[index].checkMessage = formatCheckSourceEvidence(result);
@@ -158,9 +195,17 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     );
   };
 
-  const performBatchApiKeyCheck = async (modelIndex: number) => {
+  const performBatchApiKeyCheck = async (
+    modelIndex: number,
+    sourceIdOverride?: number,
+  ) => {
     const data = editingData.value;
     if (!data || !data.id) return;
+    const sourceId = sourceIdOverride ?? selectedSourceId.value;
+    if (sourceId === null || sourceId === undefined) {
+      toastController.warn($t("providerEditPage.alert.noSourceForCheck"));
+      return;
+    }
 
     const translatedType = $t("providerEditPage.alert.checkTypeApiKeys");
     toastController.info(
@@ -182,7 +227,7 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         provider_api_key_id: key.id,
       };
       try {
-        const result = await providerService.checkProviderConnection(data.id!, payload);
+        const result = await providerService.checkProviderConnection(data.id!, sourceId, payload);
         successCount++;
         data.provider_keys[index].checkStatus = "success";
         data.provider_keys[index].checkMessage = formatCheckSourceEvidence(result);
@@ -207,6 +252,11 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
       toastController.warn(
         $t("providerEditPage.alert.providerNotSavedForCheck"),
       );
+      return;
+    }
+
+    if (selectedSourceId.value === null) {
+      toastController.warn($t("providerEditPage.alert.sourceRequiredForCheck"));
       return;
     }
 
@@ -256,6 +306,11 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
       return;
     }
 
+    if (selectedSourceId.value === null) {
+      toastController.warn($t("providerEditPage.alert.sourceRequiredForCheck"));
+      return;
+    }
+
     if (type === "models") {
       if (data.models.length === 0) {
         toastController.info($t("providerEditPage.alert.noModelsToCheck"));
@@ -289,6 +344,51 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
         isModelSelectModalOpen.value = true;
       }
     }
+  };
+
+  const handleSourceCheck = (sourceId: number) => {
+    const data = editingData.value;
+    if (!data || !data.id) {
+      toastController.warn(
+        $t("providerEditPage.alert.providerNotSavedForCheck"),
+      );
+      return;
+    }
+    if (data.models.length === 0) {
+      toastController.warn($t("providerEditPage.alert.noModelForCheck"));
+      return;
+    }
+    if (data.provider_keys.length === 0) {
+      toastController.warn($t("providerEditPage.alert.noApiKeyForCheck"));
+      return;
+    }
+
+    sourceCheckSourceId.value = sourceId;
+    sourceCheckModelIndex.value = null;
+    sourceCheckApiKeyIndex.value = null;
+    isSourceCheckModalOpen.value = true;
+  };
+
+  const handleConfirmSourceCheck = async () => {
+    const modelIndex =
+      sourceCheckModelIndex.value === null
+        ? null
+        : Number(sourceCheckModelIndex.value);
+    const apiKeyIndex =
+      sourceCheckApiKeyIndex.value === null
+        ? null
+        : Number(sourceCheckApiKeyIndex.value);
+    const sourceId = sourceCheckSourceId.value;
+
+    if (modelIndex === null || apiKeyIndex === null || sourceId === null) {
+      return;
+    }
+
+    isSourceCheckModalOpen.value = false;
+    sourceCheckModelIndex.value = null;
+    sourceCheckApiKeyIndex.value = null;
+    sourceCheckSourceId.value = null;
+    await performCheck(modelIndex, apiKeyIndex, sourceId);
   };
 
   const handleConfirmModelSelection = () => {
@@ -344,12 +444,18 @@ export function useProviderCheck(editingData: Ref<EditingProviderData | null>) {
     modelIndexToCheck,
     apiKeyIndexToUseStr,
     isBatchCheckingModels,
+    isSourceCheckModalOpen,
+    sourceCheckModelIndex,
+    sourceCheckApiKeyIndex,
     modelOptionsForSelect,
     apiKeyOptionsForSelect,
     selectedModelCheckTargetLabel,
     selectedApiKeyCheckTargetLabel,
+    selectedSourceCheckTargetLabel,
     handleCheck,
     handleBatchCheck,
+    handleSourceCheck,
+    handleConfirmSourceCheck,
     handleConfirmModelSelection,
     handleConfirmApiKeySelection,
   };

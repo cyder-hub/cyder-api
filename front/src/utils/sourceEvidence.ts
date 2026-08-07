@@ -1,6 +1,5 @@
 export interface SourceIdentityEvidence {
   source_id: number | null;
-  source_key: string | null;
   source_profile_type: string | null;
 }
 
@@ -12,9 +11,9 @@ export function formatSourceIdentity(
     return unselectedLabel;
   }
 
-  const key = source.source_key?.trim() || `#${source.source_id}`;
+  const identity = `#${source.source_id}`;
   const profile = source.source_profile_type?.trim();
-  return profile ? `${key} · ${profile}` : key;
+  return profile ? `${identity} · ${profile}` : identity;
 }
 
 export function formatSafeSourceEndpoint(

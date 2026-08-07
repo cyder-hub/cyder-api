@@ -57,28 +57,30 @@ pub struct DashboardTopProviderReadItem {
 pub fn operational_signals_from_runtime_items(
     items: &[ProviderRuntimeItem],
 ) -> DashboardOperationalSignalsReadModel {
-    let mut open_providers = items
+    let provider_items = aggregate_provider_runtime_items(items);
+
+    let mut open_providers = provider_items
         .iter()
         .filter(|item| item.runtime_level == ProviderRuntimeLevel::Open)
         .map(signal_item_from_runtime_item)
         .collect::<Vec<_>>();
     sort_provider_signals(&mut open_providers);
 
-    let mut half_open_providers = items
+    let mut half_open_providers = provider_items
         .iter()
         .filter(|item| item.runtime_level == ProviderRuntimeLevel::HalfOpen)
         .map(signal_item_from_runtime_item)
         .collect::<Vec<_>>();
     sort_provider_signals(&mut half_open_providers);
 
-    let mut degraded_providers = items
+    let mut degraded_providers = provider_items
         .iter()
         .filter(|item| item.runtime_level == ProviderRuntimeLevel::Degraded)
         .map(signal_item_from_runtime_item)
         .collect::<Vec<_>>();
     sort_provider_signals(&mut degraded_providers);
 
-    let mut top_error_providers = items
+    let mut top_error_providers = provider_items
         .iter()
         .filter(|item| item.error_count > 0)
         .map(signal_item_from_runtime_item)
@@ -92,7 +94,7 @@ pub fn operational_signals_from_runtime_items(
     });
     top_error_providers.truncate(5);
 
-    let mut top_cost_providers = items
+    let mut top_cost_providers = provider_items
         .iter()
         .filter(|item| item.total_cost.iter().any(|cost| cost.amount_nanos > 0))
         .map(cost_provider_item_from_runtime_item)
@@ -117,7 +119,7 @@ pub fn operational_signals_from_runtime_items(
 pub fn top_providers_from_runtime_items(
     items: &[ProviderRuntimeItem],
 ) -> Vec<DashboardTopProviderReadItem> {
-    let mut top_providers = items
+    let mut top_providers = aggregate_provider_runtime_items(items)
         .iter()
         .map(top_provider_item_from_runtime_item)
         .collect::<Vec<_>>();
@@ -200,6 +202,189 @@ fn total_cost_rank_value(cost: &HashMap<String, i64>) -> i64 {
     cost.values().copied().sum()
 }
 
+fn aggregate_provider_runtime_items(items: &[ProviderRuntimeItem]) -> Vec<ProviderRuntimeItem> {
+    let mut providers = HashMap::<i64, ProviderRuntimeItem>::new();
+    for item in items {
+        if let Some(existing) = providers.get_mut(&item.provider_id) {
+            merge_provider_runtime_item(existing, item);
+        } else {
+            providers.insert(item.provider_id, item.clone());
+        }
+    }
+    providers.into_values().collect()
+}
+
+fn merge_provider_runtime_item(existing: &mut ProviderRuntimeItem, incoming: &ProviderRuntimeItem) {
+    existing.request_count = existing
+        .request_count
+        .saturating_add(incoming.request_count);
+    existing.success_count = existing
+        .success_count
+        .saturating_add(incoming.success_count);
+    existing.error_count = existing.error_count.saturating_add(incoming.error_count);
+    existing.success_rate = (existing.request_count > 0)
+        .then_some(existing.success_count as f64 / existing.request_count as f64);
+
+    merge_weighted_average(
+        &mut existing.avg_time_to_first_response_body_ms,
+        &mut existing.time_to_first_response_body_sample_count,
+        incoming.avg_time_to_first_response_body_ms,
+        incoming.time_to_first_response_body_sample_count,
+    );
+    merge_weighted_average(
+        &mut existing.avg_ttft_ms,
+        &mut existing.ttft_sample_count,
+        incoming.avg_ttft_ms,
+        incoming.ttft_sample_count,
+    );
+    merge_weighted_average(
+        &mut existing.avg_total_latency_ms,
+        &mut existing.total_latency_sample_count,
+        incoming.avg_total_latency_ms,
+        incoming.total_latency_sample_count,
+    );
+
+    existing.runtime_level = worse_runtime_level(existing.runtime_level, incoming.runtime_level);
+    existing.health_status = worse_health_status(existing.health_status, incoming.health_status);
+    existing.consecutive_failures = existing
+        .consecutive_failures
+        .max(incoming.consecutive_failures);
+    existing.half_open_probe_in_flight |= incoming.half_open_probe_in_flight;
+    existing.runtime_state_backend_degraded |= incoming.runtime_state_backend_degraded;
+    if existing.runtime_state_backend_error.is_none() {
+        existing.runtime_state_backend_error = incoming.runtime_state_backend_error.clone();
+    }
+
+    max_optional(&mut existing.opened_at, incoming.opened_at);
+    max_optional(&mut existing.last_failure_at, incoming.last_failure_at);
+    max_optional(&mut existing.last_recovered_at, incoming.last_recovered_at);
+    max_optional(&mut existing.last_request_at, incoming.last_request_at);
+    max_optional(&mut existing.last_success_at, incoming.last_success_at);
+
+    let incoming_is_newer_error = incoming.last_error_at > existing.last_error_at;
+    let incoming_fills_same_error = incoming.last_error_at == existing.last_error_at
+        && existing.last_error_summary.is_none()
+        && incoming.last_error_summary.is_some();
+    if incoming_is_newer_error || incoming_fills_same_error {
+        existing.last_error_at = incoming.last_error_at;
+        existing.last_error_summary = incoming.last_error_summary.clone();
+        existing.last_error = incoming.last_error.clone();
+    }
+
+    existing.enabled_model_count = existing
+        .enabled_model_count
+        .max(incoming.enabled_model_count);
+    existing.enabled_provider_key_count = existing
+        .enabled_provider_key_count
+        .max(incoming.enabled_provider_key_count);
+    merge_status_code_breakdown(
+        &mut existing.status_code_breakdown,
+        &incoming.status_code_breakdown,
+    );
+    merge_cost_stats(&mut existing.total_cost, &incoming.total_cost);
+}
+
+fn merge_weighted_average(
+    current_average: &mut Option<f64>,
+    current_sample_count: &mut i64,
+    incoming_average: Option<f64>,
+    incoming_sample_count: i64,
+) {
+    let current_count = (*current_sample_count).max(0);
+    let incoming_count = incoming_sample_count.max(0);
+    let total_count = current_count.saturating_add(incoming_count);
+    if total_count == 0 {
+        *current_average = None;
+        *current_sample_count = 0;
+        return;
+    }
+
+    let current_sum = current_average.unwrap_or_default() * current_count as f64;
+    let incoming_sum = incoming_average.unwrap_or_default() * incoming_count as f64;
+    *current_average = Some((current_sum + incoming_sum) / total_count as f64);
+    *current_sample_count = total_count;
+}
+
+fn max_optional(current: &mut Option<i64>, incoming: Option<i64>) {
+    if incoming > *current {
+        *current = incoming;
+    }
+}
+
+fn merge_status_code_breakdown(
+    current: &mut Vec<crate::service::metrics::provider_runtime::ProviderRuntimeStatusCodeStat>,
+    incoming: &[crate::service::metrics::provider_runtime::ProviderRuntimeStatusCodeStat],
+) {
+    for incoming_item in incoming {
+        if let Some(current_item) = current
+            .iter_mut()
+            .find(|item| item.status_code == incoming_item.status_code)
+        {
+            current_item.count = current_item.count.saturating_add(incoming_item.count);
+        } else {
+            current.push(incoming_item.clone());
+        }
+    }
+    current.sort_by_key(|item| item.status_code);
+}
+
+fn merge_cost_stats(
+    current: &mut Vec<crate::service::metrics::provider_runtime::ProviderRuntimeCostStat>,
+    incoming: &[crate::service::metrics::provider_runtime::ProviderRuntimeCostStat],
+) {
+    for incoming_item in incoming {
+        if let Some(current_item) = current
+            .iter_mut()
+            .find(|item| item.currency == incoming_item.currency)
+        {
+            current_item.amount_nanos = current_item
+                .amount_nanos
+                .saturating_add(incoming_item.amount_nanos);
+        } else {
+            current.push(incoming_item.clone());
+        }
+    }
+    current.sort_by(|left, right| left.currency.cmp(&right.currency));
+}
+
+fn worse_runtime_level(
+    left: ProviderRuntimeLevel,
+    right: ProviderRuntimeLevel,
+) -> ProviderRuntimeLevel {
+    if runtime_level_priority(left) >= runtime_level_priority(right) {
+        left
+    } else {
+        right
+    }
+}
+
+fn runtime_level_priority(level: ProviderRuntimeLevel) -> u8 {
+    match level {
+        ProviderRuntimeLevel::Open => 5,
+        ProviderRuntimeLevel::HalfOpen => 4,
+        ProviderRuntimeLevel::Degraded => 3,
+        ProviderRuntimeLevel::Healthy => 2,
+        ProviderRuntimeLevel::NoTraffic => 1,
+    }
+}
+
+fn worse_health_status(
+    left: crate::service::metrics::provider_runtime::ProviderRuntimeHealthStatus,
+    right: crate::service::metrics::provider_runtime::ProviderRuntimeHealthStatus,
+) -> crate::service::metrics::provider_runtime::ProviderRuntimeHealthStatus {
+    use crate::service::metrics::provider_runtime::ProviderRuntimeHealthStatus;
+
+    match (left, right) {
+        (ProviderRuntimeHealthStatus::Open, _) | (_, ProviderRuntimeHealthStatus::Open) => {
+            ProviderRuntimeHealthStatus::Open
+        }
+        (ProviderRuntimeHealthStatus::HalfOpen, _) | (_, ProviderRuntimeHealthStatus::HalfOpen) => {
+            ProviderRuntimeHealthStatus::HalfOpen
+        }
+        _ => ProviderRuntimeHealthStatus::Healthy,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +422,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dashboard_provider_views_aggregate_source_rows_before_ranking() {
+        let mut open_source = runtime_item(7, ProviderRuntimeLevel::Open, 10, 4, 500);
+        open_source.source_id = 71;
+        open_source.last_error_at = Some(100);
+        open_source.last_error_summary = Some("source 71 failed".to_string());
+
+        let mut healthy_source = runtime_item(7, ProviderRuntimeLevel::Healthy, 30, 1, 700);
+        healthy_source.source_id = 72;
+        healthy_source.source_is_default = false;
+        healthy_source.avg_total_latency_ms = Some(500.0);
+        healthy_source.last_error_at = Some(200);
+        healthy_source.last_error_summary = Some("source 72 failed".to_string());
+
+        let signals = operational_signals_from_runtime_items(&[open_source, healthy_source]);
+        assert_eq!(signals.open_providers.len(), 1);
+        assert_eq!(signals.open_providers[0].provider_id, 7);
+        assert_eq!(signals.open_providers[0].request_count, 40);
+        assert_eq!(signals.open_providers[0].error_count, 5);
+        assert_eq!(signals.open_providers[0].last_error_at, Some(200));
+        assert_eq!(
+            signals.open_providers[0].last_error_summary.as_deref(),
+            Some("source 72 failed")
+        );
+        assert_eq!(signals.top_cost_providers.len(), 1);
+        assert_eq!(signals.top_cost_providers[0].request_count, 40);
+        assert_eq!(signals.top_cost_providers[0].total_cost["USD"], 1_200);
+        assert_eq!(
+            signals.top_cost_providers[0].avg_total_latency_ms,
+            Some(400.0)
+        );
+
+        let top = top_providers_from_runtime_items(&[
+            runtime_item(7, ProviderRuntimeLevel::Open, 10, 4, 500),
+            runtime_item(7, ProviderRuntimeLevel::Healthy, 30, 1, 700),
+        ]);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].provider_id, 7);
+        assert_eq!(top[0].request_count, 40);
+        assert_eq!(top[0].success_count, 35);
+        assert_eq!(top[0].error_count, 5);
+        assert_eq!(top[0].total_cost["USD"], 1_200);
+    }
+
     fn runtime_item(
         provider_id: i64,
         runtime_level: ProviderRuntimeLevel,
@@ -248,12 +477,13 @@ mod tests {
             provider_id,
             provider_key: format!("p{provider_id}"),
             provider_name: format!("Provider {provider_id}"),
-            is_enabled: true,
+            provider_is_enabled: true,
             source_id: provider_id * 10 + 1,
-            source_key: "primary".to_string(),
             source_profile_type: UpstreamProfileType::Openai,
             source_endpoint: "https://api.example.com/v1".to_string(),
             source_use_proxy: false,
+            source_is_enabled: true,
+            source_is_default: true,
             enabled_model_count: 1,
             enabled_provider_key_count: 1,
             health_status: ProviderRuntimeHealthStatus::Healthy,

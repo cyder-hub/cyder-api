@@ -95,6 +95,16 @@ const summaryCards = computed(() => [
     value: summary.value?.total_provider_count ?? 0,
   },
   {
+    key: "total_sources",
+    label: $t("providerRuntimePage.summary.totalSources"),
+    value: summary.value?.total_source_count ?? 0,
+  },
+  {
+    key: "enabled_sources",
+    label: $t("providerRuntimePage.summary.enabledSources"),
+    value: summary.value?.enabled_source_count ?? 0,
+  },
+  {
     key: "healthy",
     label: $t("providerRuntimePage.summary.healthy"),
     value: summary.value?.healthy_count ?? 0,
@@ -430,8 +440,15 @@ function handleReset() {
   });
 }
 
-function goToProviderEdit(providerId: number) {
-  void router.push(`/provider/edit/${providerId}`);
+function goToProviderEdit(providerId: number, sourceId?: number) {
+  if (sourceId == null) {
+    void router.push(`/provider/edit/${providerId}`);
+    return;
+  }
+  void router.push({
+    path: `/provider/edit/${providerId}`,
+    query: { tab: "sources", source_id: String(sourceId) },
+  });
 }
 
 watch(

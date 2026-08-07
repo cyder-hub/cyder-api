@@ -94,8 +94,6 @@ const queryState = useRecordQuery({
   router,
   validators: {
     hasProviderId: (id) => providerStore.providers.some((item) => item.id === id),
-    hasSourceId: (id) =>
-      providerStore.providers.some((item) => item.upstream_source.id === id),
     hasApiKeyId: (id) => apiKeyStore.apiKeys.some((item) => item.id === id),
     hasModelId: (id) => modelStore.modelOptions.some((item) => Number(item.value) === id),
   },

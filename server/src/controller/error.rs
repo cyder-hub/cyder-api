@@ -67,7 +67,7 @@ impl IntoResponse for BaseError {
             BaseError::ProviderRuntimeRefreshFailed => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 1201,
-                "provider credential change was committed, but runtime refresh failed; the provider is fail-closed"
+                "provider configuration was committed, but runtime refresh failed; the provider is fail-closed"
                     .to_string(),
             ),
             BaseError::Unauthorized(msg) => (

@@ -10,13 +10,12 @@ use crate::database::provider::{
     UpdateProviderApiKeyMetadata, UpdateProviderData,
 };
 use crate::database::upstream_source::{
-    NewUpstreamSource, PRIMARY_SOURCE_KEY, UpdateUpstreamSourceData,
+    NewUpstreamSource, UpdateUpstreamSourceData, UpstreamSource,
 };
 use crate::schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType};
 use crate::service::provider_http::normalize_provider_endpoint;
 use crate::service::secret_encryption::{SecretDomain, SecretEncryptionService, SensitiveSecret};
-use crate::service::upstream_profile::{UpstreamAuthProfile, upstream_runtime_profile};
-use crate::service::vertex::{invalidate_vertex_token, validate_vertex_service_account};
+use crate::service::vertex::invalidate_vertex_token;
 use crate::utils::ID_GENERATOR;
 
 use super::audit::{AdminAuditEvent, AdminAuditField};
@@ -26,15 +25,33 @@ use super::mutation::{AdminCatalogInvalidation, AdminMutationEffect, AdminMutati
 pub struct ProviderUpsertInput {
     pub name: String,
     pub key: String,
-    pub upstream_source: UpstreamSourceUpsertInput,
+    pub is_enabled: Option<bool>,
+    pub initial_source: Option<UpstreamSourceCreateInput>,
     pub provider_api_key_mode: Option<ProviderApiKeyMode>,
 }
 
 #[derive(Debug, Clone)]
-pub struct UpstreamSourceUpsertInput {
+pub struct ProviderUpdateInput {
+    pub name: String,
+    pub is_enabled: Option<bool>,
+    pub provider_api_key_mode: Option<ProviderApiKeyMode>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamSourceCreateInput {
+    pub profile_type: UpstreamProfileType,
     pub endpoint: String,
     pub use_proxy: bool,
-    pub profile_type: Option<UpstreamProfileType>,
+    pub is_enabled: bool,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamSourceUpdateInput {
+    pub endpoint: Option<String>,
+    pub use_proxy: Option<bool>,
+    pub is_enabled: Option<bool>,
+    pub is_default: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -101,37 +118,45 @@ impl ProviderAdminService {
         &self,
         input: ProviderUpsertInput,
     ) -> Result<ProviderAggregate, BaseError> {
-        let endpoint =
-            normalize_provider_endpoint(&input.upstream_source.endpoint).map_err(|error| {
-                BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
-            })?;
         let current_time = Utc::now().timestamp_millis();
         let provider_id = ID_GENERATOR.generate_id();
         let new_provider_data = NewProvider {
             id: provider_id,
             provider_key: input.key,
             name: input.name,
-            is_enabled: true,
+            is_enabled: input.is_enabled.unwrap_or(true),
             created_at: current_time,
             updated_at: current_time,
             provider_api_key_mode: input
                 .provider_api_key_mode
                 .unwrap_or(ProviderApiKeyMode::Queue),
         };
-        let new_source_data = NewUpstreamSource {
-            id: ID_GENERATOR.generate_id(),
-            provider_id,
-            source_key: PRIMARY_SOURCE_KEY.to_string(),
-            profile_type: input
-                .upstream_source
-                .profile_type
-                .unwrap_or(UpstreamProfileType::Openai),
-            endpoint,
-            use_proxy: input.upstream_source.use_proxy,
-            created_at: current_time,
-            updated_at: current_time,
-        };
-        let created_provider = Provider::create(&new_provider_data, &new_source_data)?;
+        let new_source_data = input
+            .initial_source
+            .map(|source| -> Result<NewUpstreamSource, BaseError> {
+                let endpoint = normalize_provider_endpoint(&source.endpoint).map_err(|error| {
+                    BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
+                })?;
+                if source.is_default && !source.is_enabled {
+                    return Err(BaseError::ParamInvalid(Some(
+                        "a default upstream source must be enabled".to_string(),
+                    )));
+                }
+                Ok(NewUpstreamSource {
+                    id: ID_GENERATOR.generate_id(),
+                    provider_id,
+                    profile_type: source.profile_type,
+                    endpoint,
+                    use_proxy: source.use_proxy,
+                    is_enabled: source.is_enabled,
+                    is_default: source.is_default,
+                    created_at: current_time,
+                    updated_at: current_time,
+                })
+            })
+            .transpose()?;
+        let created_provider =
+            Provider::create_optional(&new_provider_data, new_source_data.as_ref())?;
 
         self.run_post_commit_effects(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
@@ -148,25 +173,15 @@ impl ProviderAdminService {
     pub async fn update_provider(
         &self,
         id: i64,
-        input: ProviderUpsertInput,
+        input: ProviderUpdateInput,
     ) -> Result<ProviderAggregate, BaseError> {
-        let endpoint =
-            normalize_provider_endpoint(&input.upstream_source.endpoint).map_err(|error| {
-                BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
-            })?;
         let update_data = UpdateProviderData {
             provider_key: None,
             name: Some(input.name),
-            is_enabled: None,
+            is_enabled: input.is_enabled,
             provider_api_key_mode: input.provider_api_key_mode,
         };
-        let source_update = UpdateUpstreamSourceData {
-            profile_type: input.upstream_source.profile_type,
-            endpoint: Some(endpoint),
-            use_proxy: Some(input.upstream_source.use_proxy),
-            updated_at: 0,
-        };
-        let updated_provider = Provider::update(id, &update_data, &source_update)?;
+        let updated_provider = Provider::update(id, &update_data)?;
 
         self.run_post_commit_effects(vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
@@ -180,16 +195,112 @@ impl ProviderAdminService {
         Ok(updated_provider)
     }
 
+    pub async fn create_source(
+        &self,
+        provider_id: i64,
+        input: UpstreamSourceCreateInput,
+    ) -> Result<UpstreamSource, BaseError> {
+        let endpoint = normalize_provider_endpoint(&input.endpoint).map_err(|error| {
+            BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
+        })?;
+        let now = Utc::now().timestamp_millis();
+        let source = UpstreamSource::create(&NewUpstreamSource {
+            id: ID_GENERATOR.generate_id(),
+            provider_id,
+            profile_type: input.profile_type,
+            endpoint,
+            use_proxy: input.use_proxy,
+            is_enabled: input.is_enabled,
+            is_default: input.is_default,
+            created_at: now,
+            updated_at: now,
+        })?;
+        self.run_runtime_refresh_post_commit(vec![
+            AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
+                id: provider_id,
+                key: None,
+            }),
+            AdminMutationEffect::audit(source_audit_event("create", &source)),
+        ])
+        .await?;
+        Ok(source)
+    }
+
+    pub async fn update_source(
+        &self,
+        provider_id: i64,
+        source_id: i64,
+        input: UpstreamSourceUpdateInput,
+    ) -> Result<UpstreamSource, BaseError> {
+        let before = UpstreamSource::get_active_by_id_for_provider(source_id, provider_id)?;
+        let endpoint = input
+            .endpoint
+            .map(|value| {
+                normalize_provider_endpoint(&value).map_err(|error| {
+                    BaseError::ParamInvalid(Some(format!("upstream source endpoint {error}")))
+                })
+            })
+            .transpose()?;
+        let clear_required = endpoint
+            .as_ref()
+            .is_some_and(|value| value != &before.endpoint)
+            || input
+                .use_proxy
+                .is_some_and(|value| value != before.use_proxy)
+            || input
+                .is_enabled
+                .is_some_and(|value| value != before.is_enabled);
+        let now = Utc::now().timestamp_millis();
+        let source = UpstreamSource::update(
+            source_id,
+            provider_id,
+            &UpdateUpstreamSourceData {
+                endpoint,
+                use_proxy: input.use_proxy,
+                is_enabled: input.is_enabled,
+                is_default: input.is_default,
+                updated_at: now,
+            },
+        )?;
+        let mut effects = vec![AdminMutationEffect::catalog_invalidation(
+            AdminCatalogInvalidation::Provider {
+                id: provider_id,
+                key: None,
+            },
+        )];
+        if clear_required {
+            effects.push(AdminMutationEffect::source_circuit_clear(source.id));
+        }
+        effects.push(AdminMutationEffect::audit(source_audit_event(
+            "update", &source,
+        )));
+        self.run_runtime_refresh_post_commit(effects).await?;
+        Ok(source)
+    }
+
+    pub async fn delete_source(&self, provider_id: i64, source_id: i64) -> Result<(), BaseError> {
+        let source = UpstreamSource::delete(source_id, provider_id)?;
+        self.run_runtime_refresh_post_commit(vec![
+            AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
+                id: provider_id,
+                key: None,
+            }),
+            AdminMutationEffect::source_circuit_clear(source.id),
+            AdminMutationEffect::audit(source_audit_event("delete", &source)),
+        ])
+        .await?;
+        Ok(())
+    }
+
     pub async fn create_provider_api_key(
         &self,
         provider_id: i64,
         input: CreateProviderApiKeyInput,
     ) -> Result<ProviderApiKeySummary, BaseError> {
-        let provider = Provider::get_by_id(provider_id)?;
+        let _provider = Provider::get_by_id(provider_id)?;
         let current_time = Utc::now().timestamp_millis();
         let key_id = ID_GENERATOR.generate_id();
         let secret = validate_provider_secret(input.api_key)?;
-        validate_provider_secret_for_type(&provider.upstream_source.profile_type, &secret)?;
         let (key_prefix, key_last4) = secret_mask_parts(secret.expose());
         let encrypted_secret = self
             .secret_encryption
@@ -310,10 +421,9 @@ impl ProviderAdminService {
         key_id: i64,
         input: ReplaceProviderApiKeyInput,
     ) -> Result<ProviderApiKeySummary, BaseError> {
-        let provider = Provider::get_by_id(provider_id)?;
+        let _provider = Provider::get_by_id(provider_id)?;
         let _existing = self.validate_provider_key_membership(provider_id, key_id)?;
         let secret = validate_provider_secret(input.api_key)?;
-        validate_provider_secret_for_type(&provider.upstream_source.profile_type, &secret)?;
         let (key_prefix, key_last4) = secret_mask_parts(secret.expose());
         let encrypted = self
             .secret_encryption
@@ -374,7 +484,7 @@ impl ProviderAdminService {
             invalidate_vertex_token(key_id);
         }
 
-        let effects = vec![
+        let mut effects = vec![
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::Provider {
                 id,
                 key: Some(provider_to_delete.provider_key.clone()),
@@ -382,13 +492,19 @@ impl ProviderAdminService {
             AdminMutationEffect::catalog_invalidation(AdminCatalogInvalidation::ProviderApiKeys {
                 provider_id: id,
             }),
-            AdminMutationEffect::audit(provider_audit_event("delete", &provider_to_delete)),
         ];
+        effects.extend(
+            provider_to_delete
+                .upstream_sources
+                .iter()
+                .map(|source| AdminMutationEffect::source_circuit_clear(source.id)),
+        );
+        effects.push(AdminMutationEffect::audit(provider_audit_event(
+            "delete",
+            &provider_to_delete,
+        )));
 
-        let report = self.mutation_runner.execute(&effects).await;
-        if report.has_catalog_failures() {
-            return Err(BaseError::ProviderRuntimeRefreshFailed);
-        }
+        self.run_runtime_refresh_post_commit(effects).await?;
 
         Ok(())
     }
@@ -401,7 +517,6 @@ impl ProviderAdminService {
             .map_err(|error| BaseError::ParamInvalid(Some(format!("provider endpoint {error}"))))?;
         let key_id = ID_GENERATOR.generate_id();
         let secret = validate_provider_secret(input.api_key)?;
-        validate_provider_secret_for_type(&input.profile_type, &secret)?;
         let (key_prefix, key_last4) = secret_mask_parts(secret.expose());
         let encrypted_secret = self
             .secret_encryption
@@ -468,6 +583,17 @@ impl ProviderAdminService {
         let _ = self.mutation_runner.execute(&effects).await;
     }
 
+    async fn run_runtime_refresh_post_commit(
+        &self,
+        effects: Vec<AdminMutationEffect>,
+    ) -> Result<(), BaseError> {
+        let report = self.mutation_runner.execute(&effects).await;
+        if report.has_catalog_failures() || report.has_source_circuit_clear_failures() {
+            return Err(BaseError::ProviderRuntimeRefreshFailed);
+        }
+        Ok(())
+    }
+
     async fn run_provider_key_post_commit(
         &self,
         effects: Vec<AdminMutationEffect>,
@@ -496,12 +622,7 @@ fn provider_audit_event(action: &'static str, provider: &ProviderAggregate) -> A
             AdminAuditField::new("provider_key", &provider.provider_key),
             AdminAuditField::new("provider_name", &provider.name),
             AdminAuditField::new("is_enabled", provider.is_enabled),
-            AdminAuditField::new("source_id", provider.upstream_source.id),
-            AdminAuditField::new("source_key", &provider.upstream_source.source_key),
-            AdminAuditField::new(
-                "source_profile_type",
-                format!("{:?}", provider.upstream_source.profile_type),
-            ),
+            AdminAuditField::new("source_count", provider.upstream_sources.len()),
         ],
     )
 }
@@ -516,12 +637,7 @@ fn provider_bootstrap_audit_event(
         AdminAuditField::new("provider_key", &created.provider.provider_key),
         AdminAuditField::new("provider_name", &created.provider.name),
         AdminAuditField::new("is_enabled", created.provider.is_enabled),
-        AdminAuditField::new("source_id", created.provider.upstream_source.id),
-        AdminAuditField::new("source_key", &created.provider.upstream_source.source_key),
-        AdminAuditField::new(
-            "source_profile_type",
-            format!("{:?}", created.provider.upstream_source.profile_type),
-        ),
+        AdminAuditField::new("source_count", created.provider.upstream_sources.len()),
         AdminAuditField::new("provider_api_key_id", created.created_key.id),
         AdminAuditField::new("model_id", created.created_model.id),
         AdminAuditField::new("model_name", &created.created_model.model_name),
@@ -529,6 +645,26 @@ fn provider_bootstrap_audit_event(
     ];
     fields.extend(AdminAuditField::optional("check_success", check_success));
     AdminAuditEvent::with_fields("manager.provider_bootstrapped", fields)
+}
+
+fn source_audit_event(action: &'static str, source: &UpstreamSource) -> AdminAuditEvent {
+    let event_name = match action {
+        "create" => "manager.provider_source_created",
+        "update" => "manager.provider_source_updated",
+        "delete" => "manager.provider_source_deleted",
+        _ => unreachable!("unsupported source audit action: {action}"),
+    };
+    AdminAuditEvent::with_fields(
+        event_name,
+        [
+            AdminAuditField::new("action", action),
+            AdminAuditField::new("provider_id", source.provider_id),
+            AdminAuditField::new("source_id", source.id),
+            AdminAuditField::new("profile_type", format!("{:?}", source.profile_type)),
+            AdminAuditField::new("is_enabled", source.is_enabled),
+            AdminAuditField::new("is_default", source.is_default),
+        ],
+    )
 }
 
 fn provider_api_key_audit_event(
@@ -580,17 +716,6 @@ fn secret_mask_parts(secret: &str) -> (String, String) {
     (prefix, last4)
 }
 
-fn validate_provider_secret_for_type(
-    profile_type: &UpstreamProfileType,
-    secret: &SensitiveSecret,
-) -> Result<(), BaseError> {
-    if upstream_runtime_profile(profile_type).auth == UpstreamAuthProfile::VertexOAuth {
-        validate_vertex_service_account(secret.expose())
-            .map_err(|message| BaseError::ParamInvalid(Some(message)))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,40 +764,16 @@ mod tests {
     }
 
     #[test]
-    fn vertex_credentials_require_safe_service_account_structure_and_rsa_key() {
-        let marker = "private-sensitive-marker";
-        let unsupported_token_uri = SensitiveSecret::new(format!(
-            r#"{{"client_email":"svc@example.com","token_uri":"https://oauth.example.com/token","private_key_id":"kid","private_key":"{marker}"}}"#
-        ));
-        let error =
-            validate_provider_secret_for_type(&UpstreamProfileType::Vertex, &unsupported_token_uri)
-                .expect_err("unsupported token URI must be rejected");
-        let message = match error {
-            BaseError::ParamInvalid(Some(message)) => message,
-            other => panic!("unexpected error: {other:?}"),
-        };
-        assert_eq!(
-            message,
-            "Vertex credential token_uri must exactly match https://oauth2.googleapis.com/token"
-        );
-        assert!(!message.contains(marker));
-
-        let malformed = SensitiveSecret::new(format!(
-            r#"{{"client_email":"svc@example.com","token_uri":"https://oauth2.googleapis.com/token","private_key_id":"kid","private_key":"{marker}"}}"#
-        ));
-        let error = validate_provider_secret_for_type(&UpstreamProfileType::Vertex, &malformed)
-            .expect_err("invalid RSA key must be rejected");
-        let message = match error {
-            BaseError::ParamInvalid(Some(message)) => message,
-            other => panic!("unexpected error: {other:?}"),
-        };
-        assert_eq!(
-            message,
-            "Vertex credential contains an invalid RSA private key"
-        );
-        assert!(!message.contains(marker));
-
-        validate_provider_secret_for_type(&UpstreamProfileType::Openai, &malformed)
-            .expect("ordinary provider credentials are opaque strings");
+    fn provider_credentials_are_opaque_for_every_source_profile() {
+        for profile in [
+            UpstreamProfileType::Vertex,
+            UpstreamProfileType::Openai,
+            UpstreamProfileType::Gemini,
+        ] {
+            let secret =
+                validate_provider_secret(format!("not-json-or-profile-specific-{profile:?}"))
+                    .expect("non-empty provider credentials should remain opaque");
+            assert!(!secret.expose().is_empty());
+        }
     }
 }

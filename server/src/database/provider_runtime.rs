@@ -8,6 +8,7 @@ use crate::schema::enum_def::RequestStatus;
 #[derive(Queryable, Debug, Clone)]
 pub struct RequestLogEntryForProviderRuntime {
     pub provider_id: i64,
+    pub source_id: i64,
     pub request_received_at: i64,
     pub upstream_request_sent_at: Option<i64>,
     pub first_response_body_at: Option<i64>,
@@ -34,6 +35,7 @@ pub struct ProviderRuntimeCostAggregate {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ProviderRuntimeAggregate {
     pub provider_id: i64,
+    pub source_id: i64,
     pub request_count: i64,
     pub success_count: i64,
     pub error_count: i64,
@@ -69,7 +71,7 @@ struct ProviderRuntimeAccumulator {
 }
 
 impl ProviderRuntimeAccumulator {
-    fn into_aggregate(self, provider_id: i64) -> ProviderRuntimeAggregate {
+    fn into_aggregate(self, provider_id: i64, source_id: i64) -> ProviderRuntimeAggregate {
         let mut status_code_breakdown = self
             .status_code_breakdown
             .into_iter()
@@ -93,6 +95,7 @@ impl ProviderRuntimeAccumulator {
 
         ProviderRuntimeAggregate {
             provider_id,
+            source_id,
             request_count: self.request_count,
             success_count: self.success_count,
             error_count: self.error_count,
@@ -146,11 +149,12 @@ fn positive_duration_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i6
 pub fn aggregate_provider_runtime_entries(
     entries: Vec<RequestLogEntryForProviderRuntime>,
 ) -> Vec<ProviderRuntimeAggregate> {
-    let mut by_provider: HashMap<i64, ProviderRuntimeAccumulator> = HashMap::new();
+    let mut by_source: HashMap<(i64, i64), ProviderRuntimeAccumulator> = HashMap::new();
 
     for entry in entries {
         let RequestLogEntryForProviderRuntime {
             provider_id,
+            source_id,
             request_received_at,
             upstream_request_sent_at,
             first_response_body_at,
@@ -162,7 +166,7 @@ pub fn aggregate_provider_runtime_entries(
             estimated_cost_currency,
         } = entry;
 
-        let item = by_provider.entry(provider_id).or_default();
+        let item = by_source.entry((provider_id, source_id)).or_default();
         item.request_count += 1;
         update_latest(&mut item.last_request_at, request_received_at);
 
@@ -202,11 +206,11 @@ pub fn aggregate_provider_runtime_entries(
         }
     }
 
-    let mut result = by_provider
+    let mut result = by_source
         .into_iter()
-        .map(|(provider_id, item)| item.into_aggregate(provider_id))
+        .map(|((provider_id, source_id), item)| item.into_aggregate(provider_id, source_id))
         .collect::<Vec<_>>();
-    result.sort_by_key(|item| item.provider_id);
+    result.sort_by_key(|item| (item.provider_id, item.source_id));
     result
 }
 
@@ -223,6 +227,7 @@ pub fn get_provider_runtime_aggregates_in_range(
                 .filter(request_log::dsl::request_received_at.ge(start_time_ms))
                 .filter(request_log::dsl::request_received_at.lt(end_time_ms))
                 .filter(request_log::dsl::provider_id.is_not_null())
+                .filter(request_log::dsl::source_id.is_not_null())
                 .into_boxed();
 
             if let Some(provider_id) = provider_id_filter {
@@ -232,6 +237,7 @@ pub fn get_provider_runtime_aggregates_in_range(
             query
                 .select((
                     request_log::dsl::provider_id,
+                    request_log::dsl::source_id,
                     request_log::dsl::request_received_at,
                     request_log::dsl::upstream_request_sent_at,
                     request_log::dsl::first_response_body_at,
@@ -244,6 +250,7 @@ pub fn get_provider_runtime_aggregates_in_range(
                 ))
                 .order(request_log::dsl::request_received_at.asc())
                 .load::<(
+                    Option<i64>,
                     Option<i64>,
                     i64,
                     Option<i64>,
@@ -259,6 +266,7 @@ pub fn get_provider_runtime_aggregates_in_range(
                 .filter_map(
                     |(
                         provider_id,
+                        source_id,
                         request_received_at,
                         upstream_request_sent_at,
                         first_response_body_at,
@@ -269,17 +277,20 @@ pub fn get_provider_runtime_aggregates_in_range(
                         estimated_cost_nanos,
                         estimated_cost_currency,
                     )| {
-                        provider_id.map(|provider_id| RequestLogEntryForProviderRuntime {
-                            provider_id,
-                            request_received_at,
-                            upstream_request_sent_at,
-                            first_response_body_at,
-                            first_token_at,
-                            is_stream,
-                            completed_at,
-                            status,
-                            estimated_cost_nanos,
-                            estimated_cost_currency,
+                        provider_id.zip(source_id).map(|(provider_id, source_id)| {
+                            RequestLogEntryForProviderRuntime {
+                                provider_id,
+                                source_id,
+                                request_received_at,
+                                upstream_request_sent_at,
+                                first_response_body_at,
+                                first_token_at,
+                                is_stream,
+                                completed_at,
+                                status,
+                                estimated_cost_nanos,
+                                estimated_cost_currency,
+                            }
                         })
                     },
                 )
@@ -292,6 +303,7 @@ pub fn get_provider_runtime_aggregates_in_range(
                 .filter(request_log::dsl::request_received_at.ge(start_time_ms))
                 .filter(request_log::dsl::request_received_at.lt(end_time_ms))
                 .filter(request_log::dsl::provider_id.is_not_null())
+                .filter(request_log::dsl::source_id.is_not_null())
                 .into_boxed();
 
             if let Some(provider_id) = provider_id_filter {
@@ -301,6 +313,7 @@ pub fn get_provider_runtime_aggregates_in_range(
             query
                 .select((
                     request_log::dsl::provider_id,
+                    request_log::dsl::source_id,
                     request_log::dsl::request_received_at,
                     request_log::dsl::upstream_request_sent_at,
                     request_log::dsl::first_response_body_at,
@@ -313,6 +326,7 @@ pub fn get_provider_runtime_aggregates_in_range(
                 ))
                 .order(request_log::dsl::request_received_at.asc())
                 .load::<(
+                    Option<i64>,
                     Option<i64>,
                     i64,
                     Option<i64>,
@@ -328,6 +342,7 @@ pub fn get_provider_runtime_aggregates_in_range(
                 .filter_map(
                     |(
                         provider_id,
+                        source_id,
                         request_received_at,
                         upstream_request_sent_at,
                         first_response_body_at,
@@ -338,17 +353,20 @@ pub fn get_provider_runtime_aggregates_in_range(
                         estimated_cost_nanos,
                         estimated_cost_currency,
                     )| {
-                        provider_id.map(|provider_id| RequestLogEntryForProviderRuntime {
-                            provider_id,
-                            request_received_at,
-                            upstream_request_sent_at,
-                            first_response_body_at,
-                            first_token_at,
-                            is_stream,
-                            completed_at,
-                            status,
-                            estimated_cost_nanos,
-                            estimated_cost_currency,
+                        provider_id.zip(source_id).map(|(provider_id, source_id)| {
+                            RequestLogEntryForProviderRuntime {
+                                provider_id,
+                                source_id,
+                                request_received_at,
+                                upstream_request_sent_at,
+                                first_response_body_at,
+                                first_token_at,
+                                is_stream,
+                                completed_at,
+                                status,
+                                estimated_cost_nanos,
+                                estimated_cost_currency,
+                            }
                         })
                     },
                 )
@@ -379,6 +397,7 @@ mod tests {
     ) -> RequestLogEntryForProviderRuntime {
         RequestLogEntryForProviderRuntime {
             provider_id,
+            source_id: provider_id + 100,
             request_received_at,
             upstream_request_sent_at: Some(upstream_request_sent_at),
             first_response_body_at: first_chunk_at,
@@ -450,6 +469,47 @@ mod tests {
         assert_eq!(aggregate.total_cost.len(), 1);
         assert_eq!(aggregate.total_cost[0].currency, "USD");
         assert_eq!(aggregate.total_cost[0].amount_nanos, 150);
+    }
+
+    #[test]
+    fn provider_runtime_aggregate_keeps_same_provider_sources_isolated() {
+        let first = entry(
+            7,
+            1_000,
+            1_000,
+            Some(1_050),
+            Some(1_200),
+            RequestStatus::Success,
+            Some(100),
+            Some("USD"),
+        );
+        let mut second = entry(
+            7,
+            2_000,
+            2_000,
+            Some(2_100),
+            Some(2_400),
+            RequestStatus::Error,
+            Some(50),
+            Some("EUR"),
+        );
+        second.source_id = 702;
+
+        let mut result = aggregate_provider_runtime_entries(vec![first, second]);
+        result.sort_by_key(|item| item.source_id);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].provider_id, 7);
+        assert_eq!(result[0].source_id, 107);
+        assert_eq!(result[0].request_count, 1);
+        assert_eq!(result[0].success_count, 1);
+        assert_eq!(result[0].error_count, 0);
+        assert_eq!(result[0].total_cost[0].currency, "USD");
+        assert_eq!(result[1].source_id, 702);
+        assert_eq!(result[1].request_count, 1);
+        assert_eq!(result[1].success_count, 0);
+        assert_eq!(result[1].error_count, 1);
+        assert_eq!(result[1].total_cost[0].currency, "EUR");
     }
 
     #[test]

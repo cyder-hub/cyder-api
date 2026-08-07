@@ -27,7 +27,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  editProvider: [providerId: number];
+  editProvider: [providerId: number, sourceId: number];
   viewRecords: [item: ProviderRuntimeItem];
 }>();
 
@@ -52,7 +52,7 @@ const { t: $t } = useAppI18n();
         </TableRow>
       </TableHeader>
       <TableBody>
-        <TableRow v-for="item in props.items" :key="item.provider_id">
+        <TableRow v-for="item in props.items" :key="item.source_id">
           <TableCell class="align-top">
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
@@ -81,9 +81,6 @@ const { t: $t } = useAppI18n();
           </TableCell>
           <TableCell class="max-w-xs align-top">
             <div class="flex flex-wrap items-center gap-2">
-              <Badge variant="outline" class="font-mono text-[10px]">
-                {{ item.source_key }}
-              </Badge>
               <span class="font-mono text-xs text-gray-700">
                 {{ item.source_profile_type }}
               </span>
@@ -167,7 +164,7 @@ const { t: $t } = useAppI18n();
                 variant="ghost"
                 size="sm"
                 class="text-gray-500"
-                @click="emit('editProvider', item.provider_id)"
+                @click="emit('editProvider', item.provider_id, item.source_id)"
               >
                 <Pencil class="mr-1 h-3.5 w-3.5" />
                 {{ $t("providerRuntimePage.editProvider") }}

@@ -33,10 +33,12 @@ test("buildProviderBootstrapPayload trims values and keeps bootstrap flags", () 
   );
 
   assert.deepEqual(payload, {
-    upstream_source: {
+    initial_source: {
       profile_type: "VERTEX",
       endpoint: "https://api.example.com/v1",
       use_proxy: true,
+      is_enabled: true,
+      is_default: true,
     },
     api_key: "secret-key",
     model_name: "gemini-1.5-pro",
@@ -70,9 +72,18 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
   const editingData = createEmptyEditingProviderData();
   editingData.name = "Old Provider";
   editingData.provider_key = "old-provider";
-  editingData.upstream_source.profile_type = "OPENAI";
-  editingData.upstream_source.endpoint = "https://old.example.com";
-  editingData.upstream_source.use_proxy = false;
+  editingData.upstream_sources.push({
+    id: 98,
+    provider_id: 99,
+    profile_type: "OPENAI",
+    endpoint: "https://old.example.com",
+    use_proxy: false,
+    is_enabled: true,
+    is_default: true,
+    deleted_at: null,
+    created_at: 1,
+    updated_at: 1,
+  });
   editingData.models.push({
     id: 1,
     model_name: "legacy-model",
@@ -103,17 +114,20 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
       created_at: 1,
       updated_at: 2,
       provider_api_key_mode: "ROUND_ROBIN",
-      upstream_source: {
+      upstream_sources: [
+        {
         id: 100,
         provider_id: 99,
-        source_key: "primary",
         profile_type: "VERTEX",
         endpoint: "https://bootstrap.example.com",
         use_proxy: true,
+        is_enabled: true,
+        is_default: true,
         deleted_at: null,
         created_at: 1,
         updated_at: 2,
-      },
+        },
+      ],
     },
     created_key: {
       id: 12,
@@ -139,14 +153,20 @@ test("hydrateEditingProviderDataFromBootstrap merges bootstrap response and pres
   assert.equal(hydrated.id, 99);
   assert.equal(hydrated.name, "Bootstrapped Provider");
   assert.equal(hydrated.provider_key, "boot-key");
-  assert.deepEqual(hydrated.upstream_source, {
-    id: 100,
-    provider_id: 99,
-    source_key: "primary",
-    profile_type: "VERTEX",
-    endpoint: "https://bootstrap.example.com",
-    use_proxy: true,
-  });
+  assert.deepEqual(hydrated.upstream_sources, [
+    {
+      id: 100,
+      provider_id: 99,
+      profile_type: "VERTEX",
+      endpoint: "https://bootstrap.example.com",
+      use_proxy: true,
+      is_enabled: true,
+      is_default: true,
+      deleted_at: null,
+      created_at: 1,
+      updated_at: 2,
+    },
+  ]);
   assert.equal(hydrated.provider_keys.length, 2);
   assert.deepEqual(hydrated.provider_keys[1], {
     id: 12,
@@ -197,9 +217,18 @@ test("syncProviderBootstrapFormState copies saved provider identity into the edi
   editingData.id = 7;
   editingData.name = "Saved Provider";
   editingData.provider_key = "saved-provider";
-  editingData.upstream_source.profile_type = "ANTHROPIC";
-  editingData.upstream_source.endpoint = "https://anthropic.example.com/v1";
-  editingData.upstream_source.use_proxy = true;
+  editingData.upstream_sources.push({
+    id: 7,
+    provider_id: 7,
+    profile_type: "ANTHROPIC",
+    endpoint: "https://anthropic.example.com/v1",
+    use_proxy: true,
+    is_enabled: true,
+    is_default: true,
+    deleted_at: null,
+    created_at: 1,
+    updated_at: 1,
+  });
 
   syncProviderBootstrapFormState(form, editingData);
 
@@ -220,9 +249,18 @@ test("buildProviderUpdatePayload keeps the existing provider key immutable", () 
   editingData.id = 11;
   editingData.name = "Existing Provider";
   editingData.provider_key = "existing-provider";
-  editingData.upstream_source.profile_type = "OPENAI";
-  editingData.upstream_source.endpoint = "https://old.example.com/v1";
-  editingData.upstream_source.use_proxy = false;
+  editingData.upstream_sources.push({
+    id: 11,
+    provider_id: 11,
+    profile_type: "OPENAI",
+    endpoint: "https://old.example.com/v1",
+    use_proxy: false,
+    is_enabled: true,
+    is_default: true,
+    deleted_at: null,
+    created_at: 1,
+    updated_at: 1,
+  });
 
   const payload = buildProviderUpdatePayload(editingData, {
     profile_type: "RESPONSES",
@@ -236,18 +274,14 @@ test("buildProviderUpdatePayload keeps the existing provider key immutable", () 
   });
 
   assert.deepEqual(payload, {
-    key: "existing-provider",
     name: "Updated Name",
-    upstream_source: {
-      profile_type: "RESPONSES",
-      endpoint: "https://new.example.com/v1",
-      use_proxy: true,
-    },
+    is_enabled: true,
+    provider_api_key_mode: "QUEUE",
   });
 });
 
-test("provider state requires the nested Primary Source contract without legacy fallbacks", async () => {
-  const [state, edit, baseForm] = await Promise.all([
+test("provider state uses the aggregate Source contract without legacy fields", async () => {
+  const [state, edit, baseForm, sourceList, sourceState] = await Promise.all([
     readFile(
       new URL("src/pages/provider-edit/composables/providerEditState.ts", ROOT),
       "utf8",
@@ -260,15 +294,28 @@ test("provider state requires the nested Primary Source contract without legacy 
       new URL("src/pages/provider-edit/components/ProviderBaseInfoForm.vue", ROOT),
       "utf8",
     ),
+    readFile(
+      new URL("src/pages/provider-edit/components/ProviderSourceList.vue", ROOT),
+      "utf8",
+    ),
+    readFile(
+      new URL("src/pages/provider-edit/composables/useProviderSources.ts", ROOT),
+      "utf8",
+    ),
   ]);
 
-  assert.match(state, /upstream_source:\s*\{/);
-  assert.match(state, /source_key: "primary"/);
-  assert.match(edit, /detail\.provider\.upstream_source\.profile_type/);
+  assert.match(state, /upstream_sources:\s*\[\]/);
+  assert.match(state, /initial_source:/);
+  assert.match(edit, /detail\.provider\.upstream_sources\.map/);
   assert.doesNotMatch(state, /provider_type/);
   assert.doesNotMatch(edit, /detail\.provider\.provider_type/);
-  assert.match(baseForm, /labelSourceKey/);
-  assert.doesNotMatch(baseForm, /source.*(?:create|delete|enable|default)/i);
+  assert.doesNotMatch(state, /source_key/);
+  assert.doesNotMatch(edit, /source_key/);
+  assert.doesNotMatch(baseForm, /labelSourceKey|source_key/);
+  assert.match(sourceList, /useProviderSources/);
+  assert.match(sourceState, /createProviderSource/);
+  assert.match(sourceState, /updateProviderSource/);
+  assert.match(sourceState, /deleteProviderSource/);
 });
 
 test("provider credential plaintext stays in dialog-local state and clears on every boundary", () => {
@@ -342,7 +389,7 @@ test("provider credential service and UI keep saved summaries plaintext-free", a
   assert.doesNotMatch(bootstrap, /localStorage|sessionStorage|console\.error/);
 });
 
-test("remote model discovery returns explicit Primary Source evidence without a legacy payload fallback", async () => {
+test("remote model discovery returns explicit Source evidence without a legacy payload fallback", async () => {
   const [types, component] = await Promise.all([
     readFile(new URL("src/services/types/providers.ts", ROOT), "utf8"),
     readFile(
@@ -356,9 +403,44 @@ test("remote model discovery returns explicit Primary Source evidence without a 
   )?.[0];
   assert.ok(responseContract);
   assert.match(responseContract, /source_id: number/);
-  assert.match(responseContract, /source_key: string/);
+  assert.doesNotMatch(responseContract, /source_key/);
   assert.match(responseContract, /profile_type: string/);
   assert.match(responseContract, /models: ProviderRemoteModelsPayload/);
   assert.match(component, /const discoveredModels = response\.models/);
   assert.doesNotMatch(component, /Array\.isArray\(response\)/);
+});
+
+test("provider Source management keeps the API explicit and refreshes server state", async () => {
+  const [types, service, sourceState, sourceList, editPage] = await Promise.all([
+    readFile(new URL("src/services/types/providers.ts", ROOT), "utf8"),
+    readFile(new URL("src/services/providers.ts", ROOT), "utf8"),
+    readFile(
+      new URL("src/pages/provider-edit/composables/useProviderSources.ts", ROOT),
+      "utf8",
+    ),
+    readFile(
+      new URL("src/pages/provider-edit/components/ProviderSourceList.vue", ROOT),
+      "utf8",
+    ),
+    readFile(new URL("src/pages/provider-edit/ProviderEditPage.vue", ROOT), "utf8"),
+  ]);
+
+  assert.match(types, /upstream_sources: UpstreamSource\[\]/);
+  assert.match(types, /source_count: number/);
+  assert.match(types, /default_source_id: number \| null/);
+  assert.match(types, /initial_source: UpstreamSourcePayload/);
+  assert.doesNotMatch(types, /source_key/);
+  assert.match(service, /provider\/\$\{providerId\}\/sources`/);
+  assert.match(service, /sources\/\$\{sourceId\}`/);
+  assert.match(service, /sources\/\$\{sourceId\}\/remote_models/);
+  assert.match(service, /sources\/\$\{sourceId\}\/check/);
+  assert.doesNotMatch(service, /provider\/\$\{id\}\/remote_models/);
+  assert.doesNotMatch(service, /provider\/\$\{id\}\/check/);
+  assert.match(sourceState, /await refreshSources\(\)/g);
+  assert.match(sourceState, /is_default: draft\.is_default/);
+  assert.match(sourceList, /hidden .*md:block/);
+  assert.match(sourceList, /md:hidden/);
+  assert.match(sourceList, /isDesktop \? 'right' : 'bottom'/);
+  assert.match(sourceList, /zeroWarning/);
+  assert.match(editPage, /id: "sources"/);
 });

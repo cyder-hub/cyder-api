@@ -34,7 +34,7 @@ use super::reload::{
 };
 
 type CacheRepo<T> = Arc<dyn DynCacheRepo<T>>;
-const CATALOG_CACHE_SCHEMA_PREFIX: &str = "r39:";
+const CATALOG_CACHE_SCHEMA_PREFIX: &str = "r310:";
 type ProviderApiKeysInvalidationHook = Arc<
     dyn Fn(i64) -> Pin<Box<dyn Future<Output = Result<(), AppStoreError>> + Send + 'static>>
         + Send
@@ -1384,7 +1384,7 @@ fn select_catalog_cache_backend_status(
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogService, select_catalog_cache_backend_status};
+    use super::{CATALOG_CACHE_SCHEMA_PREFIX, CatalogService, select_catalog_cache_backend_status};
     use crate::config::CacheBackendType;
     use crate::database::TestDbContext;
     use crate::database::model::{Model, ModelCapabilityFlags};
@@ -1394,7 +1394,7 @@ mod tests {
         ReasoningPatchFamily, ReasoningPreset,
     };
     use crate::database::runtime_feature_config::{RuntimeFeatureConfig, RuntimeFeatureKey};
-    use crate::database::upstream_source::{NewUpstreamSource, PRIMARY_SOURCE_KEY};
+    use crate::database::upstream_source::NewUpstreamSource;
     use crate::schema::enum_def::{Action, ProviderApiKeyMode, UpstreamProfileType};
     use crate::service::cache::types::{
         CacheApiKey, CacheCostCatalogVersion, CacheEntry, CacheModel, CacheModelsCatalog,
@@ -1441,10 +1441,11 @@ mod tests {
             &NewUpstreamSource {
                 id: id + 10_000,
                 provider_id: id,
-                source_key: PRIMARY_SOURCE_KEY.to_string(),
                 profile_type: UpstreamProfileType::Openai,
                 endpoint: "https://api.example.com/v1".to_string(),
                 use_proxy: false,
+                is_enabled: true,
+                is_default: true,
                 created_at: 1,
                 updated_at: 1,
             },
@@ -1514,6 +1515,12 @@ mod tests {
         assert_eq!(status.configured_backend, CacheBackendType::Redis);
         assert_eq!(status.effective_backend, CacheBackendType::Memory);
         assert_eq!(status.fallback_reason.as_deref(), Some("test_isolation"));
+    }
+
+    #[test]
+    fn catalog_cache_schema_uses_the_r310_namespace() {
+        assert_eq!(CATALOG_CACHE_SCHEMA_PREFIX, "r310:");
+        assert_ne!(CATALOG_CACHE_SCHEMA_PREFIX, "r39:");
     }
 
     fn preset(
@@ -1675,6 +1682,18 @@ mod tests {
             let (decoded, _): (CacheModelsCatalog, usize) =
                 bincode::decode_from_slice(&encoded, bincode::config::standard())
                     .expect("catalog snapshot should bincode decode");
+            let decoded_provider = decoded
+                .providers
+                .iter()
+                .find(|item| item.id == provider.id)
+                .expect("provider source snapshot");
+            assert_eq!(decoded_provider.upstream_sources.len(), 1);
+            assert_eq!(
+                decoded_provider.upstream_sources[0].id,
+                provider.id + 10_000
+            );
+            assert!(decoded_provider.upstream_sources[0].is_enabled);
+            assert!(decoded_provider.upstream_sources[0].is_default);
             assert_eq!(decoded.reasoning_configs.len(), 2);
             assert_eq!(decoded.runtime_feature_configs.len(), 2);
         })

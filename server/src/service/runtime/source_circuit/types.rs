@@ -400,5 +400,7 @@ pub trait SourceCircuitStore: Send + Sync {
         permit: Option<&SourceCircuitProbePermit>,
     ) -> Result<SourceHealthSnapshot, SourceCircuitError>;
 
+    async fn clear(&self, source_id: i64) -> Result<(), SourceCircuitError>;
+
     async fn snapshot(&self, source_id: i64) -> Result<SourceHealthSnapshot, SourceCircuitError>;
 }

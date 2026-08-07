@@ -18,7 +18,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  editProvider: [providerId: number];
+  editProvider: [providerId: number, sourceId: number];
   viewRecords: [item: ProviderRuntimeItem];
 }>();
 
@@ -29,7 +29,7 @@ const { t: $t } = useI18n();
   <div class="grid grid-cols-1 gap-4 xl:hidden">
     <article
       v-for="item in props.items"
-      :key="item.provider_id"
+      :key="item.source_id"
       class="rounded-xl border border-gray-200 bg-white"
     >
       <div class="flex flex-col gap-4 px-4 py-4 sm:px-5">
@@ -52,7 +52,7 @@ const { t: $t } = useI18n();
               variant="ghost"
               size="sm"
               class="h-7 px-2 text-xs text-gray-500"
-              @click="emit('editProvider', item.provider_id)"
+              @click="emit('editProvider', item.provider_id, item.source_id)"
             >
               <Pencil class="mr-1 h-3.5 w-3.5" />
               {{ $t("providerRuntimePage.editProvider") }}
@@ -87,9 +87,6 @@ const { t: $t } = useI18n();
             <span class="text-[11px] font-medium uppercase tracking-wide text-gray-500">
               {{ $t("providerRuntimePage.source.title") }}
             </span>
-            <Badge variant="outline" class="font-mono text-[10px]">
-              {{ item.source_key }}
-            </Badge>
             <Badge variant="outline" class="font-mono text-[10px]">
               {{ item.source_profile_type }}
             </Badge>

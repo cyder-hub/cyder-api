@@ -84,8 +84,8 @@ impl MetricsService {
             .build_provider_runtime_items(app_state, window, true)
             .await?;
         let runtime = self
-            .provider_runtime_summary_from_items(app_state, window, &runtime_items)
-            .await;
+            .provider_runtime_summary_from_items(app_state, window, &runtime_items, true)
+            .await?;
         Ok(MetricsDashboardResourcesReadModel {
             overview,
             today,

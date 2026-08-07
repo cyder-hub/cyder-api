@@ -627,7 +627,7 @@ mod tests {
     ) {
         use crate::database::provider::_sqlite_model::*;
         use crate::database::upstream_source::{
-            _sqlite_model::NewUpstreamSourceDb, NewUpstreamSource, PRIMARY_SOURCE_KEY,
+            _sqlite_model::NewUpstreamSourceDb, NewUpstreamSource,
         };
 
         let now = 1_000_000;
@@ -649,10 +649,11 @@ mod tests {
         let source = NewUpstreamSource {
             id,
             provider_id: id,
-            source_key: PRIMARY_SOURCE_KEY.to_string(),
             profile_type: UpstreamProfileType::Openai,
             endpoint: "https://example.com/v1".to_string(),
             use_proxy: false,
+            is_enabled: true,
+            is_default: true,
             created_at: now,
             updated_at: now,
         };

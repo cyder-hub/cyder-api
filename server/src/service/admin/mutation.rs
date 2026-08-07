@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use crate::logging::event_message_with_fields;
 use crate::service::app_state::AppStoreError;
 use crate::service::catalog::CatalogService;
+use crate::service::runtime::SourceCircuitService;
 use cyder_tools::log::warn;
 
 use super::audit::{AdminAuditEvent, AdminAuditLogger};
@@ -95,6 +96,7 @@ impl AdminCatalogInvalidation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdminMutationEffect {
     CatalogInvalidation(AdminCatalogInvalidation),
+    SourceCircuitClear { source_id: i64 },
     Audit(AdminAuditEvent),
 }
 
@@ -106,6 +108,10 @@ impl AdminMutationEffect {
     pub fn audit(event: AdminAuditEvent) -> Self {
         Self::Audit(event)
     }
+
+    pub fn source_circuit_clear(source_id: i64) -> Self {
+        Self::SourceCircuitClear { source_id }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,28 +120,44 @@ pub struct AdminCatalogInvalidationFailure {
     pub error_message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminSourceCircuitClearFailure {
+    pub source_id: i64,
+    pub error_message: String,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AdminMutationReport {
     pub catalog_invalidation_failures: Vec<AdminCatalogInvalidationFailure>,
+    pub source_circuit_clear_failures: Vec<AdminSourceCircuitClearFailure>,
 }
 
 impl AdminMutationReport {
     pub fn has_catalog_failures(&self) -> bool {
         !self.catalog_invalidation_failures.is_empty()
     }
+
+    pub fn has_source_circuit_clear_failures(&self) -> bool {
+        !self.source_circuit_clear_failures.is_empty()
+    }
 }
 
 pub(crate) struct AdminMutationRunner {
     catalog: Arc<CatalogService>,
+    source_circuit: Arc<SourceCircuitService>,
     audit_logger: AdminAuditLogger,
     #[cfg(test)]
     emitted_audit_events: Mutex<Vec<AdminAuditEvent>>,
 }
 
 impl AdminMutationRunner {
-    pub(crate) fn new(catalog: Arc<CatalogService>) -> Self {
+    pub(crate) fn new(
+        catalog: Arc<CatalogService>,
+        source_circuit: Arc<SourceCircuitService>,
+    ) -> Self {
         Self {
             catalog,
+            source_circuit,
             audit_logger: AdminAuditLogger,
             #[cfg(test)]
             emitted_audit_events: Mutex::new(Vec::new()),
@@ -147,12 +169,21 @@ impl AdminMutationRunner {
 
         // Post-commit effects always run in the same order:
         // 1. cache invalidation
-        // 2. management audit events
+        // 2. runtime state cleanup
+        // 3. management audit events
         for effect in effects {
-            if let AdminMutationEffect::CatalogInvalidation(invalidation) = effect
-                && let Err(err) = self.apply_catalog_invalidation(invalidation).await
-            {
-                self.record_invalidation_failure(&mut report, invalidation, err);
+            match effect {
+                AdminMutationEffect::CatalogInvalidation(invalidation) => {
+                    if let Err(err) = self.apply_catalog_invalidation(invalidation).await {
+                        self.record_invalidation_failure(&mut report, invalidation, err);
+                    }
+                }
+                AdminMutationEffect::SourceCircuitClear { source_id } => {
+                    if let Err(err) = self.source_circuit.clear_source(*source_id).await {
+                        self.record_source_circuit_clear_failure(&mut report, *source_id, err);
+                    }
+                }
+                AdminMutationEffect::Audit(_) => {}
             }
         }
 
@@ -287,5 +318,73 @@ impl AdminMutationRunner {
                 invalidation: invalidation.clone(),
                 error_message,
             });
+    }
+
+    fn record_source_circuit_clear_failure(
+        &self,
+        report: &mut AdminMutationReport,
+        source_id: i64,
+        err: crate::service::runtime::SourceCircuitError,
+    ) {
+        let error_message = err.to_string();
+        warn!(
+            "{}",
+            event_message_with_fields(
+                "manager.source_circuit_clear_failed",
+                &[
+                    ("source_id", Some(source_id.to_string())),
+                    ("error", Some(error_message.clone())),
+                ],
+            )
+        );
+        report
+            .source_circuit_clear_failures
+            .push(AdminSourceCircuitClearFailure {
+                source_id,
+                error_message,
+            });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AdminMutationEffect, AdminMutationRunner};
+    use crate::service::catalog::CatalogService;
+    use crate::service::runtime::{SourceCircuitService, SourceHealthStatus};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn source_circuit_clear_effect_runs_after_commit_and_is_reported() {
+        let catalog = Arc::new(CatalogService::new(true).await);
+        let source_circuit = Arc::new(SourceCircuitService::new_memory());
+        for _ in 0..5 {
+            source_circuit
+                .record_source_failure(810, "timeout".to_string(), None)
+                .await
+                .expect("source failure should record");
+        }
+        assert_eq!(
+            source_circuit
+                .get_source_health_snapshot(810)
+                .await
+                .expect("open snapshot should load")
+                .status,
+            SourceHealthStatus::Open
+        );
+
+        let runner = AdminMutationRunner::new(catalog, Arc::clone(&source_circuit));
+        let report = runner
+            .execute(&[AdminMutationEffect::source_circuit_clear(810)])
+            .await;
+
+        assert!(!report.has_source_circuit_clear_failures());
+        assert_eq!(
+            source_circuit
+                .get_source_health_snapshot(810)
+                .await
+                .expect("cleared snapshot should load")
+                .status,
+            SourceHealthStatus::Healthy
+        );
     }
 }

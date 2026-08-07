@@ -12,16 +12,17 @@ export interface ProviderBase {
   created_at: number;
   updated_at: number;
   provider_api_key_mode: string;
-  upstream_source: UpstreamSource;
+  upstream_sources: UpstreamSource[];
 }
 
 export interface UpstreamSource {
   id: number;
   provider_id: number;
-  source_key: string;
   profile_type: string;
   endpoint: string;
   use_proxy: boolean;
+  is_enabled: boolean;
+  is_default: boolean;
   deleted_at: number | null;
   created_at: number;
   updated_at: number;
@@ -31,6 +32,15 @@ export interface UpstreamSourcePayload {
   profile_type: string;
   endpoint: string;
   use_proxy: boolean;
+  is_enabled: boolean;
+  is_default: boolean;
+}
+
+export interface UpstreamSourceUpdatePayload {
+  endpoint?: string;
+  use_proxy?: boolean;
+  is_enabled?: boolean;
+  is_default?: boolean;
 }
 
 export interface ProviderSummaryItem {
@@ -38,7 +48,10 @@ export interface ProviderSummaryItem {
   provider_key: string;
   name: string;
   is_enabled: boolean;
-  upstream_source: UpstreamSource;
+  source_count: number;
+  enabled_source_count: number;
+  default_source_id: number | null;
+  default_source_profile_type: string | null;
 }
 
 export interface ProviderApiKeySummary {
@@ -81,7 +94,6 @@ export type ProviderRemoteModelsPayload =
 
 export interface ProviderRemoteModelsResponse {
   source_id: number;
-  source_key: string;
   profile_type: string;
   models: ProviderRemoteModelsPayload;
 }
@@ -95,12 +107,11 @@ export interface ProviderCheckPayload {
 
 export interface ProviderCheckResponse {
   source_id: number;
-  source_key: string;
   profile_type: string;
 }
 
 export interface ProviderBootstrapPayload {
-  upstream_source: UpstreamSourcePayload;
+  initial_source: UpstreamSourcePayload;
   api_key: string;
   model_name: string;
   key: string;
@@ -119,10 +130,18 @@ export interface ProviderBootstrapResponse {
   check_result?: unknown;
 }
 
-export interface ProviderPayload {
+export interface ProviderCreatePayload {
   key: string;
   name: string;
-  upstream_source: UpstreamSourcePayload;
+  is_enabled?: boolean;
+  provider_api_key_mode?: string;
+  initial_source?: UpstreamSourcePayload;
+}
+
+export interface ProviderUpdatePayload {
+  name: string;
+  is_enabled?: boolean;
+  provider_api_key_mode?: string;
 }
 
 export interface ProviderKeyPayload {

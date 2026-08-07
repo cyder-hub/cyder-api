@@ -7,6 +7,7 @@ use crate::database::{
         ProviderSummaryItem,
     },
     request_patch::RequestPatchRuleResponse,
+    upstream_source::UpstreamSource,
 };
 use crate::proxy::runtime::transport::send_with_deadline;
 use crate::proxy::{
@@ -14,8 +15,9 @@ use crate::proxy::{
     load_runtime_request_patch_trace,
 };
 use crate::service::admin::provider::{
-    BootstrapProviderCommand, CreateProviderApiKeyInput, ProviderApiKeyReveal, ProviderUpsertInput,
-    ReplaceProviderApiKeyInput, UpdateProviderApiKeyInput, UpstreamSourceUpsertInput,
+    BootstrapProviderCommand, CreateProviderApiKeyInput, ProviderApiKeyReveal, ProviderUpdateInput,
+    ProviderUpsertInput, ReplaceProviderApiKeyInput, UpdateProviderApiKeyInput,
+    UpstreamSourceCreateInput, UpstreamSourceUpdateInput,
 };
 use crate::service::app_state::{AppState, StateRouter, create_state_router}; // Added AppState
 use axum::{
@@ -62,16 +64,23 @@ struct ProviderDetailResponse {
 #[serde(deny_unknown_fields)]
 struct UpstreamSourcePayload {
     endpoint: String,
-    #[serde(default)]
     profile_type: UpstreamProfileType,
     #[serde(default)]
     use_proxy: bool,
+    #[serde(default = "default_enabled")]
+    is_enabled: bool,
+    #[serde(default)]
+    is_default: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BootstrapProviderPayload {
-    upstream_source: UpstreamSourcePayload,
+    initial_source: UpstreamSourcePayload,
     api_key: String,
     model_name: String,
     name: Option<String>,
@@ -101,7 +110,6 @@ struct BootstrapProviderResponse {
 #[derive(Serialize)]
 struct ProviderRemoteModelsResponse {
     source_id: i64,
-    source_key: String,
     profile_type: UpstreamProfileType,
     models: Value,
 }
@@ -121,8 +129,36 @@ async fn list_summary() -> DbResult<HttpResult<Vec<ProviderSummaryItem>>> {
 struct InserPayload {
     pub name: String,
     pub key: String,
-    pub upstream_source: UpstreamSourcePayload,
+    pub is_enabled: Option<bool>,
+    pub initial_source: Option<UpstreamSourcePayload>,
     pub provider_api_key_mode: Option<ProviderApiKeyMode>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateProviderPayload {
+    pub name: String,
+    pub is_enabled: Option<bool>,
+    pub provider_api_key_mode: Option<ProviderApiKeyMode>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateSourcePayload {
+    endpoint: Option<String>,
+    use_proxy: Option<bool>,
+    is_enabled: Option<bool>,
+    is_default: Option<bool>,
+}
+
+fn source_create_input(payload: UpstreamSourcePayload) -> UpstreamSourceCreateInput {
+    UpstreamSourceCreateInput {
+        endpoint: payload.endpoint,
+        use_proxy: payload.use_proxy,
+        profile_type: payload.profile_type,
+        is_enabled: payload.is_enabled,
+        is_default: payload.is_default,
+    }
 }
 
 async fn insert(
@@ -135,11 +171,8 @@ async fn insert(
         .create_provider(ProviderUpsertInput {
             name: payload.name,
             key: payload.key,
-            upstream_source: UpstreamSourceUpsertInput {
-                endpoint: payload.upstream_source.endpoint,
-                use_proxy: payload.upstream_source.use_proxy,
-                profile_type: Some(payload.upstream_source.profile_type),
-            },
+            is_enabled: payload.is_enabled,
+            initial_source: payload.initial_source.map(source_create_input),
             provider_api_key_mode: payload.provider_api_key_mode,
         })
         .await?;
@@ -156,21 +189,16 @@ async fn get_provider(Path(id): Path<i64>) -> Result<HttpResult<ProviderAggregat
 async fn update_provider(
     State(app_state): State<Arc<AppState>>,
     Path(id): Path<i64>,
-    Json(payload): Json<InserPayload>,
+    Json(payload): Json<UpdateProviderPayload>,
 ) -> Result<HttpResult<ProviderAggregate>, BaseError> {
     let updated_provider = app_state
         .admin
         .provider
         .update_provider(
             id,
-            ProviderUpsertInput {
+            ProviderUpdateInput {
                 name: payload.name,
-                key: payload.key,
-                upstream_source: UpstreamSourceUpsertInput {
-                    endpoint: payload.upstream_source.endpoint,
-                    use_proxy: payload.upstream_source.use_proxy,
-                    profile_type: Some(payload.upstream_source.profile_type),
-                },
+                is_enabled: payload.is_enabled,
                 provider_api_key_mode: payload.provider_api_key_mode,
             },
         )
@@ -184,6 +212,53 @@ async fn delete_provider(
     Path(id): Path<i64>,
 ) -> Result<HttpResult<()>, BaseError> {
     app_state.admin.provider.delete_provider(id).await?;
+    Ok(HttpResult::new(()))
+}
+
+async fn create_source(
+    State(app_state): State<Arc<AppState>>,
+    Path(provider_id): Path<i64>,
+    Json(payload): Json<UpstreamSourcePayload>,
+) -> Result<HttpResult<UpstreamSource>, BaseError> {
+    let source = app_state
+        .admin
+        .provider
+        .create_source(provider_id, source_create_input(payload))
+        .await?;
+    Ok(HttpResult::new(source))
+}
+
+async fn update_source(
+    State(app_state): State<Arc<AppState>>,
+    Path((provider_id, source_id)): Path<(i64, i64)>,
+    Json(payload): Json<UpdateSourcePayload>,
+) -> Result<HttpResult<UpstreamSource>, BaseError> {
+    let source = app_state
+        .admin
+        .provider
+        .update_source(
+            provider_id,
+            source_id,
+            UpstreamSourceUpdateInput {
+                endpoint: payload.endpoint,
+                use_proxy: payload.use_proxy,
+                is_enabled: payload.is_enabled,
+                is_default: payload.is_default,
+            },
+        )
+        .await?;
+    Ok(HttpResult::new(source))
+}
+
+async fn delete_source(
+    State(app_state): State<Arc<AppState>>,
+    Path((provider_id, source_id)): Path<(i64, i64)>,
+) -> Result<HttpResult<()>, BaseError> {
+    app_state
+        .admin
+        .provider
+        .delete_source(provider_id, source_id)
+        .await?;
     Ok(HttpResult::new(()))
 }
 
@@ -206,6 +281,7 @@ async fn get_provider_detail(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CheckProviderPayload {
     model_id: Option<i64>,
     model_name: Option<String>,
@@ -233,13 +309,19 @@ async fn resolve_provider_check_request_patches(
     app_state: &Arc<AppState>,
     provider: &ProviderAggregate,
     model: Option<&Model>,
+    source: &crate::service::cache::types::CacheUpstreamSource,
 ) -> Result<Vec<RuntimeResolvedRequestPatch>, BaseError> {
     let cache_provider = CacheProvider::from(provider.clone());
     let cache_model = model.cloned().map(CacheModel::from);
-    let trace =
-        load_runtime_request_patch_trace(&cache_provider, cache_model.as_ref(), None, app_state)
-            .await
-            .map_err(provider_check_patch_error)?;
+    let trace = load_runtime_request_patch_trace(
+        &cache_provider,
+        cache_model.as_ref(),
+        None,
+        Some(source),
+        app_state,
+    )
+    .await
+    .map_err(provider_check_patch_error)?;
     if let Some(model) = model {
         if let Some(conflict_error) = trace.conflict_error(&model.model_name) {
             return Err(provider_check_patch_error(conflict_error));
@@ -250,25 +332,33 @@ async fn resolve_provider_check_request_patches(
 }
 
 async fn build_provider_check_request(
-    provider: &ProviderAggregate,
+    _provider: &ProviderAggregate,
+    source: &UpstreamSource,
     credential: &ProviderCredential,
     model_name: &str,
     request_patches: &[RuntimeResolvedRequestPatch],
 ) -> Result<ProviderCheckRequest, BaseError> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    let cache_provider = CacheProvider::from(provider.clone());
+    let cache_source = crate::service::cache::types::CacheUpstreamSource {
+        id: source.id,
+        profile_type: source.profile_type,
+        endpoint: source.endpoint.clone(),
+        use_proxy: source.use_proxy,
+        is_enabled: source.is_enabled,
+        is_default: source.is_default,
+    };
     apply_provider_request_auth_header(
         &mut headers,
-        &cache_provider.upstream_source,
-        upstream_protocol_for_profile(&cache_provider.upstream_source.profile_type),
+        &cache_source,
+        upstream_protocol_for_profile(&cache_source.profile_type),
         credential,
     )
     .map_err(provider_credential_error)?;
 
-    let mut request = match provider.upstream_source.profile_type {
+    let mut request = match source.profile_type {
         UpstreamProfileType::Gemini => ProviderCheckRequest {
-            url: format_gemini_generate_content_url(provider, model_name),
+            url: format_gemini_generate_content_url(source, model_name),
             headers,
             body: json!({
                 "contents": [
@@ -281,7 +371,7 @@ async fn build_provider_check_request(
             }),
         },
         UpstreamProfileType::Vertex => ProviderCheckRequest {
-            url: format_gemini_generate_content_url(provider, model_name),
+            url: format_gemini_generate_content_url(source, model_name),
             headers,
             body: json!({
                 "contents": [
@@ -294,7 +384,7 @@ async fn build_provider_check_request(
             }),
         },
         UpstreamProfileType::VertexOpenai => ProviderCheckRequest {
-            url: format_openai_check_url(provider),
+            url: format_openai_check_url(source),
             headers,
             body: json!({
                 "model": model_name,
@@ -309,10 +399,7 @@ async fn build_provider_check_request(
         UpstreamProfileType::Anthropic => {
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             ProviderCheckRequest {
-                url: format!(
-                    "{}/messages",
-                    provider.upstream_source.endpoint.trim_end_matches('/')
-                ),
+                url: format!("{}/messages", source.endpoint.trim_end_matches('/')),
                 headers,
                 body: json!({
                     "model": model_name,
@@ -327,10 +414,7 @@ async fn build_provider_check_request(
             }
         }
         UpstreamProfileType::Ollama => ProviderCheckRequest {
-            url: format!(
-                "{}/api/chat",
-                provider.upstream_source.endpoint.trim_end_matches('/')
-            ),
+            url: format!("{}/api/chat", source.endpoint.trim_end_matches('/')),
             headers,
             body: json!({
                 "model": model_name,
@@ -346,7 +430,7 @@ async fn build_provider_check_request(
         UpstreamProfileType::Openai
         | UpstreamProfileType::Responses
         | UpstreamProfileType::GeminiOpenai => ProviderCheckRequest {
-            url: format_openai_check_url(provider),
+            url: format_openai_check_url(source),
             headers,
             body: json!({
                 "model": model_name,
@@ -375,17 +459,14 @@ async fn build_provider_check_request(
     Ok(request)
 }
 
-fn format_openai_check_url(provider: &ProviderAggregate) -> String {
-    format!(
-        "{}/chat/completions",
-        provider.upstream_source.endpoint.trim_end_matches('/')
-    )
+fn format_openai_check_url(source: &UpstreamSource) -> String {
+    format!("{}/chat/completions", source.endpoint.trim_end_matches('/'))
 }
 
-fn format_gemini_generate_content_url(provider: &ProviderAggregate, model_name: &str) -> String {
+fn format_gemini_generate_content_url(source: &UpstreamSource, model_name: &str) -> String {
     format!(
         "{}/{}:generateContent",
-        provider.upstream_source.endpoint.trim_end_matches('/'),
+        source.endpoint.trim_end_matches('/'),
         model_name
     )
 }
@@ -406,16 +487,13 @@ fn provider_credential_error(error: ProviderCredentialError) -> BaseError {
     }
 }
 
-fn normalize_provider_for_outbound(
-    mut provider: ProviderAggregate,
-) -> Result<ProviderAggregate, BaseError> {
-    provider.upstream_source.endpoint =
-        normalize_provider_endpoint(&provider.upstream_source.endpoint).map_err(|error| {
-            BaseError::ParamInvalid(Some(format!(
-                "upstream source endpoint is invalid and must be repaired before use: {error}"
-            )))
-        })?;
-    Ok(provider)
+fn normalize_source_for_outbound(mut source: UpstreamSource) -> Result<UpstreamSource, BaseError> {
+    source.endpoint = normalize_provider_endpoint(&source.endpoint).map_err(|error| {
+        BaseError::ParamInvalid(Some(format!(
+            "upstream source endpoint is invalid and must be repaired before use: {error}"
+        )))
+    })?;
+    Ok(source)
 }
 
 fn profile_type_label(profile_type: &UpstreamProfileType) -> &'static str {
@@ -484,7 +562,7 @@ fn base_error_message(error: &BaseError) -> String {
             "provider API key secret is unavailable; replace the credential".to_string()
         }
         BaseError::ProviderRuntimeRefreshFailed => {
-            "provider credential change was committed, but runtime refresh failed".to_string()
+            "provider configuration was committed, but runtime refresh failed".to_string()
         }
         BaseError::Unauthorized(msg) => msg.clone().unwrap_or_else(|| "Unauthorized".to_string()),
         BaseError::StoreError(msg) => msg
@@ -515,13 +593,15 @@ fn resolve_bootstrap_identity(
 async fn perform_provider_check(
     client: &reqwest::Client,
     provider: &ProviderAggregate,
+    source: &UpstreamSource,
     credential: &ProviderCredential,
     model_name: &str,
     request_patches: &[RuntimeResolvedRequestPatch],
     proxy_timeouts: &ProxyTimeoutConfig,
 ) -> Result<(), BaseError> {
     let check_request =
-        build_provider_check_request(provider, credential, model_name, request_patches).await?;
+        build_provider_check_request(provider, source, credential, model_name, request_patches)
+            .await?;
 
     let mut headers = check_request.headers;
     apply_upstream_accept_encoding(&mut headers, false);
@@ -568,7 +648,7 @@ fn build_bootstrap_response(
 
 async fn check_provider(
     State(app_state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
+    Path((id, source_id)): Path<(i64, i64)>,
     Json(payload): Json<CheckProviderPayload>,
 ) -> Result<HttpResult<Value>, BaseError> {
     let mut selected_model: Option<Model> = None;
@@ -597,16 +677,34 @@ async fn check_provider(
         }
     };
 
-    let provider = normalize_provider_for_outbound(Provider::get_by_id(id)?)?;
-    let request_patches =
-        resolve_provider_check_request_patches(&app_state, &provider, selected_model.as_ref())
-            .await?;
+    let provider = Provider::get_by_id(id)?;
+    let source = normalize_source_for_outbound(UpstreamSource::get_active_by_id_for_provider(
+        source_id, id,
+    )?)?;
+    let cache_source = crate::service::cache::types::CacheUpstreamSource {
+        id: source.id,
+        profile_type: source.profile_type,
+        endpoint: source.endpoint.clone(),
+        use_proxy: source.use_proxy,
+        is_enabled: source.is_enabled,
+        is_default: source.is_default,
+    };
+    let request_patches = resolve_provider_check_request_patches(
+        &app_state,
+        &provider,
+        selected_model.as_ref(),
+        &cache_source,
+    )
+    .await?;
     let credential = match (payload.provider_api_key_id, payload.provider_api_key) {
-        (Some(key_id), _) => resolve_saved_provider_credential(&provider, key_id, &app_state)
-            .await
-            .map_err(provider_credential_error)?,
+        (Some(key_id), _) => {
+            resolve_saved_provider_credential(&provider, &cache_source, key_id, &app_state)
+                .await
+                .map_err(provider_credential_error)?
+        }
         (_, Some(api_key)) => resolve_draft_provider_credential(
             &provider,
+            &cache_source,
             0,
             SensitiveSecret::new(api_key),
             &app_state,
@@ -622,7 +720,7 @@ async fn check_provider(
 
     let client = app_state
         .infra
-        .provider_client(provider.upstream_source.use_proxy)
+        .provider_client(source.use_proxy)
         .await
         .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
@@ -630,6 +728,7 @@ async fn check_provider(
     perform_provider_check(
         client.as_ref(),
         &provider,
+        &source,
         &credential,
         &model_name,
         &request_patches,
@@ -637,16 +736,12 @@ async fn check_provider(
     )
     .await?;
     info!(
-        "provider check succeeded: provider_id={}, source_id={}, source_key={}, profile_type={:?}",
-        provider.id,
-        provider.upstream_source.id,
-        provider.upstream_source.source_key,
-        provider.upstream_source.profile_type,
+        "provider check succeeded: provider_id={}, source_id={}, profile_type={:?}",
+        provider.id, source.id, source.profile_type,
     );
     Ok(HttpResult::new(json!({
-        "source_id": provider.upstream_source.id,
-        "source_key": provider.upstream_source.source_key,
-        "profile_type": provider.upstream_source.profile_type,
+        "source_id": source.id,
+        "profile_type": source.profile_type,
     })))
 }
 
@@ -655,8 +750,8 @@ async fn bootstrap_provider(
     Json(payload): Json<BootstrapProviderPayload>,
 ) -> Result<HttpResult<BootstrapProviderResponse>, BaseError> {
     let (provider_name, provider_key) = resolve_bootstrap_identity(
-        &payload.upstream_source.profile_type,
-        &payload.upstream_source.endpoint,
+        &payload.initial_source.profile_type,
+        &payload.initial_source.endpoint,
         payload.name.clone(),
         payload.key.clone(),
     )?;
@@ -665,9 +760,9 @@ async fn bootstrap_provider(
         provider_id: ID_GENERATOR.generate_id(),
         provider_key: provider_key.clone(),
         name: provider_name.clone(),
-        endpoint: payload.upstream_source.endpoint.clone(),
-        use_proxy: payload.upstream_source.use_proxy,
-        profile_type: payload.upstream_source.profile_type,
+        endpoint: payload.initial_source.endpoint.clone(),
+        use_proxy: payload.initial_source.use_proxy,
+        profile_type: payload.initial_source.profile_type,
         provider_api_key_mode: ProviderApiKeyMode::Queue,
         api_key: payload.api_key.clone(),
         api_key_description: normalize_optional_text(payload.api_key_description.clone()),
@@ -682,10 +777,23 @@ async fn bootstrap_provider(
         .await?;
 
     let check_result = if payload.save_and_test {
-        let client = app_state
-            .infra
-            .provider_client(created.provider.upstream_source.use_proxy)
-            .await;
+        let source = created
+            .provider
+            .upstream_sources
+            .first()
+            .cloned()
+            .ok_or_else(|| {
+                BaseError::DatabaseFatal(Some("bootstrap source missing".to_string()))
+            })?;
+        let cache_source = crate::service::cache::types::CacheUpstreamSource {
+            id: source.id,
+            profile_type: source.profile_type,
+            endpoint: source.endpoint.clone(),
+            use_proxy: source.use_proxy,
+            is_enabled: source.is_enabled,
+            is_default: source.is_default,
+        };
+        let client = app_state.infra.provider_client(source.use_proxy).await;
         let model_name_to_check = created
             .created_model
             .real_model_name
@@ -697,12 +805,14 @@ async fn bootstrap_provider(
             &app_state,
             &created.provider,
             Some(&created.created_model),
+            &cache_source,
         )
         .await;
 
         let credential_and_patches = match (client, request_patches) {
             (Ok(client), Ok(request_patches)) => resolve_draft_provider_credential(
                 &created.provider,
+                &cache_source,
                 created.created_key.id,
                 SensitiveSecret::new(payload.api_key),
                 &app_state,
@@ -723,6 +833,7 @@ async fn bootstrap_provider(
                 match perform_provider_check(
                     client.as_ref(),
                     &created.provider,
+                    &source,
                     &credential,
                     &model_name_to_check,
                     &request_patches,
@@ -761,25 +872,31 @@ async fn bootstrap_provider(
 
 async fn get_remote_models(
     State(app_state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
+    Path((id, source_id)): Path<(i64, i64)>,
 ) -> Result<HttpResult<ProviderRemoteModelsResponse>, BaseError> {
-    let provider = normalize_provider_for_outbound(Provider::get_by_id(id)?)?;
+    let provider = Provider::get_by_id(id)?;
+    let source = normalize_source_for_outbound(UpstreamSource::get_active_by_id_for_provider(
+        source_id, id,
+    )?)?;
     let cache_provider = CacheProvider::from(provider.clone());
-    let credential = resolve_selected_provider_credential(
-        &cache_provider,
-        &cache_provider.upstream_source,
-        &app_state,
-    )
-    .await
-    .map_err(provider_credential_error)?;
+    let cache_source = cache_provider
+        .upstream_sources
+        .iter()
+        .find(|candidate| candidate.id == source.id)
+        .cloned()
+        .ok_or_else(|| BaseError::NotFound(Some("upstream source not found".to_string())))?;
+    let credential =
+        resolve_selected_provider_credential(&cache_provider, &cache_source, &app_state)
+            .await
+            .map_err(provider_credential_error)?;
 
     let client = app_state
         .infra
-        .auxiliary_client(provider.upstream_source.use_proxy)
+        .auxiliary_client(source.use_proxy)
         .await
         .map_err(|error| BaseError::ParamInvalid(Some(error.to_string())))?;
 
-    let (url, headers) = build_remote_models_request(&provider, &cache_provider, &credential)?;
+    let (url, headers) = build_remote_models_request(&source, &cache_source, &credential)?;
     let models = fetch_remote_models(
         client.as_ref(),
         url,
@@ -790,17 +907,13 @@ async fn get_remote_models(
     .await?;
 
     info!(
-        "provider model discovery succeeded: provider_id={}, source_id={}, source_key={}, profile_type={:?}",
-        provider.id,
-        provider.upstream_source.id,
-        provider.upstream_source.source_key,
-        provider.upstream_source.profile_type,
+        "provider model discovery succeeded: provider_id={}, source_id={}, profile_type={:?}",
+        provider.id, source.id, source.profile_type,
     );
 
     Ok(HttpResult::new(ProviderRemoteModelsResponse {
-        source_id: provider.upstream_source.id,
-        source_key: provider.upstream_source.source_key,
-        profile_type: provider.upstream_source.profile_type,
+        source_id: source.id,
+        profile_type: source.profile_type,
         models,
     }))
 }
@@ -846,26 +959,22 @@ async fn fetch_remote_models(
 }
 
 fn build_remote_models_request(
-    provider: &ProviderAggregate,
-    cache_provider: &CacheProvider,
+    source: &UpstreamSource,
+    cache_source: &crate::service::cache::types::CacheUpstreamSource,
     credential: &ProviderCredential,
 ) -> Result<(Url, HeaderMap), BaseError> {
     let url = if matches!(
-        provider.upstream_source.profile_type,
+        source.profile_type,
         UpstreamProfileType::Gemini | UpstreamProfileType::Vertex
     ) {
-        Url::parse(&provider.upstream_source.endpoint).map_err(|e| {
+        Url::parse(&source.endpoint).map_err(|e| {
             BaseError::ParamInvalid(Some(format!(
                 "Failed to parse provider endpoint as URL: {}",
                 e
             )))
         })?
     } else {
-        Url::parse(&format!(
-            "{}/models",
-            provider.upstream_source.endpoint.trim_end_matches('/')
-        ))
-        .map_err(|e| {
+        Url::parse(&format!("{}/models", source.endpoint.trim_end_matches('/'))).map_err(|e| {
             BaseError::ParamInvalid(Some(format!(
                 "Failed to parse provider endpoint as URL: {}",
                 e
@@ -875,8 +984,8 @@ fn build_remote_models_request(
     let mut headers = HeaderMap::new();
     apply_provider_request_auth_header(
         &mut headers,
-        &cache_provider.upstream_source,
-        upstream_protocol_for_profile(&cache_provider.upstream_source.profile_type),
+        cache_source,
+        upstream_protocol_for_profile(&cache_source.profile_type),
         &credential,
     )
     .map_err(provider_credential_error)?;
@@ -1053,8 +1162,16 @@ pub fn create_provider_router() -> StateRouter {
             .route("/detail/list", get(list_provider_details))
             .route("/{id}", get(get_provider))
             .route("/{id}/detail", get(get_provider_detail))
-            .route("/{id}/remote_models", get(get_remote_models))
-            .route("/{id}/check", post(check_provider))
+            .route("/{id}/sources", post(create_source))
+            .route(
+                "/{id}/sources/{source_id}",
+                put(update_source).delete(delete_source),
+            )
+            .route("/{id}/sources/{source_id}/check", post(check_provider))
+            .route(
+                "/{id}/sources/{source_id}/remote_models",
+                get(get_remote_models),
+            )
             .route("/{id}", delete(delete_provider))
             .route("/{id}", put(update_provider))
             // Provider API Key routes
@@ -1106,7 +1223,7 @@ mod tests {
     use crate::database::provider::{
         Provider, ProviderAggregate, ProviderApiKeyRepository, ProviderApiKeySummary,
     };
-    use crate::database::upstream_source::{PRIMARY_SOURCE_KEY, UpstreamSource};
+    use crate::database::upstream_source::UpstreamSource;
     use crate::ingress::client_identity::{ClientIdentity, ClientIdentitySource};
     use crate::schema::enum_def::{
         ProviderApiKeyMode, RequestPatchOperation, RequestPatchPlacement, UpstreamProfileType,
@@ -1116,6 +1233,7 @@ mod tests {
         CacheProvider, RequestPatchRuleOrigin, RequestPatchSource, RuntimeResolvedRequestPatch,
     };
     use crate::service::provider_credential::ProviderCredential;
+    use crate::service::runtime::SourceHealthStatus;
     use crate::service::secret_encryption::SecretDomain;
     use crate::service::vertex::{cache_vertex_token_for_test, vertex_token_is_cached_for_test};
     use crate::utils::HttpResult;
@@ -1256,6 +1374,7 @@ mod tests {
         let provider = sample_provider(UpstreamProfileType::Openai, "https://api.example.com/v1");
         let request = super::build_provider_check_request(
             &provider,
+            &provider.upstream_sources[0],
             &credential("sk-test"),
             "gpt-4o-mini",
             &[],
@@ -1283,6 +1402,7 @@ mod tests {
         );
         let request = super::build_provider_check_request(
             &provider,
+            &provider.upstream_sources[0],
             &credential("sk-gemini"),
             "gemini-2.5-flash",
             &[],
@@ -1313,6 +1433,7 @@ mod tests {
         );
         let request = super::build_provider_check_request(
             &provider,
+            &provider.upstream_sources[0],
             &credential("ak-test"),
             "claude-3-5-haiku-latest",
             &[],
@@ -1344,6 +1465,7 @@ mod tests {
         );
         let request = super::build_provider_check_request(
             &provider,
+            &provider.upstream_sources[0],
             &credential("gm-test"),
             "gemini-2.0-flash",
             &[],
@@ -1370,6 +1492,7 @@ mod tests {
         let provider = sample_provider(UpstreamProfileType::Ollama, "http://localhost:11434");
         let request = super::build_provider_check_request(
             &provider,
+            &provider.upstream_sources[0],
             &credential("ollama-key"),
             "llama3.1",
             &[],
@@ -1411,6 +1534,7 @@ mod tests {
         ];
         let request = super::build_provider_check_request(
             &provider,
+            &provider.upstream_sources[0],
             &credential("sk-test"),
             "gpt-4o-mini",
             &request_patches,
@@ -1456,6 +1580,7 @@ mod tests {
         super::perform_provider_check(
             &reqwest::Client::new(),
             &provider,
+            &provider.upstream_sources[0],
             &credential("provider-header-secret"),
             "model",
             &[],
@@ -1499,6 +1624,7 @@ mod tests {
             super::perform_provider_check(
                 &reqwest::Client::new(),
                 &provider,
+                &provider.upstream_sources[0],
                 &credential("provider-check-secret"),
                 "model",
                 &[],
@@ -1659,9 +1785,10 @@ mod tests {
         ] {
             let provider = sample_provider(profile_type, endpoint);
             let cache_provider = CacheProvider::from(provider.clone());
+            let source = &provider.upstream_sources[0];
             let (url, headers) = super::build_remote_models_request(
-                &provider,
-                &cache_provider,
+                source,
+                &cache_provider.upstream_sources[0],
                 &credential("remote-secret"),
             )
             .expect("remote models request should build");
@@ -1774,17 +1901,10 @@ mod tests {
             provider_key: "openai-api-example-com".to_string(),
             name: "OpenAI api.example.com".to_string(),
             is_enabled: true,
-            upstream_source: UpstreamSource {
-                id: 43,
-                provider_id: 42,
-                source_key: PRIMARY_SOURCE_KEY.to_string(),
-                profile_type: UpstreamProfileType::Openai,
-                endpoint: "https://api.example.com/v1".to_string(),
-                use_proxy: false,
-                deleted_at: None,
-                created_at: 0,
-                updated_at: 0,
-            },
+            source_count: 1,
+            enabled_source_count: 1,
+            default_source_id: Some(43),
+            default_source_profile_type: Some(UpstreamProfileType::Openai),
         }]);
 
         let value = serde_json::to_value(payload).expect("summary payload should serialize");
@@ -1806,10 +1926,14 @@ mod tests {
                 "provider_key".to_string(),
                 "name".to_string(),
                 "is_enabled".to_string(),
-                "upstream_source".to_string(),
+                "source_count".to_string(),
+                "enabled_source_count".to_string(),
+                "default_source_id".to_string(),
+                "default_source_profile_type".to_string(),
             ])
         );
-        assert_eq!(item["upstream_source"]["source_key"], PRIMARY_SOURCE_KEY);
+        assert_eq!(item["source_count"], 1);
+        assert_eq!(item["default_source_profile_type"], "OPENAI");
         assert!(item.get("models").is_none());
         assert!(item.get("provider_keys").is_none());
         assert!(item.get("custom_fields").is_none());
@@ -1865,7 +1989,7 @@ mod tests {
                         json!({
                             "name": "HTTP Provider",
                             "key": "http-provider",
-                            "upstream_source": {
+                            "initial_source": {
                                 "endpoint": "  HTTPS://API.EXAMPLE.COM:443/v1///  ",
                                 "use_proxy": false,
                                 "profile_type": "OPENAI"
@@ -1880,7 +2004,7 @@ mod tests {
                 assert_eq!(create_body["code"], 0);
                 assert_eq!(create_body["data"]["provider_key"], "http-provider");
                 assert_eq!(
-                    create_body["data"]["upstream_source"]["endpoint"],
+                    create_body["data"]["upstream_sources"][0]["endpoint"],
                     "https://api.example.com/v1"
                 );
                 assert!(create_body["data"].get("endpoint").is_none());
@@ -1892,7 +2016,7 @@ mod tests {
                 let provider = Provider::get_by_id(provider_id).expect("provider should persist");
                 assert_eq!(provider.name, "HTTP Provider");
                 assert_eq!(
-                    provider.upstream_source.endpoint,
+                    provider.upstream_sources[0].endpoint,
                     "https://api.example.com/v1"
                 );
 
@@ -1904,7 +2028,7 @@ mod tests {
                     .expect("provider should exist in cache");
                 assert_eq!(provider_cached.provider_key, "http-provider");
                 assert_eq!(
-                    provider_cached.upstream_source.endpoint,
+                    provider_cached.upstream_sources[0].endpoint,
                     "https://api.example.com/v1"
                 );
 
@@ -2097,7 +2221,7 @@ mod tests {
                         json!({
                             "name": "Invalid Provider",
                             "key": "invalid-provider",
-                            "upstream_source": {
+                            "initial_source": {
                                 "endpoint": "https://api.example.com/v1?tenant=one",
                                 "use_proxy": false,
                                 "profile_type": "OPENAI"
@@ -2119,6 +2243,294 @@ mod tests {
                     Provider::list_all()
                         .expect("providers should list")
                         .is_empty()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn provider_http_source_routes_are_explicit_and_ownership_scoped() {
+        let test_db_context = TestDbContext::new_sqlite("controller-provider-source-http.sqlite");
+
+        test_db_context
+            .run_async(async {
+                let app_state = create_test_app_state(test_db_context.clone()).await;
+                let create_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider",
+                        json!({
+                            "name": "Source HTTP Provider",
+                            "key": "source-http-provider",
+                            "provider_api_key_mode": "QUEUE"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(create_response.status(), StatusCode::OK);
+                let create_body = response_json(create_response).await;
+                assert_eq!(create_body["data"]["upstream_sources"], json!([]));
+                let provider_id = create_body["data"]["id"]
+                    .as_i64()
+                    .expect("provider id should be returned");
+
+                let source_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/sources"),
+                        json!({
+                            "profile_type": "OPENAI",
+                            "endpoint": "https://api.example.com/v1",
+                            "use_proxy": false,
+                            "is_enabled": true,
+                            "is_default": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(source_response.status(), StatusCode::OK);
+                let source_body = response_json(source_response).await;
+                assert_eq!(source_body["data"]["profile_type"], "OPENAI");
+                let source_id = source_body["data"]["id"]
+                    .as_i64()
+                    .expect("source id should be returned");
+
+                for _ in 0..5 {
+                    app_state
+                        .source_circuit
+                        .record_source_failure(source_id, "stale source failure".to_string(), None)
+                        .await
+                        .expect("source failure should record");
+                }
+                assert_eq!(
+                    app_state
+                        .source_circuit
+                        .get_source_health_snapshot(source_id)
+                        .await
+                        .expect("source snapshot should load")
+                        .status,
+                    SourceHealthStatus::Open
+                );
+
+                let default_only_response = send(
+                    &app_state,
+                    json_request(
+                        Method::PUT,
+                        &format!("/provider/{provider_id}/sources/{source_id}"),
+                        json!({
+                            "endpoint": "https://api.example.com/v1",
+                            "use_proxy": false,
+                            "is_enabled": true,
+                            "is_default": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(default_only_response.status(), StatusCode::OK);
+                assert_eq!(
+                    app_state
+                        .source_circuit
+                        .get_source_health_snapshot(source_id)
+                        .await
+                        .expect("source snapshot should load")
+                        .status,
+                    SourceHealthStatus::Open,
+                    "default-only changes must not clear source circuit state"
+                );
+
+                let update_response = send(
+                    &app_state,
+                    json_request(
+                        Method::PUT,
+                        &format!("/provider/{provider_id}/sources/{source_id}"),
+                        json!({
+                            "endpoint": "https://api.example.com/v1/updated",
+                            "use_proxy": true,
+                            "is_enabled": true,
+                            "is_default": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(update_response.status(), StatusCode::OK);
+                let update_body = response_json(update_response).await;
+                assert_eq!(
+                    update_body["data"]["endpoint"],
+                    "https://api.example.com/v1/updated"
+                );
+                assert_eq!(update_body["data"]["is_default"], true);
+                assert_eq!(
+                    app_state
+                        .source_circuit
+                        .get_source_health_snapshot(source_id)
+                        .await
+                        .expect("source snapshot should load")
+                        .status,
+                    SourceHealthStatus::Healthy,
+                    "endpoint/proxy changes must clear source circuit state"
+                );
+
+                for _ in 0..5 {
+                    app_state
+                        .source_circuit
+                        .record_source_failure(
+                            source_id,
+                            "disabled source failure".to_string(),
+                            None,
+                        )
+                        .await
+                        .expect("source failure should record");
+                }
+                let disable_response = send(
+                    &app_state,
+                    json_request(
+                        Method::PUT,
+                        &format!("/provider/{provider_id}/sources/{source_id}"),
+                        json!({
+                            "use_proxy": true,
+                            "is_enabled": false,
+                            "is_default": false
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(disable_response.status(), StatusCode::OK);
+                assert_eq!(
+                    app_state
+                        .source_circuit
+                        .get_source_health_snapshot(source_id)
+                        .await
+                        .expect("source snapshot should load")
+                        .status,
+                    SourceHealthStatus::Healthy,
+                    "enabled-to-disabled changes must clear source circuit state"
+                );
+
+                for _ in 0..5 {
+                    app_state
+                        .source_circuit
+                        .record_source_failure(
+                            source_id,
+                            "re-enabled source failure".to_string(),
+                            None,
+                        )
+                        .await
+                        .expect("source failure should record");
+                }
+                let enable_response = send(
+                    &app_state,
+                    json_request(
+                        Method::PUT,
+                        &format!("/provider/{provider_id}/sources/{source_id}"),
+                        json!({
+                            "use_proxy": true,
+                            "is_enabled": true,
+                            "is_default": true
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(enable_response.status(), StatusCode::OK);
+                assert_eq!(
+                    app_state
+                        .source_circuit
+                        .get_source_health_snapshot(source_id)
+                        .await
+                        .expect("source snapshot should load")
+                        .status,
+                    SourceHealthStatus::Healthy,
+                    "disabled-to-enabled changes must clear source circuit state"
+                );
+
+                let second_provider_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider",
+                        json!({
+                            "name": "Second Source HTTP Provider",
+                            "key": "second-source-http-provider"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(second_provider_response.status(), StatusCode::OK);
+                let second_provider_id =
+                    response_json(second_provider_response).await["data"]["id"]
+                        .as_i64()
+                        .expect("second provider id should be returned");
+
+                let wrong_owner_response = send(
+                    &app_state,
+                    empty_request(
+                        Method::DELETE,
+                        &format!("/provider/{second_provider_id}/sources/{source_id}"),
+                    ),
+                )
+                .await;
+                assert_eq!(wrong_owner_response.status(), StatusCode::NOT_FOUND);
+
+                let old_check_response = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        &format!("/provider/{provider_id}/check"),
+                        json!({}),
+                    ),
+                )
+                .await;
+                assert_eq!(old_check_response.status(), StatusCode::NOT_FOUND);
+                let old_discovery_response = send(
+                    &app_state,
+                    empty_request(
+                        Method::GET,
+                        &format!("/provider/{provider_id}/remote_models"),
+                    ),
+                )
+                .await;
+                assert_eq!(old_discovery_response.status(), StatusCode::NOT_FOUND);
+
+                let delete_response = send(
+                    &app_state,
+                    empty_request(
+                        Method::DELETE,
+                        &format!("/provider/{provider_id}/sources/{source_id}"),
+                    ),
+                )
+                .await;
+                assert_eq!(delete_response.status(), StatusCode::OK);
+                assert!(response_json(delete_response).await["data"].is_null());
+                assert_eq!(
+                    app_state
+                        .source_circuit
+                        .get_source_health_snapshot(source_id)
+                        .await
+                        .expect("deleted source snapshot should load")
+                        .status,
+                    SourceHealthStatus::Healthy,
+                    "deleting a source must clear source circuit state"
+                );
+                let provider_after_delete = Provider::get_by_id(provider_id)
+                    .expect("provider should remain after deleting its final source");
+                assert!(provider_after_delete.upstream_sources.is_empty());
+
+                let bootstrap_without_source = send(
+                    &app_state,
+                    json_request(
+                        Method::POST,
+                        "/provider/bootstrap",
+                        json!({
+                            "api_key": "bootstrap-secret",
+                            "model_name": "bootstrap-model"
+                        }),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    bootstrap_without_source.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY
                 );
             })
             .await;
@@ -2166,7 +2578,7 @@ mod tests {
         ))
         .expect("manager Provider OpenAPI should parse");
         assert_eq!(document["openapi"].as_str(), Some("3.1.0"));
-        assert_eq!(document["info"]["version"].as_str(), Some("1.0.0-pre.4"));
+        assert_eq!(document["info"]["version"].as_str(), Some("1.0.0-pre.5"));
         assert_eq!(
             document["x-cyder-default-cache-control"].as_str(),
             Some("no-store")
@@ -2223,8 +2635,22 @@ mod tests {
             ("/ai/manager/api/provider/{id}", "get"),
             ("/ai/manager/api/provider/{id}", "put"),
             ("/ai/manager/api/provider/{id}", "delete"),
-            ("/ai/manager/api/provider/{id}/check", "post"),
-            ("/ai/manager/api/provider/{id}/remote_models", "get"),
+            ("/ai/manager/api/provider/{id}/detail", "get"),
+            ("/ai/manager/api/provider/detail/list", "get"),
+            ("/ai/manager/api/provider/{id}/sources", "post"),
+            ("/ai/manager/api/provider/{id}/sources/{source_id}", "put"),
+            (
+                "/ai/manager/api/provider/{id}/sources/{source_id}",
+                "delete",
+            ),
+            (
+                "/ai/manager/api/provider/{id}/sources/{source_id}/check",
+                "post",
+            ),
+            (
+                "/ai/manager/api/provider/{id}/sources/{source_id}/remote_models",
+                "get",
+            ),
         ];
         for (path, method) in provider_operations {
             let operation = &document["paths"][path][method];
@@ -2248,7 +2674,8 @@ mod tests {
             document["components"]["schemas"]["ProviderAggregate"]["properties"]
                 .as_mapping()
                 .expect("Provider aggregate properties should exist");
-        assert!(aggregate_properties.contains_key(serde_yaml::Value::from("upstream_source")));
+        assert!(aggregate_properties.contains_key(serde_yaml::Value::from("upstream_sources")));
+        assert!(!aggregate_properties.contains_key(serde_yaml::Value::from("upstream_source")));
         for forbidden in ["endpoint", "provider_type", "profile_type", "use_proxy"] {
             assert!(!aggregate_properties.contains_key(serde_yaml::Value::from(forbidden)));
         }
@@ -2257,23 +2684,31 @@ mod tests {
         let upsert_properties = upsert["properties"]
             .as_mapping()
             .expect("Provider upsert properties should exist");
-        assert!(upsert_properties.contains_key(serde_yaml::Value::from("upstream_source")));
+        assert!(upsert_properties.contains_key(serde_yaml::Value::from("initial_source")));
         for forbidden in ["endpoint", "provider_type", "profile_type", "use_proxy"] {
             assert!(!upsert_properties.contains_key(serde_yaml::Value::from(forbidden)));
         }
-        assert_eq!(
+        assert!(
             document["components"]["schemas"]["UpstreamSource"]["properties"]["source_key"]
-                ["const"]
-                .as_str(),
-            Some("primary")
+                .is_null()
         );
+        assert!(document["components"]["schemas"]["ProviderAggregate"]["properties"]
+            ["upstream_sources"]
+            .is_mapping());
+        for field in ["is_enabled", "is_default"] {
+            assert!(
+                document["components"]["schemas"]["UpstreamSource"]["properties"][field]
+                    .is_mapping()
+            );
+        }
         for schema in ["SourceEvidence", "ProviderRemoteModels"] {
             let properties = document["components"]["schemas"][schema]["properties"]
                 .as_mapping()
                 .expect("Source evidence properties should exist");
-            for field in ["source_id", "source_key", "profile_type"] {
+            for field in ["source_id", "profile_type"] {
                 assert!(properties.contains_key(serde_yaml::Value::from(field)));
             }
+            assert!(!properties.contains_key(serde_yaml::Value::from("source_key")));
         }
 
         let reveal = &document["paths"]["/ai/manager/api/provider/{id}/provider_keys/{key_id}/reveal"]
@@ -2310,6 +2745,14 @@ mod tests {
         assert!(
             document["paths"]["/ai/manager/api/provider/{id}/provider_key"].is_null(),
             "legacy singular collection must not be documented"
+        );
+        assert!(
+            document["paths"]["/ai/manager/api/provider/{id}/check"].is_null(),
+            "legacy provider check route must not be documented"
+        );
+        assert!(
+            document["paths"]["/ai/manager/api/provider/{id}/remote_models"].is_null(),
+            "legacy provider discovery route must not be documented"
         );
         assert!(
             document["paths"]["/ai/manager/api/provider/{id}/provider_keys/{key_id}/reveal"]["get"]
@@ -2361,13 +2804,12 @@ mod tests {
     fn remote_model_discovery_response_includes_exact_source_evidence() {
         let response = ProviderRemoteModelsResponse {
             source_id: 42,
-            source_key: "primary".to_string(),
             profile_type: UpstreamProfileType::Gemini,
             models: json!({"models": [{"name": "models/gemini"}]}),
         };
         let value = serde_json::to_value(response).expect("response should serialize");
         assert_eq!(value["source_id"], 42);
-        assert_eq!(value["source_key"], "primary");
+        assert!(value.get("source_key").is_none());
         assert_eq!(value["profile_type"], "GEMINI");
         assert_eq!(value["models"]["models"][0]["name"], "models/gemini");
     }
@@ -2384,17 +2826,18 @@ mod tests {
                 updated_at: 0,
                 provider_api_key_mode: ProviderApiKeyMode::Queue,
             },
-            upstream_source: UpstreamSource {
+            upstream_sources: vec![UpstreamSource {
                 id: 2,
                 provider_id: 1,
-                source_key: PRIMARY_SOURCE_KEY.to_string(),
                 profile_type,
                 endpoint: endpoint.to_string(),
                 use_proxy: false,
+                is_enabled: true,
+                is_default: true,
                 deleted_at: None,
                 created_at: 0,
                 updated_at: 0,
-            },
+            }],
         }
     }
 }

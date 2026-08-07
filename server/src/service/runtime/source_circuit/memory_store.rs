@@ -104,6 +104,11 @@ impl SourceCircuitStore for MemorySourceCircuitStore {
         Ok(source_state.snapshot())
     }
 
+    async fn clear(&self, source_id: i64) -> Result<(), SourceCircuitError> {
+        self.inner.lock().await.remove(&source_id);
+        Ok(())
+    }
+
     async fn snapshot(&self, source_id: i64) -> Result<SourceHealthSnapshot, SourceCircuitError> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut state = self.inner.lock().await;

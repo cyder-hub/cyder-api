@@ -172,8 +172,9 @@ fn collect_accessible_models(
             );
 
             for preset in exposed_presets_for_model(catalog, provider, model) {
-                let target = build_direct_reasoning_target(provider, model);
-                if target_supports_reasoning_preset(catalog, &target, preset).is_ok() {
+                let supports_preset =
+                    enabled_source_supports_reasoning_preset(catalog, provider, model, preset);
+                if supports_preset {
                     push_model(
                         &mut result,
                         &mut seen_ids,
@@ -190,6 +191,22 @@ fn collect_accessible_models(
         }
     }
     result
+}
+
+fn enabled_source_supports_reasoning_preset(
+    catalog: &CacheModelsCatalog,
+    provider: &CacheProvider,
+    model: &CacheModel,
+    preset: ReasoningPreset,
+) -> bool {
+    provider
+        .upstream_sources
+        .iter()
+        .filter(|source| source.is_enabled)
+        .any(|source| {
+            let target = build_direct_reasoning_target(provider, model, source);
+            target_supports_reasoning_preset(catalog, &target, preset).is_ok()
+        })
 }
 
 fn exposed_presets_for_model(
@@ -218,12 +235,19 @@ fn exposed_presets_for_config(config: &CacheReasoningConfig) -> Vec<ReasoningPre
         .collect()
 }
 
-fn build_direct_reasoning_target(provider: &CacheProvider, model: &CacheModel) -> ExecutionTarget {
+fn build_direct_reasoning_target(
+    provider: &CacheProvider,
+    model: &CacheModel,
+    source: &crate::service::cache::types::CacheUpstreamSource,
+) -> ExecutionTarget {
     ExecutionTarget {
         provider: Arc::new(provider.clone()),
         model: Arc::new(model.clone()),
-        upstream_source: Arc::new(provider.upstream_source.clone()),
-        upstream_protocol: determine_upstream_protocol(&provider.upstream_source),
+        upstream_source: Arc::new(source.clone()),
+        downstream_protocol: DownstreamProtocol::Openai,
+        upstream_protocol: determine_upstream_protocol(source),
+        selection_reason:
+            crate::proxy::runtime::route_resolver::SourceSelectionReason::ProtocolMatch,
         reasoning_config_id: None,
         reasoning_config_scope: None,
         reasoning_config_source: None,
@@ -268,5 +292,111 @@ fn is_model_allowed(api_key: &CacheApiKey, provider: &CacheProvider, model: &Cac
             );
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::reasoning_config::{ReasoningConfigMode, ReasoningPatchFamily};
+    use crate::schema::enum_def::{Action, ProviderApiKeyMode, UpstreamProfileType};
+    use crate::service::cache::types::{CacheReasoningConfigPreset, CacheUpstreamSource};
+
+    fn catalog_with_source_enabled(source_enabled: bool) -> CacheModelsCatalog {
+        CacheModelsCatalog {
+            providers: vec![CacheProvider {
+                id: 1,
+                provider_key: "openai".to_string(),
+                name: "OpenAI".to_string(),
+                provider_api_key_mode: ProviderApiKeyMode::Queue,
+                is_enabled: true,
+                upstream_sources: vec![CacheUpstreamSource {
+                    id: 2,
+                    profile_type: UpstreamProfileType::Openai,
+                    endpoint: "https://api.openai.com/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: source_enabled,
+                    is_default: true,
+                }],
+            }],
+            models: vec![CacheModel {
+                id: 3,
+                provider_id: 1,
+                model_name: "gpt-4o".to_string(),
+                real_model_name: None,
+                cost_catalog_id: None,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_reasoning: true,
+                supports_image_input: false,
+                supports_embeddings: false,
+                supports_rerank: false,
+                is_enabled: true,
+            }],
+            reasoning_configs: vec![CacheReasoningConfig {
+                id: 4,
+                scope_kind: crate::database::reasoning_config::ReasoningConfigScope::Provider,
+                provider_id: Some(1),
+                model_id: None,
+                mode: ReasoningConfigMode::Custom,
+                family: Some(ReasoningPatchFamily::OpenAiChatReasoningEffort),
+                presets: vec![CacheReasoningConfigPreset {
+                    id: 5,
+                    config_id: 4,
+                    preset: ReasoningPreset::High,
+                    suffix: "high".to_string(),
+                    requires_reasoning: true,
+                    allowed_operation_kinds: vec!["generation".to_string()],
+                    expose_in_models: true,
+                    is_enabled: true,
+                }],
+            }],
+            runtime_feature_configs: vec![],
+        }
+    }
+
+    fn allow_all_api_key() -> CacheApiKey {
+        CacheApiKey {
+            id: 10,
+            api_key_hash: "hash".to_string(),
+            key_prefix: "prefix".to_string(),
+            key_last4: "last4".to_string(),
+            name: "test".to_string(),
+            description: None,
+            default_action: Action::Allow,
+            is_enabled: true,
+            expires_at: None,
+            rate_limit_rpm: None,
+            max_concurrent_requests: None,
+            quota_daily_requests: None,
+            quota_daily_tokens: None,
+            quota_monthly_tokens: None,
+            budget_daily_nanos: None,
+            budget_daily_currency: None,
+            budget_monthly_nanos: None,
+            budget_monthly_currency: None,
+            acl_rules: vec![],
+        }
+    }
+
+    #[test]
+    fn disabled_sources_do_not_advertise_reasoning_suffixes() {
+        let disabled_catalog = catalog_with_source_enabled(false);
+        let disabled_models = collect_accessible_models(&disabled_catalog, &allow_all_api_key());
+        assert_eq!(
+            disabled_models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["openai/gpt-4o"]
+        );
+
+        let enabled_catalog = catalog_with_source_enabled(true);
+        let enabled_models = collect_accessible_models(&enabled_catalog, &allow_all_api_key());
+        assert!(
+            enabled_models
+                .iter()
+                .any(|model| model.id == "openai/gpt-4o-high")
+        );
     }
 }

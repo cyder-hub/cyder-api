@@ -7,13 +7,17 @@ import type {
   ProviderBootstrapResponse,
   ProviderCheckPayload,
   ProviderCheckResponse,
+  ProviderCreatePayload,
   ProviderKeyPayload,
   ProviderKeyReplacePayload,
   ProviderKeyUpdatePayload,
   ProviderListItem,
-  ProviderPayload,
   ProviderRemoteModelsResponse,
   ProviderSummaryItem,
+  ProviderUpdatePayload,
+  UpstreamSource,
+  UpstreamSourcePayload,
+  UpstreamSourceUpdatePayload,
 } from "./types";
 
 export function getProviderDetailList(): Promise<ProviderListItem[]> {
@@ -30,13 +34,13 @@ export function bootstrapProvider(
   return request.post("/ai/manager/api/provider/bootstrap", payload);
 }
 
-export function createProvider(payload: ProviderPayload): Promise<ProviderBase> {
+export function createProvider(payload: ProviderCreatePayload): Promise<ProviderBase> {
   return request.post("/ai/manager/api/provider", payload);
 }
 
 export function updateProvider(
   id: number | string,
-  payload: ProviderPayload,
+  payload: ProviderUpdatePayload,
 ): Promise<ProviderBase> {
   return request.put(`/ai/manager/api/provider/${id}`, payload);
 }
@@ -51,10 +55,40 @@ export function getProviderDetail(
   return request.get(`/ai/manager/api/provider/${id}/detail`);
 }
 
+export function createProviderSource(
+  providerId: number | string,
+  payload: UpstreamSourcePayload,
+): Promise<UpstreamSource> {
+  return request.post(`/ai/manager/api/provider/${providerId}/sources`, payload);
+}
+
+export function updateProviderSource(
+  providerId: number | string,
+  sourceId: number | string,
+  payload: UpstreamSourceUpdatePayload,
+): Promise<UpstreamSource> {
+  return request.put(
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}`,
+    payload,
+  );
+}
+
+export function deleteProviderSource(
+  providerId: number | string,
+  sourceId: number | string,
+): Promise<void> {
+  return request.delete(
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}`,
+  );
+}
+
 export function getProviderRemoteModels(
-  id: number | string,
+  providerId: number | string,
+  sourceId: number | string,
 ): Promise<ProviderRemoteModelsResponse> {
-  return request.get(`/ai/manager/api/provider/${id}/remote_models`);
+  return request.get(
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/remote_models`,
+  );
 }
 
 export function createProviderKey(
@@ -103,8 +137,12 @@ export function deleteProviderKey(
 }
 
 export function checkProviderConnection(
-  id: number | string,
+  providerId: number | string,
+  sourceId: number | string,
   payload?: ProviderCheckPayload,
 ): Promise<ProviderCheckResponse> {
-  return request.post(`/ai/manager/api/provider/${id}/check`, payload || {});
+  return request.post(
+    `/ai/manager/api/provider/${providerId}/sources/${sourceId}/check`,
+    payload || {},
+  );
 }

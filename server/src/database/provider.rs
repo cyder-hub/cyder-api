@@ -5,10 +5,7 @@ use serde::Deserialize; // Serialize on Provider is via db_object!, Deserialize 
 use serde::Serialize;
 
 use crate::database::model::{Model, NewModel};
-use crate::database::upstream_source::{
-    NewUpstreamSource, PRIMARY_SOURCE_KEY, UpdateUpstreamSourceData, UpstreamSource,
-    invalid_source_cardinality,
-};
+use crate::database::upstream_source::{NewUpstreamSource, UpstreamSource};
 use crate::database::{DbConnection, DbResult, get_connection};
 use crate::{db_execute, db_object};
 // db_object! is exported at the crate root by `#[macro_export]` in `database/mod.rs`.
@@ -70,7 +67,7 @@ db_object! {
 pub struct ProviderAggregate {
     #[serde(flatten)]
     pub provider: Provider,
-    pub upstream_source: UpstreamSource,
+    pub upstream_sources: Vec<UpstreamSource>,
 }
 
 impl std::ops::Deref for ProviderAggregate {
@@ -355,7 +352,10 @@ pub struct ProviderSummaryItem {
     pub provider_key: String,
     pub name: String,
     pub is_enabled: bool,
-    pub upstream_source: UpstreamSource,
+    pub source_count: i64,
+    pub enabled_source_count: i64,
+    pub default_source_id: Option<i64>,
+    pub default_source_profile_type: Option<UpstreamProfileType>,
 }
 
 macro_rules! bootstrap_transaction {
@@ -396,10 +396,11 @@ macro_rules! bootstrap_transaction {
             let new_source_data = NewUpstreamSource {
                 id: bootstrap_input.source_id,
                 provider_id: provider.id,
-                source_key: PRIMARY_SOURCE_KEY.to_string(),
                 profile_type: bootstrap_input.profile_type,
                 endpoint: bootstrap_input.endpoint.clone(),
                 use_proxy: bootstrap_input.use_proxy,
+                is_enabled: true,
+                is_default: true,
                 created_at: current_time,
                 updated_at: current_time,
             };
@@ -461,7 +462,7 @@ macro_rules! bootstrap_transaction {
             Ok(BootstrapProviderResult {
                 provider: ProviderAggregate {
                     provider,
-                    upstream_source,
+                    upstream_sources: vec![upstream_source],
                 },
                 created_key,
                 created_model,
@@ -496,6 +497,7 @@ pub struct ProviderDetail {
 macro_rules! create_provider_transaction {
     ($conn:expr, $source_new_db:ident, $source_db:ident, $new_provider:expr, $new_source:expr) => {{
         $conn.transaction::<ProviderAggregate, BaseError, _>(|conn| {
+            let new_source_data = $new_source;
             let provider = diesel::insert_into(provider::table)
                 .values(NewProviderDb::to_db($new_provider))
                 .returning(ProviderDb::as_returning())
@@ -507,36 +509,38 @@ macro_rules! create_provider_transaction {
                 })?
                 .from_db();
 
-            if $new_source.provider_id != provider.id
-                || $new_source.source_key != PRIMARY_SOURCE_KEY
-            {
-                return Err(BaseError::ParamInvalid(Some(
-                    "upstream source must belong to its provider and use source_key=primary"
-                        .to_string(),
-                )));
-            }
-
-            let upstream_source = diesel::insert_into(upstream_source::table)
-                .values($source_new_db::to_db($new_source))
-                .returning($source_db::as_returning())
-                .get_result::<$source_db>(conn)
-                .map_err(|error| {
-                    BaseError::DatabaseFatal(Some(format!(
-                        "Failed to insert provider upstream source: {error}"
-                    )))
-                })?
-                .from_db();
+            let upstream_sources = match new_source_data {
+                Some(new_source) => {
+                    if new_source.provider_id != provider.id {
+                        return Err(BaseError::ParamInvalid(Some(
+                            "upstream source must belong to its provider".to_string(),
+                        )));
+                    }
+                    let upstream_source = diesel::insert_into(upstream_source::table)
+                        .values($source_new_db::to_db(new_source))
+                        .returning($source_db::as_returning())
+                        .get_result::<$source_db>(conn)
+                        .map_err(|error| {
+                            BaseError::DatabaseFatal(Some(format!(
+                                "Failed to insert provider upstream source: {error}"
+                            )))
+                        })?
+                        .from_db();
+                    vec![upstream_source]
+                }
+                None => Vec::new(),
+            };
 
             Ok(ProviderAggregate {
                 provider,
-                upstream_source,
+                upstream_sources,
             })
         })
     }};
 }
 
 macro_rules! update_provider_transaction {
-    ($conn:expr, $source_update_db:ident, $source_db:ident, $id:expr, $provider_update:expr, $source_update:expr, $now:expr) => {{
+    ($conn:expr, $source_db:ident, $id:expr, $provider_update:expr, $now:expr) => {{
         $conn.transaction::<ProviderAggregate, BaseError, _>(|conn| {
             let provider = diesel::update(
                 provider::table.filter(
@@ -574,46 +578,32 @@ macro_rules! update_provider_transaction {
                         $id
                     )))
                 })?;
-            if source_rows.len() != 1 {
-                return Err(invalid_source_cardinality($id, source_rows.len()));
-            }
-            let source_id = source_rows
+            let upstream_sources = source_rows
                 .into_iter()
-                .next()
-                .expect("cardinality checked")
-                .from_db()
-                .id;
-
-            let upstream_source = diesel::update(
-                upstream_source::table.filter(
-                    upstream_source::dsl::id
-                        .eq(source_id)
-                        .and(upstream_source::dsl::deleted_at.is_null()),
-                ),
-            )
-            .set($source_update_db::to_db($source_update))
-            .returning($source_db::as_returning())
-            .get_result::<$source_db>(conn)
-            .map_err(|error| {
-                BaseError::DatabaseFatal(Some(format!(
-                    "Failed to update upstream source {source_id}: {error}"
-                )))
-            })?
-            .from_db();
+                .map(|row| row.from_db())
+                .collect::<Vec<_>>();
 
             Ok(ProviderAggregate {
                 provider,
-                upstream_source,
+                upstream_sources,
             })
         })
     }};
 }
 
 impl Provider {
-    /// Atomically inserts a logical provider and its only primary upstream source.
+    /// Atomically inserts a logical provider with an initial Source.
     pub fn create(
         new_provider_data: &NewProvider,
         new_source_data: &NewUpstreamSource,
+    ) -> DbResult<ProviderAggregate> {
+        Self::create_optional(new_provider_data, Some(new_source_data))
+    }
+
+    /// Atomically inserts a logical provider and an optional initial Source.
+    pub fn create_optional(
+        new_provider_data: &NewProvider,
+        new_source_data: Option<&NewUpstreamSource>,
     ) -> DbResult<ProviderAggregate> {
         let conn = &mut get_connection()?;
         match conn {
@@ -650,51 +640,35 @@ impl Provider {
         }
     }
 
-    /// Atomically updates a logical provider and its only active upstream source.
-    pub fn update(
-        id_value: i64,
-        update_data: &UpdateProviderData,
-        source_update: &UpdateUpstreamSourceData,
-    ) -> DbResult<ProviderAggregate> {
+    /// Atomically updates only logical Provider fields. Source mutations use
+    /// `UpstreamSource` repository operations so Profile remains immutable.
+    pub fn update(id_value: i64, update_data: &UpdateProviderData) -> DbResult<ProviderAggregate> {
         let conn = &mut get_connection()?;
         let current_time = Utc::now().timestamp_millis();
         let mut update_data = update_data.clone();
         update_data.provider_key = None;
-        let mut source_update = source_update.clone();
-        source_update.updated_at = current_time;
-
         match conn {
             DbConnection::Postgres(conn) => {
                 use self::_postgres_model::*;
                 use crate::database::_postgres_schema::*;
-                use crate::database::upstream_source::_postgres_model::{
-                    UpdateUpstreamSourceDataDb as AggregateSourceUpdateDb,
-                    UpstreamSourceDb as AggregateSourceDb,
-                };
+                use crate::database::upstream_source::_postgres_model::UpstreamSourceDb as AggregateSourceDb;
                 update_provider_transaction!(
                     conn,
-                    AggregateSourceUpdateDb,
                     AggregateSourceDb,
                     id_value,
                     &update_data,
-                    &source_update,
                     current_time
                 )
             }
             DbConnection::Sqlite(conn) => {
                 use self::_sqlite_model::*;
                 use crate::database::_sqlite_schema::*;
-                use crate::database::upstream_source::_sqlite_model::{
-                    UpdateUpstreamSourceDataDb as AggregateSourceUpdateDb,
-                    UpstreamSourceDb as AggregateSourceDb,
-                };
+                use crate::database::upstream_source::_sqlite_model::UpstreamSourceDb as AggregateSourceDb;
                 update_provider_transaction!(
                     conn,
-                    AggregateSourceUpdateDb,
                     AggregateSourceDb,
                     id_value,
                     &update_data,
-                    &source_update,
                     current_time
                 )
             }
@@ -771,7 +745,7 @@ impl Provider {
                         )))
                     })?;
 
-                let source_updated = diesel::update(
+                diesel::update(
                     upstream_source::table.filter(
                         upstream_source::dsl::provider_id
                             .eq(target_id_value)
@@ -780,6 +754,8 @@ impl Provider {
                 )
                 .set((
                     upstream_source::dsl::deleted_at.eq(current_time),
+                    upstream_source::dsl::is_enabled.eq(false),
+                    upstream_source::dsl::is_default.eq(false),
                     upstream_source::dsl::updated_at.eq(current_time),
                 ))
                 .execute(conn)
@@ -789,10 +765,6 @@ impl Provider {
                         target_id_value, e
                     )))
                 })?;
-                if updated > 0 && source_updated != 1 {
-                    return Err(invalid_source_cardinality(target_id_value, source_updated));
-                }
-
                 diesel::update(
                     provider_api_key::table.filter(
                         provider_api_key::dsl::provider_id
@@ -869,7 +841,7 @@ impl Provider {
                 Ok::<Option<Provider>, BaseError>(db_provider_opt.map(|db_p| db_p.from_db()))
             })?
         };
-        provider.map(attach_unique_source).transpose()
+        provider.map(attach_sources).transpose()
     }
 
     /// Retrieves a provider by its ID, if it's not marked as deleted.
@@ -901,7 +873,7 @@ impl Provider {
                 Ok::<Provider, BaseError>(db_provider.from_db())
             })?
         };
-        attach_unique_source(provider)
+        attach_sources(provider)
     }
 
     /// Lists all provider records that are not marked as deleted, ordered by creation date.
@@ -926,7 +898,7 @@ impl Provider {
                 )
             })?
         };
-        attach_unique_sources(providers)
+        attach_sources_batch(providers)
     }
 
     /// Lists provider summary rows for lightweight dropdowns and maps.
@@ -940,7 +912,22 @@ impl Provider {
                 provider_key: aggregate.provider_key.clone(),
                 name: aggregate.name.clone(),
                 is_enabled: aggregate.is_enabled,
-                upstream_source: aggregate.upstream_source,
+                source_count: aggregate.upstream_sources.len() as i64,
+                enabled_source_count: aggregate
+                    .upstream_sources
+                    .iter()
+                    .filter(|source| source.is_enabled)
+                    .count() as i64,
+                default_source_id: aggregate
+                    .upstream_sources
+                    .iter()
+                    .find(|source| source.is_default)
+                    .map(|source| source.id),
+                default_source_profile_type: aggregate
+                    .upstream_sources
+                    .iter()
+                    .find(|source| source.is_default)
+                    .map(|source| source.profile_type),
             })
             .collect())
     }
@@ -974,7 +961,7 @@ impl Provider {
                 )
             })?
         };
-        attach_unique_sources(providers)
+        attach_sources_batch(providers)
     }
 
     /// Retrieves a provider's details including API keys and direct request patches by its ID.
@@ -991,29 +978,27 @@ impl Provider {
     }
 }
 
-fn attach_unique_source(provider: Provider) -> DbResult<ProviderAggregate> {
-    let upstream_source = UpstreamSource::get_unique_active_by_provider_id(provider.id)?;
+fn attach_sources(provider: Provider) -> DbResult<ProviderAggregate> {
+    let upstream_sources = UpstreamSource::list_active_by_provider_id(provider.id)?;
     Ok(ProviderAggregate {
         provider,
-        upstream_source,
+        upstream_sources,
     })
 }
 
-fn attach_unique_sources(providers: Vec<Provider>) -> DbResult<Vec<ProviderAggregate>> {
+fn attach_sources_batch(providers: Vec<Provider>) -> DbResult<Vec<ProviderAggregate>> {
     let provider_ids = providers
         .iter()
         .map(|provider| provider.id)
         .collect::<Vec<_>>();
-    let mut sources = UpstreamSource::list_unique_active_for_provider_ids(&provider_ids)?;
+    let mut sources = UpstreamSource::list_active_for_provider_ids(&provider_ids)?;
     providers
         .into_iter()
         .map(|provider| {
-            let upstream_source = sources
-                .remove(&provider.id)
-                .ok_or_else(|| invalid_source_cardinality(provider.id, 0))?;
+            let upstream_sources = sources.remove(&provider.id).unwrap_or_default();
             Ok(ProviderAggregate {
                 provider,
-                upstream_source,
+                upstream_sources,
             })
         })
         .collect()
@@ -1414,6 +1399,7 @@ mod tests {
     use super::*;
     use crate::config::SecretEncryptionConfig;
     use crate::database::_sqlite_schema::provider_api_key;
+    use crate::database::upstream_source::UpdateUpstreamSourceData;
     use crate::service::secret_encryption::{
         SecretDomain, SecretEncryptionService, SensitiveSecret,
     };
@@ -1544,25 +1530,34 @@ mod tests {
             .expect("provider summary rows should load");
 
         rows.into_iter()
-            .map(|(id, provider_key, name, is_enabled)| ProviderSummaryItem {
-                upstream_source: {
-                    use crate::database::upstream_source::_sqlite_model::UpstreamSourceDb;
+            .map(|(id, provider_key, name, is_enabled)| {
+                use crate::database::upstream_source::_sqlite_model::UpstreamSourceDb;
 
-                    upstream_source::table
-                        .filter(
-                            upstream_source::dsl::provider_id
-                                .eq(id)
-                                .and(upstream_source::dsl::deleted_at.is_null()),
-                        )
-                        .select(UpstreamSourceDb::as_select())
-                        .first::<UpstreamSourceDb>(conn)
-                        .expect("summary source should load")
-                        .from_db()
-                },
-                id,
-                provider_key,
-                name,
-                is_enabled,
+                let sources = upstream_source::table
+                    .filter(
+                        upstream_source::dsl::provider_id
+                            .eq(id)
+                            .and(upstream_source::dsl::deleted_at.is_null()),
+                    )
+                    .select(UpstreamSourceDb::as_select())
+                    .load::<UpstreamSourceDb>(conn)
+                    .expect("summary sources should load")
+                    .into_iter()
+                    .map(|source| source.from_db())
+                    .collect::<Vec<_>>();
+                let default_source = sources.iter().find(|source| source.is_default);
+
+                ProviderSummaryItem {
+                    id,
+                    provider_key,
+                    name,
+                    is_enabled,
+                    source_count: sources.len() as i64,
+                    enabled_source_count: sources.iter().filter(|source| source.is_enabled).count()
+                        as i64,
+                    default_source_id: default_source.map(|source| source.id),
+                    default_source_profile_type: default_source.map(|source| source.profile_type),
+                }
             })
             .collect()
     }
@@ -1576,11 +1571,10 @@ mod tests {
         assert_eq!(result.provider.id, 101);
         assert_eq!(result.provider.provider_key, "openai-api-example-com");
         assert_eq!(result.provider.name, "OpenAI api.example.com");
-        assert_eq!(result.provider.upstream_source.id, 103);
-        assert_eq!(
-            result.provider.upstream_source.source_key,
-            PRIMARY_SOURCE_KEY
-        );
+        assert_eq!(result.provider.upstream_sources.len(), 1);
+        assert_eq!(result.provider.upstream_sources[0].id, 103);
+        assert!(result.provider.upstream_sources[0].is_enabled);
+        assert!(result.provider.upstream_sources[0].is_default);
         assert_eq!(result.created_key.provider_id, result.provider.id);
         assert_eq!(result.created_key.key_prefix, "sk-t");
         assert_eq!(result.created_key.key_last4, "test");
@@ -1625,7 +1619,13 @@ mod tests {
         assert_eq!(row.provider_key, "openai-api-example-com");
         assert_eq!(row.name, "OpenAI api.example.com");
         assert!(row.is_enabled);
-        assert_eq!(row.upstream_source.source_key, PRIMARY_SOURCE_KEY);
+        assert_eq!(row.source_count, 1);
+        assert_eq!(row.enabled_source_count, 1);
+        assert_eq!(row.default_source_id, Some(103));
+        assert_eq!(
+            row.default_source_profile_type,
+            Some(UpstreamProfileType::Openai)
+        );
     }
 
     #[test]
@@ -1645,17 +1645,18 @@ mod tests {
                     updated_at: 1,
                     provider_api_key_mode: ProviderApiKeyMode::Queue,
                 },
-                upstream_source: UpstreamSource {
+                upstream_sources: vec![UpstreamSource {
                     id: 2,
                     provider_id: 1,
-                    source_key: PRIMARY_SOURCE_KEY.to_string(),
                     profile_type: UpstreamProfileType::Openai,
                     endpoint: "https://api.example.com/v1".to_string(),
                     use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
                     deleted_at: None,
                     created_at: 1,
                     updated_at: 1,
-                },
+                }],
             },
             api_keys: vec![],
             request_patches: vec![RequestPatchRuleResponse {
@@ -1689,8 +1690,8 @@ mod tests {
         );
         assert!(object.get("custom_fields").is_none());
         assert_eq!(
-            object["provider"]["upstream_source"]["source_key"],
-            PRIMARY_SOURCE_KEY
+            object["provider"]["upstream_sources"][0]["profile_type"],
+            "OPENAI"
         );
         assert!(object["provider"].get("endpoint").is_none());
         assert!(object["provider"].get("provider_type").is_none());
@@ -1698,7 +1699,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_aggregate_update_and_delete_keep_primary_source_atomic() {
+    async fn provider_aggregate_update_and_delete_keep_source_state_atomic() {
         let database = crate::database::TestDbContext::new_sqlite("provider-aggregate-crud.sqlite");
         database
             .run_async(async {
@@ -1715,10 +1716,11 @@ mod tests {
                     &NewUpstreamSource {
                         id: 402,
                         provider_id: 401,
-                        source_key: PRIMARY_SOURCE_KEY.to_string(),
                         profile_type: UpstreamProfileType::Openai,
                         endpoint: "https://old.example.com/v1".to_string(),
                         use_proxy: false,
+                        is_enabled: true,
+                        is_default: true,
                         created_at: 1,
                         updated_at: 1,
                     },
@@ -1733,25 +1735,26 @@ mod tests {
                         is_enabled: None,
                         provider_api_key_mode: None,
                     },
-                    &UpdateUpstreamSourceData {
-                        profile_type: Some(UpstreamProfileType::Responses),
-                        endpoint: Some("https://new.example.com/v1".to_string()),
-                        use_proxy: Some(true),
-                        updated_at: 0,
-                    },
                 )
-                .expect("aggregate should update");
+                .expect("provider should update");
                 assert_eq!(updated.name, "Updated Provider");
                 assert_eq!(updated.provider_key, "aggregate-provider");
-                assert_eq!(
-                    updated.upstream_source.profile_type,
-                    UpstreamProfileType::Responses
-                );
-                assert_eq!(
-                    updated.upstream_source.endpoint,
-                    "https://new.example.com/v1"
-                );
-                assert!(updated.upstream_source.use_proxy);
+
+                let updated_source = UpstreamSource::update(
+                    402,
+                    401,
+                    &UpdateUpstreamSourceData {
+                        endpoint: Some("https://new.example.com/v1".to_string()),
+                        use_proxy: Some(true),
+                        is_enabled: None,
+                        is_default: None,
+                        updated_at: 2,
+                    },
+                )
+                .expect("source should update");
+                assert_eq!(updated_source.profile_type, UpstreamProfileType::Openai);
+                assert_eq!(updated_source.endpoint, "https://new.example.com/v1");
+                assert!(updated_source.use_proxy);
 
                 assert_eq!(Provider::delete_with_dependents(401).expect("delete"), 1);
                 assert!(Provider::get_by_id(401).is_err());
@@ -1770,112 +1773,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_aggregate_reads_fail_closed_for_missing_or_ambiguous_source() {
+    async fn provider_aggregate_allows_zero_or_more_sources_and_preserves_family_identity() {
         let database =
             crate::database::TestDbContext::new_sqlite("provider-source-cardinality.sqlite");
         database
             .run_async(async {
-                let seed = |provider_id, source_id, key: &str| {
-                    Provider::create(
-                        &NewProvider {
-                            id: provider_id,
-                            provider_key: key.to_string(),
-                            name: key.to_string(),
-                            is_enabled: true,
-                            created_at: 1,
-                            updated_at: 1,
-                            provider_api_key_mode: ProviderApiKeyMode::Queue,
-                        },
-                        &NewUpstreamSource {
-                            id: source_id,
-                            provider_id,
-                            source_key: PRIMARY_SOURCE_KEY.to_string(),
-                            profile_type: UpstreamProfileType::Openai,
-                            endpoint: format!("https://{key}.example.com/v1"),
-                            use_proxy: false,
-                            created_at: 1,
-                            updated_at: 1,
-                        },
-                    )
-                    .expect("aggregate should seed");
-                };
-
-                seed(411, 412, "missing-source");
-                {
-                    let conn = &mut get_connection().expect("test connection");
-                    db_execute!(conn, {
-                        diesel::delete(upstream_source::table.find(412))
-                            .execute(conn)
-                            .expect("source should delete for corruption fixture");
-                    });
-                }
-                let missing = Provider::get_by_id(411).expect_err("missing source must fail");
-                assert!(format!("{missing:?}").contains("exactly one active primary"));
-                assert!(format!("{missing:?}").contains("found 0"));
-
-                seed(421, 422, "ambiguous-source");
-                {
-                    let conn = &mut get_connection().expect("test connection");
-                    db_execute!(conn, {
-                        diesel::sql_query("DROP INDEX idx_upstream_source_provider_active_unique")
-                            .execute(conn)
-                            .expect("test should remove uniqueness guard");
-                        diesel::insert_into(upstream_source::table)
-                            .values((
-                                upstream_source::dsl::id.eq(423_i64),
-                                upstream_source::dsl::provider_id.eq(421_i64),
-                                upstream_source::dsl::source_key.eq(PRIMARY_SOURCE_KEY),
-                                upstream_source::dsl::profile_type.eq(UpstreamProfileType::Gemini),
-                                upstream_source::dsl::endpoint.eq("https://second.example.com/v1"),
-                                upstream_source::dsl::use_proxy.eq(false),
-                                upstream_source::dsl::created_at.eq(1_i64),
-                                upstream_source::dsl::updated_at.eq(1_i64),
-                            ))
-                            .execute(conn)
-                            .expect("corrupt second source should insert");
-                    });
-                }
-                let ambiguous = Provider::get_by_id(421).expect_err("two sources must fail");
-                assert!(format!("{ambiguous:?}").contains("exactly one active primary"));
-                assert!(format!("{ambiguous:?}").contains("found 2"));
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn provider_aggregate_create_rejects_non_primary_source_without_partial_write() {
-        let database =
-            crate::database::TestDbContext::new_sqlite("provider-non-primary-source.sqlite");
-        database
-            .run_async(async {
-                let error = Provider::create(
+                let provider = Provider::create_optional(
                     &NewProvider {
-                        id: 431,
-                        provider_key: "non-primary-source".to_string(),
-                        name: "Non-primary Source".to_string(),
+                        id: 411,
+                        provider_key: "source-free-provider".to_string(),
+                        name: "Source Free Provider".to_string(),
                         is_enabled: true,
                         created_at: 1,
                         updated_at: 1,
                         provider_api_key_mode: ProviderApiKeyMode::Queue,
                     },
-                    &NewUpstreamSource {
-                        id: 432,
-                        provider_id: 431,
-                        source_key: "secondary".to_string(),
-                        profile_type: UpstreamProfileType::Openai,
-                        endpoint: "https://api.example.com/v1".to_string(),
-                        use_proxy: false,
-                        created_at: 1,
-                        updated_at: 1,
-                    },
+                    None,
                 )
-                .expect_err("non-primary source must be rejected");
+                .expect("provider without a source should be valid");
+                assert!(provider.upstream_sources.is_empty());
 
-                assert!(format!("{error:?}").contains("source_key=primary"));
-                assert!(
-                    Provider::list_all()
-                        .expect("providers should list")
-                        .is_empty()
+                let source = UpstreamSource::create(&NewUpstreamSource {
+                    id: 412,
+                    provider_id: 411,
+                    profile_type: UpstreamProfileType::Openai,
+                    endpoint: "https://first.example.com/v1".to_string(),
+                    use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .expect("first source should create");
+                assert!(source.is_default);
+
+                let second = UpstreamSource::create(&NewUpstreamSource {
+                    id: 413,
+                    provider_id: 411,
+                    profile_type: UpstreamProfileType::Gemini,
+                    endpoint: "https://second.example.com/v1".to_string(),
+                    use_proxy: true,
+                    is_enabled: true,
+                    is_default: false,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .expect("different source family should coexist");
+                assert!(!second.is_default);
+
+                let loaded = Provider::get_by_id(411).expect("provider should load");
+                assert_eq!(
+                    loaded
+                        .upstream_sources
+                        .iter()
+                        .map(|source| source.id)
+                        .collect::<Vec<_>>(),
+                    vec![412, 413]
                 );
             })
             .await;
@@ -1897,10 +1850,11 @@ mod tests {
                 }, &NewUpstreamSource {
                     id: 503,
                     provider_id: 501,
-                    source_key: PRIMARY_SOURCE_KEY.to_string(),
                     profile_type: UpstreamProfileType::Openai,
                     endpoint: "https://api.example.com/v1".to_string(),
                     use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -1916,10 +1870,11 @@ mod tests {
                 }, &NewUpstreamSource {
                     id: 504,
                     provider_id: 502,
-                    source_key: PRIMARY_SOURCE_KEY.to_string(),
                     profile_type: UpstreamProfileType::Openai,
                     endpoint: "https://other.example.com/v1".to_string(),
                     use_proxy: false,
+                    is_enabled: true,
+                    is_default: true,
                     created_at: 1,
                     updated_at: 1,
                 })

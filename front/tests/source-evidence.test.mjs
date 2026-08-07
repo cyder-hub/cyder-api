@@ -20,18 +20,16 @@ test("Source evidence distinguishes a selected Source from a pre-routing failure
     formatSourceIdentity(
       {
         source_id: 42,
-        source_key: "primary",
         source_profile_type: "OPENAI",
       },
       "Source not selected",
     ),
-    "primary · OPENAI",
+    "#42 · OPENAI",
   );
   assert.equal(
     formatSourceIdentity(
       {
         source_id: null,
-        source_key: null,
         source_profile_type: null,
       },
       "Source not selected",
@@ -77,10 +75,12 @@ test("Record and Runtime views render Source-first evidence without legacy Runti
       readSource("src/pages/provider-runtime/components/ProviderRuntimeTable.vue"),
     ]);
 
-  for (const field of ["source_id", "source_key", "source_profile_type"]) {
+  for (const field of ["source_id", "source_profile_type"]) {
     assert.match(recordTypes, new RegExp(`${field}:`));
     assert.match(runtimeTypes, new RegExp(`${field}:`));
   }
+  assert.doesNotMatch(recordTypes, /source_key:/);
+  assert.doesNotMatch(runtimeTypes, /source_key:/);
   assert.match(recordTypes, /source_endpoint:/);
   assert.match(runtimeTypes, /source_endpoint:/);
   assert.doesNotMatch(runtimeTypes, /provider_type:/);

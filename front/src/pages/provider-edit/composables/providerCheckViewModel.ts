@@ -26,5 +26,5 @@ export function buildCheckOptions<T>(
 export function formatCheckSourceEvidence(
   result: ProviderCheckResponse,
 ): string {
-  return `${result.source_key} · ${result.profile_type} · source #${result.source_id}`;
+  return `${result.profile_type} · source #${result.source_id}`;
 }

@@ -117,6 +117,7 @@ impl AppState {
         let admin = Arc::new(AdminServices::new(
             Arc::clone(&catalog),
             Arc::clone(&secret_encryption),
+            Arc::clone(&runtime_backend.source_circuit),
         ));
         let provider_key_selector = ProviderKeySelector::new(
             Arc::clone(&catalog),
@@ -329,10 +330,6 @@ mod tests {
         let secret_encryption = Arc::new(SecretEncryptionService::from_config(
             &config.secret_encryption,
         ));
-        let admin = Arc::new(AdminServices::new(
-            Arc::clone(&catalog),
-            Arc::clone(&secret_encryption),
-        ));
         let infra = Arc::new(
             AppInfra::new_with_config(
                 config.outbound_http.clone(),
@@ -346,6 +343,11 @@ mod tests {
         let runtime_backend = RuntimeStateBackendBundle::from_config(&CONFIG, true)
             .await
             .expect("test runtime backend should initialize");
+        let admin = Arc::new(AdminServices::new(
+            Arc::clone(&catalog),
+            Arc::clone(&secret_encryption),
+            Arc::clone(&runtime_backend.source_circuit),
+        ));
         let provider_key_selector = ProviderKeySelector::new(
             Arc::clone(&catalog),
             Arc::clone(&runtime_backend.provider_key_cursor_store),
@@ -379,7 +381,7 @@ mod tests {
         assert_eq!(Arc::strong_count(&app_state.admin), 1);
         assert_eq!(Arc::strong_count(&app_state.provider_key_selector), 1);
         assert_eq!(Arc::strong_count(&app_state.api_key_governance), 1);
-        assert_eq!(Arc::strong_count(&app_state.source_circuit), 1);
+        assert_eq!(Arc::strong_count(&app_state.source_circuit), 2);
         assert_eq!(
             Arc::strong_count(&app_state.reasoning_continuation_store),
             1

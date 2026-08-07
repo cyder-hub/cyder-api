@@ -5,7 +5,7 @@ use crate::{
         ReasoningConfigMode, ReasoningConfigScope, ReasoningPatchFamily, ReasoningPreset,
     },
     database::runtime_feature_config::{RuntimeFeatureConfigScope, RuntimeFeatureKey},
-    schema::enum_def::{UpstreamProfileType, UpstreamProtocol},
+    schema::enum_def::{DownstreamProtocol, UpstreamProfileType, UpstreamProtocol},
     service::{
         app_state::AppState,
         cache::types::{
@@ -30,7 +30,9 @@ pub struct ExecutionTarget {
     pub provider: Arc<CacheProvider>,
     pub model: Arc<CacheModel>,
     pub upstream_source: Arc<CacheUpstreamSource>,
+    pub downstream_protocol: DownstreamProtocol,
     pub upstream_protocol: UpstreamProtocol,
+    pub selection_reason: SourceSelectionReason,
     pub reasoning_config_id: Option<i64>,
     pub reasoning_config_scope: Option<ReasoningConfigScope>,
     pub reasoning_config_source: Option<ReasoningConfigSource>,
@@ -39,6 +41,21 @@ pub struct ExecutionTarget {
     pub reasoning_preset: Option<ReasoningPreset>,
     pub reasoning_suffix: Option<String>,
     pub runtime_features: TargetRuntimeFeatures,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceSelectionReason {
+    ProtocolMatch,
+    DefaultTransform,
+}
+
+impl SourceSelectionReason {
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::ProtocolMatch => "protocol_match",
+            Self::DefaultTransform => "default_transform",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +72,7 @@ pub enum RuntimeFeatureConfigSource {
 }
 
 impl RuntimeFeatureConfigSource {
+    #[cfg(test)]
     pub(crate) fn as_key(self) -> &'static str {
         match self {
             Self::DefaultFalse => "default_false",
@@ -126,6 +144,7 @@ pub(crate) enum ExecutionPlanBuildError {
     InvalidModelFormat(String),
     TargetNotFound(String),
     UnsupportedCapability(String),
+    ProviderConfiguration(String),
     CatalogUnavailable(String),
 }
 
@@ -135,6 +154,7 @@ impl ExecutionPlanBuildError {
             Self::InvalidModelFormat(_) => Self::InvalidModelFormat(message),
             Self::TargetNotFound(_) => Self::TargetNotFound(message),
             Self::UnsupportedCapability(_) => Self::UnsupportedCapability(message),
+            Self::ProviderConfiguration(_) => Self::ProviderConfiguration(message),
             Self::CatalogUnavailable(_) => Self::CatalogUnavailable(message),
         }
     }
@@ -144,6 +164,7 @@ impl ExecutionPlanBuildError {
             Self::InvalidModelFormat(message)
             | Self::TargetNotFound(message)
             | Self::UnsupportedCapability(message)
+            | Self::ProviderConfiguration(message)
             | Self::CatalogUnavailable(message) => message,
         }
     }
@@ -158,19 +179,21 @@ impl fmt::Display for ExecutionPlanBuildError {
 impl std::error::Error for ExecutionPlanBuildError {}
 
 impl ExecutionPlan {
+    #[cfg(test)]
     pub fn target_summary_for_log(&self) -> String {
         let target = &self.target;
         format!(
-            "base_name={}; provider={}/{}; model={}/{}; source={}/{}({:?}); llm_api={:?}; reasoning_suffix={:?}; runtime_feature_openai_reasoning_content_repair={}/{}",
+            "base_name={}; provider={}/{}; model={}/{}; source={}({:?}); downstream_protocol={:?}; upstream_protocol={:?}; selection_reason={}; reasoning_suffix={:?}; runtime_feature_openai_reasoning_content_repair={}/{}",
             self.base_requested_name,
             target.provider.id,
             target.provider.provider_key,
             target.model.id,
             target.model.model_name,
             target.upstream_source.id,
-            target.upstream_source.source_key,
             target.upstream_source.profile_type,
+            target.downstream_protocol,
             target.upstream_protocol,
+            target.selection_reason.as_key(),
             self.resolved_reasoning_suffix,
             target
                 .runtime_features
@@ -199,6 +222,7 @@ fn parse_provider_model(value: &str) -> (&str, &str) {
 fn build_direct_execution_plan(
     catalog: &CacheModelsCatalog,
     requested_name: &str,
+    downstream_protocol: DownstreamProtocol,
 ) -> Result<ExecutionPlan, ExecutionPlanBuildError> {
     let (provider_key, model_name) = parse_provider_model(requested_name);
     if provider_key.is_empty() || model_name.is_empty() {
@@ -232,9 +256,10 @@ fn build_direct_execution_plan(
                 requested_name
             ))
         })?;
+    let (selected_source, selection_reason) = select_source(&provider, downstream_protocol)?;
     // Freeze the selected source before resolving Provider/Model-scoped runtime
     // configuration so every later stage observes the same execution entry.
-    let upstream_source = Arc::new(provider.upstream_source.clone());
+    let upstream_source = Arc::new(selected_source);
     let upstream_protocol = determine_upstream_protocol(&upstream_source);
     let runtime_features = resolve_target_runtime_features(catalog, &provider, &model);
     Ok(ExecutionPlan {
@@ -247,7 +272,9 @@ fn build_direct_execution_plan(
             provider: Arc::new(provider),
             model: Arc::new(model),
             upstream_source,
+            downstream_protocol,
             upstream_protocol,
+            selection_reason,
             reasoning_config_id: None,
             reasoning_config_scope: None,
             reasoning_config_source: None,
@@ -258,6 +285,72 @@ fn build_direct_execution_plan(
             runtime_features,
         },
     })
+}
+
+fn downstream_wire_family(protocol: DownstreamProtocol) -> UpstreamProtocol {
+    match protocol {
+        DownstreamProtocol::Openai => UpstreamProtocol::Openai,
+        DownstreamProtocol::Responses => UpstreamProtocol::Responses,
+        DownstreamProtocol::Anthropic => UpstreamProtocol::Anthropic,
+        DownstreamProtocol::Gemini => UpstreamProtocol::Gemini,
+    }
+}
+
+fn select_source(
+    provider: &CacheProvider,
+    downstream_protocol: DownstreamProtocol,
+) -> Result<(CacheUpstreamSource, SourceSelectionReason), ExecutionPlanBuildError> {
+    let mut family_counts = std::collections::HashMap::<UpstreamProtocol, usize>::new();
+    let mut default_count = 0usize;
+    for source in &provider.upstream_sources {
+        let family = determine_upstream_protocol(source);
+        *family_counts.entry(family).or_default() += 1;
+        if source.is_default {
+            default_count += 1;
+        }
+    }
+    if family_counts.values().any(|count| *count > 1) || default_count > 1 {
+        return Err(ExecutionPlanBuildError::ProviderConfiguration(format!(
+            "Provider '{}' has duplicate active Source family/default state",
+            provider.provider_key
+        )));
+    }
+
+    let desired_family = downstream_wire_family(downstream_protocol);
+    let exact = provider
+        .upstream_sources
+        .iter()
+        .filter(|source| source.is_enabled && determine_upstream_protocol(source) == desired_family)
+        .cloned()
+        .collect::<Vec<_>>();
+    match exact.as_slice() {
+        [source] => return Ok((source.clone(), SourceSelectionReason::ProtocolMatch)),
+        [] => {}
+        _ => {
+            return Err(ExecutionPlanBuildError::ProviderConfiguration(format!(
+                "Provider '{}' has multiple enabled Sources for downstream protocol {:?}",
+                provider.provider_key, downstream_protocol
+            )));
+        }
+    }
+
+    let defaults = provider
+        .upstream_sources
+        .iter()
+        .filter(|source| source.is_enabled && source.is_default)
+        .cloned()
+        .collect::<Vec<_>>();
+    match defaults.as_slice() {
+        [source] => Ok((source.clone(), SourceSelectionReason::DefaultTransform)),
+        [] => Err(ExecutionPlanBuildError::ProviderConfiguration(format!(
+            "Provider '{}' has no enabled Source matching downstream protocol {:?} and no enabled default Source",
+            provider.provider_key, downstream_protocol
+        ))),
+        _ => Err(ExecutionPlanBuildError::ProviderConfiguration(format!(
+            "Provider '{}' has multiple enabled default Sources",
+            provider.provider_key
+        ))),
+    }
 }
 
 pub(crate) fn target_supports_reasoning_preset(
@@ -397,16 +490,21 @@ fn resolve_effective_runtime_feature(
 fn build_execution_plan_from_catalog(
     catalog: &CacheModelsCatalog,
     requested_name: &str,
+    downstream_protocol: DownstreamProtocol,
 ) -> Result<ExecutionPlan, ExecutionPlanBuildError> {
-    match build_direct_execution_plan(catalog, requested_name) {
+    match build_direct_execution_plan(catalog, requested_name, downstream_protocol) {
         Ok(plan) => Ok(plan),
         Err(exact_error) => {
             let suffixes = enabled_reasoning_suffixes(catalog);
             let Some(resolved_name) = parse_reasoning_suffix(requested_name, &suffixes) else {
                 return Err(exact_error);
             };
-            let mut plan = build_direct_execution_plan(catalog, &resolved_name.base_requested_name)
-                .map_err(|base_error| {
+            let mut plan = build_direct_execution_plan(
+                catalog,
+                &resolved_name.base_requested_name,
+                downstream_protocol,
+            )
+            .map_err(|base_error| {
                     let message = format!(
                         "Model '{}' uses a known reasoning suffix, but base model '{}' could not be resolved: {}",
                         resolved_name.original_requested_name,
@@ -438,6 +536,7 @@ fn build_execution_plan_from_catalog(
 pub(crate) async fn build_execution_plan(
     app_state: &Arc<AppState>,
     requested_name: &str,
+    downstream_protocol: DownstreamProtocol,
 ) -> Result<ExecutionPlan, ExecutionPlanBuildError> {
     let catalog = app_state
         .catalog
@@ -453,14 +552,19 @@ pub(crate) async fn build_execution_plan(
                 requested_name
             ))
         })?;
-    build_execution_plan_from_catalog(catalog.as_ref(), requested_name)
+    build_execution_plan_from_catalog(catalog.as_ref(), requested_name, downstream_protocol)
 }
 
 #[cfg(test)]
 mod execution_plan_error_tests {
-    use super::{ExecutionPlanBuildError, build_execution_plan_from_catalog};
+    use super::{
+        ExecutionPlanBuildError, SourceSelectionReason, build_execution_plan_from_catalog,
+        select_source,
+    };
     use crate::{
-        schema::enum_def::{ProviderApiKeyMode, UpstreamProfileType, UpstreamProtocol},
+        schema::enum_def::{
+            DownstreamProtocol, ProviderApiKeyMode, UpstreamProfileType, UpstreamProtocol,
+        },
         service::cache::types::{
             CacheModel, CacheModelsCatalog, CacheProvider, CacheUpstreamSource,
         },
@@ -483,13 +587,14 @@ mod execution_plan_error_tests {
             name: "Gemini OpenAI".to_string(),
             provider_api_key_mode: ProviderApiKeyMode::Queue,
             is_enabled: provider_enabled,
-            upstream_source: CacheUpstreamSource {
+            upstream_sources: vec![CacheUpstreamSource {
                 id: 12,
-                source_key: "primary".to_string(),
                 profile_type: UpstreamProfileType::GeminiOpenai,
                 endpoint: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
                 use_proxy: true,
-            },
+                is_enabled: true,
+                is_default: true,
+            }],
         });
         catalog.models.push(CacheModel {
             id: 13,
@@ -508,10 +613,41 @@ mod execution_plan_error_tests {
         catalog
     }
 
+    fn source(
+        id: i64,
+        profile_type: UpstreamProfileType,
+        is_enabled: bool,
+        is_default: bool,
+    ) -> CacheUpstreamSource {
+        CacheUpstreamSource {
+            id,
+            profile_type,
+            endpoint: format!("https://source-{id}.example.com"),
+            use_proxy: false,
+            is_enabled,
+            is_default,
+        }
+    }
+
+    fn provider_with_sources(sources: Vec<CacheUpstreamSource>) -> CacheProvider {
+        CacheProvider {
+            id: 21,
+            provider_key: "multi-source".to_string(),
+            name: "Multi Source".to_string(),
+            provider_api_key_mode: ProviderApiKeyMode::Queue,
+            is_enabled: true,
+            upstream_sources: sources,
+        }
+    }
+
     #[test]
     fn malformed_model_name_is_a_parse_error() {
-        let error = build_execution_plan_from_catalog(&empty_catalog(), "gpt-4o")
-            .expect_err("provider prefix is required");
+        let error = build_execution_plan_from_catalog(
+            &empty_catalog(),
+            "gpt-4o",
+            DownstreamProtocol::Openai,
+        )
+        .expect_err("provider prefix is required");
 
         assert!(matches!(
             error,
@@ -521,29 +657,39 @@ mod execution_plan_error_tests {
 
     #[test]
     fn missing_direct_target_is_not_a_parse_error() {
-        let error = build_execution_plan_from_catalog(&empty_catalog(), "openai/gpt-4o")
-            .expect_err("missing provider should fail resolution");
+        let error = build_execution_plan_from_catalog(
+            &empty_catalog(),
+            "openai/gpt-4o",
+            DownstreamProtocol::Openai,
+        )
+        .expect_err("missing provider should fail resolution");
 
         assert!(matches!(error, ExecutionPlanBuildError::TargetNotFound(_)));
     }
 
     #[test]
-    fn direct_plan_freezes_primary_source_before_runtime_config_resolution() {
+    fn direct_plan_freezes_selected_source_before_runtime_config_resolution() {
         let mut catalog = direct_catalog(true);
 
-        let plan = build_execution_plan_from_catalog(&catalog, "gemini-openai/gemini-2.5-flash")
-            .expect("direct plan should resolve");
-        catalog.providers[0].upstream_source.endpoint = "https://changed.invalid".to_string();
+        let plan = build_execution_plan_from_catalog(
+            &catalog,
+            "gemini-openai/gemini-2.5-flash",
+            DownstreamProtocol::Openai,
+        )
+        .expect("direct plan should resolve");
+        catalog.providers[0].upstream_sources[0].endpoint = "https://changed.invalid".to_string();
 
         assert_eq!(plan.target.upstream_source.id, 12);
-        assert_eq!(plan.target.upstream_source.source_key, "primary");
         assert_eq!(
             plan.target.upstream_source.endpoint,
             "https://generativelanguage.googleapis.com/v1beta/openai"
         );
         assert_eq!(plan.target.upstream_protocol, UpstreamProtocol::Openai);
         assert!(plan.target.is_openai_compatible_generation());
-        assert!(plan.target_summary_for_log().contains("source=12/primary"));
+        assert!(
+            plan.target_summary_for_log()
+                .contains("source=12(GeminiOpenai)")
+        );
     }
 
     #[test]
@@ -551,9 +697,87 @@ mod execution_plan_error_tests {
         let error = build_execution_plan_from_catalog(
             &direct_catalog(false),
             "gemini-openai/gemini-2.5-flash",
+            DownstreamProtocol::Openai,
         )
         .expect_err("disabled provider must fail before execution");
 
         assert!(matches!(error, ExecutionPlanBuildError::TargetNotFound(_)));
+    }
+
+    #[test]
+    fn selector_maps_all_downstream_protocols_to_exact_wire_families() {
+        let provider = provider_with_sources(vec![
+            source(31, UpstreamProfileType::Openai, true, true),
+            source(32, UpstreamProfileType::Responses, true, false),
+            source(33, UpstreamProfileType::Anthropic, true, false),
+            source(34, UpstreamProfileType::Gemini, true, false),
+            source(35, UpstreamProfileType::Ollama, true, false),
+        ]);
+
+        for (downstream_protocol, expected_source_id) in [
+            (DownstreamProtocol::Openai, 31),
+            (DownstreamProtocol::Responses, 32),
+            (DownstreamProtocol::Anthropic, 33),
+            (DownstreamProtocol::Gemini, 34),
+        ] {
+            let (selected, reason) =
+                select_source(&provider, downstream_protocol).expect("exact Source should win");
+            assert_eq!(selected.id, expected_source_id);
+            assert_eq!(reason, SourceSelectionReason::ProtocolMatch);
+        }
+    }
+
+    #[test]
+    fn selector_uses_enabled_default_when_exact_source_is_disabled() {
+        let provider = provider_with_sources(vec![
+            source(41, UpstreamProfileType::Openai, false, false),
+            source(42, UpstreamProfileType::Ollama, true, true),
+        ]);
+
+        let (selected, reason) =
+            select_source(&provider, DownstreamProtocol::Openai).expect("default should apply");
+        assert_eq!(selected.id, 42);
+        assert_eq!(reason, SourceSelectionReason::DefaultTransform);
+    }
+
+    #[test]
+    fn selector_fails_closed_for_zero_sources_and_missing_default() {
+        let zero_source = provider_with_sources(vec![]);
+        assert!(matches!(
+            select_source(&zero_source, DownstreamProtocol::Openai),
+            Err(ExecutionPlanBuildError::ProviderConfiguration(_))
+        ));
+
+        let no_default = provider_with_sources(vec![source(
+            51,
+            UpstreamProfileType::Responses,
+            true,
+            false,
+        )]);
+        assert!(matches!(
+            select_source(&no_default, DownstreamProtocol::Openai),
+            Err(ExecutionPlanBuildError::ProviderConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn selector_fails_closed_for_duplicate_family_or_default_state() {
+        let duplicate_family = provider_with_sources(vec![
+            source(61, UpstreamProfileType::Openai, true, true),
+            source(62, UpstreamProfileType::GeminiOpenai, false, false),
+        ]);
+        assert!(matches!(
+            select_source(&duplicate_family, DownstreamProtocol::Openai),
+            Err(ExecutionPlanBuildError::ProviderConfiguration(_))
+        ));
+
+        let duplicate_default = provider_with_sources(vec![
+            source(63, UpstreamProfileType::Responses, true, true),
+            source(64, UpstreamProfileType::Ollama, true, true),
+        ]);
+        assert!(matches!(
+            select_source(&duplicate_default, DownstreamProtocol::Openai),
+            Err(ExecutionPlanBuildError::ProviderConfiguration(_))
+        ));
     }
 }

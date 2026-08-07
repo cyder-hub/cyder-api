@@ -1635,11 +1635,11 @@ mod tests {
             );
 
             INSERT INTO upstream_source (
-                id, provider_id, source_key, profile_type, endpoint, use_proxy,
-                deleted_at, created_at, updated_at
+                id, provider_id, profile_type, endpoint, use_proxy,
+                is_enabled, is_default, deleted_at, created_at, updated_at
             ) VALUES (
-                15, 10, 'primary', 'OPENAI', 'https://api.example.com/v1', 0,
-                NULL, 1, 1
+                15, 10, 'OPENAI', 'https://api.example.com/v1', 0,
+                1, 1, NULL, 1, 1
             );
 
             INSERT INTO provider_api_key (
@@ -1673,7 +1673,7 @@ mod tests {
                 provider_id, provider_api_key_id, model_id, source_id,
                 provider_key_snapshot, provider_name_snapshot,
                 model_name_snapshot, real_model_name_snapshot,
-                source_key_snapshot, source_profile_type_snapshot, source_endpoint_snapshot,
+                source_profile_type_snapshot, source_endpoint_snapshot,
                 upstream_protocol,
                 estimated_cost_nanos, estimated_cost_currency,
                 total_input_tokens, total_output_tokens, reasoning_tokens, total_tokens,
@@ -1687,7 +1687,7 @@ mod tests {
                 10, 20, 30, 15,
                 'openai-main', 'OpenAI Main',
                 'gpt-test', 'gpt-test-real',
-                'primary', 'OPENAI', 'https://api.example.com/v1', 'OPENAI',
+                'OPENAI', 'https://api.example.com/v1', 'OPENAI',
                 500, 'USD',
                 10, 20, 5, 35,
                 1000, 1500
@@ -1700,7 +1700,7 @@ mod tests {
                 10, 20, 30, 15,
                 'openai-main', 'OpenAI Main',
                 'gpt-test', 'gpt-test-real',
-                'primary', 'OPENAI', 'https://api.example.com/v1', 'OPENAI',
+                'OPENAI', 'https://api.example.com/v1', 'OPENAI',
                 300, 'USD',
                 7, 13, 2, 22,
                 2000, 2550
@@ -1713,7 +1713,7 @@ mod tests {
                 NULL, NULL, NULL, NULL,
                 NULL, NULL,
                 NULL, NULL,
-                NULL, NULL, NULL, NULL,
+                NULL, NULL, NULL,
                 NULL, NULL,
                 1, 2, 0, 3,
                 3000, 3100

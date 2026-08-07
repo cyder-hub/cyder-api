@@ -22,7 +22,7 @@
           size="sm"
           class="w-full sm:w-auto"
           @click="handleFetchRemoteModels"
-          :disabled="!editingData.id"
+          :disabled="!editingData.id || props.sourceId === null"
         >
           <CloudDownload class="mr-1.5 h-4 w-4" />
           {{ $t("providerEditPage.buttonFetchRemote") }}
@@ -30,6 +30,13 @@
       </div>
       </template>
     </SectionHeader>
+
+    <p
+      v-if="props.sourceId !== null"
+      class="rounded-lg border border-blue-100 bg-blue-50/60 px-3.5 py-3 text-xs leading-5 text-blue-800"
+    >
+      {{ $t("providerEditPage.alert.discoveryInheritanceWarning", { source: selectedSourceEvidence }) }}
+    </p>
 
     <div
       v-if="editingData.models.length === 0"
@@ -339,6 +346,9 @@ import {
 
 const { t: $t } = useI18n();
 const editingData = defineModel<EditingProviderData>("editingData", { required: true });
+const props = defineProps<{
+  sourceId: number | null;
+}>();
 
 const isSheetOpen = ref(false);
 const sheetModelId = ref<number | null>(null);
@@ -382,6 +392,13 @@ const emit = defineEmits<{
 const hasUncommittedModels = computed(() => {
   if (!editingData.value) return false;
   return editingData.value.models.some((m) => m.id === null);
+});
+
+const selectedSourceEvidence = computed(() => {
+  const source = editingData.value.upstream_sources.find(
+    (item) => item.id === props.sourceId,
+  );
+  return source ? `${source.profile_type} · #${source.id}` : `#${props.sourceId}`;
 });
 
 const addModel = () => {
@@ -499,7 +516,14 @@ const handleFetchRemoteModels = async () => {
   }
 
   try {
-    const response = await providerService.getProviderRemoteModels(data.id);
+    const source = data.upstream_sources.find(
+      (item) => item.id === props.sourceId,
+    );
+    if (!source || props.sourceId === null) {
+      toastController.warn($t("providerEditPage.alert.noSourceForModel"));
+      return;
+    }
+    const response = await providerService.getProviderRemoteModels(data.id, props.sourceId);
 
     let remoteModels: ProviderRemoteModelItem[] = [];
     let isGeminiLike = false;
@@ -533,7 +557,7 @@ const handleFetchRemoteModels = async () => {
     const newModels: LocalEditableModelItem[] = [];
     remoteModels.forEach((item) => {
       let model_name = (item.id as string) || (item.name as string);
-      const profileType = data.upstream_source.profile_type;
+      const profileType = source.profile_type;
       const isGoogleOwned = item.owned_by === "google";
       const isGeminiProvider =
         profileType === "GEMINI" || profileType === "VERTEX";
@@ -570,16 +594,21 @@ const handleFetchRemoteModels = async () => {
       toastController.success(
         $t("providerEditPage.alert.newModelsAdded", {
           count: newModels.length,
-          source: `${response.source_key} · ${response.profile_type} · #${response.source_id}`,
+          source: `${response.profile_type} · #${response.source_id}`,
         }),
       );
     } else {
       toastController.info(
         $t("providerEditPage.alert.noNewModelsFromSource", {
-          source: `${response.source_key} · ${response.profile_type} · #${response.source_id}`,
+          source: `${response.profile_type} · #${response.source_id}`,
         }),
       );
     }
+    toastController.info(
+      $t("providerEditPage.alert.discoveryInheritanceWarning", {
+        source: `${response.profile_type} · #${response.source_id}`,
+      }),
+    );
   } catch (error) {
     console.error("Failed to fetch remote models:", error);
     toastController.error(

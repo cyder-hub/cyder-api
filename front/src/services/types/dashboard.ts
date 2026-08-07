@@ -54,6 +54,10 @@ export interface DashboardTodayStats {
 
 export interface DashboardRuntimeSummary {
   window: DashboardRuntimeWindow;
+  total_provider_count: number;
+  enabled_provider_count: number;
+  total_source_count: number;
+  enabled_source_count: number;
   healthy_count: number;
   degraded_count: number;
   half_open_count: number;

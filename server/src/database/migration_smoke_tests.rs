@@ -25,6 +25,7 @@ const POSTGRES_SMOKE_DATABASE: &str = "cyder_r1_migration_smoke";
 const POSTGRES_CLEAN_BASELINE_VERSION: &str = "20260423180000";
 const R26_HASH: &str = "bb70cc6e62109d41551197d981876cd7b8ae92140ca73a2fc95c55a43c860d6b";
 const R39_UPSTREAM_SOURCE_VERSION: &str = "20260805090000";
+const R310_PROVIDER_MULTI_SOURCE_VERSION: &str = "20260806090000";
 
 const LEGACY_SQLITE_API_KEY_SCHEMA: &str = r#"
 CREATE TABLE api_key (
@@ -194,6 +195,12 @@ struct CountRow {
     count: i64,
 }
 
+#[derive(QueryableByName)]
+struct TextValueRow {
+    #[diesel(sql_type = Text)]
+    value: String,
+}
+
 fn assert_bootstrap_versions_recorded(
     applied_versions: Vec<String>,
     clean_baseline_version: &str,
@@ -239,13 +246,21 @@ fn migrate_sqlite_to_before_r39(
     let mut migrations = connection
         .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
         .expect("pending sqlite upgrade migrations should load");
+    let r310 = migrations
+        .pop()
+        .expect("R3.10 sqlite migration should exist");
+    assert_eq!(
+        r310.name().version().to_string(),
+        R310_PROVIDER_MULTI_SOURCE_VERSION,
+        "R3.10 must be the final sqlite migration in this release"
+    );
     let r39 = migrations
         .pop()
         .expect("R3.9 sqlite migration should exist");
     assert_eq!(
         r39.name().version().to_string(),
         R39_UPSTREAM_SOURCE_VERSION,
-        "R3.9 must remain the final sqlite migration in this release"
+        "R3.9 must remain immediately before R3.10"
     );
     connection
         .run_migrations(&migrations)
@@ -263,13 +278,21 @@ fn migrate_postgres_to_before_r39(connection: &mut PgConnection) -> Box<dyn Migr
     let mut migrations = connection
         .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
         .expect("pending postgres upgrade migrations should load");
+    let r310 = migrations
+        .pop()
+        .expect("R3.10 postgres migration should exist");
+    assert_eq!(
+        r310.name().version().to_string(),
+        R310_PROVIDER_MULTI_SOURCE_VERSION,
+        "R3.10 must be the final postgres migration in this release"
+    );
     let r39 = migrations
         .pop()
         .expect("R3.9 postgres migration should exist");
     assert_eq!(
         r39.name().version().to_string(),
         R39_UPSTREAM_SOURCE_VERSION,
-        "R3.9 must remain the final postgres migration in this release"
+        "R3.9 must remain immediately before R3.10"
     );
     connection
         .run_migrations(&migrations)
@@ -644,6 +667,131 @@ fn assert_postgres_r39_source_schema(connection: &mut PgConnection) {
     assert_eq!(legacy_enum, 0);
 }
 
+fn assert_sqlite_r310_source_schema(connection: &mut diesel::SqliteConnection) {
+    for column in [
+        "id",
+        "provider_id",
+        "profile_type",
+        "endpoint",
+        "use_proxy",
+        "is_enabled",
+        "is_default",
+        "deleted_at",
+        "created_at",
+        "updated_at",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "upstream_source", column),
+            1,
+            "SQLite R3.10 upstream_source must contain {column}"
+        );
+    }
+    for column in ["source_key"] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "upstream_source", column),
+            0,
+            "SQLite R3.10 upstream_source must not contain {column}"
+        );
+    }
+    for column in [
+        "source_id",
+        "source_profile_type_snapshot",
+        "source_endpoint_snapshot",
+    ] {
+        assert_eq!(
+            sqlite_table_column_count(connection, "request_log", column),
+            1,
+            "SQLite R3.10 request_log must contain {column}"
+        );
+    }
+    assert_eq!(
+        sqlite_table_column_count(connection, "request_log", "source_key_snapshot"),
+        0,
+        "SQLite R3.10 request_log must not contain source_key_snapshot"
+    );
+
+    for index in [
+        "idx_upstream_source_provider_default_unique",
+        "idx_upstream_source_provider_wire_family_unique",
+    ] {
+        let count = diesel::sql_query(format!(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name = '{index}'"
+        ))
+        .get_result::<CountRow>(connection)
+        .expect("SQLite R3.10 source index should query")
+        .count;
+        assert_eq!(count, 1, "SQLite R3.10 must contain index {index}");
+    }
+}
+
+fn assert_postgres_r310_source_schema(connection: &mut PgConnection) {
+    let source_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'upstream_source'
+           AND column_name IN (
+               'id', 'provider_id', 'profile_type', 'endpoint', 'use_proxy',
+               'is_enabled', 'is_default', 'deleted_at', 'created_at', 'updated_at'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.10 upstream_source columns should query")
+    .count;
+    assert_eq!(source_columns, 10);
+    let legacy_source_key = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'upstream_source'
+           AND column_name = 'source_key'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL source_key column should query")
+    .count;
+    assert_eq!(legacy_source_key, 0);
+
+    let request_source_columns = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name IN (
+               'source_id', 'source_profile_type_snapshot', 'source_endpoint_snapshot'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.10 request source columns should query")
+    .count;
+    assert_eq!(request_source_columns, 3);
+    let legacy_snapshot = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'request_log'
+           AND column_name = 'source_key_snapshot'",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL source_key_snapshot column should query")
+    .count;
+    assert_eq!(legacy_snapshot, 0);
+
+    let indexes = diesel::sql_query(
+        "SELECT COUNT(*) AS count
+         FROM pg_indexes
+         WHERE schemaname = 'public'
+           AND tablename = 'upstream_source'
+           AND indexname IN (
+               'idx_upstream_source_provider_default_unique',
+               'idx_upstream_source_provider_wire_family_unique'
+           )",
+    )
+    .get_result::<CountRow>(connection)
+    .expect("PostgreSQL R3.10 source indexes should query")
+    .count;
+    assert_eq!(indexes, 2);
+}
+
 fn seed_sqlite_r39_boundary_fixture(connection: &mut diesel::SqliteConnection) {
     connection
         .batch_execute(
@@ -966,7 +1114,7 @@ fn sqlite_clean_upgrade_chain_from_empty() {
 
     run_sqlite_migrations(&mut connection).expect("sqlite clean + upgrade migrations should run");
     assert_sqlite_request_log_timing_schema(&mut connection);
-    assert_sqlite_r39_source_schema(&mut connection);
+    assert_sqlite_r310_source_schema(&mut connection);
 
     let applied_versions = connection
         .applied_migrations()
@@ -997,6 +1145,192 @@ fn sqlite_clean_upgrade_chain_from_empty() {
             .has_pending_migration(SQLITE_UPGRADE_MIGRATIONS)
             .expect("sqlite pending migrations should remain queryable"),
         "sqlite second migration run should remain fully applied"
+    );
+}
+
+#[test]
+fn sqlite_r310_source_migration_preserves_rows_and_enforces_source_contract() {
+    let (_temp_dir, mut connection) =
+        open_test_sqlite_connection("r310-provider-multi-source.sqlite");
+    let r39 = migrate_sqlite_to_before_r39(&mut connection);
+
+    connection
+        .run_migration(r39.as_ref())
+        .expect("R3.9 sqlite migration should run before R3.10 fixture");
+    connection
+        .batch_execute(
+            "INSERT INTO api_key (
+                id, api_key_hash, key_prefix, key_last4, name, default_action,
+                is_enabled, created_at, updated_at
+             ) VALUES (
+                1, 'r310-api-key-hash', 'r310', '0001', 'R3.10 API key', 'ALLOW', 1, 1, 1
+             );
+             INSERT INTO provider (
+                id, provider_key, name, is_enabled, created_at, updated_at,
+                provider_api_key_mode
+             ) VALUES (
+                30, 'r310-provider', 'R3.10 Provider', 1, 1, 1, 'QUEUE'
+             );
+             INSERT INTO upstream_source (
+                id, provider_id, source_key, profile_type, endpoint, use_proxy,
+                created_at, updated_at
+             ) VALUES (
+                31, 30, 'primary', 'OPENAI', 'https://source.example/v1', 0, 1, 1
+             );
+             INSERT INTO request_log (
+                id, request_id, api_key_id, requested_model_name,
+                downstream_protocol, overall_status, request_received_at,
+                is_stream, provider_id, source_id, provider_key_snapshot,
+                provider_name_snapshot, source_key_snapshot,
+                source_profile_type_snapshot, source_endpoint_snapshot,
+                upstream_protocol, created_at, updated_at
+             ) VALUES (
+                32, '018fa7d8-6a00-4c9a-8f7e-333333333333', 1,
+                'r310-model', 'OPENAI', 'SUCCESS', 10, 0, 30, 31,
+                'r310-provider', 'R3.10 Provider', 'primary', 'OPENAI',
+                'https://source.example/v1', 'OPENAI', 10, 10
+             );
+             INSERT INTO metric_request_rollup_minute (
+                bucket_start_ms, scope_type, scope_id, scope_label,
+                request_count, success_count, error_count, cancelled_count,
+                time_to_first_response_body_sum_ms,
+                time_to_first_response_body_count, ttft_sum_ms, ttft_count,
+                total_latency_sum_ms, total_latency_count,
+                input_tokens, output_tokens, reasoning_tokens, total_tokens,
+                created_at, updated_at
+             ) VALUES (
+                0, 'source', '31', 'primary', 1, 1, 0, 0,
+                1, 1, 1, 1, 1, 1, 1, 1, 0, 2, 1, 1
+             );
+             INSERT INTO metric_cost_rollup_minute (
+                bucket_start_ms, scope_type, scope_id,
+                currency, amount_nanos, created_at, updated_at
+             ) VALUES (0, 'source', '31', 'USD', 100, 1, 1);",
+        )
+        .expect("R3.9 source fixture should insert");
+
+    let r310 = connection
+        .pending_migrations(SQLITE_UPGRADE_MIGRATIONS)
+        .expect("pending sqlite migrations should load")
+        .pop()
+        .expect("R3.10 sqlite migration should be pending");
+    assert_eq!(
+        r310.name().version().to_string(),
+        R310_PROVIDER_MULTI_SOURCE_VERSION
+    );
+    connection
+        .run_migration(r310.as_ref())
+        .expect("R3.10 sqlite migration should run");
+
+    assert_sqlite_r310_source_schema(&mut connection);
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM upstream_source WHERE id = 31")
+            .get_result::<CountRow>(&mut connection)
+            .expect("migrated source should query")
+            .count,
+        1
+    );
+    let snapshot = diesel::sql_query(
+        "SELECT source_profile_type_snapshot AS value
+         FROM request_log WHERE id = 32",
+    )
+    .get_result::<TextValueRow>(&mut connection)
+    .expect("migrated request log snapshot should query");
+    assert_eq!(snapshot.value, "OPENAI");
+    let source_rollup = diesel::sql_query(
+        "SELECT scope_label AS value
+         FROM metric_request_rollup_minute
+         WHERE scope_type = 'source' AND scope_id = '31'",
+    )
+    .get_result::<TextValueRow>(&mut connection)
+    .expect("migrated source metric rollup should query");
+    assert_eq!(source_rollup.value, "OPENAI");
+    assert_eq!(
+        diesel::sql_query(
+            "SELECT COUNT(*) AS count
+             FROM metric_cost_rollup_minute
+             WHERE scope_type = 'source' AND scope_id = '31'",
+        )
+        .get_result::<CountRow>(&mut connection)
+        .expect("migrated source cost rollup should query")
+        .count,
+        1,
+        "cost rollup identity and value should remain intact"
+    );
+
+    connection
+        .batch_execute(
+            "INSERT INTO provider (
+                id, provider_key, name, is_enabled, created_at, updated_at,
+                provider_api_key_mode
+             ) VALUES (40, 'constraint-provider', 'Constraint Provider', 1, 1, 1, 'QUEUE');
+             INSERT INTO upstream_source (
+                id, provider_id, profile_type, endpoint, use_proxy,
+                is_enabled, is_default, created_at, updated_at
+             ) VALUES (41, 40, 'OPENAI', 'https://one.example/v1', 0, 1, 1, 1, 1);",
+        )
+        .expect("constraint provider and first source should insert");
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, endpoint, use_proxy,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (42, 40, 'VERTEX_OPENAI', 'https://two.example/v1', 0, 0, 0, 1, 1);"
+            )
+            .is_err(),
+        "disabled sources must still reserve their active wire family"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, endpoint, use_proxy,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (43, 40, 'RESPONSES', 'https://responses.example/v1', 0, 1, 0, 1, 1);"
+            )
+            .is_ok(),
+        "different source families should coexist"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, endpoint, use_proxy,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (44, 40, 'ANTHROPIC', 'https://anthropic.example/v1', 0, 1, 1, 1, 1);"
+            )
+            .is_err(),
+        "a provider may have only one active default source"
+    );
+    assert!(
+        connection
+            .batch_execute(
+                "INSERT INTO upstream_source (
+                    id, provider_id, profile_type, endpoint, use_proxy,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (45, 40, 'GEMINI', 'https://gemini.example/v1', 0, 0, 1, 1, 1);"
+            )
+            .is_err(),
+        "a disabled source may not be the default"
+    );
+    connection
+        .batch_execute(
+            "UPDATE upstream_source
+             SET deleted_at = 2, is_enabled = 0, is_default = 0
+             WHERE id = 41;
+             INSERT INTO upstream_source (
+                id, provider_id, profile_type, endpoint, use_proxy,
+                is_enabled, is_default, created_at, updated_at
+             ) VALUES (46, 40, 'VERTEX_OPENAI', 'https://replacement.example/v1', 0, 1, 1, 1, 1);",
+        )
+        .expect("soft deletion should release the source family and default slot");
+    assert_eq!(
+        diesel::sql_query("SELECT COUNT(*) AS count FROM pragma_foreign_key_check")
+            .get_result::<CountRow>(&mut connection)
+            .expect("SQLite foreign key check should run")
+            .count,
+        0
     );
 }
 
@@ -2136,7 +2470,7 @@ fn postgres_clean_upgrade_chain_from_empty() {
         assert_postgres_request_log_protocol_schema(&mut connection);
         assert_postgres_request_identity_schema(&mut connection);
         assert_postgres_request_log_timing_schema(&mut connection);
-        assert_postgres_r39_source_schema(&mut connection);
+        assert_postgres_r310_source_schema(&mut connection);
 
         let applied_versions = connection
             .applied_migrations()
@@ -2169,6 +2503,209 @@ fn postgres_clean_upgrade_chain_from_empty() {
                 .has_pending_migration(POSTGRES_UPGRADE_MIGRATIONS)
                 .expect("postgres pending migrations should remain queryable"),
             "postgres second migration run should remain fully applied"
+        );
+    }));
+
+    rebuild_postgres_public_schema(&mut connection);
+    if let Err(panic_payload) = test_result {
+        resume_unwind(panic_payload);
+    }
+}
+
+#[test]
+#[ignore = "requires the dedicated PostgreSQL 17 R3.10 migration smoke database"]
+fn postgres_r310_source_migration_preserves_rows_and_enforces_source_contract() {
+    let database_url = env::var(POSTGRES_SMOKE_URL_ENV).unwrap_or_else(|_| {
+        panic!("{POSTGRES_SMOKE_URL_ENV} must point to the dedicated PostgreSQL smoke database")
+    });
+    let mut connection = PgConnection::establish(&database_url)
+        .expect("dedicated postgres smoke database should be reachable");
+    assert_eq!(
+        postgres_database_name(&mut connection),
+        POSTGRES_SMOKE_DATABASE,
+        "refusing to rebuild a non-dedicated PostgreSQL database"
+    );
+
+    rebuild_postgres_public_schema(&mut connection);
+    let test_result = catch_unwind(AssertUnwindSafe(|| {
+        let r39 = migrate_postgres_to_before_r39(&mut connection);
+        connection
+            .run_migration(r39.as_ref())
+            .expect("R3.9 postgres migration should run before R3.10 fixture");
+        connection
+            .batch_execute(
+                "INSERT INTO api_key (
+                    id, api_key_hash, key_prefix, key_last4, name, default_action,
+                    is_enabled, created_at, updated_at
+                 ) VALUES (
+                    1, 'r310-api-key-hash', 'r310', '0001', 'R3.10 API key', 'ALLOW', TRUE, 1, 1
+                 );
+                 INSERT INTO provider (
+                    id, provider_key, name, is_enabled, created_at, updated_at,
+                    provider_api_key_mode
+                 ) VALUES (
+                    30, 'r310-provider', 'R3.10 Provider', TRUE, 1, 1, 'QUEUE'
+                 );
+                 INSERT INTO upstream_source (
+                    id, provider_id, source_key, profile_type, endpoint, use_proxy,
+                    created_at, updated_at
+                 ) VALUES (
+                    31, 30, 'primary', 'OPENAI', 'https://source.example/v1', FALSE, 1, 1
+                 );
+                 INSERT INTO request_log (
+                    id, request_id, api_key_id, requested_model_name,
+                    downstream_protocol, overall_status, request_received_at,
+                    is_stream, provider_id, source_id, provider_key_snapshot,
+                    provider_name_snapshot, source_key_snapshot,
+                    source_profile_type_snapshot, source_endpoint_snapshot,
+                    upstream_protocol, created_at, updated_at
+                 ) VALUES (
+                    32, '018fa7d8-6a00-4c9a-8f7e-333333333333', 1,
+                    'r310-model', 'OPENAI', 'SUCCESS', 10, FALSE, 30, 31,
+                    'r310-provider', 'R3.10 Provider', 'primary', 'OPENAI',
+                    'https://source.example/v1', 'OPENAI', 10, 10
+                 );
+                 INSERT INTO metric_request_rollup_minute (
+                    bucket_start_ms, scope_type, scope_id, scope_label,
+                    request_count, success_count, error_count, cancelled_count,
+                    time_to_first_response_body_sum_ms,
+                    time_to_first_response_body_count, ttft_sum_ms, ttft_count,
+                    total_latency_sum_ms, total_latency_count,
+                    input_tokens, output_tokens, reasoning_tokens, total_tokens,
+                    created_at, updated_at
+                 ) VALUES (
+                    0, 'source', '31', 'primary', 1, 1, 0, 0,
+                    1, 1, 1, 1, 1, 1, 1, 1, 0, 2, 1, 1
+                 );
+                 INSERT INTO metric_cost_rollup_minute (
+                    bucket_start_ms, scope_type, scope_id,
+                    currency, amount_nanos, created_at, updated_at
+                 ) VALUES (0, 'source', '31', 'USD', 100, 1, 1);",
+            )
+            .expect("R3.9 postgres source fixture should insert");
+
+        let r310 = connection
+            .pending_migrations(POSTGRES_UPGRADE_MIGRATIONS)
+            .expect("pending postgres migrations should load")
+            .pop()
+            .expect("R3.10 postgres migration should be pending");
+        assert_eq!(
+            r310.name().version().to_string(),
+            R310_PROVIDER_MULTI_SOURCE_VERSION
+        );
+        connection
+            .run_migration(r310.as_ref())
+            .expect("R3.10 postgres migration should run");
+
+        assert_postgres_r310_source_schema(&mut connection);
+        assert_eq!(
+            diesel::sql_query("SELECT COUNT(*) AS count FROM upstream_source WHERE id = 31")
+                .get_result::<CountRow>(&mut connection)
+                .expect("migrated postgres source should query")
+                .count,
+            1
+        );
+        let snapshot = diesel::sql_query(
+            "SELECT source_profile_type_snapshot::text AS value
+             FROM request_log WHERE id = 32",
+        )
+        .get_result::<TextValueRow>(&mut connection)
+        .expect("migrated postgres request log snapshot should query");
+        assert_eq!(snapshot.value, "OPENAI");
+        let source_rollup = diesel::sql_query(
+            "SELECT scope_label AS value
+             FROM metric_request_rollup_minute
+             WHERE scope_type = 'source' AND scope_id = '31'",
+        )
+        .get_result::<TextValueRow>(&mut connection)
+        .expect("migrated postgres source metric rollup should query");
+        assert_eq!(source_rollup.value, "OPENAI");
+        assert_eq!(
+            diesel::sql_query(
+                "SELECT amount_nanos AS count
+                 FROM metric_cost_rollup_minute
+                 WHERE scope_type = 'source' AND scope_id = '31'",
+            )
+            .get_result::<CountRow>(&mut connection)
+            .expect("migrated postgres source cost rollup should query")
+            .count,
+            100,
+            "cost rollup identity and value should remain intact"
+        );
+
+        connection
+            .batch_execute(
+                "INSERT INTO provider (
+                    id, provider_key, name, is_enabled, created_at, updated_at,
+                    provider_api_key_mode
+                 ) VALUES (40, 'constraint-provider', 'Constraint Provider', TRUE, 1, 1, 'QUEUE');
+                 INSERT INTO upstream_source (
+                    id, provider_id, profile_type, endpoint, use_proxy,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (41, 40, 'OPENAI', 'https://one.example/v1', FALSE, TRUE, TRUE, 1, 1);",
+            )
+            .expect("postgres constraint provider and first source should insert");
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO upstream_source (
+                        id, provider_id, profile_type, endpoint, use_proxy,
+                        is_enabled, is_default, created_at, updated_at
+                     ) VALUES (42, 40, 'VERTEX_OPENAI', 'https://two.example/v1', FALSE, FALSE, FALSE, 1, 1);"
+                )
+                .is_err(),
+            "disabled sources must still reserve their active wire family"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO upstream_source (
+                        id, provider_id, profile_type, endpoint, use_proxy,
+                        is_enabled, is_default, created_at, updated_at
+                     ) VALUES (43, 40, 'RESPONSES', 'https://responses.example/v1', FALSE, TRUE, FALSE, 1, 1);"
+                )
+                .is_ok(),
+            "different source families should coexist"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO upstream_source (
+                        id, provider_id, profile_type, endpoint, use_proxy,
+                        is_enabled, is_default, created_at, updated_at
+                     ) VALUES (44, 40, 'ANTHROPIC', 'https://anthropic.example/v1', FALSE, TRUE, TRUE, 1, 1);"
+                )
+                .is_err(),
+            "a provider may have only one active default source"
+        );
+        assert!(
+            connection
+                .batch_execute(
+                    "INSERT INTO upstream_source (
+                        id, provider_id, profile_type, endpoint, use_proxy,
+                        is_enabled, is_default, created_at, updated_at
+                     ) VALUES (45, 40, 'GEMINI', 'https://gemini.example/v1', FALSE, FALSE, TRUE, 1, 1);"
+                )
+                .is_err(),
+            "a disabled source may not be the default"
+        );
+        connection
+            .batch_execute(
+                "UPDATE upstream_source
+                 SET deleted_at = 2, is_enabled = FALSE, is_default = FALSE
+                 WHERE id = 41;
+                 INSERT INTO upstream_source (
+                    id, provider_id, profile_type, endpoint, use_proxy,
+                    is_enabled, is_default, created_at, updated_at
+                 ) VALUES (46, 40, 'VERTEX_OPENAI', 'https://replacement.example/v1', FALSE, TRUE, TRUE, 1, 1);",
+            )
+            .expect("postgres soft deletion should release source family and default slot");
+        assert_eq!(
+            diesel::sql_query("SELECT COUNT(*) AS count FROM upstream_source")
+                .get_result::<CountRow>(&mut connection)
+                .expect("postgres source count should query")
+                .count,
+            4
         );
     }));
 

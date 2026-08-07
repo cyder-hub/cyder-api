@@ -50,17 +50,34 @@
             <ProviderBaseInfoForm v-model:editingData="editingData" />
           </template>
 
+          <template v-else-if="activeTab === 'sources'">
+            <ProviderSourceList
+              v-model:editingData="editingData"
+              @check-source="handleSourceCheck"
+            />
+          </template>
+
           <template v-else-if="activeTab === 'models'">
+            <ProviderSourceSelector
+              v-model="selectedSourceId"
+              :sources="editingData.upstream_sources"
+            />
             <ProviderModelList
               v-model:editingData="editingData"
+              :source-id="selectedSourceId"
               @check-single="(index) => handleCheck('model', index)"
               @check-batch="() => handleBatchCheck('models')"
             />
           </template>
 
           <template v-else-if="activeTab === 'credentials'">
+            <ProviderSourceSelector
+              v-model="selectedSourceId"
+              :sources="editingData.upstream_sources"
+            />
             <ProviderApiKeyList
               v-model:editingData="editingData"
+              :source-id="selectedSourceId"
               @check-single="(index) => handleCheck('apiKey', index)"
               @check-batch="() => handleBatchCheck('api_keys')"
             />
@@ -69,16 +86,13 @@
           <template v-else-if="activeTab === 'advanced'">
             <div v-if="editingData.id">
               <div class="mb-4 rounded-lg border border-gray-200 bg-gray-50/60 px-3.5 py-3 text-xs leading-5 text-gray-600">
-                {{ $t("providerEditPage.sections.advancedConfig.scopeDescription", {
-                  profile: editingData.upstream_source.profile_type,
-                }) }}
+                {{ $t("providerEditPage.sections.advancedConfig.scopeDescription") }}
               </div>
               <ReasoningConfigPanel
                 owner-kind="provider"
                 :owner-id="editingData.id"
                 :actions="reasoningActions"
                 :title="$t('providerEditPage.sections.advancedConfig.title')"
-                :profile-type="editingData.upstream_source.profile_type"
                 @saved="handleReasoningConfigSaved"
               >
                 <template #runtime-feature>
@@ -216,15 +230,91 @@
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        <Dialog
+          :open="isSourceCheckModalOpen"
+          @update:open="(v: boolean) => (isSourceCheckModalOpen = v)"
+        >
+          <DialogContent class="flex max-h-[92dvh] flex-col border border-gray-200 bg-white p-0 sm:max-w-md">
+            <DialogHeader class="border-b border-gray-100 px-4 py-4 sm:px-6 sm:pb-4">
+              <DialogTitle class="text-lg font-semibold text-gray-900">
+                {{ $t("providerEditPage.modalSourceCheck.title") }}
+              </DialogTitle>
+            </DialogHeader>
+            <div class="flex-1 space-y-4 overflow-y-auto px-4 py-4 sm:px-6 sm:pt-4">
+              <p class="text-sm text-gray-500">
+                {{ $t("providerEditPage.modalSourceCheck.description") }}
+              </p>
+              <p class="font-mono text-xs text-gray-600">
+                {{ $t("providerEditPage.modalSourceCheck.source", { target: selectedSourceCheckTargetLabel }) }}
+              </p>
+              <div class="space-y-1.5">
+                <Label class="text-gray-700">
+                  {{ $t("providerEditPage.modalSourceCheck.modelLabel") }}
+                </Label>
+                <Select v-model="sourceCheckModelIndex">
+                  <SelectTrigger class="w-full">
+                    <SelectValue :placeholder="$t('providerEditPage.modalSourceCheck.modelPlaceholder')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem
+                      v-for="opt in modelOptionsForSelect"
+                      :key="opt.value"
+                      :value="String(opt.value)"
+                    >
+                      {{ opt.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1.5">
+                <Label class="text-gray-700">
+                  {{ $t("providerEditPage.modalSourceCheck.apiKeyLabel") }}
+                </Label>
+                <Select v-model="sourceCheckApiKeyIndex">
+                  <SelectTrigger class="w-full">
+                    <SelectValue :placeholder="$t('providerEditPage.modalSourceCheck.apiKeyPlaceholder')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem
+                      v-for="opt in apiKeyOptionsForSelect"
+                      :key="opt.value"
+                      :value="String(opt.value)"
+                    >
+                      {{ opt.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <DialogFooter class="border-t border-gray-100 px-4 py-4 sm:flex-row sm:justify-end sm:px-6">
+              <Button
+                variant="ghost"
+                class="w-full text-gray-600 sm:w-auto"
+                @click="isSourceCheckModalOpen = false"
+              >
+                {{ $t("common.cancel") }}
+              </Button>
+              <Button
+                variant="default"
+                class="w-full sm:w-auto"
+                :disabled="sourceCheckModelIndex === null || sourceCheckApiKeyIndex === null"
+                @click="handleConfirmSourceCheck"
+              >
+                {{ $t("common.check") }}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, type Ref } from "vue";
+import { ref, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import PageHeader from "@/components/PageHeader.vue";
 import SectionHeader from "@/components/SectionHeader.vue";
 import { Button } from "@/components/ui/button";
@@ -242,6 +332,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Label } from "@/components/ui/label";
 import {
   ArrowLeft,
   Loader2,
@@ -252,6 +343,8 @@ import type { EditingProviderData } from "./types";
 import { useProviderEdit } from "./composables/useProviderEdit";
 import { useProviderCheck } from "./composables/useProviderCheck";
 import ProviderBaseInfoForm from "./components/ProviderBaseInfoForm.vue";
+import ProviderSourceList from "./components/ProviderSourceList.vue";
+import ProviderSourceSelector from "./components/ProviderSourceSelector.vue";
 import ProviderModelList from "./components/ProviderModelList.vue";
 import ProviderApiKeyList from "./components/ProviderApiKeyList.vue";
 import ProviderRequestPatchPanel from "./components/ProviderRequestPatchPanel.vue";
@@ -260,6 +353,7 @@ import RuntimeFeatureConfigPanel from "@/components/runtime-feature/RuntimeFeatu
 
 const { t: $t } = useI18n();
 const router = useRouter();
+const route = useRoute();
 const {
   isLoading,
   errorMsg,
@@ -270,13 +364,42 @@ const {
   handleRuntimeFeatureConfigSaved,
 } = useProviderEdit();
 
-const activeTab = ref<"base" | "models" | "credentials" | "advanced">("base");
+type ProviderEditTab = "base" | "sources" | "models" | "credentials" | "advanced";
+const routeTab = route.query.tab;
+const activeTab = ref<ProviderEditTab>(
+  routeTab === "sources" ||
+    routeTab === "models" ||
+    routeTab === "credentials" ||
+    routeTab === "advanced"
+    ? routeTab
+    : "base",
+);
 const providerEditTabs = [
   { id: "base", labelKey: "providerEditPage.tabs.base" },
+  { id: "sources", labelKey: "providerEditPage.tabs.sources" },
   { id: "models", labelKey: "providerEditPage.tabs.models" },
   { id: "credentials", labelKey: "providerEditPage.tabs.credentials" },
   { id: "advanced", labelKey: "providerEditPage.tabs.advanced" },
 ] as const;
+
+const routeSourceId =
+  typeof route.query.source_id === "string" ? Number(route.query.source_id) : NaN;
+const selectedSourceId = ref<number | null>(
+  Number.isInteger(routeSourceId) && routeSourceId > 0 ? routeSourceId : null,
+);
+
+watch(
+  () => editingData.value?.upstream_sources,
+  (sources) => {
+    if (
+      selectedSourceId.value !== null &&
+      !sources?.some((source) => source.id === selectedSourceId.value)
+    ) {
+      selectedSourceId.value = null;
+    }
+  },
+  { deep: true },
+);
 
 const {
   isModelSelectModalOpen,
@@ -287,9 +410,18 @@ const {
   apiKeyOptionsForSelect,
   selectedModelCheckTargetLabel,
   selectedApiKeyCheckTargetLabel,
+  isSourceCheckModalOpen,
+  sourceCheckModelIndex,
+  sourceCheckApiKeyIndex,
+  selectedSourceCheckTargetLabel,
   handleCheck,
   handleBatchCheck,
+  handleSourceCheck,
+  handleConfirmSourceCheck,
   handleConfirmModelSelection,
   handleConfirmApiKeySelection,
-} = useProviderCheck(editingData as Ref<EditingProviderData | null>);
+} = useProviderCheck(
+  editingData as Ref<EditingProviderData | null>,
+  selectedSourceId,
+);
 </script>

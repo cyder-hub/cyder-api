@@ -3,7 +3,7 @@ import type {
   ProviderBootstrapPayload,
   ProviderBootstrapResponse,
   ModelItem,
-  ProviderPayload,
+  ProviderUpdatePayload,
 } from "@/services/types";
 import type {
   EditingProviderData,
@@ -31,17 +31,25 @@ export interface ProviderBootstrapFormState extends ProviderBootstrapPreviewStat
   real_model_name?: string | null;
 }
 
+function getPreferredSource(editingData?: Partial<EditingProviderData> | null) {
+  return (
+    editingData?.upstream_sources?.find((source) => source.is_default) ??
+    editingData?.upstream_sources?.find((source) => source.is_enabled) ??
+    editingData?.upstream_sources?.[0]
+  );
+}
+
 export function createProviderBootstrapFormState(
   editingData?: Partial<EditingProviderData> | null,
 ): ProviderBootstrapFormState {
+  const source = getPreferredSource(editingData);
   return {
-    profile_type:
-      trimText(editingData?.upstream_source?.profile_type) || "OPENAI",
-    endpoint: trimText(editingData?.upstream_source?.endpoint),
+    profile_type: trimText(source?.profile_type) || "OPENAI",
+    endpoint: trimText(source?.endpoint),
     api_key: "",
     model_name: "",
     api_key_description: "",
-    use_proxy: editingData?.upstream_source?.use_proxy ?? false,
+    use_proxy: source?.use_proxy ?? false,
     provider_name: trimText(editingData?.name),
     provider_key: trimText(editingData?.provider_key),
   };
@@ -55,10 +63,10 @@ export function syncProviderBootstrapFormState(
     return form;
   }
 
-  form.profile_type =
-    trimText(editingData.upstream_source?.profile_type) || "OPENAI";
-  form.endpoint = trimText(editingData.upstream_source?.endpoint);
-  form.use_proxy = editingData.upstream_source?.use_proxy ?? false;
+  const source = getPreferredSource(editingData);
+  form.profile_type = trimText(source?.profile_type) || "OPENAI";
+  form.endpoint = trimText(source?.endpoint);
+  form.use_proxy = source?.use_proxy ?? false;
   form.provider_name = trimText(editingData.name);
   form.provider_key = trimText(editingData.provider_key);
 
@@ -138,14 +146,9 @@ export function createEmptyEditingProviderData(): EditingProviderData {
     id: null,
     name: "",
     provider_key: "",
-    upstream_source: {
-      id: null,
-      provider_id: null,
-      source_key: "primary",
-      profile_type: "OPENAI",
-      endpoint: "",
-      use_proxy: false,
-    },
+    is_enabled: true,
+    provider_api_key_mode: "QUEUE",
+    upstream_sources: [],
     models: [],
     provider_keys: [],
     request_patches: [],
@@ -157,10 +160,12 @@ export function buildProviderBootstrapPayload(
   saveAndTest = false,
 ): ProviderBootstrapPayload {
   const payload: ProviderBootstrapPayload = {
-    upstream_source: {
+    initial_source: {
       profile_type: trimText(form.profile_type),
       endpoint: trimText(form.endpoint),
       use_proxy: !!form.use_proxy,
+      is_enabled: true,
+      is_default: true,
     },
     api_key: trimText(form.api_key),
     model_name: trimText(form.model_name),
@@ -189,17 +194,11 @@ export function buildProviderBootstrapPayload(
 export function buildProviderUpdatePayload(
   editingData: EditingProviderData,
   form: ProviderBootstrapFormState,
-): ProviderPayload {
+): ProviderUpdatePayload {
   return {
-    key: trimText(editingData.provider_key),
     name: trimText(form.provider_name) || trimText(editingData.name),
-    upstream_source: {
-      profile_type:
-        trimText(form.profile_type) ||
-        trimText(editingData.upstream_source.profile_type),
-      endpoint: trimText(form.endpoint),
-      use_proxy: !!form.use_proxy,
-    },
+    is_enabled: editingData.is_enabled,
+    provider_api_key_mode: editingData.provider_api_key_mode,
   };
 }
 
@@ -237,10 +236,11 @@ export function hydrateEditingProviderDataFromBootstrap(
   }
 
   const provider = response.provider;
+  const source = getPreferredSource(editingData);
   const preview = buildProviderBootstrapPreview(
     {
-      profile_type: editingData.upstream_source.profile_type,
-      endpoint: editingData.upstream_source.endpoint,
+      profile_type: source?.profile_type ?? "OPENAI",
+      endpoint: source?.endpoint ?? "",
       provider_name: editingData.name,
       provider_key: editingData.provider_key,
     },
@@ -257,16 +257,21 @@ export function hydrateEditingProviderDataFromBootstrap(
     trimText(provider?.provider_key) ||
     preview.provider_key ||
     editingData.provider_key;
-  const source = provider?.upstream_source;
-  if (source) {
-    editingData.upstream_source = {
+  if (provider) {
+    editingData.is_enabled = provider.is_enabled;
+    editingData.provider_api_key_mode = provider.provider_api_key_mode;
+    editingData.upstream_sources = provider.upstream_sources.map((source) => ({
       id: source.id,
       provider_id: source.provider_id,
-      source_key: trimText(source.source_key),
       profile_type: trimText(source.profile_type),
       endpoint: trimText(source.endpoint),
       use_proxy: source.use_proxy,
-    };
+      is_enabled: source.is_enabled,
+      is_default: source.is_default,
+      deleted_at: source.deleted_at,
+      created_at: source.created_at,
+      updated_at: source.updated_at,
+    }));
   }
 
   if (response.created_key) {

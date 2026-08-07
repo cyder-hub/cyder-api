@@ -90,7 +90,6 @@ struct RequestLogListItemResponse {
     model_name: Option<String>,
     real_model_name: Option<String>,
     source_id: Option<i64>,
-    source_key: Option<String>,
     source_profile_type: Option<UpstreamProfileType>,
     upstream_http_status: Option<i32>,
     estimated_cost_nanos: Option<i64>,
@@ -126,7 +125,6 @@ impl From<RequestLogListItem> for RequestLogListItemResponse {
             model_name: value.model_name_snapshot,
             real_model_name: value.real_model_name_snapshot,
             source_id: value.source_id,
-            source_key: value.source_key_snapshot,
             source_profile_type: value.source_profile_type_snapshot,
             upstream_http_status: value.upstream_http_status,
             estimated_cost_nanos: value.estimated_cost_nanos,
@@ -172,7 +170,6 @@ struct RequestLogResponse {
     provider_name: Option<String>,
     model_name: Option<String>,
     real_model_name: Option<String>,
-    source_key: Option<String>,
     source_profile_type: Option<UpstreamProfileType>,
     source_endpoint: Option<String>,
     upstream_protocol: Option<UpstreamProtocol>,
@@ -229,7 +226,6 @@ impl From<RequestLogRecord> for RequestLogResponse {
             provider_name: value.provider_name_snapshot,
             model_name: value.model_name_snapshot,
             real_model_name: value.real_model_name_snapshot,
-            source_key: value.source_key_snapshot,
             source_profile_type: value.source_profile_type_snapshot,
             source_endpoint: value.source_endpoint_snapshot,
             upstream_protocol: value.upstream_protocol,
@@ -322,7 +318,6 @@ mod tests {
             provider_name_snapshot: None,
             model_name_snapshot: None,
             real_model_name_snapshot: None,
-            source_key_snapshot: Some("primary".to_string()),
             source_profile_type_snapshot: Some(UpstreamProfileType::Openai),
             source_endpoint_snapshot: Some("https://api.example.com/v1".to_string()),
             upstream_protocol: None,
@@ -389,7 +384,7 @@ mod tests {
         assert_eq!(value["request_id"], "018fa7d8-6a00-4c9a-8f7e-111111111111");
         assert_eq!(value["client_request_id"], "controller-test");
         assert_eq!(value["source_id"], 3);
-        assert_eq!(value["source_key"], "primary");
+        assert!(value.get("source_key").is_none());
         assert_eq!(value["source_profile_type"], "OPENAI");
         assert_eq!(value["source_endpoint"], "https://api.example.com/v1");
         assert!(value.get("first_response_body_at").is_some());

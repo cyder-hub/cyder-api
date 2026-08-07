@@ -114,12 +114,11 @@ type NamedEntity = {
   name: string;
 };
 
-type ProviderEntity = NamedEntity & {
-  upstream_source: {
-    id: number;
-    source_key: string;
-    profile_type: string;
-  };
+type SourceEntity = {
+  id: number;
+  provider_id: number;
+  profile_type: string;
+  deleted_at?: number | null;
 };
 
 type ModelOption = {
@@ -134,8 +133,10 @@ export interface UseRecordListOptions {
   buildListParams: () => RecordListParams;
   t: RecordListTranslator;
   providerStore: {
-    providers: ProviderEntity[];
+    providers: NamedEntity[];
+    sources: SourceEntity[];
     fetchProviders: () => Promise<unknown>;
+    fetchProviderSources: () => Promise<unknown>;
   };
   apiKeyStore: {
     apiKeys: NamedEntity[];
@@ -181,13 +182,34 @@ export function useRecordList(options: UseRecordListOptions) {
     })),
   ]);
 
-  const sourceOptions = computed<FilterOption[]>(() => [
-    { value: "0", label: options.t("recordPage.filter.allSources") },
-    ...(options.providerStore.providers || []).map((provider) => ({
-      value: String(provider.upstream_source.id),
-      label: `${provider.name} / ${provider.upstream_source.source_key} / ${provider.upstream_source.profile_type}`,
-    })),
-  ]);
+  const sourceOptions = computed<FilterOption[]>(() => {
+    const providerNames = new Map(
+      (options.providerStore.providers || []).map((provider) => [provider.id, provider.name]),
+    );
+    const aggregateSources = options.providerStore.sources.filter(
+      (source) => source.deleted_at == null,
+    );
+    const result = [
+      { value: "0", label: options.t("recordPage.filter.allSources") },
+      ...aggregateSources.map((source) => ({
+        value: String(source.id),
+        label: `${providerNames.get(source.provider_id) || source.provider_id} / ${source.profile_type} / #${source.id}`,
+      })),
+    ];
+    const selectedSourceId = options.filters.source_id;
+    if (
+      selectedSourceId > 0 &&
+      !aggregateSources.some((source) => source.id === selectedSourceId)
+    ) {
+      result.push({
+        value: String(selectedSourceId),
+        label: options.t("recordPage.filter.retiredSource", {
+          id: selectedSourceId,
+        }),
+      });
+    }
+    return result;
+  });
 
   const modelOptions = computed<FilterOption[]>(() => [
     { value: "0", label: options.t("recordPage.filter.allModels") },
@@ -321,6 +343,7 @@ export function useRecordList(options: UseRecordListOptions) {
   const loadFilterOptions = async () => {
     await Promise.all([
       options.providerStore.fetchProviders(),
+      options.providerStore.fetchProviderSources(),
       options.apiKeyStore.fetchApiKeys(),
       options.modelStore.fetchModels(),
     ]);
